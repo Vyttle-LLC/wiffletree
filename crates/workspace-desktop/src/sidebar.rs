@@ -8,7 +8,7 @@ use gpui_component::{
 };
 use ui::{
     brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, pill, session_icon,
-    status_glyph, status_label,
+    status_glyph, status_label, ticket_state_color,
 };
 
 const INDENT: f32 = 14.;
@@ -369,19 +369,26 @@ impl Workspace {
                 .filter(|s| s.parent_id.as_ref() == Some(&root.id))
                 .collect();
             for team in &teams {
-                tree = tree.child(self.session_row(team, 1, team.name.clone(), None, p, cx));
-                // Agents sit directly under their team, kept together by ticket; each row names it.
+                tree = tree.child(self.session_row(team, 1, team.name.clone(), p, cx));
                 for ticket in snapshot
                     .tickets
                     .iter()
                     .filter(|t| t.coordinator_id == team.id)
                 {
-                    for worker in self.shown(snapshot).filter(|s| {
+                    let on_ticket = |s: &Session| {
                         self.runtime(&s.id)
                             .is_some_and(|r| r.ticket_id.as_ref() == Some(&ticket.id))
-                    }) {
+                    };
+                    let workers: Vec<_> = self.shown(snapshot).filter(|s| on_ticket(s)).collect();
+                    // A ticket whose agents are all archived, such as a closed one, goes with them.
+                    if workers.is_empty() && snapshot.sessions.iter().any(on_ticket) {
+                        continue;
+                    }
+                    tree = tree.child(self.ticket_row(ticket, p, cx));
+                    for worker in workers {
+                        // The ticket row above already names the work.
                         let label = worker.role.label().to_owned();
-                        tree = tree.child(self.session_row(worker, 2, label, Some(ticket), p, cx));
+                        tree = tree.child(self.session_row(worker, 3, label, p, cx));
                     }
                 }
                 // Older stores can contain workers created before ticket ownership existed.
@@ -389,8 +396,7 @@ impl Workspace {
                     s.parent_id.as_ref() == Some(&team.id)
                         && self.runtime(&s.id).is_none_or(|r| r.ticket_id.is_none())
                 }) {
-                    tree =
-                        tree.child(self.session_row(worker, 2, worker.name.clone(), None, p, cx));
+                    tree = tree.child(self.session_row(worker, 2, worker.name.clone(), p, cx));
                 }
             }
             if teams.is_empty() && self.selected.as_ref() == Some(&root.id) {
@@ -633,26 +639,19 @@ impl Workspace {
         session: &Session,
         depth: usize,
         label: String,
-        ticket: Option<&Ticket>,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = session.id.clone();
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
         let status = self.shown_status(session);
-        let mut detail = format!(
+        let detail = format!(
             "{} · {} · {:?} · {}",
             session.name,
             session.role.label(),
             session.provider,
             self.status_detail(session)
         );
-        if let Some(ticket) = ticket {
-            detail.push_str(&format!(
-                " · Ticket {}",
-                humanize(&ticket.state).to_lowercase()
-            ));
-        }
         self.row(SharedString::from(format!("tree-{id}")), depth, selected, p)
             .when(session.archived, |d| d.opacity(0.55))
             // Working agents keep full-strength text; idle ones recede.
@@ -669,27 +668,45 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .items_baseline()
-                    .gap_1p5()
-                    .child(
-                        div()
-                            .flex_none()
-                            .when(depth == 1, |d| d.font_weight(FontWeight::MEDIUM))
-                            .child(label),
-                    )
-                    .when_some(ticket, |d, ticket| {
-                        d.child(
-                            div()
-                                .min_w_0()
-                                .text_ellipsis()
-                                .text_size(px(11.5))
-                                .text_color(p.subtle)
-                                .child(ticket.title.clone()),
-                        )
-                    }),
+                    .text_ellipsis()
+                    .when(depth == 1, |d| d.font_weight(FontWeight::MEDIUM))
+                    .child(label),
             )
             .child(div().flex_none().child(status_glyph(status, 12., p)))
+    }
+
+    fn ticket_row(&self, ticket: &Ticket, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let coordinator = ticket.coordinator_id.clone();
+        let state = humanize(&ticket.state);
+        let detail = format!("{} · {state}", ticket.title);
+        self.row(
+            SharedString::from(format!("ticket-{}", ticket.id)),
+            2,
+            false,
+            p,
+        )
+        .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
+        .on_click(cx.listener(move |v, _, w, c| {
+            v.select(coordinator.clone(), w, c);
+            v.show_panel(Panel::Team, w, c);
+        }))
+        .child(div().flex_none().child(icon("task").size(px(14.))))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_ellipsis()
+                .text_color(p.text)
+                .child(ticket.title.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .size(px(6.))
+                .mr(px(3.))
+                .rounded_full()
+                .bg(ticket_state_color(&ticket.state, p)),
+        )
     }
 }
 

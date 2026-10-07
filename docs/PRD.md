@@ -66,7 +66,7 @@ A repository may participate in several projects. The app must arbitrate operati
 
 ## Interface requirements
 
-The sidebar follows project/main coordinator → repository coordinator → agents. Tickets do not get rows of their own: each agent row leads with its role and follows it with its ticket's title in secondary text, and agents on the same ticket stay together. The Teams panel lists tickets with their state. “New project” is the primary creation action and creates the main coordinator. Conversations belong to coordinator and worker sessions. Compact rows show status glyphs with accessible names and hover detail; PR identity and provider details are available in context without widening every row.
+The sidebar follows project/main coordinator → repository coordinator → tickets → agents. Ticket names lead within the repository team. “New project” is the primary creation action and creates the main coordinator. Ticket rows group work; conversations belong to coordinator and worker sessions. Compact rows show status glyphs with accessible names and hover detail; PR identity and provider details are available in context without widening every row.
 
 Selecting any session opens its conversation; selecting a ticket opens its owning coordinator’s Tickets inspector. The main coordinator is the primary interaction surface. Repository coordinator and worker conversations remain available for optional inspection or intervention; inspecting them is not required to resolve normal orchestration.
 
