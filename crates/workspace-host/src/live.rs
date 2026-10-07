@@ -172,7 +172,7 @@ impl Host {
             "Assign an implementer, tester or reviewer"
         );
         let mut ticket = self.ticket(ticket_id)?;
-        ensure!(ticket.state != "accepted", "Ticket is already accepted");
+        ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
         let owner = self.session(&ticket.coordinator_id)?;
         // A role session is never recycled across tickets. Retrying the same assignment is idempotent.
         if let Some(existing) = self.runtimes()?.into_iter().find(|r| {
@@ -217,6 +217,39 @@ impl Host {
         ticket.state = "assigned".into();
         self.save_ticket(&ticket)?;
         Ok(session)
+    }
+    /// Archives a finished ticket's agents. Their conversations, branch and worktree are kept.
+    pub fn close_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
+        let mut ticket = self.ticket(ticket_id)?;
+        if ticket.state == "closed" {
+            return Ok(ticket);
+        }
+        let agents: Vec<Session> = self
+            .runtimes()?
+            .into_iter()
+            .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
+            .map(|r| self.session(&r.session_id))
+            .collect::<Result<_>>()?;
+        if let Some(busy) = agents.iter().find(|s| s.status == Status::Working) {
+            bail!(
+                "{} is still working; close the ticket after it reports",
+                busy.name
+            );
+        }
+        for agent in &agents {
+            self.set_archived(&agent.id, true)?;
+        }
+        ticket.state = "closed".into();
+        self.save_ticket(&ticket)?;
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        Self::event(
+            &self.db,
+            &coordinator.project_id,
+            Some(&coordinator.id),
+            "ticket_closed",
+            &ticket.id,
+        )?;
+        Ok(ticket)
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
@@ -400,7 +433,7 @@ impl Host {
                 )?;
                 if let Some(ticket_id) = self.session_runtime(id)?.ticket_id {
                     let mut ticket = self.ticket(&ticket_id)?;
-                    if kind != "progress" && ticket.state != "accepted" {
+                    if kind != "progress" && ticket.is_open() {
                         ticket.state = kind.into();
                         self.save_ticket(&ticket)?;
                     }
@@ -431,6 +464,14 @@ impl Host {
                 ticket.state = "accepted".into();
                 self.save_ticket(&ticket)?;
                 Ok(serde_json::to_value(ticket)?)
+            }
+            "close_ticket" => {
+                let ticket = self.ticket(string("ticket_id")?)?;
+                ensure!(
+                    ticket.coordinator_id == id,
+                    "Ticket belongs to another coordinator"
+                );
+                Ok(serde_json::to_value(self.close_ticket(&ticket.id)?)?)
             }
             "ask_user" => {
                 ensure!(

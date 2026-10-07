@@ -136,7 +136,7 @@ Record the selected model, effort, routing reason and policy version for each re
 
 Acceptance: role/provider defaults save atomically; both kinds of coordinator use the same saved settings; editing defaults does not rewrite existing agent profiles; parent-selected Big/Small profiles resolve to the configured provider/model/effort; unapproved Luna selection fails without creating an agent; chat overrides survive restart and exact-session resume. Models cards fill the inspector width and keep model and effort labels readable; model menus scroll within a bounded height; default-provider choices remain independent per role.
 
-Dual-provider review remains a follow-up: one ticket currently supports one reviewer assignment. A Claude-plus-Codex review will require separately tracked reviewer assignments and consolidated acceptance evidence.
+Dual-provider review remains a follow-up: one ticket currently supports one reviewer assignment. A Claude-plus-Codex review will require separately tracked reviewer assignments and consolidated acceptance evidence. Until then, coordinators run extra reviews as their own tickets and close each one with `close_ticket` once its findings are recorded. Closing archives the ticket's agents and hides the ticket with them; it preserves their conversations, branch and worktree.
 
 ## Agent communication and shared context
 

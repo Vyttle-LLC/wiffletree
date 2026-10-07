@@ -202,7 +202,7 @@ impl Workspace {
                 }
                 entry = entry.child(list);
             }
-            if ticket.state != "accepted" {
+            if ticket.is_open() {
                 entry = entry.child(
                     div().flex().child(
                         button(SharedString::from(format!("assign-{ticket_id}")))

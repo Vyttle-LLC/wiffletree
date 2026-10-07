@@ -61,6 +61,12 @@ pub fn tools() -> Value {
             vec!["ticket_id"]
         ),
         tool(
+            "close_ticket",
+            "Repository coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents; conversations, branch and worktree are kept.",
+            json!({"ticket_id":string}),
+            vec!["ticket_id"]
+        ),
+        tool(
             "ask_user",
             "Main coordinator: place a question in the human inbox, then finish your turn. The answer resumes you.",
             json!({"request_id":string,"question":string}),
