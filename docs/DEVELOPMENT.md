@@ -154,7 +154,7 @@ gh release create v0.2.0 --target main --generate-notes \
 
 Everything above the first heading or list item is the summary. Without one, the card just says the version is ready. Each tag must be higher than the last, because installed apps only move to a newer version.
 
-`bash scripts/install_release.sh [tag]` replaces `/Applications/Wiffletree.app` with a release, the latest by default. It quits a running copy first, which interrupts active turns. It downloads through `gh`, so use it to install the first release over a local build, or while the repository is still private and the in-app updater cannot see releases.
+`scripts/install.sh [tag]` is the public installer the README's `curl … | bash` line runs. It replaces `/Applications/Wiffletree.app` (or `$WIFFLETREE_INSTALL_DIR/Wiffletree.app`) with a release, the latest by default, after checking its signature and Gatekeeper assessment. It quits a running copy first, which interrupts active turns. Use it to replace a local development build with a release, which then updates itself. A tag whose release has no build yet fails with a retry hint, so expect that for the few minutes the release workflow is still publishing.
 
 Signing and notarization use these repository secrets. The release fails without them rather than publishing an unsigned build.
 
