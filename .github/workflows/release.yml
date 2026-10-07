@@ -19,7 +19,7 @@ jobs:
 
   release:
     needs: check
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     env:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -30,9 +30,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Needed to confirm the tag is on main.
-          clean: false # Keep target/ between runs; tracked files are still reset.
 
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Ensure the Metal toolchain
         run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
@@ -51,7 +51,6 @@ jobs:
       - name: Import the Developer ID certificate
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
-          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
           password="$(uuidgen)"
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
           security create-keychain -p "$password" "$keychain"
@@ -61,7 +60,7 @@ jobs:
             -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          # Sign by hash from this keychain alone; the runner's login keychain may hold the same certificate.
+          # Sign by hash from this keychain alone, so a copy of the certificate elsewhere never matches.
           identity="$(security find-identity -v -p codesigning "$keychain" \
             | awk '/Developer ID Application/ { print $2; exit }')"
           test -n "$identity"
@@ -92,10 +91,3 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "$archive" \
               --title "Wiffletree $WIFFLETREE_VERSION" --verify-tag --generate-notes
           fi
-
-      # The runner is a persistent Mac: remove the signing keychain and key files from it.
-      - name: Remove signing material
-        if: always()
-        run: |
-          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN" || true; fi
-          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/api-key.p8" "$RUNNER_TEMP/notarize.zip"

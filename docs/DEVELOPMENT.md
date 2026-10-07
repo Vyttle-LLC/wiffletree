@@ -133,7 +133,7 @@ Coordinates are window points from the top-left corner. `shot` saves the window 
 
 ## Releases and updates
 
-Every pull request and every push to `main` runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. Merging does not release anything. Both workflows run on Vyttle's self-hosted Mac runner (`self-hosted, macOS, ARM64`), not GitHub-hosted machines. Pull requests from forks skip CI so that untrusted code never runs on that Mac. A release deletes its temporary signing keychain and key files from the runner when it finishes.
+Every pull request and every push to `main` runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. Merging does not release anything. Both workflows run on GitHub-hosted macOS runners (`macos-15`).
 
 To release, tag a commit on `main` with its version and push the tag:
 
