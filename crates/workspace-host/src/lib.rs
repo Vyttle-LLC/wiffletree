@@ -377,6 +377,16 @@ impl Host {
     /// archived. Restoring also restores the owners above it, so the session is reachable again.
     /// Messages, tickets, worktrees and provider conversations are kept either way.
     pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Vec<Session>> {
+        self.change_archived(id, archived, None)
+    }
+    /// Like set_archived, also recording `milestone` for the session itself in the same
+    /// transaction when its flag changes, so the event and the transition are never split.
+    pub(crate) fn change_archived(
+        &mut self,
+        id: &str,
+        archived: bool,
+        milestone: Option<&str>,
+    ) -> Result<Vec<Session>> {
         let mut affected = self.session_tree(id)?;
         if !archived {
             let mut owner = affected[0].parent_id.clone();
@@ -408,6 +418,9 @@ impl Host {
                 if archived { "archived" } else { "restored" },
                 &session.name,
             )?;
+            if let Some(kind) = milestone.filter(|_| session.id == id) {
+                Self::event(&tx, &project, Some(id), kind, &session.name)?;
+            }
         }
         if stops_project {
             tx.execute(

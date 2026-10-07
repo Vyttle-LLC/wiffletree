@@ -258,17 +258,75 @@ impl Host {
         )?;
         Ok(ticket)
     }
+    /// Archives a main coordinator's finished repository team: its accepted tickets are closed and
+    /// the coordinator's whole tree is archived. Retrying an archived team is harmless. Refuses
+    /// while any team member is working or any ticket is still open, naming every blocker.
+    pub fn archive_team(&mut self, main: &str, coordinator_id: &str) -> Result<Vec<Session>> {
+        ensure!(
+            self.session(main)?.role == Role::ProjectOrchestrator,
+            "Only the main coordinator archives repository teams"
+        );
+        let coordinator = self.session(coordinator_id)?;
+        ensure!(
+            coordinator.role == Role::TaskOrchestrator
+                && coordinator.parent_id.as_deref() == Some(main),
+            "Archive only your own repository coordinators"
+        );
+        let tickets: Vec<Ticket> = self
+            .tickets()?
+            .into_iter()
+            .filter(|t| t.coordinator_id == coordinator.id)
+            .collect();
+        let blockers: Vec<String> = self
+            .session_tree(&coordinator.id)?
+            .iter()
+            .filter(|s| s.status == Status::Working)
+            .map(|s| format!("{} is working", s.name))
+            .chain(
+                tickets
+                    .iter()
+                    .filter(|t| t.is_open())
+                    .map(|t| format!("ticket \"{}\" ({}) is {}", t.title, t.id, t.state)),
+            )
+            .collect();
+        ensure!(
+            blockers.is_empty(),
+            "{} still has outstanding work: {}",
+            coordinator.name,
+            blockers.join("; ")
+        );
+        for ticket in tickets.iter().filter(|t| t.state == "accepted") {
+            self.close_ticket(&ticket.id)?;
+        }
+        self.change_archived(&coordinator.id, true, Some("team_archived"))
+    }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
-        Ok(
-            json!({"self":session,"project":self.project(&session.project_id)?,
+        let mut context = json!({"self":session,"project":self.project(&session.project_id)?,
             "repositories":self.project_repositories(&session.project_id)?,
             "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).collect::<Vec<_>>(),
             "tickets":self.tickets()?.into_iter().filter(|t|self.session(&t.coordinator_id).is_ok_and(|s|s.project_id==session.project_id)).collect::<Vec<_>>(),
             "runtime":self.session_runtime(id)?, "policies":self.policies()?,
             "memory":self.logs(&session.project_id,None,10)?,
-            "open_questions":self.open_questions(&session)?}),
-        )
+            "open_questions":self.open_questions(&session)?});
+        if session.role == Role::ProjectOrchestrator {
+            context["teams"] = json!(self.teams(id)?);
+        }
+        Ok(context)
+    }
+    /// The main coordinator's view of each repository team and the state of its tickets.
+    fn teams(&self, main: &str) -> Result<Vec<Value>> {
+        let tickets = self.tickets()?;
+        Ok(self
+            .sessions()?
+            .into_iter()
+            .filter(|s| s.role == Role::TaskOrchestrator && s.parent_id.as_deref() == Some(main))
+            .map(|s| {
+                json!({"id":s.id,"name":s.name,"status":s.status,"archived":s.archived,
+                "tickets":tickets.iter().filter(|t|t.coordinator_id==s.id)
+                    .map(|t|json!({"id":t.id,"title":t.title,"state":t.state})).collect::<Vec<_>>()})
+            })
+            .collect())
     }
     /// Questions this session placed in the inbox that the human has not yet settled.
     pub fn open_questions(&self, session: &Session) -> Result<Vec<Attention>> {
@@ -485,6 +543,9 @@ impl Host {
                 );
                 Ok(serde_json::to_value(self.close_ticket(&ticket.id)?)?)
             }
+            "archive_team" => Ok(serde_json::to_value(
+                self.archive_team(id, string("session_id")?)?,
+            )?),
             "ask_user" => {
                 ensure!(
                     session.role == Role::ProjectOrchestrator,

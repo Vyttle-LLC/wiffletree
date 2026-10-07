@@ -476,3 +476,163 @@ fn closing_a_finished_review_ticket_archives_its_agents() {
             .is_err()
     );
 }
+
+fn accepted_ticket(host: &mut Host, coordinator: &Session, title: &str) -> (Ticket, Session) {
+    let ticket = host
+        .create_ticket(&coordinator.id, title, "Ship it")
+        .unwrap();
+    let tester = host
+        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+        .unwrap();
+    host.agent_tool(
+        &tester.id,
+        "report",
+        json!({"message_id":"done","kind":"passed","body":"Green"}),
+    )
+    .unwrap();
+    host.agent_tool(
+        &coordinator.id,
+        "accept_ticket",
+        json!({"ticket_id":ticket.id}),
+    )
+    .unwrap();
+    (host.ticket(&ticket.id).unwrap(), tester)
+}
+
+#[test]
+fn only_the_main_coordinator_archives_its_own_repository_teams() {
+    let (_home, _repo, mut host, root, coordinator) = fixture();
+    let ticket = host
+        .create_ticket(&coordinator.id, "Toolbar", "Style it")
+        .unwrap();
+    let worker = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    let other = host.create_project("Elsewhere").unwrap();
+    let other_root = host
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.project_id == other.id)
+        .unwrap();
+    let not_main = "Only the main coordinator archives repository teams";
+    let not_own = "Archive only your own repository coordinators";
+    for (caller, target, expected) in [
+        (&coordinator.id, &coordinator.id, not_main),
+        (&root.id, &root.id, not_own),
+        (&root.id, &worker.id, not_own),
+        (&other_root.id, &coordinator.id, not_own),
+    ] {
+        let refused = host
+            .agent_tool(caller, "archive_team", json!({"session_id":target}))
+            .unwrap_err();
+        assert!(refused.to_string().contains(expected), "{refused}");
+    }
+    assert!(host.sessions().unwrap().iter().all(|s| !s.archived));
+}
+
+#[test]
+fn archiving_a_team_names_every_blocker_then_closes_accepted_work() {
+    let (_home, _repo, mut host, root, coordinator) = fixture();
+    let (accepted, tester) = accepted_ticket(&mut host, &coordinator, "Toolbar");
+    let open = host
+        .create_ticket(&coordinator.id, "Sidebar", "Style it")
+        .unwrap();
+    let worker = host
+        .assign_ticket(&open.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    host.set_status(&worker.id, Status::Working).unwrap();
+    let archive = json!({"session_id":coordinator.id});
+
+    let refused = host
+        .agent_tool(&root.id, "archive_team", archive.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains(&format!("{} is working", worker.name)),
+        "{refused}"
+    );
+    assert!(refused.contains("\"Sidebar\""), "{refused}");
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+    assert_eq!(host.ticket(&accepted.id).unwrap().state, "accepted");
+
+    host.set_status(&worker.id, Status::Done).unwrap();
+    host.close_ticket(&open.id).unwrap();
+    let team: Vec<Session> = serde_json::from_value(
+        host.agent_tool(&root.id, "archive_team", archive.clone())
+            .unwrap(),
+    )
+    .unwrap();
+
+    let ids: Vec<_> = team.iter().map(|s| s.id.as_str()).collect();
+    for member in [&coordinator, &tester, &worker] {
+        assert!(ids.contains(&member.id.as_str()));
+        assert!(host.session(&member.id).unwrap().archived);
+    }
+    assert!(!host.session(&root.id).unwrap().archived);
+    assert_eq!(host.ticket(&accepted.id).unwrap().state, "closed");
+    let archived_events = |host: &Host| {
+        host.activity(&root.project_id, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.kind == "team_archived")
+            .count()
+    };
+    assert_eq!(archived_events(&host), 1);
+    assert!(host.send("late", None, &tester.id, "One more").is_err());
+    host.agent_tool(&root.id, "archive_team", archive).unwrap();
+    assert_eq!(archived_events(&host), 1);
+
+    host.set_archived(&coordinator.id, false).unwrap();
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+    host.send("back", None, &tester.id, "Welcome back").unwrap();
+}
+
+#[test]
+fn main_coordinator_context_lists_each_team_with_its_tickets() {
+    let (_home, _repo, mut host, root, coordinator) = fixture();
+    let ticket = host
+        .create_ticket(&coordinator.id, "Toolbar", "Style it")
+        .unwrap();
+
+    let context = host
+        .agent_tool(&root.id, "workspace_context", json!({}))
+        .unwrap();
+    assert_eq!(
+        context["teams"],
+        json!([{"id":coordinator.id,"name":"Backend","status":coordinator.status,"archived":false,
+            "tickets":[{"id":ticket.id,"title":"Toolbar","state":"planned"}]}])
+    );
+    let context = host
+        .agent_tool(&coordinator.id, "workspace_context", json!({}))
+        .unwrap();
+    assert!(context.get("teams").is_none());
+}
+
+#[test]
+fn a_failed_team_archive_leaves_the_team_active_and_a_retry_records_it() {
+    let (home, _repo, mut host, root, coordinator) = fixture();
+    accepted_ticket(&mut host, &coordinator, "Toolbar");
+    let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_team_event BEFORE INSERT ON activity WHEN NEW.kind='team_archived'
+         BEGIN SELECT RAISE(ABORT,'injected'); END;",
+    )
+    .unwrap();
+    let archive = json!({"session_id":coordinator.id});
+
+    assert!(
+        host.agent_tool(&root.id, "archive_team", archive.clone())
+            .is_err()
+    );
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+
+    db.execute_batch("DROP TRIGGER fail_team_event").unwrap();
+    host.agent_tool(&root.id, "archive_team", archive).unwrap();
+    assert!(host.session(&coordinator.id).unwrap().archived);
+    let events = host.activity(&root.project_id, None, 100).unwrap();
+    assert_eq!(
+        events.iter().filter(|a| a.kind == "team_archived").count(),
+        1
+    );
+}
