@@ -137,8 +137,11 @@ impl Workspace {
             )
             .child(self.workspace_nav(p, cx))
             .child(self.quota_strip(p, cx))
-            .children(self.update_card(p, cx))
-            .child(self.sidebar_footer(p, cx))
+            .child(
+                self.sidebar_footer(p, cx)
+                    .relative()
+                    .children(self.update_card(p, cx)),
+            )
     }
 
     /// Pages about the whole workspace, kept apart from the per-session tools on the right.
@@ -233,6 +236,7 @@ impl Workspace {
     }
 
     /// What the downloaded release brings, with its changelog and the restart that installs it.
+    /// It floats above the footer rather than taking room from the sidebar above it.
     fn update_card(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
         let staged = self
             .update
@@ -240,68 +244,76 @@ impl Workspace {
             .filter(|_| !self.update_card_dismissed)?;
         let page = staged.page.clone();
         Some(
-            div().px_3().pb_2().child(
-                card(p)
-                    .bg(p.surface)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
+            div()
+                .absolute()
+                .bottom(relative(1.))
+                .left_0()
+                .right_0()
+                .px_3()
+                .pb_2()
+                .child(
+                    card(p)
+                        .bg(p.surface)
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(format!("Wiffletree {} is ready", staged.version)),
+                                )
+                                .child(
+                                    button("dismiss-update")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(icon("close").size(px(12.)))
+                                        .tooltip("Later")
+                                        .on_click(cx.listener(|v, _, _, c| {
+                                            v.update_card_dismissed = true;
+                                            c.notify();
+                                        })),
+                                ),
+                        )
+                        .when_some(staged.summary.clone(), |d, summary| {
+                            d.child(
                                 div()
                                     .text_size(px(12.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("Wiffletree {} is ready", staged.version)),
+                                    .line_height(relative(1.45))
+                                    .text_color(p.subtle)
+                                    .line_clamp(4)
+                                    .child(summary),
                             )
-                            .child(
-                                button("dismiss-update")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(icon("close").size(px(12.)))
-                                    .tooltip("Later")
-                                    .on_click(cx.listener(|v, _, _, c| {
-                                        v.update_card_dismissed = true;
-                                        c.notify();
-                                    })),
+                        })
+                        // A row keeps the link's hit area to its text rather than the card's width.
+                        .child(
+                            div().flex().child(
+                                div()
+                                    .id("changelog")
+                                    .cursor_pointer()
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.accent)
+                                    .hover(|d| d.underline())
+                                    .child("Changelog →")
+                                    .on_click(move |_, _, cx| cx.open_url(&page)),
                             ),
-                    )
-                    .when_some(staged.summary.clone(), |d, summary| {
-                        d.child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(relative(1.45))
-                                .text_color(p.subtle)
-                                .line_clamp(4)
-                                .child(summary),
                         )
-                    })
-                    // A row keeps the link's hit area to its text rather than the card's width.
-                    .child(
-                        div().flex().child(
-                            div()
-                                .id("changelog")
-                                .cursor_pointer()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.accent)
-                                .hover(|d| d.underline())
-                                .child("Changelog →")
-                                .on_click(move |_, _, cx| cx.open_url(&page)),
+                        .child(
+                            div().flex().child(
+                                button("install-update")
+                                    .primary()
+                                    .small()
+                                    .flex_1()
+                                    .icon(icon("refresh").size(px(13.)))
+                                    .label("Restart to update")
+                                    .on_click(cx.listener(|v, _, w, c| v.restart_to_update(w, c))),
+                            ),
                         ),
-                    )
-                    .child(
-                        div().flex().child(
-                            button("install-update")
-                                .primary()
-                                .small()
-                                .flex_1()
-                                .icon(icon("refresh").size(px(13.)))
-                                .label("Restart to update")
-                                .on_click(cx.listener(|v, _, w, c| v.restart_to_update(w, c))),
-                        ),
-                    ),
-            ),
+                ),
         )
     }
 
