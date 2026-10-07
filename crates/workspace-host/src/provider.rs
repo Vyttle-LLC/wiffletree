@@ -1,4 +1,5 @@
 //! Noninteractive provider turns with the user's YOLO execution policy.
+use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 use std::os::unix::process::CommandExt;
 use std::{
@@ -14,7 +15,9 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum ProviderEvent {
     Session(String),
-    Text(String),
+    Step(StepUpdate),
+    /// The turn's final text, sent once before `Finished` when the turn succeeds.
+    Reply(String),
     Usage {
         request_id: String,
         model: Option<String>,
@@ -197,6 +200,8 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let mut failure = None;
     let mut usage = Value::Null;
     let mut requests = crate::telemetry::ClaudeRequests::default();
+    let mut claude = ClaudeSteps::new(&turn.cwd);
+    let mut codex = CodexSteps::new(&turn.cwd);
     loop {
         if cancel.load(Ordering::Relaxed) {
             anyhow::bail!("Turn interrupted; inspect changes before retrying")
@@ -217,15 +222,17 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                         emit(ProviderEvent::Session(id.into()));
                     }
                 }
-                "item.completed" => {
-                    if value["item"]["type"] == "agent_message"
-                        && let Some(text) = value["item"]["text"].as_str()
-                    {
-                        emit(ProviderEvent::Text(text.into()));
-                    }
+                "item.started" | "item.updated" | "item.completed" => {
+                    codex
+                        .event(&value)
+                        .into_iter()
+                        .for_each(|step| emit(ProviderEvent::Step(step)));
                 }
                 "turn.completed" => {
                     terminal = true;
+                    if let Some(reply) = codex.reply() {
+                        emit(ProviderEvent::Reply(reply));
+                    }
                     usage = value["usage"].clone();
                     emit(ProviderEvent::Usage {
                         request_id: format!("turn:{}", turn.run_id),
@@ -244,6 +251,10 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                     if let Some(event) = requests.event(&value) {
                         emit(event);
                     }
+                    claude
+                        .event(&value)
+                        .into_iter()
+                        .for_each(|step| emit(ProviderEvent::Step(step)));
                 }
                 "rate_limit_event" => {
                     if let Some(mut reading) = crate::telemetry::claude_quota(&value, now()) {
@@ -267,20 +278,20 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                         value["mcp_server_errors"]
                     );
                 }
-                "assistant" => {
-                    if let Some(content) = value["message"]["content"].as_array() {
-                        for block in content {
-                            if block["type"] == "text"
-                                && let Some(text) = block["text"].as_str()
-                            {
-                                emit(ProviderEvent::Text(text.into()));
-                            }
-                        }
-                    }
+                "assistant" | "user" => {
+                    claude
+                        .event(&value)
+                        .into_iter()
+                        .for_each(|step| emit(ProviderEvent::Step(step)));
                 }
                 "result" => {
                     terminal = true;
                     usage = value["usage"].clone();
+                    if value["is_error"] != true
+                        && let Some(reply) = claude.reply(&value)
+                    {
+                        emit(ProviderEvent::Reply(reply));
+                    }
                     if value["is_error"] == true {
                         failure = Some(
                             value["result"]

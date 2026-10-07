@@ -73,7 +73,19 @@ try:
         emit({'type':'rate_limit_event','rate_limit_info':{'rateLimitType':'five_hour','status':'allowed','utilization':0.25,'resetsAt':int(time.time())+300}})
     prompt=sys.stdin.read()
     ctx=tool('workspace_context');me=ctx['self'];role=me['role']
+    # Every turn narrates and runs one command, so work steps stay out of the transcript.
+    if claude:
+        emit({'type':'stream_event','event':{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}}})
+        emit({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Checking the workspace.'}}})
+        emit({'type':'assistant','message':{'content':[{'type':'text','text':'Checking the workspace.'}]}})
+        emit({'type':'stream_event','event':{'type':'content_block_stop','index':0}})
+        emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'fixture-ls','name':'Bash','input':{'command':'ls'}}]}})
+    else:
+        emit({'type':'item.completed','item':{'id':'fixture-say','type':'agent_message','text':'Checking the workspace.'}})
+        emit({'type':'item.started','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'','exit_code':None,'status':'in_progress'}})
     if 'HANG_UNTIL_CANCELLED' in prompt:time.sleep(30)
+    if claude: emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'fixture-ls','content':'result.txt'}]}})
+    else: emit({'type':'item.completed','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'result.txt\n','exit_code':0,'status':'completed'}})
     if 'REQUEST_PERMISSION' in prompt:
         permission=tool('request_permission',tool_name='Bash',input={'command':'python3 -m unittest'},tool_use_id='test-permission')
         result='PERMISSION_'+permission['behavior']

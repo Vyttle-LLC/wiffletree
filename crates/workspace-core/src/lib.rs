@@ -1,8 +1,10 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
+mod steps;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+pub use steps::*;
 pub use usage::*;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -706,6 +708,18 @@ pub enum Command {
         session_id: String,
         before: Option<i64>,
         limit: usize,
+    },
+    /// One run's steps changed after `after`: `run_id` names the run, or `None` for the
+    /// session's latest. Answered with a `StepPage`.
+    Steps {
+        session_id: String,
+        run_id: Option<String>,
+        after: u64,
+    },
+    /// Duration and step counts for up to a page of the session's runs.
+    RunSummaries {
+        session_id: String,
+        run_ids: Vec<String>,
     },
     Simulate {
         message_id: String,

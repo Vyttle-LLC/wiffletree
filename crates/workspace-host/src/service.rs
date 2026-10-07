@@ -1,5 +1,6 @@
 //! Event-driven host actor: all SQLite access stays on one thread; provider I/O never blocks it.
 use crate::provider::{ProviderEvent, Turn};
+use crate::stream::StepUpdate;
 use crate::*;
 use async_channel::{Receiver, Sender};
 use std::{
@@ -75,6 +76,7 @@ impl Drop for Handle {
 pub struct Service {
     handle: Arc<Handle>,
     changes: Receiver<()>,
+    step_changes: Receiver<()>,
 }
 struct Active {
     run: String,
@@ -83,6 +85,9 @@ struct Active {
     messages: Vec<String>,
     output: String,
     reported: bool,
+    /// This turn's steps; the store has each one as of its last start or state change.
+    steps: Vec<Step>,
+    omitted_steps: usize,
 }
 struct Permission {
     session: String,
@@ -93,6 +98,12 @@ struct Actor {
     host: Host,
     sender: Sender<Event>,
     changed: Sender<()>,
+    /// Work steps change many times a second, so they have their own signal; a pending
+    /// step signal must never hold back a state change.
+    steps_changed: Sender<()>,
+    steps_dirty: bool,
+    /// Each session's latest step revision, seeded from the store on first use.
+    revisions: HashMap<String, u64>,
     active: HashMap<String, Active>,
     permissions: HashMap<String, Permission>,
     socket: PathBuf,
@@ -107,6 +118,7 @@ impl Service {
         );
         let (sender, receiver) = async_channel::bounded(256);
         let (changed, changes) = async_channel::bounded(1);
+        let (steps_changed, step_changes) = async_channel::bounded(1);
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let worker = sender.clone();
         std::thread::Builder::new().name("workspace-host".into()).spawn(move || {
@@ -153,12 +165,12 @@ impl Service {
                     });
                 }
             });
-            let mut actor=Actor {host,sender:worker,changed,active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new()};
+            let mut actor=Actor {host,sender:worker,changed,steps_changed,steps_dirty:false,revisions:HashMap::new(),active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new()};
             while let Ok(event)=receiver.recv_blocking(){
                 if matches!(event,Event::Shutdown){break}
                 let dirty=actor.handle(event);
                 if let Err(e)=actor.schedule(){eprintln!("Workspace scheduler: {e:#}");}
-                if dirty {let _=actor.changed.try_send(());}
+                actor.signal(dirty);
             }
             let interrupted=actor.active.iter().map(|(id,a)|{a.cancel.store(true,Ordering::Relaxed);(id.clone(),a.run.clone())}).collect::<Vec<_>>();
             for (id,run) in interrupted {let _=actor.provider_event(&id,&run,ProviderEvent::Finished{error:Some("Host stopped during a turn; inspect work before retrying".into()),usage:Value::Null});}
@@ -171,6 +183,7 @@ impl Service {
         Ok(Self {
             handle: Arc::new(Handle { sender }),
             changes,
+            step_changes,
         })
     }
     pub fn request(
@@ -186,6 +199,10 @@ impl Service {
     }
     pub fn changes(&self) -> Receiver<()> {
         self.changes.clone()
+    }
+    /// Signals that some session's work steps changed; fetch them with `Command::Steps`.
+    pub fn step_changes(&self) -> Receiver<()> {
+        self.step_changes.clone()
     }
 }
 impl Actor {
@@ -249,6 +266,8 @@ impl Actor {
                     command,
                     Command::Snapshot
                         | Command::Messages { .. }
+                        | Command::Steps { .. }
+                        | Command::RunSummaries { .. }
                         | Command::Logs { .. }
                         | Command::Activity { .. }
                         | Command::GitHistory { .. }
@@ -299,7 +318,18 @@ impl Actor {
                         }
                         _ => {}
                     }
-                    let response = self.host.execute(command.clone())?;
+                    let response = match &command {
+                        Command::Steps {
+                            session_id,
+                            run_id,
+                            after,
+                        } => serde_json::to_value(self.steps(
+                            session_id,
+                            run_id.as_deref(),
+                            *after,
+                        )?)?,
+                        _ => self.host.execute(command.clone())?,
+                    };
                     // Speaking to a project, retrying its work or answering its coordinator
                     // starts it; there is no separate step to go live.
                     let started = match &command {
@@ -417,10 +447,12 @@ impl Actor {
                 if !self.active.get(&session).is_some_and(|a| a.run == run) {
                     return false;
                 }
+                let changes_state =
+                    !matches!(event, ProviderEvent::Step(_) | ProviderEvent::Reply(_));
                 if let Err(e) = self.provider_event(&session, &run, event) {
                     eprintln!("Workspace provider event: {e:#}");
                 }
-                true
+                changes_state
             }
             Event::Shutdown => false,
         }
@@ -434,18 +466,10 @@ impl Actor {
                 runtime.provider_session_id = Some(provider_id);
                 self.host.save_runtime(&runtime)?;
             }
-            ProviderEvent::Text(text) => {
+            ProviderEvent::Step(update) => self.record_step(id, run, update)?,
+            ProviderEvent::Reply(text) => {
                 let active = self.active.get_mut(id).unwrap();
-                if active.output.len() < MAX_TEXT_BYTES {
-                    if !active.output.is_empty() {
-                        active.output.push_str("\n\n");
-                    }
-                    active.output.extend(
-                        text.chars()
-                            .take((MAX_TEXT_BYTES - active.output.len()) / 4),
-                    );
-                }
-                self.host.append_output(&session, run, &active.output)?;
+                active.output = text.chars().take(MAX_TEXT_BYTES / 4).collect();
             }
             ProviderEvent::Usage {
                 request_id,
@@ -464,12 +488,16 @@ impl Actor {
             }
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
             ProviderEvent::Finished { error, usage } => {
-                let active = self.active.remove(id).unwrap();
+                let mut active = self.active.remove(id).unwrap();
+                self.settle_steps(id, &mut active, error.is_some())?;
+                if error.is_none() {
+                    self.host.append_output(&session, run, &active.output)?;
+                }
                 runtime.last_finished_at = Some(now());
                 runtime.last_error = error.clone();
                 self.host.save_runtime(&runtime)?;
                 self.host.db.execute(
-                    "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4)) WHERE id=?1",
+                    "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5) WHERE id=?1",
                     params![
                         run,
                         now(),
@@ -478,7 +506,8 @@ impl Actor {
                         } else {
                             "completed"
                         },
-                        json!({"error":error,"usage":usage}).to_string()
+                        json!({"error":error,"usage":usage}).to_string(),
+                        active.omitted_steps as i64
                     ],
                 )?;
                 for message in &active.messages {
@@ -549,6 +578,114 @@ impl Actor {
             }
         }
         Ok(())
+    }
+    /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
+    fn signal(&mut self, state_changed: bool) {
+        if state_changed {
+            let _ = self.changed.try_send(());
+        }
+        if std::mem::take(&mut self.steps_dirty) {
+            let _ = self.steps_changed.try_send(());
+        }
+    }
+    fn next_revision(&mut self, session_id: &str) -> Result<u64> {
+        let latest = match self.revisions.get(session_id) {
+            Some(&revision) => revision,
+            None => self.host.step_revision(session_id)?,
+        };
+        self.revisions.insert(session_id.into(), latest + 1);
+        Ok(latest + 1)
+    }
+    /// Merges an adapter's update into the turn's steps. Text deltas stay in memory; the store
+    /// is written when a step starts or changes state.
+    fn record_step(&mut self, session_id: &str, run: &str, update: StepUpdate) -> Result<()> {
+        let revision = self.next_revision(session_id)?;
+        let active = self.active.get_mut(session_id).context("No active turn")?;
+        let existing = active.steps.iter().position(|s| s.id == update.id);
+        let index = match existing {
+            Some(index) => index,
+            None if active.steps.len() >= MAX_RUN_STEPS => {
+                active.omitted_steps += 1;
+                return Ok(());
+            }
+            None => {
+                active.steps.push(Step {
+                    run_id: run.into(),
+                    id: update.id.clone(),
+                    parent_id: None,
+                    kind: update.kind,
+                    state: StepState::Running,
+                    title: String::new(),
+                    note: None,
+                    detail: None,
+                    omitted: 0,
+                    seq: active.steps.len() as u32,
+                    revision,
+                    started_at: now(),
+                    finished_at: None,
+                });
+                active.steps.len() - 1
+            }
+        };
+        let step = &mut active.steps[index];
+        let persist = existing.is_none() || step.state != update.state;
+        step.parent_id = update.parent_id;
+        step.kind = update.kind;
+        step.state = update.state;
+        step.title = update.title;
+        step.note = update.note;
+        step.detail = update.detail;
+        step.omitted = 0;
+        step.revision = revision;
+        if step.state != StepState::Running {
+            step.finished_at.get_or_insert_with(now);
+        }
+        steps::bound(step);
+        if persist {
+            self.host.save_step(session_id, step)?;
+        }
+        self.steps_dirty = true;
+        Ok(())
+    }
+    /// A finished turn leaves nothing running: unfinished steps succeed with the turn, or are
+    /// interrupted when it failed. Every step is stored as it ended.
+    fn settle_steps(&mut self, session_id: &str, active: &mut Active, failed: bool) -> Result<()> {
+        for index in 0..active.steps.len() {
+            if active.steps[index].state == StepState::Running {
+                let revision = self.next_revision(session_id)?;
+                let step = &mut active.steps[index];
+                step.state = if failed {
+                    StepState::Interrupted
+                } else {
+                    StepState::Succeeded
+                };
+                step.finished_at = Some(now());
+                step.revision = revision;
+            }
+            self.host.save_step(session_id, &active.steps[index])?;
+        }
+        self.steps_dirty = true;
+        Ok(())
+    }
+    /// A running turn's steps come from memory, which is ahead of the store; others from the store.
+    fn steps(&self, session_id: &str, run_id: Option<&str>, after: u64) -> Result<StepPage> {
+        let active = self
+            .active
+            .get(session_id)
+            .filter(|a| run_id.is_none_or(|run| run == a.run));
+        let Some(active) = active else {
+            return self.host.steps(session_id, run_id, after);
+        };
+        let mut page = self.host.run_page(session_id, Some(&active.run))?;
+        page.steps = active
+            .steps
+            .iter()
+            .filter(|s| s.revision > after)
+            .cloned()
+            .collect();
+        page.revision = page.steps.iter().map(|s| s.revision).fold(after, u64::max);
+        page.omitted_steps = active.omitted_steps;
+        Ok(page)
     }
     fn schedule(&mut self) -> Result<()> {
         if self.active.len() >= 8 {
@@ -699,6 +836,8 @@ impl Actor {
                 messages: vec![message.id],
                 output: String::new(),
                 reported: false,
+                steps: vec![],
+                omitted_steps: 0,
             },
         );
         let _ = self.changed.try_send(());
@@ -730,7 +869,186 @@ impl Actor {
 
 #[cfg(test)]
 mod tests {
-    use super::runtime_stopped;
+    use super::*;
+
+    /// An actor with one active turn and no provider process behind it.
+    fn actor_with_turn() -> (tempfile::TempDir, Actor, String, String) {
+        let (home, actor, session, run, _, _) = actor_with_signals();
+        (home, actor, session, run)
+    }
+
+    fn actor_with_signals() -> (
+        tempfile::TempDir,
+        Actor,
+        String,
+        String,
+        Receiver<()>,
+        Receiver<()>,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        host.create_project("Steps").unwrap();
+        let session = host.sessions().unwrap().remove(0).id;
+        let run = new_id();
+        host.db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,'{}')",
+                params![run, session, now()],
+            )
+            .unwrap();
+        let (sender, _) = async_channel::bounded(1);
+        let (changed, changes) = async_channel::bounded(1);
+        let (steps_changed, step_changes) = async_channel::bounded(1);
+        let mut actor = Actor {
+            host,
+            sender,
+            changed,
+            steps_changed,
+            steps_dirty: false,
+            revisions: HashMap::new(),
+            active: HashMap::new(),
+            permissions: HashMap::new(),
+            socket: PathBuf::new(),
+            helper: PathBuf::new(),
+            turns: HashMap::new(),
+        };
+        actor.active.insert(
+            session.clone(),
+            Active {
+                run: run.clone(),
+                token: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                messages: vec![],
+                output: String::new(),
+                reported: false,
+                steps: vec![],
+                omitted_steps: 0,
+            },
+        );
+        (home, actor, session, run, changes, step_changes)
+    }
+
+    fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {
+        StepUpdate {
+            id: id.into(),
+            parent_id: None,
+            kind,
+            state,
+            title: title.into(),
+            note: None,
+            detail: Some(title.into()),
+        }
+    }
+
+    #[test]
+    fn streamed_text_is_written_when_it_starts_and_ends() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        let writes = actor.host.db.total_changes();
+        let mut text = String::new();
+        for _ in 0..1_000 {
+            text.push_str("w ");
+            let delta = update("text", StepKind::Narration, StepState::Running, &text);
+            actor
+                .provider_event(&session, &run, ProviderEvent::Step(delta))
+                .unwrap();
+        }
+        let done = update("text", StepKind::Narration, StepState::Succeeded, &text);
+        actor
+            .provider_event(&session, &run, ProviderEvent::Step(done))
+            .unwrap();
+        assert_eq!(actor.host.db.total_changes() - writes, 2);
+        // A reader sees every delta live, and the store has the finished text.
+        let live = actor.steps(&session, None, 0).unwrap();
+        assert_eq!((live.revision, live.steps.len()), (1_001, 1));
+        let stored = actor.host.steps(&session, Some(&run), 0).unwrap();
+        assert_eq!(stored.steps[0].detail.as_deref(), Some(text.as_str()));
+        assert!(
+            actor
+                .steps(&session, None, live.revision)
+                .unwrap()
+                .steps
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_interrupts_its_running_steps_and_keeps_narration_out_of_chat() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        for step in [
+            update(
+                "say",
+                StepKind::Narration,
+                StepState::Succeeded,
+                "Running the tests:",
+            ),
+            update("test", StepKind::Command, StepState::Running, "cargo test"),
+        ] {
+            actor
+                .provider_event(&session, &run, ProviderEvent::Step(step))
+                .unwrap();
+        }
+        let failure = ProviderEvent::Finished {
+            error: Some("Turn interrupted".into()),
+            usage: Value::Null,
+        };
+        actor.provider_event(&session, &run, failure).unwrap();
+        let page = actor.host.steps(&session, Some(&run), 0).unwrap();
+        let states: Vec<_> = page.steps.iter().map(|s| s.state).collect();
+        assert_eq!(states, [StepState::Succeeded, StepState::Interrupted]);
+        assert!(!page.running);
+        let transcript = actor.host.messages(&session, None, 100).unwrap();
+        assert!(
+            transcript
+                .iter()
+                .all(|m| !m.body.contains("Running the tests"))
+        );
+    }
+
+    #[test]
+    fn a_burst_of_steps_leaves_one_step_signal_and_no_state_signal() {
+        let (_home, mut actor, session, run, changes, step_changes) = actor_with_signals();
+        for n in 0..500 {
+            let event = Event::Provider {
+                session: session.clone(),
+                run: run.clone(),
+                event: ProviderEvent::Step(update(
+                    &n.to_string(),
+                    StepKind::Read,
+                    StepState::Succeeded,
+                    "a",
+                )),
+            };
+            let state_changed = actor.handle(event);
+            actor.signal(state_changed);
+        }
+        assert_eq!((step_changes.len(), changes.len()), (1, 0));
+        step_changes.try_recv().unwrap();
+        // The last change after a client reads is never lost.
+        let last = update("last", StepKind::Command, StepState::Running, "ls");
+        actor
+            .provider_event(&session, &run, ProviderEvent::Step(last))
+            .unwrap();
+        actor.signal(false);
+        assert_eq!(step_changes.len(), 1);
+    }
+
+    #[test]
+    fn steps_beyond_the_run_limit_are_counted_not_kept() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        for n in 0..MAX_RUN_STEPS + 3 {
+            let step = update(
+                &n.to_string(),
+                StepKind::Read,
+                StepState::Succeeded,
+                "notes.txt",
+            );
+            actor
+                .provider_event(&session, &run, ProviderEvent::Step(step))
+                .unwrap();
+        }
+        let page = actor.steps(&session, None, 0).unwrap();
+        assert_eq!((page.steps.len(), page.omitted_steps), (MAX_RUN_STEPS, 3));
+    }
 
     #[test]
     fn provider_errors_cannot_close_their_fence() {

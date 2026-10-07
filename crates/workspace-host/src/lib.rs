@@ -8,6 +8,8 @@ pub mod provider;
 mod repositories;
 pub mod runtime;
 pub mod service;
+mod steps;
+mod stream;
 mod telemetry;
 pub mod usage;
 use anyhow::{Context, Result, bail, ensure};
@@ -99,6 +101,7 @@ impl Host {
         }
         db.execute_batch(include_str!("live.sql"))?;
         db.execute_batch(include_str!("usage.sql"))?;
+        db.execute_batch(include_str!("steps.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         let mut host = Self {
             db,
@@ -140,7 +143,7 @@ impl Host {
             [],
         )?;
         tx.commit()?;
-        Ok(())
+        self.recover_steps()
     }
     pub(crate) fn event(
         db: &Connection,
@@ -989,6 +992,15 @@ impl Host {
                 skip,
                 limit,
             } => self.git_history(&repository_id, skip, limit)?,
+            Command::Steps {
+                session_id,
+                run_id,
+                after,
+            } => serde_json::to_value(self.steps(&session_id, run_id.as_deref(), after)?)?,
+            Command::RunSummaries {
+                session_id,
+                run_ids,
+            } => serde_json::to_value(self.run_summaries(&session_id, &run_ids)?)?,
         })
     }
 }

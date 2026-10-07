@@ -125,6 +125,49 @@ fn main() -> Result<()> {
             ])?;
         }
     }
+    // One long run at the step limit, and a page of finished runs for reply summaries.
+    let long_run = "steps-long";
+    let summary_runs: Vec<String> = (0..MAX_PAGE).map(|i| format!("steps-{i}")).collect();
+    {
+        let mut runs = tx.prepare("INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,detail) VALUES (?1,?2,'[]',?3,?3,'{}')")?;
+        let mut steps = tx.prepare(
+            "INSERT INTO steps(session_id,run_id,id,revision,data) VALUES (?1,?2,?3,?4,?5)",
+        )?;
+        let mut revision = 0;
+        for run in summary_runs.iter().map(String::as_str).chain([long_run]) {
+            runs.execute(params![run, session.id, now()])?;
+            let count = if run == long_run { MAX_RUN_STEPS } else { 20 };
+            for seq in 0..count {
+                revision += 1;
+                let step = Step {
+                    run_id: run.into(),
+                    id: format!("step-{seq}"),
+                    parent_id: None,
+                    kind: if seq % 4 == 0 {
+                        StepKind::Narration
+                    } else {
+                        StepKind::Command
+                    },
+                    state: StepState::Succeeded,
+                    title: "cargo test --workspace".into(),
+                    note: Some("exit 0".into()),
+                    detail: Some("x".repeat(512)),
+                    omitted: 0,
+                    seq: seq as u32,
+                    revision,
+                    started_at: now(),
+                    finished_at: Some(now()),
+                };
+                steps.execute(params![
+                    session.id,
+                    run,
+                    step.id,
+                    revision as i64,
+                    serde_json::to_string(&step)?
+                ])?;
+            }
+        }
+    }
     tx.commit()?;
     let seed_ms = seed_started.elapsed().as_secs_f64() * 1000.;
     drop(db);
@@ -146,6 +189,18 @@ fn main() -> Result<()> {
             std::hint::black_box(host.logs(&session.project_id, None, 100)?);
             Ok(())
         })?,
+        samples("step page, whole 2,000-step run", 1000, |_| {
+            std::hint::black_box(host.steps(&session.id, Some(long_run), 0)?);
+            Ok(())
+        })?,
+        samples("step page after cursor, nothing new", 1000, |_| {
+            std::hint::black_box(host.steps(&session.id, Some(long_run), u32::MAX as u64)?);
+            Ok(())
+        })?,
+        samples("reply summaries (100 runs)", 1000, |_| {
+            std::hint::black_box(host.run_summaries(&session.id, &summary_runs)?);
+            Ok(())
+        })?,
         samples("durable 4 KiB enqueue (FULL sync)", 200, |i| {
             host.send(
                 &format!("measured-{i}"),
@@ -165,7 +220,7 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"build":if cfg!(debug_assertions){"debug"}else{"release"},"durability":"SQLite WAL / synchronous=FULL","fixture":{"projects":5,"repositories":"10 metadata fixtures; no Git history benchmark","sessions":50,"messages":100000,"activity":100000,"source_logs":100000},"seed_ms":seed_ms,"results":results,"recovery":reopen,"excluded":"native UI, GPU, provider runtimes/inference, streaming, filesystem import and long soak"})
+            &json!({"build":if cfg!(debug_assertions){"debug"}else{"release"},"durability":"SQLite WAL / synchronous=FULL","fixture":{"projects":5,"repositories":"10 metadata fixtures; no Git history benchmark","sessions":50,"messages":100000,"activity":100000,"source_logs":100000,"step_runs":101,"steps":MAX_RUN_STEPS+MAX_PAGE*20},"seed_ms":seed_ms,"results":results,"recovery":reopen,"excluded":"native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak"})
         )?
     );
     Ok(())

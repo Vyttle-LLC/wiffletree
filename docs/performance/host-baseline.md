@@ -19,6 +19,18 @@ The benchmark process peaked at 11,255,808 bytes (~10.7 MiB) resident memory acc
 
 Raw values and environment: [host-baseline.json](host-baseline.json).
 
+## Work steps — October 7, 2026
+
+The fixture adds 101 finished runs with 4,000 stored steps: one run at the 2,000-step limit and 100 runs of 20 steps. These rows come from a later run on a different Mac (Apple M4, Mac16,10, 24 GiB memory, 10 logical cores; macOS 27.0.1 (26A434); Rust 1.97.0; release build), so compare them with each other rather than with the table above. In the same run, the existing measures stayed within about 0.02 ms of the table above, and host reopen with step recovery measured p50 12.347 ms and p95 13.137 ms.
+
+| Operation | Samples | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| Step page, whole 2,000-step run | 1,000 | 2.194 ms | 2.317 ms | 3.915 ms |
+| Step page after cursor, nothing new | 1,000 | 0.124 ms | 0.130 ms | 0.155 ms |
+| Reply summaries, 100 runs | 1,000 | 1.284 ms | 1.432 ms | 2.292 ms |
+
+Peak resident memory was 16,596,992 bytes (~15.8 MiB). Not measured: the service actor's in-memory merge per streamed update, eight simultaneous streams, and the desktop's per-batch main-thread time against the 8 ms p95 target. In a manual run, a replayed recorded Claude turn of 129 stream events produced 73 paced step fetches and no step-triggered snapshot reloads; the snapshot reloads that did occur came from per-request usage events.
+
 Reproduce with:
 
 ```sh

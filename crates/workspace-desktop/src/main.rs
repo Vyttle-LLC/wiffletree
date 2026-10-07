@@ -1,3 +1,4 @@
+mod activity;
 mod assets;
 mod automation;
 mod bridge;
@@ -5,11 +6,13 @@ mod context_view;
 mod conversation;
 mod creation;
 mod data_dir;
+mod history_sheet;
 mod inspector;
 mod memory_view;
 mod models;
 mod models_view;
 mod palette;
+mod preferences;
 mod project_name;
 mod repositories_view;
 mod sidebar;
@@ -123,9 +126,23 @@ struct Workspace {
     checking_update: bool,
     /// Hides the update card; the footer keeps a smaller restart button.
     update_card_dismissed: bool,
+    /// The selected session's latest run, shown as the activity card while it works.
+    activity: Option<activity::RunActivity>,
+    step_fetch: activity::StepFetch,
+    activity_clock: bool,
+    preferences: preferences::Preferences,
+    /// The open turn history, which follows step changes while it is shown.
+    history: Option<WeakEntity<history_sheet::HistorySheet>>,
+    /// Finished runs' durations and step counts, keyed by run.
+    run_summaries: BTreeMap<String, RunSummary>,
 }
 impl Workspace {
-    fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        bridge: Bridge,
+        preferences: preferences::Preferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 9));
         // The send button follows the draft, so redraw as it changes.
         cx.subscribe(&input, |_, _, event, cx| {
@@ -211,6 +228,12 @@ impl Workspace {
             update: None,
             checking_update: false,
             update_card_dismissed: false,
+            activity: None,
+            step_fetch: Default::default(),
+            activity_clock: false,
+            preferences,
+            history: None,
+            run_summaries: BTreeMap::new(),
         };
         if let Some(changes) = view.bridge.changes() {
             cx.spawn_in(window, async move |this, cx| {
@@ -229,6 +252,7 @@ impl Workspace {
             })
             .detach();
         }
+        view.watch_steps(window, cx);
         view.request(Command::Snapshot, window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
@@ -439,6 +463,7 @@ impl Workspace {
                     match serde_json::from_value::<Vec<Message>>(value) {
                         Ok(rows) => {
                             self.replace_messages(rows);
+                            self.load_run_summaries(window, cx);
                             if before.is_none() {
                                 self.cached_pages
                                     .insert(session_id.clone(), self.messages.clone());
@@ -472,6 +497,10 @@ impl Workspace {
                     self.load_messages(window, cx);
                 }
             }
+            Command::RunSummaries { .. } => match serde_json::from_value(value) {
+                Ok(summaries) => self.accept_run_summaries(summaries),
+                Err(error) => self.toast_error(error.to_string(), window, cx),
+            },
             Command::Logs { project_id, .. } => {
                 if self.panel == Some(Panel::Memory) && self.project_id() == Some(project_id) {
                     self.panel_data = value;
@@ -681,6 +710,11 @@ impl Workspace {
             self.load_messages(window, cx);
             self.load_panel(window, cx);
         }
+        // A turn that just started has no steps yet; ask before the first one arrives.
+        if self.selected_working() && !self.activity.as_ref().is_some_and(|a| a.running) {
+            self.fetch_steps(window, cx);
+        }
+        self.sync_activity_clock(window, cx);
         self.sync_context(window, cx);
     }
     /// Unsaved edits survive refreshes; an untouched editor follows the saved policy.
@@ -693,11 +727,7 @@ impl Workspace {
     }
     /// Transcript rows are the loaded messages plus a trailing activity row while the agent works.
     fn transcript_rows(&self) -> usize {
-        let working = self.page.is_none()
-            && self
-                .selected_session()
-                .is_some_and(|s| s.status == Status::Working);
-        self.messages.len() + usize::from(working)
+        self.messages.len() + usize::from(self.selected_working())
     }
     fn sync_transcript_rows(&mut self) {
         let rows = self.transcript_rows();
@@ -776,6 +806,9 @@ impl Workspace {
         self.sync_context(window, cx);
         self.load_messages(window, cx);
         self.load_panel(window, cx);
+        self.activity = None;
+        self.fetch_steps(window, cx);
+        self.sync_activity_clock(window, cx);
         cx.notify();
     }
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1408,6 +1441,7 @@ fn main() -> anyhow::Result<()> {
             std::env::var_os("HOME").expect("macOS home directory"),
         ))
     });
+    let preferences = preferences::Preferences::load(&home);
     let bridge = Bridge::start(home, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
     gpui_platform::application()
@@ -1443,7 +1477,7 @@ fn main() -> anyhow::Result<()> {
                     |window, cx| {
                         window.set_window_title("Wiffletree");
                         let view = cx.new(|cx| {
-                            let v = Workspace::new(bridge, window, cx);
+                            let v = Workspace::new(bridge, preferences, window, cx);
                             v.apply_theme(window, cx);
                             v
                         });
