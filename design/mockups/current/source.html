@@ -248,6 +248,62 @@
 #celadon-chat .sidebar-handle{right:-3px}#celadon-chat .inspector-handle{left:-3px}
 @media(max-width:980px){#celadon-chat .app{grid-template-columns:200px minmax(0,1fr)}#celadon-chat .conversation-layout.inspector-open{grid-template-columns:minmax(0,1fr) 68px}#celadon-chat .inspector{grid-row:2;grid-column:1}#celadon-chat .toolrail{grid-column:2;grid-row:1 / span 2}#celadon-chat .pane-handle{display:none}}
 @media(max-width:540px){#celadon-chat .app{grid-template-columns:minmax(0,1fr)}#celadon-chat .conversation-layout,#celadon-chat .conversation-layout.inspector-open{grid-template-columns:minmax(0,1fr)}#celadon-chat .toolrail{grid-row:1;grid-column:1;flex-direction:row;flex-wrap:wrap}#celadon-chat .conversation,#celadon-chat .inspector-open .conversation{grid-row:2}#celadon-chat .inspector{grid-row:3}#celadon-chat .sessionbar{padding:16px}}
+/* Live work stream: activity card, turn summary and turn history drawer. */
+@keyframes wt-spin{to{transform:rotate(360deg)}}
+@keyframes wt-shimmer{to{background-position:-200% 0}}
+@keyframes wt-in{from{opacity:0;transform:translateY(6px)}}
+@keyframes wt-drawer{from{transform:translateX(24px);opacity:.4}}
+#celadon-chat .wt-spin{display:inline-flex;animation:wt-spin 1s linear infinite}
+#celadon-chat .activity-card{width:100%;color:var(--text);background:var(--surface);border:1px solid color-mix(in srgb,var(--edge) 70%,transparent);border-radius:12px;padding:8px 8px 8px 14px}
+#celadon-chat .activity-card button{font:inherit;color:inherit;text-align:left;background:none;border:0}
+#celadon-chat .ac-head{display:flex;align-items:center;gap:4px}
+#celadon-chat .ac-open{flex:1;min-width:0;display:flex;align-items:center;gap:7px;padding:4px 0;font-size:11px!important;color:var(--subtle)!important}
+#celadon-chat .ac-open strong{color:var(--text);font-weight:600}
+#celadon-chat .ac-stats{white-space:nowrap}
+#celadon-chat .ac-current::before{content:'·';margin-right:7px;color:var(--subtle)}
+#celadon-chat .ac-current{display:none;min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+#celadon-chat .ac-current code{background:none;padding:0}
+#celadon-chat .ac-view{margin-left:auto;display:inline-flex;align-items:center;gap:2px;white-space:nowrap}
+#celadon-chat .ac-toggle{flex:none;width:26px;height:26px;padding:0!important;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;color:var(--subtle)!important}
+#celadon-chat .ac-toggle:hover,#celadon-chat .ac-body:hover{background:var(--overlay)!important}
+#celadon-chat .ac-toggle .lucide{flex:none;width:14px!important;height:14px!important;transition:transform .2s}
+#celadon-chat .ac-body{display:block;width:100%;padding:0 6px 4px 0;margin-left:-6px;padding-left:6px;border-radius:8px;overflow:hidden;max-height:110px;transition:max-height .2s ease,opacity .2s ease}
+#celadon-chat .activity-card.minimized .ac-body{max-height:0;opacity:0;padding-bottom:0;pointer-events:none}
+#celadon-chat .activity-card.minimized .ac-toggle .lucide{transform:rotate(180deg)}
+#celadon-chat .activity-card.minimized .ac-current{display:block}
+#celadon-chat .activity-card.minimized .ac-view{display:none}
+#celadon-chat .ac-head .lucide,#celadon-chat .step-row .lucide,#celadon-chat .turn-summary .lucide{width:13px;height:13px}
+#celadon-chat .ac-narration{margin:4px 0 6px;height:21px;font-size:13px;line-height:21px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#celadon-chat .ac-narration.streaming{background:linear-gradient(90deg,var(--text) 0%,var(--text) 35%,var(--subtle) 50%,var(--text) 65%,var(--text) 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:wt-shimmer 1.8s linear infinite}
+#celadon-chat .ac-narration.streaming code{background:none;padding:0}
+#celadon-chat .ac-steps{list-style:none;margin:0;padding:0;display:grid;grid-template-rows:repeat(3,24px)}
+#celadon-chat .step-row{display:grid;grid-template-columns:14px 14px minmax(0,1fr) auto;align-items:center;gap:8px;min-width:0;font-size:11px}
+#celadon-chat .step-row.new{animation:wt-in .25s ease-out}
+#celadon-chat .step-row .title{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#celadon-chat .step-row .meta{font-size:10px;color:var(--subtle);white-space:nowrap}
+#celadon-chat .step-row .kind{color:var(--subtle);display:inline-flex}
+#celadon-chat .glyph{display:inline-flex}
+#celadon-chat .glyph.ok{color:var(--read-green,var(--green))}
+#celadon-chat .glyph.bad{color:var(--read-red,var(--red))}
+#celadon-chat .glyph.run{color:var(--read-accent,var(--accent))}
+#celadon-chat .turn-summary{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--subtle);padding:3px 8px;margin:0 0 6px -8px;border-radius:6px}
+#celadon-chat .turn-summary:hover{background:var(--overlay);color:var(--text)}
+#celadon-chat .turn-summary .bad{color:var(--read-red,var(--red))}
+#celadon-chat .sheet-host.drawer{justify-content:flex-end;align-items:stretch;padding:0}
+#celadon-chat .sheet.turn-sheet{width:min(100%,560px);height:100%;border-radius:0;border-width:0 0 0 1px;padding:18px 0 0;display:flex;flex-direction:column;animation:wt-drawer .2s ease-out}
+#celadon-chat .turn-sheet>header{padding:0 20px}
+#celadon-chat .turn-sheet .turn-meta{padding:2px 20px 0;font-size:11px;color:var(--subtle);display:flex;align-items:center;gap:6px}
+#celadon-chat .turn-sheet .sheet-body{flex:1;min-height:0;overflow:auto;margin-top:10px;padding:0 20px 16px}
+#celadon-chat .turn-group{padding:12px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 40%,transparent)}
+#celadon-chat .turn-group p{margin:0 0 6px;font-size:13px;line-height:1.6}
+#celadon-chat .turn-group details>summary{list-style:none;padding:3px 0}
+#celadon-chat .turn-group details>summary::-webkit-details-marker{display:none}
+#celadon-chat .turn-group details[open] .chev{transform:rotate(90deg)}
+#celadon-chat .turn-group .chev{display:inline-flex;transition:transform .15s}
+#celadon-chat .turn-group pre{margin:4px 0 8px 44px;padding:8px 10px;background:var(--base);border-radius:7px;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;color:var(--subtle)}
+#celadon-chat .turn-group code,#celadon-chat .ac-narration code{font:12px ui-monospace,SFMono-Regular,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
+#celadon-chat .turn-foot{padding:10px 20px;font-size:10px;color:var(--subtle);border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
+@media(prefers-reduced-motion:reduce){#celadon-chat .ac-body,#celadon-chat .ac-toggle .lucide{transition:none}#celadon-chat .wt-spin,#celadon-chat .step-row.new,#celadon-chat .sheet.turn-sheet{animation:none}#celadon-chat .ac-narration.streaming{animation:none;background:none;color:var(--text)}}
 </style>
 <script>
 (()=>{
@@ -277,7 +333,7 @@ function luminance(hex){const c=[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255
 function contrast(a,b){const l=[luminance(a),luminance(b)].sort((a,b)=>a-b);return (l[1]+.05)/(l[0]+.05);}
 function readable(color,p){let result=color;for(let step=0;step<=20;step++){const fraction=step/20;result='#'+[1,3,5].map(i=>Math.round(parseInt(color.slice(i,i+2),16)*(1-fraction)+parseInt(p.text.slice(i,i+2),16)*fraction).toString(16).padStart(2,'0')).join('');if(['base','surface','overlay'].every(k=>contrast(result,p[k])>=4.5))break;}return result;}
 function applyTheme(){const p=palettes[effectiveTheme()];Object.entries(p.palette).forEach(([k,v])=>root.style.setProperty('--'+k,v));root.style.setProperty('--subtle',readable(p.palette.subtle,p.palette));for(const role of ['accent','green','yellow','red','blue'])root.style.setProperty('--read-'+role,readable(p.palette[role],p.palette));root.style.colorScheme=p.appearance;root.style.setProperty('--round',design.radius+'px');root.style.setProperty('--space',design.spacing+'px');}
-function remember(){window.openai?.setWidgetState?.({modelContent:{layout:'chat-wide',agent:state.entity,view:state.view,theme:state.theme},privateContent:{completionSeen:state.completionSeen,drafts:Object.fromEntries(Object.entries(state.drafts).slice(-8).map(([k,v])=>[k,String(v).slice(0,1200)])),selected:state.selected}})?.catch(()=>{});}
+function remember(){window.openai?.setWidgetState?.({modelContent:{layout:'chat-wide',agent:state.entity,view:state.view,theme:state.theme},privateContent:{completionSeen:state.completionSeen,activityMinimized:state.activityMinimized===true,drafts:Object.fromEntries(Object.entries(state.drafts).slice(-8).map(([k,v])=>[k,String(v).slice(0,1200)])),selected:state.selected}})?.catch(()=>{});}
 function childKeys(key){return Object.keys(entities).filter(k=>entities[k].parent===key);}
 function descendants(key){return [key,...childKeys(key).flatMap(descendants)];}
 function totals(key){return descendants(key).reduce((a,k)=>({input:a.input+entities[k].ownIn,output:a.output+entities[k].ownOut}),{input:0,output:0});}
@@ -432,6 +488,105 @@ root.addEventListener('keydown',event=>{
  const width=root.querySelector(sidebar?'.sidebar':'.inspector').getBoundingClientRect().width;
  root.style.setProperty(property,Math.max(sidebar?210:280,Math.min(sidebar?500:560,width+(event.key==='ArrowRight'?20:-20)*(sidebar?1:-1)))+'px');
 });
+
+// Live work stream study: a scripted turn drives the activity card, turn summary and history drawer.
+// Sample steps only; no provider output is read.
+const stepKinds={command:'terminal',edit:'pencil',search:'search',read:'file-text',plan:'list-checks',tool:'send'};
+const startupTurn=[
+ {n:'Reading the startup harness to see how timings are captured.'},
+ {k:'search',t:'rg "performance.mark" src/',m:'6 matches'},
+ {k:'read',t:'src/startup/metrics.ts'},
+ {n:'Timings come from `performance.mark` around module init. Running the current suite for a baseline:'},
+ {k:'command',t:'npm test -- startup',m:'4.2s',ticks:4,d:'PASS tests/startup.test.ts\n  ✓ cold start under budget (812 ms)\n  ✓ warm start (143 ms)\n\nTests: 2 passed'},
+ {n:'Cold start is noisy from run to run. Adding a baseline that takes the median of 15 runs:'},
+ {k:'plan',t:'Plan · 1 of 3 done',d:'✓ Measure current cold start\n◻ Add a median-of-15 harness\n◻ Record the baseline in docs'},
+ {k:'edit',t:'tests/startup/baseline.test.ts',m:'+64'},
+ {k:'edit',t:'src/startup/metrics.ts',m:'+9 −2'},
+ {k:'command',t:'npm test -- startup/baseline',m:'38s',ticks:5,fail:true,d:'FAIL tests/startup/baseline.test.ts\n  ✕ median cold start is stable\n    Expected spread < 10%, received 23%'},
+ {n:'Spread is 23%. The first run pays for the module cache, so I’m discarding it as a warm-up:'},
+ {k:'edit',t:'tests/startup/baseline.test.ts',m:'+4 −1'},
+ {k:'command',t:'npm test -- startup/baseline',m:'41s',ticks:5,d:'PASS tests/startup/baseline.test.ts\n  ✓ median cold start is stable (spread 6%)'},
+ {k:'plan',t:'Plan · 2 of 3 done',d:'✓ Measure current cold start\n✓ Add a median-of-15 harness\n◻ Record the baseline in docs'},
+ {n:'Baseline is stable at a 798 ms median. Recording it in `docs/performance.md`, then reporting.'},
+ {k:'edit',t:'docs/performance.md',m:'+18'},
+ {k:'tool',t:'report · ready_for_testing'},
+ {reply:'Baseline recorded: median cold start is **798 ms** with a 6% spread over 15 runs. I added `tests/startup/baseline.test.ts`, discard the warm-up run, and documented the method in `docs/performance.md`. Reported ready for testing.'}
+];
+const themeTurn=[
+ {n:'Replacing hard-coded toolbar colors with semantic tokens from the palette contract.'},
+ {k:'search',t:'rg "#1B2632|#EEE9DF" src/',m:'4 matches'},
+ {k:'edit',t:'src/theme/tokens.ts',m:'+18 −8'},
+ {k:'command',t:'npm run typecheck',m:'6.1s',d:'No type errors.'},
+ {n:'The fallback still uses a fixed color, which breaks the Sky variant. Switching it to the surface role:'},
+ {k:'edit',t:'src/theme/fallback.ts',m:'+3 −3'},
+ {k:'command',t:'npm test -- theme',m:'12s',fail:true,d:'✕ Sky variant has a focus role\n  Expected role "focus" to be defined'},
+ {n:'Sky was missing the focus role in its generated export. Regenerating the variants:'},
+ {k:'command',t:'npm run palette:generate',m:'2.3s',d:'4 variants written'},
+ {k:'command',t:'npm test -- theme',m:'11s',d:'Tests: 42 passed'},
+ {k:'tool',t:'report · ready_for_testing'}
+];
+const turns={theme:{events:themeTurn,shown:themeTurn.length,done:true,seconds:401}};
+const openDetails=new Set();
+let turnTimer=null;
+function inline(text){return esc(text).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>');}
+function clock(s){s=Math.floor(s);return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
+function liveWorker(key){const e=entities[key];return key!=='project'&&e.role!=='Task orchestrator'&&!state.paused[key]&&agentPhase(key).kind==='working';}
+function turnFor(key){if(!turns[key]&&liveWorker(key))turns[key]={events:startupTurn,shown:1,wait:2,done:false,started:Date.now(),offset:251};return turns[key];}
+function seconds(turn){return turn.done?turn.seconds:turn.offset+(Date.now()-turn.started)/1000;}
+function revealed(turn){return turn.events.slice(0,turn.shown).filter(e=>!e.reply);}
+function steps(turn){return revealed(turn).filter(e=>!e.n);}
+function stepState(turn,event){const last=revealed(turn).at(-1);if(!turn.done&&event===last)return 'run';return event.fail?'bad':'ok';}
+function glyph(state){return `<span class="glyph ${state}">${state==='run'?`<span class="wt-spin">${icon('loader-circle')}</span>`:icon(state==='bad'?'x':'check')}</span>`;}
+function stepRow(turn,event,fresh){const s=stepState(turn,event);return `<li class="step-row ${fresh?'new':''}">${glyph(s)}<span class="kind">${icon(stepKinds[event.k])}</span><span class="title">${esc(event.t)}</span><span class="meta">${s==='run'?'running':esc(event.m||'')}</span></li>`;}
+function durationLabel(s){s=Math.round(s);return s<60?`${s}s`:`${Math.floor(s/60)}m ${String(s%60).padStart(2,'0')}s`;}
+function activityCard(key){
+ const turn=turns[key],list=steps(turn),recent=list.slice(-3),last=revealed(turn).at(-1),narration=revealed(turn).filter(e=>e.n).at(-1),streaming=last===narration,min=state.activityMinimized;
+ const current=last?(last.n?inline(last.n):esc(last.t)):'Starting…';
+ return `<div class="activity-card ${min?'minimized':''}"><div class="ac-head"><button class="ac-open" data-turn="${key}" aria-label="Show this turn’s work history"><span class="glyph run"><span class="wt-spin">${icon('loader-circle')}</span></span><strong>Working</strong><span class="ac-stats">· ${clock(seconds(turn))} · ${list.length} step${list.length===1?'':'s'}</span><span class="ac-current ${last&&!last.n?'mono':''}">${current}</span><span class="ac-view">View all ${icon('chevron-right')}</span></button>${button(icon('chevron-up'),`data-activity-toggle aria-expanded="${!min}" aria-label="${min?'Show':'Minimize'} live activity" data-tooltip="${min?'Show':'Minimize'} live activity"`,'ac-toggle')}</div><button class="ac-body" data-turn="${key}" tabindex="${min?-1:0}" aria-hidden="${min}"><p class="ac-narration ${streaming?'streaming':''}">${narration?inline(narration.n):'Starting…'}</p><ul class="ac-steps">${recent.map((e,i)=>stepRow(turn,e,i===recent.length-1&&!streaming)).join('')}</ul></button></div>`;
+}
+function turnSummary(key){const turn=turns[key],list=steps(turn),failed=list.filter(e=>e.fail).length;return `<button class="turn-summary" data-turn="${key}">${icon('chevron-right')}Worked ${durationLabel(turn.seconds)} · ${list.length} steps${failed?` · <span class="bad">${failed} failed</span>`:''}</button>`;}
+function turnRegion(key){
+ const turn=turnFor(key);if(!turn||key==='theme')return '';
+ if(!turn.done)return `<div data-turn-region>${activityCard(key)}</div>`;
+ const reply=turn.events.find(e=>e.reply);
+ return `<div data-turn-region><div class="message">${turnSummary(key)}<div class="by"><span>${esc(entities[key].provider)} · ${esc(entities[key].name)}</span><span>Now</span></div><p>${inline(reply.reply)}</p></div></div>`;
+}
+function turnHistory(key){
+ const turn=turns[key],groups=[];
+ for(const event of revealed(turn)){if(event.n||!groups.length)groups.push({n:event.n,steps:[]});if(!event.n)groups.at(-1).steps.push(event);}
+ return groups.map((g,gi)=>`<section class="turn-group">${g.n?`<p>${inline(g.n)}</p>`:''}${g.steps.map((e,si)=>{const id=`${key}:${gi}:${si}`,row=`<ul class="ac-steps" style="display:block">${stepRow(turn,e,false)}</ul>`;return e.d?`<details data-step="${id}" ${openDetails.has(id)?'open':''}><summary>${row}</summary><pre>${esc(e.d)}</pre></details>`:row;}).join('')}</section>`).join('');
+}
+function turnMeta(key){const turn=turns[key],n=steps(turn).length;return turn.done?`${icon('check')} Worked ${durationLabel(turn.seconds)} · ${n} steps`:`<span class="glyph run"><span class="wt-spin">${icon('loader-circle')}</span></span> Working · ${clock(seconds(turn))} · ${n} steps`;}
+function turnSheet(key){return `<section class="sheet turn-sheet" role="dialog" aria-modal="true" aria-label="Turn history"><header class="between"><h2>${esc(entities[key].name)} · this turn</h2>${button(icon('x'),'data-close aria-label="Close turn history"')}</header><div class="turn-meta">${turnMeta(key)}</div><div class="sheet-body">${turnHistory(key)}</div><div class="turn-foot">Simulated turn · sample steps, not provider output · Esc to close</div></section>`;}
+const baseChat=chat,baseSeedMessage=seedMessage,baseRenderSheet=renderSheet,baseRender=render;
+seedMessage=function(){const html=baseSeedMessage();return state.entity==='theme'?html.replace('<div class="message">',`<div class="message">${turnSummary('theme')}`):html;};
+chat=function(){return baseChat().replace('</div><div class="chat-composer-area">',`${turnRegion(state.entity)}</div><div class="chat-composer-area">`);};
+renderSheet=function(){const host=root.querySelector('.sheet-host');const turn=state.sheet?.kind==='turn';host?.classList.toggle('drawer',turn);if(turn){host.innerHTML=turnSheet(state.sheet.value);return;}baseRenderSheet();};
+render=function(){baseRender();syncTurnTimer();};
+function refreshTurn(key){
+ const region=root.querySelector('[data-turn-region]');if(region)region.outerHTML=turnRegion(key);
+ if(state.sheet?.kind==='turn'&&state.sheet.value===key){const body=root.querySelector('.turn-sheet .sheet-body'),following=body.scrollHeight-body.scrollTop-body.clientHeight<24,top=body.scrollTop;root.querySelector('.turn-sheet .turn-meta').innerHTML=turnMeta(key);body.innerHTML=turnHistory(key);body.scrollTop=following?body.scrollHeight:top;}
+ icons();
+}
+function syncTurnTimer(){
+ const turn=turns[state.entity],active=turn&&!turn.done;
+ if(active&&!turnTimer)turnTimer=setInterval(()=>{const key=state.entity,t=turns[key];if(!t||t.done){syncTurnTimer();return;}if(--t.wait<=0){t.shown++;const next=t.events[t.shown-1];t.wait=next?.ticks||2;if(next?.reply){t.seconds=seconds(t);t.done=true;}}refreshTurn(key);if(t.done)syncTurnTimer();},1000);
+ if(!active&&turnTimer){clearInterval(turnTimer);turnTimer=null;}
+}
+root.addEventListener('click',event=>{
+ const trigger=event.target.closest('[data-turn]');if(trigger){openSheet('turn',trigger.dataset.turn);return;}
+ if(event.target.matches('.sheet-host.drawer'))closeSheet();
+});
+root.addEventListener('click',event=>{
+ const toggle=event.target.closest('[data-activity-toggle]');if(!toggle)return;
+ state.activityMinimized=!state.activityMinimized;remember();
+ // Flip the class in place so the height animates; the next tick re-renders the same state.
+ const min=state.activityMinimized,label=(min?'Show':'Minimize')+' live activity';
+ toggle.closest('.activity-card').classList.toggle('minimized',min);
+ toggle.setAttribute('aria-expanded',String(!min));toggle.setAttribute('aria-label',label);toggle.dataset.tooltip=label;
+});
+state.activityMinimized=priv.activityMinimized===true;
+root.addEventListener('toggle',event=>{const id=event.target.dataset?.step;if(!id)return;event.target.open?openDetails.add(id):openDetails.delete(id);},true);
 
 render();
 if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:render});tweak.addToggle(design,'atmosphere',{label:'Ambient color'});tweak.addSlider(design,'radius',{label:'Window corner radius',min:4,max:24,unit:'px'});tweak.addSlider(design,'spacing',{label:'Workspace spacing',min:14,max:24,unit:'px'});}

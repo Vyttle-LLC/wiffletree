@@ -6,11 +6,14 @@
 
 The UI leads with the main orchestrator's conversation. The native hierarchy is project/main coordinator → repository coordinator → tickets → agents. The HTML study still contains simulated examples from the earlier task-orchestrator model; the current PRD and native app define the updated workflow. Glyphs distinguish working, blocked, done, and paused; human escalation appears on the main orchestrator. A scoped inspector rail stays at the right edge. Selecting a tool opens a panel naming the selected project, task or agent; project selection hides task-only Git tools. Sidebar and inspector widths are adjustable. Context files remain separated by project, task and conversation scope.
 
+While a worker is working, a fixed-height activity card replaces the working indicator. It shows the latest narration line and the three most recent steps. Clicking it opens the turn's full history in a drawer on the right. The chevron minimizes the card to one line that still shows the current step, and the choice carries over to other agents. A finished turn collapses to a “Worked 4m 53s · 12 steps” line above its reply. Open Baseline tests or Profiler to watch a turn run, or theme-init for a finished one. The native app's behavior is specified in `openspec/specs/work-stream`.
+
 **Wiffletree** is the product name, selected October 5, 2026; **Tidal** remains the selected brand color palette as of October 2, 2026. The current study uses Wiffletree branding and paired Tidal light and dark modes. Celadon remains its sample project; it is no longer the product's theme family. See [Brand colors](brand.md) for the palette, semantic roles, and usage rules. The [brand kit](brand/README.md) pairs the selected red Interlock open-joint symbol with the original two-tone wordmark; [preview both appearances](brand/png/preview.png).
 
 ## Prototype boundaries
 
 - Chat submission, permissions, Git actions, PR data, timers, and usage are local simulations.
+- Activity cards and turn histories replay scripted sample steps; they read no provider output.
 - Context selection and sent file-reference chips are interactive. File imports retain only names and sizes in the session; no durable upload or provider delivery is implemented.
 - Some presentation choices and drafts persist in browser storage. Sample conversations, created agents, approvals, and imported file metadata may reset on reload.
 - The file-picker flow was not verified end to end in the sandboxed in-app browser. Selection of sample context files, sent references, task/agent creation, and approval routing were exercised.
