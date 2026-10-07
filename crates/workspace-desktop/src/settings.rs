@@ -48,7 +48,7 @@ impl Settings {
                         // The appearance can also change from the sidebar.
                         _redraw: cx.observe(workspace, |_, _, cx| cx.notify()),
                     };
-                    view.ask_host(HostRequest::Read, cx);
+                    view.ask_host(Command::Settings, cx);
                     view
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -82,7 +82,9 @@ impl Settings {
             let _ = this.update(cx, |view, cx| {
                 match chosen {
                     Some(path) => view.ask_host(
-                        HostRequest::SetWorkspacesDir(path.to_string_lossy().into_owned()),
+                        Command::SetWorkspacesDir {
+                            path: path.to_string_lossy().into_owned(),
+                        },
                         cx,
                     ),
                     None => view.choosing_folder = false,
@@ -94,8 +96,8 @@ impl Settings {
     }
 
     /// Shows the host's answer, or its error beside the folder it still uses.
-    fn ask_host(&mut self, request: HostRequest, cx: &mut Context<Self>) {
-        let receiver = match request.send(&self.bridge) {
+    fn ask_host(&mut self, command: Command, cx: &mut Context<Self>) {
+        let receiver = match self.bridge.request(command) {
             Ok(receiver) => receiver,
             Err(error) => {
                 self.folder_error = Some(error);
@@ -225,27 +227,5 @@ impl Render for Settings {
                     .child(div().h(px(1.)).bg(p.edge.opacity(0.25)))
                     .child(self.folder_section(p, cx)),
             )
-    }
-}
-
-/// Stand-in for the host contract (`HostSettings`, `Command::Settings` and
-/// `Command::SetWorkspacesDir`) until the host branch lands.
-#[derive(serde::Deserialize)]
-struct HostSettings {
-    workspaces_dir: String,
-}
-enum HostRequest {
-    Read,
-    SetWorkspacesDir(String),
-}
-impl HostRequest {
-    fn send(
-        &self,
-        _bridge: &Bridge,
-    ) -> Result<async_channel::Receiver<Result<Value, String>>, String> {
-        match self {
-            Self::Read => Err("This host cannot report its workspace folder yet.".into()),
-            Self::SetWorkspacesDir(path) => Err(format!("This host cannot use {path} yet.")),
-        }
     }
 }
