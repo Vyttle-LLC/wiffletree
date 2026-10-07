@@ -14,14 +14,14 @@ use ui::{
 const INDENT: f32 = 14.;
 
 impl Appearance {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Light => "Light",
             Self::Dark => "Dark",
         }
     }
-    fn icon(self) -> &'static str {
+    pub(super) fn icon(self) -> &'static str {
         match self {
             Self::System => "monitor",
             Self::Light => "sun",
@@ -324,7 +324,7 @@ impl Workspace {
     }
 
     fn appearance_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.appearance;
+        let current = self.preferences.appearance;
         let weak = cx.weak_entity();
         button("appearance")
             .ghost()
@@ -337,10 +337,9 @@ impl Workspace {
                         PopupMenuItem::new(appearance.label())
                             .icon(icon(appearance.icon()))
                             .checked(appearance == current)
-                            .on_click(move |_, window, cx| {
-                                let _ = weak.update(cx, |view, cx| {
-                                    view.set_appearance(appearance, window, cx)
-                                });
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    weak.update(cx, |view, cx| view.set_appearance(appearance, cx));
                             }),
                     );
                 }

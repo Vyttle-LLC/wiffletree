@@ -2,11 +2,22 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Preferences {
     /// Show a working agent's activity as one line instead of the full card.
     #[serde(default)]
     pub minimize_activity: bool,
+    #[serde(default)]
+    pub appearance: Appearance,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -44,5 +55,33 @@ mod tests {
         assert!(Preferences::load(home.path()).minimize_activity);
         std::fs::write(home.path().join("desktop-preferences.json"), "not json").unwrap();
         assert!(!Preferences::load(home.path()).minimize_activity);
+    }
+
+    #[test]
+    fn appearance_survives_a_relaunch() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Preferences::load(home.path()).appearance,
+            Appearance::System
+        );
+        for appearance in [Appearance::Dark, Appearance::Light, Appearance::System] {
+            let mut preferences = Preferences::load(home.path());
+            preferences.appearance = appearance;
+            preferences.save().unwrap();
+            assert_eq!(Preferences::load(home.path()).appearance, appearance);
+        }
+    }
+
+    #[test]
+    fn a_file_from_before_appearance_keeps_its_choices() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("desktop-preferences.json"),
+            r#"{ "minimize_activity": true }"#,
+        )
+        .unwrap();
+        let preferences = Preferences::load(home.path());
+        assert!(preferences.minimize_activity);
+        assert_eq!(preferences.appearance, Appearance::System);
     }
 }

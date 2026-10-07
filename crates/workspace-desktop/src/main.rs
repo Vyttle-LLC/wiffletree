@@ -16,6 +16,7 @@ mod palette;
 mod preferences;
 mod project_name;
 mod repositories_view;
+mod settings;
 mod sidebar;
 mod team_view;
 mod ui;
@@ -32,6 +33,7 @@ use gpui_component::{
     scroll::ScrollableElement,
 };
 use palette::{Palette, palette};
+use preferences::Appearance;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -59,13 +61,6 @@ enum Page {
     Usage,
     Models,
     Repositories,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Appearance {
-    System,
-    Light,
-    Dark,
 }
 
 fn button(id: impl Into<ElementId>) -> Button {
@@ -109,7 +104,6 @@ struct Workspace {
     collapsed_projects: BTreeSet<String>,
     show_archived: bool,
     tree_scroll: ScrollHandle,
-    appearance: Appearance,
     quotas: Vec<QuotaReading>,
     quota_pending: bool,
     usage_report: Option<UsageReport>,
@@ -214,7 +208,6 @@ impl Workspace {
             collapsed_projects: BTreeSet::new(),
             show_archived: false,
             tree_scroll: ScrollHandle::new(),
-            appearance: Appearance::System,
             quotas: vec![],
             quota_pending: false,
             usage_report: None,
@@ -1303,7 +1296,7 @@ impl Workspace {
         palette(self.is_dark(cx))
     }
     fn is_dark(&self, cx: &App) -> bool {
-        match self.appearance {
+        match self.preferences.appearance {
             Appearance::Light => false,
             Appearance::Dark => true,
             Appearance::System => matches!(
@@ -1312,17 +1305,16 @@ impl Workspace {
             ),
         }
     }
-    fn set_appearance(
-        &mut self,
-        appearance: Appearance,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.appearance = appearance;
-        self.apply_theme(window, cx);
+    /// Applies to every open window and is remembered for the next launch.
+    fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.preferences.appearance = appearance;
+        if let Err(error) = self.preferences.save() {
+            eprintln!("Saving preferences: {error}");
+        }
+        self.apply_theme(cx);
         cx.notify();
     }
-    fn apply_theme(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_theme(&self, cx: &mut App) {
         let dark = self.is_dark(cx);
         Theme::change(
             if dark {
@@ -1330,7 +1322,7 @@ impl Workspace {
             } else {
                 ThemeMode::Light
             },
-            Some(window),
+            None,
             cx,
         );
         let p = palette(dark);
@@ -1383,7 +1375,14 @@ impl Workspace {
 
 actions!(
     workspace,
-    [Quit, SendMessage, NewProject, About, CheckForUpdates]
+    [
+        Quit,
+        SendMessage,
+        NewProject,
+        About,
+        OpenSettings,
+        CheckForUpdates
+    ]
 );
 
 /// The release version, or the crate version marked as a local build.
@@ -1455,6 +1454,7 @@ fn main() -> anyhow::Result<()> {
                 KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
                 KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
                 KeyBinding::new("cmd-n", NewProject, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
@@ -1462,6 +1462,7 @@ fn main() -> anyhow::Result<()> {
             cx.set_menus(vec![
                 Menu::new("Wiffletree").items([
                     MenuItem::action("About Wiffletree", About),
+                    MenuItem::action("Settings…", OpenSettings),
                     MenuItem::action("Check for Updates…", CheckForUpdates),
                     MenuItem::separator(),
                     MenuItem::action("Quit Wiffletree", Quit),
@@ -1479,14 +1480,25 @@ fn main() -> anyhow::Result<()> {
                     },
                     |window, cx| {
                         window.set_window_title("Wiffletree");
+                        let settings_bridge = bridge.clone();
                         let view = cx.new(|cx| {
                             let v = Workspace::new(bridge, preferences, window, cx);
-                            v.apply_theme(window, cx);
+                            v.apply_theme(cx);
                             v
                         });
                         // Registered on the app so ⌘N and the menu work whatever has focus.
                         // Deferred because a shortcut arrives while the window is mid-update.
                         let workspace = view.downgrade();
+                        let settings_workspace = workspace.clone();
+                        cx.on_action(move |_: &OpenSettings, cx| {
+                            let workspace = settings_workspace.clone();
+                            let bridge = settings_bridge.clone();
+                            cx.defer(move |cx| {
+                                if let Some(workspace) = workspace.upgrade() {
+                                    settings::Settings::open(&workspace, bridge, cx);
+                                }
+                            });
+                        });
                         let handle = window.window_handle();
                         let new_project = workspace.clone();
                         cx.on_action(move |_: &NewProject, cx| {
