@@ -52,12 +52,22 @@ pub unsafe fn adopt() {
 fn resolve(shell: &Path, timeout: Duration) -> anyhow::Result<Vec<(OsString, OsString)>> {
     let marker = format!("__WIFFLETREE_ENV_{}__", uuid::Uuid::new_v4().simple());
     let script = format!("printf '%s' {marker}; /usr/bin/env -0; printf '%s' {marker}");
-    let mut child = Command::new(shell)
+    let mut command = Command::new(shell);
+    command
         .args(["-l", "-i", "-c", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
+        .stderr(Stdio::null());
+    // A new session, unlike a new process group, detaches the interactive shell from the
+    // controlling terminal, so the terminal cannot stop it. Its group id is still its pid.
+    // SAFETY: setsid is async-signal-safe and touches no memory in the forked child.
+    unsafe {
+        command.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        })
+    };
+    let mut child = command
         .spawn()
         .map_err(|error| anyhow::anyhow!("starting {}: {error}", shell.display()))?;
     let mut stdout = child.stdout.take().expect("piped stdout");
