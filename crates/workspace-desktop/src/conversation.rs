@@ -11,7 +11,8 @@ use ui::{
     age, banner, brand_image, effort_label, hint, humanize, icon, pill, session_icon, status_badge,
 };
 
-const COLUMN: f32 = 820.;
+/// Wide enough for the composer, narrow enough that message lines stay readable.
+const COLUMN: f32 = 720.;
 
 /// Kinds an agent can pass to the host's `report` tool.
 const REPORT_KINDS: [&str; 6] = [
@@ -40,7 +41,7 @@ fn first_line(text: &str, limit: usize) -> String {
     }
 }
 
-fn markdown(id: &str, body: &str, window: &mut Window, app: &mut App) -> TextView {
+pub(super) fn markdown(id: &str, body: &str, window: &mut Window, app: &mut App) -> TextView {
     TextView::markdown(
         SharedString::from(format!("message-markdown-{id}")),
         body.to_owned(),
@@ -59,7 +60,7 @@ fn markdown(id: &str, body: &str, window: &mut Window, app: &mut App) -> TextVie
             })
     })
     .text_size(px(14.))
-    .line_height(relative(1.6))
+    .line_height(relative(1.5))
 }
 
 fn avatar(icon_name: &str, color: Hsla) -> Div {
@@ -316,23 +317,6 @@ impl Workspace {
             ];
         }
         let mut notices = vec![];
-        let attention = self.project_attention().len();
-        if session.role == Role::ProjectOrchestrator && attention > 0 {
-            notices.push(
-                banner(p.yellow)
-                    .child(icon("attention").text_color(p.yellow))
-                    .child(div().flex_1().child(if attention == 1 {
-                        "Your coordinator is waiting on a decision.".to_owned()
-                    } else {
-                        format!("Your coordinator is waiting on {attention} decisions.")
-                    }))
-                    .child(
-                        button("open-inbox").label("Open inbox").on_click(
-                            cx.listener(|v, _, w, c| v.show_panel(Panel::Attention, w, c)),
-                        ),
-                    ),
-            );
-        }
         if let Some(error) = self
             .runtime(&session.id)
             .and_then(|r| r.last_error.as_deref())
@@ -397,6 +381,87 @@ impl Workspace {
             );
         }
         notices
+    }
+
+    /// The project's open decisions, one at a time, so the human can settle them in place.
+    /// Hidden while the inbox is open, which already lists them all.
+    fn decisions(
+        &self,
+        session: &Session,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if session.role != Role::ProjectOrchestrator || self.panel == Some(Panel::Attention) {
+            return None;
+        }
+        let items = self.project_attention();
+        let position = self
+            .answering
+            .as_ref()
+            .and_then(|id| items.iter().position(|item| &item.id == id))
+            .unwrap_or(0);
+        let item = items.get(position)?;
+        let step = |offset: usize| {
+            let id = items[(position + offset) % items.len()].id.clone();
+            cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))
+        };
+        let navigation = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(hint(
+                if items.len() == 1 {
+                    "Your coordinator is waiting on a decision".to_owned()
+                } else {
+                    format!(
+                        "Your coordinator is waiting on {} decisions · {} of {}",
+                        items.len(),
+                        position + 1,
+                        items.len()
+                    )
+                },
+                p,
+            ))
+            .child(div().flex_1())
+            .when(items.len() > 1, |d| {
+                d.child(
+                    button("previous-decision")
+                        .ghost()
+                        .small()
+                        .icon(icon("chevron-left"))
+                        .tooltip("Previous decision")
+                        .on_click(step(items.len() - 1)),
+                )
+                .child(
+                    button("next-decision")
+                        .ghost()
+                        .small()
+                        .icon(icon("chevron-right"))
+                        .tooltip("Next decision")
+                        .on_click(step(1)),
+                )
+            })
+            .child(
+                button("open-inbox")
+                    .ghost()
+                    .small()
+                    .label("Open inbox")
+                    .on_click(cx.listener(|v, _, w, c| v.show_panel(Panel::Attention, w, c))),
+            );
+        Some(
+            div()
+                .w_full()
+                .max_w(px(COLUMN))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(navigation)
+                .child(
+                    self.attention_card(item, true, p, window, cx)
+                        .border_color(p.yellow.opacity(0.45)),
+                ),
+        )
     }
 
     fn empty_conversation(&self, role: Role, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -711,7 +776,13 @@ impl Workspace {
         div().flex().items_center().child(model).child(effort)
     }
 
-    fn composer(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn composer(
+        &self,
+        session: &Session,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let sending = self.sending.contains(&session.id);
         let empty = self.input.read(cx).value().trim().is_empty();
         div()
@@ -734,6 +805,7 @@ impl Workspace {
             .flex_col()
             .items_center()
             .gap_2()
+            .children(self.decisions(session, p, window, cx))
             .children(
                 self.notices(session, p, cx)
                     .into_iter()
@@ -743,6 +815,8 @@ impl Workspace {
                 div()
                     .w_full()
                     .max_w(px(COLUMN))
+                    .flex()
+                    .flex_col()
                     .rounded_xl()
                     .border_1()
                     .border_color(p.edge.opacity(0.7))
@@ -789,7 +863,12 @@ impl Workspace {
             )
     }
 
-    pub(super) fn conversation(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    pub(super) fn conversation(
+        &self,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let Some(session) = self.selected_session() else {
             return div();
         };
@@ -806,7 +885,7 @@ impl Workspace {
             } else {
                 self.transcript(session, p).into_any_element()
             })
-            .child(self.composer(session, p, cx))
+            .child(self.composer(session, p, window, cx))
     }
 }
 

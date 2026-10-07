@@ -52,17 +52,23 @@ fn store_owner_attention_and_blocked_state_are_independent() {
     host.set_status(&session.id, Status::Blocked).unwrap();
     assert!(host.snapshot().unwrap().attention.is_empty());
     let attention = host
-        .request_attention(&session.id, "local", "exact-operation", "Allow test?")
+        .request_attention(&session.id, "local", "exact-operation", "Allow test?", &[])
         .unwrap();
     assert_eq!(
-        host.request_attention(&session.id, "local", "exact-operation", "Allow test?")
+        host.request_attention(&session.id, "local", "exact-operation", "Allow test?", &[])
             .unwrap()
             .id,
         attention.id
     );
     assert!(
-        host.request_attention(&session.id, "other-host", "exact-operation", "Allow test?")
-            .is_err()
+        host.request_attention(
+            &session.id,
+            "other-host",
+            "exact-operation",
+            "Allow test?",
+            &[]
+        )
+        .is_err()
     );
     drop(host);
     let mut host = Host::open(directory.path()).unwrap();

@@ -441,7 +441,9 @@ impl Render for Workspace {
                 p,
                 cx,
             ),
-            Page::Conversation if self.selected_session().is_some() => self.conversation(p, cx),
+            Page::Conversation if self.selected_session().is_some() => {
+                self.conversation(p, window, cx)
+            }
             Page::Conversation => self.start_screen(p, cx),
         };
         // Session tools make no sense beside a page about the whole workspace.
@@ -485,7 +487,11 @@ impl Render for Workspace {
                                                     .when_some(
                                                         self.panel.filter(|_| session_tools),
                                                         |d, panel| {
-                                                            d.child(self.panel_view(panel, p, cx))
+                                                            d.child(
+                                                                self.panel_view(
+                                                                    panel, p, window, cx,
+                                                                ),
+                                                            )
                                                         },
                                                     ),
                                             ),

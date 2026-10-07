@@ -181,6 +181,9 @@ pub struct Attention {
     pub host: String,
     pub operation_id: String,
     pub prompt: String,
+    /// Suggested answers the human can pick with one click; free text is always allowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
     pub answer: Option<String>,
 }
 impl Attention {

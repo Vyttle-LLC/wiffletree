@@ -648,10 +648,15 @@ impl Host {
         host: &str,
         operation: &str,
         prompt: &str,
+        options: &[String],
     ) -> Result<Attention> {
         text(host, 128)?;
         text(operation, 128)?;
         text(prompt, 4096)?;
+        ensure!(options.len() <= 6, "Offer at most 6 options");
+        for option in options {
+            text(option, 200)?;
+        }
         let session = self.session(session)?;
         if let Some(existing) = self
             .db
@@ -663,7 +668,7 @@ impl Host {
             .optional()?
         {
             ensure!(
-                existing.host == host && existing.prompt == prompt,
+                existing.host == host && existing.prompt == prompt && existing.options == options,
                 "Operation identity reused with changed approval details"
             );
             return Ok(existing);
@@ -675,6 +680,7 @@ impl Host {
             host: host.into(),
             operation_id: operation.into(),
             prompt: prompt.into(),
+            options: options.to_vec(),
             answer: None,
         };
         let tx = self.db.transaction()?;
@@ -952,6 +958,7 @@ impl Host {
                 &host,
                 &operation_id,
                 &prompt,
+                &[],
             )?)?,
             Command::ResolveAttention { id, answer } => {
                 serde_json::to_value(self.resolve_attention(&id, &answer)?)?
