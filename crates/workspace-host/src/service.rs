@@ -274,6 +274,7 @@ impl Actor {
                         | Command::ProviderCheck
                         | Command::Quotas
                         | Command::Usage { .. }
+                        | Command::Settings
                 );
                 let result = (|| -> Result<Value> {
                     match &command {
@@ -783,7 +784,7 @@ impl Actor {
                 !session.role.is_worker(),
                 "Assign this worker to a ticket before running it"
             );
-            let path = self.host.home.join("projects").join(&session.project_id);
+            let path = self.host.project_directory(&session.project_id)?;
             fs::create_dir_all(&path)?;
             path
         };
