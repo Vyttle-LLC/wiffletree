@@ -43,7 +43,7 @@ Out of scope for the first usable release: remote execution, a Linux graphical c
 | Project / main coordinator | One feature, bug or outcome; user conversation, planning, cross-repository decisions and escalation | App-managed project home |
 | Repository coordinator | One development team for this project/repository; decomposes, dispatches and accepts all its tickets | Reads attached repository; owns integration planning |
 | Ticket / task | Bounded work with acceptance criteria, dependencies and evidence | Isolated worktree and branch |
-| Implementer, tester or reviewer | One role on one ticket; resumes for fixes or retests on that same ticket | Uses the ticket workspace; one active agent per ticket |
+| Implementer, tester or reviewer | One role on one ticket, or one focus when several reviewers share it; resumes for fixes or retests on that same ticket | Uses the ticket workspace; one active agent per ticket |
 | Watcher | Observes Git, GitHub and runtime changes | Ordinary background software |
 
 The project is the outcome, the repository is an attachment, and a task is a ticket within the project. Ten frontend tickets share one frontend coordinator; five backend tickets share one backend coordinator. Neither coordinator is reused by unrelated projects. Each ticket gets its own workers. Coordinators sleep without model calls between events and resume the same provider conversation when needed.
@@ -136,7 +136,7 @@ Record the selected model, effort, routing reason and policy version for each re
 
 Acceptance: role/provider defaults save atomically; both kinds of coordinator use the same saved settings; editing defaults does not rewrite existing agent profiles; parent-selected Big/Small profiles resolve to the configured provider/model/effort; unapproved Luna selection fails without creating an agent; chat overrides survive restart and exact-session resume. Models cards fill the inspector width and keep model and effort labels readable; model menus scroll within a bounded height; default-provider choices remain independent per role.
 
-Dual-provider review remains a follow-up: one ticket currently supports one reviewer assignment. A Claude-plus-Codex review will require separately tracked reviewer assignments and consolidated acceptance evidence. Until then, coordinators run extra reviews as their own tickets and close each one with `close_ticket` once its findings are recorded. Closing archives the ticket's agents and hides the ticket with them; it preserves their conversations, branch and worktree.
+A ticket can have several reviewers, such as a Claude and a Codex correctness pass and a style pass. Each is assigned with a short focus that names it in the tree and keeps retries idempotent, and all of them review the ticket's own branch and worktree. Like every agent on a ticket, they take turns in its worktree. The repository coordinator consolidates their findings before acceptance. A separate review ticket is only for work that has no ticket of its own; once its findings are recorded, `close_ticket` archives its agents and hides the ticket with them, preserving their conversations, branch and worktree.
 
 ## Agent communication and shared context
 

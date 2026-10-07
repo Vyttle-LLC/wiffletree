@@ -165,8 +165,12 @@ impl Host {
         role: Role,
         provider: Provider,
         instruction: &str,
+        focus: Option<&str>,
     ) -> Result<Session> {
         text(instruction, MAX_TEXT_BYTES)?;
+        if let Some(focus) = focus {
+            text(focus, 60)?;
+        }
         ensure!(
             role.is_worker(),
             "Assign an implementer, tester or reviewer"
@@ -174,9 +178,11 @@ impl Host {
         let mut ticket = self.ticket(ticket_id)?;
         ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
         let owner = self.session(&ticket.coordinator_id)?;
-        // A role session is never recycled across tickets. Retrying the same assignment is idempotent.
+        // A role session is never recycled across tickets. Retrying the same assignment is
+        // idempotent; a different focus adds another agent in that role, such as a second reviewer.
         if let Some(existing) = self.runtimes()?.into_iter().find(|r| {
             r.ticket_id.as_deref() == Some(ticket_id)
+                && r.focus.as_deref() == focus
                 && self.session(&r.session_id).is_ok_and(|s| s.role == role)
         }) {
             let session = self.session(&existing.session_id)?;
@@ -192,7 +198,7 @@ impl Host {
             None,
             &format!(
                 "{} · {}",
-                role.label(),
+                role.agent_label(focus),
                 ticket.title.chars().take(80).collect::<String>()
             ),
             role,
@@ -201,6 +207,7 @@ impl Host {
         let runtime = SessionRuntime {
             session_id: session.id.clone(),
             ticket_id: Some(ticket.id.clone()),
+            focus: focus.map(Into::into),
             workdir: Some(ticket.worktree.clone()),
             ..Default::default()
         };
@@ -368,8 +375,13 @@ impl Host {
                 let role: Role = serde_json::from_value(args["role"].clone())?;
                 let route = self.assignment_route(role, &args)?;
                 let provider = route.profile.provider;
-                let worker =
-                    self.assign_ticket(&ticket.id, role, provider, string("instruction")?)?;
+                let worker = self.assign_ticket(
+                    &ticket.id,
+                    role,
+                    provider,
+                    string("instruction")?,
+                    args["focus"].as_str(),
+                )?;
                 let mut runtime = self.session_runtime(&worker.id)?;
                 if runtime.profile.is_none() {
                     runtime.profile = Some(route.profile);

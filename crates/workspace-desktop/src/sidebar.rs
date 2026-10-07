@@ -387,7 +387,8 @@ impl Workspace {
                     tree = tree.child(self.ticket_row(ticket, p, cx));
                     for worker in workers {
                         // The ticket row above already names the work.
-                        let label = worker.role.label().to_owned();
+                        let focus = self.runtime(&worker.id).and_then(|r| r.focus.as_deref());
+                        let label = worker.role.agent_label(focus);
                         tree = tree.child(self.session_row(worker, 3, label, p, cx));
                     }
                 }

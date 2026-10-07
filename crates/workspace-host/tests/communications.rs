@@ -166,10 +166,16 @@ fn ticket_agents_are_scoped_and_reports_are_immediate_and_idempotent() {
         ticket.id
     );
     let implementer = host
-        .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Implement")
+        .assign_ticket(
+            &ticket.id,
+            Role::Implementer,
+            Provider::Codex,
+            "Implement",
+            None,
+        )
         .unwrap();
     let tester = host
-        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Verify")
+        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Verify", None)
         .unwrap();
     assert_eq!(
         host.session_runtime(&implementer.id).unwrap().ticket_id,
@@ -245,7 +251,8 @@ fn ticket_agents_are_scoped_and_reports_are_immediate_and_idempotent() {
             &ticket.id,
             Role::Reviewer,
             Provider::Codex,
-            "Late assignment"
+            "Late assignment",
+            None
         )
         .is_err()
     );
@@ -414,13 +421,37 @@ fn agent_assignment_enforces_and_freezes_the_bounded_model_choice() {
 }
 
 #[test]
+fn reviewers_with_distinct_focuses_share_their_ticket() {
+    let (_home, _repo, mut host, _root, coordinator) = fixture();
+    let ticket = host
+        .create_ticket(&coordinator.id, "Fix calls", "Fix inbound calls")
+        .unwrap();
+    let mut review = |provider, focus| {
+        host.assign_ticket(&ticket.id, Role::Reviewer, provider, "Review", Some(focus))
+            .unwrap()
+    };
+    let claude = review(Provider::Claude, "Claude correctness");
+    let codex = review(Provider::Codex, "Codex correctness");
+    let retry = review(Provider::Codex, "Codex correctness");
+    assert_ne!(claude.id, codex.id);
+    assert_eq!(retry.id, codex.id);
+    assert_eq!(codex.name, "Reviewer · Codex correctness · Fix calls");
+    for reviewer in [&claude, &codex] {
+        let runtime = host.session_runtime(&reviewer.id).unwrap();
+        assert_eq!(runtime.ticket_id.as_ref(), Some(&ticket.id));
+        assert_eq!(runtime.workdir.as_ref(), Some(&ticket.worktree));
+    }
+    assert_eq!(host.tickets().unwrap().len(), 1);
+}
+
+#[test]
 fn closing_a_finished_review_ticket_archives_its_agents() {
     let (_home, _repo, mut host, root, coordinator) = fixture();
     let ticket = host
         .create_ticket(&coordinator.id, "Review round 1", "Review the fix")
         .unwrap();
     let reviewer = host
-        .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Review")
+        .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Review", None)
         .unwrap();
     let close = json!({"ticket_id":ticket.id});
     assert!(
@@ -441,7 +472,7 @@ fn closing_a_finished_review_ticket_archives_its_agents() {
     assert!(host.session(&reviewer.id).unwrap().archived);
     assert!(!host.session(&coordinator.id).unwrap().archived);
     assert!(
-        host.assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Late")
+        host.assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Late", None)
             .is_err()
     );
 }

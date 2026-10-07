@@ -45,6 +45,13 @@ impl Role {
     pub fn is_worker(self) -> bool {
         !matches!(self, Self::ProjectOrchestrator | Self::TaskOrchestrator)
     }
+    /// A ticket agent's short name: its role, plus its focus when others share that role.
+    pub fn agent_label(self, focus: Option<&str>) -> String {
+        match focus {
+            Some(focus) => format!("{} · {focus}", self.label()),
+            None => self.label().to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -579,6 +586,9 @@ pub struct SessionRuntime {
     pub provider_session_id: Option<String>,
     pub profile: Option<ModelProfile>,
     pub ticket_id: Option<String>,
+    /// What this agent covers when others share its role on the ticket, such as "Codex correctness".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
     pub workdir: Option<String>,
     /// Where the provider last ran this session; its conversation is resumable only from there.
     #[serde(default)]
@@ -652,6 +662,9 @@ pub enum Command {
         role: Role,
         provider: Provider,
         instruction: String,
+        /// Tells apart agents sharing a role on one ticket, such as two reviewers.
+        #[serde(default)]
+        focus: Option<String>,
     },
     CreateProject {
         name: String,
