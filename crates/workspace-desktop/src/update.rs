@@ -21,7 +21,7 @@ const LATEST_RELEASE: &str = "https://api.github.com/repos/Vyttle-LLC/wiffletree
 #[derive(Clone)]
 pub struct Staged {
     pub version: String,
-    /// The release notes' opening paragraph, written above the generated change list.
+    /// The release notes' `## Summary` section.
     pub summary: Option<String>,
     /// The release page, which holds the full changelog.
     pub page: String,
@@ -144,15 +144,18 @@ fi
 if [ "$4" = 1 ]; then open "$2"; fi
 "#;
 
-/// Text before the first heading or list, joined into one paragraph.
+/// The `## Summary` section, up to the next heading such as the generated `## What's Changed`.
+/// Lines stay separate, as GitHub shows them on the release page.
 fn summary(notes: &str) -> Option<String> {
     let summary = notes
         .lines()
         .map(str::trim)
-        .take_while(|line| !line.starts_with(['#', '*', '-']))
+        .skip_while(|line| *line != "## Summary")
+        .skip(1)
+        .take_while(|line| !line.starts_with('#'))
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
-        .join(" ");
+        .join("\n");
     (!summary.is_empty()).then_some(summary)
 }
 
@@ -292,14 +295,14 @@ mod tests {
     }
 
     #[test]
-    fn summarizes_the_text_above_the_generated_notes() {
-        let notes = "Scheduled tasks and a\r\nsidebar status section.\r\n\r\n## What's Changed\r\n* Add tasks by @someone";
+    fn summarizes_the_summary_section() {
+        let notes = "## Summary\r\nClearer messages\r\n\r\n* Newer dependencies\r\n\r\n## What's Changed\r\n* Fix messages by @someone";
         assert_eq!(
             summary(notes).as_deref(),
-            Some("Scheduled tasks and a sidebar status section.")
+            Some("Clearer messages\n* Newer dependencies")
         );
-        assert_eq!(summary("## What's Changed\n* Add tasks"), None);
-        assert_eq!(summary("**Full Changelog**: https://example.com"), None);
+        assert_eq!(summary("Intro\n## What's Changed\n* Add tasks"), None);
+        assert_eq!(summary("## Summary\n## What's Changed\n* Add tasks"), None);
         assert_eq!(summary(""), None);
     }
 
