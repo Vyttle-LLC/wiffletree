@@ -7,9 +7,7 @@ use gpui_component::{
     spinner::Spinner,
     text::TextView,
 };
-use ui::{
-    age, banner, brand_image, effort_label, hint, humanize, icon, pill, session_icon, status_badge,
-};
+use ui::{age, banner, brand_image, effort_label, hint, humanize, icon, pill, session_icon};
 
 /// Wide enough for the composer, narrow enough that message lines stay readable.
 const COLUMN: f32 = 720.;
@@ -260,7 +258,7 @@ impl Workspace {
                     ),
             )
             .children(self.context_chip(session, p, cx))
-            .child(status_badge(session.status, p))
+            .child(self.session_badge(session, p))
             .when(!session.archived, |d| {
                 d.child(
                     button("pause-session")

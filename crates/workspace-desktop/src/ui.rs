@@ -180,18 +180,18 @@ pub(super) fn session_icon(role: Role) -> &'static str {
         _ => "agent",
     }
 }
+/// Only activity gets color. Yellow is reserved for what needs a person, and a blocked worker
+/// reports to its coordinator rather than to you.
 pub(super) fn status_color(status: Status, p: Palette) -> Hsla {
     match status {
         Status::Working => p.focus,
-        Status::Done => p.green,
-        Status::Blocked => p.yellow,
         _ => p.subtle,
     }
 }
-pub(super) fn status_icon(status: Status) -> &'static str {
+fn status_icon(status: Status) -> &'static str {
     match status {
         Status::Ready => "ready",
-        Status::Working => "working",
+        Status::Working => "loader-circle",
         Status::Blocked => "blocked",
         Status::Done => "check",
         Status::Paused => "pause",
@@ -206,7 +206,41 @@ pub(super) fn status_label(status: Status) -> &'static str {
         other => other.label(),
     }
 }
-pub(super) fn status_badge(status: Status, p: Palette) -> Div {
+/// Working spins so activity is visible at a glance; reduced motion leaves it still.
+pub(super) fn status_glyph(status: Status, size: f32, p: Palette) -> AnyElement {
+    let color = status_color(status, p);
+    if status == Status::Working {
+        Spinner::new()
+            .icon(icon(status_icon(status)))
+            .with_size(px(size))
+            .color(color)
+            .into_any_element()
+    } else {
+        icon(status_icon(status))
+            .size(px(size))
+            .text_color(color)
+            .into_any_element()
+    }
+}
+/// The project orchestrator's open questions and approvals: the one signal that asks for you.
+pub(super) fn needs_you_badge(count: usize, p: Palette) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .pl(px(4.))
+        .pr(px(6.))
+        .py(px(1.))
+        .rounded_full()
+        .bg(p.yellow)
+        .text_color(p.on_accent)
+        .text_size(px(10.5))
+        .font_weight(FontWeight::BOLD)
+        .child(icon("attention").size(px(12.)))
+        .child(count.to_string())
+}
+fn status_badge(status: Status, label: &'static str, p: Palette) -> Div {
     let color = status_color(status, p);
     div()
         .flex_none()
@@ -219,8 +253,8 @@ pub(super) fn status_badge(status: Status, p: Palette) -> Div {
         .bg(color.opacity(0.10))
         .text_color(color)
         .text_size(px(11.))
-        .child(icon(status_icon(status)).size(px(12.)))
-        .child(status_label(status))
+        .child(status_glyph(status, 12., p))
+        .child(label)
 }
 pub(super) fn ticket_state_color(state: &str, p: Palette) -> Hsla {
     match state {
@@ -232,6 +266,16 @@ pub(super) fn ticket_state_color(state: &str, p: Palette) -> Hsla {
 }
 
 impl Workspace {
+    /// A session's status badge; an idle coordinator whose team is working says so.
+    pub(super) fn session_badge(&self, session: &Session, p: Palette) -> Div {
+        let status = self.shown_status(session);
+        let label = if status == session.status {
+            status_label(status)
+        } else {
+            "Team working"
+        };
+        status_badge(status, label, p)
+    }
     /// Sessions to list: archived ones appear only while the sidebar is showing them.
     pub(super) fn shown<'a>(&'a self, snapshot: &'a Snapshot) -> impl Iterator<Item = &'a Session> {
         snapshot

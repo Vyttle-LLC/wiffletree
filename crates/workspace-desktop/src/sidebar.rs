@@ -7,8 +7,8 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use ui::{
-    brand_image, card, eyebrow, hint, humanize, icon, pill, session_icon, status_color,
-    status_icon, status_label, ticket_state_color,
+    brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, pill, session_icon,
+    status_glyph, status_label, ticket_state_color,
 };
 
 const INDENT: f32 = 14.;
@@ -168,7 +168,7 @@ impl Workspace {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(if selected { p.accent } else { p.subtle })
+                            .text_color(if selected { p.text } else { p.subtle })
                             .child(icon(glyph).size(px(14.))),
                     )
                     .child(label),
@@ -417,6 +417,20 @@ impl Workspace {
         tree
     }
 
+    pub(super) fn shown_status(&self, session: &Session) -> Status {
+        let sessions = self.snapshot.as_ref().map_or(&[][..], |s| &s.sessions);
+        shown_status(session, sessions)
+    }
+
+    fn status_detail(&self, session: &Session) -> String {
+        let label = status_label(session.status);
+        if self.shown_status(session) == session.status {
+            label.to_owned()
+        } else {
+            format!("{label} · Team working")
+        }
+    }
+
     fn row(&self, id: SharedString, depth: usize, selected: bool, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
@@ -459,10 +473,15 @@ impl Workspace {
             .filter(|a| a.project_id == project_id)
             .count();
         let detail = format!(
-            "{} · {}{}",
+            "{} · {}{}{}",
             root.name,
-            status_label(root.status),
-            if live { " · Running" } else { " · Stopped" }
+            self.status_detail(root),
+            if live { " · Running" } else { " · Stopped" },
+            match attention {
+                0 => String::new(),
+                1 => " · 1 item needs you".to_owned(),
+                n => format!(" · {n} items need you"),
+            }
         );
         let archived = root.archived;
         let archive_id = id.clone();
@@ -512,7 +531,7 @@ impl Workspace {
             .child(
                 div()
                     .flex_none()
-                    .text_color(if selected { p.accent } else { p.subtle })
+                    .text_color(if selected { p.text } else { p.subtle })
                     .child(icon("project")),
             )
             .child(div().flex_1().min_w_0().child(if let Some(edit) = edit {
@@ -543,9 +562,6 @@ impl Workspace {
                     .child(root.name.clone())
                     .into_any_element()
             }))
-            .when(attention > 0, |d| {
-                d.child(pill(attention.to_string(), p.yellow))
-            })
             .when(selected && !editing, |d| {
                 let weak = cx.weak_entity();
                 d.child(
@@ -608,16 +624,14 @@ impl Workspace {
                         }),
                 )
             })
-            .child(
+            // Needs you outranks every other state, so it takes the status slot.
+            .child(if attention > 0 {
+                needs_you_badge(attention, p)
+            } else {
                 div()
                     .flex_none()
-                    .text_color(if live {
-                        p.green
-                    } else {
-                        status_color(root.status, p)
-                    })
-                    .child(icon(status_icon(root.status)).size(px(12.))),
-            )
+                    .child(status_glyph(self.shown_status(root), 12., p))
+            })
     }
 
     fn session_row(
@@ -630,21 +644,24 @@ impl Workspace {
     ) -> Stateful<Div> {
         let id = session.id.clone();
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
+        let status = self.shown_status(session);
         let detail = format!(
             "{} · {} · {:?} · {}",
             session.name,
             session.role.label(),
             session.provider,
-            status_label(session.status)
+            self.status_detail(session)
         );
         self.row(SharedString::from(format!("tree-{id}")), depth, selected, p)
             .when(session.archived, |d| d.opacity(0.55))
+            // Working agents keep full-strength text; idle ones recede.
+            .when(status == Status::Working, |d| d.text_color(p.text))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
             .child(
                 div()
                     .flex_none()
-                    .text_color(if selected { p.accent } else { p.subtle })
+                    .text_color(if selected { p.text } else { p.subtle })
                     .child(icon(session_icon(session.role)).size(px(14.))),
             )
             .child(
@@ -655,12 +672,7 @@ impl Workspace {
                     .when(depth == 1, |d| d.font_weight(FontWeight::MEDIUM))
                     .child(label),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(status_color(session.status, p))
-                    .child(icon(status_icon(session.status)).size(px(12.))),
-            )
+            .child(div().flex_none().child(status_glyph(status, 12., p)))
     }
 
     fn ticket_row(&self, ticket: &Ticket, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -695,5 +707,77 @@ impl Workspace {
                 .rounded_full()
                 .bg(ticket_state_color(&ticket.state, p)),
         )
+    }
+}
+
+/// An idle coordinator shows its team's work, so a collapsed or quiet parent never hides it.
+fn shown_status(session: &Session, sessions: &[Session]) -> Status {
+    let idle = matches!(session.status, Status::Ready | Status::Done);
+    if idle && team_working(&session.id, sessions) {
+        Status::Working
+    } else {
+        session.status
+    }
+}
+
+fn team_working(coordinator_id: &str, sessions: &[Session]) -> bool {
+    let parent_of = |id: &str| {
+        sessions
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.parent_id.as_deref())
+    };
+    let reports_to = |session: &Session| {
+        std::iter::successors(session.parent_id.as_deref(), |id| parent_of(id))
+            .any(|id| id == coordinator_id)
+    };
+    sessions
+        .iter()
+        .any(|s| !s.archived && s.status == Status::Working && reports_to(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown_status;
+    use workspace_core::{Provider, Role, Session, Status};
+
+    fn session(id: &str, parent: Option<&str>, status: Status) -> Session {
+        Session {
+            id: id.into(),
+            project_id: "project".into(),
+            parent_id: parent.map(Into::into),
+            repository_id: None,
+            name: id.into(),
+            role: Role::Implementer,
+            provider: Provider::Claude,
+            status,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn idle_coordinators_show_work_anywhere_below_them() {
+        let sessions = [
+            session("main", None, Status::Ready),
+            session("team", Some("main"), Status::Done),
+            session("implementer", Some("team"), Status::Working),
+            session("other-team", Some("main"), Status::Ready),
+        ];
+        assert_eq!(shown_status(&sessions[0], &sessions), Status::Working);
+        assert_eq!(shown_status(&sessions[1], &sessions), Status::Working);
+        assert_eq!(shown_status(&sessions[3], &sessions), Status::Ready);
+    }
+
+    #[test]
+    fn a_coordinators_own_attention_state_is_not_masked() {
+        let mut sessions = [
+            session("team", None, Status::Blocked),
+            session("implementer", Some("team"), Status::Working),
+        ];
+        assert_eq!(shown_status(&sessions[0], &sessions), Status::Blocked);
+
+        sessions[0].status = Status::Ready;
+        sessions[1].archived = true;
+        assert_eq!(shown_status(&sessions[0], &sessions), Status::Ready);
     }
 }

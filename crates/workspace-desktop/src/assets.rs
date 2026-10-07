@@ -26,10 +26,6 @@ const BRAND: &[(&str, &[u8])] = &[
 const DRAWINGS: &[(&str, &str)] = &[
     ("ready", r#"<circle cx="12" cy="12" r="6"/>"#),
     (
-        "working",
-        r#"<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>"#,
-    ),
-    (
         "blocked",
         r#"<circle cx="12" cy="12" r="8"/><path d="M8 12h8"/>"#,
     ),
