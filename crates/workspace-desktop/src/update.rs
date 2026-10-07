@@ -63,11 +63,10 @@ pub fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
         return Ok(None);
     }
     let name = asset_name(version);
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == name)
-        .with_context(|| format!("Release {version} has no {name}"))?;
+    // A release published before CI attaches its build is not an update yet.
+    let Some(asset) = release.assets.iter().find(|asset| asset.name == name) else {
+        return Ok(None);
+    };
     let digest = asset
         .digest
         .as_deref()
