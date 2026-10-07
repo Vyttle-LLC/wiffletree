@@ -24,6 +24,22 @@ const REPORT_KINDS: [&str; 6] = [
     "completed",
 ];
 
+/// How a refreshed transcript page lines up with the one on screen: how many leading messages
+/// fell off the page and how many after them are unchanged. `None` when the pages don't overlap.
+pub(super) fn transcript_overlap(
+    shown: &[Message],
+    refreshed: &[Message],
+) -> Option<(usize, usize)> {
+    let first = refreshed.first()?;
+    let dropped = shown.iter().position(|m| m.id == first.id)?;
+    let unchanged = shown[dropped..]
+        .iter()
+        .zip(refreshed)
+        .take_while(|(old, new)| old == new)
+        .count();
+    Some((dropped, unchanged))
+}
+
 /// Agent reports arrive as `[kind] sender name\nbody`; returns the kind and body.
 fn report(body: &str) -> Option<(&str, &str)> {
     let (kind, rest) = body.strip_prefix('[')?.split_once("] ")?;
@@ -865,7 +881,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, report};
+    use super::{first_line, report, transcript_overlap};
+    use workspace_core::{Message, Receipt};
 
     #[test]
     fn reports_split_into_kind_and_body() {
@@ -890,5 +907,51 @@ mod tests {
             "Provider exited"
         );
         assert_eq!(first_line("abcdef", 3), "abc…");
+    }
+
+    fn message(id: &str, body: &str) -> Message {
+        Message {
+            sequence: 0,
+            id: id.into(),
+            project_id: "p".into(),
+            sender: None,
+            recipient: "s".into(),
+            body: body.into(),
+            receipt: Receipt::Completed,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn identical_refreshes_change_nothing() {
+        let page = [message("a", "hi"), message("b", "there")];
+        assert_eq!(transcript_overlap(&page, &page), Some((0, 2)));
+    }
+
+    #[test]
+    fn refreshes_keep_the_unchanged_prefix() {
+        let shown = [message("a", "hi"), message("b", "there")];
+        let appended = [
+            message("a", "hi"),
+            message("b", "there"),
+            message("c", "new"),
+        ];
+        assert_eq!(transcript_overlap(&shown, &appended), Some((0, 2)));
+        let edited = [message("a", "hi"), message("b", "edited")];
+        assert_eq!(transcript_overlap(&shown, &edited), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_full_page_drops_its_oldest_message() {
+        let shown = [message("a", "1"), message("b", "2")];
+        let refreshed = [message("b", "2"), message("c", "3")];
+        assert_eq!(transcript_overlap(&shown, &refreshed), Some((1, 1)));
+    }
+
+    #[test]
+    fn unrelated_pages_do_not_overlap() {
+        let shown = [message("c", "3")];
+        assert_eq!(transcript_overlap(&shown, &[message("a", "1")]), None);
+        assert_eq!(transcript_overlap(&shown, &[]), None);
     }
 }

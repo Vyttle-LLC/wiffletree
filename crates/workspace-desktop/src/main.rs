@@ -437,8 +437,7 @@ impl Workspace {
                 if self.selected.as_deref() == Some(&session_id) && self.page == before {
                     match serde_json::from_value::<Vec<Message>>(value) {
                         Ok(rows) => {
-                            self.messages = Rc::new(rows);
-                            self.list.reset(self.transcript_rows());
+                            self.replace_messages(rows);
                             if before.is_none() {
                                 self.cached_pages
                                     .insert(session_id.clone(), self.messages.clone());
@@ -707,6 +706,22 @@ impl Workspace {
         } else if shown != rows {
             self.list
                 .splice(self.messages.len()..shown, rows - self.messages.len());
+        }
+    }
+    /// Splices only what a refresh changed, so a reader scrolled up keeps their place.
+    fn replace_messages(&mut self, rows: Vec<Message>) {
+        let shown = std::mem::replace(&mut self.messages, Rc::new(rows));
+        let Some((dropped, unchanged)) = conversation::transcript_overlap(&shown, &self.messages)
+        else {
+            self.list.reset(self.transcript_rows());
+            return;
+        };
+        if dropped > 0 {
+            self.list.splice(0..dropped, 0);
+        }
+        let (shown_rows, rows) = (self.list.item_count(), self.transcript_rows());
+        if unchanged < self.messages.len() || shown_rows != rows {
+            self.list.splice(unchanged..shown_rows, rows - unchanged);
         }
     }
     fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
