@@ -169,20 +169,14 @@ impl Workspace {
         rail
     }
 
-    pub(super) fn panel_view(
-        &self,
-        panel: Panel,
-        p: Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    pub(super) fn panel_view(&self, panel: Panel, p: Palette, cx: &mut Context<Self>) -> Div {
         let role = self.selected_role();
         let body = match panel {
             Panel::Overview => self.overview(p, cx),
             Panel::Team => self.team_panel(p, cx),
             Panel::Memory => self.memory_panel(p, cx),
             Panel::Events => self.events_panel(p),
-            Panel::Attention => self.attention_panel(p, window, cx),
+            Panel::Attention => self.attention_panel(p, cx),
             Panel::Git => self.git_panel(p),
         };
         let (scope, subtitle) = (scope(role), self.owner_name());
@@ -503,7 +497,7 @@ impl Workspace {
         ))
     }
 
-    fn attention_panel(&self, p: Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn attention_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let items = self.project_attention();
         if items.is_empty() {
             return empty_state(
@@ -522,7 +516,7 @@ impl Workspace {
         let mut body = div().flex().flex_col().gap_3();
         for item in items {
             let open = answering.as_ref() == Some(&item.id);
-            body = body.child(self.attention_card(item, open, p, window, cx));
+            body = body.child(self.attention_card(item, open, p, cx));
         }
         body
     }
@@ -533,7 +527,6 @@ impl Workspace {
         item: &Attention,
         answering: bool,
         p: Palette,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let asker = self
@@ -628,16 +621,11 @@ impl Workspace {
                     .id(SharedString::from(format!("question-{id}")))
                     .max_h(px(280.))
                     .overflow_y_scroll()
-                    .child(markdown(
-                        &format!("attention-{id}"),
-                        &item.prompt,
-                        window,
-                        cx,
-                    )),
+                    .child(markdown(&format!("attention-{id}"), &item.prompt)),
             )
             .when(!item.options.is_empty(), |d| d.child(choices));
         if answering {
-            entry.child(Input::new(&self.answer).w_full()).child(
+            entry.child(Textarea::new(&self.answer).w_full()).child(
                 actions.child(
                     button(SharedString::from(format!("answer-{id}")))
                         .primary()

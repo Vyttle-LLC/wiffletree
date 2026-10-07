@@ -11,7 +11,6 @@ pub mod service;
 mod telemetry;
 pub mod usage;
 use anyhow::{Context, Result, bail, ensure};
-use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -32,7 +31,7 @@ impl Drop for StoreLock {
     fn drop(&mut self) {
         // A concurrent fork can briefly inherit the descriptor before exec closes it.
         // Release ownership explicitly after the database has been dropped.
-        let _ = FileExt::unlock(&self.0);
+        let _ = self.0.unlock();
     }
 }
 pub fn now() -> i64 {
@@ -82,7 +81,7 @@ impl Host {
             .create(true)
             .truncate(false)
             .open(home.join("host.lock"))?;
-        lock.try_lock_exclusive()
+        lock.try_lock()
             .context("Another host already owns this store")?;
         let lock = StoreLock(lock);
         let db = Connection::open(home.join("workspace.sqlite3"))?;

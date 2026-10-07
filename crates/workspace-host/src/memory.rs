@@ -196,8 +196,7 @@ impl Host {
             .create(true)
             .truncate(false)
             .open(root.join(".workspace-brain.lock"))?;
-        lock.try_lock_exclusive()
-            .context("Another writer owns this brain")?;
+        lock.try_lock().context("Another writer owns this brain")?;
         let logs: Vec<WorkLog> = self.list_data("SELECT data FROM work_logs l WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM log_exports e WHERE e.log_id=l.id AND e.brain=?2) ORDER BY sequence ASC LIMIT 100", params![project.id, brain])?;
         if logs.is_empty() {
             return Ok(0);

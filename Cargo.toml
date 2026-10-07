@@ -1,7 +1,6 @@
 [workspace]
 members = ["crates/workspace-core", "crates/workspace-host", "crates/workspace-desktop"]
 default-members = ["crates/workspace-core", "crates/workspace-host"]
-exclude = ["vendor"]
 resolver = "2"
 
 [workspace.package]
@@ -10,7 +9,7 @@ edition = "2024"
 publish = false
 license = "MIT"
 repository = "https://github.com/Vyttle-LLC/wiffletree"
-rust-version = "1.88"
+rust-version = "1.95"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -23,7 +22,3 @@ workspace-host = { path = "crates/workspace-host" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-# Backports an upstream fix; see vendor/README.md.
-[patch.crates-io]
-gpui-component = { path = "vendor/gpui-component" }

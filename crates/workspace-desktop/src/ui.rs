@@ -414,7 +414,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.colors(cx);
         let main = match self.view {
             Page::Usage => self.page(
@@ -441,9 +441,7 @@ impl Render for Workspace {
                 p,
                 cx,
             ),
-            Page::Conversation if self.selected_session().is_some() => {
-                self.conversation(p, window, cx)
-            }
+            Page::Conversation if self.selected_session().is_some() => self.conversation(p, cx),
             Page::Conversation => self.start_screen(p, cx),
         };
         // Session tools make no sense beside a page about the whole workspace.
@@ -487,11 +485,7 @@ impl Render for Workspace {
                                                     .when_some(
                                                         self.panel.filter(|_| session_tools),
                                                         |d, panel| {
-                                                            d.child(
-                                                                self.panel_view(
-                                                                    panel, p, window, cx,
-                                                                ),
-                                                            )
+                                                            d.child(self.panel_view(panel, p, cx))
                                                         },
                                                     ),
                                             ),
@@ -501,8 +495,6 @@ impl Render for Workspace {
                     )
                     .when(session_tools, |d| d.child(self.inspector_rail(p, cx))),
             )
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
     }
 }
 

@@ -96,7 +96,7 @@ impl Workspace {
     pub(super) fn cancel_project_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project_edit.as_ref().is_some_and(|e| !e.saving) {
             self.project_edit = None;
-            window.blur();
+            window.blur(cx);
             cx.notify();
         }
     }

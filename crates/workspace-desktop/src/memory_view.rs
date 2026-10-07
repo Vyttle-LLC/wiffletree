@@ -57,7 +57,7 @@ impl Workspace {
         card(p)
             .child(section("CAPTURE", p).child(kinds))
             .child(Input::new(&self.memory_title).w_full())
-            .child(Input::new(&self.memory_body).w_full())
+            .child(Textarea::new(&self.memory_body).w_full())
             .child(
                 div()
                     .flex()
