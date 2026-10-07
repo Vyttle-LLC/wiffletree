@@ -8,6 +8,7 @@ mod creation;
 mod data_dir;
 mod history_sheet;
 mod inspector;
+mod login_env;
 mod memory_view;
 mod models;
 mod models_view;
@@ -1407,6 +1408,8 @@ fn show_about() {
 }
 
 fn main() -> anyhow::Result<()> {
+    // SAFETY: nothing else has started yet, so no other thread can read the environment.
+    unsafe { login_env::adopt() };
     let mut args = std::env::args().skip(1);
     let mut home = None;
     let mut repository = None;
