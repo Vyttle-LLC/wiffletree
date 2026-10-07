@@ -1,0 +1,44 @@
+# Runs the validation suite on pull requests and main; the release workflow reuses it before publishing.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Runs on the Vyttle Mac runner. Pull requests from forks never run here: they would execute
+    # untrusted code on that machine.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false # Keep target/ between runs; tracked files are still reset.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Ensure the Metal toolchain
+        run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --locked --workspace
+
+      - name: Communication tests
+        run: |
+          cargo build --locked -p workspace-host
+          python3 scripts/test_communications.py

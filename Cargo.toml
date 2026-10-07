@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/workspace-core", "crates/workspace-host", "crates/workspace-desktop"]
+default-members = ["crates/workspace-core", "crates/workspace-host"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+repository = "https://github.com/Vyttle-LLC/wiffletree"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+workspace-core = { path = "crates/workspace-core" }
+workspace-host = { path = "crates/workspace-host" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

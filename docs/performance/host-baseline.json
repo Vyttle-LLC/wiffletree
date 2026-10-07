@@ -1,0 +1,70 @@
+{
+  "build": "release",
+  "durability": "SQLite WAL / synchronous=FULL",
+  "excluded": "native UI, GPU, provider runtimes/inference, streaming, filesystem import and long soak",
+  "fixture": {
+    "activity": 100000,
+    "messages": 100000,
+    "projects": 5,
+    "repositories": "10 metadata fixtures; no Git history benchmark",
+    "sessions": 50,
+    "source_logs": 100000
+  },
+  "recovery": {
+    "max_ms": 16.228459,
+    "measure": "host restart and cached snapshot",
+    "p50_ms": 12.5845,
+    "p95_ms": 14.873083000000001,
+    "samples": 100
+  },
+  "results": [
+    {
+      "max_ms": 0.197125,
+      "measure": "indexed transcript page (100 rows)",
+      "p50_ms": 0.060041000000000004,
+      "p95_ms": 0.067458,
+      "samples": 1000
+    },
+    {
+      "max_ms": 0.09962499999999999,
+      "measure": "workspace snapshot (50 sessions)",
+      "p50_ms": 0.043459,
+      "p95_ms": 0.04629200000000001,
+      "samples": 1000
+    },
+    {
+      "max_ms": 0.32495799999999997,
+      "measure": "indexed activity page (100 rows)",
+      "p50_ms": 0.044417,
+      "p95_ms": 0.090542,
+      "samples": 1000
+    },
+    {
+      "max_ms": 0.135375,
+      "measure": "indexed source-memory page (100 rows)",
+      "p50_ms": 0.090875,
+      "p95_ms": 0.09375,
+      "samples": 1000
+    },
+    {
+      "max_ms": 1.223792,
+      "measure": "durable 4 KiB enqueue (FULL sync)",
+      "p50_ms": 0.109125,
+      "p95_ms": 0.153917,
+      "samples": 200
+    }
+  ],
+  "seed_ms": 1056.9624580000002,
+  "environment": {
+    "recorded_date": "2026-10-02 America/New_York",
+    "cpu": "Apple M3 Pro",
+    "model": "Mac15,6",
+    "memory_bytes": 38654705664,
+    "logical_cores": 12,
+    "os": "macOS 27.0 (26A428)",
+    "rust": "1.97.0",
+    "native_gpui": "0.2.2",
+    "peak_host_benchmark_rss_bytes": 11255808,
+    "notes": "Local temporary filesystem; warm indexed reads; release build; desktop build overlapped part of the run. No provider execution."
+  }
+}

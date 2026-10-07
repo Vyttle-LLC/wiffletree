@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "name": "Tidal",
+  "brand": {
+    "deepTeal": "#1A262D",
+    "blueTeal": "#1C3742",
+    "tide": "#2D5A5A",
+    "rust": "#902818",
+    "stone": "#D1D1CD"
+  },
+  "variants": {
+    "light": {
+      "base": "#F3F2ED",
+      "surface": "#FFFDF7",
+      "overlay": "#E4E9E3",
+      "text": "#1A262D",
+      "subtle": "#526865",
+      "muted": "#748781",
+      "edge": "#C4CFCA",
+      "accent": "#902818",
+      "on-accent": "#FFFDF7",
+      "focus": "#2D5A5A",
+      "green": "#326348",
+      "red": "#A3213E",
+      "yellow": "#77551C",
+      "blue": "#365E78",
+      "magenta": "#765074",
+      "cyan": "#2D5A5A"
+    },
+    "dark": {
+      "base": "#1A262D",
+      "surface": "#22373E",
+      "overlay": "#2A434A",
+      "text": "#F3F2ED",
+      "subtle": "#AFBFBC",
+      "muted": "#829B99",
+      "edge": "#496063",
+      "accent": "#E6977E",
+      "on-accent": "#1A262D",
+      "focus": "#86C1BC",
+      "green": "#A0CBB0",
+      "red": "#FFA6B8",
+      "yellow": "#E4C17A",
+      "blue": "#9AC4D8",
+      "magenta": "#CFADD0",
+      "cyan": "#86C1BC"
+    }
+  }
+}

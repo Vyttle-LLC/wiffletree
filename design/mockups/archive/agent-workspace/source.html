@@ -1,0 +1,88 @@
+<div id="agent-workspace" class="viz-carousel" aria-label="Agent workspace concepts">
+  <section data-variant="Control room" aria-label="Control room"></section>
+  <section data-variant="Agent desk" aria-label="Agent desk" hidden></section>
+</div>
+<style>
+#agent-workspace { --aw-bg:light-dark(#fafaf8,#191a1c); --aw-panel:light-dark(#ffffff,#222326); --aw-sidebar:light-dark(#f0f1ed,#151618); --aw-ink:light-dark(#242b29,#e8ece9); --aw-muted:light-dark(#67736c,#a2ada5); --aw-line:light-dark(#dfe4de,#373d38); --aw-accent:light-dark(#287451,#89cba6); --aw-soft:light-dark(#e7f1ea,#293e31); --aw-warn:light-dark(#8c6422,#e6bc72); color:var(--aw-ink); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+#agent-workspace * { box-sizing:border-box; }
+#agent-workspace .aw-shell { background:var(--aw-bg); border:1px solid var(--aw-line); border-radius:12px; overflow:hidden; min-height:670px; }
+#agent-workspace button,#agent-workspace input { font:inherit; color:inherit; }
+#agent-workspace button { background:transparent; border:1px solid var(--aw-line); border-radius:7px; padding:7px 11px; text-align:left; }
+#agent-workspace button:hover { background:var(--aw-soft); }
+#agent-workspace .aw-bar { padding:12px 18px; display:flex; gap:14px; align-items:center; border-bottom:1px solid var(--aw-line); background:var(--aw-panel); flex-wrap:wrap; }
+#agent-workspace .aw-brand { font-weight:600; letter-spacing:-.4px; }
+#agent-workspace .aw-tag { margin-left:auto; color:var(--aw-muted); font-size:12px; }
+#agent-workspace .aw-body { display:grid; grid-template-columns:178px minmax(0,1fr); min-height:616px; }
+#agent-workspace .aw-side { background:var(--aw-sidebar); border-right:1px solid var(--aw-line); padding:18px 12px; }
+#agent-workspace .aw-label { font-size:11px; text-transform:uppercase; letter-spacing:1.2px; color:var(--aw-muted); margin:16px 0 10px; }
+#agent-workspace .aw-side button { display:block; width:100%; border:0; margin-bottom:6px; padding:10px; }
+#agent-workspace .aw-side button.aw-active { background:var(--aw-panel); box-shadow:0 1px 3px #0000000d; }
+#agent-workspace small { display:block; color:var(--aw-muted); font-size:12px; }
+#agent-workspace .aw-main { min-width:0; padding:22px; }
+#agent-workspace h2 { font-size:22px; letter-spacing:-.6px; font-weight:600; margin:0 0 4px; }
+#agent-workspace h3 { font-size:14px; font-weight:600; margin:0; }
+#agent-workspace p { margin:8px 0; }
+#agent-workspace .aw-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:20px; }
+#agent-workspace .aw-chip { display:inline-block; color:var(--aw-muted); border:1px solid var(--aw-line); border-radius:4px; padding:2px 6px; font-size:11px; margin:7px 4px 0 0; }
+#agent-workspace .aw-columns { display:grid; grid-template-columns:230px minmax(0,1fr); gap:18px; }
+#agent-workspace .aw-agent { width:100%; display:block; padding:13px!important; background:var(--aw-panel); margin-bottom:9px; }
+#agent-workspace .aw-agent[aria-pressed=true] { border-color:var(--aw-accent); background:var(--aw-soft); }
+#agent-workspace .aw-status { display:block; color:var(--aw-accent); font-size:12px; margin-top:8px; }
+#agent-workspace .aw-status.wait { color:var(--aw-warn); }
+#agent-workspace .aw-detail { border:1px solid var(--aw-line); border-radius:9px; background:var(--aw-panel); display:flex; flex-direction:column; min-width:0; min-height:438px; }
+#agent-workspace .aw-detailhead { padding:15px; border-bottom:1px solid var(--aw-line); display:flex; justify-content:space-between; gap:8px; align-items:center; }
+#agent-workspace .aw-tabs { display:flex; gap:14px; padding:8px 15px; border-bottom:1px solid var(--aw-line); }
+#agent-workspace .aw-tabs button { border:0; padding:3px 0; color:var(--aw-muted); border-radius:0; }
+#agent-workspace .aw-tabs button[aria-pressed=true] { color:var(--aw-ink); border-bottom:2px solid var(--aw-accent); }
+#agent-workspace .aw-transcript { padding:17px; flex:1; min-height:220px; overflow-wrap:anywhere; }
+#agent-workspace .aw-message { margin-bottom:19px; }
+#agent-workspace .aw-message small { font-size:11px; margin-bottom:5px; }
+#agent-workspace .aw-event { border-left:2px solid var(--aw-line); padding-left:11px; color:var(--aw-muted); font-size:12px; margin:13px 0; }
+#agent-workspace .aw-compose { padding:12px; border-top:1px solid var(--aw-line); }
+#agent-workspace .aw-compose form { display:flex; gap:8px; }
+#agent-workspace input { min-width:0; width:100%; border:1px solid var(--aw-line); border-radius:7px; padding:9px; background:var(--aw-bg); }
+#agent-workspace .aw-send { background:var(--aw-ink); color:var(--aw-panel); }
+#agent-workspace .aw-footer { font-size:11px; color:var(--aw-muted); margin-top:7px; }
+#agent-workspace .aw-feed { margin-top:19px; border-top:1px solid var(--aw-line); padding-top:13px; }
+#agent-workspace .aw-feed p { color:var(--aw-muted); font-size:12px; }
+#agent-workspace .aw-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+#agent-workspace .aw-grid .aw-detail { min-height:235px; }
+#agent-workspace .aw-grid .aw-transcript { min-height:95px; padding:12px 15px; }
+#agent-workspace .aw-grid .aw-message { margin-bottom:8px; }
+#agent-workspace .aw-grid .aw-detailhead { padding:12px; }
+#agent-workspace .aw-grid .aw-compose { padding:9px; }
+#agent-workspace .aw-grid input { font-size:12px; }
+#agent-workspace pre { white-space:pre-wrap; font-size:12px; }
+@media(max-width:850px) { #agent-workspace .aw-columns { grid-template-columns:190px minmax(0,1fr); } #agent-workspace .aw-body { grid-template-columns:150px minmax(0,1fr); } #agent-workspace .aw-main { padding:16px; } }
+@media(max-width:650px) { #agent-workspace .aw-body { display:block; } #agent-workspace .aw-side { border-right:0; border-bottom:1px solid var(--aw-line); } #agent-workspace .aw-side .aw-label,#agent-workspace .aw-side .aw-secondary { display:none; } #agent-workspace .aw-side button { width:auto; display:inline-block; } #agent-workspace .aw-columns,#agent-workspace .aw-grid { grid-template-columns:1fr; } #agent-workspace .aw-heading { flex-wrap:wrap; } #agent-workspace .aw-agent { margin-bottom:5px; } #agent-workspace input { font-size:16px!important; } }
+</style>
+<script>
+(() => {
+const root=document.getElementById('agent-workspace');
+const agents=[
+ {name:'Orchestrator',provider:'Claude',repo:'All repositories',status:'Coordinating',text:'The API contract is ready. I’ve handed it to the web worker and asked the reviewer to check expiration and duplicate invites.',event:'Sent API contract → Web worker',task:'Coordinate implementation and review'},
+ {name:'API worker',provider:'Codex',repo:'pica-api',status:'Running tests',text:'Invite creation and redemption are implemented. I’m checking expiration, repeated redemption, and email normalization before handing this off.',event:'Running invitation integration tests',task:'Build invitation endpoints'},
+ {name:'Web worker',provider:'Claude',repo:'pica-studio',status:'Needs your input',text:'When someone already has an account, should accepting an invitation take them straight to the workspace?',event:'Received API contract ← API worker',task:'Build the invitation flow'},
+ {name:'Reviewer',provider:'Codex',repo:'Both repositories',status:'Waiting for changes',text:'I’ll review both changes together once the workers finish. I’m focusing on authorization and agreement between the API and UI.',event:'Waiting on API worker and Web worker',task:'Review the complete user journey'}
+];
+const prefs={showActivity:true};
+function sidebar(){return `<aside class="aw-side"><div class="aw-label">Tasks</div><button class="aw-active cursor-interaction">Ship invitations<small>4 agents · 2 repos</small></button><button class="cursor-interaction aw-secondary" data-task="Sync billing">Sync billing<small>Paused · 3 repos</small></button><button class="cursor-interaction aw-secondary" data-task="Search performance">Search performance<small>Ready for review</small></button><div class="aw-label">Needs you</div><small class="aw-secondary">1 question in invitations</small><div class="aw-label">Repositories</div><small class="aw-secondary">pica-api<br>pica-studio<br><br>Attached to this task</small></aside>`;}
+function header(){return `<header class="aw-bar"><span class="aw-brand">◎ &nbsp; Relay</span><span style="color:var(--aw-muted)">Personal workspace</span><span class="aw-tag">UX concept · simulated activity</span></header>`;}
+function heading(){return `<div class="aw-heading"><div><small>FEATURE / IN PROGRESS</small><h2>Ship invitations</h2><small>Invite people to a workspace and let them accept.</small><span class="aw-chip">pica-api</span><span class="aw-chip">pica-studio</span></div><button class="cursor-interaction" data-pause>Pause task</button></div>`;}
+function detail(a,i,tiled=false){return `<article class="aw-detail" data-agent="${i}"><div class="aw-detailhead"><div><h3>${a.name}</h3><small>${a.provider} · ${a.repo}</small></div><span class="aw-status ${i===2?'wait':''}">${a.status}</span></div>${tiled?'':`<div class="aw-tabs"><button class="cursor-interaction" data-tab="Conversation" aria-pressed="true">Conversation</button><button class="cursor-interaction" data-tab="Changes" aria-pressed="false">Changes</button><button class="cursor-interaction" data-tab="Activity" aria-pressed="false">Activity</button></div>`}<div class="aw-transcript" aria-live="polite"><div class="aw-message"><small>${a.name.toUpperCase()} · ${tiled?'NOW':'2 MIN AGO'}</small><p>${a.text}</p></div>${tiled?'':`<div class="aw-event">${a.event}</div><div class="aw-message"><small>ASSIGNMENT</small><p>${a.task}</p></div>`}</div><div class="aw-compose"><form><input aria-label="Message ${a.name}" placeholder="Message ${a.name.toLowerCase()}…" required><button class="aw-send cursor-interaction" type="submit" aria-label="Send to ${a.name}">↑</button></form>${tiled?'':`<div class="aw-footer">Direct to this agent · visible to the orchestrator</div>`}</div></article>`;}
+const sections=root.querySelectorAll('[data-variant]');
+sections[0].innerHTML=`<div class="aw-shell">${header()}<div class="aw-body">${sidebar()}<main class="aw-main">${heading()}<div class="aw-columns"><div><div class="aw-label" style="margin-top:0">Agents</div>${agents.map((a,i)=>`<button class="aw-agent cursor-interaction" data-select="${i}" aria-pressed="${i===0}"><h3>${a.name}</h3><small>${a.provider} · ${a.repo}</small><span class="aw-status ${i===2?'wait':''}">${a.status}</span></button>`).join('')}</div><div data-selected>${detail(agents[0],0)}</div></div><div class="aw-feed"><h3>Across the task</h3><p>12:42 &nbsp; API worker → Web worker &nbsp; Shared invitation contract</p><p>12:44 &nbsp; Web worker → You &nbsp; Asked about existing accounts</p></div></main></div></div>`;
+sections[1].innerHTML=`<div class="aw-shell">${header()}<div class="aw-body">${sidebar()}<main class="aw-main">${heading()}<div class="aw-grid">${agents.map((a,i)=>detail(a,i,true)).join('')}</div><div class="aw-feed"><h3>Across the task</h3><p>API contract delivered · API tests running · Web worker needs your input</p></div></main></div></div>`;
+root.addEventListener('click',e=>{
+const select=e.target.closest('[data-select]');
+if(select){const idx=Number(select.dataset.select); sections[0].querySelectorAll('[data-select]').forEach(b=>b.setAttribute('aria-pressed',String(b===select))); sections[0].querySelector('[data-selected]').innerHTML=detail(agents[idx],idx);}
+const tab=e.target.closest('[data-tab]');
+if(tab){const card=tab.closest('[data-agent]'),idx=Number(card.dataset.agent);card.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-pressed',String(b===tab)));const output=card.querySelector('.aw-transcript');if(tab.dataset.tab==='Conversation'){output.innerHTML=`<div class="aw-message"><small>${agents[idx].name.toUpperCase()}</small><p>${agents[idx].text}</p></div><div class="aw-event">${agents[idx].event}</div>`;}else if(tab.dataset.tab==='Changes'){output.innerHTML=idx===1?'<h3>Invitation endpoints</h3><small>pica-api · 3 files changed</small><pre>+ POST /workspaces/:id/invitations\n+ POST /invitations/:token/accept\n+ Reject expired or already redeemed tokens</pre>':idx===2?'<h3>Invitation flow</h3><small>pica-studio · 2 files changed</small><pre>+ Invite dialog\n+ Accept invitation page\n+ Expired invitation state</pre>':'<h3>Task changes</h3><p>API worker: 3 files<br>Web worker: 2 files</p><small>Review available when both workers finish.</small>';}else{output.innerHTML=`<div class="aw-event">12:40 · ${agents[idx].task}</div><div class="aw-event">12:42 · ${agents[idx].event}</div><small>Session connected · Messages delivered</small>`;}}
+const pause=e.target.closest('[data-pause]');if(pause){pause.textContent=pause.textContent==='Pause task'?'Resume task':'Pause task';}
+const other=e.target.closest('[data-task]');if(other){const main=other.closest('.aw-body').querySelector('.aw-main');main.innerHTML=`<small>TASK / ${other.dataset.task==='Sync billing'?'PAUSED':'READY FOR REVIEW'}</small><h2>${other.dataset.task}</h2><p>This task has its own agents and repository workspaces.</p><button class="cursor-interaction" data-back>← Back to invitations</button>`;}
+if(e.target.closest('[data-back]')){location.reload();}
+});
+root.addEventListener('submit',e=>{e.preventDefault();const card=e.target.closest('[data-agent]'),input=e.target.querySelector('input'),out=card.querySelector('.aw-transcript');const message=document.createElement('div');message.className='aw-message';const label=document.createElement('small');label.textContent='YOU · DELIVERED (DEMO)';const p=document.createElement('p');p.textContent=input.value;message.append(label,p);out.append(message);input.value='';});
+if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:()=>root.querySelectorAll('.aw-feed').forEach(x=>x.hidden=!prefs.showActivity)});tweak.addToggle(prefs,'showActivity',{label:'Show shared activity'});}
+})();
+</script>

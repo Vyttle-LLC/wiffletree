@@ -1,0 +1,6 @@
+{
+  "selected_on": "2026-10-05",
+  "tool": "built-in image_gen",
+  "final_edit_prompt": "Make a precise color-only edit of this Wiffletree Interlock \u2014 open joint branding board. Replace the peach/salmon accent in all THREE colored W symbols (large hero mark, bottom-left dark app tile, bottom-middle sea-glass app tile) with a rich saturated warm RED, target #D63C35. This must read clearly RED, not peach, orange, pink, burgundy, or brown. Preserve absolutely everything else: same exact open-joint W geometry, same accent size and position, same wordmark spelling and typography, same layout and scale, same deep teal, same sea glass, same offwhite background. Keep bottom-right monochrome W entirely deep teal as in the original. Keep heading '04 / Interlock \u2014 open joint'. Do not redesign, change shapes, shift spacing, add text or add decoration. Render the same full landscape board with the red accent replacing peach.",
+  "vector_adaptation": "Open-joint symbol redrawn as paths; original Instrument Sans two-tone wordmark retained, with unaccented native i dot."
+}

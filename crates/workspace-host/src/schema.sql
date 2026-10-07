@@ -1,0 +1,17 @@
+CREATE TABLE projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE repositories (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), path TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(project_id,path));
+CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), parent_id TEXT REFERENCES sessions(id), role TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX sessions_project ON sessions(project_id);
+CREATE TABLE messages (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL REFERENCES projects(id), sender TEXT REFERENCES sessions(id), recipient TEXT NOT NULL REFERENCES sessions(id), body TEXT NOT NULL, receipt TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX messages_recipient ON messages(recipient,sequence);
+CREATE INDEX outbox ON messages(recipient,receipt,sequence);
+CREATE TABLE attention (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), session_id TEXT NOT NULL REFERENCES sessions(id), operation_id TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(session_id,operation_id));
+CREATE TABLE policies (role TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE activity (sequence INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL REFERENCES projects(id), session_id TEXT REFERENCES sessions(id), kind TEXT NOT NULL, detail TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX activity_project ON activity(project_id,sequence);
+CREATE TABLE work_logs (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL REFERENCES projects(id), session_id TEXT NOT NULL REFERENCES sessions(id), milestone TEXT NOT NULL, repository TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(session_id,milestone));
+CREATE INDEX logs_project ON work_logs(project_id,sequence);
+CREATE TABLE log_exports (log_id TEXT NOT NULL REFERENCES work_logs(id), brain TEXT NOT NULL, PRIMARY KEY(log_id,brain));
+CREATE TABLE maintenance_runs (sequence INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL REFERENCES projects(id), data TEXT NOT NULL);
+CREATE INDEX runs_project ON maintenance_runs(project_id,sequence);
+PRAGMA user_version = 1;
