@@ -206,9 +206,14 @@ fn settings_round_trip_keep_unknown_fields_and_fall_back_when_missing_or_corrupt
     let file = directory.path().join("settings.json");
     let mut host = Host::open(directory.path()).unwrap();
     let default = host.settings();
-    assert!(
-        default.workspaces_dir.ends_with("/wiffletree"),
-        "{default:?}"
+    // Beta builds, like the host they test, default to their own folder.
+    let folder = match option_env!("WIFFLETREE_CHANNEL") {
+        Some("beta") => "wiffletree-beta",
+        _ => "wiffletree",
+    };
+    assert_eq!(
+        default.workspaces_dir,
+        std::env::home_dir().unwrap().join(folder).to_str().unwrap()
     );
 
     std::fs::write(&file, r#"{"future_option":true}"#).unwrap();
@@ -267,4 +272,43 @@ fn unusable_workspace_folders_are_refused_and_keep_the_saved_setting() {
     let relative = host.set_workspaces_dir("relative/folder").unwrap_err();
     assert!(relative.to_string().contains("absolute"), "{relative}");
     assert_eq!(host.settings(), kept);
+}
+
+#[test]
+fn checking_a_workspace_folder_never_writes_through_an_existing_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let outside = directory.path().join("outside.txt");
+    std::fs::write(&outside, b"keep me").unwrap();
+    let chosen = directory.path().join("chosen");
+    std::fs::create_dir(&chosen).unwrap();
+    std::os::unix::fs::symlink(&outside, chosen.join(".wiffletree-write-check")).unwrap();
+
+    host.set_workspaces_dir(chosen.to_str().unwrap()).unwrap();
+
+    assert_eq!(std::fs::read(&outside).unwrap(), b"keep me");
+    assert!(chosen.join(".wiffletree-write-check").is_symlink());
+    assert_eq!(std::fs::read_dir(&chosen).unwrap().count(), 1);
+}
+
+#[test]
+fn nested_branches_take_their_prefix_and_a_wiffletree_branch_is_reported() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut host, project, web) = team(directory.path(), "Calls");
+    git(
+        &directory.path().join("Web App"),
+        &["branch", "wiffletree/fix/nested"],
+    );
+    let ticket = host.create_ticket(&web.id, "Fix", "Fix it").unwrap();
+    assert_eq!(ticket.branch, "wiffletree/fix-2");
+
+    let blocked = directory.path().join("Blocked");
+    repository(&blocked);
+    git(&blocked, &["branch", "wiffletree"]);
+    let other = coordinator(&mut host, &project, &blocked);
+    let error = host
+        .create_ticket(&other.id, "Fix", "Fix it")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("branch named \"wiffletree\""), "{error}");
 }

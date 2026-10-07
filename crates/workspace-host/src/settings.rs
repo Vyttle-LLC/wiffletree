@@ -70,17 +70,24 @@ fn project_slug(project: &Project) -> String {
         .unwrap_or_else(|| slug(&project.name, "project"))
 }
 
-fn branch_exists(repository: &Path, branch: &str) -> bool {
-    runtime::git_output(
+/// Every local branch under `wiffletree/`, as `refs/heads/...` names.
+fn wiffletree_branches(repository: &Path) -> Result<Vec<String>> {
+    let refs = runtime::git_output(
         repository,
         &[
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/wiffletree",
         ],
     )
-    .is_ok()
+    .context("Could not list the repository's wiffletree branches")?;
+    let refs: Vec<String> = refs.lines().map(str::to_owned).collect();
+    ensure!(
+        !refs.iter().any(|r| r == "refs/heads/wiffletree"),
+        "A branch named \"wiffletree\" blocks ticket branches; rename it in {}",
+        repository.display()
+    );
+    Ok(refs)
 }
 
 impl Host {
@@ -102,9 +109,9 @@ impl Host {
         );
         fs::create_dir_all(&folder)
             .with_context(|| format!("Cannot create {}", folder.display()))?;
-        let probe = folder.join(".wiffletree-write-check");
-        fs::write(&probe, b"")
-            .and_then(|_| fs::remove_file(&probe))
+        // A new, uniquely named file: never one that exists, which could be a symlink elsewhere.
+        tempfile::NamedTempFile::new_in(&folder)
+            .and_then(|probe| probe.close())
             .with_context(|| format!("Cannot write to {}", folder.display()))?;
         let settings = HostSettings {
             workspaces_dir: folder.to_string_lossy().into_owned(),
@@ -171,11 +178,16 @@ impl Host {
                 "repository",
             ));
         let tickets = self.tickets()?;
+        let branches = wiffletree_branches(repository_path)?;
         let slug = unused(&slug(title, "ticket"), |candidate| {
             let path = parent.join(candidate);
+            let branch = format!("refs/heads/wiffletree/{candidate}");
             path.exists()
                 || tickets.iter().any(|t| Path::new(&t.worktree) == path)
-                || branch_exists(repository_path, &format!("wiffletree/{candidate}"))
+                || branches.iter().any(|r| {
+                    r.strip_prefix(&branch)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                })
         });
         Ok((parent.join(&slug), format!("wiffletree/{slug}")))
     }
