@@ -379,6 +379,7 @@ impl Actor {
                                 self.host.session(&id)?.name,
                                 input.to_string().chars().take(3000).collect::<String>()
                             ),
+                            &[],
                         )?;
                         self.permissions.insert(
                             request.id,
@@ -584,7 +585,7 @@ impl Actor {
             }
             if self.turns.get(&project.id).copied().unwrap_or_default() >= 100 {
                 self.host.set_live(&project.id, false)?;
-                self.host.request_attention(&session.id,"local",&format!("{TURN_BUDGET}:{}", new_id()),"This project ran 100 turns since you last stepped in. Review the work, then message it or resume to continue.")?;
+                self.host.request_attention(&session.id,"local",&format!("{TURN_BUDGET}:{}", new_id()),"This project ran 100 turns since you last stepped in. Review the work, then message it or resume to continue.",&[])?;
                 continue;
             }
             let runtime = self.host.session_runtime(&session.id)?;

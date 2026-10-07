@@ -1,5 +1,6 @@
 //! The right-edge rail and the inspector panel it opens for the selected session.
 use super::*;
+use conversation::markdown;
 use gpui_component::{
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
@@ -168,14 +169,20 @@ impl Workspace {
         rail
     }
 
-    pub(super) fn panel_view(&self, panel: Panel, p: Palette, cx: &mut Context<Self>) -> Div {
+    pub(super) fn panel_view(
+        &self,
+        panel: Panel,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let role = self.selected_role();
         let body = match panel {
             Panel::Overview => self.overview(p, cx),
             Panel::Team => self.team_panel(p, cx),
             Panel::Memory => self.memory_panel(p, cx),
             Panel::Events => self.events_panel(p),
-            Panel::Attention => self.attention_panel(p, cx),
+            Panel::Attention => self.attention_panel(p, window, cx),
             Panel::Git => self.git_panel(p),
         };
         let (scope, subtitle) = (scope(role), self.owner_name());
@@ -496,7 +503,7 @@ impl Workspace {
         ))
     }
 
-    fn attention_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn attention_panel(&self, p: Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let items = self.project_attention();
         if items.is_empty() {
             return empty_state(
@@ -514,107 +521,154 @@ impl Workspace {
         });
         let mut body = div().flex().flex_col().gap_3();
         for item in items {
-            let asker = self
-                .session(&item.session_id)
-                .map_or("Agent".to_owned(), |s| s.name.clone());
-            let permission = item.is_permission();
-            let id = item.id.clone();
-            let mut entry = card(p)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(hint(asker, p).text_ellipsis())
-                        .child(if permission {
-                            pill("Approval", p.yellow)
-                        } else {
-                            pill("Question", p.focus)
-                        }),
-                )
+            let open = answering.as_ref() == Some(&item.id);
+            body = body.child(self.attention_card(item, open, p, window, cx));
+        }
+        body
+    }
+
+    /// One inbox item with everything needed to settle it. `answering` opens the answer box.
+    pub(super) fn attention_card(
+        &self,
+        item: &Attention,
+        answering: bool,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let asker = self
+            .session(&item.session_id)
+            .map_or("Agent".to_owned(), |s| s.name.clone());
+        let id = item.id.clone();
+        let entry = card(p).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(hint(asker, p).text_ellipsis())
+                .child(if item.is_permission() {
+                    pill("Approval", p.yellow)
+                } else {
+                    pill("Question", p.focus)
+                }),
+        );
+        if item.is_permission() {
+            let approve = id.clone();
+            return entry
                 .child(
                     div()
                         .text_size(px(13.))
                         .line_height(relative(1.5))
                         .child(item.prompt.clone()),
-                );
-            entry = if permission {
-                let approve = id.clone();
-                entry
-                    .child(hint(format!("{} · {}", item.host, item.operation_id), p))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                button(SharedString::from(format!("deny-{id}")))
-                                    .ghost()
-                                    .label("Deny")
-                                    .on_click(cx.listener(move |v, _, w, c| {
-                                        v.resolve_attention(&id, "denied", w, c)
-                                    })),
-                            )
-                            .child(
-                                button(SharedString::from(format!("approve-{approve}")))
-                                    .primary()
-                                    .label("Approve once")
-                                    .on_click(cx.listener(move |v, _, w, c| {
-                                        v.resolve_attention(&approve, "approved", w, c)
-                                    })),
-                            ),
-                    )
-            } else {
-                let dismiss = id.clone();
-                let actions = div().flex().justify_end().gap_2().child(
-                    button(SharedString::from(format!("dismiss-{id}")))
-                        .ghost()
-                        .label("Dismiss")
-                        .on_click(cx.listener(move |v, _, w, c| {
-                            v.request(
-                                Command::DismissAttention {
-                                    id: dismiss.clone(),
-                                },
-                                w,
-                                c,
-                            )
-                        })),
-                );
-                if answering.as_ref() == Some(&id) {
-                    entry.child(Input::new(&self.answer).w_full()).child(
-                        actions.child(
-                            button(SharedString::from(format!("answer-{id}")))
+                )
+                .child(hint(format!("{} · {}", item.host, item.operation_id), p))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            button(SharedString::from(format!("deny-{id}")))
+                                .ghost()
+                                .label("Deny")
+                                .on_click(cx.listener(move |v, _, w, c| {
+                                    v.resolve_attention(&id, "denied", w, c)
+                                })),
+                        )
+                        .child(
+                            button(SharedString::from(format!("approve-{approve}")))
                                 .primary()
-                                .label("Send answer")
+                                .label("Approve once")
                                 .on_click(cx.listener(move |v, _, w, c| {
-                                    let answer = v.answer.read(c).value().trim().to_string();
-                                    if !answer.is_empty() {
-                                        v.resolve_attention(&id, &answer, w, c);
-                                    }
+                                    v.resolve_attention(&approve, "approved", w, c)
                                 })),
                         ),
-                    )
-                } else {
-                    entry.child(
-                        actions.child(
-                            button(SharedString::from(format!("start-answer-{id}")))
-                                .label("Answer")
-                                .on_click(cx.listener(move |v, _, w, c| {
-                                    v.answering = Some(id.clone());
-                                    v.answer.update(c, |input, c| {
-                                        input.set_value("", w, c);
-                                        input.focus(w, c);
-                                    });
-                                    c.notify();
-                                })),
-                        ),
-                    )
-                }
-            };
-            body = body.child(entry);
+                );
         }
-        body
+        let mut choices = div().flex().flex_col().gap_1p5();
+        for (ix, option) in item.options.iter().enumerate() {
+            let (id, option) = (id.clone(), option.clone());
+            choices = choices.child(
+                div()
+                    .id(SharedString::from(format!("choice-{id}-{ix}")))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(p.edge.opacity(0.5))
+                    .text_size(px(13.))
+                    .line_height(relative(1.4))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(p.overlay).border_color(p.accent))
+                    .child(option.clone())
+                    .on_click(
+                        cx.listener(move |v, _, w, c| v.resolve_attention(&id, &option, w, c)),
+                    ),
+            );
+        }
+        let dismiss = id.clone();
+        let actions = div().flex().justify_end().gap_2().child(
+            button(SharedString::from(format!("dismiss-{id}")))
+                .ghost()
+                .label("Dismiss")
+                .on_click(cx.listener(move |v, _, w, c| {
+                    v.request(
+                        Command::DismissAttention {
+                            id: dismiss.clone(),
+                        },
+                        w,
+                        c,
+                    )
+                })),
+        );
+        let entry = entry
+            .child(
+                div()
+                    .id(SharedString::from(format!("question-{id}")))
+                    .max_h(px(280.))
+                    .overflow_y_scroll()
+                    .child(markdown(
+                        &format!("attention-{id}"),
+                        &item.prompt,
+                        window,
+                        cx,
+                    )),
+            )
+            .when(!item.options.is_empty(), |d| d.child(choices));
+        if answering {
+            entry.child(Input::new(&self.answer).w_full()).child(
+                actions.child(
+                    button(SharedString::from(format!("answer-{id}")))
+                        .primary()
+                        .label("Send answer")
+                        .on_click(cx.listener(move |v, _, w, c| {
+                            let answer = v.answer.read(c).value().trim().to_string();
+                            if !answer.is_empty() {
+                                v.resolve_attention(&id, &answer, w, c);
+                            }
+                        })),
+                ),
+            )
+        } else {
+            entry.child(
+                actions.child(
+                    button(SharedString::from(format!("start-answer-{id}")))
+                        .label("Answer")
+                        .on_click(cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))),
+                ),
+            )
+        }
+    }
+
+    /// Opens the answer box for one question, empty and focused.
+    pub(super) fn start_answer(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.answering = Some(id.to_owned());
+        self.answer.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
     }
 
     fn resolve_attention(

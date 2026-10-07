@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{Value, json};
 use workspace_core::*;
 use workspace_host::Host;
 
@@ -291,13 +291,32 @@ fn coordinator_closes_questions_the_human_already_settled() {
 }
 
 #[test]
+fn coordinator_offers_choices_with_a_question() {
+    let (_home, _repo, mut host, root, _coordinator) = fixture();
+    let mut ask = |options: Value| {
+        host.agent_tool(
+            &root.id,
+            "ask_user",
+            json!({"request_id":"waive","question":"Waive the P1?","options":options}),
+        )
+    };
+    assert!(ask(json!("Waive it")).is_err());
+    assert!(ask(json!(["Waive it", ""])).is_err());
+    ask(json!(["Waive it", "Fix it now"])).unwrap();
+    assert_eq!(
+        host.snapshot().unwrap().attention[0].options,
+        ["Waive it", "Fix it now"]
+    );
+}
+
+#[test]
 fn human_dismisses_questions_but_decides_permissions() {
     let (_home, _repo, mut host, root, _coordinator) = fixture();
     let question = host
-        .request_attention(&root.id, "local", "question", "Ship it?")
+        .request_attention(&root.id, "local", "question", "Ship it?", &[])
         .unwrap();
     let permission = host
-        .request_attention(&root.id, "local", "permission:1", "Run rm?")
+        .request_attention(&root.id, "local", "permission:1", "Run rm?", &[])
         .unwrap();
     assert!(host.dismiss_attention(&permission.id).is_err());
     host.dismiss_attention(&question.id).unwrap();

@@ -68,8 +68,8 @@ pub fn tools() -> Value {
         ),
         tool(
             "ask_user",
-            "Main coordinator: place a question in the human inbox, then finish your turn. The answer resumes you.",
-            json!({"request_id":string,"question":string}),
+            "Main coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
+            json!({"request_id":string,"question":string,"options":{"type":"array","items":{"type":"string"},"maxItems":6}}),
             vec!["request_id", "question"]
         ),
         tool(

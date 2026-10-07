@@ -478,11 +478,17 @@ impl Host {
                     session.role == Role::ProjectOrchestrator,
                     "Escalate to your coordinator first"
                 );
+                let options = match args.get("options") {
+                    Some(options) => serde_json::from_value(options.clone())
+                        .context("options must be a list of strings")?,
+                    None => vec![],
+                };
                 Ok(serde_json::to_value(self.request_attention(
                     id,
                     "local",
                     string("request_id")?,
                     string("question")?,
+                    &options,
                 )?)?)
             }
             "close_question" => {
