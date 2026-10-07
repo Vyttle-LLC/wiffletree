@@ -67,6 +67,12 @@ pub fn tools() -> Value {
             vec!["ticket_id"]
         ),
         tool(
+            "archive_team",
+            "Main coordinator: archive one of your repository coordinators and its agents once every ticket is accepted, or closed if abandoned. Refuses, listing every blocker, while a team member is working or a ticket is not accepted or closed. Closes accepted tickets; conversations, branches and worktrees are kept and the human can restore the team from the sidebar. Repeating it for an archived team is harmless.",
+            json!({"session_id":string}),
+            vec!["session_id"]
+        ),
+        tool(
             "ask_user",
             "Main coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
             json!({"request_id":string,"question":string,"options":{"type":"array","items":{"type":"string"},"maxItems":6}}),
