@@ -589,11 +589,15 @@ impl Actor {
                 continue;
             }
             let runtime = self.host.session_runtime(&session.id)?;
+            // A ticket's worktree has one writer at a time; reviewers only read, so they run together.
             if let Some(ticket) = &runtime.ticket_id
                 && self.active.keys().any(|id| {
                     self.host
                         .session_runtime(id)
                         .is_ok_and(|r| r.ticket_id.as_ref() == Some(ticket))
+                        && self.host.session(id).is_ok_and(|active| {
+                            !(session.role == Role::Reviewer && active.role == Role::Reviewer)
+                        })
                 })
             {
                 continue;
