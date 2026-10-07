@@ -86,6 +86,10 @@ pub fn skill(role: Role) -> String {
 }
 pub fn command(turn: &Turn) -> Result<ProcessCommand> {
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
+    configure(&mut cmd, turn);
+    Ok(cmd)
+}
+fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
     cmd.current_dir(&turn.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -101,7 +105,9 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
                 .args(["--model",&turn.profile.model,"--effort",&turn.profile.effort])
                 .args(["--append-system-prompt",&instructions])
                 .args(["--mcp-config",&json!({"mcpServers":{"agent_workspace":{"command":turn.helper,"args":["agent-mcp"]}}}).to_string()])
-                .args(["--allowedTools","mcp__agent_workspace__*"]);
+                .args(["--allowedTools","mcp__agent_workspace__*"])
+                // Agents work only in the directory Wiffletree assigned them.
+                .args(["--disallowedTools","EnterWorktree,ExitWorktree"]);
             cmd.args(["--dangerously-skip-permissions", "--tools", "default"]);
             if let Some(id) = &turn.provider_session {
                 cmd.args(["--resume", id]);
@@ -119,7 +125,6 @@ pub fn command(turn: &Turn) -> Result<ProcessCommand> {
             cmd.arg("-");
         }
     }
-    Ok(cmd)
 }
 struct Process(Child);
 impl Drop for Process {
@@ -354,7 +359,42 @@ fn without_terminal_codes(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::without_terminal_codes;
+    use super::*;
+
+    #[test]
+    fn claude_cannot_open_its_own_worktrees() {
+        let turn = Turn {
+            run_id: new_id(),
+            session: Session {
+                id: new_id(),
+                project_id: new_id(),
+                parent_id: None,
+                repository_id: None,
+                name: "Implementer".into(),
+                role: Role::Implementer,
+                provider: Provider::Claude,
+                status: Status::Ready,
+                archived: false,
+            },
+            profile: ModelProfile {
+                provider: Provider::Claude,
+                model: "opus".into(),
+                effort: "medium".into(),
+            },
+            provider_session: None,
+            cwd: PathBuf::from("/tmp"),
+            prompt: String::new(),
+            socket: PathBuf::new(),
+            token: String::new(),
+            helper: PathBuf::new(),
+        };
+        let mut cmd = ProcessCommand::new("claude");
+        configure(&mut cmd, &turn);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[denied + 1], "EnterWorktree,ExitWorktree");
+        assert!(args.iter().any(|a| a == "--allowedTools"));
+    }
 
     #[test]
     fn provider_errors_lose_terminal_codes() {

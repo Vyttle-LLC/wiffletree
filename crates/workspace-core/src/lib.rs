@@ -103,6 +103,10 @@ pub struct Project {
     /// The workspace repositories this project may use; `None` means all of them.
     #[serde(default)]
     pub repositories: Option<Vec<String>>,
+    /// The main coordinator's directory, fixed at creation; its name is the project's slug.
+    /// `None` for projects created before workspace folders, which keep their original directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 impl Project {
     pub fn uses(&self, repository_id: &str) -> bool {
@@ -566,6 +570,13 @@ impl Snapshot {
     }
 }
 
+/// Host-owned settings, kept in the host's `settings.json`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSettings {
+    /// Where new projects and ticket worktrees are created.
+    pub workspaces_dir: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ticket {
     pub id: String,
@@ -777,6 +788,13 @@ pub enum Command {
         repository_id: String,
         skip: usize,
         limit: usize,
+    },
+    /// Answered with `HostSettings`.
+    Settings,
+    /// Checks the folder can be created and written to, saves it and answers with
+    /// `HostSettings`. Only projects and tickets created afterwards use it.
+    SetWorkspacesDir {
+        path: String,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

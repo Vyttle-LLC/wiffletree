@@ -36,6 +36,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
             request({'type':'set_policy','policy':{'role':role,'mode':'fixed','default':profile,'allowed':[profile],'small':profile,'standard':profile,'complex':profile}})
         profile={'provider':'claude','model':'sonnet','effort':'low'}
         request({'type':'set_policy','policy':{'role':'tester','mode':'fixed','default':profile,'allowed':[profile],'small':profile,'standard':profile,'complex':profile}})
+        request({'type':'set_workspaces_dir','path':str(tmp/'workspaces')})
         project=request({'type':'create_project','name':'Protocol fixture'})
         main=snapshot()['sessions'][0]
         request({'type':'attach_repository','project_id':project['id'],'path':str(repo),'base':'HEAD'})
