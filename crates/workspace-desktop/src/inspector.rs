@@ -227,11 +227,10 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("inspector-scroll")
                     .w_full()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .p_5()
                     .text_size(px(13.))
                     .child(body.w_full()),
@@ -615,9 +614,9 @@ impl Workspace {
         let entry = entry
             .child(
                 div()
-                    .id(SharedString::from(format!("question-{id}")))
                     .max_h(px(280.))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
+                    .id(SharedString::from(format!("question-{id}")))
                     .child(markdown(&format!("attention-{id}"), &item.prompt)),
             )
             .when(!item.options.is_empty(), |d| d.child(choices));

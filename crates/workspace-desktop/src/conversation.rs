@@ -578,7 +578,7 @@ impl Workspace {
             )
     }
 
-    fn transcript(&self, session: &Session, p: Palette) -> List {
+    fn transcript(&self, session: &Session, p: Palette) -> Div {
         let messages = self.messages.clone();
         let sessions = self
             .snapshot
@@ -586,7 +586,7 @@ impl Workspace {
             .map(|s| s.sessions.clone())
             .unwrap_or_default();
         let current = session.clone();
-        list(self.list.clone(), move |ix, _, _| {
+        let transcript = list(self.list.clone(), move |ix, _, _| {
             let content = match messages.get(ix) {
                 Some(message) if message.sender.is_none() => human_message(message, p),
                 Some(message) => {
@@ -615,8 +615,13 @@ impl Workspace {
                 .child(div().w_full().max_w(px(COLUMN)).child(content))
                 .into_any_element()
         })
-        .flex_1()
-        .min_h_0()
+        .size_full();
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(transcript)
+            .vertical_scrollbar(&self.list)
     }
 
     fn pagination(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {

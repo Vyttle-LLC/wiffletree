@@ -25,6 +25,7 @@ use gpui_component::{
     button::Button,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     notification::Notification,
+    scroll::ScrollableElement,
 };
 use palette::{Palette, palette};
 use serde_json::Value;
