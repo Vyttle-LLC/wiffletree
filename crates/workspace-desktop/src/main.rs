@@ -124,11 +124,7 @@ struct Workspace {
 }
 impl Workspace {
     fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .auto_grow(2, 9)
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).multi_line(true).auto_grow(2, 9));
         // The send button follows the draft, so redraw as it changes.
         cx.subscribe(&input, |_, _, event, cx| {
             if matches!(event, InputEvent::Change) {
