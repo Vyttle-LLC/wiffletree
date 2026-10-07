@@ -18,6 +18,7 @@ gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
 gpui-component = { version = "=0.7.1", features = ["tree-sitter-languages"] }
 async-channel = "2.5"
+libc = "0.2"
 objc = "0.2"
 sha2 = "0.11"
 

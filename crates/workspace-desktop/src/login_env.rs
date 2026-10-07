@@ -4,7 +4,7 @@
 use std::{
     ffi::{OsStr, OsString},
     io::Read,
-    os::unix::ffi::OsStrExt,
+    os::unix::{ffi::OsStrExt, process::CommandExt},
     path::Path,
     process::{Command, Stdio},
     sync::mpsc,
@@ -57,6 +57,7 @@ fn resolve(shell: &Path, timeout: Duration) -> anyhow::Result<Vec<(OsString, OsS
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .map_err(|error| anyhow::anyhow!("starting {}: {error}", shell.display()))?;
     let mut stdout = child.stdout.take().expect("piped stdout");
@@ -68,7 +69,9 @@ fn resolve(shell: &Path, timeout: Duration) -> anyhow::Result<Vec<(OsString, OsS
     let output = match receiver.recv_timeout(timeout) {
         Ok(output) => output?,
         Err(_) => {
-            let _ = child.kill();
+            // Kill the whole group so processes started by rc files die with the shell.
+            // SAFETY: killpg only sends a signal; the group id is the shell's pid.
+            unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
             let _ = child.wait();
             anyhow::bail!("{} timed out after {timeout:?}", shell.display());
         }
@@ -80,11 +83,12 @@ fn resolve(shell: &Path, timeout: Duration) -> anyhow::Result<Vec<(OsString, OsS
         .ok_or_else(|| anyhow::anyhow!("{} printed no environment", shell.display()))
 }
 
-/// Reads the NUL-separated `env -0` output between the two markers, ignoring rc-file noise
-/// around them, malformed entries and per-session variables.
+/// Reads the NUL-separated `env -0` output between the first and last markers, ignoring rc-file
+/// noise around them, malformed entries and per-session variables. Searching from both ends keeps
+/// a value that contains the marker, such as the `-c` script itself, from truncating the output.
 fn parse(output: &[u8], marker: &[u8]) -> Option<Vec<(OsString, OsString)>> {
     let start = find(output, marker)? + marker.len();
-    let end = start + find(&output[start..], marker)?;
+    let end = start + rfind(&output[start..], marker)?;
     Some(
         output[start..end]
             .split(|&byte| byte == 0)
@@ -107,6 +111,12 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
 
 #[cfg(test)]
@@ -140,6 +150,16 @@ mod tests {
                 ("NOTE", "two\nlines"),
                 ("EMPTY", "")
             ]
+        );
+    }
+
+    #[test]
+    fn value_containing_the_marker_does_not_truncate_the_environment() {
+        let output = b"MARKSCRIPT=printf MARK; env\0PATH=/nix/bin\0MARK";
+        let variables = parse(output, b"MARK").unwrap();
+        assert_eq!(
+            pairs(&variables),
+            [("SCRIPT", "printf MARK; env"), ("PATH", "/nix/bin")]
         );
     }
 
@@ -187,6 +207,31 @@ echo "rc file says goodbye""#,
         let error = resolve(&shell, Duration::from_millis(200)).unwrap_err();
         assert!(error.to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn timeout_kills_processes_started_by_the_shell() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("grandchild.pid");
+        let shell = fake_shell(
+            directory.path(),
+            &format!("/bin/sleep 42 &\necho $! > '{}'\nwait", pid_file.display()),
+        );
+        resolve(&shell, Duration::from_millis(200)).unwrap_err();
+        let grandchild: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only checks whether the process still exists.
+        while unsafe { libc::kill(grandchild, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {grandchild} survived"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

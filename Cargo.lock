@@ -8674,6 +8674,7 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "objc",
  "serde",
  "serde_json",
