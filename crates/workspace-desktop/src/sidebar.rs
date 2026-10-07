@@ -126,14 +126,20 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("tree-scroll")
-                    .track_scroll(&self.tree_scroll)
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .pb_3()
-                    .child(self.tree(p, cx)),
+                    .child(
+                        div()
+                            .id("tree-scroll")
+                            .track_scroll(&self.tree_scroll)
+                            .size_full()
+                            .overflow_y_scroll()
+                            .px_2()
+                            .pb_3()
+                            .child(self.tree(p, cx)),
+                    )
+                    .vertical_scrollbar(&self.tree_scroll),
             )
             .child(self.workspace_nav(p, cx))
             .child(self.quota_strip(p, cx))

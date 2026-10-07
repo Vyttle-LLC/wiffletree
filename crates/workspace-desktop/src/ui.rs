@@ -373,10 +373,9 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("page-scroll")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .px_6()
                     .py_5()
                     .child(div().w_full().max_w(px(COLUMN)).mx_auto().child(body)),
