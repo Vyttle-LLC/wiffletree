@@ -30,6 +30,18 @@ fn open_questions_reminder(questions: &[Attention]) -> String {
         "\n\nYour open inbox questions (request_id: question):\n{list}\nIf this message or the current state already settles one, call close_question for it before ending your turn."
     )
 }
+/// Provider output is not Markdown, so it is fenced to show verbatim.
+fn runtime_stopped(error: &str) -> String {
+    let longest = error
+        .split(|c| c != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!(
+        "Runtime stopped:\n{fence}text\n{error}\n{fence}\nInspect the worktree before retrying uncertain work."
+    )
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -475,7 +487,11 @@ impl Actor {
                     )?;
                 }
                 if let Some(error) = &error {
-                    self.host.append_output(&session,&format!("error:{run}"),&format!("Runtime stopped: {error}\nInspect the worktree before retrying uncertain work."))?;
+                    self.host.append_output(
+                        &session,
+                        &format!("error:{run}"),
+                        &runtime_stopped(error),
+                    )?;
                     self.host.set_status(
                         id,
                         if session.status == Status::Paused {
@@ -704,5 +720,18 @@ impl Actor {
             }
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_stopped;
+
+    #[test]
+    fn provider_errors_cannot_close_their_fence() {
+        let notice = runtime_stopped("KeyError in __getitem__\n```\n**not markdown**");
+        assert!(
+            notice.contains("\n````text\nKeyError in __getitem__\n```\n**not markdown**\n````\n")
+        );
     }
 }

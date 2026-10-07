@@ -1307,6 +1307,12 @@ impl Workspace {
         theme.colors.primary_foreground = p.on_accent;
         theme.colors.secondary = p.overlay;
         theme.colors.secondary_foreground = p.text;
+        // Menu and select highlights, and the background of inline code in rendered Markdown.
+        // A tint of the text so it shows on the base, panels and message bubbles alike.
+        theme.colors.accent = p.text.opacity(0.12);
+        theme.colors.accent_foreground = p.text;
+        theme.colors.link = p.focus;
+        theme.colors.selection = p.focus.opacity(0.3);
         theme.colors.muted = p.surface;
         theme.colors.muted_foreground = p.subtle;
         theme.colors.input = p.edge;

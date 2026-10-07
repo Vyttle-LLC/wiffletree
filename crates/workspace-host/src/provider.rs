@@ -163,7 +163,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                 }
             }
         }
-        String::from_utf8_lossy(&tail).into_owned()
+        without_terminal_codes(&String::from_utf8_lossy(&tail))
     });
     let stdout = process.0.stdout.take().context("No provider stdout")?;
     let (send, receive) = std::sync::mpsc::sync_channel(128);
@@ -307,4 +307,50 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         usage,
     });
     Ok(())
+}
+
+/// Drops terminal color and cursor sequences so provider errors read as plain text.
+fn without_terminal_codes(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
+        }
+        match chars.next() {
+            // Control sequence: parameters, then one final byte in @..~.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // Operating system command, such as a hyperlink, ended by BEL or ESC \.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next() == Some('\\')) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    plain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_terminal_codes;
+
+    #[test]
+    fn provider_errors_lose_terminal_codes() {
+        let traceback = "\x1b[35mFile\x1b[0m \x1b[1;31mKeyError\x1b[0m: \x1b]8;;https://x.invalid\x1b\\link\x1b]8;;\x07 done";
+        assert_eq!(
+            without_terminal_codes(traceback),
+            "File KeyError: link done"
+        );
+    }
 }
