@@ -206,9 +206,14 @@ fn settings_round_trip_keep_unknown_fields_and_fall_back_when_missing_or_corrupt
     let file = directory.path().join("settings.json");
     let mut host = Host::open(directory.path()).unwrap();
     let default = host.settings();
-    assert!(
-        default.workspaces_dir.ends_with("/wiffletree"),
-        "{default:?}"
+    // Beta builds, like the host they test, default to their own folder.
+    let folder = match option_env!("WIFFLETREE_CHANNEL") {
+        Some("beta") => "wiffletree-beta",
+        _ => "wiffletree",
+    };
+    assert_eq!(
+        default.workspaces_dir,
+        std::env::home_dir().unwrap().join(folder).to_str().unwrap()
     );
 
     std::fs::write(&file, r#"{"future_option":true}"#).unwrap();
