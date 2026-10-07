@@ -564,6 +564,12 @@ pub struct Ticket {
     pub branch: String,
     pub state: String,
 }
+impl Ticket {
+    /// Accepted and closed tickets take no further agents or state changes.
+    pub fn is_open(&self) -> bool {
+        !matches!(self.state.as_str(), "accepted" | "closed")
+    }
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionRuntime {
     pub session_id: String,

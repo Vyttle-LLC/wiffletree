@@ -393,3 +393,36 @@ fn agent_assignment_enforces_and_freezes_the_bounded_model_choice() {
         Some(policy.default)
     );
 }
+
+#[test]
+fn closing_a_finished_review_ticket_archives_its_agents() {
+    let (_home, _repo, mut host, root, coordinator) = fixture();
+    let ticket = host
+        .create_ticket(&coordinator.id, "Review round 1", "Review the fix")
+        .unwrap();
+    let reviewer = host
+        .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Review")
+        .unwrap();
+    let close = json!({"ticket_id":ticket.id});
+    assert!(
+        host.agent_tool(&root.id, "close_ticket", close.clone())
+            .is_err()
+    );
+    host.set_status(&reviewer.id, Status::Working).unwrap();
+    assert!(
+        host.agent_tool(&coordinator.id, "close_ticket", close.clone())
+            .is_err()
+    );
+    host.set_status(&reviewer.id, Status::Done).unwrap();
+    host.agent_tool(&coordinator.id, "close_ticket", close.clone())
+        .unwrap();
+    host.agent_tool(&coordinator.id, "close_ticket", close)
+        .unwrap();
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert!(host.session(&reviewer.id).unwrap().archived);
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+    assert!(
+        host.assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Late")
+            .is_err()
+    );
+}

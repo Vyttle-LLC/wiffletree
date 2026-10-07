@@ -142,7 +142,7 @@ impl CreationForm {
             snapshot
                 .tickets
                 .iter()
-                .filter(|t| Some(t.coordinator_id.as_str()) == owner && t.state != "accepted")
+                .filter(|t| Some(t.coordinator_id.as_str()) == owner && t.is_open())
                 .map(|t| Choice {
                     id: t.id.clone(),
                     label: t.title.clone(),

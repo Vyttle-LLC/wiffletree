@@ -363,11 +363,17 @@ impl Workspace {
                     .iter()
                     .filter(|t| t.coordinator_id == team.id)
                 {
-                    tree = tree.child(self.ticket_row(ticket, p, cx));
-                    for worker in self.shown(snapshot).filter(|s| {
+                    let on_ticket = |s: &Session| {
                         self.runtime(&s.id)
                             .is_some_and(|r| r.ticket_id.as_ref() == Some(&ticket.id))
-                    }) {
+                    };
+                    let workers: Vec<_> = self.shown(snapshot).filter(|s| on_ticket(s)).collect();
+                    // A ticket whose agents are all archived, such as a closed one, goes with them.
+                    if workers.is_empty() && snapshot.sessions.iter().any(on_ticket) {
+                        continue;
+                    }
+                    tree = tree.child(self.ticket_row(ticket, p, cx));
+                    for worker in workers {
                         // The ticket row above already names the work.
                         let label = worker.role.label().to_owned();
                         tree = tree.child(self.session_row(worker, 3, label, p, cx));
