@@ -536,7 +536,7 @@ impl Workspace {
                     .gap_2()
                     .child(if role == Role::ProjectOrchestrator {
                         brand_image(
-                            if self.is_dark(cx) {
+                            if is_dark(cx) {
                                 "brand/symbol-dark.svg"
                             } else {
                                 "brand/symbol-light.svg"
@@ -581,7 +581,7 @@ impl Workspace {
         let messages = self.messages.clone();
         let card = self.activity_card();
         let summaries = Rc::new(self.run_summaries.clone());
-        let minimized = self.preferences.minimize_activity;
+        let minimized = cx.global::<Preferences>().minimize_activity;
         let view = cx.entity().downgrade();
         let sessions = self
             .snapshot

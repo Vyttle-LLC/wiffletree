@@ -9,17 +9,15 @@ struct SettingsWindow(WindowHandle<Root>);
 impl Global for SettingsWindow {}
 
 pub(super) struct Settings {
-    workspace: WeakEntity<Workspace>,
     bridge: Bridge,
     workspaces_dir: Option<String>,
     folder_error: Option<String>,
     choosing_folder: bool,
-    _redraw: Subscription,
 }
 
 impl Settings {
     /// Focuses the Settings window, opening it first if none is open.
-    pub(super) fn open(workspace: &Entity<Workspace>, bridge: Bridge, cx: &mut App) {
+    pub(super) fn open(bridge: Bridge, cx: &mut App) {
         if let Some(SettingsWindow(handle)) = cx.try_global::<SettingsWindow>().copied()
             && handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -40,13 +38,10 @@ impl Settings {
                 window.set_window_title("Settings");
                 let view = cx.new(|cx| {
                     let mut view = Self {
-                        workspace: workspace.downgrade(),
                         bridge,
                         workspaces_dir: None,
                         folder_error: None,
                         choosing_folder: false,
-                        // The appearance can also change from the sidebar.
-                        _redraw: cx.observe(workspace, |_, _, cx| cx.notify()),
                     };
                     view.ask_host(Command::Settings, cx);
                     view
@@ -58,12 +53,6 @@ impl Settings {
             Ok(handle) => cx.set_global(SettingsWindow(handle)),
             Err(error) => eprintln!("Opening Settings: {error:#}"),
         }
-    }
-
-    fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
-        let _ = self
-            .workspace
-            .update(cx, |workspace, cx| workspace.set_appearance(appearance, cx));
     }
 
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -129,10 +118,7 @@ impl Settings {
     }
 
     fn appearance_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let current = self
-            .workspace
-            .read_with(cx, |workspace, _| workspace.preferences.appearance)
-            .unwrap_or_default();
+        let current = cx.global::<Preferences>().appearance;
         let mut options = div().flex().gap_1();
         for appearance in [Appearance::System, Appearance::Light, Appearance::Dark] {
             options = options.child(
@@ -142,7 +128,7 @@ impl Settings {
                     appearance == current,
                 )
                 .icon(icon(appearance.icon()).size(px(13.)))
-                .on_click(cx.listener(move |view, _, _, cx| view.set_appearance(appearance, cx))),
+                .on_click(move |_, _, cx| set_appearance(appearance, cx)),
             );
         }
         div()

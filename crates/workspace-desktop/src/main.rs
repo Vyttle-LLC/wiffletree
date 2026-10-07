@@ -33,7 +33,7 @@ use gpui_component::{
     scroll::ScrollableElement,
 };
 use palette::{Palette, palette};
-use preferences::Appearance;
+use preferences::{Appearance, Preferences};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -125,19 +125,13 @@ struct Workspace {
     activity: Option<activity::RunActivity>,
     step_fetch: activity::StepFetch,
     activity_clock: bool,
-    preferences: preferences::Preferences,
     /// The open turn history, which follows step changes while it is shown.
     history: Option<WeakEntity<history_sheet::HistorySheet>>,
     /// Finished runs' durations and step counts, keyed by run.
     run_summaries: BTreeMap<String, RunSummary>,
 }
 impl Workspace {
-    fn new(
-        bridge: Bridge,
-        preferences: preferences::Preferences,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 9));
         // The send button follows the draft, so redraw as it changes.
         cx.subscribe(&input, |_, _, event, cx| {
@@ -225,7 +219,6 @@ impl Workspace {
             activity: None,
             step_fetch: Default::default(),
             activity_clock: false,
-            preferences,
             history: None,
             run_summaries: BTreeMap::new(),
         };
@@ -1293,84 +1286,88 @@ impl Workspace {
         );
     }
     fn colors(&self, cx: &App) -> Palette {
-        palette(self.is_dark(cx))
+        palette(is_dark(cx))
     }
-    fn is_dark(&self, cx: &App) -> bool {
-        match self.preferences.appearance {
-            Appearance::Light => false,
-            Appearance::Dark => true,
-            Appearance::System => matches!(
-                cx.window_appearance(),
-                WindowAppearance::Dark | WindowAppearance::VibrantDark
-            ),
-        }
+}
+
+/// Whether this client draws dark, following macOS when the choice is System.
+fn is_dark(cx: &App) -> bool {
+    match cx.global::<Preferences>().appearance {
+        Appearance::Light => false,
+        Appearance::Dark => true,
+        Appearance::System => matches!(
+            cx.window_appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ),
     }
-    /// Applies to every open window and is remembered for the next launch.
-    fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
-        self.preferences.appearance = appearance;
-        if let Err(error) = self.preferences.save() {
-            eprintln!("Saving preferences: {error}");
-        }
-        self.apply_theme(cx);
-        cx.notify();
+}
+
+/// Applies to every open window and is remembered for the next launch.
+fn set_appearance(appearance: Appearance, cx: &mut App) {
+    let preferences = cx.global_mut::<Preferences>();
+    preferences.appearance = appearance;
+    if let Err(error) = preferences.save() {
+        eprintln!("Saving preferences: {error}");
     }
-    fn apply_theme(&self, cx: &mut App) {
-        let dark = self.is_dark(cx);
-        Theme::change(
-            if dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            None,
-            cx,
-        );
-        let p = palette(dark);
-        // `update` carries the edits into the component tokens and the Markdown style.
-        Theme::update(cx, |theme| {
-            theme.font_family = ".SystemUIFont".into();
-            theme.font_size = px(14.);
-            theme.colors.background = p.base;
-            theme.colors.foreground = p.text;
-            theme.colors.border = p.edge.opacity(0.5);
-            theme.colors.popover = p.surface;
-            theme.colors.popover_foreground = p.text;
-            theme.colors.list_active = p.overlay;
-            theme.colors.list_hover = p.overlay;
-            theme.colors.list_active_border = p.focus;
-            theme.colors.secondary_hover = p.overlay;
-            theme.colors.secondary_active = p.overlay;
-            theme.colors.drag_border = p.focus;
-            theme.colors.primary = p.accent;
-            theme.colors.primary_foreground = p.on_accent;
-            theme.colors.button_primary = p.accent;
-            theme.colors.button_primary_foreground = p.on_accent;
-            theme.colors.secondary = p.overlay;
-            theme.colors.secondary_foreground = p.text;
-            // Plain buttons, Secondary before gpui-component 0.6, keep the same grey.
-            theme.colors.button = p.overlay;
-            theme.colors.button_hover = p.overlay;
-            theme.colors.button_active = p.overlay;
-            theme.colors.button_foreground = p.text;
-            // Menu and select highlights, and the background of inline code in rendered Markdown.
-            // A tint of the text so it shows on the base, panels and message bubbles alike.
-            theme.colors.accent = p.text.opacity(0.12);
-            theme.colors.accent_foreground = p.text;
-            theme.colors.link = p.focus;
-            theme.colors.table_head_foreground = p.text;
-            theme.colors.selection = p.focus.opacity(0.3);
-            theme.colors.muted = p.surface;
-            theme.colors.muted_foreground = p.subtle;
-            theme.colors.input = p.edge;
-            theme.colors.ring = p.focus;
-            theme.colors.title_bar = p.surface;
-            theme.colors.title_bar_border = p.edge.opacity(0.35);
-            theme.colors.danger = p.red;
-            theme.colors.success = p.green;
-            theme.colors.warning = p.yellow;
-            theme.colors.info = p.focus;
-        });
-    }
+    apply_theme(cx);
+}
+
+fn apply_theme(cx: &mut App) {
+    let dark = is_dark(cx);
+    Theme::change(
+        if dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        None,
+        cx,
+    );
+    let p = palette(dark);
+    // `update` carries the edits into the component tokens and the Markdown style.
+    Theme::update(cx, |theme| {
+        theme.font_family = ".SystemUIFont".into();
+        theme.font_size = px(14.);
+        theme.colors.background = p.base;
+        theme.colors.foreground = p.text;
+        theme.colors.border = p.edge.opacity(0.5);
+        theme.colors.popover = p.surface;
+        theme.colors.popover_foreground = p.text;
+        theme.colors.list_active = p.overlay;
+        theme.colors.list_hover = p.overlay;
+        theme.colors.list_active_border = p.focus;
+        theme.colors.secondary_hover = p.overlay;
+        theme.colors.secondary_active = p.overlay;
+        theme.colors.drag_border = p.focus;
+        theme.colors.primary = p.accent;
+        theme.colors.primary_foreground = p.on_accent;
+        theme.colors.button_primary = p.accent;
+        theme.colors.button_primary_foreground = p.on_accent;
+        theme.colors.secondary = p.overlay;
+        theme.colors.secondary_foreground = p.text;
+        // Plain buttons, Secondary before gpui-component 0.6, keep the same grey.
+        theme.colors.button = p.overlay;
+        theme.colors.button_hover = p.overlay;
+        theme.colors.button_active = p.overlay;
+        theme.colors.button_foreground = p.text;
+        // Menu and select highlights, and the background of inline code in rendered Markdown.
+        // A tint of the text so it shows on the base, panels and message bubbles alike.
+        theme.colors.accent = p.text.opacity(0.12);
+        theme.colors.accent_foreground = p.text;
+        theme.colors.link = p.focus;
+        theme.colors.table_head_foreground = p.text;
+        theme.colors.selection = p.focus.opacity(0.3);
+        theme.colors.muted = p.surface;
+        theme.colors.muted_foreground = p.subtle;
+        theme.colors.input = p.edge;
+        theme.colors.ring = p.focus;
+        theme.colors.title_bar = p.surface;
+        theme.colors.title_bar_border = p.edge.opacity(0.35);
+        theme.colors.danger = p.red;
+        theme.colors.success = p.green;
+        theme.colors.warning = p.yellow;
+        theme.colors.info = p.focus;
+    });
 }
 
 actions!(
@@ -1443,13 +1440,15 @@ fn main() -> anyhow::Result<()> {
             std::env::var_os("HOME").expect("macOS home directory"),
         ))
     });
-    let preferences = preferences::Preferences::load(&home);
+    let preferences = Preferences::load(&home);
     let bridge = Bridge::start(home, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_component::init(cx);
+            cx.set_global(preferences);
+            apply_theme(cx);
             cx.bind_keys([
                 KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
                 KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
@@ -1459,6 +1458,13 @@ fn main() -> anyhow::Result<()> {
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_action(|_: &About, _| show_about());
+            // Settings needs no main window, so it opens even after that one is closed.
+            // Deferred so ⌘, pressed inside Settings can still focus that window.
+            let settings_bridge = bridge.clone();
+            cx.on_action(move |_: &OpenSettings, cx| {
+                let bridge = settings_bridge.clone();
+                cx.defer(move |cx| settings::Settings::open(bridge, cx));
+            });
             cx.set_menus(vec![
                 Menu::new("Wiffletree").items([
                     MenuItem::action("About Wiffletree", About),
@@ -1480,25 +1486,10 @@ fn main() -> anyhow::Result<()> {
                     },
                     |window, cx| {
                         window.set_window_title("Wiffletree");
-                        let settings_bridge = bridge.clone();
-                        let view = cx.new(|cx| {
-                            let v = Workspace::new(bridge, preferences, window, cx);
-                            v.apply_theme(cx);
-                            v
-                        });
+                        let view = cx.new(|cx| Workspace::new(bridge, window, cx));
                         // Registered on the app so ⌘N and the menu work whatever has focus.
                         // Deferred because a shortcut arrives while the window is mid-update.
                         let workspace = view.downgrade();
-                        let settings_workspace = workspace.clone();
-                        cx.on_action(move |_: &OpenSettings, cx| {
-                            let workspace = settings_workspace.clone();
-                            let bridge = settings_bridge.clone();
-                            cx.defer(move |cx| {
-                                if let Some(workspace) = workspace.upgrade() {
-                                    settings::Settings::open(&workspace, bridge, cx);
-                                }
-                            });
-                        });
                         let handle = window.window_handle();
                         let new_project = workspace.clone();
                         cx.on_action(move |_: &NewProject, cx| {

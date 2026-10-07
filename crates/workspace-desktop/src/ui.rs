@@ -418,7 +418,7 @@ impl Workspace {
                 .items_start()
                 .gap_3()
                 .child(brand_image(
-                    if self.is_dark(cx) {
+                    if is_dark(cx) {
                         "brand/symbol-dark.svg"
                     } else {
                         "brand/symbol-light.svg"
