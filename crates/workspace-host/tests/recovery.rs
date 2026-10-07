@@ -416,3 +416,17 @@ fn markdown_batches_keep_header_compiler_marker_and_newest_first_order() {
     );
     assert_eq!(content.matches("<!-- workspace-entry:").count(), 101);
 }
+
+#[test]
+fn one_host_owns_a_store_until_it_closes() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = Host::open(directory.path()).unwrap();
+    let second = Host::open(directory.path()).err().unwrap();
+    assert!(
+        second
+            .to_string()
+            .contains("Another host already owns this store")
+    );
+    drop(host);
+    Host::open(directory.path()).unwrap();
+}

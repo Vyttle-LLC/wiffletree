@@ -41,12 +41,10 @@ fn first_line(text: &str, limit: usize) -> String {
     }
 }
 
-pub(super) fn markdown(id: &str, body: &str, window: &mut Window, app: &mut App) -> TextView {
+pub(super) fn markdown(id: &str, body: &str) -> TextView {
     TextView::markdown(
         SharedString::from(format!("message-markdown-{id}")),
         body.to_owned(),
-        window,
-        app,
     )
     .selectable(true)
     .code_block_actions(|block, _, _| {
@@ -92,7 +90,7 @@ fn receipt_color(receipt: Receipt, p: Palette) -> Hsla {
 }
 
 /// The human's own message: a right-aligned bubble with its delivery state.
-fn human_message(message: &Message, p: Palette, window: &mut Window, app: &mut App) -> Div {
+fn human_message(message: &Message, p: Palette) -> Div {
     div()
         .w_full()
         .flex()
@@ -106,7 +104,7 @@ fn human_message(message: &Message, p: Palette, window: &mut Window, app: &mut A
                 .py_2()
                 .rounded_xl()
                 .bg(p.overlay)
-                .child(markdown(&message.id, &message.body, window, app)),
+                .child(markdown(&message.id, &message.body)),
         )
         .child(
             div()
@@ -121,14 +119,7 @@ fn human_message(message: &Message, p: Palette, window: &mut Window, app: &mut A
 }
 
 /// A message written by an agent: this session's own reply, or another agent's report.
-fn agent_message(
-    message: &Message,
-    sender: Option<&Session>,
-    own: bool,
-    p: Palette,
-    window: &mut Window,
-    app: &mut App,
-) -> Div {
+fn agent_message(message: &Message, sender: Option<&Session>, own: bool, p: Palette) -> Div {
     let (kind, body) = match report(&message.body) {
         Some((kind, body)) if !own => (Some(kind), body),
         _ => (None, message.body.as_str()),
@@ -177,7 +168,7 @@ fn agent_message(
                         .child(meta(age(message.created_at), p)),
                 )
                 .when(!body.trim().is_empty(), |d| {
-                    d.child(markdown(&message.id, body, window, app))
+                    d.child(markdown(&message.id, body))
                 }),
         )
 }
@@ -385,13 +376,7 @@ impl Workspace {
 
     /// The project's open decisions, one at a time, so the human can settle them in place.
     /// Hidden while the inbox is open, which already lists them all.
-    fn decisions(
-        &self,
-        session: &Session,
-        p: Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
+    fn decisions(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
         if session.role != Role::ProjectOrchestrator || self.panel == Some(Panel::Attention) {
             return None;
         }
@@ -458,7 +443,7 @@ impl Workspace {
                 .gap_1()
                 .child(navigation)
                 .child(
-                    self.attention_card(item, true, p, window, cx)
+                    self.attention_card(item, true, p, cx)
                         .border_color(p.yellow.opacity(0.45)),
                 ),
         )
@@ -587,15 +572,15 @@ impl Workspace {
             .map(|s| s.sessions.clone())
             .unwrap_or_default();
         let current = session.clone();
-        list(self.list.clone(), move |ix, window, app| {
+        list(self.list.clone(), move |ix, _, _| {
             let content = match messages.get(ix) {
-                Some(message) if message.sender.is_none() => human_message(message, p, window, app),
+                Some(message) if message.sender.is_none() => human_message(message, p),
                 Some(message) => {
                     let sender = sessions
                         .iter()
                         .find(|s| Some(&s.id) == message.sender.as_ref());
                     let own = message.sender.as_ref() == Some(&current.id);
-                    agent_message(message, sender, own, p, window, app)
+                    agent_message(message, sender, own, p)
                 }
                 // The row after the last message appears only while the agent works.
                 None => div()
@@ -776,13 +761,7 @@ impl Workspace {
         div().flex().items_center().child(model).child(effort)
     }
 
-    fn composer(
-        &self,
-        session: &Session,
-        p: Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn composer(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let sending = self.sending.contains(&session.id);
         let empty = self.input.read(cx).value().trim().is_empty();
         div()
@@ -805,7 +784,7 @@ impl Workspace {
             .flex_col()
             .items_center()
             .gap_2()
-            .children(self.decisions(session, p, window, cx))
+            .children(self.decisions(session, p, cx))
             .children(
                 self.notices(session, p, cx)
                     .into_iter()
@@ -825,10 +804,10 @@ impl Workspace {
                     .pt_2()
                     .pb_2()
                     .child(
-                        Input::new(&self.input)
+                        Textarea::new(&self.input)
                             .w_full()
                             .appearance(false)
-                            .focus_bordered(false),
+                            .bordered(false),
                     )
                     .child(
                         div()
@@ -863,12 +842,7 @@ impl Workspace {
             )
     }
 
-    pub(super) fn conversation(
-        &self,
-        p: Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    pub(super) fn conversation(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let Some(session) = self.selected_session() else {
             return div();
         };
@@ -885,7 +859,7 @@ impl Workspace {
             } else {
                 self.transcript(session, p).into_any_element()
             })
-            .child(self.composer(session, p, window, cx))
+            .child(self.composer(session, p, cx))
     }
 }
 

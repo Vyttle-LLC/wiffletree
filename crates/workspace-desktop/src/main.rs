@@ -23,8 +23,7 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     Root, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
     button::Button,
-    dialog::DialogButtonProps,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     notification::Notification,
 };
 use palette::{Palette, palette};
@@ -34,6 +33,8 @@ use std::{
     path::PathBuf,
     rc::Rc,
 };
+// GPUI exports an accessibility `Role` too; ours wins over both globs.
+use workspace_core::Role;
 use workspace_core::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,14 +77,14 @@ struct Workspace {
     drafts: BTreeMap<String, String>,
     cached_pages: BTreeMap<String, Rc<Vec<Message>>>,
     cache_order: VecDeque<String>,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     sending: BTreeSet<String>,
     page: Option<i64>,
     memory_title: Entity<InputState>,
-    memory_body: Entity<InputState>,
+    memory_body: Entity<TextareaState>,
     memory_kind: LogKind,
     brain_path: Entity<InputState>,
-    answer: Entity<InputState>,
+    answer: Entity<TextareaState>,
     answering: Option<String>,
     role_defaults: Vec<RoleDefault>,
     saved_role_defaults: Vec<RoleDefault>,
@@ -124,7 +125,7 @@ struct Workspace {
 }
 impl Workspace {
     fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).multi_line(true).auto_grow(2, 9));
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 9));
         // The send button follows the draft, so redraw as it changes.
         cx.subscribe(&input, |_, _, event, cx| {
             if matches!(event, InputEvent::Change) {
@@ -145,8 +146,7 @@ impl Workspace {
         )
         .detach();
         let answer = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(2, 6)
                 .placeholder("Your answer…")
         });
@@ -167,8 +167,7 @@ impl Workspace {
                 InputState::new(window, cx).placeholder("Title, e.g. Palette stays compatible")
             }),
             memory_body: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .auto_grow(3, 8)
                     .placeholder("What was decided or observed, and why it matters")
             }),
@@ -616,9 +615,10 @@ impl Workspace {
                 self.request(Command::Snapshot, window, cx);
             }
             Command::AppendLog { .. } => {
-                for input in [&self.memory_title, &self.memory_body] {
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                }
+                self.memory_title
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.memory_body
+                    .update(cx, |input, cx| input.set_value("", window, cx));
                 self.toast("Saved to project memory", window, cx);
                 self.load_panel(window, cx);
             }
@@ -1071,12 +1071,12 @@ impl Workspace {
             return self.install_update(window, cx);
         }
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, _| {
             let weak = weak.clone();
             dialog
                 .title("Restart to update?")
                 .confirm()
-                .button_props(DialogButtonProps::default().ok_text("Restart"))
+                .ok_text("Restart")
                 .child("Agents are working. Restarting interrupts their turns; you can retry the held input afterwards.")
                 .on_ok(move |_, window, cx| {
                     let _ = weak.update(cx, |view, cx| view.install_update(window, cx));
@@ -1172,7 +1172,7 @@ impl Workspace {
         let focused_form = form.clone();
         let weak = cx.weak_entity();
         let cancel = weak.clone();
-        window.open_dialog(cx, move |dialog, window, _| {
+        window.open_alert_dialog(cx, move |dialog, window, _| {
             let weak = weak.clone();
             let cancel = cancel.clone();
             dialog
@@ -1180,7 +1180,7 @@ impl Workspace {
                 .width(px(560.).min(window.viewport_size().width - px(48.)))
                 .max_h(window.viewport_size().height - px(100.))
                 .confirm()
-                .button_props(DialogButtonProps::default().ok_text(kind.action()))
+                .ok_text(kind.action())
                 .child(form.clone())
                 .on_ok(move |_, window, cx| {
                     let _ = weak.update(cx, |view, cx| view.submit_creation(window, cx));
@@ -1284,40 +1284,50 @@ impl Workspace {
             cx,
         );
         let p = palette(dark);
-        let theme = Theme::global_mut(cx);
-        theme.font_family = ".SystemUIFont".into();
-        theme.font_size = px(14.);
-        theme.colors.background = p.base;
-        theme.colors.foreground = p.text;
-        theme.colors.border = p.edge.opacity(0.5);
-        theme.colors.popover = p.surface;
-        theme.colors.popover_foreground = p.text;
-        theme.colors.list_active = p.overlay;
-        theme.colors.list_hover = p.overlay;
-        theme.colors.list_active_border = p.focus;
-        theme.colors.secondary_hover = p.overlay;
-        theme.colors.secondary_active = p.overlay;
-        theme.colors.drag_border = p.focus;
-        theme.colors.primary = p.accent;
-        theme.colors.primary_foreground = p.on_accent;
-        theme.colors.secondary = p.overlay;
-        theme.colors.secondary_foreground = p.text;
-        // Menu and select highlights, and the background of inline code in rendered Markdown.
-        // A tint of the text so it shows on the base, panels and message bubbles alike.
-        theme.colors.accent = p.text.opacity(0.12);
-        theme.colors.accent_foreground = p.text;
-        theme.colors.link = p.focus;
-        theme.colors.selection = p.focus.opacity(0.3);
-        theme.colors.muted = p.surface;
-        theme.colors.muted_foreground = p.subtle;
-        theme.colors.input = p.edge;
-        theme.colors.ring = p.focus;
-        theme.colors.title_bar = p.surface;
-        theme.colors.title_bar_border = p.edge.opacity(0.35);
-        theme.colors.danger = p.red;
-        theme.colors.success = p.green;
-        theme.colors.warning = p.yellow;
-        theme.colors.info = p.focus;
+        // `update` carries the edits into the component tokens and the Markdown style.
+        Theme::update(cx, |theme| {
+            theme.font_family = ".SystemUIFont".into();
+            theme.font_size = px(14.);
+            theme.colors.background = p.base;
+            theme.colors.foreground = p.text;
+            theme.colors.border = p.edge.opacity(0.5);
+            theme.colors.popover = p.surface;
+            theme.colors.popover_foreground = p.text;
+            theme.colors.list_active = p.overlay;
+            theme.colors.list_hover = p.overlay;
+            theme.colors.list_active_border = p.focus;
+            theme.colors.secondary_hover = p.overlay;
+            theme.colors.secondary_active = p.overlay;
+            theme.colors.drag_border = p.focus;
+            theme.colors.primary = p.accent;
+            theme.colors.primary_foreground = p.on_accent;
+            theme.colors.button_primary = p.accent;
+            theme.colors.button_primary_foreground = p.on_accent;
+            theme.colors.secondary = p.overlay;
+            theme.colors.secondary_foreground = p.text;
+            // Plain buttons, Secondary before gpui-component 0.6, keep the same grey.
+            theme.colors.button = p.overlay;
+            theme.colors.button_hover = p.overlay;
+            theme.colors.button_active = p.overlay;
+            theme.colors.button_foreground = p.text;
+            // Menu and select highlights, and the background of inline code in rendered Markdown.
+            // A tint of the text so it shows on the base, panels and message bubbles alike.
+            theme.colors.accent = p.text.opacity(0.12);
+            theme.colors.accent_foreground = p.text;
+            theme.colors.link = p.focus;
+            theme.colors.table_head_foreground = p.text;
+            theme.colors.selection = p.focus.opacity(0.3);
+            theme.colors.muted = p.surface;
+            theme.colors.muted_foreground = p.subtle;
+            theme.colors.input = p.edge;
+            theme.colors.ring = p.focus;
+            theme.colors.title_bar = p.surface;
+            theme.colors.title_bar_border = p.edge.opacity(0.35);
+            theme.colors.danger = p.red;
+            theme.colors.success = p.green;
+            theme.colors.warning = p.yellow;
+            theme.colors.info = p.focus;
+        });
     }
 }
 
@@ -1384,37 +1394,26 @@ fn main() -> anyhow::Result<()> {
     });
     let bridge = Bridge::start(home, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
-    Application::new()
+    gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_component::init(cx);
             cx.bind_keys([
                 KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
                 KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
-                KeyBinding::new(
-                    "shift-enter",
-                    gpui_component::input::Enter { secondary: false },
-                    Some("ChatComposer > Input"),
-                ),
                 KeyBinding::new("cmd-n", NewProject, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_action(|_: &About, _| show_about());
             cx.set_menus(vec![
-                Menu {
-                    name: "Wiffletree".into(),
-                    items: vec![
-                        MenuItem::action("About Wiffletree", About),
-                        MenuItem::action("Check for Updates…", CheckForUpdates),
-                        MenuItem::separator(),
-                        MenuItem::action("Quit Wiffletree", Quit),
-                    ],
-                },
-                Menu {
-                    name: "File".into(),
-                    items: vec![MenuItem::action("New Project", NewProject)],
-                },
+                Menu::new("Wiffletree").items([
+                    MenuItem::action("About Wiffletree", About),
+                    MenuItem::action("Check for Updates…", CheckForUpdates),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Wiffletree", Quit),
+                ]),
+                Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
             ]);
             let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
             let window = cx

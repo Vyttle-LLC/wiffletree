@@ -4,11 +4,13 @@ use gpui_component::{
     ActiveTheme, Disableable, IconName, IndexPath, Selectable, Sizable,
     button::ButtonVariants,
     checkbox::Checkbox,
-    input::{Input, InputState},
+    input::{Input, InputState, Textarea, TextareaState},
     select::{Select, SelectItem, SelectState},
     spinner::Spinner,
 };
 use std::collections::BTreeSet;
+// GPUI exports an accessibility `Role` too; ours wins over both globs.
+use workspace_core::Role;
 use workspace_core::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,7 +69,7 @@ pub struct CreationForm {
     /// The title, path or folder, depending on the kind.
     name: Entity<InputState>,
     /// The ticket brief or the agent's instruction.
-    detail: Entity<InputState>,
+    detail: Entity<TextareaState>,
     base: Entity<InputState>,
     choices: Entity<SelectState<Vec<Choice>>>,
     options: Vec<Choice>,
@@ -98,12 +100,11 @@ impl CreationForm {
         if self.kind == Creation::ProjectRepositories {
             return;
         }
-        let first = if self.kind == Creation::Agent {
-            &self.detail
+        if self.kind == Creation::Agent {
+            self.detail.update(cx, |input, cx| input.focus(window, cx));
         } else {
-            &self.name
-        };
-        first.update(cx, |input, cx| input.focus(window, cx));
+            self.name.update(cx, |input, cx| input.focus(window, cx));
+        }
     }
 
     pub fn new(
@@ -196,14 +197,13 @@ impl CreationForm {
             })
         });
         let detail = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .auto_grow(4, 10)
-                .placeholder(if kind == Creation::Ticket {
+            TextareaState::new(window, cx).auto_grow(4, 10).placeholder(
+                if kind == Creation::Ticket {
                     "What to build, acceptance criteria, dependencies and how to test it"
                 } else {
                     "Optional. Leave empty to work the ticket as briefed."
-                })
+                },
+            )
         });
         let base = cx.new(|cx| {
             InputState::new(window, cx)
@@ -561,7 +561,7 @@ impl CreationForm {
             ))
             .child(Self::field(
                 "Brief and acceptance criteria",
-                Input::new(&self.detail).w_full().disabled(self.pending),
+                Textarea::new(&self.detail).w_full().disabled(self.pending),
             ))
     }
 
@@ -595,7 +595,7 @@ impl CreationForm {
             .child(Self::field("Role", roles))
             .child(Self::field(
                 "Instruction",
-                Input::new(&self.detail).w_full().disabled(self.pending),
+                Textarea::new(&self.detail).w_full().disabled(self.pending),
             ))
             .children(self.role_default_note(self.role, cx))
     }
