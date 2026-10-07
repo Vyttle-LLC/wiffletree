@@ -189,7 +189,7 @@ fn legacy_projects_and_tickets_keep_their_stored_paths() {
     .unwrap();
     drop(db);
 
-    let host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
     assert_eq!(host.project(&project.id).unwrap().home, None);
     assert_eq!(
         host.project_directory(&project.id).unwrap(),
@@ -198,6 +198,27 @@ fn legacy_projects_and_tickets_keep_their_stored_paths() {
     let saved = host.ticket(&ticket.id).unwrap();
     assert_eq!(Path::new(&saved.worktree), legacy_worktree);
     assert_eq!(saved.branch, "codex/workspace-0b7c1a2e");
+
+    // Its first new ticket fixes a slug; `legacy` is taken by the folder made before the downgrade.
+    let first = host
+        .create_ticket(&coordinator.id, "Before rename", "Kept")
+        .unwrap();
+    host.rename_project(&project.id, "Renamed").unwrap();
+    let second = host
+        .create_ticket(&coordinator.id, "After rename", "Kept")
+        .unwrap();
+    let tasks = directory.path().join("workspaces/tasks/legacy-2/web-app");
+    assert_eq!(Path::new(&first.worktree), tasks.join("before-rename"));
+    assert_eq!(Path::new(&second.worktree), tasks.join("after-rename"));
+    let project = host.project(&project.id).unwrap();
+    assert_eq!(
+        (project.home, project.slug.as_deref()),
+        (None, Some("legacy-2"))
+    );
+    assert_eq!(
+        host.project_directory(&project.id).unwrap(),
+        host.home.join("projects").join(&project.id)
+    );
 }
 
 #[test]
@@ -252,26 +273,33 @@ fn unusable_workspace_folders_are_refused_and_keep_the_saved_setting() {
     let file = directory.path().join("a file");
     std::fs::write(&file, b"").unwrap();
 
+    let inside = file.join("inside");
     let blocked = host
-        .set_workspaces_dir(file.join("inside").to_str().unwrap())
+        .set_workspaces_dir(inside.to_str().unwrap())
         .unwrap_err();
-    assert!(
-        blocked.to_string().starts_with("Cannot create"),
-        "{blocked}"
-    );
+    assert_names_only(&blocked, "Cannot create", &inside);
     let read_only = directory.path().join("read only");
     std::fs::create_dir(&read_only).unwrap();
     std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o555)).unwrap();
     let unwritable = host
         .set_workspaces_dir(read_only.to_str().unwrap())
         .unwrap_err();
-    assert!(
-        unwritable.to_string().starts_with("Cannot write to"),
-        "{unwritable}"
-    );
+    assert_names_only(&unwritable, "Cannot write to", &read_only);
     let relative = host.set_workspaces_dir("relative/folder").unwrap_err();
     assert!(relative.to_string().contains("absolute"), "{relative}");
     assert_eq!(host.settings(), kept);
+}
+
+/// One line naming the chosen folder and the system's reason, never a probe file inside it.
+fn assert_names_only(error: &anyhow::Error, action: &str, folder: &Path) {
+    let message = format!("{error:#}");
+    let reason = message
+        .strip_prefix(&format!("{action} {}: ", folder.display()))
+        .unwrap_or_else(|| panic!("{message}"));
+    assert!(
+        !reason.is_empty() && !reason.contains('/') && !reason.contains('\n'),
+        "{message}"
+    );
 }
 
 #[test]
