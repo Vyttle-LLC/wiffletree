@@ -127,7 +127,6 @@ impl Workspace {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
-                .validate(|text, _| text.len() <= MAX_TEXT_BYTES)
                 .auto_grow(2, 9)
         });
         // The send button follows the draft, so redraw as it changes.
