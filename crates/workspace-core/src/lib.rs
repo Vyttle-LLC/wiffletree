@@ -107,6 +107,9 @@ pub struct Project {
     /// `None` for projects created before workspace folders, which keep their original directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<String>,
+    /// Names the folders of a project without `home`, fixed when its first ticket needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
 }
 impl Project {
     pub fn uses(&self, repository_id: &str) -> bool {

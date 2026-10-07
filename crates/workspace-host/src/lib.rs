@@ -212,6 +212,7 @@ impl Host {
             turn_limit: 4,
             repositories: None,
             home: Some(self.new_project_home(name)?),
+            slug: None,
         };
         let session = Session {
             id: new_id(),

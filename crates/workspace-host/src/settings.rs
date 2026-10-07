@@ -59,15 +59,23 @@ fn unused(base: &str, taken: impl Fn(&str) -> bool) -> String {
         .expect("an unused suffix exists")
 }
 
-/// The slug that names a project's folders: its home folder's name, or for a project created
-/// before workspace folders, its current name.
-fn project_slug(project: &Project) -> String {
+/// The slug that names a project's folders: its home folder's name, or the slug a project from
+/// before workspace folders was given for its first ticket.
+fn project_slug(project: &Project) -> Option<String> {
     project
         .home
         .as_deref()
         .and_then(|home| Path::new(home).file_name())
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| slug(&project.name, "project"))
+        .or_else(|| project.slug.clone())
+}
+
+/// The operating system's reason alone, without the path of a probe file the user never chose.
+fn reason(error: &std::io::Error) -> std::io::Error {
+    error
+        .raw_os_error()
+        .map(std::io::Error::from_raw_os_error)
+        .unwrap_or_else(|| error.kind().into())
 }
 
 /// Every local branch under `wiffletree/`, as `refs/heads/...` names.
@@ -108,11 +116,11 @@ impl Host {
             "Choose an absolute folder for workspaces"
         );
         fs::create_dir_all(&folder)
-            .with_context(|| format!("Cannot create {}", folder.display()))?;
+            .map_err(|e| anyhow::anyhow!("Cannot create {}: {}", folder.display(), reason(&e)))?;
         // A new, uniquely named file: never one that exists, which could be a symlink elsewhere.
         tempfile::NamedTempFile::new_in(&folder)
             .and_then(|probe| probe.close())
-            .with_context(|| format!("Cannot write to {}", folder.display()))?;
+            .map_err(|e| anyhow::anyhow!("Cannot write to {}: {}", folder.display(), reason(&e)))?;
         let settings = HostSettings {
             workspaces_dir: folder.to_string_lossy().into_owned(),
         };
@@ -146,17 +154,37 @@ impl Host {
     /// `<workspaces>/projects/<slug>` with a slug no other project or folder uses.
     pub(crate) fn new_project_home(&self, name: &str) -> Result<String> {
         let workspaces = PathBuf::from(self.settings().workspaces_dir);
-        let projects = self.projects()?;
-        let slug = unused(&slug(name, "project"), |candidate| {
-            projects.iter().any(|p| project_slug(p) == candidate)
-                || workspaces.join("projects").join(candidate).exists()
-                || workspaces.join("tasks").join(candidate).exists()
-        });
+        let slug = self.unused_project_slug(name, &workspaces)?;
         Ok(workspaces
             .join("projects")
             .join(slug)
             .to_string_lossy()
             .into_owned())
+    }
+    fn unused_project_slug(&self, name: &str, workspaces: &Path) -> Result<String> {
+        let projects = self.projects()?;
+        Ok(unused(&slug(name, "project"), |candidate| {
+            projects
+                .iter()
+                .any(|p| project_slug(p).as_deref() == Some(candidate))
+                || workspaces.join("projects").join(candidate).exists()
+                || workspaces.join("tasks").join(candidate).exists()
+        }))
+    }
+    /// The project's slug. A project from before workspace folders gets one on first use and
+    /// keeps it, so renaming it never moves where its tickets go.
+    fn fixed_project_slug(&self, project: &Project, workspaces: &Path) -> Result<String> {
+        if let Some(slug) = project_slug(project) {
+            return Ok(slug);
+        }
+        let slug = self.unused_project_slug(&project.name, workspaces)?;
+        let mut project = project.clone();
+        project.slug = Some(slug.clone());
+        self.db.execute(
+            "UPDATE projects SET data=?2 WHERE id=?1",
+            params![project.id, encode(&project)?],
+        )?;
+        Ok(slug)
     }
     /// `<workspaces>/tasks/<project>/<repository>/<ticket>` and its `wiffletree/<ticket>`
     /// branch, suffixing the ticket slug until neither is in use.
@@ -167,9 +195,10 @@ impl Host {
         title: &str,
     ) -> Result<(PathBuf, String)> {
         let repository_path = Path::new(&repository.path);
-        let parent = PathBuf::from(self.settings().workspaces_dir)
+        let workspaces = PathBuf::from(self.settings().workspaces_dir);
+        let parent = workspaces
             .join("tasks")
-            .join(project_slug(project))
+            .join(self.fixed_project_slug(project, &workspaces)?)
             .join(slug(
                 &repository_path
                     .file_name()
