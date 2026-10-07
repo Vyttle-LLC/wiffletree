@@ -72,7 +72,7 @@ Selecting any session opens its conversation; selecting a ticket opens its ownin
 
 Relevant workspace tabs:
 
-- Conversation: streamed visible output, tool activity, direct messages and permission requests.
+- Conversation: durable messages, each turn's final reply, direct messages and permission requests, with the turn's live work shown beside them (see Live work).
 
 - Branch history: graphical commit ancestry, local and remote refs, target base, ahead and behind state, selected commits, and history-change proposals.
 
@@ -103,6 +103,16 @@ The references inform a layered workspace with a quiet atmospheric background, s
 The embedded prototype uses simulated sessions, Git history, PRs, usage and maintenance jobs. Its main interactions include agent selection, separate drafts, queued chat messages, commit selection and history instructions, PR feedback, scoped test approval, task creation, sourced brain notes, conflict rulings and scheduled-job controls. Theme switching preserves the current draft and commit selection. These interactions change demo state only; no provider, GitHub or execution-host operation is performed. The prototype demonstrates design and behavior, not a working Rust/GPUI implementation or measured native performance.
 
 [Open the current interactive mockup](../design/mockups/current/index.html) · [Editable source](../design/mockups/current/source.html)
+
+### Live work
+
+The conversation keeps durable messages and each turn's final reply. An agent's in-progress work, meaning narration between tool calls, commands, file edits, reads, searches, plans and tool calls, is shown as work steps beside it and never as chat messages. Both providers' streams become the same provider-neutral steps. Each step has a kind, a one-line title, an optional short note such as `+12 −4` or `exit 1`, a bounded detail, and a state: running, succeeded, failed or interrupted.
+
+While the selected agent works, a fixed-height activity card follows the last message. It shows the elapsed time and the step count, the agent's latest narration line as a ticker, and its three latest actions with their state. The card can be minimized to one line that still shows the current step. That choice is a client preference, so it applies to every agent and survives relaunch. Clicking the card opens the turn's history in a sheet over the right side of the window, where each narration paragraph is followed by the steps that came after it and command output expands on demand. When the turn ends, the card becomes a "Worked 9m 12s · 23 steps" line above the reply, which opens the same history, including after a restart.
+
+Steps never wake, notify or message an agent. They reach the client through a separate signal and a cursor fetch paced to about 30 updates per second, never through snapshot reloads. The host stores a step when it starts and when its state changes, not per text delta. A step still running when the host stops is shown as interrupted. Titles, notes and details are bounded, and a run keeps at most 2,000 steps. Omitted output and steps are counted and shown rather than dropped silently, and steps of runs finished more than 30 days ago are pruned.
+
+Follow-up: a team view in which a coordinator's activity card or history lists its child agents' live steps, built on the same step fetch.
 
 ### Agent message formatting
 

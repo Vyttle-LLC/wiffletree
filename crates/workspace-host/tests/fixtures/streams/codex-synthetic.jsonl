@@ -1,0 +1,19 @@
+{"type":"thread.started","thread_id":"codex-thread"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_r","type":"reasoning","text":""}}
+{"type":"item.completed","item":{"id":"item_r","type":"reasoning","text":"**Planning** the change"}}
+{"type":"item.started","item":{"id":"item_plan","type":"todo_list","items":[{"text":"Add the test","completed":false},{"text":"Fix the bug","completed":false}]}}
+{"type":"item.updated","item":{"id":"item_plan","type":"todo_list","items":[{"text":"Add the test","completed":true},{"text":"Fix the bug","completed":false}]}}
+{"type":"item.started","item":{"id":"item_report","type":"mcp_tool_call","server":"agent_workspace","tool":"report","arguments":{"kind":"progress"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_report","type":"mcp_tool_call","server":"agent_workspace","tool":"report","arguments":{"kind":"progress"},"result":{"content":[]},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_gh","type":"mcp_tool_call","server":"github","tool":"search_issues","arguments":{},"error":{"message":"rate limited"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_web","type":"web_search","query":"rust char_indices"}}
+{"type":"item.started","item":{"id":"item_test","type":"command_execution","command":"bash -lc \"cargo test -p core\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.updated","item":{"id":"item_test","type":"command_execution","command":"bash -lc \"cargo test -p core\"","aggregated_output":"running 3 tests\n","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_test","type":"command_execution","command":"bash -lc \"cargo test -p core\"","aggregated_output":"running 3 tests\ntest parse ... FAILED\n","exit_code":101,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_files","type":"file_change","changes":[{"path":"/work/repo/src/lib.rs","kind":"update"},{"path":"/work/repo/tests/parse.rs","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_future","type":"a_future_item","payload":true}}
+{"type":"item.completed","item":{"type":"agent_message","text":"a message without an id"}}
+{"type":"turn.future_event","detail":"ignored"}
+{"type":"item.completed","item":{"id":"item_done","type":"agent_message","text":"Fixed the parser and added a regression test."}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30}}

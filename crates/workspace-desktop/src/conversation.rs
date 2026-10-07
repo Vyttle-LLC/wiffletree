@@ -4,7 +4,6 @@ use gpui_component::{
     Disableable,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
-    spinner::Spinner,
     text::TextView,
 };
 use ui::{age, banner, brand_image, effort_label, hint, humanize, icon, pill, session_icon};
@@ -578,8 +577,12 @@ impl Workspace {
             )
     }
 
-    fn transcript(&self, session: &Session, p: Palette) -> Div {
+    fn transcript(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let messages = self.messages.clone();
+        let card = self.activity_card();
+        let summaries = Rc::new(self.run_summaries.clone());
+        let minimized = self.preferences.minimize_activity;
+        let view = cx.entity().downgrade();
         let sessions = self
             .snapshot
             .as_ref()
@@ -594,17 +597,35 @@ impl Workspace {
                         .iter()
                         .find(|s| Some(&s.id) == message.sender.as_ref());
                     let own = message.sender.as_ref() == Some(&current.id);
-                    agent_message(message, sender, own, p)
+                    let reply = agent_message(message, sender, own, p);
+                    // A reply whose turn did something shows how long and how much, above it.
+                    let summary = message
+                        .id
+                        .strip_prefix("output:")
+                        .and_then(|run| summaries.get(run))
+                        .filter(|s| own && s.actions > 0);
+                    match summary {
+                        Some(summary) => div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .child(activity::turn_summary(summary, p, view.clone()))
+                            .child(reply),
+                        None => reply,
+                    }
                 }
                 // The row after the last message appears only while the agent works.
                 None => div()
                     .w_full()
                     .flex()
-                    .items_center()
                     .gap_3()
                     .child(avatar(session_icon(current.role), p.accent))
-                    .child(Spinner::new().small().color(p.subtle))
-                    .child(hint(format!("{} is working…", current.name), p)),
+                    .child(div().flex_1().min_w_0().child(activity::activity_row(
+                        &card,
+                        minimized,
+                        p,
+                        view.clone(),
+                    ))),
             };
             div()
                 .w_full()
@@ -876,7 +897,7 @@ impl Workspace {
                 self.empty_conversation(session.role, p, cx)
                     .into_any_element()
             } else {
-                self.transcript(session, p).into_any_element()
+                self.transcript(session, p, cx).into_any_element()
             })
             .child(self.composer(session, p, cx))
     }

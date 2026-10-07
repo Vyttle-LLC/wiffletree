@@ -49,6 +49,14 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         assert any(s['provider']=='claude' and s['role']=='tester' for s in done['sessions'])
         print(f'Cross-provider protocol handoff passed in {time.monotonic()-start_time:.3f}s',flush=True)
         until(lambda s:all(x['status']!='working' for x in s['sessions']))
+        def steps(session,after=0,run=None):return request({'type':'steps','session_id':session,'run_id':run,'after':after})
+        transcript=request({'type':'messages','session_id':main['id'],'before':None,'limit':100})
+        assert any(m['body']=='MAIN_READY' for m in transcript),transcript
+        assert not any('Checking the workspace' in m['body'] for m in transcript),'Narration stays out of the chat'
+        page=steps(main['id'])
+        assert [(s['kind'],s['state'],s['title']) for s in page['steps']][:2]==[('narration','succeeded','Checking the workspace.'),('command','succeeded','ls')],page
+        assert not page['running'] and not steps(main['id'],page['revision'])['steps']
+        print('Work steps stream beside the chat, which receives only final replies',flush=True)
         usage_command={'type':'usage','days':7,'project_id':None,'provider':None,'timezone':'America/New_York'}
         usage=request(usage_command)
         assert usage['totals']['requests']>=4,usage
@@ -89,15 +97,19 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         print('Coordinator closes settled questions; the human can dismiss one without waking it',flush=True)
         request({'type':'send','id':'hang','sender':None,'recipient':main['id'],'body':'HANG_UNTIL_CANCELLED'})
         until(lambda s:any(x['id']==main['id'] and x['status']=='working' for x in s['sessions']))
+        until(lambda _:('command','running') in [(s['kind'],s['state']) for s in steps(main['id'])['steps']])
         request({'type':'set_live','project_id':project['id'],'enabled':False})
         until(lambda s:any(r['session_id']==main['id'] and r.get('last_error') for r in s['runtimes']))
         messages=request({'type':'messages','session_id':main['id'],'before':None,'limit':100})
         assert next(m for m in messages if m['id']=='hang')['receipt']=='held'
+        hung=steps(main['id'])
+        assert ('command','interrupted') in [(s['kind'],s['state']) for s in hung['steps']],hung
         saved_usage=request(usage_command)['totals']
         host.stdin.close();host.wait(timeout=5);host=start()
         assert request(usage_command)['totals']==saved_usage
         assert not snapshot()['live_projects']
         assert next(r['profile'] for r in snapshot()['runtimes'] if r['session_id']==main['id'])==override
+        assert steps(main['id'],run=hung['run_id'])['steps']==hung['steps'],'Steps survive a restart'
         request({'type':'reconcile_session','session_id':main['id'],'retry':False})
         messages=request({'type':'messages','session_id':main['id'],'before':None,'limit':100})
         assert next(m for m in messages if m['id']=='hang')['receipt']=='cancelled'
