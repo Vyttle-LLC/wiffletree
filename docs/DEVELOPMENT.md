@@ -135,24 +135,31 @@ Coordinates are window points from the top-left corner. `shot` saves the window 
 
 Every pull request and every push to `main` runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. Merging does not release anything. Both workflows run on GitHub-hosted macOS runners (`macos-15`).
 
-To release, tag a commit on `main` with its version and push the tag:
+To release, tag a commit on `main` with its version and a short summary, then push the tag:
 
 ```sh
 git switch main && git pull
-git tag v0.2.0
+git tag -a v0.2.0 -m "Scheduled tasks and config sync
+A sidebar status section"
 git push origin v0.2.0
 ```
 
-The tag runs `.github/workflows/release.yml`. It rejects tags that aren't `v<major>.<minor>.<patch>` or that point outside `main`. Then it reruns the checks and builds the bundle with that version. It signs the bundle with the Developer ID and the hardened runtime, notarizes and staples it, and publishes `Wiffletree-<version>-macos-arm64.zip` as the release for the tag. Creating the release in GitHub's UI with a new tag works too; the workflow attaches the build to that release.
+The tag runs `.github/workflows/release.yml`. It rejects tags that aren't `v<major>.<minor>.<patch>` or that point outside `main`. Then it reruns the checks and builds the bundle with that version. It signs the bundle with the Developer ID and the hardened runtime, notarizes and staples it, and publishes `Wiffletree-<version>-macos-arm64.zip` as the release for the tag. The tag message becomes the notes' `## Summary` section, above the PR list GitHub generates. A tag without a message (`git tag v0.2.0`) publishes only the generated list.
 
-The app shows each update in a card at the bottom of the sidebar. The card has the release notes' opening paragraph, a **Changelog** link to the release page and **Restart to update**. So start the notes with one plain sentence about what changed, then let GitHub generate the PR list below it. In the UI, write the sentence and click **Generate release notes**. From the command line:
+The app shows each update in a card at the bottom of the sidebar. The card has the release notes' `## Summary` section, a **Changelog** link to the release page and **Restart to update**. The summary runs to the next heading, keeps its line breaks, and is clipped to four lines. Without one, the card just says the version is ready.
 
-```sh
-gh release create v0.2.0 --target main --generate-notes \
-  --notes "Scheduled tasks, config sync and a sidebar status section."
+Creating the release in GitHub's UI with a new tag works too; the workflow attaches the build to that release and leaves its notes alone. Click **Generate release notes**, then add the summary above the list:
+
+```markdown
+## Summary
+Scheduled tasks and config sync
+A sidebar status section
+
+## What's Changed
+* …
 ```
 
-Everything above the first heading or list item is the summary. Without one, the card just says the version is ready. Each tag must be higher than the last, because installed apps only move to a newer version.
+Each tag must be higher than the last, because installed apps only move to a newer version.
 
 `scripts/install.sh [tag]` is the public installer the README's `curl … | bash` line runs. It replaces `/Applications/Wiffletree.app` (or `$WIFFLETREE_INSTALL_DIR/Wiffletree.app`) with a release, the latest by default, after checking its signature and Gatekeeper assessment. It quits a running copy first, which interrupts active turns. Use it to replace a local development build with a release, which then updates itself. A tag whose release has no build yet fails with a retry hint, so expect that for the few minutes the release workflow is still publishing.
 

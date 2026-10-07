@@ -88,6 +88,13 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$archive" --clobber
           else
+            # An annotated tag's message becomes the Summary the update card shows.
+            git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+            summary=()
+            if [ "$(git cat-file -t "$GITHUB_REF_NAME")" = tag ]; then
+              message="$(git cat-file tag "$GITHUB_REF_NAME" | sed -e '1,/^$/d' -e '/^-----BEGIN /,$d')"
+              summary=(--notes "## Summary"$'\n'"$message"$'\n')
+            fi
             gh release create "$GITHUB_REF_NAME" "$archive" \
-              --title "Wiffletree $WIFFLETREE_VERSION" --verify-tag --generate-notes
+              --title "Wiffletree $WIFFLETREE_VERSION" --verify-tag --generate-notes "${summary[@]}"
           fi
