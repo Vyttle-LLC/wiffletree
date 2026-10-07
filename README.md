@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="design/brand/logo/lockup-dark.svg">
-    <img src="design/brand/logo/lockup-light.svg" alt="Wiffletree" width="360">
-  </picture>
+  <img src="docs/images/banner.svg" alt="Wiffletree">
 </p>
 
 <p align="center">
