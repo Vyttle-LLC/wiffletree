@@ -515,22 +515,18 @@ fn only_the_main_coordinator_archives_its_own_repository_teams() {
         .into_iter()
         .find(|s| s.project_id == other.id)
         .unwrap();
-    for (caller, target) in [
-        (&coordinator.id, &coordinator.id),
-        (&root.id, &root.id),
-        (&root.id, &worker.id),
-        (&other_root.id, &coordinator.id),
+    let not_main = "Only the main coordinator archives repository teams";
+    let not_own = "Archive only your own repository coordinators";
+    for (caller, target, expected) in [
+        (&coordinator.id, &coordinator.id, not_main),
+        (&root.id, &root.id, not_own),
+        (&root.id, &worker.id, not_own),
+        (&other_root.id, &coordinator.id, not_own),
     ] {
         let refused = host
             .agent_tool(caller, "archive_team", json!({"session_id":target}))
             .unwrap_err();
-        assert!(
-            refused.to_string().contains("main coordinator")
-                || refused
-                    .to_string()
-                    .contains("your own repository coordinators"),
-            "{refused}"
-        );
+        assert!(refused.to_string().contains(expected), "{refused}");
     }
     assert!(host.sessions().unwrap().iter().all(|s| !s.archived));
 }
@@ -611,4 +607,32 @@ fn main_coordinator_context_lists_each_team_with_its_tickets() {
         .agent_tool(&coordinator.id, "workspace_context", json!({}))
         .unwrap();
     assert!(context.get("teams").is_none());
+}
+
+#[test]
+fn a_failed_team_archive_leaves_the_team_active_and_a_retry_records_it() {
+    let (home, _repo, mut host, root, coordinator) = fixture();
+    accepted_ticket(&mut host, &coordinator, "Toolbar");
+    let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_team_event BEFORE INSERT ON activity WHEN NEW.kind='team_archived'
+         BEGIN SELECT RAISE(ABORT,'injected'); END;",
+    )
+    .unwrap();
+    let archive = json!({"session_id":coordinator.id});
+
+    assert!(
+        host.agent_tool(&root.id, "archive_team", archive.clone())
+            .is_err()
+    );
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+
+    db.execute_batch("DROP TRIGGER fail_team_event").unwrap();
+    host.agent_tool(&root.id, "archive_team", archive).unwrap();
+    assert!(host.session(&coordinator.id).unwrap().archived);
+    let events = host.activity(&root.project_id, None, 100).unwrap();
+    assert_eq!(
+        events.iter().filter(|a| a.kind == "team_archived").count(),
+        1
+    );
 }

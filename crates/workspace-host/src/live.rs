@@ -298,17 +298,7 @@ impl Host {
         for ticket in tickets.iter().filter(|t| t.state == "accepted") {
             self.close_ticket(&ticket.id)?;
         }
-        let team = self.set_archived(&coordinator.id, true)?;
-        if !coordinator.archived {
-            Self::event(
-                &self.db,
-                &coordinator.project_id,
-                Some(&coordinator.id),
-                "team_archived",
-                &coordinator.name,
-            )?;
-        }
-        Ok(team)
+        self.change_archived(&coordinator.id, true, Some("team_archived"))
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
