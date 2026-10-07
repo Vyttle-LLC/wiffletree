@@ -13,18 +13,14 @@ concurrency:
 
 jobs:
   check:
-    # Runs on the Vyttle Mac runner. Pull requests from forks never run here: they would execute
-    # untrusted code on that machine.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-        with:
-          clean: false # Keep target/ between runs; tracked files are still reset.
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
 
       - name: Ensure the Metal toolchain
         run: xcrun --find metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
