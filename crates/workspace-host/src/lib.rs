@@ -830,11 +830,13 @@ impl Host {
                 role,
                 provider,
                 instruction,
+                focus,
             } => serde_json::to_value(self.assign_ticket(
                 &ticket_id,
                 role,
                 provider,
                 &instruction,
+                focus.as_deref(),
             )?)?,
             Command::ProviderCheck => provider::check(),
             Command::Quotas => serde_json::to_value(self.quotas()?)?,

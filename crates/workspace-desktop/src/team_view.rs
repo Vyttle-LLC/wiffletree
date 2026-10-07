@@ -3,8 +3,7 @@ use super::*;
 use gpui_component::button::ButtonVariants;
 use inspector::copyable;
 use ui::{
-    card, empty_state, hint, humanize, icon, pill, section, session_icon, status_badge,
-    ticket_state_color,
+    card, empty_state, hint, humanize, icon, pill, section, session_icon, ticket_state_color,
 };
 
 impl Workspace {
@@ -46,7 +45,7 @@ impl Workspace {
             )
             .child(div().flex_1().min_w_0().text_ellipsis().child(label))
             .child(hint(format!("{:?}", session.provider), p))
-            .child(status_badge(session.status, p))
+            .child(self.session_badge(session, p))
             .child(icon("chevron-right").size(px(12.)).text_color(p.subtle))
     }
 
@@ -114,7 +113,7 @@ impl Workspace {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(team.name.clone()),
                             )
-                            .child(status_badge(team.status, p)),
+                            .child(self.session_badge(team, p)),
                     )
                     .child(hint(
                         format!(

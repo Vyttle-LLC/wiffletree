@@ -38,8 +38,8 @@ pub fn tools() -> Value {
         ),
         tool(
             "assign_ticket",
-            "Repository coordinator: assign a dedicated agent using its saved provider and Big/Small profile. Exact proposals must be approved in the role policy; no model substitution is allowed. Existing role assignments are returned; use send_message for follow-up fixes.",
-            json!({"ticket_id":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"provider":{"type":"string","enum":["claude","codex"]},"instruction":string,"size":{"type":"string","enum":["big","small"]},"complexity":{"type":"string","enum":["small","standard","complex"]},"profile":{"type":"object","properties":{"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string},"required":["provider","model","effort"],"additionalProperties":false}}),
+            "Repository coordinator: assign a dedicated agent using its saved provider and Big/Small profile. Exact proposals must be approved in the role policy; no model substitution is allowed. Existing assignments with the same role and focus are returned; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
+            json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"provider":{"type":"string","enum":["claude","codex"]},"instruction":string,"size":{"type":"string","enum":["big","small"]},"complexity":{"type":"string","enum":["small","standard","complex"]},"profile":{"type":"object","properties":{"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string},"required":["provider","model","effort"],"additionalProperties":false}}),
             vec!["ticket_id", "role", "instruction"]
         ),
         tool(

@@ -6,10 +6,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
-use ui::{
-    card, empty_state, eyebrow, hint, icon, mono, pill, property, section, session_icon,
-    status_badge,
-};
+use ui::{card, empty_state, eyebrow, hint, icon, mono, pill, property, section, session_icon};
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -322,7 +319,7 @@ impl Workspace {
                             )
                             .child(hint(session.role.label(), p)),
                     )
-                    .child(status_badge(session.status, p)),
+                    .child(self.session_badge(session, p)),
             )
             .child(
                 card(p)

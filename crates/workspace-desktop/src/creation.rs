@@ -329,6 +329,7 @@ impl CreationForm {
                 } else {
                     detail
                 },
+                focus: None,
             }),
             _ => Ok(Command::CreateSession {
                 project_id,

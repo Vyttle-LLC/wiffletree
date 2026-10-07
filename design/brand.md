@@ -44,6 +44,7 @@ The selected reference is the teal, stone, and rust palette supplied in the bran
 - Default to **System**, resolving to Tidal Light or Tidal Dark. Explicit Light and Dark selections persist on each client independently.
 - Use stone or deep teal for most of the interface. Apply rust sparingly to primary actions, selection, and brand details. Dark mode uses a lighter warm accent of the same family.
 - Keep brand accent separate from success, warnings, and errors. Rust is not the destructive-action token; successful checks and diff additions remain green. Pair every status with text or a glyph.
+- In the project tree, warning yellow means *needs you* and nothing else. Working uses the focus color; Blocked, Done, Ready and Paused stay in secondary text so they never compete with it.
 - Use `on-accent` for filled primary-action labels. Never assume those labels are always white or always the canvas color.
 - Use secondary text for readable metadata; decorative muted colors are not normal-text tokens. Subtle separators are not focus indicators. Use the focus token for keyboard focus and essential control outlines.
 - Keep the sample project named Celadon independent of product branding. Preserve archived studies and their original palettes.
