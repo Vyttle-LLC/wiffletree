@@ -132,6 +132,10 @@ struct Workspace {
 }
 impl Workspace {
     fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Under the System appearance, macOS can switch modes while the app runs. The component
+        // theme only changes when told, so re-apply it or it keeps the previous mode's colours.
+        cx.observe_window_appearance(window, |_, _, cx| apply_theme(cx))
+            .detach();
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 9));
         // The send button follows the draft, so redraw as it changes.
         cx.subscribe(&input, |_, _, event, cx| {
