@@ -44,9 +44,9 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         start_time=time.monotonic()
         request({'type':'send','id':'start','sender':None,'recipient':main['id'],'body':'START_HANDOFF'})
         assert project['id'] in snapshot()['live_projects'],'A human message starts its project'
-        done=until(lambda s:any(t['state']=='accepted' for t in s['tickets']))
+        # Acceptance removes the worktree once the tester's turn ends.
+        done=until(lambda s:any(t['state']=='accepted' and not Path(t['worktree']).exists() for t in s['tickets']))
         ticket=done['tickets'][0]
-        assert not Path(ticket['worktree']).exists(),'Acceptance removes the worktree'
         assert subprocess.run(['git','show',f"{ticket['branch']}:result.txt"],cwd=repo,check=True,capture_output=True,text=True).stdout=='verified','The branch keeps the work'
         assert not (repo/'result.txt').exists()
         assert any(s['provider']=='claude' and s['role']=='tester' for s in done['sessions'])

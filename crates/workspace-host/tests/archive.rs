@@ -298,7 +298,7 @@ fn finish_turn(db: &rusqlite::Connection, host: &mut Host, agent: &Session) {
         [&agent.id],
     )
     .unwrap();
-    host.settle_pending_worktrees().unwrap();
+    host.settle_pending_worktrees();
 }
 
 /// A passed ticket whose tester reported and is still writing its summary.
@@ -351,7 +351,7 @@ fn accepting_while_the_tester_is_in_its_turn_removes_the_worktree_when_the_turn_
         host.pending_worktree_removals().unwrap(),
         std::slice::from_ref(&ticket.id)
     );
-    host.settle_pending_worktrees().unwrap();
+    host.settle_pending_worktrees();
     assert!(Path::new(&ticket.worktree).exists());
 
     // The pending removal survives a restart.
@@ -385,7 +385,7 @@ fn work_left_after_acceptance_keeps_the_worktree_and_tells_the_coordinator_once(
     fs::write(Path::new(&ticket.worktree).join("summary.md"), "late").unwrap();
 
     finish_turn(&db, &mut host, &tester);
-    host.settle_pending_worktrees().unwrap();
+    host.settle_pending_worktrees();
 
     assert!(Path::new(&ticket.worktree).join("summary.md").exists());
     assert!(host.pending_worktree_removals().unwrap().is_empty());
@@ -501,7 +501,7 @@ fn an_unmarked_finished_ticket_keeps_its_worktree_when_turns_end() {
     finish_turn(&db, &mut host, &agent);
     drop(host);
     let mut host = Host::open(directory.path().join("home")).unwrap();
-    host.settle_pending_worktrees().unwrap();
+    host.settle_pending_worktrees();
 
     assert!(Path::new(&ticket.worktree).exists());
 }
@@ -668,4 +668,67 @@ fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
         host.messages(&root.id, None, 10).unwrap()[0].body,
         "Still writable"
     );
+}
+
+#[test]
+fn a_failed_restore_keeps_the_pending_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let agent = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    start_turn(&db, &agent);
+    host.set_archived(&coordinator.id, true).unwrap();
+    let failing = fail_activity(directory.path(), "restored");
+
+    assert!(host.set_archived(&coordinator.id, false).is_err());
+
+    assert!(host.session(&coordinator.id).unwrap().archived);
+    assert_eq!(
+        host.pending_worktree_removals().unwrap(),
+        std::slice::from_ref(&ticket.id)
+    );
+    failing.execute_batch("DROP TRIGGER fail_activity").unwrap();
+    finish_turn(&db, &mut host, &agent);
+    assert!(!Path::new(&ticket.worktree).exists());
+}
+
+#[test]
+fn a_refused_notice_falls_back_to_the_inbox_and_settles_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let (ticket, tester) = reported_in_turn(&mut host, &db, &coordinator);
+    host.agent_tool(
+        &coordinator.id,
+        "accept_ticket",
+        json!({"ticket_id":ticket.id}),
+    )
+    .unwrap();
+    fs::write(Path::new(&ticket.worktree).join("summary.md"), "late").unwrap();
+    // A full queue refuses the coordinator's notice.
+    db.execute_batch(
+        "CREATE TRIGGER refuse_notice BEFORE INSERT ON messages WHEN NEW.id LIKE 'worktree-kept:%'
+         BEGIN SELECT RAISE(ABORT,'queue full'); END;",
+    )
+    .unwrap();
+
+    finish_turn(&db, &mut host, &tester);
+    host.settle_pending_worktrees();
+
+    assert!(host.pending_worktree_removals().unwrap().is_empty());
+    let asked = host.open_attention(&root.project_id).unwrap();
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].prompt.contains(&ticket.id), "{}", asked[0].prompt);
+    let kept = host
+        .activity(&root.project_id, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == "worktree_kept")
+        .count();
+    assert_eq!(kept, 1);
 }

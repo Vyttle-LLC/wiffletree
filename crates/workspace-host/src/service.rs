@@ -109,6 +109,8 @@ struct Actor {
     socket: PathBuf,
     helper: PathBuf,
     turns: HashMap<String, usize>,
+    /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
+    stopping: bool,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -134,7 +136,7 @@ impl Service {
                 // A host restart never silently resumes uncertain provider side effects.
                 host.db.execute("UPDATE live_projects SET enabled=0",[])?;
                 host.db.execute("UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail='Host restarted; reconcile before retry' WHERE finished_at IS NULL",[now()])?;
-                host.settle_pending_worktrees()?;
+                host.settle_pending_worktrees();
                 let directory=tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
                 let socket=directory.path().join("ipc");
                 let listener=UnixListener::bind(&socket)?;
@@ -166,15 +168,14 @@ impl Service {
                     });
                 }
             });
-            let mut actor=Actor {host,sender:worker,changed,steps_changed,steps_dirty:false,revisions:HashMap::new(),active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new()};
+            let mut actor=Actor {host,sender:worker,changed,steps_changed,steps_dirty:false,revisions:HashMap::new(),active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new(),stopping:false};
             while let Ok(event)=receiver.recv_blocking(){
                 if matches!(event,Event::Shutdown){break}
                 let dirty=actor.handle(event);
                 if let Err(e)=actor.schedule(){eprintln!("Workspace scheduler: {e:#}");}
                 actor.signal(dirty);
             }
-            let interrupted=actor.active.iter().map(|(id,a)|{a.cancel.store(true,Ordering::Relaxed);(id.clone(),a.run.clone())}).collect::<Vec<_>>();
-            for (id,run) in interrupted {let _=actor.provider_event(&id,&run,ProviderEvent::Finished{error:Some("Host stopped during a turn; inspect work before retrying".into()),usage:Value::Null});}
+            actor.stop();
             for (_,permission) in actor.permissions.drain(){let _=permission.reply.try_send(Err("Workspace stopped".into()));}
             stop_listener.store(true,Ordering::Relaxed);
             let _=std::os::unix::net::UnixStream::connect(&socket);
@@ -539,7 +540,10 @@ impl Actor {
                 } else if session.status == Status::Working {
                     self.host.set_status(id, Status::Ready)?;
                 }
-                self.host.settle_pending_worktrees()?;
+                // Shutdown finishes turns without waiting for their processes; startup settles.
+                if !self.stopping {
+                    self.host.settle_pending_worktrees();
+                }
                 // A deliberately archived parent has no one to wake.
                 if let Some(parent) = &session.parent_id
                     && !self.host.session(parent)?.archived
@@ -587,6 +591,28 @@ impl Actor {
             }
         }
         Ok(())
+    }
+    /// Cancels every active turn and records it finished without waiting for its process.
+    fn stop(&mut self) {
+        self.stopping = true;
+        let interrupted = self
+            .active
+            .iter()
+            .map(|(id, a)| {
+                a.cancel.store(true, Ordering::Relaxed);
+                (id.clone(), a.run.clone())
+            })
+            .collect::<Vec<_>>();
+        for (id, run) in interrupted {
+            let _ = self.provider_event(
+                &id,
+                &run,
+                ProviderEvent::Finished {
+                    error: Some("Host stopped during a turn; inspect work before retrying".into()),
+                    usage: Value::Null,
+                },
+            );
+        }
     }
     /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
     fn signal(&mut self, state_changed: bool) {
@@ -775,7 +801,8 @@ impl Actor {
             &format!("start-error:{}", message.id),
             &format!("Could not start: {error:#}"),
         )?;
-        self.host.settle_pending_worktrees()
+        self.host.settle_pending_worktrees();
+        Ok(())
     }
     fn start_turn(&mut self, session: Session, message: Message) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
@@ -959,6 +986,7 @@ mod tests {
             socket: PathBuf::new(),
             helper: PathBuf::new(),
             turns: HashMap::new(),
+            stopping: false,
         };
         (actor, changes, step_changes)
     }
@@ -1091,6 +1119,32 @@ mod tests {
         assert_eq!(
             actor.host.session(&tester.id).unwrap().status,
             Status::Disconnected
+        );
+    }
+
+    #[test]
+    fn shutdown_leaves_a_pending_removal_for_startup() {
+        let (_home, mut actor, ticket, tester) = ticket_pending_removal();
+        actor.active.insert(
+            tester.id.clone(),
+            Active {
+                run: "run".into(),
+                token: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                messages: vec![],
+                output: String::new(),
+                reported: true,
+                steps: vec![],
+                omitted_steps: 0,
+            },
+        );
+
+        actor.stop();
+
+        assert!(Path::new(&ticket.worktree).exists());
+        assert_eq!(
+            actor.host.pending_worktree_removals().unwrap(),
+            std::slice::from_ref(&ticket.id)
         );
     }
 

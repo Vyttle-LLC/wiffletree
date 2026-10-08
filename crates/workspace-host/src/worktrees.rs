@@ -220,15 +220,6 @@ impl Host {
             |r| r.get(0),
         )?)
     }
-    pub(crate) fn cancel_pending_removals(&self, tickets: &[Ticket]) -> Result<()> {
-        for ticket in tickets {
-            self.db.execute(
-                "DELETE FROM pending_worktree_removals WHERE ticket_id=?1",
-                [&ticket.id],
-            )?;
-        }
-        Ok(())
-    }
     /// Tickets whose worktree removal waits for an agent's turn to end.
     pub fn pending_worktree_removals(&self) -> Result<Vec<String>> {
         Ok(self
@@ -238,45 +229,80 @@ impl Host {
             .collect::<rusqlite::Result<_>>()?)
     }
     /// Performs pending removals whose tickets no longer have an agent in its turn. The service
-    /// calls this when a turn ends and at startup. A worktree that gained unsaved work, or that
-    /// Git cannot remove, is kept and its coordinator told; the mark is cleared either way.
-    pub fn settle_pending_worktrees(&mut self) -> Result<()> {
-        let pending: Vec<(String, i64)> = self
+    /// calls this when a provider process ends and at startup. A worktree that gained unsaved
+    /// work, or that Git cannot remove, is kept and someone told; the mark is cleared either way.
+    /// Failures are logged per ticket and retried at the next settlement, never propagated.
+    pub fn settle_pending_worktrees(&mut self) {
+        let pending: Result<Vec<(String, i64)>> = self
             .db
-            .prepare("SELECT ticket_id,marked_at FROM pending_worktree_removals ORDER BY rowid")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (id, marked_at) in pending {
-            let ticket = self.ticket(&id)?;
-            if self.agent_in_turn(&ticket)? {
-                continue;
+            .prepare("SELECT ticket_id,marked_at FROM pending_worktree_removals ORDER BY rowid")
+            .and_then(|mut query| {
+                query
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            })
+            .map_err(Into::into);
+        match pending {
+            Ok(pending) => {
+                for (id, marked_at) in pending {
+                    if let Err(error) = self.settle_pending_worktree(&id, marked_at) {
+                        eprintln!("Pending worktree removal for ticket {id}: {error:#}");
+                    }
+                }
             }
-            let removed = self
-                .check_removable(std::slice::from_ref(&ticket))
-                .and_then(|()| self.remove_worktree(&ticket));
-            let coordinator = self.session(&ticket.coordinator_id)?;
-            match removed {
-                Ok(_) => Self::event(
-                    &self.db,
-                    &coordinator.project_id,
-                    Some(&coordinator.id),
-                    "worktree_removed",
-                    &ticket.id,
-                )?,
-                Err(reason) => self.report_kept_worktree(&ticket, marked_at, &reason)?,
-            }
-            self.cancel_pending_removals(&[ticket])?;
+            Err(error) => eprintln!("Pending worktree removals: {error:#}"),
         }
+    }
+    fn settle_pending_worktree(&mut self, id: &str, marked_at: i64) -> Result<()> {
+        let ticket = self.ticket(id)?;
+        if self.agent_in_turn(&ticket)? {
+            return Ok(());
+        }
+        let outcome = match self
+            .check_removable(std::slice::from_ref(&ticket))
+            .and_then(|()| self.remove_worktree(&ticket))
+        {
+            Ok(_) => "worktree_removed",
+            Err(reason) => {
+                self.report_kept_worktree(&ticket, marked_at, &reason)?;
+                "worktree_kept"
+            }
+        };
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        let tx = self.db.transaction()?;
+        Self::event(
+            &tx,
+            &coordinator.project_id,
+            Some(&coordinator.id),
+            outcome,
+            &ticket.id,
+        )?;
+        tx.execute(
+            "DELETE FROM pending_worktree_removals WHERE ticket_id=?1",
+            [&ticket.id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     /// Tells the nearest unarchived owner of the ticket, from its coordinator up, once per mark.
-    /// When the whole tree is archived, the notice waits in the human's attention inbox instead.
+    /// When the whole tree is archived or the message is refused, the notice goes to the human's
+    /// attention inbox instead.
     fn report_kept_worktree(
         &mut self,
         ticket: &Ticket,
         marked_at: i64,
         reason: &anyhow::Error,
     ) -> Result<()> {
+        let id = format!("worktree-kept:{}:{marked_at}", ticket.id);
+        let reported: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)
+             OR EXISTS(SELECT 1 FROM attention WHERE operation_id=?1)",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if reported {
+            return Ok(());
+        }
         let notice = format!(
             "Wiffletree kept the worktree of ticket \"{}\" ({}) at {} instead of removing it: {reason:#}. Its branch {} is kept. Commit or discard that work, then remove the worktree yourself.",
             ticket.title, ticket.id, ticket.worktree, ticket.branch
@@ -287,7 +313,6 @@ impl Host {
             end -= 1;
         }
         let notice = &notice[..end];
-        let id = format!("worktree-kept:{}:{marked_at}", ticket.id);
         let mut owner = Some(self.session(&ticket.coordinator_id)?);
         while let Some(session) = owner.take_if(|s| s.archived) {
             owner = session
@@ -296,24 +321,13 @@ impl Host {
                 .map(|parent| self.session(parent))
                 .transpose()?;
         }
-        match owner {
-            Some(owner) => {
-                if self.message(&id).is_err() {
-                    self.send(&id, None, &owner.id, notice)?;
-                }
-            }
-            None => {
-                self.request_attention(&ticket.coordinator_id, "local", &id, notice, &[])?;
-            }
+        if let Some(owner) = owner
+            && self.send(&id, None, &owner.id, notice).is_ok()
+        {
+            return Ok(());
         }
-        let coordinator = self.session(&ticket.coordinator_id)?;
-        Self::event(
-            &self.db,
-            &coordinator.project_id,
-            Some(&coordinator.id),
-            "worktree_kept",
-            &ticket.id,
-        )
+        self.request_attention(&ticket.coordinator_id, "local", &id, notice, &[])?;
+        Ok(())
     }
 }
 

@@ -409,6 +409,10 @@ impl Host {
             .into_iter()
             .filter(|t| owners.contains(&t.coordinator_id.as_str()) && (archived || t.is_open()))
             .collect();
+        let restored: Vec<String> = match archived {
+            true => vec![],
+            false => tickets.iter().map(|t| t.id.clone()).collect(),
+        };
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
@@ -443,6 +447,13 @@ impl Host {
                     [&project],
                 )?;
             }
+            // Restoring cancels the restored tickets' pending worktree removals.
+            for ticket in &restored {
+                tx.execute(
+                    "DELETE FROM pending_worktree_removals WHERE ticket_id=?1",
+                    [ticket],
+                )?;
+            }
             tx.commit()?;
             Ok(affected)
         };
@@ -450,7 +461,6 @@ impl Host {
             self.with_worktrees_removed(&tickets, save)
         } else {
             self.restore_worktrees(&tickets)?;
-            self.cancel_pending_removals(&tickets)?;
             save(self)
         }
     }
