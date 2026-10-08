@@ -389,13 +389,19 @@ impl Host {
                     }
                 }
             }
-            host.set_status(
-                &session.id,
-                match kind {
-                    "blocked" | "failed" => Status::Blocked,
-                    _ => Status::Done,
-                },
-            )?;
+            // A report from a turn being stopped leaves the session stopped until it is resumed.
+            if !matches!(
+                host.session(&session.id)?.status,
+                Status::Paused | Status::Disconnected
+            ) {
+                host.set_status(
+                    &session.id,
+                    match kind {
+                        "blocked" | "failed" => Status::Blocked,
+                        _ => Status::Done,
+                    },
+                )?;
+            }
             Ok(serde_json::to_value(message)?)
         })
     }

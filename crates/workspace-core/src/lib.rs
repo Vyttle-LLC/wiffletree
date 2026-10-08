@@ -374,6 +374,16 @@ pub struct Snapshot {
     pub schedules: Vec<Schedule>,
     #[serde(default)]
     pub model_selection: ModelSelection,
+    /// Sessions whose input has not reached a turn yet.
+    #[serde(default)]
+    pub undelivered: Vec<UndeliveredInput>,
+}
+/// A session's input waiting for a turn: held after an interrupted turn, or queued.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndeliveredInput {
+    pub session_id: String,
+    pub held: u32,
+    pub queued: u32,
 }
 impl Snapshot {
     /// The workspace repositories a project uses, in the order they were added.
@@ -683,8 +693,27 @@ pub struct SessionRuntime {
     /// Cleared when Skip cancels that input or a turn starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    /// Who stopped the session, while it stays paused or interrupted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<Stopper>,
     pub last_started_at: Option<i64>,
     pub last_finished_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stopper {
+    /// An emergency stop: the session resumes only when the human says so.
+    Human,
+    Parent,
+}
+impl Stopper {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Human => "the human",
+            Self::Parent => "its parent",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

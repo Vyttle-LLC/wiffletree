@@ -75,6 +75,16 @@ fn ensure_unreserved(operation: &str) -> Result<()> {
     );
     Ok(())
 }
+/// How a queued message reaches its recipient.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    /// Starts the recipient's next turn.
+    Turn,
+    /// Rides along with the next turn without starting one.
+    Quiet,
+    /// Starts a turn and is never refused for a full queue; see `send_human_notice`.
+    HumanNotice,
+}
 pub(crate) fn text(value: &str, maximum: usize) -> Result<()> {
     ensure!(
         !value.trim().is_empty() && value.len() <= maximum,
@@ -216,7 +226,10 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()? })
+    }
+    fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
+        Ok(self.db.prepare("SELECT recipient,SUM(receipt='held'),SUM(receipt='queued' AND quiet=0) FROM messages WHERE receipt IN ('held','queued') GROUP BY recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     pub fn create_project(&mut self, name: &str) -> Result<Project> {
         text(name, 128)?;
@@ -547,7 +560,7 @@ impl Host {
         body: &str,
         files: &[PathBuf],
     ) -> Result<Message> {
-        self.queue(id, sender, recipient, body, files, false)
+        self.queue(id, sender, recipient, body, files, Delivery::Turn)
     }
     /// Queues a message that rides along with the recipient's next turn without starting one.
     pub(crate) fn send_quietly(
@@ -557,7 +570,18 @@ impl Host {
         recipient: &str,
         body: &str,
     ) -> Result<Message> {
-        self.queue(id, sender, recipient, body, &[], true)
+        self.queue(id, sender, recipient, body, &[], Delivery::Quiet)
+    }
+    /// Queues a notice of the human's own action past the recipient cap: human clicks bound
+    /// these, and losing one would hide an emergency stop from the parent.
+    pub(crate) fn send_human_notice(
+        &mut self,
+        id: &str,
+        sender: Option<&str>,
+        recipient: &str,
+        body: &str,
+    ) -> Result<Message> {
+        self.queue(id, sender, recipient, body, &[], Delivery::HumanNotice)
     }
     fn queue(
         &mut self,
@@ -566,8 +590,9 @@ impl Host {
         recipient: &str,
         body: &str,
         files: &[PathBuf],
-        quiet: bool,
+        delivery: Delivery,
     ) -> Result<Message> {
+        let quiet = delivery == Delivery::Quiet;
         text(id, 128)?;
         if files.is_empty() {
             text(body, MAX_TEXT_BYTES)?;
@@ -619,7 +644,7 @@ impl Host {
             |r| r.get(0),
         )?;
         ensure!(
-            queued < 1024,
+            queued < 1024 || delivery == Delivery::HumanNotice,
             "Recipient queue is full; accepted messages are preserved"
         );
         if files.is_empty() {
@@ -1051,6 +1076,9 @@ impl Host {
                 serde_json::to_value(session)?
             }
             Command::SetStatus { session_id, status } => {
+                if status != Status::Paused {
+                    self.clear_stop(&session_id)?;
+                }
                 self.set_status(&session_id, status)?;
                 json!({"saved":true})
             }

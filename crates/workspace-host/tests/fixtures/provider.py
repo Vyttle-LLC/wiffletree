@@ -91,7 +91,8 @@ try:
     else:
         emit({'type':'item.completed','item':{'id':'fixture-say','type':'agent_message','text':'Checking the workspace.'}})
         emit({'type':'item.started','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'','exit_code':None,'status':'in_progress'}})
-    if 'HANG_UNTIL_CANCELLED' in prompt:time.sleep(30)
+    # A retried turn finishes, so a test can see the redelivered input run.
+    if 'HANG_UNTIL_CANCELLED' in prompt and 'Retry of interrupted turn' not in prompt:time.sleep(30)
     if claude: emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'fixture-ls','content':'result.txt'}]}})
     else: emit({'type':'item.completed','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'result.txt\n','exit_code':0,'status':'completed'}})
     if 'JUST_REPLY' in prompt:
@@ -119,6 +120,17 @@ try:
                 tool('verify_ticket',ticket_id=ticket['id'],verifiers=verifiers)
             elif ticket['state']=='passed':
                 tool('accept_ticket',ticket_id=ticket['id'])
+        # Coordinator control: the tool results come back as the reply, for the test to read.
+        children=[s['id'] for s in ctx['team'] if s['parent_id']==me['id'] and not s['archived']]
+        control=None
+        if 'STOP_CHILDREN' in prompt:
+            control=tool('stop_agents',reason='Wrong approach')
+        if 'MESSAGE_CHILD' in prompt:
+            control=tool('send_message',recipient=children[0],message_id=str(uuid.uuid4()),body='JUST_REPLY queued while stopped')
+        if 'RESUME_CHILD' in prompt:
+            held={'held':'retry'} if 'HELD_RETRY' in prompt else {}
+            message={'message':'JUST_REPLY carry on'} if 'WITH_MESSAGE' in prompt else {}
+            control=tool('resume_agent',session_id=children[0],**held,**message)
         if 'SCHEDULE_TIMER' in prompt:
             tool('schedule',label='Fixture check',prompt='TIMER_CHECK',at='+2s')
         if 'SCHEDULE_MONITOR' in prompt:
@@ -126,7 +138,7 @@ try:
         timer_fire='Sender: your timer' in prompt and '[timer] Fixture check' in prompt and 'TIMER_CHECK' in prompt
         # A coordinator's own read-only check: its final message is the result in the human's chat.
         check='Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt
-        result='TIMER_FIRED' if timer_fire else 'SERVICE_HEALTHY' if check else 'MAIN_READY'
+        result='CONTROL '+json.dumps(control) if control else 'TIMER_FIRED' if timer_fire else 'SERVICE_HEALTHY' if check else 'MAIN_READY'
     elif role=='implementer' and 'Verification round' in prompt:
         Path('fix.txt').write_text('fixed')
         for git in [['add','fix.txt'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-q','-m','Fix verification failure']]:

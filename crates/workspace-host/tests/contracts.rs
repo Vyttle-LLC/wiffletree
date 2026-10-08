@@ -24,9 +24,15 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         "accept_ticket",
         "close_ticket",
         "archive_agent",
+        "stop_agents",
+        "resume_agent",
     ] {
         assert!(names.contains(&name), "{name}");
     }
+    assert!(
+        !names.contains(&"stop_turn"),
+        "stop_agents replaces stop_turn"
+    );
     let text = tools.to_string().to_lowercase();
     for retired in RETIRED.into_iter().chain(["main coordinator"]) {
         assert!(!text.contains(retired), "{retired}");
@@ -59,7 +65,10 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         "accept_ticket",
         "close_ticket",
         "archive_agent",
+        "stop_agents",
+        "resume_agent",
     ] {
         assert!(coordinator.contains(tool), "{tool}");
     }
+    assert!(!coordinator.contains("stop_turn"));
 }
