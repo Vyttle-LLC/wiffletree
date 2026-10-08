@@ -8676,6 +8676,7 @@ dependencies = [
  "gpui-pre-platform",
  "libc",
  "objc",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -15,7 +15,6 @@ use workspace_core::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Creation {
-    Coordinator,
     Ticket,
     Agent,
     Repository,
@@ -26,7 +25,6 @@ pub enum Creation {
 impl Creation {
     pub fn title(self) -> &'static str {
         match self {
-            Self::Coordinator => "Add repository team",
             Self::Ticket => "New ticket",
             Self::Agent => "Assign ticket agent",
             Self::Repository => "Attach repository",
@@ -36,7 +34,6 @@ impl Creation {
     }
     pub fn action(self) -> &'static str {
         match self {
-            Self::Coordinator => "Create team",
             Self::Ticket => "Create ticket",
             Self::Agent => "Assign agent",
             Self::Repository => "Attach repository",
@@ -132,33 +129,14 @@ impl CreationForm {
                 Some(&s.project_id) == project_id.as_ref() && s.role == Role::ProjectOrchestrator
             })
             .map(|s| s.id.clone());
-        let owner = selected.and_then(|s| {
-            if s.role == Role::TaskOrchestrator {
-                Some(s.id.as_str())
-            } else {
-                s.parent_id.as_deref()
-            }
-        });
         let choices: Vec<Choice> = if kind == Creation::Agent {
             snapshot
                 .tickets
                 .iter()
-                .filter(|t| Some(t.coordinator_id.as_str()) == owner && t.is_open())
+                .filter(|t| Some(&t.coordinator_id) == root_id.as_ref() && t.is_open())
                 .map(|t| Choice {
                     id: t.id.clone(),
-                    label: t.title.clone(),
-                })
-                .collect()
-        } else if kind == Creation::Ticket {
-            snapshot
-                .sessions
-                .iter()
-                .filter(|s| {
-                    Some(&s.project_id) == project_id.as_ref() && s.role == Role::TaskOrchestrator
-                })
-                .map(|s| Choice {
-                    id: s.id.clone(),
-                    label: s.name.clone(),
+                    label: super::tree::ticket_label(snapshot, t),
                 })
                 .collect()
         } else {
@@ -175,7 +153,6 @@ impl CreationForm {
         };
         let current = match kind {
             Creation::Agent => ticket,
-            Creation::Ticket => owner,
             _ => selected.and_then(|s| s.repository_id.as_deref()),
         };
         let index = choices
@@ -188,7 +165,6 @@ impl CreationForm {
         });
         let name = cx.new(|cx| {
             InputState::new(window, cx).placeholder(match kind {
-                Creation::Coordinator => "Defaults to the repository name",
                 Creation::Ticket => "e.g. Build notification preferences",
                 Creation::Repository => "/Users/you/dev/repository",
                 Creation::Agent | Creation::Import | Creation::ProjectRepositories => {
@@ -301,9 +277,8 @@ impl CreationForm {
             .find(|option| Some(&option.id) == selected)
             .cloned()
             .ok_or(match self.kind {
-                Creation::Coordinator => "Attach a repository to this project first",
-                Creation::Ticket => "Add a repository team to this project first",
-                _ => "Create a ticket in this repository team first",
+                Creation::Ticket => "Add a repository to this project first",
+                _ => "Create a ticket in this project first",
             })?;
         let detail = self.detail.read(cx).value().trim().to_string();
         match self.kind {
@@ -315,7 +290,11 @@ impl CreationForm {
                     return Err("Describe the ticket and its acceptance criteria".into());
                 }
                 Ok(Command::CreateTicket {
-                    coordinator_id: choice.id,
+                    coordinator_id: self
+                        .root_id
+                        .clone()
+                        .ok_or("Project coordinator unavailable")?,
+                    repository_id: choice.id,
                     title: name,
                     brief: detail,
                 })
@@ -331,17 +310,9 @@ impl CreationForm {
                 },
                 focus: None,
             }),
-            _ => Ok(Command::CreateSession {
-                project_id,
-                parent_id: self
-                    .root_id
-                    .clone()
-                    .ok_or("Project coordinator unavailable")?,
-                repository_id: Some(choice.id),
-                name: if name.is_empty() { choice.label } else { name },
-                role: Role::TaskOrchestrator,
-                provider: self.default_provider(Role::TaskOrchestrator)?,
-            }),
+            Creation::Repository | Creation::Import | Creation::ProjectRepositories => {
+                unreachable!("answered above")
+            }
         }
     }
 
@@ -521,29 +492,6 @@ impl CreationForm {
         ))
     }
 
-    fn coordinator_fields(&self, cx: &mut Context<Self>) -> Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(Self::field(
-                "Repository",
-                Select::new(&self.choices)
-                    .w_full()
-                    .placeholder("Select a repository")
-                    .disabled(self.pending),
-            ))
-            .child(Self::field(
-                "Team name",
-                Input::new(&self.name).w_full().disabled(self.pending),
-            ))
-            .child(Self::note(
-                "One coordinator plans and accepts every ticket for this repository within the project.",
-                cx,
-            ))
-            .children(self.role_default_note(Role::TaskOrchestrator, cx))
-    }
-
     fn ticket_fields(&self) -> Div {
         div()
             .flex()
@@ -554,10 +502,10 @@ impl CreationForm {
                 Input::new(&self.name).w_full().disabled(self.pending),
             ))
             .child(Self::field(
-                "Repository team",
+                "Repository",
                 Select::new(&self.choices)
                     .w_full()
-                    .placeholder("Select a team")
+                    .placeholder("Select a repository")
                     .disabled(self.pending),
             ))
             .child(Self::field(
@@ -870,7 +818,6 @@ impl CreationForm {
 impl Render for CreationForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let fields = match self.kind {
-            Creation::Coordinator => self.coordinator_fields(cx),
             Creation::Ticket => self.ticket_fields(),
             Creation::Agent => self.agent_fields(cx),
             Creation::Repository => self.repository_fields(cx),

@@ -20,7 +20,7 @@
 
 ## 4. Verification cycle
 
-- [ ] 4.1 Add the `verification` setting (verifiers, `max_rounds` default 2, range 1–5, unique focus) to host `settings.json` with a Settings editor; verify defaults and validation errors
+- [x] 4.1 Add the `verification` setting (verifiers, `max_rounds` default 2, range 1–5, unique focus) to host `settings.json` with a Settings editor; verify defaults and validation errors
 - [x] 4.2 Implement `verify_ticket` with its preconditions (ownership, `ready_for_testing`, no running cycle, clean worktree, verifier count ≤ min(`turn_limit - 1`, `HOST_WORKER_TURNS`), extracting the literal `6` host-wide worker limit in `service.rs::schedule` as that named constant), the pinned commit, verifier reuse by (role, focus) and the `verify:` messages; verify each refusal and the three-verifier start
 - [x] 4.3 In `service.rs::schedule`, treat a running cycle's testers and reviewers as readers, admit a round all-or-none, and hold new worker turns host-wide while a round waits so it cannot be starved; verify with the fake provider that three verifiers' `provider_runs` satisfy `MAX(started_at) < MIN(finished_at)`
 - [x] 4.4 Route reports during a cycle: bypass the per-report `ticket.state = kind` update so state changes only at round start (`verifying`) and round end, read-only check on verdicts, batch them to the coordinator, end the round, send one failure message to the implementer, re-run only failed verifiers on the implementer's next clean `ready_for_testing`, block at the cap with one waking message, end the cycle as `blocked` with an immediate wake on any other non-progress implementer report, and record a verdict that arrives after its cycle ended without changing the ticket's state; verify every scenario in `specs/ticket-verification`, including that `accept_ticket` refuses after one of three verifiers passed
@@ -33,9 +33,9 @@
 
 ## 6. Desktop
 
-- [ ] 6.1 Rebuild `sidebar.rs::tree` as coordinator → "repository · ticket" rows → agents; verify in the running app with a migrated store
-- [ ] 6.2 Remove "Add repository team" from `creation.rs` and add a repository picker to New ticket; update `conversation.rs`, `main.rs`, `inspector.rs`, `team_view.rs` and `usage_view.rs` references to `TaskOrchestrator`; verify in the running app
-- [ ] 6.3 Show verification rounds (commit, verifier results) in the coordinator's Tickets inspector; verify in the running app
+- [x] 6.1 Rebuild `sidebar.rs::tree` as coordinator → "repository · ticket" rows → agents; verify in the running app with a migrated store (deviation: verified by view-model tests in `tree.rs` against a temporary, migrated store; the app was not launched)
+- [x] 6.2 Remove "Add repository team" from `creation.rs` and add a repository picker to New ticket; update `conversation.rs`, `main.rs`, `inspector.rs`, `team_view.rs` and `usage_view.rs` references to `TaskOrchestrator`; verify in the running app (deviation: verified by compiling, clippy and the creation and tree view-model tests; the app was not launched)
+- [x] 6.3 Show verification rounds (commit, verifier results) in the coordinator's Tickets inspector; verify in the running app (deviation: verified by a view-model test of `tree::verification_lines` against a temporary store; the app was not launched)
 
 ## 7. Leftover worktree cleanup
 

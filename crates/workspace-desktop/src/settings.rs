@@ -1,6 +1,11 @@
-//! The Settings window: this client's appearance and the host's workspace folder.
+//! The Settings window: this client's appearance, the host's workspace folder and who verifies
+//! tickets.
 use super::*;
-use gpui_component::{ActiveTheme, Disableable};
+use gpui_component::{
+    ActiveTheme, Disableable, Sizable,
+    button::ButtonVariants,
+    input::{Input, InputState},
+};
 use ui::{hint, icon, mono, section, segment};
 
 /// The open Settings window, so ⌘, focuses it instead of opening a second one.
@@ -13,6 +18,19 @@ pub(super) struct Settings {
     workspaces_dir: Option<String>,
     folder_error: Option<String>,
     choosing_folder: bool,
+    verification: Option<VerificationSettings>,
+    verification_error: Option<String>,
+    /// The verifier being added.
+    draft: VerifierConfig,
+    focus: Entity<InputState>,
+    instruction: Entity<InputState>,
+}
+
+/// Which setting a host request changes, so its error shows beside it.
+#[derive(Clone, Copy)]
+enum Setting {
+    Folder,
+    Verification,
 }
 
 impl Settings {
@@ -25,12 +43,12 @@ impl Settings {
         {
             return;
         }
-        let bounds = Bounds::centered(None, size(px(520.), px(300.)), cx);
+        let bounds = Bounds::centered(None, size(px(560.), px(680.)), cx);
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitleBar::title_bar_options()),
-                is_resizable: false,
+                is_resizable: true,
                 is_minimizable: false,
                 ..Default::default()
             },
@@ -42,8 +60,25 @@ impl Settings {
                         workspaces_dir: None,
                         folder_error: None,
                         choosing_folder: false,
+                        verification: None,
+                        verification_error: None,
+                        draft: VerifierConfig {
+                            role: Role::Tester,
+                            focus: String::new(),
+                            instruction: None,
+                            provider: None,
+                            size: None,
+                        },
+                        focus: cx.new(|cx| {
+                            InputState::new(window, cx).placeholder("Focus, e.g. Codex correctness")
+                        }),
+                        instruction: cx.new(|cx| {
+                            InputState::new(window, cx).placeholder(
+                                "Optional instruction, e.g. Run the Reviso style review",
+                            )
+                        }),
                     };
-                    view.ask_host(Command::Settings, cx);
+                    view.ask_host(Command::Settings, Setting::Folder, cx);
                     view
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -74,6 +109,7 @@ impl Settings {
                         Command::SetWorkspacesDir {
                             path: path.to_string_lossy().into_owned(),
                         },
+                        Setting::Folder,
                         cx,
                     ),
                     None => view.choosing_folder = false,
@@ -84,12 +120,12 @@ impl Settings {
         .detach();
     }
 
-    /// Shows the host's answer, or its error beside the folder it still uses.
-    fn ask_host(&mut self, command: Command, cx: &mut Context<Self>) {
+    /// Shows the host's answer, or its error beside the setting it still uses.
+    fn ask_host(&mut self, command: Command, setting: Setting, cx: &mut Context<Self>) {
         let receiver = match self.bridge.request(command) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.folder_error = Some(error);
+                *self.error_for(setting) = Some(error);
                 self.choosing_folder = false;
                 return;
             }
@@ -106,15 +142,197 @@ impl Settings {
                 match answer {
                     Ok(settings) => {
                         view.workspaces_dir = Some(settings.workspaces_dir);
-                        view.folder_error = None;
+                        view.verification = Some(settings.verification);
+                        *view.error_for(setting) = None;
                     }
-                    Err(error) => view.folder_error = Some(error),
+                    Err(error) => *view.error_for(setting) = Some(error),
                 }
                 view.choosing_folder = false;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn error_for(&mut self, setting: Setting) -> &mut Option<String> {
+        match setting {
+            Setting::Folder => &mut self.folder_error,
+            Setting::Verification => &mut self.verification_error,
+        }
+    }
+
+    /// Saves a changed verification setting; the host refuses an invalid one and keeps its own.
+    fn save_verification(
+        &mut self,
+        change: impl FnOnce(&mut VerificationSettings),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut verification) = self.verification.clone() else {
+            return;
+        };
+        change(&mut verification);
+        self.ask_host(
+            Command::SetVerification { verification },
+            Setting::Verification,
+            cx,
+        );
+    }
+
+    fn add_verifier(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self.focus.read(cx).value().trim().to_owned();
+        let instruction = self.instruction.read(cx).value().trim().to_owned();
+        let verifier = VerifierConfig {
+            focus,
+            instruction: (!instruction.is_empty()).then_some(instruction),
+            ..self.draft.clone()
+        };
+        self.save_verification(|v| v.verifiers.push(verifier), cx);
+        for input in [&self.focus, &self.instruction] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+    }
+
+    fn verification_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let Some(verification) = &self.verification else {
+            return div();
+        };
+        let cap = verification.max_rounds;
+        let mut rounds = div().flex().gap_1();
+        for n in 1..=MAX_VERIFICATION_ROUNDS {
+            rounds = rounds.child(
+                segment(
+                    SharedString::from(format!("rounds-{n}")),
+                    n.to_string(),
+                    n == cap,
+                )
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.save_verification(|v| v.max_rounds = n, cx)
+                })),
+            );
+        }
+        let mut list = div().flex().flex_col().gap_1();
+        for (index, verifier) in verification.verifiers.iter().enumerate() {
+            let model = match (verifier.provider, verifier.size) {
+                (None, None) => "role default".to_owned(),
+                (provider, size) => [
+                    provider.map(|p| format!("{p:?}")),
+                    size.map(|s| format!("{s:?}")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" "),
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .child(verifier.role.agent_label(Some(&verifier.focus))),
+                    )
+                    .child(hint(model, p))
+                    .child(
+                        button(SharedString::from(format!("remove-verifier-{index}")))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("close"))
+                            .tooltip("Remove this verifier")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.save_verification(
+                                    |v| {
+                                        v.verifiers.remove(index);
+                                    },
+                                    cx,
+                                )
+                            })),
+                    ),
+            );
+        }
+        let draft = &self.draft;
+        let mut roles = div().flex().gap_1();
+        for role in [Role::Tester, Role::Reviewer] {
+            roles = roles.child(
+                segment(
+                    SharedString::from(format!("verifier-role-{role:?}")),
+                    role.label(),
+                    draft.role == role,
+                )
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.draft.role = role;
+                    cx.notify();
+                })),
+            );
+        }
+        let mut providers = div().flex().gap_1();
+        for (label, provider) in [
+            ("Default", None),
+            ("Claude", Some(Provider::Claude)),
+            ("Codex", Some(Provider::Codex)),
+        ] {
+            providers = providers.child(
+                segment(
+                    SharedString::from(format!("verifier-provider-{label}")),
+                    label,
+                    draft.provider == provider,
+                )
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.draft.provider = provider;
+                    cx.notify();
+                })),
+            );
+        }
+        let mut sizes = div().flex().gap_1();
+        for (label, size) in [
+            ("Default", None),
+            ("Big", Some(ProfileSize::Big)),
+            ("Small", Some(ProfileSize::Small)),
+        ] {
+            sizes = sizes.child(
+                segment(
+                    SharedString::from(format!("verifier-size-{label}")),
+                    label,
+                    draft.size == size,
+                )
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.draft.size = size;
+                    cx.notify();
+                })),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("VERIFICATION", p))
+            .child(hint(
+                "verify_ticket starts every verifier at once on the ticket's current commit. Only failed verifiers re-run, up to the round cap.",
+                p,
+            ))
+            .child(div().flex().items_center().gap_2().child("Round cap").child(rounds))
+            .child(list)
+            .child(div().flex().gap_2().child(roles).child(providers).child(sizes))
+            .child(Input::new(&self.focus))
+            .child(Input::new(&self.instruction))
+            .child(
+                div().flex().child(
+                    button("add-verifier")
+                        .icon(icon("plus"))
+                        .label("Add verifier")
+                        .on_click(cx.listener(|view, _, window, cx| view.add_verifier(window, cx))),
+                ),
+            )
+            .children(self.verification_error.clone().map(|error| {
+                div()
+                    .text_size(px(12.))
+                    .line_height(relative(1.5))
+                    .text_color(p.red)
+                    .child(error)
+            }))
     }
 
     fn appearance_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -211,7 +429,9 @@ impl Render for Settings {
                     .gap_4()
                     .child(self.appearance_section(p, cx))
                     .child(div().h(px(1.)).bg(p.edge.opacity(0.25)))
-                    .child(self.folder_section(p, cx)),
+                    .child(self.folder_section(p, cx))
+                    .child(div().h(px(1.)).bg(p.edge.opacity(0.25)))
+                    .child(self.verification_section(p, cx)),
             )
     }
 }

@@ -14,7 +14,7 @@ use workspace_host::usage::local_time;
 fn scope(role: Role) -> &'static str {
     match role {
         Role::ProjectOrchestrator => "Project",
-        Role::TaskOrchestrator => "Repository team",
+        Role::TaskOrchestrator => "Retired repository coordinator",
         _ => "Agent",
     }
 }
@@ -68,10 +68,9 @@ impl Panel {
             Self::Git => "git",
         }
     }
-    fn title(self, role: Role) -> &'static str {
+    fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
-            Self::Team if role == Role::ProjectOrchestrator => "Teams",
             Self::Team => "Tickets",
             Self::Memory => "Memory",
             Self::Events => "Events",
@@ -118,7 +117,7 @@ impl Workspace {
         {
             let selected = self.panel == Some(panel);
             let badge = (panel == Panel::Attention && attention > 0).then_some(attention);
-            let tooltip = format!("{} · {}", panel.title(role), self.owner_name());
+            let tooltip = format!("{} · {}", panel.title(), self.owner_name());
             rail = rail.child(
                 div()
                     .id(SharedString::from(format!("inspector-{panel:?}")))
@@ -142,7 +141,7 @@ impl Workspace {
                         div()
                             .text_size(px(10.))
                             .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                            .child(panel.title(role)),
+                            .child(panel.title()),
                     )
                     .when_some(badge, |d, count| {
                         d.child(
@@ -214,7 +213,7 @@ impl Workspace {
                                 div()
                                     .text_size(px(18.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(panel.title(role)),
+                                    .child(panel.title()),
                             ),
                     )
                     .child(
@@ -392,16 +391,12 @@ impl Workspace {
         body = body.child(self.context_card(session, p, cx));
         if session.role == Role::ProjectOrchestrator {
             let in_project = |s: &&Session| s.project_id == session.project_id;
-            let teams: Vec<_> = self
-                .shown(snapshot)
-                .filter(in_project)
-                .filter(|s| s.role == Role::TaskOrchestrator)
-                .collect();
-            let tickets = snapshot
+            let tickets: Vec<_> = snapshot
                 .tickets
                 .iter()
-                .filter(|t| teams.iter().any(|team| team.id == t.coordinator_id))
-                .count();
+                .filter(|t| t.coordinator_id == session.id)
+                .collect();
+            let open = tickets.iter().filter(|t| t.is_open()).count();
             let agents = self
                 .shown(snapshot)
                 .filter(in_project)
@@ -411,8 +406,8 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(Self::stat(teams.len(), "Teams", p))
-                    .child(Self::stat(tickets, "Tickets", p))
+                    .child(Self::stat(tickets.len(), "Tickets", p))
+                    .child(Self::stat(open, "Open", p))
                     .child(Self::stat(agents, "Agents", p)),
             );
             let weak = cx.weak_entity();
@@ -512,9 +507,15 @@ impl Workspace {
         let archived = session.archived;
         let noun = match session.role {
             Role::ProjectOrchestrator => "project",
-            Role::TaskOrchestrator => "team",
             _ => "agent",
         };
+        // A retired repository coordinator stays archived: its conversation is history only.
+        if session.role == Role::TaskOrchestrator {
+            return body.child(hint(
+                "Retired when tickets moved to the project coordinator. Its conversation stays readable here; it cannot be restored.",
+                p,
+            ));
+        }
         body = body.child(
             div()
                 .flex()

@@ -20,6 +20,7 @@ mod repositories_view;
 mod settings;
 mod sidebar;
 mod team_view;
+mod tree;
 mod ui;
 mod update;
 mod usage_view;
@@ -762,7 +763,7 @@ impl Workspace {
     fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match self.selected_session().map(|s| s.role) {
             Some(Role::ProjectOrchestrator) => "Describe the goal, or reply to your coordinator…",
-            Some(Role::TaskOrchestrator) => "Message this repository coordinator…",
+            Some(Role::TaskOrchestrator) => "This retired repository coordinator is read-only",
             Some(_) => "Give this agent a direct instruction…",
             None => "Create a project to start…",
         };
@@ -1222,10 +1223,10 @@ impl Workspace {
         let has_repository = project
             .as_ref()
             .is_some_and(|id| !snapshot.project_repositories(id).is_empty());
-        // A team needs a repository, so start with the step that is actually missing.
-        let kind = if kind == Creation::Coordinator && !has_repository {
+        // A ticket needs a repository, so start with the step that is actually missing.
+        let kind = if kind == Creation::Ticket && !has_repository {
             window.push_notification(
-                Notification::info("Add a repository first. Each team works in one."),
+                Notification::info("Add a repository first. Each ticket works in one."),
                 cx,
             );
             Creation::Import

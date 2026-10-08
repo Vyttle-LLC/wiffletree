@@ -44,14 +44,17 @@ impl Workspace {
                 .filter(|project| project.uses(&repository.id))
                 .count();
             let works_here = |s: &&Session| s.repository_id.as_ref() == Some(&repository.id);
-            let teams = snapshot
-                .sessions
+            let tickets = snapshot
+                .tickets
                 .iter()
-                .filter(works_here)
-                .filter(|s| s.role == Role::TaskOrchestrator && !s.archived)
+                .filter(|t| t.repository_id == repository.id && t.is_open())
                 .count();
-            // Archived teams still point at the repository, so they keep it too.
-            let in_use = snapshot.sessions.iter().any(|s| works_here(&s));
+            // Finished tickets and archived agents still point at the repository, so they keep it.
+            let in_use = snapshot.sessions.iter().any(|s| works_here(&s))
+                || snapshot
+                    .tickets
+                    .iter()
+                    .any(|t| t.repository_id == repository.id);
             let id = repository.id.clone();
             let missing = snapshot.missing_repositories.contains(&repository.id);
             list = list.child(
@@ -77,9 +80,9 @@ impl Workspace {
                     )
                     .child(hint(
                         format!(
-                            "{projects} {} · {teams} {}",
+                            "{projects} {} · {tickets} open {}",
                             if projects == 1 { "project" } else { "projects" },
-                            if teams == 1 { "team" } else { "teams" },
+                            if tickets == 1 { "ticket" } else { "tickets" },
                         ),
                         p,
                     ))
@@ -91,7 +94,7 @@ impl Workspace {
                             .xsmall()
                             .icon(icon("close"))
                             .tooltip(if in_use {
-                                "Teams work here, so it stays in the workspace"
+                                "Tickets work here, so it stays in the workspace"
                             } else {
                                 "Remove from the workspace; root folders won't add it back. Files on disk are untouched."
                             })

@@ -444,7 +444,7 @@ impl Workspace {
                         .child("Start with a project."),
                 )
                 .child(hint(
-                    "A project is one outcome: a feature, a bug, a migration. Its main coordinator plans the work with you and runs a team in each repository.",
+                    "A project is one outcome: a feature, a bug, a migration. Its coordinator plans the work with you and runs each ticket in its own repository worktree with its own agents.",
                     p,
                 ))
                 .child(

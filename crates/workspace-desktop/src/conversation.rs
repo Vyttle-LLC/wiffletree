@@ -276,17 +276,20 @@ impl Workspace {
                         .on_click(cx.listener(|v, _, w, c| v.toggle_pause(w, c))),
                 )
             })
-            .when(session.role == Role::TaskOrchestrator, |d| {
-                d.child(
-                    button("new-ticket")
-                        .ghost()
-                        .icon(icon("plus"))
-                        .label("New ticket")
-                        .on_click(
-                            cx.listener(|v, _, w, c| v.open_creation(Creation::Ticket, None, w, c)),
-                        ),
-                )
-            })
+            .when(
+                session.role == Role::ProjectOrchestrator && !session.archived,
+                |d| {
+                    d.child(
+                        button("new-ticket")
+                            .ghost()
+                            .icon(icon("plus"))
+                            .label("New ticket")
+                            .on_click(cx.listener(|v, _, w, c| {
+                                v.open_creation(Creation::Ticket, None, w, c)
+                            })),
+                    )
+                },
+            )
             // A project runs once you message it, so the only control it needs is Stop.
             .children(if session.archived {
                 Some(
@@ -512,8 +515,8 @@ impl Workspace {
                 ],
             ),
             Role::TaskOrchestrator => (
-                "One repository. A focused team.",
-                "This coordinator plans the tickets for its repository and hands them to implementers and testers.",
+                "A retired repository coordinator.",
+                "Its tickets and agents now belong to the project coordinator. This conversation stays readable.",
                 &[
                     (
                         "Propose tickets",

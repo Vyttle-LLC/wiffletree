@@ -353,69 +353,60 @@ impl Workspace {
                 p,
             )));
         }
-        for project in snapshot.projects.iter().rev() {
-            let Some(root) = self
-                .shown(snapshot)
-                .find(|s| s.project_id == project.id && s.parent_id.is_none())
-            else {
-                continue;
-            };
-            tree = tree.child(self.project_row(root, p, cx));
-            if self.collapsed_projects.contains(&project.id) {
-                continue;
-            }
-            let teams: Vec<_> = self
-                .shown(snapshot)
-                .filter(|s| s.parent_id.as_ref() == Some(&root.id))
-                .collect();
-            for team in &teams {
-                tree = tree.child(self.session_row(team, 1, team.name.clone(), p, cx));
-                for ticket in snapshot
-                    .tickets
-                    .iter()
-                    .filter(|t| t.coordinator_id == team.id)
-                {
-                    let on_ticket = |s: &Session| {
-                        self.runtime(&s.id)
-                            .is_some_and(|r| r.ticket_id.as_ref() == Some(&ticket.id))
-                    };
-                    let workers: Vec<_> = self.shown(snapshot).filter(|s| on_ticket(s)).collect();
-                    // A ticket whose agents are all archived, such as a closed one, goes with them.
-                    if workers.is_empty() && snapshot.sessions.iter().any(on_ticket) {
-                        continue;
+        let mut has_tickets = std::collections::BTreeSet::new();
+        for ticket in &snapshot.tickets {
+            has_tickets.insert(ticket.coordinator_id.clone());
+        }
+        let mut project = None;
+        for row in tree::rows(snapshot, self.show_archived, &self.collapsed_projects) {
+            match row {
+                tree::Row::Project(root) => {
+                    if let Some(previous) = project.replace(root) {
+                        tree = self.close_project(tree, previous, &has_tickets, cx);
                     }
-                    tree = tree.child(self.ticket_row(ticket, p, cx));
-                    for worker in workers {
-                        // The ticket row above already names the work.
-                        let focus = self.runtime(&worker.id).and_then(|r| r.focus.as_deref());
-                        let label = worker.role.agent_label(focus);
-                        tree = tree.child(self.session_row(worker, 3, label, p, cx));
-                    }
+                    tree = tree.child(self.project_row(root, p, cx));
                 }
-                // Older stores can contain workers created before ticket ownership existed.
-                for worker in self.shown(snapshot).filter(|s| {
-                    s.parent_id.as_ref() == Some(&team.id)
-                        && self.runtime(&s.id).is_none_or(|r| r.ticket_id.is_none())
-                }) {
-                    tree = tree.child(self.session_row(worker, 2, worker.name.clone(), p, cx));
+                tree::Row::Ticket { ticket, label } => {
+                    tree = tree.child(self.ticket_row(ticket, label, p, cx));
                 }
+                tree::Row::Agent {
+                    session,
+                    depth,
+                    label,
+                } => tree = tree.child(self.session_row(session, depth, label, p, cx)),
             }
-            if teams.is_empty() && self.selected.as_ref() == Some(&root.id) {
-                tree = tree.child(
-                    button(SharedString::from(format!("add-team-{}", root.id)))
-                        .ghost()
-                        .icon(icon("plus"))
-                        .label("Add repository team")
-                        .ml(px(INDENT + 8.))
-                        .mr_auto()
-                        .on_click(cx.listener(|v, _, w, c| {
-                            v.open_creation(Creation::Coordinator, None, w, c)
-                        })),
-                );
-            }
-            tree = tree.child(div().h_2());
+        }
+        if let Some(last) = project {
+            tree = self.close_project(tree, last, &has_tickets, cx);
         }
         tree
+    }
+
+    /// Offers a first ticket under a selected coordinator that has none, then spaces projects.
+    fn close_project(
+        &self,
+        mut tree: Div,
+        root: &Session,
+        has_tickets: &std::collections::BTreeSet<String>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if !has_tickets.contains(&root.id)
+            && !self.collapsed_projects.contains(&root.project_id)
+            && self.selected.as_ref() == Some(&root.id)
+        {
+            tree = tree.child(
+                button(SharedString::from(format!("add-ticket-{}", root.id)))
+                    .ghost()
+                    .icon(icon("plus"))
+                    .label("New ticket")
+                    .ml(px(INDENT + 8.))
+                    .mr_auto()
+                    .on_click(
+                        cx.listener(|v, _, w, c| v.open_creation(Creation::Ticket, None, w, c)),
+                    ),
+            );
+        }
+        tree.child(div().h_2())
     }
 
     pub(super) fn shown_status(&self, session: &Session) -> Status {
@@ -575,7 +566,7 @@ impl Workspace {
                             let rename = weak.clone();
                             let rename_id = rename_id.clone();
                             let add_repositories = weak.clone();
-                            let add_team = weak.clone();
+                            let add_ticket = weak.clone();
                             let archive = weak.clone();
                             let archive_id = archive_id.clone();
                             menu.item(PopupMenuItem::new("Rename").icon(icon("rename")).on_click(
@@ -595,16 +586,11 @@ impl Workspace {
                                     }),
                             )
                             .item(
-                                PopupMenuItem::new("Add repository team")
+                                PopupMenuItem::new("New ticket")
                                     .icon(icon("plus"))
                                     .on_click(move |_, window, cx| {
-                                        let _ = add_team.update(cx, |view, cx| {
-                                            view.open_creation(
-                                                Creation::Coordinator,
-                                                None,
-                                                window,
-                                                cx,
-                                            )
+                                        let _ = add_ticket.update(cx, |view, cx| {
+                                            view.open_creation(Creation::Ticket, None, window, cx)
                                         });
                                     }),
                             )
@@ -676,13 +662,19 @@ impl Workspace {
             .child(div().flex_none().child(status_glyph(status, 12., p)))
     }
 
-    fn ticket_row(&self, ticket: &Ticket, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn ticket_row(
+        &self,
+        ticket: &Ticket,
+        label: String,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let coordinator = ticket.coordinator_id.clone();
         let state = humanize(&ticket.state);
-        let detail = format!("{} · {state}", ticket.title);
+        let detail = format!("{label} · {state}");
         self.row(
             SharedString::from(format!("ticket-{}", ticket.id)),
-            2,
+            1,
             false,
             p,
         )
@@ -698,7 +690,7 @@ impl Workspace {
                 .min_w_0()
                 .text_ellipsis()
                 .text_color(p.text)
-                .child(ticket.title.clone()),
+                .child(label),
         )
         .child(
             div()

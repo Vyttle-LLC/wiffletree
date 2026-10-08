@@ -1,4 +1,4 @@
-//! Teams for a project, and tickets with their agents for a repository coordinator.
+//! A project's tickets with their repository, agents and verification rounds.
 use super::*;
 use gpui_component::button::ButtonVariants;
 use inspector::copyable;
@@ -12,11 +12,16 @@ impl Workspace {
         else {
             return div();
         };
-        if session.role == Role::ProjectOrchestrator {
-            self.teams(session, snapshot, p, cx)
-        } else {
-            self.tickets(session, snapshot, p, cx)
-        }
+        // Every ticket belongs to the project's coordinator; its agents show the same list.
+        let owner = match session.parent_id.as_ref() {
+            Some(parent) if session.role != Role::ProjectOrchestrator => snapshot
+                .sessions
+                .iter()
+                .find(|s| &s.id == parent)
+                .unwrap_or(session),
+            _ => session,
+        };
+        self.tickets(owner, snapshot, p, cx)
     }
 
     fn session_link(
@@ -49,92 +54,9 @@ impl Workspace {
             .child(icon("chevron-right").size(px(12.)).text_color(p.subtle))
     }
 
-    fn teams(
-        &self,
-        project: &Session,
-        snapshot: &Snapshot,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let teams: Vec<_> = self
-            .shown(snapshot)
-            .filter(|s| s.parent_id.as_ref() == Some(&project.id))
-            .collect();
-        let mut body =
-            div().flex().flex_col().gap_3().child(
-                section("REPOSITORY TEAMS", p).child(
-                    button("add-team")
-                        .primary()
-                        .icon(icon("plus"))
-                        .label("Add team")
-                        .on_click(cx.listener(|v, _, w, c| {
-                            v.open_creation(Creation::Coordinator, None, w, c)
-                        })),
-                ),
-            );
-        if teams.is_empty() {
-            return body.child(empty_state(
-                "team",
-                "No teams yet",
-                "Each repository gets one coordinator that plans its tickets and runs its agents. Your main coordinator can also create teams when you go live.",
-                p,
-            ));
-        }
-        for team in teams {
-            let id = team.id.clone();
-            let tickets: Vec<_> = snapshot
-                .tickets
-                .iter()
-                .filter(|t| t.coordinator_id == team.id)
-                .collect();
-            let accepted = tickets.iter().filter(|t| t.state == "accepted").count();
-            let repository = snapshot
-                .repositories
-                .iter()
-                .find(|r| Some(&r.id) == team.repository_id.as_ref())
-                .map_or(String::new(), |r| r.name.clone());
-            body = body.child(
-                card(p)
-                    .id(SharedString::from(format!("team-{id}")))
-                    .cursor_pointer()
-                    .hover(move |d| d.border_color(p.focus))
-                    .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(icon(session_icon(team.role)).text_color(p.subtle))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_ellipsis()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(team.name.clone()),
-                            )
-                            .child(self.session_badge(team, p)),
-                    )
-                    .child(hint(
-                        format!(
-                            "{repository} · {} {} · {accepted} accepted",
-                            tickets.len(),
-                            if tickets.len() == 1 {
-                                "ticket"
-                            } else {
-                                "tickets"
-                            }
-                        ),
-                        p,
-                    )),
-            );
-        }
-        body
-    }
-
     fn tickets(
         &self,
-        team: &Session,
+        coordinator: &Session,
         snapshot: &Snapshot,
         p: Palette,
         cx: &mut Context<Self>,
@@ -142,7 +64,7 @@ impl Workspace {
         let tickets: Vec<_> = snapshot
             .tickets
             .iter()
-            .filter(|t| t.coordinator_id == team.id)
+            .filter(|t| t.coordinator_id == coordinator.id)
             .collect();
         let mut body = div().flex().flex_col().gap_3().child(
             section("TICKETS", p).child(
@@ -184,7 +106,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(ticket.title.clone()),
+                                .child(tree::ticket_label(snapshot, ticket)),
                         )
                         .child(pill(
                             humanize(&ticket.state),
@@ -193,11 +115,21 @@ impl Workspace {
                 )
                 .child(hint(ticket.brief.clone(), p).line_clamp(4))
                 .child(copyable("Branch", &ticket.branch, p));
+            let rounds = tree::verification_lines(ticket);
+            if !rounds.is_empty() {
+                let mut list = div().flex().flex_col().gap_1();
+                for line in rounds {
+                    list = list.child(hint(line, p));
+                }
+                entry = entry.child(list);
+            }
             let agents = agents_of(ticket);
             if !agents.is_empty() {
                 let mut list = div().flex().flex_col().mx(px(-8.));
                 for agent in agents {
-                    list = list.child(self.session_link(agent, agent.role.label().into(), p, cx));
+                    let focus = self.runtime(&agent.id).and_then(|r| r.focus.as_deref());
+                    list =
+                        list.child(self.session_link(agent, agent.role.agent_label(focus), p, cx));
                 }
                 entry = entry.child(list);
             }
@@ -220,7 +152,8 @@ impl Workspace {
         let unassigned: Vec<_> = self
             .shown(snapshot)
             .filter(|s| {
-                s.parent_id.as_ref() == Some(&team.id)
+                s.parent_id.as_ref() == Some(&coordinator.id)
+                    && s.role != Role::TaskOrchestrator
                     && self.runtime(&s.id).is_none_or(|r| r.ticket_id.is_none())
             })
             .collect();
