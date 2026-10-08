@@ -18,8 +18,6 @@ type Reply = Sender<std::result::Result<Value, String>>;
 const TURN_BUDGET: &str = "turn-budget";
 /// How long a turn runs before it checks in with its parent, and how often after that.
 const CHECK_IN_MS: i64 = 30 * 60_000;
-/// Operation prefix for the inbox item a long turn raises when it has no parent to check in with.
-const CHECK_IN: &str = "check-in";
 /// How long an idle parent waits after a child's first progress report, so a burst of
 /// them arrives in one turn.
 const PROGRESS_BATCH_MS: i64 = 20_000;
@@ -115,8 +113,8 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
     // No turn runs any more, so no check-in still says one does.
     let check_ins = host
         .db
-        .prepare(&format!("SELECT id FROM attention WHERE substr(operation_id,1,{})='{CHECK_IN}:' AND json_extract(data,'$.answer') IS NULL", CHECK_IN.len() + 1))?
-        .query_map([], |r| r.get::<_, String>(0))?
+        .prepare("SELECT id FROM attention WHERE substr(operation_id,1,length(?1))=?1 AND json_extract(data,'$.answer') IS NULL")?
+        .query_map([CHECK_IN], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in check_ins {
         host.resolve_attention(&id, "Superseded by a host restart")?;
@@ -1128,7 +1126,7 @@ impl Actor {
                     return Ok(());
                 }
                 self.host.send(
-                    &format!("{CHECK_IN}:{run}:{minutes}"),
+                    &format!("{CHECK_IN}{run}:{minutes}"),
                     Some(id),
                     parent,
                     &format!(
@@ -1141,7 +1139,7 @@ impl Actor {
                 self.host.request_attention(
                     id,
                     "local",
-                    &format!("{CHECK_IN}:{run}:{minutes}"),
+                    &format!("{CHECK_IN}{run}:{minutes}"),
                     &format!("{status} It keeps running; use Pause or Stop if it is stuck."),
                     &[],
                 )?;
@@ -2144,6 +2142,56 @@ mod tests {
 
         recover_unfinished_turns(&mut actor.host).unwrap();
         assert!(actor.host.open_attention(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_in_cleanup_leaves_human_questions_alone() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        let project = actor.host.session(&session).unwrap().project_id;
+        let ask = |request_id: &str| json!({"request_id":request_id,"question":"Deploy?"});
+        actor
+            .host
+            .agent_tool(&session, "ask_user", ask("check-in-deploy"))
+            .unwrap();
+        let refused = actor
+            .host
+            .agent_tool(&session, "ask_user", ask("check-in:deploy"))
+            .unwrap_err();
+        assert!(refused.to_string().contains("reserved"), "{refused}");
+        let command = Command::RequestAttention {
+            session_id: session.clone(),
+            host: "local".into(),
+            operation_id: "check-in:deploy".into(),
+            prompt: "Deploy?".into(),
+        };
+        assert!(actor.host.execute(command).is_err());
+        let open = |actor: &Actor| {
+            actor
+                .host
+                .open_attention(&project)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.operation_id)
+                .collect::<Vec<_>>()
+        };
+
+        let started = actor.active[&session].started_at;
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+        assert_eq!(open(&actor).len(), 2);
+        actor
+            .provider_event(
+                &session,
+                &run,
+                ProviderEvent::Finished {
+                    error: None,
+                    usage: Value::Null,
+                    cancelled: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(open(&actor), ["check-in-deploy"]);
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert_eq!(open(&actor), ["check-in-deploy"]);
     }
 
     #[test]
