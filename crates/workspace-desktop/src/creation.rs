@@ -5,6 +5,7 @@ use gpui_component::{
     button::ButtonVariants,
     checkbox::Checkbox,
     input::{Input, InputState, Textarea, TextareaState},
+    menu::{DropdownMenu, PopupMenuItem},
     select::{Select, SelectItem, SelectState},
     spinner::Spinner,
 };
@@ -71,7 +72,10 @@ pub struct CreationForm {
     choices: Entity<SelectState<Vec<Choice>>>,
     options: Vec<Choice>,
     role: Role,
-    policies: Vec<RolePolicy>,
+    model_selection: ModelSelection,
+    catalog: Vec<workspace_host::runtime::ModelOption>,
+    /// The human's pick; `None` follows the role's pre-fill.
+    profile: Option<ModelProfile>,
     pub pending: bool,
     pub error: String,
     bridge: Bridge,
@@ -197,7 +201,9 @@ impl CreationForm {
             choices,
             options,
             role: Role::Implementer,
-            policies: snapshot.policies.clone(),
+            model_selection: snapshot.model_selection.clone(),
+            catalog: Vec::new(),
+            profile: None,
             pending: false,
             error: String::new(),
             bridge,
@@ -210,12 +216,16 @@ impl CreationForm {
         }
     }
 
-    fn default_provider(&self, role: Role) -> Result<Provider, String> {
-        self.policies
-            .iter()
-            .find(|p| p.role == role)
-            .map(|p| p.default.provider)
-            .ok_or_else(|| "Role policy unavailable".into())
+    /// The installed CLIs' models, offered by the model picker beside the allowed ones.
+    pub fn with_catalog(mut self, catalog: &[workspace_host::runtime::ModelOption]) -> Self {
+        self.catalog = catalog.to_vec();
+        self
+    }
+
+    fn chosen_profile(&self, role: Role) -> Option<ModelProfile> {
+        self.profile
+            .clone()
+            .or_else(|| self.model_selection.prefill(role))
     }
 
     pub fn command(&self, cx: &App) -> Result<Command, String> {
@@ -302,7 +312,9 @@ impl CreationForm {
             Creation::Agent => Ok(Command::AssignTicket {
                 ticket_id: choice.id,
                 role: self.role,
-                provider: self.default_provider(self.role)?,
+                profile: self
+                    .chosen_profile(self.role)
+                    .ok_or("Choose a model for this agent")?,
                 instruction: if detail.is_empty() {
                     default_instruction(self.role).into()
                 } else {
@@ -481,15 +493,45 @@ impl CreationForm {
             .child(text.into())
     }
 
-    fn role_default_note(&self, role: Role, cx: &App) -> Option<Div> {
-        let policy = self.policies.iter().find(|p| p.role == role)?;
-        Some(Self::note(
-            format!(
-                "Starts on {:?} · {} · {}. Change defaults in Models.",
-                policy.default.provider, policy.default.model, policy.default.effort
-            ),
-            cx,
-        ))
+    /// The model picker: the role's providers first, then every other model. Never limited.
+    fn model_field(&self, role: Role, cx: &mut Context<Self>) -> Div {
+        let current = self.chosen_profile(role);
+        let label = current.as_ref().map_or_else(
+            || "Choose a model".to_owned(),
+            |profile| super::models::profile_label(&self.catalog, profile),
+        );
+        let groups = super::models::picker_groups(&self.model_selection, &self.catalog, role);
+        let catalog = self.catalog.clone();
+        let weak = cx.weak_entity();
+        Self::field(
+            "Model",
+            super::button("create-model")
+                .outline()
+                .w_full()
+                .label(label)
+                .dropdown_caret(true)
+                .disabled(self.pending)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for group in &groups {
+                        menu = menu.label(group.heading.clone());
+                        for profile in &group.profiles {
+                            let weak = weak.clone();
+                            let chosen = profile.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(super::models::profile_label(&catalog, profile))
+                                    .checked(current.as_ref() == Some(profile))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = weak.update(cx, |form, cx| {
+                                            form.profile = Some(chosen.clone());
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                    }
+                    menu.scrollable(true).max_h(px(360.))
+                }),
+        )
     }
 
     fn ticket_fields(&self) -> Div {
@@ -526,6 +568,7 @@ impl CreationForm {
                     .disabled(self.pending)
                     .on_click(cx.listener(move |form, _, _, cx| {
                         form.role = role;
+                        form.profile = None;
                         cx.notify();
                     })),
             );
@@ -542,11 +585,11 @@ impl CreationForm {
                     .disabled(self.pending),
             ))
             .child(Self::field("Role", roles))
+            .child(self.model_field(self.role, cx))
             .child(Self::field(
                 "Instruction",
                 Textarea::new(&self.detail).w_full().disabled(self.pending),
             ))
-            .children(self.role_default_note(self.role, cx))
     }
 
     fn repository_fields(&self, cx: &mut Context<Self>) -> Div {

@@ -45,39 +45,16 @@ fn verifier(role: Role, focus: &str, provider: Option<Provider>) -> VerifierConf
         focus: focus.into(),
         instruction: None,
         provider,
-        size: None,
     }
 }
 
-/// Lets the tester role run on either provider through its saved Big profiles.
+/// Lets the tester role run on either provider.
 fn testers_on_both_providers(host: &mut Host) {
-    let profile = |provider, model: &str| ModelProfile {
-        provider,
-        model: model.into(),
-        effort: "high".into(),
-    };
-    let claude = profile(Provider::Claude, "sonnet");
-    let codex = profile(Provider::Codex, "gpt-6.1-sol");
-    let mut policy = host.policy(Role::Tester).unwrap();
-    policy.mode = RoutingMode::Automatic;
-    policy.default = codex.clone();
-    policy.small = codex.clone();
-    policy.standard = codex.clone();
-    policy.complex = codex.clone();
-    policy.allowed = vec![claude.clone(), codex.clone()];
-    policy.provider_profiles = vec![
-        ProviderProfiles {
-            provider: Provider::Claude,
-            big: claude.clone(),
-            small: claude,
-        },
-        ProviderProfiles {
-            provider: Provider::Codex,
-            big: codex.clone(),
-            small: codex,
-        },
-    ];
-    host.set_policy(&policy).unwrap();
+    let mut selection = host.model_selection().unwrap();
+    selection
+        .role_providers
+        .insert(Role::Tester, [Provider::Claude, Provider::Codex].into());
+    host.set_model_selection(&selection).unwrap();
 }
 
 #[test]

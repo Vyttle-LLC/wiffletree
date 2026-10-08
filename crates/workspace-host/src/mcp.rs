@@ -16,11 +16,12 @@ pub fn read_json(reader: &mut impl BufRead) -> Result<Option<Value>> {
 }
 pub fn tools() -> Value {
     let string = json!({"type":"string"});
+    let profile = json!({"type":"object","properties":{"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string},"required":["provider","model","effort"],"additionalProperties":false});
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}});
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets, runtime and role policies.",
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and the guide.",
             json!({}),
             vec![]
         ),
@@ -32,15 +33,15 @@ pub fn tools() -> Value {
         ),
         tool(
             "assign_ticket",
-            "Coordinator: assign a dedicated agent using its saved provider and Big/Small profile. Exact proposals must be approved in the role policy; no model substitution is allowed. Existing assignments with the same role and focus are returned; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
-            json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"provider":{"type":"string","enum":["claude","codex"]},"instruction":string,"size":{"type":"string","enum":["big","small"]},"complexity":{"type":"string","enum":["small","standard","complex"]},"profile":{"type":"object","properties":{"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string},"required":["provider","model","effort"],"additionalProperties":false}}),
-            vec!["ticket_id", "role", "instruction"]
+            "Coordinator: assign a dedicated agent. Choose an exact profile from model_selection in workspace_context, within the role's providers (any enabled provider for a reviewer) and the models allowed on this machine, guided by its guide, and give a one-line reason naming the deciding factor. Other choices are refused and nothing is substituted. Existing assignments with the same role and focus are returned unchanged; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
+            json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"instruction":string,"profile":profile,"reason":string}),
+            vec!["ticket_id", "role", "instruction", "profile", "reason"]
         ),
         tool(
             "verify_ticket",
-            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked.",
-            json!({"ticket_id":string}),
-            vec!["ticket_id"]
+            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. For each verifier in model_selection.verifiers, give its focus, an exact profile within its provider (or, without one, its role's providers) and the models allowed on this machine, guided by the guide, and a one-line reason. Any refused choice starts no verifier, and nothing is substituted. A verifier session that already exists under that focus is reused only if your profile matches its pinned one; otherwise it is archived and a fresh verifier starts on your choice. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked.",
+            json!({"ticket_id":string,"verifiers":{"type":"array","items":{"type":"object","properties":{"focus":string,"profile":profile,"reason":string},"required":["focus","profile","reason"],"additionalProperties":false}}}),
+            vec!["ticket_id", "verifiers"]
         ),
         tool(
             "send_message",

@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiffletree · Model selection mockups</title>
+<style>
+/* Canonical Tidal tokens, copied from design/themes/wiffletree-tidal.json. */
+:root, [data-theme="light"] {
+  --base:#F3F2ED; --surface:#FFFDF7; --overlay:#E4E9E3; --text:#1A262D; --subtle:#526865;
+  --muted:#748781; --edge:#C4CFCA; --accent:#902818; --on-accent:#FFFDF7; --focus:#2D5A5A;
+  --green:#326348; --red:#A3213E; --yellow:#77551C; --blue:#365E78; --magenta:#765074;
+}
+[data-theme="dark"] {
+  --base:#1A262D; --surface:#22373E; --overlay:#2A434A; --text:#F3F2ED; --subtle:#AFBFBC;
+  --muted:#829B99; --edge:#496063; --accent:#E6977E; --on-accent:#1A262D; --focus:#86C1BC;
+  --green:#A0CBB0; --red:#FFA6B8; --yellow:#E4C17A; --blue:#9AC4D8; --magenta:#CFADD0;
+}
+* { box-sizing:border-box; }
+body { margin:0; font:13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  background:var(--overlay); color:var(--text); }
+code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; }
+
+/* Page chrome around the mock windows (not part of the app). */
+.top { display:flex; align-items:center; gap:8px; padding:14px 20px; flex-wrap:wrap; }
+.top h1 { font-size:15px; margin:0 12px 0 0; }
+.tab { border:1px solid var(--edge); background:var(--surface); color:var(--text); border-radius:6px;
+  padding:5px 10px; font:inherit; cursor:pointer; }
+.tab[aria-selected="true"] { background:var(--text); color:var(--base); border-color:var(--text); }
+.spacer { flex:1; }
+.banner { margin:0 20px 10px; padding:8px 12px; border-radius:8px; border:1px dashed var(--yellow);
+  color:var(--yellow); background:color-mix(in srgb, var(--yellow) 8%, transparent); font-weight:500; }
+.caption { margin:0 20px 12px; color:var(--subtle); max-width:980px; }
+.view { display:none; } .view.on { display:block; }
+
+/* App window. */
+.window { margin:0 20px 28px; border-radius:12px; overflow:hidden; border:1px solid var(--edge);
+  background:var(--surface); box-shadow:0 10px 30px rgba(0,0,0,.12); display:flex; flex-direction:column; min-height:640px; }
+.titlebar { height:34px; flex:none; display:flex; align-items:center; gap:8px; padding:0 14px; background:var(--base); }
+.dot { width:12px; height:12px; border-radius:50%; background:var(--edge); }
+.app { flex:1; display:flex; min-height:0; }
+.sidebar { width:250px; flex:none; background:var(--base); border-right:1px solid color-mix(in srgb,var(--edge) 50%,transparent);
+  padding:10px 8px; display:flex; flex-direction:column; gap:2px; }
+.logo { font-size:22px; font-weight:600; letter-spacing:-.3px; padding:4px 8px 14px; }
+.logo span { color:var(--accent); }
+.eyebrow { font-size:10.5px; font-weight:600; letter-spacing:.6px; text-transform:uppercase; color:var(--subtle); padding:6px 8px; }
+.row { padding:6px 8px; border-radius:6px; display:flex; align-items:center; gap:8px; color:var(--text); }
+.row.sel { background:color-mix(in srgb,var(--edge) 45%,transparent); }
+.row.indent1 { padding-left:24px; } .row.indent2 { padding-left:44px; color:var(--subtle); }
+.row .end { margin-left:auto; color:var(--subtle); font-size:11px; }
+.grow { flex:1; }
+.main { flex:1; min-width:0; display:flex; flex-direction:column; }
+.header { height:64px; flex:none; padding:0 24px; display:flex; align-items:center; gap:12px;
+  border-bottom:1px solid color-mix(in srgb,var(--edge) 30%,transparent); }
+.crumb { font-size:11px; color:var(--subtle); }
+.title { font-size:18px; font-weight:600; }
+.body { flex:1; overflow:auto; padding:16px 24px; display:flex; flex-direction:column; gap:12px; }
+.footer { flex:none; padding:10px 24px; display:flex; align-items:center; gap:8px; border-top:1px solid color-mix(in srgb,var(--edge) 40%,transparent); }
+.hint { font-size:12px; color:var(--subtle); }
+.card { border:1px solid color-mix(in srgb,var(--edge) 40%,transparent); background:var(--base); border-radius:8px;
+  padding:12px; display:flex; flex-direction:column; gap:8px; }
+.card h3 { margin:0; font-size:13px; font-weight:600; display:flex; align-items:center; gap:8px; }
+.btn { font:inherit; font-size:12px; border:1px solid var(--edge); background:var(--surface); color:var(--text);
+  border-radius:6px; padding:4px 10px; cursor:default; white-space:nowrap; }
+.btn.ghost { border-color:transparent; background:transparent; }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+.btn.primary[disabled] { opacity:.45; }
+.btn.danger { color:var(--red); }
+.dd { font:inherit; font-size:12px; border:1px solid var(--edge); background:var(--surface); color:var(--text);
+  border-radius:6px; padding:4px 10px; display:inline-flex; align-items:center; justify-content:center; gap:6px; min-width:0; }
+.dd::after { content:"⌄"; font-size:11px; color:var(--subtle); transform:translateY(-2px); }
+.seg { display:inline-flex; gap:3px; }
+.seg b { font-weight:500; font-size:11px; padding:2px 7px; border-radius:5px; color:var(--subtle); }
+.seg b.on { background:var(--text); color:var(--base); }
+.pill { display:inline-block; white-space:nowrap; padding:1px 7px; border-radius:999px; font-size:10.5px; font-weight:500; }
+.pill.green { color:var(--green); background:color-mix(in srgb,var(--green) 12%,transparent); }
+.pill.red { color:var(--red); background:color-mix(in srgb,var(--red) 12%,transparent); }
+.pill.yellow { color:var(--yellow); background:color-mix(in srgb,var(--yellow) 12%,transparent); }
+.pill.blue { color:var(--blue); background:color-mix(in srgb,var(--blue) 12%,transparent); }
+.mock-tag { margin-left:auto; font-size:10px; font-weight:600; letter-spacing:.5px; color:var(--yellow);
+  border:1px dashed var(--yellow); border-radius:4px; padding:1px 6px; text-transform:uppercase; }
+
+/* (a) Allowlist grid. */
+.al { display:grid; grid-template-columns: 90px minmax(150px,1.4fr) minmax(90px,.7fr) minmax(170px,1fr) auto; gap:6px 8px; align-items:center; }
+.al .head { font-size:11px; color:var(--subtle); }
+.al .dup .dd { border-color:var(--red); }
+.capfield { display:flex; align-items:center; gap:6px; }
+.capfield input { width:100%; font:inherit; font-size:12px; border:1px solid var(--edge); background:var(--surface);
+  color:var(--text); border-radius:6px; padding:4px 8px; }
+.warn { color:var(--red); font-size:12px; display:flex; gap:6px; align-items:center; }
+.defaults { display:grid; grid-template-columns: 170px minmax(220px,340px); gap:6px 12px; align-items:center; }
+.editor { border:1px solid var(--edge); background:var(--surface); border-radius:6px; padding:10px 12px;
+  font-family:ui-monospace, "SF Mono", Menlo, monospace; font-size:12px; line-height:1.6; white-space:pre-wrap; min-height:220px; outline:none; }
+.editor .h { color:var(--accent); font-weight:600; }
+.counter { text-align:right; font-size:11px; color:var(--subtle); }
+.cols2 { display:flex; flex-wrap:wrap; gap:12px; } .cols2 > * { flex:1; min-width:340px; }
+.profile { display:grid; grid-template-columns:44px 1fr 100px; gap:6px; align-items:center; }
+.underline-tabs { display:flex; gap:16px; border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent); }
+.underline-tabs span { padding:4px 0; color:var(--subtle); } .underline-tabs span.on { color:var(--text); border-bottom:2px solid var(--accent); }
+
+/* (b) Chat, composer and inspector. */
+.msg { display:flex; gap:12px; } .avatar { width:26px; height:26px; flex:none; border-radius:6px; background:color-mix(in srgb,var(--accent) 12%,transparent);
+  color:var(--accent); display:grid; place-items:center; font-size:12px; font-weight:600; }
+.who { font-weight:600; } .when { color:var(--subtle); font-size:11px; margin-left:auto; }
+.chosen { font-size:12px; color:var(--subtle); padding:0 4px 6px; }
+.chosen b { color:var(--text); font-weight:500; }
+.composer { border:1px solid var(--edge); border-radius:12px; background:var(--surface); padding:10px 14px; display:flex; flex-direction:column; gap:10px; }
+.composer .ph { color:var(--muted); }
+.composer .bar { display:flex; align-items:center; gap:14px; font-size:12px; }
+.composer .bar .m::after { content:" ⌄"; color:var(--subtle); }
+.usage { display:inline-flex; align-items:center; gap:6px; color:var(--subtle); }
+.meter { width:70px; height:6px; border-radius:3px; background:color-mix(in srgb,var(--edge) 60%,transparent); overflow:hidden; }
+.meter i { display:block; height:100%; background:var(--focus); }
+.inspector { width:300px; flex:none; border-left:1px solid color-mix(in srgb,var(--edge) 40%,transparent); background:var(--surface); display:flex; flex-direction:column; }
+.inspector .body { padding:14px; }
+.rail { width:62px; flex:none; border-left:1px solid color-mix(in srgb,var(--edge) 40%,transparent); background:var(--base);
+  display:flex; flex-direction:column; align-items:center; padding-top:10px; gap:6px; font-size:10.5px; color:var(--subtle); }
+.rail div { width:52px; text-align:center; padding:6px 0; border-radius:8px; }
+.rail .on { background:color-mix(in srgb,var(--accent) 10%,transparent); color:var(--accent); }
+.agent { padding:6px 8px; border-radius:6px; display:flex; flex-direction:column; gap:1px; }
+.agent:hover { background:color-mix(in srgb,var(--edge) 25%,transparent); }
+.agent .r { font-size:11.5px; color:var(--subtle); }
+.agent .reason { font-size:11.5px; color:var(--subtle); font-style:italic; }
+
+/* (c) Dialog. */
+.scrim { position:relative; flex:1; display:grid; place-items:center; background:color-mix(in srgb,var(--text) 18%,transparent); padding:24px; }
+.dialog { width:520px; background:var(--surface); border-radius:12px; border:1px solid var(--edge); box-shadow:0 18px 40px rgba(0,0,0,.25);
+  padding:18px 20px; display:flex; flex-direction:column; gap:12px; }
+.dialog h2 { margin:0; font-size:16px; }
+.field { display:grid; grid-template-columns:100px 1fr; gap:8px; align-items:start; }
+.field label { padding-top:5px; color:var(--subtle); font-size:12px; }
+.menu { margin-top:4px; border:1px solid var(--edge); background:var(--surface); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.15);
+  padding:4px; }
+.menu .g { font-size:10.5px; font-weight:600; letter-spacing:.6px; text-transform:uppercase; color:var(--subtle); padding:6px 8px 2px; }
+.menu .i { padding:5px 8px; border-radius:5px; display:flex; gap:8px; align-items:center; }
+.menu .i.on { background:color-mix(in srgb,var(--focus) 12%,transparent); }
+.menu .i .chk { width:14px; color:var(--focus); }
+.menu .i .tag { margin-left:auto; font-size:11px; color:var(--subtle); }
+.menu .sep { height:1px; background:color-mix(in srgb,var(--edge) 60%,transparent); margin:4px 0; }
+.textarea { border:1px solid var(--edge); border-radius:6px; padding:8px; min-height:56px; color:var(--muted); background:var(--surface); }
+
+/* (d) Work stream and events. */
+.stream { border:1px solid color-mix(in srgb,var(--edge) 50%,transparent); border-radius:10px; background:var(--base); padding:10px 12px; display:flex; flex-direction:column; gap:6px; }
+.step { display:flex; gap:8px; align-items:flex-start; font-size:12.5px; }
+.step .ic { width:16px; flex:none; text-align:center; }
+.step.ok .ic { color:var(--green); } .step.fail .ic { color:var(--red); }
+.step.fail { background:color-mix(in srgb,var(--red) 7%,transparent); border-radius:6px; padding:6px; }
+.step .out { color:var(--subtle); font-size:12px; margin-top:2px; }
+.narr { color:var(--subtle); font-style:italic; font-size:12.5px; }
+.event { display:flex; flex-direction:column; gap:2px; padding:8px 0; border-bottom:1px solid color-mix(in srgb,var(--edge) 40%,transparent); }
+.event .k { display:flex; gap:8px; align-items:center; font-size:12px; }
+.event .d { font-size:12px; color:var(--subtle); }
+/* Providers and roles cards. */
+.prov { border:1px solid color-mix(in srgb,var(--edge) 40%,transparent); border-radius:8px; background:var(--surface); padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+.prov.off { opacity:.55; }
+.prov-head { display:flex; align-items:center; gap:10px; font-weight:600; }
+.toggle { width:30px; height:18px; border-radius:9px; background:var(--edge); position:relative; flex:none; }
+.toggle::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:var(--surface); }
+.toggle.on { background:var(--focus); } .toggle.on::after { left:14px; }
+.status { font-size:11px; font-weight:400; color:var(--green); } .status.no { color:var(--subtle); }
+.grid { display:grid; grid-template-columns: 150px repeat(var(--n), 64px); gap:4px 6px; align-items:center; font-size:12px; }
+.grid .h { font-size:11px; color:var(--subtle); text-align:center; } .grid .h.l { text-align:left; }
+.cb { width:14px; height:14px; border-radius:3px; border:1px solid var(--edge); background:var(--surface); display:inline-grid; place-items:center; font-size:10px; line-height:1; justify-self:center; vertical-align:middle; }
+.cb.on { background:var(--focus); border-color:var(--focus); color:var(--surface); }
+.cb.on::before { content:"✓"; }
+.caps { display:flex; gap:6px; flex-wrap:wrap; }
+.cap { font-size:11px; display:inline-flex; align-items:center; gap:4px; color:var(--subtle); }
+.cap input { width:68px; font:inherit; font-size:11px; border:1px solid var(--edge); background:var(--surface); color:var(--text); border-radius:5px; padding:2px 6px; }
+.roles { display:grid; grid-template-columns: 180px auto 1fr; gap:8px 12px; align-items:center; }
+.rchk { display:inline-flex; gap:6px; align-items:center; margin-right:14px; }
+.rchk.dis { color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="top" role="tablist">
+  <h1>Model selection · UI mockups</h1>
+  <button class="tab" data-view="today">Today</button>
+  <button class="tab" data-view="a" aria-selected="true">(a) Models page</button>
+  <button class="tab" data-view="b">(b) Chosen by</button>
+  <button class="tab" data-view="c">(c) New agent picker</button>
+  <button class="tab" data-view="d">(d) Rejections</button>
+  <span class="spacer"></span>
+  <button class="tab" id="theme">Dark</button>
+</div>
+<div class="banner">MOCKUP: static design study for the OpenSpec change <code>model-selection</code>. All names, models, reasons and numbers are sample data. Nothing here is live or implemented.</div>
+
+<!-- Shared sidebar markup is repeated per view so each view is a plain static picture. -->
+
+<!-- TODAY -->
+<section class="view" id="today">
+<p class="caption"><b>Today</b>, for comparison (recreated from <code>docs/images/models.png</code>): four role cards, each with a default-provider toggle, Claude/Codex profile tabs and Big/Small rows. The change removes all of this.</p>
+<div class="window"><div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">w<span>/</span> wiffletree</div>
+    <div class="eyebrow">Projects · 1</div>
+    <div class="row">▾ Workspace trial</div><div class="row indent1">tidepool</div>
+    <div class="grow"></div>
+    <div class="eyebrow">Workspace</div><div class="row">Repositories</div><div class="row">Usage and limits</div><div class="row sel">Models</div>
+  </aside>
+  <main class="main">
+    <div class="header"><div><div class="crumb">Workspace › Defaults for new agents in every project</div><div class="title">Models</div></div><span class="mock-tag">Today · mockup</span></div>
+    <div class="body">
+      <div class="hint">Pick each role's default provider and approve a Big and a Small profile per provider. New agents start on the default provider's Big profile; coordinators may only choose saved profiles. Coordinator covers main and repository coordinators.</div>
+      <div class="cols2">
+        <div class="card"><h3>Coordinator <span class="grow"></span><span class="hint">Default</span><span class="seg"><b class="on">Claude</b><b>Codex</b></span></h3>
+          <div class="underline-tabs"><span class="on">Claude profiles</span><span>Codex profiles</span></div>
+          <div class="profile"><span>Big</span><span class="dd">Opus · latest</span><span class="dd">High</span><span>Small</span><span class="dd">Opus · latest</span><span class="dd">Medium</span></div></div>
+        <div class="card"><h3>Implementer <span class="grow"></span><span class="hint">Default</span><span class="seg"><b class="on">Claude</b><b>Codex</b></span></h3>
+          <div class="underline-tabs"><span class="on">Claude profiles</span><span>Codex profiles</span></div>
+          <div class="profile"><span>Big</span><span class="dd">Opus · latest</span><span class="dd">Medium</span><span>Small</span><span class="dd">Sonnet · latest</span><span class="dd">High</span></div></div>
+        <div class="card"><h3>Tester <span class="grow"></span><span class="hint">Default</span><span class="seg"><b class="on">Claude</b><b>Codex</b></span></h3>
+          <div class="underline-tabs"><span class="on">Claude profiles</span><span>Codex profiles</span></div>
+          <div class="profile"><span>Big</span><span class="dd">Opus · latest</span><span class="dd">High</span><span>Small</span><span class="dd">Sonnet · latest</span><span class="dd">High</span></div></div>
+        <div class="card"><h3>Reviewer <span class="grow"></span><span class="hint">Default</span><span class="seg"><b>Claude</b><b class="on">Codex</b></span></h3>
+          <div class="underline-tabs"><span>Claude profiles</span><span class="on">Codex profiles</span></div>
+          <div class="profile"><span>Big</span><span class="dd">GPT 6.1 Sol</span><span class="dd">High</span><span>Small</span><span class="dd">GPT 6.1 Sol</span><span class="dd">Medium</span></div></div>
+      </div>
+    </div>
+    <div class="footer"><span class="hint grow">Saved</span><button class="btn primary" disabled>Save profiles</button></div>
+  </main>
+</div></div>
+</section>
+
+<!-- (a) MODELS PAGE -->
+<section class="view on" id="a">
+<p class="caption"><b>(a) Models page, per machine.</b> Four cards. <b>Providers</b> is the hard limit: which subscriptions this machine has and which models and efforts may run. <b>Roles</b> picks providers for coordinators, implementer and tester. <b>Review</b> sets the standard reviews (one per ticked provider, in parallel after the tester) and free-text instructions for custom reviews. <b>Guide</b> is prose on how to pick the model within a provider. The ticks below are today's real policies migrated (the union of allowed lists).</p>
+<div class="window"><div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">w<span>/</span> wiffletree</div>
+    <div class="eyebrow">Projects · 1</div>
+    <div class="row">▾ Workspace trial</div><div class="row indent1">tidepool</div>
+    <div class="grow"></div>
+    <div class="eyebrow">Workspace</div><div class="row">Repositories</div><div class="row">Usage and limits</div><div class="row sel">Models</div>
+  </aside>
+  <main class="main">
+    <div class="header"><div><div class="crumb">Workspace › Models on this machine</div><div class="title">Models</div></div><span class="mock-tag">Mockup · sample data</span></div>
+    <div class="body">
+      <div class="hint">Settings apply to this machine only. Coordinators may only use enabled providers, the providers set for each role, and ticked models. Your own choices are never limited.</div>
+
+      <div class="card">
+        <h3>Providers <span class="hint" style="font-weight:400">the subscriptions on this machine</span></h3>
+        <div class="prov">
+          <div class="prov-head"><span class="toggle on"></span>Claude <span class="status">● CLI found</span></div>
+          <div class="grid" style="--n:5">
+            <span class="h l">Model</span><span class="h">low</span><span class="h">medium</span><span class="h">high</span><span class="h">xhigh</span><span class="h">max</span>
+            <span>Opus · latest</span><i class="cb"></i><i class="cb on"></i><i class="cb on"></i><i class="cb"></i><i class="cb"></i>
+            <span>Sonnet · latest</span><i class="cb"></i><i class="cb on"></i><i class="cb on"></i><i class="cb"></i><i class="cb"></i>
+            <span>Haiku · latest</span><i class="cb"></i><i class="cb"></i><i class="cb"></i><i class="cb"></i><i class="cb"></i>
+          </div>
+        </div>
+        <div class="prov">
+          <div class="prov-head"><span class="toggle on"></span>Codex <span class="status">● CLI found</span></div>
+          <div class="grid" style="--n:5">
+            <span class="h l">Model</span><span class="h">low</span><span class="h">medium</span><span class="h">high</span><span class="h">xhigh</span><span class="h">ultra</span>
+            <span>GPT 6.1 Sol</span><i class="cb on"></i><i class="cb on"></i><i class="cb on"></i><i class="cb"></i><i class="cb"></i>
+            <span>GPT 6 Astra</span><i class="cb"></i><i class="cb"></i><i class="cb on"></i><i class="cb"></i><i class="cb"></i>
+            <span>GPT 6 Luna</span><i class="cb"></i><i class="cb"></i><i class="cb"></i><i class="cb"></i><i class="cb"></i>
+          </div>
+        </div>
+        <div class="hint">Model lists come from the installed CLIs, plus saved models. Unticking a model affects new assignments only. Disabling a provider holds its coordinator-chosen agents at their next turn and tells their coordinator.</div>
+      </div>
+
+      <div class="card">
+        <h3>Roles <span class="hint" style="font-weight:400">which providers coordinators may assign to each role</span></h3>
+        <div class="roles">
+          <span>Main coordinator</span><span><span class="rchk"><i class="cb on"></i>Claude</span><span class="rchk"><i class="cb"></i>Codex</span></span><span></span>
+          <span>Repository coordinator</span><span><span class="rchk"><i class="cb on"></i>Claude</span><span class="rchk"><i class="cb"></i>Codex</span></span><span></span>
+          <span>Implementer</span><span><span class="rchk"><i class="cb on"></i>Claude</span><span class="rchk"><i class="cb"></i>Codex</span></span><span></span>
+          <span>Tester</span><span><span class="rchk"><i class="cb on"></i>Claude</span><span class="rchk"><i class="cb"></i>Codex</span></span><span></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Review <span class="hint" style="font-weight:400">the verification set after the tester</span></h3>
+        <div class="roles">
+          <span>Standard reviews</span><span><span class="rchk"><i class="cb on"></i>Claude</span><span class="rchk"><i class="cb on"></i>Codex</span></span><span class="hint">One review per ticked provider, run in parallel after the tester.</span>
+        </div>
+        <div class="hint" style="margin-top:4px">Instructions (optional): extra reviews, passed to coordinators with the guide. Each extra review gets its own reviewer on the same ticket. Reviewers may use any enabled provider.</div>
+        <div class="editor" contenteditable="true" spellcheck="false" style="min-height:56px">Run reviso:style with Codex as a third review.</div>
+      </div>
+
+      <div class="card">
+        <h3>Guide <span class="hint" style="font-weight:400">how coordinators pick the model and effort within a provider</span></h3>
+        <div class="editor" contenteditable="true" spellcheck="false" style="min-height:160px">Choose the model and effort within the role's provider by the size and risk of the work.
+
+Claude: small, contained change → sonnet; large or cross-cutting → opus.
+Codex: routine review → gpt-6.1-sol · medium; large or risky change → gpt-6.1-sol · high.
+Raise effort for migrations and security-sensitive code.
+
+<span class="h">## Sizing (migrated 2026-10-08)</span>
+Coordinators · Claude: large work → opus · high; small work → opus · medium.
+Implementer · Claude: large work → opus · medium; small work → sonnet · high.
+Tester · Claude: large work → opus · high; small work → sonnet · high.
+Reviewer · Claude: large work → opus · high; small work → sonnet · medium.
+Reviewer · Codex: large work → gpt-6.1-sol · high; small work → gpt-6.1-sol · medium.
+Maintenance was fixed to gpt-6.1-sol · medium (tiers: low → gpt-6.1-sol · low, complex → gpt-6-astra · high).</div>
+        <div class="counter">0.9 / 32 KB</div>
+      </div>
+    </div>
+    <div class="footer"><span class="hint">⟳</span><span class="hint grow">Unsaved changes</span><button class="btn ghost">Discard</button><button class="btn primary">Save</button></div>
+  </main>
+</div></div>
+<p class="caption" style="margin-top:-12px"><b>Same page on a Codex-only machine</b> (for contrast): Claude switched off, every role and the review set to Codex.</p>
+<div class="window" style="min-height:0"><div class="app"><main class="main"><div class="body">
+  <div class="prov off"><div class="prov-head"><span class="toggle"></span>Claude <span class="status no">○ CLI not found</span><span class="hint" style="font-weight:400">Disabled: no Claude model may be chosen by coordinators.</span></div></div>
+  <div class="roles"><span>Implementer</span><span><span class="rchk dis"><i class="cb"></i>Claude</span><span class="rchk"><i class="cb on"></i>Codex</span></span><span></span>
+  <span>Standard reviews</span><span><span class="rchk dis"><i class="cb"></i>Claude</span><span class="rchk"><i class="cb on"></i>Codex</span></span><span class="hint">One Codex review after the tester.</span></div>
+</div></main></div></div>
+</section>
+
+<!-- (b) CHOSEN BY -->
+<section class="view" id="b">
+<p class="caption"><b>(b) Where the choice shows.</b> In the agent's chat, one line above the composer says who chose the model and why. In the Tickets panel, every agent is listed with its model and reason, including the three reviewers of the verification set: Claude, Codex and the custom Codex · reviso:style review. The sidebar is unchanged.</p>
+<div class="window"><div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">w<span>/</span> wiffletree</div>
+    <div class="eyebrow">Projects · 1</div>
+    <div class="row">▾ Workspace trial</div><div class="row indent1">tidepool</div>
+    <div class="row indent2">Add --json flag to list</div>
+    <div class="row indent2 sel" style="color:var(--text)">Implementer <span class="end">◉</span></div>
+    <div class="grow"></div>
+    <div class="eyebrow">Workspace</div><div class="row">Repositories</div><div class="row">Usage and limits</div><div class="row">Models</div>
+  </aside>
+  <main class="main">
+    <div class="header"><div><div class="crumb">Workspace trial › tidepool › Implementer</div><div class="title">Add --json flag to tidepool list</div></div><span class="grow"></span><span class="mock-tag">Mockup · sample data</span><span class="pill blue">Working</span></div>
+    <div class="body" style="justify-content:flex-end">
+      <div class="msg"><div class="avatar">t</div><div><div style="display:flex;gap:8px"><span class="who">tidepool</span><span class="when">2m ago</span></div>
+        Add a <code>--json</code> flag to <code>tidepool list</code>. Acceptance criteria are in the ticket. Report ready_for_testing when done.</div></div>
+      <div>
+        <div class="chosen">Chosen by <b>tidepool</b>: Small, contained CLI flag; Sonnet is enough</div>
+        <div class="composer">
+          <span class="ph">Message this implementer…</span>
+          <div class="bar"><span class="m">Claude · Sonnet · latest</span><span class="m">High</span>
+            <span class="grow"></span><span class="hint">↵ send · ⇧↵ newline</span></div>
+        </div>
+        <div class="hint" style="padding:8px 4px 0">Other states of the same line: <i>Chosen by you</i> · <i>Kept the model it used before</i> (migration)</div>
+      </div>
+    </div>
+  </main>
+  <aside class="inspector">
+    <div class="header" style="padding:0 14px;height:64px"><div><div class="crumb">Repository team · tidepool</div><div class="title">Tickets</div></div></div>
+    <div class="body">
+      <div class="eyebrow" style="padding:0">Tickets</div>
+      <div class="card">
+        <h3>Migrate readings store to SQLite <span class="grow"></span><span class="pill yellow">In review</span></h3>
+        <div class="eyebrow" style="padding:4px 0 0">Agents</div>
+        <div style="margin:0 -8px">
+          <div class="agent"><span>Implementer</span><span class="r">Claude · Opus · High</span><span class="reason">Cross-cutting storage migration; Opus, raised effort</span></div>
+          <div class="agent"><span>Tester</span><span class="r">Claude · Opus · High</span><span class="reason">Migration needs careful end-to-end checks</span></div>
+          <div class="agent"><span>Reviewer · Claude</span><span class="r">Claude · Opus · High</span><span class="reason">Standard review; large change</span></div>
+          <div class="agent"><span>Reviewer · Codex</span><span class="r">Codex · GPT 6.1 Sol · High</span><span class="reason">Standard review; risky data change</span></div>
+          <div class="agent"><span>Reviewer · Codex · reviso:style</span><span class="r">Codex · GPT 6.1 Sol · Medium</span><span class="reason">Custom review from the review instructions; routine style pass</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Add --json flag to tidepool list <span class="grow"></span><span class="pill blue">Assigned</span></h3>
+        <div class="eyebrow" style="padding:4px 0 0">Agents</div>
+        <div style="margin:0 -8px">
+          <div class="agent" style="background:color-mix(in srgb,var(--edge) 25%,transparent)"><span>Implementer</span><span class="r">Claude · Sonnet · High</span><span class="reason">Small, contained CLI flag; Sonnet is enough</span></div>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <nav class="rail"><div>Overview</div><div class="on">Tickets</div><div>Git</div><div>Memory</div><div>Events</div></nav>
+</div></div>
+</section>
+
+<!-- (c) NEW AGENT PICKER -->
+<section class="view" id="c">
+<p class="caption"><b>(c) New agent dialog.</b> The Model field is pre-filled with the role's first provider (Claude, then Codex; for a reviewer, the first standard-review provider) and that provider's first allowed model. The menu groups those providers first, then everything else; the human's choice wins, so nothing is blocked. It replaces today's "Starts on … Change defaults in Models." note.</p>
+<div class="window"><div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">w<span>/</span> wiffletree</div>
+    <div class="eyebrow">Projects · 1</div>
+    <div class="row">▾ Workspace trial</div><div class="row indent1 sel">tidepool</div>
+    <div class="grow"></div>
+    <div class="eyebrow">Workspace</div><div class="row">Repositories</div><div class="row">Usage and limits</div><div class="row">Models</div>
+  </aside>
+  <div class="scrim">
+    <div class="dialog">
+      <h2 style="display:flex;align-items:center">New agent <span class="mock-tag">Mockup</span></h2>
+      <div class="field"><label>Ticket</label><span class="dd" style="justify-content:space-between">Migrate readings store to SQLite</span></div>
+      <div class="field"><label>Role</label><span class="seg"><b>Implementer</b><b>Tester</b><b class="on">Reviewer</b></span></div>
+      <div class="field"><label>Model</label>
+        <div><span class="dd" style="width:100%;justify-content:space-between;border-color:var(--focus)">Claude · Opus · Medium</span>
+          <div class="menu">
+            <div class="g">Standard review · Claude</div>
+            <div class="i on"><span class="chk">✓</span>Claude · Opus · Medium<span class="tag">pre-filled</span></div>
+            <div class="i"><span class="chk"></span>Claude · Opus · High</div>
+            <div class="i"><span class="chk"></span>Claude · Sonnet · Medium</div>
+            <div class="i"><span class="chk"></span>Claude · Sonnet · High</div>
+            <div class="g">Standard review · Codex</div>
+            <div class="i"><span class="chk"></span>Codex · GPT 6.1 Sol · Low</div>
+            <div class="i"><span class="chk"></span>Codex · GPT 6.1 Sol · Medium</div>
+            <div class="i"><span class="chk"></span>Codex · GPT 6.1 Sol · High</div>
+            <div class="i"><span class="chk"></span>Codex · GPT 6 Astra · High</div>
+            <div class="sep"></div>
+            <div class="g">Other models · not ticked on this machine</div>
+            <div class="i"><span class="chk"></span>Claude · Haiku · latest · Medium</div>
+            <div class="i"><span class="chk"></span>Codex · GPT 6 Luna · Medium</div>
+          </div>
+        </div></div>
+      <div class="field"><label>Instruction</label><div class="textarea">Review this ticket's branch for correctness…</div></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn ghost">Cancel</button><button class="btn primary">Create</button></div>
+    </div>
+  </div>
+</div></div>
+</section>
+
+<!-- (d) REJECTIONS -->
+<section class="view" id="d">
+<p class="caption"><b>(d) Rejections.</b> Two kinds, both failed <code>assign_ticket</code> steps in the coordinator's work stream plus a <code>model_rejected</code> entry in Events. No agent is created, and the coordinator corrects its choice. <b>Wrong provider for the role:</b> Implementer uses Claude only (reviewers are exempt). <b>Model not allowed:</b> opus · max is not ticked.</p>
+<div class="window"><div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i></div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">w<span>/</span> wiffletree</div>
+    <div class="eyebrow">Projects · 1</div>
+    <div class="row">▾ Workspace trial</div><div class="row indent1 sel">tidepool</div>
+    <div class="row indent2">Migrate readings store</div>
+    <div class="grow"></div>
+    <div class="eyebrow">Workspace</div><div class="row">Repositories</div><div class="row">Usage and limits</div><div class="row">Models</div>
+  </aside>
+  <main class="main">
+    <div class="header"><div><div class="crumb">Workspace trial › Repository coordinator</div><div class="title">tidepool</div></div><span class="grow"></span><span class="mock-tag">Mockup · sample data</span><span class="pill blue">Working</span></div>
+    <div class="body" style="justify-content:flex-end">
+      <div class="msg"><div class="avatar">t</div><div style="flex:1">
+        <div style="display:flex;gap:8px"><span class="who">tidepool</span><span class="when">working · 1m 40s · 7 steps</span></div>
+        <div class="stream">
+          <div class="narr">Large migration. Assigning an implementer.</div>
+          <div class="step ok"><span class="ic">✓</span><div><code>workspace_context</code></div></div>
+          <div class="step fail"><span class="ic">✕</span><div><code>assign_ticket</code> implementer · Codex · gpt-6.1-sol · high
+            <div class="out">Codex is not configured for Implementer on this machine. Implementer uses: Claude. No agent was created.</div></div></div>
+          <div class="step fail"><span class="ic">✕</span><div><code>assign_ticket</code> implementer · Claude · opus · max
+            <div class="out">claude · opus · max is not allowed on this machine. Allowed Claude models: opus · high, opus · medium, sonnet · high, sonnet · medium. No agent was created.</div></div></div>
+          <div class="narr">Using Opus high: cross-cutting change, and the guide says to raise effort for migrations.</div>
+          <div class="step ok"><span class="ic">◉</span><div><code>assign_ticket</code> implementer · Claude · opus · high</div></div>
+        </div>
+      </div></div>
+      <div class="composer"><span class="ph">Message this repository coordinator…</span><div class="bar"><span class="m">Claude · Opus · latest</span><span class="m">High</span><span class="grow"></span><span class="hint">↵ send</span></div></div>
+    </div>
+  </main>
+  <aside class="inspector">
+    <div class="header" style="padding:0 14px;height:64px"><div><div class="crumb">Repository team · tidepool</div><div class="title">Events</div></div></div>
+    <div class="body" style="gap:0">
+      <div class="event"><div class="k"><span class="pill green">model_selected</span><span class="hint">just now</span></div><div class="d">Implementer: claude · opus · high. Cross-cutting storage migration; Opus, raised effort.</div></div>
+      <div class="event"><div class="k"><span class="pill red">model_rejected</span><span class="hint">10s ago</span></div><div class="d">tidepool asked for claude · opus · max (implementer). Not allowed on this machine. No agent was created.</div></div>
+      <div class="event"><div class="k"><span class="pill red">model_rejected</span><span class="hint">20s ago</span></div><div class="d">tidepool asked for codex · gpt-6.1-sol · high (implementer). Codex is not configured for Implementer. No agent was created.</div></div>
+      <div class="event"><div class="k"><span class="pill blue">ticket_created</span><span class="hint">1m ago</span></div><div class="d">Migrate readings store to SQLite.</div></div>
+    </div>
+  </aside>
+  <nav class="rail"><div>Overview</div><div>Tickets</div><div>Git</div><div>Memory</div><div class="on">Events</div></nav>
+</div></div>
+</section>
+
+<script>
+  const show = id => {
+    document.querySelectorAll('.tab[data-view]').forEach(t => t.setAttribute('aria-selected', t.dataset.view === id));
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === id));
+  };
+  document.querySelectorAll('.tab[data-view]').forEach(tab => tab.addEventListener('click', () => {
+    show(tab.dataset.view);
+    history.replaceState(null, '', '#' + tab.dataset.view);
+  }));
+  // Links such as mockups.html#c open one surface directly.
+  if (document.getElementById(location.hash.slice(1))?.classList.contains('view')) { show(location.hash.slice(1)); scrollTo(0, 0); }
+  const theme = document.getElementById('theme');
+  theme.addEventListener('click', () => {
+    const dark = document.documentElement.dataset.theme !== 'dark';
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    theme.textContent = dark ? 'Light' : 'Dark';
+  });
+</script>
+</body>
+</html>

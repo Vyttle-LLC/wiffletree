@@ -31,11 +31,10 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
             time.sleep(.02)
         raise AssertionError(value)
     try:
-        profile={'provider':'codex','model':'gpt-6.1-sol','effort':'medium'}
-        for role in ['implementer']:
-            request({'type':'set_policy','policy':{'role':role,'mode':'fixed','default':profile,'allowed':[profile],'small':profile,'standard':profile,'complex':profile}})
-        profile={'provider':'claude','model':'sonnet','effort':'low'}
-        request({'type':'set_policy','policy':{'role':'tester','mode':'fixed','default':profile,'allowed':[profile],'small':profile,'standard':profile,'complex':profile}})
+        # A cross-provider handoff: Codex implements and Claude tests.
+        selection=snapshot()['model_selection']
+        selection['role_providers']={**selection['role_providers'],'implementer':['codex'],'tester':['claude']}
+        request({'type':'set_model_selection','selection':selection})
         request({'type':'set_workspaces_dir','path':str(tmp/'workspaces')})
         project=request({'type':'create_project','name':'Protocol fixture'})
         main=snapshot()['sessions'][0]

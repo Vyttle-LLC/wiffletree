@@ -1,7 +1,9 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
+mod selection;
 mod steps;
 mod usage;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
+pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -266,244 +268,11 @@ pub struct ModelProfile {
     pub model: String,
     pub effort: String,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingMode {
-    Fixed,
-    Automatic,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Complexity {
-    Small,
-    Standard,
-    Complex,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RolePolicy {
-    pub role: Role,
-    pub mode: RoutingMode,
-    pub default: ModelProfile,
-    pub allowed: Vec<ModelProfile>,
-    pub small: ModelProfile,
-    pub standard: ModelProfile,
-    pub complex: ModelProfile,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub provider_profiles: Vec<ProviderProfiles>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderProfiles {
-    pub provider: Provider,
-    pub big: ModelProfile,
-    pub small: ModelProfile,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoleDefault {
-    pub role: Role,
-    pub default_provider: Provider,
-    pub profiles: Vec<ProviderProfiles>,
-}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelCapability {
     pub provider: Provider,
     pub model: String,
     pub efforts: Vec<String>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Route {
-    pub profile: ModelProfile,
-    pub reason: String,
-    pub catalog_verified: bool,
-}
-impl RolePolicy {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.allowed.is_empty() && self.allowed.len() <= 32,
-            "Allowlist must contain 1–32 profiles"
-        );
-        let unique: BTreeSet<_> = self.allowed.iter().collect();
-        ensure!(
-            unique.len() == self.allowed.len(),
-            "Duplicate allowed profile"
-        );
-        for profile in [&self.default, &self.small, &self.standard, &self.complex] {
-            ensure!(
-                self.allowed.contains(profile),
-                "Every routing tier and default must be allowed"
-            );
-        }
-        for profile in &self.allowed {
-            ensure!(
-                !profile.model.trim().is_empty() && profile.model.len() <= 128,
-                "Invalid model ID"
-            );
-            ensure!(
-                !profile.effort.trim().is_empty() && profile.effort.len() <= 32,
-                "Invalid effort"
-            );
-        }
-        if !self.provider_profiles.is_empty() {
-            ensure!(
-                self.provider_profiles.len() == 2,
-                "Configure Claude and Codex profiles"
-            );
-            let mut approved = BTreeSet::new();
-            for provider in [Provider::Claude, Provider::Codex] {
-                let entries: Vec<_> = self
-                    .provider_profiles
-                    .iter()
-                    .filter(|p| p.provider == provider)
-                    .collect();
-                ensure!(entries.len() == 1, "Configure each provider exactly once");
-                for profile in [&entries[0].big, &entries[0].small] {
-                    ensure!(profile.provider == provider, "Profile provider mismatch");
-                    approved.insert(profile);
-                }
-            }
-            ensure!(
-                approved == unique,
-                "Only configured Big/Small profiles may be allowed"
-            );
-        }
-        Ok(())
-    }
-    pub fn select(
-        &self,
-        complexity: Complexity,
-        proposal: Option<&ModelProfile>,
-        session_provider: Option<Provider>,
-        catalog: Option<&[ModelCapability]>,
-    ) -> Result<Route> {
-        self.validate()?;
-        let (profile, reason) = match self.mode {
-            RoutingMode::Fixed => (&self.default, "Fixed role default".to_owned()),
-            RoutingMode::Automatic => {
-                if let Some(proposed) = proposal {
-                    ensure!(
-                        self.allowed.contains(proposed),
-                        "Orchestrator selection is outside the role allowlist"
-                    );
-                    (
-                        proposed,
-                        "Orchestrator selection within role allowlist".to_owned(),
-                    )
-                } else if !self.provider_profiles.is_empty() {
-                    let provider = session_provider.unwrap_or(self.default.provider);
-                    let profiles = self
-                        .provider_profiles
-                        .iter()
-                        .find(|p| p.provider == provider)
-                        .context("Provider has no configured profiles")?;
-                    let small = complexity == Complexity::Small;
-                    (
-                        if small {
-                            &profiles.small
-                        } else {
-                            &profiles.big
-                        },
-                        format!(
-                            "Configured {provider:?} {} profile",
-                            if small { "Small" } else { "Big" }
-                        ),
-                    )
-                } else {
-                    (
-                        match complexity {
-                            Complexity::Small => &self.small,
-                            Complexity::Standard => &self.standard,
-                            Complexity::Complex => &self.complex,
-                        },
-                        format!("Configured {complexity:?} work tier"),
-                    )
-                }
-            }
-        };
-        if let Some(provider) = session_provider {
-            ensure!(
-                profile.provider == provider,
-                "Provider change requires a replacement session"
-            );
-        }
-        if let Some(catalog) = catalog {
-            ensure!(
-                catalog.iter().any(|m| m.provider == profile.provider
-                    && m.model == profile.model
-                    && m.efforts.contains(&profile.effort)),
-                "Runtime catalog does not support selected model/effort"
-            );
-        }
-        Ok(Route {
-            profile: profile.clone(),
-            reason,
-            catalog_verified: catalog.is_some(),
-        })
-    }
-}
-
-pub fn default_policies() -> Vec<RolePolicy> {
-    let sol = ModelProfile {
-        provider: Provider::Codex,
-        model: "gpt-6.1-sol".into(),
-        effort: "medium".into(),
-    };
-    let small = ModelProfile {
-        effort: "low".into(),
-        ..sol.clone()
-    };
-    let astra = ModelProfile {
-        provider: Provider::Codex,
-        model: "gpt-6-astra".into(),
-        effort: "high".into(),
-    };
-    Role::ALL
-        .into_iter()
-        .map(|role| {
-            let mut policy = RolePolicy {
-                role,
-                mode: RoutingMode::Fixed,
-                default: sol.clone(),
-                allowed: vec![small.clone(), sol.clone(), astra.clone()],
-                small: small.clone(),
-                standard: sol.clone(),
-                complex: astra.clone(),
-                provider_profiles: Vec::new(),
-            };
-            if matches!(
-                role,
-                Role::ProjectOrchestrator | Role::TaskOrchestrator | Role::Implementer
-            ) {
-                let opus = ModelProfile {
-                    provider: Provider::Claude,
-                    model: "opus".into(),
-                    effort: "medium".into(),
-                };
-                policy.default = ModelProfile {
-                    effort: if role == Role::Implementer {
-                        "medium"
-                    } else {
-                        "high"
-                    }
-                    .into(),
-                    ..opus.clone()
-                };
-                policy.small = ModelProfile {
-                    effort: "low".into(),
-                    ..opus.clone()
-                };
-                policy.standard = opus.clone();
-                policy.complex = ModelProfile {
-                    effort: "high".into(),
-                    ..opus
-                };
-                policy.allowed.extend([
-                    policy.small.clone(),
-                    policy.standard.clone(),
-                    policy.complex.clone(),
-                ]);
-            }
-            policy
-        })
-        .collect()
 }
 
 /// Active turns only: idle coordinators and administrative operations take no slot.
@@ -588,7 +357,6 @@ pub struct Snapshot {
     pub repositories: Vec<Repository>,
     pub sessions: Vec<Session>,
     pub attention: Vec<Attention>,
-    pub policies: Vec<RolePolicy>,
     #[serde(default)]
     pub tickets: Vec<Ticket>,
     #[serde(default)]
@@ -604,6 +372,8 @@ pub struct Snapshot {
     /// Coordinator timers that will still fire.
     #[serde(default)]
     pub schedules: Vec<Schedule>,
+    #[serde(default)]
+    pub model_selection: ModelSelection,
 }
 impl Snapshot {
     /// The workspace repositories a project uses, in the order they were added.
@@ -661,16 +431,20 @@ pub struct VerificationSettings {
     pub max_rounds: u32,
 }
 impl Default for VerificationSettings {
-    /// One tester on the tester role's default profile, and two rounds.
+    /// A tester and a Claude and a Codex review, which fit the default turn limit; two rounds.
     fn default() -> Self {
+        let verifier = |role, focus: &str, provider| VerifierConfig {
+            role,
+            focus: focus.into(),
+            instruction: None,
+            provider,
+        };
         Self {
-            verifiers: vec![VerifierConfig {
-                role: Role::Tester,
-                focus: "Tests".into(),
-                instruction: None,
-                provider: None,
-                size: None,
-            }],
+            verifiers: vec![
+                verifier(Role::Tester, "Tests", None),
+                verifier(Role::Reviewer, "Claude", Some(Provider::Claude)),
+                verifier(Role::Reviewer, "Codex", Some(Provider::Codex)),
+            ],
             max_rounds: 2,
         }
     }
@@ -711,25 +485,25 @@ impl VerificationSettings {
         Ok(())
     }
 }
-/// One configured verifier. Only the `provider` and `size` assignment arguments are accepted.
+/// One configured verifier. The coordinator picks its exact model when it calls
+/// `verify_ticket`; a configured `provider` limits that choice to the provider's models.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifierConfig {
     pub role: Role,
-    /// Tells verifiers apart on a ticket, such as "Codex correctness" or "Style".
+    /// Tells verifiers apart on a ticket, such as "Codex" or "Style".
     pub focus: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<ProfileSize>,
 }
-/// The configured Big or Small profile, as `assign_ticket`'s `size` argument names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProfileSize {
-    Big,
-    Small,
+
+/// The coordinator's exact model for one configured verifier, named by its focus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifierChoice {
+    pub focus: String,
+    pub profile: ModelProfile,
+    pub reason: String,
 }
 
 /// A ticket is a workspace: one repository, one worktree and branch, and its agents.
@@ -902,6 +676,13 @@ pub struct SessionRuntime {
     #[serde(default)]
     pub directory: Option<String>,
     pub last_error: Option<String>,
+    /// How `profile` was chosen; `None` for sessions pinned before model selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
+    /// A turn was held (no model, or its provider disabled) and its queued input is retained.
+    /// Cleared when Skip cancels that input or a turn starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     pub last_started_at: Option<i64>,
     pub last_finished_at: Option<i64>,
 }
@@ -967,10 +748,11 @@ pub enum Command {
         title: String,
         brief: String,
     },
+    /// The human assigns an agent; `profile` is never limited by the model selection.
     AssignTicket {
         ticket_id: String,
         role: Role,
-        provider: Provider,
+        profile: ModelProfile,
         instruction: String,
         /// Tells apart agents sharing a role on one ticket, such as two reviewers.
         #[serde(default)]
@@ -995,7 +777,7 @@ pub enum Command {
         repository_id: Option<String>,
         name: String,
         role: Role,
-        provider: Provider,
+        profile: ModelProfile,
     },
     SetStatus {
         session_id: String,
@@ -1035,17 +817,10 @@ pub enum Command {
     Simulate {
         message_id: String,
     },
-    SetRoleDefaults {
-        defaults: Vec<RoleDefault>,
-    },
-    SetPolicy {
-        policy: Box<RolePolicy>,
-    },
-    Route {
-        role: Role,
-        complexity: Complexity,
-        proposal: Option<ModelProfile>,
-        session_provider: Option<Provider>,
+    /// Saves providers, role providers, reviews and the guide together; answered with the saved
+    /// `ModelSelection` at its next revision.
+    SetModelSelection {
+        selection: Box<ModelSelection>,
     },
     RequestAttention {
         session_id: String,

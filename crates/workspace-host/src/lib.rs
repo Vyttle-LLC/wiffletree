@@ -121,6 +121,7 @@ impl Host {
         db.execute_batch(include_str!("usage.sql"))?;
         db.execute_batch(include_str!("steps.sql"))?;
         db.execute_batch(include_str!("schedules.sql"))?;
+        db.execute_batch(include_str!("selection.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
@@ -132,13 +133,8 @@ impl Host {
             fire_retries: Default::default(),
         };
         host.recover()?;
-        for policy in default_policies() {
-            host.db.execute(
-                "INSERT OR IGNORE INTO policies VALUES (?1,?2)",
-                params![tag(&policy.role)?, encode(&policy)?],
-            )?;
-        }
         host.migrate_opus_defaults()?;
+        host.migrate_model_selection()?;
         host.backfill_usage()?;
         Ok(host)
     }
@@ -219,11 +215,8 @@ impl Host {
             })
             .context("Repository not found")
     }
-    pub fn policies(&self) -> Result<Vec<RolePolicy>> {
-        self.list_data("SELECT data FROM policies ORDER BY role", [])
-    }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, policies: self.policies()?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()? })
     }
     pub fn create_project(&mut self, name: &str) -> Result<Project> {
         text(name, 128)?;
@@ -236,6 +229,10 @@ impl Host {
             home: Some(self.new_project_home(name)?),
             slug: None,
         };
+        let prefill = self
+            .model_selection()?
+            .prefill(Role::ProjectOrchestrator)
+            .context("Enable a provider in Models first")?;
         let session = Session {
             id: new_id(),
             project_id: project.id.clone(),
@@ -243,7 +240,7 @@ impl Host {
             repository_id: None,
             name: project.name.clone(),
             role: Role::ProjectOrchestrator,
-            provider: self.policy(Role::ProjectOrchestrator)?.default.provider,
+            provider: prefill.provider,
             status: Status::Ready,
             archived: false,
         };
@@ -261,6 +258,7 @@ impl Host {
             &project.name,
         )?;
         tx.commit()?;
+        self.pin(&session.id, prefill, Chooser::Default, "Role default")?;
         Ok(project)
     }
     pub fn rename_project(&mut self, id: &str, name: &str) -> Result<Project> {
@@ -741,20 +739,11 @@ impl Host {
             earliest == message.sequence,
             "Earlier queued input must be delivered first"
         );
-        let route = self.policy(session.role)?.select(
-            Complexity::Standard,
-            None,
-            Some(session.provider),
-            None,
-        )?;
+        let profile = self.turn_profile(&session)?;
         let body = format!(
-            "Local simulation · {}\n\nInstruction recorded durably for {}. Selected {} / {} ({:?}). {}.\n\nNo provider turn or repository change was performed. Use role settings to configure fixed defaults or bounded automatic routing; capture decisions in Memory for replacement sessions.",
+            "Local simulation · {}\n\nInstruction recorded durably for {}. Selected {profile}.\n\nNo provider turn or repository change was performed. Configure providers, roles and the guide in Models; capture decisions in Memory for replacement sessions.",
             session.role.label(),
             session.name,
-            route.profile.model,
-            route.profile.effort,
-            route.profile.provider,
-            route.reason
         );
         let tx = self.db.transaction()?;
         for receipt in [
@@ -774,21 +763,6 @@ impl Host {
         tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5)", params![reply_id, session.project_id, session.id, body, now()])?;
         tx.commit()?;
         self.message(&reply_id)
-    }
-    pub fn policy(&self, role: Role) -> Result<RolePolicy> {
-        Ok(self.db.query_row(
-            "SELECT data FROM policies WHERE role=?1",
-            [tag(&role)?],
-            |r| decode(r, 0),
-        )?)
-    }
-    pub fn set_policy(&mut self, policy: &RolePolicy) -> Result<()> {
-        policy.validate()?;
-        self.db.execute(
-            "UPDATE policies SET data=?2 WHERE role=?1",
-            params![tag(&policy.role)?, encode(policy)?],
-        )?;
-        Ok(())
     }
     pub fn request_attention(
         &mut self,
@@ -983,16 +957,23 @@ impl Host {
             Command::AssignTicket {
                 ticket_id,
                 role,
-                provider,
+                profile,
                 instruction,
                 focus,
-            } => serde_json::to_value(self.assign_ticket(
-                &ticket_id,
-                role,
-                provider,
-                &instruction,
-                focus.as_deref(),
-            )?)?,
+            } => {
+                let session = self.assign_ticket(
+                    &ticket_id,
+                    role,
+                    profile.provider,
+                    &instruction,
+                    focus.as_deref(),
+                )?;
+                // A pinned agent keeps its model; a new or unpinned one takes the human's pick.
+                if self.session_runtime(&session.id)?.profile.is_none() {
+                    self.pin_human_choice(&session, profile)?;
+                }
+                serde_json::to_value(session)?
+            }
             Command::ProviderCheck => provider::check(),
             Command::Quotas => serde_json::to_value(self.quotas()?)?,
             Command::RecordQuota { reading } => {
@@ -1056,15 +1037,19 @@ impl Host {
                 repository_id,
                 name,
                 role,
-                provider,
-            } => serde_json::to_value(self.create_session(
-                &project_id,
-                &parent_id,
-                repository_id.as_deref(),
-                &name,
-                role,
-                provider,
-            )?)?,
+                profile,
+            } => {
+                let session = self.create_session(
+                    &project_id,
+                    &parent_id,
+                    repository_id.as_deref(),
+                    &name,
+                    role,
+                    profile.provider,
+                )?;
+                self.pin_human_choice(&session, profile)?;
+                serde_json::to_value(session)?
+            }
             Command::SetStatus { session_id, status } => {
                 self.set_status(&session_id, status)?;
                 json!({"saved":true})
@@ -1092,25 +1077,9 @@ impl Host {
                 limit,
             } => serde_json::to_value(self.messages(&session_id, before, limit)?)?,
             Command::Simulate { message_id } => serde_json::to_value(self.simulate(&message_id)?)?,
-            Command::SetPolicy { policy } => {
-                self.set_policy(&policy)?;
-                json!({"saved":true})
+            Command::SetModelSelection { selection } => {
+                serde_json::to_value(self.set_model_selection(&selection)?)?
             }
-            Command::SetRoleDefaults { defaults } => {
-                self.set_role_defaults(&defaults)?;
-                json!({"saved":true})
-            }
-            Command::Route {
-                role,
-                complexity,
-                proposal,
-                session_provider,
-            } => serde_json::to_value(self.policy(role)?.select(
-                complexity,
-                proposal.as_ref(),
-                session_provider,
-                None,
-            )?)?,
             Command::RequestAttention {
                 session_id,
                 host,

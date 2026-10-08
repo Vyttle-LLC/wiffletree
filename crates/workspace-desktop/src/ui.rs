@@ -480,7 +480,7 @@ impl Render for Workspace {
             ),
             Page::Models => self.page(
                 "Models",
-                "Defaults for new agents in every project",
+                "Models on this machine",
                 self.models_panel(p, cx),
                 Some(self.models_footer(p, cx)),
                 p,

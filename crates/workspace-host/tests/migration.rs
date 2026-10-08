@@ -1,5 +1,6 @@
 //! Store schema 6 retires repository coordinators. The fixture is a schema-5 store, as the
 //! previous release left it, with an active team and an archived one.
+mod common;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -524,9 +525,14 @@ fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
         .unwrap_err();
     assert!(refused.to_string().contains("verify_ticket"), "{refused}");
 
+    common::one_tester(&mut host);
     let cycle: Ticket = serde_json::from_value(
-        host.agent_tool(&f.main.id, "verify_ticket", accept.clone())
-            .unwrap(),
+        host.agent_tool(
+            &f.main.id,
+            "verify_ticket",
+            common::verify_args(&host, &f.open.id),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(cycle.state, "verifying");
@@ -546,4 +552,109 @@ fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
     )
     .unwrap();
     assert_eq!(accepted.state, "accepted");
+}
+
+#[test]
+fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
+    let f = fixture();
+    let profile = |provider: &str, model: &str, effort: &str| json!({"provider":provider,"model":model,"effort":effort});
+    let sol = |effort| profile("codex", "gpt-6.1-sol", effort);
+    let opus = |effort| profile("claude", "opus", effort);
+    let fixed = |role: &str, default: Value| {
+        json!({"role":role,"mode":"fixed","default":default,
+            "allowed":[sol("low"),sol("medium"),profile("codex","gpt-6-astra","high"),default],
+            "small":sol("low"),"standard":sol("medium"),"complex":profile("codex","gpt-6-astra","high"),
+            "turn_budget_minutes":null})
+    };
+    // The repository coordinators' policy: automatic, Codex by default, with Big/Small profiles.
+    let team_policy = json!({"role":"task_orchestrator","mode":"automatic","default":sol("high"),
+        "allowed":[opus("high"),opus("medium"),sol("high"),sol("medium")],
+        "small":sol("medium"),"standard":sol("high"),"complex":sol("high"),
+        "provider_profiles":[{"provider":"claude","big":opus("high"),"small":opus("medium")},
+            {"provider":"codex","big":sol("high"),"small":sol("medium")}],
+        "turn_budget_minutes":25});
+    let rows = [
+        (
+            "project_orchestrator",
+            fixed("project_orchestrator", opus("high")),
+        ),
+        ("task_orchestrator", team_policy),
+        ("implementer", fixed("implementer", opus("medium"))),
+        ("tester", fixed("tester", sol("medium"))),
+        ("reviewer", fixed("reviewer", sol("medium"))),
+        ("maintenance", fixed("maintenance", sol("medium"))),
+    ];
+    let db = raw(&f.home);
+    for (role, row) in rows {
+        db.execute(
+            "INSERT INTO policies VALUES (?1,?2) ON CONFLICT(role) DO UPDATE SET data=excluded.data",
+            params![role, row.to_string()],
+        )
+        .unwrap();
+    }
+    db.execute_batch(
+        "DELETE FROM policy_migrations WHERE id='model-selection'; DELETE FROM model_selection;
+         UPDATE runtimes SET data=json_remove(data,'$.profile','$.selection');",
+    )
+    .unwrap();
+    drop(db);
+
+    let host = Host::open(&f.home).unwrap();
+    assert_eq!(version(&f.home), 6);
+    // Schema 6 ran first: the team is retired and its ticket belongs to the coordinator.
+    assert!(host.session(f.team).unwrap().archived);
+    assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
+    let selection = host.model_selection().unwrap();
+    selection.validate().unwrap();
+    assert_eq!(
+        selection.role_providers.keys().copied().collect::<Vec<_>>(),
+        PROVIDER_ROLES.to_vec(),
+        "no repository coordinator role"
+    );
+    // Its models stay allowed and its settings survive as prose.
+    selection
+        .permits(
+            Role::Reviewer,
+            &ModelProfile {
+                provider: Provider::Codex,
+                model: "gpt-6.1-sol".into(),
+                effort: "high".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        selection.guide.contains(
+            "### Repository coordinator\n- Default: codex · gpt-6.1-sol · high (coordinators could choose within its list).\n"
+        ),
+        "{}",
+        selection.guide
+    );
+    assert!(
+        selection
+            .guide
+            .contains("### Maintenance\n- Was fixed to codex · gpt-6.1-sol · medium")
+    );
+    // The retired Codex team keeps the model it would have used; agents keep theirs too.
+    let pinned = |id: &str| host.session_runtime(id).unwrap().profile;
+    assert_eq!(
+        pinned(f.team),
+        Some(ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "high".into(),
+        })
+    );
+    assert_eq!(
+        pinned(&f.implementer.id),
+        None,
+        "a Codex implementer under a Claude-only fixed policy stays unpinned"
+    );
+    assert!(pinned(&f.tester.id).is_some());
+    // Reopening changes nothing.
+    let before = host.model_selection().unwrap();
+    drop(host);
+    assert_eq!(
+        Host::open(&f.home).unwrap().model_selection().unwrap(),
+        before
+    );
 }

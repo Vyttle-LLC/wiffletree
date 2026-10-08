@@ -227,12 +227,12 @@ fn markdown_symlink_destination_is_rejected_and_failure_is_recorded() {
 }
 
 #[test]
-fn role_settings_and_versioned_commands_survive_restart() {
+fn model_settings_and_versioned_commands_survive_restart() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open(directory.path()).unwrap();
-    let mut policy = host.policy(Role::Tester).unwrap();
-    policy.mode = RoutingMode::Automatic;
-    host.set_policy(&policy).unwrap();
+    let mut selection = host.model_selection().unwrap();
+    selection.guide = "Raise effort for migrations.".into();
+    let selection = host.set_model_selection(&selection).unwrap();
     let response = host.respond(Request {
         version: 99,
         id: "wrong-version".into(),
@@ -242,7 +242,7 @@ fn role_settings_and_versioned_commands_survive_restart() {
     assert!(response.error.is_some());
     drop(host);
     let mut host = Host::open(directory.path()).unwrap();
-    assert_eq!(host.policy(Role::Tester).unwrap(), policy);
+    assert_eq!(host.model_selection().unwrap(), selection);
     let response = host.respond(Request {
         version: PROTOCOL_VERSION,
         id: "snapshot".into(),

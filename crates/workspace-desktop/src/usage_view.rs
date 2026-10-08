@@ -284,7 +284,11 @@ impl Workspace {
                             .child(hint(age(event.created_at), p).flex_none()),
                     )
                     .when_some(source, |d, source| d.child(hint(source, p)))
-                    .child(hint(event.detail.clone(), p).line_clamp(3)),
+                    .child(
+                        // A rejection's allowed list is the part a reader needs.
+                        hint(event.detail.clone(), p)
+                            .when(event.kind != "model_rejected", |d| d.line_clamp(3)),
+                    ),
             );
         }
         if shown == 0 {
@@ -831,7 +835,7 @@ impl Workspace {
                     .flex()
                     .flex_wrap()
                     .gap_3()
-                    .children(models::PROVIDERS.map(|provider| self.provider_limits(provider, p))),
+                    .children(PROVIDERS.map(|provider| self.provider_limits(provider, p))),
             )
             .child(hint(
                 "Shared across every app and machine on these accounts. Codex refreshes every 5 minutes; Claude reports during live responses.",
