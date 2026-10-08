@@ -45,7 +45,9 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         request({'type':'send','id':'start','sender':None,'recipient':main['id'],'body':'START_HANDOFF'})
         assert project['id'] in snapshot()['live_projects'],'A human message starts its project'
         done=until(lambda s:any(t['state']=='accepted' for t in s['tickets']))
-        assert (Path(done['tickets'][0]['worktree'])/'result.txt').read_text()=='verified'
+        ticket=done['tickets'][0]
+        assert not Path(ticket['worktree']).exists(),'Acceptance removes the worktree'
+        assert subprocess.run(['git','show',f"{ticket['branch']}:result.txt"],cwd=repo,check=True,capture_output=True,text=True).stdout=='verified','The branch keeps the work'
         assert not (repo/'result.txt').exists()
         assert any(s['provider']=='claude' and s['role']=='tester' for s in done['sessions'])
         print(f'Cross-provider protocol handoff passed in {time.monotonic()-start_time:.3f}s',flush=True)

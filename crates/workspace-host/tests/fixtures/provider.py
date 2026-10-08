@@ -114,7 +114,10 @@ try:
         result='COORDINATED'
     elif role=='implementer':
         Path('result.txt').write_text('verified')
-        tool('report',message_id='ready',kind='ready_for_testing',body='result.txt written')
+        # Acceptance removes the worktree and refuses uncommitted work, so the double commits like a real implementer.
+        for git in [['add','result.txt'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-q','-m','Write result']]:
+            subprocess.run(['git',*git],check=True,capture_output=True)
+        tool('report',message_id='ready',kind='ready_for_testing',body='result.txt committed')
         result='IMPLEMENTED'
     else:
         assert Path('result.txt').read_text()=='verified'
