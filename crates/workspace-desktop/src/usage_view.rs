@@ -245,13 +245,10 @@ impl Workspace {
         };
         let in_scope = |event: &Activity| {
             selected.role == Role::ProjectOrchestrator
-                || event.session_id.as_deref().is_some_and(|id| {
-                    id == selected.id
-                        || (selected.role == Role::TaskOrchestrator
-                            && self
-                                .session(id)
-                                .is_some_and(|s| s.parent_id.as_ref() == Some(&selected.id)))
-                })
+                || event
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|id| id == selected.id)
         };
         let mut body = div().flex().flex_col().child(section(
             format!("RECENT · {}", selected.name.to_uppercase()),

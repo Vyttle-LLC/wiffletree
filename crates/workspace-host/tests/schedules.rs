@@ -154,21 +154,19 @@ fn only_coordinators_schedule_within_limits_and_stopped_timers_never_fire() {
     let repository = host
         .attach_repository(&root.project_id, repo.path().to_str().unwrap(), "HEAD")
         .unwrap();
+    // Another project's coordinator, archived below.
+    let other = host.create_project("Other").unwrap();
     let coordinator = host
-        .create_session(
-            &root.project_id,
-            &root.id,
-            Some(&repository.id),
-            "Backend",
-            Role::TaskOrchestrator,
-            Provider::Claude,
-        )
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.project_id == other.id)
         .unwrap();
     let worker = host
         .create_session(
             &root.project_id,
-            &coordinator.id,
-            None,
+            &root.id,
+            Some(&repository.id),
             "Implementer",
             Role::Implementer,
             Provider::Claude,

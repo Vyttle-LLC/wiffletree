@@ -103,8 +103,16 @@ try:
                 assert question['operation_id'] in prompt and 'close_question' in prompt, prompt
                 tool('close_question',request_id=question['operation_id'],resolution='Repository attached')
         if 'START_HANDOFF' in prompt:
-            team=tool('create_repo_coordinator',repository_id=ctx['repositories'][0]['id'],provider='codex')
-            tool('send_message',recipient=team['id'],message_id='start',body='Run the fixture ticket.')
+            # FAIL_CODEX_ROUND_1 makes the Codex verifier fail round 1, so the implementer fixes it.
+            brief='Create result.txt containing verified'+(' FAIL_CODEX_ROUND_1' if 'FAIL_CODEX_ROUND_1' in prompt else '')
+            ticket=tool('create_ticket',repository_id=ctx['repositories'][0]['id'],title='Fixture ticket',brief=brief)
+            tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture')
+        for ticket in ctx['tickets']:
+            if ticket['state']=='ready_for_testing':
+                assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
+                tool('verify_ticket',ticket_id=ticket['id'])
+            elif ticket['state']=='passed':
+                tool('accept_ticket',ticket_id=ticket['id'])
         if 'SCHEDULE_TIMER' in prompt:
             tool('schedule',label='Fixture check',prompt='TIMER_CHECK',at='+2s')
         if 'SCHEDULE_MONITOR' in prompt:
@@ -113,22 +121,12 @@ try:
         # A coordinator's own read-only check: its final message is the result in the human's chat.
         check='Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt
         result='TIMER_FIRED' if timer_fire else 'SERVICE_HEALTHY' if check else 'MAIN_READY'
-    elif role=='task_orchestrator' and 'Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt:
-        # A repository coordinator reports its check to its parent.
-        tool('report',message_id=str(uuid.uuid4()),kind='progress',body='Service healthy')
-        result='CHECK_REPORTED'
-    elif role=='task_orchestrator':
-        tickets=ctx['tickets']
-        if not tickets:
-            ticket=tool('create_ticket',title='Fixture ticket',brief='Create result.txt containing verified')
-            tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture')
-        elif tickets[0]['state']=='ready_for_testing':
-            assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
-            tool('assign_ticket',ticket_id=tickets[0]['id'],role='tester',instruction='Verify fixture')
-        elif tickets[0]['state']=='passed':
-            tool('accept_ticket',ticket_id=tickets[0]['id'])
-            tool('report',message_id='accepted',kind='completed',body='Independent verification passed')
-        result='COORDINATED'
+    elif role=='implementer' and 'Verification round' in prompt:
+        Path('fix.txt').write_text('fixed')
+        for git in [['add','fix.txt'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-q','-m','Fix verification failure']]:
+            subprocess.run(['git',*git],check=True,capture_output=True)
+        tool('report',message_id='fixed',kind='ready_for_testing',body='fix.txt committed')
+        result='FIXED'
     elif role=='implementer':
         tool('report',message_id='planned',kind='progress',body='Fixture planned')
         Path('result.txt').write_text('verified')
@@ -140,7 +138,12 @@ try:
         result='IMPLEMENTED'
     else:
         assert Path('result.txt').read_text()=='verified'
-        tool('report',message_id='passed',kind='passed',body='Read result.txt: verified')
+        # Verifiers of one round overlap; a short check keeps that visible in the timestamps.
+        if 'Verify ticket' in prompt: time.sleep(0.3)
+        if 'FAIL_CODEX_ROUND_1' in prompt and 'Focus: Codex' in prompt and ': round 1 of' in prompt:
+            tool('report',message_id='failed',kind='failed',body='fix.txt is missing')
+        else:
+            tool('report',message_id=str(uuid.uuid4()),kind='passed',body='Read result.txt: verified')
         result='TESTED'
     emit({'type':'assistant','message':{'content':[{'type':'text','text':result}]}} if claude else {'type':'item.completed','item':{'type':'agent_message','text':result}})
     if claude:

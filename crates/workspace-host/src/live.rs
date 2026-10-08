@@ -1,4 +1,4 @@
-//! Durable project teams, ticket workspaces and scoped agent operations.
+//! Durable ticket workspaces under each project's coordinator, and scoped agent operations.
 use crate::*;
 
 /// Reports per child that `workspace_context` lists, newest first.
@@ -83,23 +83,39 @@ impl Host {
         self.save_runtime(&runtime)?;
         self.set_status(id, Status::Ready)
     }
-    pub fn create_ticket(&mut self, owner: &str, title: &str, brief: &str) -> Result<Ticket> {
+    /// A ticket is a workspace: one repository the project uses, one worktree and branch. Repeating
+    /// the same coordinator, repository and title returns the existing ticket.
+    pub fn create_ticket(
+        &mut self,
+        owner: &str,
+        repository_id: &str,
+        title: &str,
+        brief: &str,
+    ) -> Result<Ticket> {
         text(title, 128)?;
         text(brief, MAX_TEXT_BYTES)?;
         let coordinator = self.session(owner)?;
         ensure!(
-            coordinator.role == Role::TaskOrchestrator,
-            "Tickets belong to a repository coordinator"
+            coordinator.role == Role::ProjectOrchestrator,
+            "Tickets belong to the project coordinator"
         );
         ensure!(
             !coordinator.archived,
             "{} is archived; restore it before adding tickets",
             coordinator.name
         );
+        let repo = self.repository(repository_id)?;
+        let project = self.project(&coordinator.project_id)?;
+        ensure!(
+            project.uses(&repo.id),
+            "Project {} does not use repository {}",
+            project.name,
+            repo.name
+        );
         if let Some(ticket) = self
             .tickets()?
             .into_iter()
-            .find(|t| t.coordinator_id == owner && t.title == title)
+            .find(|t| t.coordinator_id == owner && t.repository_id == repo.id && t.title == title)
         {
             ensure!(
                 ticket.brief == brief,
@@ -107,23 +123,18 @@ impl Host {
             );
             return Ok(ticket);
         }
-        let repo = self.repository(
-            coordinator
-                .repository_id
-                .as_deref()
-                .context("Missing repository")?,
-        )?;
-        let project = self.project(&coordinator.project_id)?;
         let (path, branch) = self.new_ticket_place(&project, &repo, title)?;
         worktrees::ensure_worktree(Path::new(&repo.path), &path, &branch, Some(&repo.base))?;
         let ticket = Ticket {
             id: new_id(),
             coordinator_id: owner.into(),
+            repository_id: repo.id.clone(),
             title: title.into(),
             brief: brief.into(),
             worktree: path.to_string_lossy().into(),
             branch,
             state: "planned".into(),
+            verification: None,
         };
         self.db.execute(
             "INSERT INTO tickets VALUES (?1,?2,?3)",
@@ -161,6 +172,37 @@ impl Host {
         focus: Option<&str>,
     ) -> Result<Session> {
         text(instruction, MAX_TEXT_BYTES)?;
+        let mut ticket = self.ticket(ticket_id)?;
+        let (session, created) = self.ticket_agent(&ticket, role, provider, focus)?;
+        if !created {
+            return Ok(session);
+        }
+        self.send(
+            &format!("assignment:{}", session.id),
+            Some(&ticket.coordinator_id),
+            &session.id,
+            &format!(
+                "Ticket: {}\n{}\n\nAssignment: {}\n\nWorktree: {}\nBranch: {}",
+                ticket.title, ticket.brief, instruction, ticket.worktree, ticket.branch
+            ),
+        )?;
+        // A verification cycle alone moves the ticket while it runs.
+        if ticket.running_cycle().is_none() {
+            ticket.state = "assigned".into();
+            self.save_ticket(&ticket)?;
+        }
+        Ok(session)
+    }
+    /// The ticket's agent with this role and focus, created as the coordinator's child working
+    /// in the ticket's worktree when there is none yet. A role session is never recycled across
+    /// tickets; a different focus adds another agent in that role, such as a second reviewer.
+    pub(crate) fn ticket_agent(
+        &mut self,
+        ticket: &Ticket,
+        role: Role,
+        provider: Provider,
+        focus: Option<&str>,
+    ) -> Result<(Session, bool)> {
         if let Some(focus) = focus {
             text(focus, 60)?;
         }
@@ -168,13 +210,10 @@ impl Host {
             role.is_worker(),
             "Assign an implementer, tester or reviewer"
         );
-        let mut ticket = self.ticket(ticket_id)?;
         ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
         let owner = self.session(&ticket.coordinator_id)?;
-        // A role session is never recycled across tickets. Retrying the same assignment is
-        // idempotent; a different focus adds another agent in that role, such as a second reviewer.
         if let Some(existing) = self.runtimes()?.into_iter().find(|r| {
-            r.ticket_id.as_deref() == Some(ticket_id)
+            r.ticket_id.as_deref() == Some(&ticket.id)
                 && r.focus.as_deref() == focus
                 && self.session(&r.session_id).is_ok_and(|s| s.role == role)
         }) {
@@ -183,12 +222,12 @@ impl Host {
                 session.provider == provider,
                 "Existing ticket agent uses another provider"
             );
-            return Ok(session);
+            return Ok((session, false));
         }
         let session = self.create_session(
             &owner.project_id,
             &owner.id,
-            None,
+            Some(&ticket.repository_id),
             &format!(
                 "{} · {}",
                 role.agent_label(focus),
@@ -197,40 +236,32 @@ impl Host {
             role,
             provider,
         )?;
-        let runtime = SessionRuntime {
+        self.save_runtime(&SessionRuntime {
             session_id: session.id.clone(),
             ticket_id: Some(ticket.id.clone()),
             focus: focus.map(Into::into),
             workdir: Some(ticket.worktree.clone()),
             ..Default::default()
-        };
-        self.save_runtime(&runtime)?;
-        self.send(
-            &format!("assignment:{}", session.id),
-            Some(&owner.id),
-            &session.id,
-            &format!(
-                "Ticket: {}\n{}\n\nAssignment: {}\n\nWorktree: {}\nBranch: {}",
-                ticket.title, ticket.brief, instruction, ticket.worktree, ticket.branch
-            ),
-        )?;
-        ticket.state = "assigned".into();
-        self.save_ticket(&ticket)?;
-        Ok(session)
+        })?;
+        Ok((session, true))
+    }
+    /// The ticket's agents, archived or not.
+    pub(crate) fn ticket_agents(&self, ticket_id: &str) -> Result<Vec<Session>> {
+        self.runtimes()?
+            .into_iter()
+            .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
+            .map(|r| self.session(&r.session_id))
+            .collect()
     }
     /// Archives a finished ticket's agents and removes its worktree. Their conversations and the
     /// branch are kept. Refuses while an agent is working or the worktree holds unsaved work.
     pub fn close_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
-        let mut ticket = self.ticket(ticket_id)?;
+        let ticket = self.ticket(ticket_id)?;
         if ticket.state == "closed" {
             return Ok(ticket);
         }
         if let Some(busy) = self
-            .runtimes()?
-            .into_iter()
-            .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
-            .map(|r| self.session(&r.session_id))
-            .collect::<Result<Vec<_>>>()?
+            .ticket_agents(ticket_id)?
             .into_iter()
             .find(|s| s.status == Status::Working)
         {
@@ -239,105 +270,105 @@ impl Host {
                 busy.name
             );
         }
+        self.finish_ticket(ticket, "closed", "ticket_closed")
+    }
+    /// Accepts a ticket whose last verification cycle passed at the commit still checked out.
+    /// Like closing, it archives the agents and removes the worktree, keeping the branch.
+    pub fn accept_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
+        let ticket = self.ticket(ticket_id)?;
+        if ticket.state == "accepted" {
+            return Ok(ticket);
+        }
+        ensure!(
+            ticket.state == "passed",
+            "Ticket is {}; independent verification must pass before acceptance",
+            ticket.state
+        );
+        let verified = ticket
+            .verification
+            .as_ref()
+            .filter(|v| v.outcome == VerificationOutcome::Passed)
+            .and_then(|v| v.verified_commit())
+            .context(
+                "Start verification with verify_ticket; acceptance needs the commit it verified",
+            )?
+            .to_owned();
+        let head = verification::head(&ticket)?;
+        ensure!(
+            head == verified,
+            "The worktree moved past the verified commit: verified {verified}, current {head}; verify again"
+        );
+        self.finish_ticket(ticket, "accepted", "ticket_accepted")
+    }
+    fn finish_ticket(
+        &mut self,
+        mut ticket: Ticket,
+        state: &str,
+        milestone: &str,
+    ) -> Result<Ticket> {
         self.with_worktrees_removed(&[ticket.clone()], |host| {
-            let agents: Vec<Session> = host
-                .runtimes()?
-                .into_iter()
-                .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
-                .map(|r| host.session(&r.session_id))
-                .collect::<Result<_>>()?;
-            for agent in &agents {
+            for agent in host.ticket_agents(&ticket.id)? {
                 host.set_archived(&agent.id, true)?;
             }
-            ticket.state = "closed".into();
+            ticket.state = state.into();
             host.save_ticket(&ticket)?;
             let coordinator = host.session(&ticket.coordinator_id)?;
             Self::event(
                 &host.db,
                 &coordinator.project_id,
                 Some(&coordinator.id),
-                "ticket_closed",
+                milestone,
                 &ticket.id,
             )
         })?;
         Ok(ticket)
-    }
-    /// Archives a main coordinator's finished repository team: its ticket worktrees are removed,
-    /// its accepted tickets are closed and the coordinator's whole tree is archived. Retrying an
-    /// archived team is harmless. Refuses while any team member is working, any ticket is still
-    /// open or any worktree holds unsaved work, naming every blocker.
-    pub fn archive_team(&mut self, main: &str, coordinator_id: &str) -> Result<Vec<Session>> {
-        ensure!(
-            self.session(main)?.role == Role::ProjectOrchestrator,
-            "Only the main coordinator archives repository teams"
-        );
-        let coordinator = self.session(coordinator_id)?;
-        ensure!(
-            coordinator.role == Role::TaskOrchestrator
-                && coordinator.parent_id.as_deref() == Some(main),
-            "Archive only your own repository coordinators"
-        );
-        let tickets: Vec<Ticket> = self
-            .tickets()?
-            .into_iter()
-            .filter(|t| t.coordinator_id == coordinator.id)
-            .collect();
-        let blockers: Vec<String> = self
-            .session_tree(&coordinator.id)?
-            .iter()
-            .filter(|s| s.status == Status::Working)
-            .map(|s| format!("{} is working", s.name))
-            .chain(
-                tickets
-                    .iter()
-                    .filter(|t| t.is_open())
-                    .map(|t| format!("ticket \"{}\" ({}) is {}", t.title, t.id, t.state)),
-            )
-            .collect();
-        ensure!(
-            blockers.is_empty(),
-            "{} still has outstanding work: {}",
-            coordinator.name,
-            blockers.join("; ")
-        );
-        self.with_worktrees_removed(&tickets, |host| {
-            for ticket in tickets.iter().filter(|t| t.state == "accepted") {
-                host.close_ticket(&ticket.id)?;
-            }
-            host.change_archived(&coordinator.id, true, Some("team_archived"))
-        })
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
         let mut context = json!({"self":session,"project":self.project(&session.project_id)?,
             "repositories":self.project_repositories(&session.project_id)?,
             "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).collect::<Vec<_>>(),
-            "tickets":self.tickets()?.into_iter().filter(|t|self.session(&t.coordinator_id).is_ok_and(|s|s.project_id==session.project_id)).collect::<Vec<_>>(),
+            "tickets":self.ticket_overview(&session.project_id)?,
             "runtime":self.session_runtime(id)?, "policies":self.policies()?,
             "memory":self.logs(&session.project_id,None,10)?,
             "open_questions":self.open_questions(&session)?});
-        if session.role == Role::ProjectOrchestrator {
-            context["teams"] = json!(self.teams(id)?);
-        }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {
             context["child_reports"] = Value::Array(child_reports);
         }
         Ok(context)
     }
-    /// The main coordinator's view of each repository team and the state of its tickets.
-    fn teams(&self, main: &str) -> Result<Vec<Value>> {
-        let tickets = self.tickets()?;
-        Ok(self
-            .sessions()?
-            .into_iter()
-            .filter(|s| s.role == Role::TaskOrchestrator && s.parent_id.as_deref() == Some(main))
-            .map(|s| {
-                json!({"id":s.id,"name":s.name,"status":s.status,"archived":s.archived,
-                "tickets":tickets.iter().filter(|t|t.coordinator_id==s.id)
-                    .map(|t|json!({"id":t.id,"title":t.title,"state":t.state})).collect::<Vec<_>>()})
-            })
-            .collect())
+    /// The project's tickets, each with its repository name, agents and verification record.
+    fn ticket_overview(&self, project: &str) -> Result<Vec<Value>> {
+        let repositories = self.repositories()?;
+        let runtimes = self.runtimes()?;
+        let mut overview = vec![];
+        for ticket in self.tickets()? {
+            if !self
+                .session(&ticket.coordinator_id)
+                .is_ok_and(|s| s.project_id == project)
+            {
+                continue;
+            }
+            let mut agents = vec![];
+            for runtime in runtimes
+                .iter()
+                .filter(|r| r.ticket_id.as_ref() == Some(&ticket.id))
+            {
+                let s = self.session(&runtime.session_id)?;
+                agents.push(json!({"id":s.id,"name":s.name,"role":s.role,"focus":runtime.focus,"status":s.status,"archived":s.archived}));
+            }
+            let mut entry = serde_json::to_value(&ticket)?;
+            entry["repository"] = json!(
+                repositories
+                    .iter()
+                    .find(|r| r.id == ticket.repository_id)
+                    .map(|r| r.name.as_str())
+            );
+            entry["agents"] = json!(agents);
+            overview.push(entry);
+        }
+        Ok(overview)
     }
     /// Recent reports each direct child sent this session, newest first. Children
     /// that never reported are omitted, so a session without children gets nothing.
@@ -377,7 +408,7 @@ impl Host {
             .filter(|a| a.session_id == session.id && !a.is_permission())
             .collect())
     }
-    fn assignment_route(&self, role: Role, args: &Value) -> Result<Route> {
+    pub(crate) fn assignment_route(&self, role: Role, args: &Value) -> Result<Route> {
         let policy = self.policy(role)?;
         let provider = args
             .get("provider")
@@ -435,54 +466,20 @@ impl Host {
                 }
                 Ok(receipt)
             }
-            "create_repo_coordinator" => {
-                ensure!(
-                    session.role == Role::ProjectOrchestrator,
-                    "Only the main coordinator creates repository teams"
-                );
-                let repo = self.repository(string("repository_id")?)?;
-                ensure!(
-                    self.project(&session.project_id)?.uses(&repo.id),
-                    "This project does not use that repository"
-                );
-                if let Some(existing) = self.sessions()?.into_iter().find(|s| {
-                    s.parent_id.as_deref() == Some(id)
-                        && s.repository_id.as_deref() == Some(&repo.id)
-                        && s.role == Role::TaskOrchestrator
-                }) {
-                    return Ok(serde_json::to_value(existing)?);
-                }
-                let route = self.assignment_route(Role::TaskOrchestrator, &args)?;
-                let coordinator = self.create_session(
-                    &session.project_id,
-                    id,
-                    Some(&repo.id),
-                    &repo.name,
-                    Role::TaskOrchestrator,
-                    route.profile.provider,
-                )?;
-                let mut runtime = self.session_runtime(&coordinator.id)?;
-                runtime.profile = Some(route.profile);
-                self.save_runtime(&runtime)?;
-                Ok(serde_json::to_value(coordinator)?)
-            }
             "create_ticket" => {
                 ensure!(
-                    session.role == Role::TaskOrchestrator,
-                    "Only repository coordinators create tickets"
+                    session.role == Role::ProjectOrchestrator,
+                    "Only the project coordinator creates tickets"
                 );
                 Ok(serde_json::to_value(self.create_ticket(
                     id,
+                    string("repository_id")?,
                     string("title")?,
                     string("brief")?,
                 )?)?)
             }
             "assign_ticket" => {
-                let ticket = self.ticket(string("ticket_id")?)?;
-                ensure!(
-                    ticket.coordinator_id == id,
-                    "Ticket belongs to another coordinator"
-                );
+                let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 let role: Role = serde_json::from_value(args["role"].clone())?;
                 let route = self.assignment_route(role, &args)?;
                 let provider = route.profile.provider;
@@ -507,98 +504,24 @@ impl Host {
                 )?;
                 Ok(serde_json::to_value(worker)?)
             }
-            "report" => {
-                let kind = string("kind")?;
-                ensure!(
-                    [
-                        "progress",
-                        "blocked",
-                        "ready_for_testing",
-                        "passed",
-                        "failed",
-                        "completed"
-                    ]
-                    .contains(&kind),
-                    "Unknown report kind"
-                );
-                ensure!(
-                    kind != "passed" || matches!(session.role, Role::Tester | Role::Reviewer),
-                    "Only verification agents report passed"
-                );
-                let body = string("body")?;
-                let parent = session.parent_id.as_deref().context(
-                    "You have no parent to report to; answer the human in this chat instead",
-                )?;
-                let report_id = format!("report:{id}:{}", string("message_id")?);
-                if let Ok(existing) = self.message(&report_id) {
-                    ensure!(
-                        existing.body == format!("[{kind}] {}\n{body}", session.name),
-                        "Report ID reused with different content"
-                    );
-                    return Ok(serde_json::to_value(existing)?);
-                }
-                let message = self.send(
-                    &report_id,
-                    Some(id),
-                    parent,
-                    &format!("[{kind}] {}\n{body}", session.name),
-                )?;
-                // Progress is delivered in batches (see the scheduler) and never moves the ticket
-                // or the reporter's status.
-                if kind == "progress" {
-                    Self::event(
-                        &self.db,
-                        &session.project_id,
-                        Some(id),
-                        "agent_progress",
-                        body,
-                    )?;
-                    return Ok(serde_json::to_value(message)?);
-                }
-                if let Some(ticket_id) = self.session_runtime(id)?.ticket_id {
-                    let mut ticket = self.ticket(&ticket_id)?;
-                    if ticket.is_open() {
-                        ticket.state = kind.into();
-                        self.save_ticket(&ticket)?;
-                    }
-                }
-                self.set_status(
-                    id,
-                    match kind {
-                        "blocked" | "failed" => Status::Blocked,
-                        _ => Status::Done,
-                    },
-                )?;
-                Ok(serde_json::to_value(message)?)
+            "report" => self.report(
+                &session,
+                string("kind")?,
+                string("body")?,
+                string("message_id")?,
+            ),
+            "verify_ticket" => {
+                let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                Ok(serde_json::to_value(self.verify_ticket(&ticket.id)?)?)
             }
             "accept_ticket" => {
-                let mut ticket = self.ticket(string("ticket_id")?)?;
-                ensure!(
-                    ticket.coordinator_id == id,
-                    "Ticket belongs to another coordinator"
-                );
-                if ticket.state == "accepted" {
-                    return Ok(serde_json::to_value(ticket)?);
-                }
-                ensure!(
-                    ticket.state == "passed",
-                    "Independent verification must pass before acceptance"
-                );
-                ticket.state = "accepted".into();
-                self.with_worktrees_removed(&[ticket.clone()], |host| host.save_ticket(&ticket))?;
-                Ok(serde_json::to_value(ticket)?)
+                let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                Ok(serde_json::to_value(self.accept_ticket(&ticket.id)?)?)
             }
             "close_ticket" => {
-                let ticket = self.ticket(string("ticket_id")?)?;
-                ensure!(
-                    ticket.coordinator_id == id,
-                    "Ticket belongs to another coordinator"
-                );
+                let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 Ok(serde_json::to_value(self.close_ticket(&ticket.id)?)?)
             }
-            "archive_team" => Ok(serde_json::to_value(
-                self.archive_team(id, string("session_id")?)?,
-            )?),
             "ask_user" => {
                 ensure!(
                     session.role == Role::ProjectOrchestrator,
@@ -643,6 +566,16 @@ impl Host {
             }
             _ => bail!("Unknown agent tool"),
         }
+    }
+    /// The ticket, if the caller is the project coordinator that owns it.
+    fn owned_ticket(&self, caller: &str, ticket_id: &str) -> Result<Ticket> {
+        let ticket = self.ticket(ticket_id)?;
+        ensure!(
+            ticket.coordinator_id == caller
+                && self.session(caller)?.role == Role::ProjectOrchestrator,
+            "Only the ticket's project coordinator manages it"
+        );
+        Ok(ticket)
     }
     pub(crate) fn append_output(&mut self, session: &Session, run: &str, body: &str) -> Result<()> {
         if body.trim().is_empty() {

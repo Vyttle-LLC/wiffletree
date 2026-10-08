@@ -5,10 +5,10 @@ Provide durable, provider-independent project/task ownership and message routing
 ## ADDED Requirements
 
 ### Requirement: Enforced hierarchy
-The host SHALL allow projects without repositories, require task orchestrators to reference a project attachment, and require workers to belong to a task in the same project. Multiple tasks SHALL share a repository attachment.
+The host SHALL allow projects without repositories, require each ticket to reference a repository its project uses, and require workers to belong to the project coordinator of the same project and to work on one of its tickets. Multiple tickets SHALL share a repository.
 
 #### Scenario: Invalid worker owner
-- **WHEN** a worker is created directly under a project or a session from another project
+- **WHEN** a worker is created under a session from another project, or a repository coordinator is created
 - **THEN** the host rejects creation without persisting a partial assignment
 
 ### Requirement: Durable ordered messages

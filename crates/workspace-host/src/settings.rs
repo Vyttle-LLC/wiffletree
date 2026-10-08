@@ -106,7 +106,18 @@ impl Host {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_else(|| HostSettings {
                 workspaces_dir: default_workspaces_dir(),
+                verification: VerificationSettings::default(),
             })
+    }
+    /// Saves who verifies tickets. An invalid setting is refused and the saved one stays.
+    pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
+        verification.validate()?;
+        let settings = HostSettings {
+            verification,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        Ok(settings)
     }
     pub fn set_workspaces_dir(&mut self, path: &str) -> Result<HostSettings> {
         text(path, 4096)?;
@@ -123,6 +134,7 @@ impl Host {
             .map_err(|e| anyhow::anyhow!("Cannot write to {}: {}", folder.display(), reason(&e)))?;
         let settings = HostSettings {
             workspaces_dir: folder.to_string_lossy().into_owned(),
+            ..self.settings()
         };
         self.save_settings(&settings)?;
         Ok(settings)

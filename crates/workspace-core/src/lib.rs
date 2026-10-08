@@ -22,6 +22,8 @@ pub fn new_id() -> String {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     ProjectOrchestrator,
+    /// Legacy repository coordinator. It can no longer be created; it remains only so archived,
+    /// migrated sessions decode and display.
     TaskOrchestrator,
     Implementer,
     Tester,
@@ -39,7 +41,7 @@ impl Role {
     ];
     pub fn label(self) -> &'static str {
         match self {
-            Self::ProjectOrchestrator => "Main coordinator",
+            Self::ProjectOrchestrator => "Coordinator",
             Self::TaskOrchestrator => "Repository coordinator",
             Self::Implementer => "Implementer",
             Self::Tester => "Tester",
@@ -646,23 +648,245 @@ pub fn duration_label(ms: i64) -> String {
 pub struct HostSettings {
     /// Where new projects and ticket worktrees are created.
     pub workspaces_dir: String,
+    #[serde(default)]
+    pub verification: VerificationSettings,
 }
 
+/// The highest verification round cap the settings accept.
+pub const MAX_VERIFICATION_ROUNDS: u32 = 5;
+/// Who verifies a ticket when `verify_ticket` is called, and how many rounds a cycle may take.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSettings {
+    pub verifiers: Vec<VerifierConfig>,
+    pub max_rounds: u32,
+}
+impl Default for VerificationSettings {
+    /// One tester on the tester role's default profile, and two rounds.
+    fn default() -> Self {
+        Self {
+            verifiers: vec![VerifierConfig {
+                role: Role::Tester,
+                focus: "Tests".into(),
+                instruction: None,
+                provider: None,
+                size: None,
+            }],
+            max_rounds: 2,
+        }
+    }
+}
+impl VerificationSettings {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=MAX_VERIFICATION_ROUNDS).contains(&self.max_rounds),
+            "The round cap must be 1–{MAX_VERIFICATION_ROUNDS}"
+        );
+        ensure!(
+            !self.verifiers.is_empty(),
+            "Configure at least one verifier"
+        );
+        let mut focuses = BTreeSet::new();
+        for verifier in &self.verifiers {
+            ensure!(
+                matches!(verifier.role, Role::Tester | Role::Reviewer),
+                "Verifiers are testers or reviewers"
+            );
+            let focus = verifier.focus.trim();
+            ensure!(
+                !focus.is_empty() && focus.len() <= 60,
+                "Give each verifier a focus of 1–60 bytes"
+            );
+            ensure!(
+                focuses.insert(focus.to_lowercase()),
+                "Two verifiers share the focus \"{focus}\""
+            );
+            ensure!(
+                verifier
+                    .instruction
+                    .as_ref()
+                    .is_none_or(|i| i.len() <= MAX_TEXT_BYTES),
+                "Verifier instruction is too long"
+            );
+        }
+        Ok(())
+    }
+}
+/// One configured verifier. Only the `provider` and `size` assignment arguments are accepted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifierConfig {
+    pub role: Role,
+    /// Tells verifiers apart on a ticket, such as "Codex correctness" or "Style".
+    pub focus: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<ProfileSize>,
+}
+/// The configured Big or Small profile, as `assign_ticket`'s `size` argument names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSize {
+    Big,
+    Small,
+}
+
+/// A ticket is a workspace: one repository, one worktree and branch, and its agents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ticket {
     pub id: String,
+    /// The project coordinator that owns the ticket.
     pub coordinator_id: String,
+    /// Empty only on tickets stored before tickets recorded their repository.
+    #[serde(default)]
+    pub repository_id: String,
     pub title: String,
     pub brief: String,
     pub worktree: String,
     pub branch: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
 }
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
     pub fn is_open(&self) -> bool {
         !matches!(self.state.as_str(), "accepted" | "closed")
     }
+    /// The verification cycle in progress, if any.
+    pub fn running_cycle(&self) -> Option<&Verification> {
+        self.verification
+            .as_ref()
+            .filter(|v| v.outcome == VerificationOutcome::Running)
+    }
+}
+/// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verification {
+    pub cycle: u32,
+    pub max_rounds: u32,
+    pub outcome: VerificationOutcome,
+    pub rounds: Vec<VerificationRound>,
+}
+impl Verification {
+    pub fn current_round(&self) -> Option<&VerificationRound> {
+        self.rounds.last()
+    }
+    /// Each verifier's most recent run in the cycle, in configured order.
+    pub fn latest_results(&self) -> Vec<&VerifierRun> {
+        let mut latest: Vec<&VerifierRun> = Vec::new();
+        for run in self.rounds.iter().flat_map(|r| &r.verifiers) {
+            match latest.iter_mut().find(|l| l.session_id == run.session_id) {
+                Some(slot) => *slot = run,
+                None => latest.push(run),
+            }
+        }
+        latest
+    }
+    /// The commit the last round verified; `accept_ticket` requires HEAD to equal it.
+    pub fn verified_commit(&self) -> Option<&str> {
+        self.current_round().map(|r| r.commit.as_str())
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationOutcome {
+    Running,
+    Passed,
+    Blocked,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationRound {
+    pub round: u32,
+    /// The commit every verifier of the round checks.
+    pub commit: String,
+    pub verifiers: Vec<VerifierRun>,
+}
+/// One verifier's part in a round. Its run is the `provider_runs` row for `session_id`
+/// whose `messages` contain `message_id`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifierRun {
+    pub session_id: String,
+    pub role: Role,
+    pub focus: String,
+    pub message_id: String,
+    pub result: VerifierResult,
+    /// The verifier's report message, once it reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_id: Option<String>,
+    /// Set by the host when it overrides the reported result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierResult {
+    Pending,
+    Passed,
+    Failed,
+    Blocked,
+}
+impl VerifierResult {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+/// Why a leftover worktree may or may not be removed; earlier classes take precedence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeftoverClass {
+    InTurn,
+    Locked,
+    Dirty,
+    Detached,
+    Unpushed,
+    UntrackedByWiffletree,
+    Clean,
+}
+impl LeftoverClass {
+    /// Only clean and unpushed worktrees may be removed, and only when the human selects them.
+    pub fn is_removable(self) -> bool {
+        matches!(self, Self::Clean | Self::Unpushed)
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::InTurn => "Agent in its turn",
+            Self::Locked => "Locked",
+            Self::Dirty => "Uncommitted changes",
+            Self::Detached => "Not on its branch",
+            Self::Unpushed => "Unpushed commits; branch is kept",
+            Self::UntrackedByWiffletree => "Not recorded by any ticket",
+            Self::Clean => "Clean",
+        }
+    }
+}
+/// A worktree left by a ticket finished before worktrees were removed on close and accept, or
+/// a Wiffletree-made worktree no ticket records (`ticket_id` is then `None`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftoverWorktree {
+    pub project_id: Option<String>,
+    pub project: String,
+    pub repository: String,
+    pub ticket_id: Option<String>,
+    pub title: String,
+    pub state: String,
+    pub worktree: String,
+    pub branch: String,
+    pub head: String,
+    pub class: LeftoverClass,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftoverRemoval {
+    pub ticket_id: String,
+    pub removed: bool,
+    /// Why it was kept, or `None` once removed.
+    pub reason: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionRuntime {
@@ -736,8 +960,10 @@ pub enum Command {
         provider: Option<Provider>,
         timezone: String,
     },
+    /// `coordinator_id` must be a project coordinator whose project uses `repository_id`.
     CreateTicket {
         coordinator_id: String,
+        repository_id: String,
         title: String,
         brief: String,
     },
@@ -869,6 +1095,17 @@ pub enum Command {
     /// `HostSettings`. Only projects and tickets created afterwards use it.
     SetWorkspacesDir {
         path: String,
+    },
+    /// Validates and saves the verification setting; answers with `HostSettings`.
+    SetVerification {
+        verification: VerificationSettings,
+    },
+    /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
+    LeftoverWorktrees,
+    /// Removes the worktrees of the tickets the human selected from the listing, re-checking
+    /// each first; answered with `Vec<LeftoverRemoval>`.
+    RemoveLeftoverWorktrees {
+        ticket_ids: Vec<String>,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

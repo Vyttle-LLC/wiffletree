@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
-use workspace_core::{Provider, Role, Session, Status, Ticket};
+use workspace_core::{Provider, Receipt, Role, Session, Status, Ticket};
 use workspace_host::Host;
 
 fn git(path: &Path, args: &[&str]) -> std::process::Output {
@@ -31,6 +31,8 @@ fn repository(path: &Path) {
     succeed(path, &["commit", "-q", "-m", "Fixture"]);
 }
 
+/// A project using the `web` repository; the second session is its coordinator, which owns the
+/// tickets, returned again for readability.
 fn team(host: &mut Host, directory: &Path) -> (Session, Session) {
     host.set_workspaces_dir(directory.join("workspaces").to_str().unwrap())
         .unwrap();
@@ -45,23 +47,15 @@ fn team(host: &mut Host, directory: &Path) -> (Session, Session) {
     let attached = host
         .attach_repository(&project.id, directory.join("web").to_str().unwrap(), "HEAD")
         .unwrap();
-    let coordinator = host
-        .create_session(
-            &project.id,
-            &root.id,
-            Some(&attached.id),
-            "Web",
-            Role::TaskOrchestrator,
-            Provider::Codex,
-        )
-        .unwrap();
-    (root, coordinator)
+    assert_eq!(host.repositories().unwrap(), [attached]);
+    (root.clone(), root)
 }
 
 /// A ticket with committed work and ignored build output in its worktree.
 fn worked_ticket(host: &mut Host, coordinator: &Session, title: &str) -> Ticket {
+    let repository = host.repositories().unwrap().remove(0);
     let ticket = host
-        .create_ticket(&coordinator.id, title, "Style it")
+        .create_ticket(&coordinator.id, &repository.id, title, "Style it")
         .unwrap();
     let worktree = Path::new(&ticket.worktree);
     fs::write(worktree.join("style.css"), "body {}\n").unwrap();
@@ -86,16 +80,55 @@ fn branch_exists(directory: &Path, ticket: &Ticket) -> bool {
     .success()
 }
 
-fn passed(host: &mut Host, ticket: &Ticket) {
-    let tester = host
-        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+/// Starts verification of a ticket its implementer reported ready, returning the verifier.
+fn verifying(host: &mut Host, ticket: &Ticket) -> Session {
+    let implementer = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
         .unwrap();
     host.agent_tool(
-        &tester.id,
+        &implementer.id,
+        "report",
+        json!({"message_id":"ready","kind":"ready_for_testing","body":"Committed"}),
+    )
+    .unwrap();
+    let verified: Ticket = serde_json::from_value(
+        host.agent_tool(
+            &ticket.coordinator_id,
+            "verify_ticket",
+            json!({"ticket_id":ticket.id}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let verifier = &verified.verification.unwrap().rounds[0].verifiers[0];
+    host.session(&verifier.session_id).unwrap()
+}
+
+/// What a turn does first: takes every queued message as its input.
+fn take_input(host: &mut Host, session: &str) {
+    for message in host.messages(session, None, 100).unwrap() {
+        if message.receipt == Receipt::Queued {
+            host.advance_receipt(&message.id, Receipt::Delivered)
+                .unwrap();
+        }
+    }
+}
+
+fn pass(host: &mut Host, verifier: &Session) {
+    take_input(host, &verifier.id);
+    host.agent_tool(
+        &verifier.id,
         "report",
         json!({"message_id":"done","kind":"passed","body":"Green"}),
     )
     .unwrap();
+}
+
+fn passed(host: &mut Host, ticket: &Ticket) -> Session {
+    let verifier = verifying(host, ticket);
+    pass(host, &verifier);
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "passed");
+    verifier
 }
 
 #[test]
@@ -125,26 +158,7 @@ fn archiving_a_project_hides_its_tree_stops_it_and_keeps_its_history() {
 }
 
 #[test]
-fn restoring_a_team_restores_its_project_but_archiving_a_team_leaves_the_project() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
-    let (root, coordinator) = team(&mut host, directory.path());
-
-    host.set_archived(&coordinator.id, true).unwrap();
-    assert!(!host.session(&root.id).unwrap().archived);
-    let refused = host.create_ticket(&coordinator.id, "Toolbar", "Style it");
-    assert!(refused.is_err());
-
-    host.set_archived(&root.id, true).unwrap();
-    host.set_archived(&coordinator.id, false).unwrap();
-    assert!(!host.session(&root.id).unwrap().archived);
-    assert!(!host.session(&coordinator.id).unwrap().archived);
-    host.send("after", None, &coordinator.id, "Welcome back")
-        .unwrap();
-}
-
-#[test]
-fn archiving_a_team_removes_clean_worktrees_and_restoring_re_creates_them() {
+fn archiving_a_project_removes_clean_worktrees_and_restoring_re_creates_them() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
@@ -301,24 +315,17 @@ fn finish_turn(db: &rusqlite::Connection, host: &mut Host, agent: &Session) {
     host.settle_pending_worktrees();
 }
 
-/// A passed ticket whose tester reported and is still writing its summary.
+/// A passed ticket whose verifier reported and is still writing its summary.
 fn reported_in_turn(
     host: &mut Host,
     db: &rusqlite::Connection,
     coordinator: &Session,
 ) -> (Ticket, Session) {
     let ticket = worked_ticket(host, coordinator, "Toolbar");
-    let tester = host
-        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
-        .unwrap();
+    let tester = verifying(host, &ticket);
     start_turn(db, &tester);
     host.set_status(&tester.id, Status::Working).unwrap();
-    host.agent_tool(
-        &tester.id,
-        "report",
-        json!({"message_id":"done","kind":"passed","body":"Green"}),
-    )
-    .unwrap();
+    pass(host, &tester);
     (ticket, tester)
 }
 
@@ -610,37 +617,6 @@ fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it
 }
 
 #[test]
-fn a_failed_team_archive_keeps_accepted_tickets_open_to_retry() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
-    let (root, coordinator) = team(&mut host, directory.path());
-    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
-    passed(&mut host, &ticket);
-    host.agent_tool(
-        &coordinator.id,
-        "accept_ticket",
-        json!({"ticket_id":ticket.id}),
-    )
-    .unwrap();
-    let archive = json!({"session_id":coordinator.id});
-    let db = fail_activity(directory.path(), "team_archived");
-
-    assert!(
-        host.agent_tool(&root.id, "archive_team", archive.clone())
-            .is_err()
-    );
-
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "accepted");
-    assert!(!host.session(&coordinator.id).unwrap().archived);
-    assert!(!Path::new(&ticket.worktree).exists());
-
-    db.execute_batch("DROP TRIGGER fail_activity").unwrap();
-    host.agent_tool(&root.id, "archive_team", archive).unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
-    assert!(host.session(&coordinator.id).unwrap().archived);
-}
-
-#[test]
 fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open(directory.path().join("home")).unwrap();
@@ -770,10 +746,7 @@ fn an_orphaned_provider_process_defers_removal_until_it_exits() {
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
-    passed(&mut host, &ticket);
-    let tester = host
-        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
-        .unwrap();
+    let tester = passed(&mut host, &ticket);
     let orphan = Orphan::spawn();
     orphan.record(&db, &tester, "interrupted");
 

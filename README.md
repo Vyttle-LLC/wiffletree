@@ -13,15 +13,15 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-86C1BC"></a>
 </p>
 
-![The main coordinator reporting a tested branch for the tidepool repository](docs/images/coordinator.png)
+![The coordinator reporting a tested branch for the tidepool repository](docs/images/coordinator.png)
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/tickets.png" alt="A repository coordinator's tickets, with the branch and agents for each"></td>
+    <td width="50%"><img src="docs/images/tickets.png" alt="A coordinator's tickets, with the branch and agents for each"></td>
     <td width="50%"><img src="docs/images/models.png" alt="Default Claude and Codex models for each agent role"></td>
   </tr>
   <tr>
-    <td align="center"><sub>A repository coordinator accepts a ticket after an independent test.</sub></td>
+    <td align="center"><sub>A coordinator accepts a ticket after independent verification.</sub></td>
     <td align="center"><sub>Any role can run on Claude or Codex.</sub></td>
   </tr>
 </table>
@@ -64,13 +64,13 @@ Wiffletree has opinions about how agent work should be organized.
 
 **Projects are outcomes, not repositories.** A project is a feature, a bug or any goal you want reached. Repositories are attached to it, and one repository can serve many projects at once.
 
-**You talk to one coordinator.** Each project has a main coordinator that owns the goal and the conversation with you. It plans, asks you the questions that matter and reports the result. You do not have to manage the team underneath it.
+**You talk to one coordinator.** Each project has a coordinator that owns the goal and the conversation with you. It plans, asks you the questions that matter and reports the result. You do not have to manage the agents underneath it.
 
-**Each repository gets its own team lead.** The main coordinator staffs a repository coordinator for every repository the work touches. That coordinator breaks the work into tickets, assigns agents and accepts the result.
+**Each ticket is its own workspace.** The coordinator breaks the work into tickets, one repository each, with its own branch and worktree. It assigns an implementer, then verifies with one call that runs every configured tester and reviewer at once on the same commit, and accepts the result.
 
 **Tickets are small, isolated and tested by someone else.** Every ticket gets its own Git worktree and branch. An implementer builds it, and a separate tester checks it against the acceptance criteria. "The turn ended" never counts as "it works."
 
-**Blocked is not the same as needs-you.** Workers report blockers to their coordinator, which resolves most of them. Only the main coordinator escalates to you, and it gathers its questions in one Inbox so you answer them once.
+**Blocked is not the same as needs-you.** Workers report blockers to the coordinator, which resolves most of them. Only the coordinator escalates to you, and it gathers its questions in one Inbox so you answer them once.
 
 **Any model can play any role.** Claude can coordinate Codex implementers, and Codex can coordinate Claude. You set a default model for each role, and you can override any single agent.
 

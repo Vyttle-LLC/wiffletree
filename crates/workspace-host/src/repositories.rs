@@ -349,15 +349,16 @@ impl Host {
                 .filter(|id| unique.insert(id.clone()))
                 .collect()
         });
-        if let Some(team) = self.sessions()?.into_iter().find(|s| {
-            s.project_id == project.id
-                && s.role == Role::TaskOrchestrator
-                && !s.archived
-                && s.repository_id.as_ref().is_some_and(|id| !project.uses(id))
+        if let Some(ticket) = self.tickets()?.into_iter().find(|t| {
+            t.is_open()
+                && !project.uses(&t.repository_id)
+                && self
+                    .session(&t.coordinator_id)
+                    .is_ok_and(|s| s.project_id == project.id && !s.archived)
         }) {
             bail!(
-                "{} works in a repository you removed; archive that team first",
-                team.name
+                "Ticket \"{}\" works in a repository you removed; close it first",
+                ticket.title
             );
         }
         let detail = match &project.repositories {
@@ -381,8 +382,9 @@ impl Host {
             !self
                 .sessions()?
                 .iter()
-                .any(|s| s.repository_id.as_deref() == Some(id)),
-            "Teams work in {}, so it stays in the workspace",
+                .any(|s| s.repository_id.as_deref() == Some(id))
+                && !self.tickets()?.iter().any(|t| t.repository_id == id),
+            "Tickets work in {}, so it stays in the workspace",
             repository.name
         );
         let projects = self.projects()?;

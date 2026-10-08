@@ -54,24 +54,14 @@ fn main() -> Result<()> {
     tx.commit()?;
     drop(db);
     let mut host = Host::open(directory.path())?;
-    let mut tasks = Vec::new();
-    for (i, (project_id, repo)) in repositories.iter().enumerate() {
+    // 45 agents across the projects' repositories, for 50 sessions with the coordinators.
+    for i in 0..45 {
+        let (project_id, repo) = &repositories[i % repositories.len()];
         let root = roots.iter().find(|r| &r.project_id == project_id).unwrap();
-        tasks.push(host.create_session(
+        host.create_session(
             project_id,
             &root.id,
             Some(&repo.id),
-            &format!("Task {i}"),
-            Role::TaskOrchestrator,
-            Provider::Codex,
-        )?);
-    }
-    for i in 0..35 {
-        let task = &tasks[i % 10];
-        host.create_session(
-            &task.project_id,
-            &task.id,
-            None,
             &format!("Worker {i}"),
             Role::Implementer,
             Provider::Codex,

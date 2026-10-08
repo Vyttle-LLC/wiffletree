@@ -23,6 +23,11 @@ const CHECK_IN_MS: i64 = 30 * 60_000;
 const PROGRESS_BATCH_MS: i64 = 20_000;
 /// Bounds one turn's prompt; any further queued messages go to the next turn.
 const MAX_TURN_MESSAGES: usize = 20;
+/// The host-wide cap on active turns.
+const HOST_TURNS: usize = 8;
+/// The host-wide cap on active turns that a worker may join; `verify_ticket` refuses rounds
+/// larger than this, so a waiting round always fits eventually.
+pub(crate) const HOST_WORKER_TURNS: usize = 6;
 
 /// Longest a wake-up sleeps before the actor looks again; macOS suspends sleeping threads
 /// while the Mac sleeps, so a long sleep could miss a timer by hours.
@@ -37,6 +42,14 @@ fn is_turn_input(table: &str) -> String {
 /// SQL condition for a message that is a child's progress report: live.rs "report" writes
 /// the id `report:{sender}:…`, so a human message cannot pass for one.
 const IS_PROGRESS_REPORT: &str = "sender IS NOT NULL AND substr(id,1,length(sender)+8)='report:'||sender||':' AND substr(body,1,11)='[progress] '";
+
+/// Whether a queued verification round could start now, must wait for capacity, or cannot start
+/// until someone intervenes (a verifier is paused, disconnected or holding input).
+enum Admission {
+    Started,
+    Waiting,
+    Stuck,
+}
 /// `input` pairs each message with a status line rendered under its id, such as a timer
 /// fire's lateness; most messages have none.
 fn turn_prompt(
@@ -64,7 +77,7 @@ fn turn_prompt(
         .collect::<Vec<_>>()
         .join("\n\n---\n\n");
     format!(
-        "Managed session {} ({}){preamble}\n{messages}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The main coordinator responds to the human directly. Never wait or poll for a reply.{reminder}",
+        "Managed session {} ({}){preamble}\n{messages}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The coordinator responds to the human directly. Never wait or poll for a reply.{reminder}",
         session.name,
         session.role.label(),
     )
@@ -475,6 +488,10 @@ impl Service {
     pub fn step_changes(&self) -> Receiver<()> {
         self.step_changes.clone()
     }
+}
+/// The project's turns a worker may take; one is kept for its coordinator.
+pub(crate) fn worker_turns(project: &Project) -> usize {
+    project.turn_limit.saturating_sub(1).max(1)
 }
 impl Actor {
     /// Repository scans run Git once per new repository, so they leave the host thread free
@@ -1171,21 +1188,26 @@ impl Actor {
             }
             Err(e) => eprintln!("Workspace timers: {e:#}"),
         }
-        if self.active.len() >= 8 {
+        if self.active.len() >= HOST_TURNS {
             return Ok(());
         }
-        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let (in_rounds, hold_workers) = self.admit_rounds()?;
+        // Quiet messages ride along with the next turn but never start one.
+        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY s.role<>'project_orchestrator',m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut considered = HashSet::new();
         for message in messages {
-            if self.active.len() >= 8 {
+            if self.active.len() >= HOST_TURNS {
                 break;
             }
-            if !considered.insert(message.recipient.clone()) {
+            if !considered.insert(message.recipient.clone())
+                || in_rounds.contains(&message.recipient)
+            {
                 continue;
             }
             let session = self.host.session(&message.recipient)?;
             if self.active.contains_key(&session.id)
                 || matches!(session.status, Status::Paused | Status::Disconnected)
+                || (hold_workers && session.role.is_worker())
             {
                 continue;
             }
@@ -1193,20 +1215,12 @@ impl Actor {
                 continue;
             };
             let project = self.host.project(&session.project_id)?;
-            let project_active = self
-                .active
-                .keys()
-                .filter(|id| {
-                    self.host
-                        .session(id)
-                        .is_ok_and(|s| s.project_id == project.id)
-                })
-                .count();
+            let project_active = self.project_active(&project.id);
             // Reserve capacity for coordinators so a full worker pool cannot starve handoffs.
             if project_active >= project.turn_limit
                 || (session.role.is_worker()
-                    && (project_active >= project.turn_limit.saturating_sub(1).max(1)
-                        || self.active.len() >= 6))
+                    && (project_active >= worker_turns(&project)
+                        || self.active.len() >= HOST_WORKER_TURNS))
             {
                 continue;
             }
@@ -1216,16 +1230,8 @@ impl Actor {
                 continue;
             }
             let runtime = self.host.session_runtime(&session.id)?;
-            // A ticket's worktree has one writer at a time; reviewers only read, so they run together.
             if let Some(ticket) = &runtime.ticket_id
-                && self.active.keys().any(|id| {
-                    self.host
-                        .session_runtime(id)
-                        .is_ok_and(|r| r.ticket_id.as_ref() == Some(ticket))
-                        && self.host.session(id).is_ok_and(|active| {
-                            !(session.role == Role::Reviewer && active.role == Role::Reviewer)
-                        })
-                })
+                && self.worktree_busy(ticket, &session)?
             {
                 continue;
             }
@@ -1234,6 +1240,127 @@ impl Actor {
             }
         }
         Ok(())
+    }
+    fn project_active(&self, project: &str) -> usize {
+        self.active
+            .keys()
+            .filter(|id| self.host.session(id).is_ok_and(|s| s.project_id == project))
+            .count()
+    }
+    /// A ticket's worktree has one writer at a time. Readers run together: reviewers, and the
+    /// testers verifying the ticket in its running cycle.
+    fn worktree_busy(&self, ticket_id: &str, session: &Session) -> Result<bool> {
+        let ticket = self.host.ticket(ticket_id)?;
+        let reader = |session: &Session| {
+            session.role == Role::Reviewer
+                || ticket.running_cycle().is_some_and(|cycle| {
+                    cycle
+                        .rounds
+                        .iter()
+                        .flat_map(|r| &r.verifiers)
+                        .any(|v| v.session_id == session.id)
+                })
+        };
+        for id in self.active.keys() {
+            if self
+                .host
+                .session_runtime(id)?
+                .ticket_id
+                .is_some_and(|t| t == ticket_id)
+            {
+                let active = self.host.session(id)?;
+                if !(reader(session) && reader(&active)) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+    /// Starts each verification round that fits. A round's verifiers start together or not at
+    /// all, so they are never scheduled one by one. Returns them, and whether a round is waiting
+    /// for capacity: then no other worker turn starts anywhere, so freed slots accumulate until
+    /// it fits.
+    fn admit_rounds(&mut self) -> Result<(HashSet<String>, bool)> {
+        let mut members_of_rounds = HashSet::new();
+        let mut waiting = false;
+        for (ticket, members) in self.waiting_rounds()? {
+            waiting |= matches!(self.admit_round(&ticket, &members)?, Admission::Waiting);
+            members_of_rounds.extend(members.into_iter().map(|s| s.id));
+        }
+        Ok((members_of_rounds, waiting))
+    }
+    /// Each running cycle's current round whose verifiers still have their round message queued.
+    fn waiting_rounds(&self) -> Result<Vec<(Ticket, Vec<Session>)>> {
+        let mut rounds = vec![];
+        for ticket in self.host.tickets()? {
+            let Some(round) = ticket.running_cycle().and_then(Verification::current_round) else {
+                continue;
+            };
+            let mut members = vec![];
+            for run in &round.verifiers {
+                if self
+                    .host
+                    .message(&run.message_id)
+                    .is_ok_and(|m| m.receipt == Receipt::Queued)
+                {
+                    members.push(self.host.session(&run.session_id)?);
+                }
+            }
+            if !members.is_empty() {
+                rounds.push((ticket, members));
+            }
+        }
+        Ok(rounds)
+    }
+    /// Starts every member of a round, or none of them.
+    fn admit_round(&mut self, ticket: &Ticket, members: &[Session]) -> Result<Admission> {
+        let project = self.host.project(&members[0].project_id)?;
+        let held = |id: &str| -> Result<bool> {
+            Ok(self.host.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='held')",
+                [id],
+                |r| r.get(0),
+            )?)
+        };
+        if !self.host.live_projects()?.contains(&project.id)
+            || self.turns.get(&project.id).copied().unwrap_or_default() >= 100
+        {
+            return Ok(Admission::Stuck);
+        }
+        for member in members {
+            if member.archived
+                || matches!(member.status, Status::Paused | Status::Disconnected)
+                || held(&member.id)?
+            {
+                return Ok(Admission::Stuck);
+            }
+        }
+        let count = members.len();
+        if members.iter().any(|m| self.active.contains_key(&m.id))
+            || self.active.len() + count > HOST_WORKER_TURNS
+            || self.project_active(&project.id) + count > worker_turns(&project)
+        {
+            return Ok(Admission::Waiting);
+        }
+        for member in members {
+            if self.worktree_busy(&ticket.id, member)? {
+                return Ok(Admission::Waiting);
+            }
+        }
+        let mut inputs = vec![];
+        for member in members {
+            match self.due_input(&member.id)? {
+                Some(input) => inputs.push((member.clone(), input)),
+                None => return Ok(Admission::Waiting),
+            }
+        }
+        for (member, input) in inputs {
+            let first = input[0].clone();
+            if let Err(error) = self.start_turn(member.clone(), input) {
+                self.start_failed(&member, &first, &error)?;
+            }
+        }
+        Ok(Admission::Started)
     }
     /// Records why a turn could not start and settles any run it opened.
     fn start_failed(
@@ -1265,7 +1392,7 @@ impl Actor {
     fn due_input(&mut self, recipient: &str) -> Result<Option<Vec<Message>>> {
         let input = self.host.db.prepare(&format!("SELECT * FROM messages WHERE recipient=?1 AND receipt='queued' AND {} ORDER BY sequence LIMIT ?2", is_turn_input("messages")))?.query_map(params![recipient, MAX_TURN_MESSAGES],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         // Urgency covers the whole queue, not just the bounded input.
-        let urgent: bool = self.host.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='queued' AND {} AND NOT ({IS_PROGRESS_REPORT}))", is_turn_input("messages")), [recipient], |r| r.get(0))?;
+        let urgent: bool = self.host.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0 AND {} AND NOT ({IS_PROGRESS_REPORT}))", is_turn_input("messages")), [recipient], |r| r.get(0))?;
         let due = input
             .first()
             .map_or(0, |m| m.created_at + PROGRESS_BATCH_MS);
@@ -1370,17 +1497,6 @@ impl Actor {
         }
         let cwd = if let Some(path) = &runtime.workdir {
             PathBuf::from(path)
-        } else if session.role == Role::TaskOrchestrator {
-            PathBuf::from(
-                self.host
-                    .repository(
-                        session
-                            .repository_id
-                            .as_deref()
-                            .context("Missing repository")?,
-                    )?
-                    .path,
-            )
         } else {
             ensure!(
                 !session.role.is_worker(),
@@ -1522,8 +1638,24 @@ mod tests {
         (actor, changes, step_changes)
     }
 
-    /// A ticket whose tester is in its turn, run `run`, under its repository coordinator.
+    /// A ticket whose tester is in its turn, run `run`, under its project coordinator.
     fn ticket_in_turn() -> (tempfile::TempDir, Actor, Ticket, Session, Session) {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        let tester = host
+            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+            .unwrap();
+        host.db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
+                [&tester.id],
+            )
+            .unwrap();
+        let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, tester, coordinator)
+    }
+
+    /// A ticket "Toolbar" in a fresh repository, owned by its project's coordinator.
+    fn ticket_fixture() -> (tempfile::TempDir, Host, Ticket, Session) {
         let home = tempfile::tempdir().unwrap();
         let repository = home.path().join("web");
         fs::create_dir_all(&repository).unwrap();
@@ -1558,30 +1690,173 @@ mod tests {
         let attached = host
             .attach_repository(&project.id, repository.to_str().unwrap(), "HEAD")
             .unwrap();
-        let coordinator = host
-            .create_session(
-                &project.id,
-                &root.id,
-                Some(&attached.id),
-                "Web",
-                Role::TaskOrchestrator,
-                Provider::Codex,
-            )
-            .unwrap();
+        let coordinator = root;
         let ticket = host
-            .create_ticket(&coordinator.id, "Toolbar", "Do")
+            .create_ticket(&coordinator.id, &attached.id, "Toolbar", "Do")
             .unwrap();
-        let tester = host
-            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+        (home, host, ticket, coordinator)
+    }
+
+    /// A live project whose ticket has a verification round of `count` testers queued and not
+    /// yet started.
+    fn waiting_round(count: usize) -> (tempfile::TempDir, Actor, Ticket, Vec<String>) {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        host.set_verification(VerificationSettings {
+            verifiers: (0..count)
+                .map(|i| VerifierConfig {
+                    role: Role::Tester,
+                    focus: format!("Tester {i}"),
+                    instruction: None,
+                    provider: None,
+                    size: None,
+                })
+                .collect(),
+            max_rounds: 2,
+        })
+        .unwrap();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Do", None)
             .unwrap();
-        host.db
-            .execute(
-                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
-                [&tester.id],
+        host.agent_tool(
+            &implementer.id,
+            "report",
+            json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"}),
+        )
+        .unwrap();
+        let ticket = host.verify_ticket(&ticket.id).unwrap();
+        host.set_live(&coordinator.project_id, true).unwrap();
+        let verifiers = ticket.verification.as_ref().unwrap().rounds[0]
+            .verifiers
+            .iter()
+            .map(|v| v.session_id.clone())
+            .collect();
+        let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, verifiers)
+    }
+
+    fn queued(actor: &Actor, ticket: &Ticket) -> usize {
+        ticket.verification.as_ref().unwrap().rounds[0]
+            .verifiers
+            .iter()
+            .filter(|v| actor.host.message(&v.message_id).unwrap().receipt == Receipt::Queued)
+            .count()
+    }
+
+    #[test]
+    fn testers_verifying_a_ticket_share_its_worktree_but_writers_do_not() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        let second = actor.host.session(&verifiers[1]).unwrap();
+        actor
+            .active
+            .insert(verifiers[0].clone(), active_turn("first", vec![]));
+        assert!(!actor.worktree_busy(&ticket.id, &second).unwrap());
+
+        let implementer = actor
+            .host
+            .ticket_agents(&ticket.id)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.role == Role::Implementer)
+            .unwrap();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("write", vec![]));
+        assert!(actor.worktree_busy(&ticket.id, &second).unwrap());
+        actor.active.remove(&implementer.id);
+
+        let ad_hoc = actor
+            .host
+            .assign_ticket(
+                &ticket.id,
+                Role::Tester,
+                Provider::Codex,
+                "Test",
+                Some("Extra"),
             )
             .unwrap();
-        let (actor, _, _) = idle_actor(host);
-        (home, actor, ticket, tester, coordinator)
+        assert!(
+            actor.worktree_busy(&ticket.id, &ad_hoc).unwrap(),
+            "a tester outside the cycle still writes"
+        );
+    }
+
+    #[test]
+    fn a_round_that_does_not_fit_the_project_waits_whole_and_holds_other_workers() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(3);
+        // Another ticket's worker takes one of the project's three worker turns.
+        let other = actor
+            .host
+            .create_ticket(&ticket.coordinator_id, &ticket.repository_id, "Other", "Do")
+            .unwrap();
+        let busy = actor
+            .host
+            .assign_ticket(&other.id, Role::Implementer, Provider::Codex, "Do", None)
+            .unwrap();
+        actor
+            .active
+            .insert(busy.id.clone(), active_turn("busy", vec![]));
+
+        let (members, waiting) = actor.admit_rounds().unwrap();
+
+        assert!(waiting, "other workers are held");
+        assert_eq!(members, verifiers.iter().cloned().collect::<HashSet<_>>());
+        assert_eq!(actor.active.len(), 1, "no verifier started alone");
+        assert_eq!(queued(&actor, &ticket), 3);
+    }
+
+    #[test]
+    fn a_round_that_does_not_fit_the_host_waits_and_holds_workers_in_every_project() {
+        let (_home, mut actor, ticket, _verifiers) = waiting_round(3);
+        for i in 0..4 {
+            actor.host.create_project(&format!("Busy {i}")).unwrap();
+        }
+        let elsewhere: Vec<String> = actor
+            .host
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.project_id != ticket_project(&actor, &ticket))
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(elsewhere.len(), 4);
+        for id in elsewhere {
+            actor.active.insert(id, active_turn("busy", vec![]));
+        }
+
+        let (_, waiting) = actor.admit_rounds().unwrap();
+
+        assert!(
+            waiting,
+            "4 active turns leave 2 of the host's 6 worker turns"
+        );
+        assert_eq!(actor.active.len(), 4);
+        assert_eq!(queued(&actor, &ticket), 3);
+    }
+
+    #[test]
+    fn a_round_with_a_paused_verifier_waits_without_holding_other_workers() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        actor
+            .host
+            .set_status(&verifiers[1], Status::Paused)
+            .unwrap();
+
+        let (members, waiting) = actor.admit_rounds().unwrap();
+
+        assert!(
+            !waiting,
+            "a round that cannot start does not stall the host"
+        );
+        assert_eq!(members.len(), 2, "its verifiers still start only together");
+        assert_eq!(queued(&actor, &ticket), 2);
+    }
+
+    fn ticket_project(actor: &Actor, ticket: &Ticket) -> String {
+        actor
+            .host
+            .session(&ticket.coordinator_id)
+            .unwrap()
+            .project_id
     }
 
     /// The same ticket closed, so its worktree removal waits for the tester's turn.
@@ -1610,22 +1885,15 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_turn_under_an_archived_team_performs_its_pending_removal() {
-        for archive_root in [true, false] {
-            let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
-            let archived = if archive_root {
-                coordinator.parent_id.clone().unwrap()
-            } else {
-                coordinator.id.clone()
-            };
-            actor.host.set_archived(&archived, true).unwrap();
-            assert!(Path::new(&ticket.worktree).exists());
+    fn an_interrupted_turn_under_an_archived_project_performs_its_pending_removal() {
+        let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
+        actor.host.set_archived(&coordinator.id, true).unwrap();
+        assert!(Path::new(&ticket.worktree).exists());
 
-            finish(&mut actor, &tester, false, Some("Turn interrupted"));
+        finish(&mut actor, &tester, false, Some("Turn interrupted"));
 
-            assert!(!Path::new(&ticket.worktree).exists());
-            assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
-        }
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
     }
 
     #[test]
@@ -1670,7 +1938,7 @@ mod tests {
         assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
     }
 
-    /// An idle main coordinator with one child that reports to it.
+    /// An idle coordinator with one child that reports to it.
     fn actor_with_child() -> (tempfile::TempDir, Actor, String, String) {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open(home.path()).unwrap();
@@ -1706,7 +1974,7 @@ mod tests {
                 &parent,
                 Some(&repo.id),
                 "Child",
-                Role::TaskOrchestrator,
+                Role::Implementer,
                 Provider::Codex,
             )
             .unwrap()
@@ -2074,6 +2342,45 @@ mod tests {
     }
 
     #[test]
+    fn a_check_in_during_a_verification_round_wakes_the_coordinator_and_leaves_the_cycle_alone() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(1);
+        let started = now();
+        actor.active.insert(
+            verifiers[0].clone(),
+            Active::new(
+                "verifying".into(),
+                String::new(),
+                Arc::new(AtomicBool::new(false)),
+                vec![],
+                started,
+            ),
+        );
+        let waking = |actor: &Actor| -> i64 {
+            actor
+                .host
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0",
+                    [&ticket.coordinator_id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = waking(&actor);
+
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+
+        let coordinator = actor.host.session(&ticket.coordinator_id).unwrap();
+        let check_in = check_ins(&actor, &coordinator);
+        assert_eq!(check_in.len(), 1, "the project coordinator receives it");
+        assert_eq!(check_in[0].sender.as_deref(), Some(verifiers[0].as_str()));
+        assert_eq!(waking(&actor), before + 1, "it wakes the coordinator");
+        let after = actor.host.ticket(&ticket.id).unwrap();
+        assert_eq!(after.state, ticket.state);
+        assert_eq!(after.verification, ticket.verification);
+    }
+
+    #[test]
     fn a_long_turn_without_a_parent_asks_the_human_once_at_a_time() {
         let (_home, mut actor, session, _) = actor_with_turn();
         let root = actor.host.session(&session).unwrap();
@@ -2220,9 +2527,11 @@ mod tests {
                 Provider::Codex,
             )
             .unwrap();
-        let grandparent = coordinator.parent_id.clone().unwrap();
+        // A ticket agent's parent is the project coordinator itself.
+        assert_eq!(coordinator.role, Role::ProjectOrchestrator);
+        assert_eq!(tester.parent_id.as_deref(), Some(coordinator.id.as_str()));
         let args = json!({"session_id":tester.id,"reason":"Wrong approach"});
-        for caller in [grandparent.as_str(), &sibling.id, &tester.id] {
+        for caller in [&sibling.id, &tester.id] {
             let error = actor.stop_turn(caller, &args).unwrap_err().to_string();
             assert_eq!(
                 error,

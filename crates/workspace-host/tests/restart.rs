@@ -76,25 +76,38 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
     let every =
         |label: &str| json!({"label":label,"prompt":format!("JUST_REPLY {label}"),"every":"30m"});
 
-    // Before the stop: project A is live, its team is mid-turn and both coordinators have timers.
+    // Before the stop: project A is live, its worker is mid-turn and both coordinators have timers.
     // Project B was never started.
-    let (live, idle, team, other, work) = {
+    let (live, idle, worker, other, work) = {
         let mut host = Host::open(home.path()).unwrap();
+        host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
+            .unwrap();
         let live = host.create_project("Live").unwrap();
         let idle = host.sessions().unwrap().remove(0);
         let repository = host
             .attach_repository(&live.id, repo.to_str().unwrap(), "HEAD")
             .unwrap();
-        let team = host
-            .create_session(
-                &live.id,
-                &idle.id,
-                Some(&repository.id),
-                "Backend",
-                Role::TaskOrchestrator,
+        let ticket = host
+            .create_ticket(&idle.id, &repository.id, "Backend", "Work")
+            .unwrap();
+        let worker = host
+            .assign_ticket(
+                &ticket.id,
+                Role::Implementer,
                 Provider::Claude,
+                "Work",
+                None,
             )
             .unwrap();
+        // The assignment was handled before the stop.
+        let assignment = format!("assignment:{}", worker.id);
+        for receipt in [
+            Receipt::Delivered,
+            Receipt::Acknowledged,
+            Receipt::Completed,
+        ] {
+            host.advance_receipt(&assignment, receipt).unwrap();
+        }
         let stopped = host.create_project("Stopped").unwrap();
         let other = host
             .sessions()
@@ -103,20 +116,16 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
             .find(|s| s.project_id == stopped.id)
             .unwrap();
         host.set_live(&live.id, true).unwrap();
-        for (session, label) in [
-            (&idle, "main check"),
-            (&team, "team check"),
-            (&other, "other check"),
-        ] {
+        for (session, label) in [(&idle, "main check"), (&other, "other check")] {
             host.agent_tool(&session.id, "schedule", every(label))
                 .unwrap();
         }
         let work = host
-            .send("work", Some(&idle.id), &team.id, "JUST_REPLY work")
+            .send("work", Some(&idle.id), &worker.id, "JUST_REPLY work")
             .unwrap();
         host.advance_receipt(&work.id, Receipt::Delivered).unwrap();
-        host.set_status(&team.id, Status::Working).unwrap();
-        (live, idle, team, other, work)
+        host.set_status(&worker.id, Status::Working).unwrap();
+        (live, idle, worker, other, work)
     };
     // The host dies mid-turn and stays down past two timer slots.
     let run = "run-cut-off";
@@ -124,7 +133,7 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
         let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
         db.execute(
             "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,?3,?4,'{}')",
-            rusqlite::params![run, team.id, json!([work.id]).to_string(), now() - 70 * MINUTE],
+            rusqlite::params![run, worker.id, json!([work.id]).to_string(), now() - 70 * MINUTE],
         )
         .unwrap();
         db.execute(
@@ -185,13 +194,13 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
             .unwrap()
             .status
     };
-    assert_eq!(session(&team.id), Status::Disconnected);
-    let held = messages(&service, &team.id);
+    assert_eq!(session(&worker.id), Status::Disconnected);
+    let held = messages(&service, &worker.id);
     assert_eq!(
         held.iter().find(|m| m.id == work.id).unwrap().receipt,
         Receipt::Held
     );
-    assert!(prompts(scratch.path(), &team.id).is_empty());
+    assert!(prompts(scratch.path(), &worker.id).is_empty());
     // B's timer fires into its queue, but nothing runs there.
     assert_eq!(fires(&other.id)[0].receipt, Receipt::Queued);
     assert!(prompts(scratch.path(), &other.id).is_empty());
@@ -199,18 +208,17 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
     request(
         &service,
         Command::ReconcileSession {
-            session_id: team.id.clone(),
+            session_id: worker.id.clone(),
             retry: true,
         },
     );
-    until("the reconciled team's turn", || replied(&service, &team.id));
-    let prompt = prompts(scratch.path(), &team.id);
+    until("the reconciled worker's turn", || {
+        replied(&service, &worker.id)
+    });
+    let prompt = prompts(scratch.path(), &worker.id);
     for expected in [
         format!("Retry of interrupted turn {run}"),
-        "The workspace host restarted".into(),
-        "Missed: timer".into(),
         "JUST_REPLY work".into(),
-        "JUST_REPLY team check".into(),
     ] {
         assert!(prompt.contains(&expected), "{expected}\n{prompt}");
     }
