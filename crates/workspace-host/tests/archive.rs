@@ -329,3 +329,71 @@ fn an_agent_that_reported_but_is_still_in_its_turn_blocks_removal() {
         .unwrap();
     assert!(!Path::new(&ticket.worktree).exists());
 }
+
+#[test]
+fn a_locked_worktree_blocks_the_archive_before_anything_is_removed() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let first = worked_ticket(&mut host, &coordinator, "First");
+    let locked = worked_ticket(&mut host, &coordinator, "Locked");
+    succeed(
+        &directory.path().join("web"),
+        &["worktree", "lock", &locked.worktree],
+    );
+
+    let refused = host
+        .set_archived(&coordinator.id, true)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        refused.contains(&locked.id) && refused.contains("locked"),
+        "{refused}"
+    );
+    assert!(Path::new(&first.worktree).exists());
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+}
+
+#[test]
+fn a_failed_archive_re_creates_the_worktrees_it_removed() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let db = rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_archive BEFORE INSERT ON activity WHEN NEW.kind='archived'
+         BEGIN SELECT RAISE(ABORT,'injected'); END;",
+    )
+    .unwrap();
+
+    assert!(host.set_archived(&coordinator.id, true).is_err());
+
+    assert!(Path::new(&ticket.worktree).join("style.css").exists());
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+}
+
+#[test]
+fn an_empty_folder_left_on_a_stale_worktree_is_replaced_and_any_other_folder_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let worktree = Path::new(&ticket.worktree);
+    fs::remove_dir_all(worktree).unwrap();
+    fs::create_dir(worktree).unwrap();
+
+    host.set_archived(&coordinator.id, false).unwrap();
+    assert!(worktree.join("style.css").exists());
+
+    fs::remove_dir_all(worktree).unwrap();
+    fs::create_dir(worktree).unwrap();
+    fs::write(worktree.join("stray.txt"), "keep me").unwrap();
+    let refused = host
+        .set_archived(&coordinator.id, false)
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains(&ticket.id), "{refused}");
+    assert!(worktree.join("stray.txt").exists());
+}

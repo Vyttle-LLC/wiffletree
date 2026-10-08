@@ -66,11 +66,57 @@ impl Host {
         }
         Ok(())
     }
-    /// Removes the tickets' worktrees, keeping their branches. Refuses without removing anything
-    /// while an agent on one of them is working or one holds uncommitted or untracked work.
-    /// Ignored files such as build output do not count. Missing worktrees are already done.
-    /// An agent that has reported is Done but still in its turn until its provider run finishes.
-    pub(crate) fn remove_worktrees(&self, tickets: &[Ticket]) -> Result<()> {
+    /// Removes the tickets' worktrees, keeping their branches, then applies `change`. Refuses
+    /// without removing anything while an agent on one of them is working or in its turn, a
+    /// worktree is locked or holds uncommitted or untracked work. Ignored files such as build
+    /// output do not count, and missing worktrees are already done. If a removal or `change`
+    /// fails, the removed worktrees, proven clean, are re-created from their branches.
+    pub(crate) fn with_worktrees_removed<T>(
+        &mut self,
+        tickets: &[Ticket],
+        change: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.check_removable(tickets)?;
+        let mut removed = vec![];
+        let mut result = Ok(());
+        for ticket in tickets {
+            match self.remove_worktree(ticket) {
+                Ok(true) => removed.push(ticket),
+                Ok(false) => {}
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
+        }
+        let result = result.and_then(|()| change(self));
+        let Err(error) = result else {
+            return result;
+        };
+        let unrestored: Vec<String> = removed
+            .into_iter()
+            .filter_map(|ticket| {
+                let repository = self.ticket_repository(ticket).ok()?;
+                ensure_worktree(
+                    Path::new(&repository.path),
+                    Path::new(&ticket.worktree),
+                    &ticket.branch,
+                    None,
+                )
+                .err()
+                .map(|e| format!("\"{}\" ({}): {e:#}", ticket.title, ticket.id))
+            })
+            .collect();
+        if unrestored.is_empty() {
+            Err(error)
+        } else {
+            Err(error.context(format!(
+                "Could not re-create removed worktrees; their branches keep the work: {}",
+                unrestored.join("; ")
+            )))
+        }
+    }
+    fn check_removable(&self, tickets: &[Ticket]) -> Result<()> {
         let runtimes = self.runtimes()?;
         let mut blockers = vec![];
         for ticket in tickets {
@@ -87,10 +133,23 @@ impl Host {
                 }
             }
             let path = Path::new(&ticket.worktree);
-            if path.exists()
-                && !runtime::git_output(path, &["status", "--porcelain"])
-                    .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))?
-                    .is_empty()
+            if !path.exists() {
+                continue;
+            }
+            let repository = self.ticket_repository(ticket)?;
+            let canonical = fs::canonicalize(path)?;
+            if registered_worktrees(Path::new(&repository.path))?
+                .iter()
+                .any(|w| w.path == canonical && w.locked)
+            {
+                blockers.push(format!(
+                    "ticket \"{}\" ({}) has a locked worktree in {}",
+                    ticket.title, ticket.id, ticket.worktree
+                ));
+            }
+            if !runtime::git_output(path, &["status", "--porcelain"])
+                .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))?
+                .is_empty()
             {
                 blockers.push(format!(
                     "ticket \"{}\" ({}) has uncommitted or untracked changes in {}",
@@ -103,16 +162,19 @@ impl Host {
             "Cannot remove ticket worktrees: {}",
             blockers.join("; ")
         );
-        for ticket in tickets {
-            let repository = Path::new(&self.ticket_repository(ticket)?.path).to_owned();
-            if Path::new(&ticket.worktree).exists() {
-                runtime::git_output(&repository, &["worktree", "remove", &ticket.worktree])
-                    .with_context(|| format!("Remove \"{}\" ({})", ticket.title, ticket.id))?;
-            } else {
-                runtime::git_output(&repository, &["worktree", "prune"])?;
-            }
-        }
         Ok(())
+    }
+    /// Whether a worktree was removed; a missing one only has its stale registration pruned.
+    fn remove_worktree(&self, ticket: &Ticket) -> Result<bool> {
+        let repository = self.ticket_repository(ticket)?;
+        let repository = Path::new(&repository.path);
+        if !Path::new(&ticket.worktree).exists() {
+            runtime::git_output(repository, &["worktree", "prune"])?;
+            return Ok(false);
+        }
+        runtime::git_output(repository, &["worktree", "remove", &ticket.worktree])
+            .with_context(|| format!("Remove \"{}\" ({})", ticket.title, ticket.id))?;
+        Ok(true)
     }
     /// A provider run is open from turn start until it finishes; service startup settles runs a
     /// stopped host left open.
@@ -125,8 +187,51 @@ impl Host {
     }
 }
 
+struct RegisteredWorktree {
+    path: PathBuf,
+    locked: bool,
+}
+
+/// The repository's worktrees from `git worktree list`, with canonical paths where they exist.
+/// Stale registrations whose folder is gone are left out.
+fn registered_worktrees(repository: &Path) -> Result<Vec<RegisteredWorktree>> {
+    Ok(
+        runtime::git_output(repository, &["worktree", "list", "--porcelain"])?
+            .split("\n\n")
+            .filter_map(|entry| {
+                let mut lines = entry.lines();
+                let path = lines.next()?.strip_prefix("worktree ")?;
+                let mut locked = false;
+                for line in lines {
+                    if line == "prunable" || line.starts_with("prunable ") {
+                        return None;
+                    }
+                    locked |= line == "locked" || line.starts_with("locked ");
+                }
+                Some(RegisteredWorktree {
+                    path: fs::canonicalize(path).ok()?,
+                    locked,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Whether `path` is the top of a checkout registered as one of the repository's worktrees.
+fn is_worktree(repository: &Path, path: &Path) -> Result<bool> {
+    let path = fs::canonicalize(path)?;
+    let top = runtime::git_output(&path, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .and_then(|top| fs::canonicalize(top.trim()).ok());
+    Ok(top.as_ref() == Some(&path)
+        && registered_worktrees(repository)?
+            .iter()
+            .any(|w| w.path == path))
+}
+
 /// Adds the worktree unless it is already registered: from an existing branch, or as a new
-/// branch from `base` when the ticket is created.
+/// branch from `base` when the ticket is created. An empty folder left in its place is replaced;
+/// any other folder that is not this worktree is refused.
 pub(crate) fn ensure_worktree(
     repository: &Path,
     path: &Path,
@@ -134,18 +239,16 @@ pub(crate) fn ensure_worktree(
     base: Option<&str>,
 ) -> Result<()> {
     if path.exists() {
-        let path = fs::canonicalize(path)?;
-        let registered = runtime::git_output(repository, &["worktree", "list", "--porcelain"])?
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .any(|listed| fs::canonicalize(listed).is_ok_and(|listed| listed == path));
+        if is_worktree(repository, path)? {
+            return Ok(());
+        }
         ensure!(
-            registered,
+            fs::read_dir(path)?.next().is_none(),
             "{} exists but is not a worktree of {}",
             path.display(),
             repository.display()
         );
-        return Ok(());
+        fs::remove_dir(path)?;
     }
     runtime::git_output(repository, &["worktree", "prune"])?;
     fs::create_dir_all(path.parent().context("Invalid worktree path")?)?;

@@ -409,45 +409,48 @@ impl Host {
             .into_iter()
             .filter(|t| owners.contains(&t.coordinator_id.as_str()) && (archived || t.is_open()))
             .collect();
+        let save = move |host: &mut Self| -> Result<Vec<Session>> {
+            let project = affected[0].project_id.clone();
+            let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
+            let tx = host.db.transaction()?;
+            for session in &mut affected {
+                if session.archived == archived {
+                    continue;
+                }
+                session.archived = archived;
+                if archived && session.status == Status::Working {
+                    session.status = Status::Ready;
+                }
+                tx.execute(
+                    "UPDATE sessions SET data=?2 WHERE id=?1",
+                    params![session.id, encode(&*session)?],
+                )?;
+                Self::event(
+                    &tx,
+                    &project,
+                    Some(&session.id),
+                    if archived { "archived" } else { "restored" },
+                    &session.name,
+                )?;
+                if let Some(kind) = milestone.filter(|_| session.id == id) {
+                    Self::event(&tx, &project, Some(id), kind, &session.name)?;
+                }
+            }
+            if stops_project {
+                tx.execute(
+                    "UPDATE live_projects SET enabled=0 WHERE project_id=?1",
+                    [&project],
+                )?;
+            }
+            tx.commit()?;
+            Ok(affected)
+        };
         if archived {
-            self.remove_worktrees(&tickets)?;
+            self.with_worktrees_removed(&tickets, save)
         } else {
             self.restore_worktrees(&tickets)?;
+            save(self)
         }
-        let project = affected[0].project_id.clone();
-        let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
-        let tx = self.db.transaction()?;
-        for session in &mut affected {
-            if session.archived == archived {
-                continue;
-            }
-            session.archived = archived;
-            if archived && session.status == Status::Working {
-                session.status = Status::Ready;
-            }
-            tx.execute(
-                "UPDATE sessions SET data=?2 WHERE id=?1",
-                params![session.id, encode(&*session)?],
-            )?;
-            Self::event(
-                &tx,
-                &project,
-                Some(&session.id),
-                if archived { "archived" } else { "restored" },
-                &session.name,
-            )?;
-            if let Some(kind) = milestone.filter(|_| session.id == id) {
-                Self::event(&tx, &project, Some(id), kind, &session.name)?;
-            }
-        }
-        if stops_project {
-            tx.execute(
-                "UPDATE live_projects SET enabled=0 WHERE project_id=?1",
-                [&project],
-            )?;
-        }
-        tx.commit()?;
-        Ok(affected)
     }
     pub fn set_status(&mut self, id: &str, status: Status) -> Result<()> {
         let mut session = self.session(id)?;

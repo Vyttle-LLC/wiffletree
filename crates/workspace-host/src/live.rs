@@ -220,18 +220,19 @@ impl Host {
         if ticket.state == "closed" {
             return Ok(ticket);
         }
-        self.remove_worktrees(std::slice::from_ref(&ticket))?;
-        let agents: Vec<Session> = self
-            .runtimes()?
-            .into_iter()
-            .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
-            .map(|r| self.session(&r.session_id))
-            .collect::<Result<_>>()?;
-        for agent in &agents {
-            self.set_archived(&agent.id, true)?;
-        }
-        ticket.state = "closed".into();
-        self.save_ticket(&ticket)?;
+        self.with_worktrees_removed(&[ticket.clone()], |host| {
+            let agents: Vec<Session> = host
+                .runtimes()?
+                .into_iter()
+                .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
+                .map(|r| host.session(&r.session_id))
+                .collect::<Result<_>>()?;
+            for agent in &agents {
+                host.set_archived(&agent.id, true)?;
+            }
+            ticket.state = "closed".into();
+            host.save_ticket(&ticket)
+        })?;
         let coordinator = self.session(&ticket.coordinator_id)?;
         Self::event(
             &self.db,
@@ -280,11 +281,12 @@ impl Host {
             coordinator.name,
             blockers.join("; ")
         );
-        self.remove_worktrees(&tickets)?;
-        for ticket in tickets.iter().filter(|t| t.state == "accepted") {
-            self.close_ticket(&ticket.id)?;
-        }
-        self.change_archived(&coordinator.id, true, Some("team_archived"))
+        self.with_worktrees_removed(&tickets, |host| {
+            for ticket in tickets.iter().filter(|t| t.state == "accepted") {
+                host.close_ticket(&ticket.id)?;
+            }
+            host.change_archived(&coordinator.id, true, Some("team_archived"))
+        })
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
@@ -517,9 +519,8 @@ impl Host {
                     ticket.state == "passed",
                     "Independent verification must pass before acceptance"
                 );
-                self.remove_worktrees(std::slice::from_ref(&ticket))?;
                 ticket.state = "accepted".into();
-                self.save_ticket(&ticket)?;
+                self.with_worktrees_removed(&[ticket.clone()], |host| host.save_ticket(&ticket))?;
                 Ok(serde_json::to_value(ticket)?)
             }
             "close_ticket" => {
