@@ -45,12 +45,33 @@ fn ticket_commands_round_trip() {
 }
 
 #[test]
-fn settings_saved_before_verification_use_one_tester_and_two_rounds() {
+fn settings_saved_before_verification_use_the_default_verifiers_and_two_rounds() {
     let settings: HostSettings = serde_json::from_value(json!({"workspaces_dir":"/w"})).unwrap();
     assert_eq!(settings.verification.max_rounds, 2);
-    assert_eq!(settings.verification.verifiers.len(), 1);
-    assert_eq!(settings.verification.verifiers[0].role, Role::Tester);
+    let verifiers: Vec<_> = settings
+        .verification
+        .verifiers
+        .iter()
+        .map(|v| (v.role.agent_label(Some(&v.focus)), v.provider))
+        .collect();
+    assert_eq!(
+        verifiers,
+        [
+            ("Tester · Tests".to_owned(), None),
+            ("Reviewer · Claude".to_owned(), Some(Provider::Claude)),
+            ("Reviewer · Codex".to_owned(), Some(Provider::Codex)),
+        ]
+    );
     settings.verification.validate().unwrap();
+}
+
+#[test]
+fn a_saved_verifier_size_is_ignored() {
+    let verifier: VerifierConfig = serde_json::from_value(
+        json!({"role":"reviewer","focus":"Codex","provider":"codex","size":"small"}),
+    )
+    .unwrap();
+    assert_eq!(verifier.provider, Some(Provider::Codex));
 }
 
 #[test]
@@ -60,7 +81,6 @@ fn verification_settings_reject_duplicate_focus_and_out_of_range_caps() {
         focus: focus.into(),
         instruction: None,
         provider: None,
-        size: None,
     };
     let mut settings = VerificationSettings {
         verifiers: vec![

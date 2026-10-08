@@ -261,7 +261,6 @@ mod tests {
                     focus: focus.into(),
                     instruction: None,
                     provider: None,
-                    size: None,
                 })
                 .to_vec(),
             max_rounds: 2,
@@ -277,7 +276,17 @@ mod tests {
         )
         .unwrap();
         assert!(verification_lines(&host.ticket(&ticket.id).unwrap()).is_empty());
-        let verifying = host.verify_ticket(&ticket.id).unwrap();
+        let profile = host
+            .model_selection()
+            .unwrap()
+            .prefill(Role::Tester)
+            .unwrap();
+        let choices = ["Claude", "Codex"].map(|focus| VerifierChoice {
+            focus: focus.into(),
+            profile: profile.clone(),
+            reason: "Routine check".into(),
+        });
+        let verifying = host.verify_ticket(&ticket.id, &choices).unwrap();
         let round = &verifying.verification.as_ref().unwrap().rounds[0];
         // The verifier's turn takes its round input before it reports.
         host.advance_receipt(&round.verifiers[0].message_id, Receipt::Delivered)

@@ -63,6 +63,12 @@ impl Host {
         );
         session.provider = profile.provider;
         runtime.profile = Some(profile);
+        runtime.selection = Some(Selection {
+            chosen_by: Chooser::Human,
+            reason: "Chosen by you".into(),
+            revision: self.model_selection()?.revision,
+            at: now(),
+        });
         self.db.execute(
             "UPDATE sessions SET data=?2 WHERE id=?1",
             params![id, encode(&session)?],
@@ -70,15 +76,25 @@ impl Host {
         self.save_runtime(&runtime)
     }
     pub fn reconcile_session(&mut self, id: &str, retry: bool) -> Result<()> {
+        let session = self.session(id)?;
         ensure!(
-            self.session(id)?.status != Status::Working,
+            session.status != Status::Working,
             "Stop the active turn first"
         );
         self.db.execute(
             "UPDATE messages SET receipt=?2 WHERE recipient=?1 AND receipt='held'",
             params![id, if retry { "queued" } else { "cancelled" }],
         )?;
+        // A held turn retains its input as queued; skipping drops it as it would held input,
+        // even if the hold's cause was fixed meanwhile.
         let mut runtime = self.session_runtime(id)?;
+        if !retry && runtime.held {
+            self.db.execute(
+                "UPDATE messages SET receipt='cancelled' WHERE recipient=?1 AND receipt='queued'",
+                [id],
+            )?;
+            runtime.held = false;
+        }
         runtime.last_error = None;
         self.save_runtime(&runtime)?;
         self.set_status(id, Status::Ready)
@@ -212,12 +228,7 @@ impl Host {
         );
         ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
         let owner = self.session(&ticket.coordinator_id)?;
-        if let Some(existing) = self.runtimes()?.into_iter().find(|r| {
-            r.ticket_id.as_deref() == Some(&ticket.id)
-                && r.focus.as_deref() == focus
-                && self.session(&r.session_id).is_ok_and(|s| s.role == role)
-        }) {
-            let session = self.session(&existing.session_id)?;
+        if let Some(session) = self.existing_assignment(&ticket.id, role, focus)? {
             ensure!(
                 session.provider == provider,
                 "Existing ticket agent uses another provider"
@@ -252,6 +263,27 @@ impl Host {
             .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
             .map(|r| self.session(&r.session_id))
             .collect()
+    }
+    /// A role session is never recycled across tickets. Retrying the same assignment is
+    /// idempotent; a different focus adds another agent in that role, such as a second reviewer.
+    /// Archived agents, such as a retired verifier, are not reused.
+    pub(crate) fn existing_assignment(
+        &self,
+        ticket_id: &str,
+        role: Role,
+        focus: Option<&str>,
+    ) -> Result<Option<Session>> {
+        self.runtimes()?
+            .into_iter()
+            .find(|r| {
+                r.ticket_id.as_deref() == Some(ticket_id)
+                    && r.focus.as_deref() == focus
+                    && self
+                        .session(&r.session_id)
+                        .is_ok_and(|s| s.role == role && !s.archived)
+            })
+            .map(|r| self.session(&r.session_id))
+            .transpose()
     }
     /// Archives a finished ticket's agents and removes its worktree. Their conversations and the
     /// branch are kept. Refuses while an agent is working or the worktree holds unsaved work.
@@ -329,9 +361,20 @@ impl Host {
             "repositories":self.project_repositories(&session.project_id)?,
             "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).collect::<Vec<_>>(),
             "tickets":self.ticket_overview(&session.project_id)?,
-            "runtime":self.session_runtime(id)?, "policies":self.policies()?,
+            "runtime":self.session_runtime(id)?,
             "memory":self.logs(&session.project_id,None,10)?,
             "open_questions":self.open_questions(&session)?});
+        if session.role == Role::ProjectOrchestrator {
+            let selection = self.model_selection()?;
+            let providers: Vec<_> = PROVIDERS
+                .into_iter()
+                .filter(|&p| selection.is_enabled(p))
+                .map(|p| json!({"provider": p, "models": selection.allowed(p)}))
+                .collect();
+            context["model_selection"] = json!({"revision": selection.revision,
+                "providers": providers, "role_providers": selection.role_providers,
+                "verifiers": self.settings().verification.verifiers, "guide": selection.guide});
+        }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {
             context["child_reports"] = Value::Array(child_reports);
@@ -408,30 +451,77 @@ impl Host {
             .filter(|a| a.session_id == session.id && !a.is_permission())
             .collect())
     }
-    pub(crate) fn assignment_route(&self, role: Role, args: &Value) -> Result<Route> {
-        let policy = self.policy(role)?;
-        let provider = args
-            .get("provider")
-            .map(|p| serde_json::from_value(p.clone()))
-            .transpose()?
-            .unwrap_or(policy.default.provider);
-        let complexity = match args.get("size") {
-            Some(size) => match size.as_str() {
-                Some("small") => Complexity::Small,
-                Some("big") => Complexity::Complex,
-                _ => bail!("Choose the configured big or small profile"),
+    /// A coordinator's exact model and one-line reason, checked against the machine's model
+    /// selection. A refusal is logged on the coordinator; nothing is substituted.
+    fn coordinator_choice(
+        &self,
+        coordinator: &Session,
+        role: Role,
+        args: &Value,
+    ) -> Result<(ModelProfile, String)> {
+        for removed in ["size", "complexity", "provider"] {
+            ensure!(
+                args.get(removed).is_none(),
+                "`{removed}` was removed; choose an exact profile within the role's providers from model_selection in workspace_context"
+            );
+        }
+        let profile: ModelProfile = serde_json::from_value(
+            args.get("profile")
+                .cloned()
+                .context("Missing profile: choose an exact provider, model and effort")?,
+        )?;
+        let reason = Selection::check_reason(
+            args["reason"]
+                .as_str()
+                .context("Missing reason: say in one line why this model")?,
+        )?
+        .to_owned();
+        if let Err(rejection) = self.model_selection()?.permits(role, &profile) {
+            Self::event(
+                &self.db,
+                &coordinator.project_id,
+                Some(&coordinator.id),
+                "model_rejected",
+                &format!(
+                    "{} asked for {profile} ({}). {rejection} No agent was created.",
+                    coordinator.name,
+                    role.label()
+                ),
+            )?;
+            bail!("{rejection} No agent was created.");
+        }
+        Ok((profile, reason))
+    }
+    /// A tool result: the session plus its pinned profile and how it was chosen.
+    fn assignment_result(&self, session: &Session) -> Result<Value> {
+        let runtime = self.session_runtime(&session.id)?;
+        let mut value = serde_json::to_value(session)?;
+        value["profile"] = json!(runtime.profile);
+        value["selection"] = json!(runtime.selection);
+        Ok(value)
+    }
+    pub(crate) fn record_choice(
+        &mut self,
+        coordinator: &Session,
+        session: &Session,
+        profile: ModelProfile,
+        reason: &str,
+    ) -> Result<()> {
+        self.pin(
+            &session.id,
+            profile.clone(),
+            Chooser::Coordinator {
+                session_id: coordinator.id.clone(),
             },
-            None => args
-                .get("complexity")
-                .map(|c| serde_json::from_value(c.clone()))
-                .transpose()?
-                .unwrap_or(Complexity::Standard),
-        };
-        let proposal = args
-            .get("profile")
-            .map(|p| serde_json::from_value::<ModelProfile>(p.clone()))
-            .transpose()?;
-        policy.select(complexity, proposal.as_ref(), Some(provider), None)
+            reason,
+        )?;
+        Self::event(
+            &self.db,
+            &coordinator.project_id,
+            Some(&session.id),
+            "model_selected",
+            &format!("{profile}. {reason}"),
+        )
     }
     pub fn agent_tool(&mut self, id: &str, name: &str, args: Value) -> Result<Value> {
         let session = self.session(id)?;
@@ -480,29 +570,23 @@ impl Host {
             }
             "assign_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
                 let role: Role = serde_json::from_value(args["role"].clone())?;
-                let route = self.assignment_route(role, &args)?;
-                let provider = route.profile.provider;
-                let worker = self.assign_ticket(
-                    &ticket.id,
-                    role,
-                    provider,
-                    string("instruction")?,
-                    args["focus"].as_str(),
-                )?;
-                let mut runtime = self.session_runtime(&worker.id)?;
-                if runtime.profile.is_none() {
-                    runtime.profile = Some(route.profile);
-                    self.save_runtime(&runtime)?;
+                let focus = args["focus"].as_str();
+                if let Some(existing) = self.existing_assignment(&ticket.id, role, focus)? {
+                    return self.assignment_result(&existing);
                 }
-                Self::event(
-                    &self.db,
-                    &session.project_id,
-                    Some(&worker.id),
-                    "model_routed",
-                    &route.reason,
-                )?;
-                Ok(serde_json::to_value(worker)?)
+                let (profile, reason) = self.coordinator_choice(&session, role, &args)?;
+                let instruction = string("instruction")?;
+                // The agent, its instruction and the ticket update exist only with the agent's
+                // model and reason, or not at all.
+                let worker = self.atomically(|host| {
+                    let worker =
+                        host.assign_ticket(&ticket.id, role, profile.provider, instruction, focus)?;
+                    host.record_choice(&session, &worker, profile, &reason)?;
+                    Ok(worker)
+                })?;
+                self.assignment_result(&worker)
             }
             "report" => self.report(
                 &session,
@@ -512,7 +596,13 @@ impl Host {
             ),
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
-                Ok(serde_json::to_value(self.verify_ticket(&ticket.id)?)?)
+                let choices: Vec<VerifierChoice> =
+                    serde_json::from_value(args.get("verifiers").cloned().context(
+                        "Missing verifiers: choose a profile and reason for each verifier",
+                    )?)?;
+                Ok(serde_json::to_value(
+                    self.verify_ticket(&ticket.id, &choices)?,
+                )?)
             }
             "accept_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;

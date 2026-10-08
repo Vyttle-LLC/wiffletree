@@ -719,7 +719,16 @@ impl Workspace {
     }
 
     fn model_controls(&self, session: &Session, cx: &mut Context<Self>) -> Div {
-        let Some(profile) = self.selected_profile() else {
+        // An agent without a model is held; its menu asks for one instead of naming a model.
+        let pinned = self.selected_profile();
+        let unchosen = pinned.is_none();
+        let Some(profile) = pinned.or_else(|| {
+            session.parent_id.is_some().then(|| ModelProfile {
+                provider: session.provider,
+                model: String::new(),
+                effort: "high".into(),
+            })
+        }) else {
             return div();
         };
         let started = self
@@ -731,27 +740,30 @@ impl Workspace {
             .iter()
             .map(|model| ((model.provider, model.model.clone()), model.label.clone()))
             .collect();
-        for approved in self
-            .snapshot
-            .iter()
-            .flat_map(|s| &s.policies)
-            .flat_map(|policy| &policy.allowed)
-        {
-            models
-                .entry((approved.provider, approved.model.clone()))
-                .or_insert_with(|| approved.model.clone());
+        if let Some(snapshot) = &self.snapshot {
+            for provider in PROVIDERS {
+                for allowed in snapshot.model_selection.allowed(provider) {
+                    models
+                        .entry((provider, allowed.model.clone()))
+                        .or_insert_with(|| allowed.model.clone());
+                }
+            }
         }
-        let label = models
-            .entry((profile.provider, profile.model.clone()))
-            .or_insert_with(|| profile.model.clone())
-            .clone();
+        let label = if unchosen {
+            "Choose a model".to_owned()
+        } else {
+            let model = models
+                .entry((profile.provider, profile.model.clone()))
+                .or_insert_with(|| profile.model.clone());
+            format!("{:?} · {model}", profile.provider)
+        };
         let session_id = session.id.clone();
         let current = profile.clone();
         let weak = cx.weak_entity();
         let model = button("chat-model")
             .ghost()
             .disabled(busy)
-            .label(format!("{:?} · {label}", profile.provider))
+            .label(label)
             .dropdown_caret(true)
             .tooltip(if busy {
                 "Pause the active turn to change the model"
@@ -795,7 +807,7 @@ impl Workspace {
             &self.model_catalog,
             profile.provider,
             &profile.model,
-            &profile.effort,
+            &[&profile.effort],
         );
         let session_id = session.id.clone();
         let weak = cx.weak_entity();
@@ -832,9 +844,28 @@ impl Workspace {
                 }
                 menu
             });
-        div().flex().items_center().child(model).child(effort)
+        div()
+            .flex()
+            .items_center()
+            .child(model)
+            .when(!unchosen, |d| d.child(effort))
     }
 
+    /// Who chose this agent's model and why, above the composer's model pills.
+    fn chosen_by_line(&self, session: &Session, p: Palette) -> Option<Div> {
+        let selection = self.runtime(&session.id)?.selection.as_ref()?;
+        let sessions = &self.snapshot.as_ref()?.sessions;
+        Some(
+            div()
+                .w_full()
+                .max_w(px(COLUMN))
+                .px_1()
+                .text_size(px(12.))
+                .text_color(p.subtle)
+                .text_ellipsis()
+                .child(models::chosen_by(selection, sessions)),
+        )
+    }
     fn composer(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let sending = self.sending.contains(&session.id);
         let attached = self.attached.get(&session.id).cloned().unwrap_or_default();
@@ -866,6 +897,7 @@ impl Workspace {
                     .into_iter()
                     .map(|notice| notice.max_w(px(COLUMN))),
             )
+            .children(self.chosen_by_line(session, p))
             .child(
                 div()
                     .w_full()

@@ -1,5 +1,6 @@
 //! Ticket verification through the host's tools: one call, pinned commits, read-only
 //! verifiers, failures back to the implementer and a capped number of rounds.
+mod common;
 use serde_json::{Value, json};
 use std::path::Path;
 use workspace_core::*;
@@ -21,44 +22,48 @@ fn git(path: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// Saved Claude and Codex Big/Small profiles for `role`, Codex by default.
-fn two_provider_policy(host: &mut Host, role: Role) -> Vec<ProviderProfiles> {
-    let profiles: Vec<_> = [Provider::Claude, Provider::Codex]
-        .into_iter()
-        .map(|provider| {
-            let model = if provider == Provider::Claude {
-                "opus"
-            } else {
-                "gpt-6.1-sol"
-            };
-            let big = ModelProfile {
-                provider,
-                model: model.into(),
-                effort: "high".into(),
-            };
-            ProviderProfiles {
-                provider,
-                small: ModelProfile {
-                    effort: "medium".into(),
-                    ..big.clone()
-                },
-                big,
-            }
-        })
-        .collect();
-    let mut policy = host.policy(role).unwrap();
-    policy.mode = RoutingMode::Automatic;
-    policy.default = profiles[1].big.clone();
-    policy.small = profiles[1].small.clone();
-    policy.standard = policy.default.clone();
-    policy.complex = policy.default.clone();
-    policy.allowed = profiles
-        .iter()
-        .flat_map(|p| [p.big.clone(), p.small.clone()])
-        .collect();
-    policy.provider_profiles = profiles.clone();
-    host.set_policy(&policy).unwrap();
-    profiles
+fn profile(provider: Provider, model: &str, effort: &str) -> ModelProfile {
+    ModelProfile {
+        provider,
+        model: model.into(),
+        effort: effort.into(),
+    }
+}
+
+/// Both subscriptions, with testers and implementers on either provider.
+fn both_providers(host: &mut Host) {
+    let access = |models: &[(&str, &str)]| ProviderAccess {
+        enabled: true,
+        models: models
+            .iter()
+            .map(|(model, effort)| AllowedModel {
+                model: (*model).into(),
+                effort: (*effort).into(),
+            })
+            .collect(),
+    };
+    let mut selection = host.model_selection().unwrap();
+    selection.providers = [
+        (
+            Provider::Claude,
+            access(&[("opus", "high"), ("opus", "medium"), ("sonnet", "high")]),
+        ),
+        (
+            Provider::Codex,
+            access(&[("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "medium")]),
+        ),
+    ]
+    .into();
+    selection.role_providers = [
+        (Role::ProjectOrchestrator, [Provider::Claude].into()),
+        (
+            Role::Implementer,
+            [Provider::Claude, Provider::Codex].into(),
+        ),
+        (Role::Tester, [Provider::Claude, Provider::Codex].into()),
+    ]
+    .into();
+    host.set_model_selection(&selection).unwrap();
 }
 
 fn verifier(role: Role, focus: &str, provider: Option<Provider>) -> VerifierConfig {
@@ -67,7 +72,6 @@ fn verifier(role: Role, focus: &str, provider: Option<Provider>) -> VerifierConf
         focus: focus.into(),
         instruction: Some(format!("Check {focus}")),
         provider,
-        size: None,
     }
 }
 
@@ -111,7 +115,7 @@ impl Fixture {
         let mut host = Host::open(directory.path().join("home")).unwrap();
         host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
             .unwrap();
-        two_provider_policy(&mut host, Role::Tester);
+        both_providers(&mut host);
         host.set_verification(VerificationSettings {
             verifiers,
             max_rounds: cap,
@@ -172,7 +176,7 @@ impl Fixture {
         Ok(serde_json::from_value(self.host.agent_tool(
             &coordinator,
             "verify_ticket",
-            json!({"ticket_id":id}),
+            common::verify_args(&self.host, &id),
         )?)?)
     }
     fn current(&self) -> Ticket {
@@ -705,53 +709,124 @@ fn acceptance_refuses_commits_after_the_verified_one() {
 }
 
 #[test]
-fn verifier_and_assignment_arguments_resolve_to_the_saved_profiles() {
-    let mut f = Fixture::ready(
-        vec![VerifierConfig {
-            role: Role::Tester,
-            focus: "Claude small".into(),
-            instruction: None,
-            provider: Some(Provider::Claude),
-            size: Some(ProfileSize::Small),
-        }],
-        2,
-    );
-    let tester_profiles = f.host.policy(Role::Tester).unwrap().provider_profiles;
-    f.verify().unwrap();
-    let session = f.verifier("Claude small");
-    let claude = tester_profiles
-        .iter()
-        .find(|p| p.provider == Provider::Claude)
-        .unwrap();
-    assert_eq!(
-        f.host.session_runtime(&session).unwrap().profile,
-        Some(claude.small.clone())
+fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    let project = f.coordinator.project_id.clone();
+    let choice = |focus: &str, profile: ModelProfile| json!({"focus":focus,"profile":profile,"reason":format!("{focus} pass")});
+    let valid = || {
+        vec![
+            choice("Claude", profile(Provider::Claude, "sonnet", "high")),
+            choice("Codex", profile(Provider::Codex, "gpt-6.1-sol", "medium")),
+            choice("style", profile(Provider::Codex, "gpt-6.1-sol", "high")),
+        ]
+    };
+    let with = |index: usize, replacement: Option<Value>| {
+        let mut choices = valid();
+        match replacement {
+            Some(value) => choices[index] = value,
+            None => {
+                choices.remove(index);
+            }
+        }
+        json!({"ticket_id":f.ticket.id,"verifiers":choices})
+    };
+    let cases = [
+        (
+            with(
+                1,
+                Some(choice("Codex", profile(Provider::Claude, "opus", "high"))),
+            ),
+            "Claude is not configured for Tester · Codex. Tester · Codex uses: Codex.",
+        ),
+        (
+            with(
+                0,
+                Some(choice("Claude", profile(Provider::Claude, "opus", "max"))),
+            ),
+            "claude · opus · max is not allowed on this machine.",
+        ),
+        (
+            with(2, None),
+            "Choose a profile and reason for Reviewer · Style",
+        ),
+        (
+            with(
+                2,
+                Some(choice(
+                    "Security",
+                    profile(Provider::Codex, "gpt-6.1-sol", "high"),
+                )),
+            ),
+            "No verifier has the focus \"Security\"",
+        ),
+        (
+            with(
+                0,
+                Some(
+                    json!({"focus":"Claude","profile":profile(Provider::Claude, "opus", "high"),"reason":"one\ntwo"}),
+                ),
+            ),
+            "one line",
+        ),
+    ];
+    let sessions = f.host.sessions().unwrap().len();
+    for (args, message) in cases {
+        let error = f
+            .host
+            .agent_tool(&f.coordinator.id, "verify_ticket", args)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(message), "{error:#}");
+        assert_eq!(f.host.sessions().unwrap().len(), sessions, "no verifier");
+        assert_eq!(f.current().state, "ready_for_testing");
+        assert!(f.current().verification.is_none());
+    }
+    let rejected: Vec<_> = f
+        .host
+        .activity(&project, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == "model_rejected")
+        .map(|a| a.detail)
+        .collect();
+    assert_eq!(rejected.len(), 2, "{rejected:?}");
+    assert!(
+        rejected
+            .iter()
+            .all(|d| d.ends_with("No verifier was started."))
     );
 
-    let implementer_profiles = two_provider_policy(&mut f.host, Role::Implementer);
-    let other = f
-        .host
-        .create_ticket(
-            &f.coordinator.id,
-            &f.ticket.repository_id,
-            "Other",
-            "Another fix",
-        )
-        .unwrap();
-    let worker: Session = serde_json::from_value(
+    let started: Ticket = serde_json::from_value(
         f.host
             .agent_tool(
                 &f.coordinator.id,
-                "assign_ticket",
-                json!({"ticket_id":other.id,"role":"implementer","provider":"codex","size":"big","instruction":"Fix"}),
+                "verify_ticket",
+                json!({"ticket_id":f.ticket.id,"verifiers":valid()}),
             )
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        f.host.session_runtime(&worker.id).unwrap().profile,
-        Some(implementer_profiles[1].big.clone())
-    );
+    assert_eq!(started.state, "verifying");
+    for (focus, expected) in [
+        ("Claude", profile(Provider::Claude, "sonnet", "high")),
+        ("Codex", profile(Provider::Codex, "gpt-6.1-sol", "medium")),
+        ("Style", profile(Provider::Codex, "gpt-6.1-sol", "high")),
+    ] {
+        let session = f.host.session(&f.verifier(focus)).unwrap();
+        assert_eq!(session.provider, expected.provider);
+        let runtime = f.host.session_runtime(&session.id).unwrap();
+        assert_eq!(runtime.profile, Some(expected));
+        let selection = runtime.selection.unwrap();
+        assert_eq!(
+            selection.chosen_by,
+            Chooser::Coordinator {
+                session_id: f.coordinator.id.clone()
+            }
+        );
+        assert_eq!(
+            selection.reason.to_lowercase(),
+            format!("{} pass", focus.to_lowercase())
+        );
+    }
 }
 
 #[test]
@@ -776,14 +851,13 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
 }
 
 #[test]
-fn without_a_saved_setting_one_tester_verifies_with_a_cap_of_two() {
+fn without_a_saved_setting_a_tester_and_two_reviewers_verify_with_a_cap_of_two() {
     let directory = tempfile::tempdir().unwrap();
     let host = Host::open(directory.path()).unwrap();
     let settings = host.settings().verification;
     assert_eq!(settings.max_rounds, 2);
-    assert_eq!(settings.verifiers.len(), 1);
-    assert_eq!(settings.verifiers[0].role, Role::Tester);
-    assert_eq!(settings.verifiers[0].provider, None);
+    assert_eq!(settings, VerificationSettings::default());
+    assert_eq!(settings.verifiers.len(), 3);
 }
 
 #[test]
@@ -889,5 +963,80 @@ fn a_verifier_dropped_from_the_settings_stays_quiet_when_it_reports_late() {
     assert!(
         f.quiet_ids(&f.coordinator.id)
             .contains(&format!("report:{old}:late-fail"))
+    );
+}
+
+/// `verify_ticket` with one choice for the single "Review" verifier.
+fn verify_review(f: &mut Fixture, chosen: ModelProfile) -> anyhow::Result<Value> {
+    let coordinator = f.coordinator.id.clone();
+    f.host.agent_tool(
+        &coordinator,
+        "verify_ticket",
+        json!({"ticket_id":f.ticket.id,"verifiers":[{"focus":"Review","profile":chosen,"reason":"Review pass"}]}),
+    )
+}
+
+/// Ends cycle 1 with the implementer blocked, then reports it ready again.
+fn ready_for_cycle_two(f: &mut Fixture) {
+    f.report(&f.implementer.id.clone(), "stuck", "blocked")
+        .unwrap();
+    f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
+        .unwrap();
+    f.coordinator_reads();
+}
+
+/// The "Review" verifier of the current cycle's first round.
+fn current_review(f: &Fixture) -> String {
+    f.current().verification.unwrap().rounds[0].verifiers[0]
+        .session_id
+        .clone()
+}
+
+#[test]
+fn a_verifier_whose_provider_changed_starts_a_fresh_session_and_retires_the_old_one() {
+    let mut f = Fixture::ready(
+        vec![verifier(Role::Reviewer, "Review", Some(Provider::Claude))],
+        2,
+    );
+    let opus = profile(Provider::Claude, "opus", "high");
+    verify_review(&mut f, opus.clone()).unwrap();
+    let old = current_review(&f);
+    ready_for_cycle_two(&mut f);
+    f.host
+        .set_verification(VerificationSettings {
+            verifiers: vec![verifier(Role::Reviewer, "Review", Some(Provider::Codex))],
+            max_rounds: 2,
+        })
+        .unwrap();
+    let sol = profile(Provider::Codex, "gpt-6.1-sol", "high");
+    verify_review(&mut f, sol.clone()).unwrap();
+    let verification = f.current().verification.unwrap();
+    assert_eq!(verification.cycle, 2);
+    let new = current_review(&f);
+    assert_ne!(new, old, "the Claude session is not reused");
+    let session = f.host.session(&new).unwrap();
+    assert_eq!(session.provider, Provider::Codex);
+    let runtime = f.host.session_runtime(&new).unwrap();
+    assert_eq!(runtime.profile, Some(sol));
+    assert_eq!(runtime.selection.unwrap().reason, "Review pass");
+    // The old session is retired with its model untouched.
+    assert!(f.host.session(&old).unwrap().archived);
+    assert_eq!(f.host.session_runtime(&old).unwrap().profile, Some(opus));
+}
+
+#[test]
+fn a_verifier_at_the_same_profile_reuses_its_session() {
+    let mut f = Fixture::ready(vec![verifier(Role::Reviewer, "Review", None)], 2);
+    let sonnet = profile(Provider::Claude, "sonnet", "high");
+    verify_review(&mut f, sonnet.clone()).unwrap();
+    let first = current_review(&f);
+    ready_for_cycle_two(&mut f);
+    verify_review(&mut f, sonnet.clone()).unwrap();
+    assert_eq!(f.current().verification.unwrap().cycle, 2);
+    assert_eq!(current_review(&f), first);
+    assert!(!f.host.session(&first).unwrap().archived);
+    assert_eq!(
+        f.host.session_runtime(&first).unwrap().profile,
+        Some(sonnet)
     );
 }

@@ -1235,6 +1235,13 @@ impl Actor {
             {
                 continue;
             }
+            if let Some(reason) = self.host.hold_reason(&session)? {
+                // One session's hold must never stop the others from being scheduled.
+                if let Err(error) = self.hold_turn(&session, &input, &reason) {
+                    eprintln!("Holding {}: {error:#}", session.id);
+                }
+                continue;
+            }
             if let Err(error) = self.start_turn(session.clone(), input) {
                 self.start_failed(&session, &message, &error)?;
             }
@@ -1355,12 +1362,54 @@ impl Actor {
             }
         }
         for (member, input) in inputs {
+            // A held verifier reports blocked and never runs on a substitute; the rest of the
+            // round runs, so the round ends and its blocked outcome wakes the coordinator.
+            if let Some(reason) = self.host.hold_reason(&member)? {
+                if let Err(error) = self.hold_turn(&member, &input, &reason) {
+                    eprintln!("Holding {}: {error:#}", member.id);
+                }
+                continue;
+            }
             let first = input[0].clone();
             if let Err(error) = self.start_turn(member.clone(), input) {
                 self.start_failed(&member, &first, &error)?;
             }
         }
         Ok(Admission::Started)
+    }
+    /// Keeps the input queued, blocks the session and tells its parent once per held input,
+    /// through the agent's own `report` path so the parent wakes.
+    fn hold_turn(&mut self, session: &Session, input: &[Message], reason: &str) -> Result<()> {
+        let mut runtime = self.host.session_runtime(&session.id)?;
+        let already = session.status == Status::Blocked
+            && runtime.held
+            && runtime.last_error.as_deref() == Some(reason);
+        if !already {
+            runtime.last_error = Some(reason.into());
+            runtime.held = true;
+            self.host.save_runtime(&runtime)?;
+            self.host.set_status(&session.id, Status::Blocked)?;
+            let _ = self.changed.try_send(());
+            Host::event(
+                &self.host.db,
+                &session.project_id,
+                Some(&session.id),
+                "turn_held",
+                reason,
+            )?;
+        }
+        // Sent on every pass, so a report that failed earlier is retried. Keyed on the held
+        // input's sequence: bounded, the same after a Retry, and a no-op once it exists.
+        if session.parent_id.is_some()
+            && let Some(first) = input.first()
+        {
+            self.host.agent_tool(
+                &session.id,
+                "report",
+                json!({"message_id": format!("turn-held:{}", first.sequence), "kind": "blocked", "body": reason}),
+            )?;
+        }
+        Ok(())
     }
     /// Records why a turn could not start and settles any run it opened.
     fn start_failed(
@@ -1482,14 +1531,15 @@ impl Actor {
     }
     fn start_turn(&mut self, session: Session, input: Vec<Message>) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
-        let profile = if let Some(profile) = &runtime.profile {
-            profile.clone()
-        } else {
-            self.host
-                .policy(session.role)?
-                .select(Complexity::Standard, None, Some(session.provider), None)?
-                .profile
-        };
+        let profile = self.host.turn_profile(&session)?;
+        if runtime.profile.is_none() {
+            runtime.selection = Some(Selection {
+                chosen_by: Chooser::Default,
+                reason: "Role default".into(),
+                revision: self.host.model_selection()?.revision,
+                at: now(),
+            });
+        }
         runtime.profile = Some(profile.clone());
         provider::executable(session.provider)?;
         if let Some(ticket) = &runtime.ticket_id {
@@ -1510,10 +1560,10 @@ impl Actor {
         let cancel = Arc::new(AtomicBool::new(false));
         let token = format!("{}{}", new_id(), new_id());
         let prompt = self.prompt(&session, &input)?;
-        let policy = self.host.policy(session.role)?;
         let started_at = now();
-        let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"policy":policy});
+        let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
         runtime.last_error = None;
+        runtime.held = false;
         runtime.last_started_at = Some(started_at);
         runtime.directory = Some(cwd.to_string_lossy().into_owned());
         self.record_turn_start(&run, &session, &input, &detail, &runtime)?;
@@ -1708,7 +1758,6 @@ mod tests {
                     focus: format!("Tester {i}"),
                     instruction: None,
                     provider: None,
-                    size: None,
                 })
                 .collect(),
             max_rounds: 2,
@@ -1723,7 +1772,23 @@ mod tests {
             json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"}),
         )
         .unwrap();
-        let ticket = host.verify_ticket(&ticket.id).unwrap();
+        let profile = host
+            .model_selection()
+            .unwrap()
+            .prefill(Role::Tester)
+            .unwrap();
+        let choices: Vec<_> = host
+            .settings()
+            .verification
+            .verifiers
+            .into_iter()
+            .map(|v| VerifierChoice {
+                focus: v.focus,
+                profile: profile.clone(),
+                reason: "Routine check".into(),
+            })
+            .collect();
+        let ticket = host.verify_ticket(&ticket.id, &choices).unwrap();
         host.set_live(&coordinator.project_id, true).unwrap();
         let verifiers = ticket.verification.as_ref().unwrap().rounds[0]
             .verifiers
@@ -1857,6 +1922,359 @@ mod tests {
             .session(&ticket.coordinator_id)
             .unwrap()
             .project_id
+    }
+
+    #[test]
+    fn a_disabled_provider_holds_coordinator_choices_and_reports_once() {
+        let (_home, mut actor, first, tester, coordinator) = ticket_in_turn();
+        let host = &mut actor.host;
+        let ticket = host
+            .create_ticket(&coordinator.id, &first.repository_id, "Review", "Do")
+            .unwrap();
+        let reviewer = host
+            .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
+            .unwrap();
+        let sol = ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
+        };
+        host.pin(
+            &reviewer.id,
+            sol.clone(),
+            Chooser::Coordinator {
+                session_id: coordinator.id.clone(),
+            },
+            "Routine review",
+        )
+        .unwrap();
+        // Only the reviewer may be scheduled; nothing here may launch a real provider.
+        for id in [&tester.id, &coordinator.id] {
+            host.set_status(id, Status::Paused).unwrap();
+        }
+        let mut selection = host.model_selection().unwrap();
+        selection
+            .providers
+            .get_mut(&Provider::Codex)
+            .unwrap()
+            .enabled = false;
+        selection
+            .role_providers
+            .insert(Role::Tester, [Provider::Claude].into());
+        host.set_model_selection(&selection).unwrap();
+        host.set_live(&reviewer.project_id, true).unwrap();
+        let reports = |host: &Host| -> Vec<String> {
+            host.db
+                .prepare("SELECT id FROM messages WHERE recipient=?1 AND sender=?2")
+                .unwrap()
+                .query_map(params![coordinator.id, reviewer.id], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        // A long input ID, such as a forwarded child report, must not break the report's ID.
+        host.db
+            .execute(
+                "UPDATE messages SET receipt='completed' WHERE id=?1",
+                [format!("assignment:{}", reviewer.id)],
+            )
+            .unwrap();
+        let assignment = format!("report:{}:assignment:{}", new_id(), new_id());
+        let input = host
+            .send(
+                &assignment,
+                Some(&coordinator.id),
+                &reviewer.id,
+                "Review it",
+            )
+            .unwrap();
+        let report_id = format!("report:{}:turn-held:{}", reviewer.id, input.sequence);
+        for retry in [false, true] {
+            if retry {
+                actor.host.reconcile_session(&reviewer.id, true).unwrap();
+            }
+            actor.schedule().unwrap();
+            assert!(!actor.active.contains_key(&reviewer.id));
+            let held = actor.host.session(&reviewer.id).unwrap();
+            assert_eq!(held.status, Status::Blocked);
+            let error = actor.host.session_runtime(&reviewer.id).unwrap().last_error;
+            assert_eq!(
+                error.as_deref(),
+                Some(
+                    "Codex is disabled on this machine. Enable it in Models, or choose another model for this agent."
+                )
+            );
+            assert_eq!(
+                actor.host.message(&assignment).unwrap().receipt,
+                Receipt::Queued,
+                "input kept"
+            );
+            assert_eq!(
+                reports(&actor.host),
+                [report_id.as_str()],
+                "one report to the parent, even after a retry"
+            );
+            assert_eq!(
+                actor
+                    .host
+                    .runtimes()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r.session_id == reviewer.id)
+                    .unwrap()
+                    .profile,
+                Some(sol.clone()),
+                "no model switch"
+            );
+        }
+        let report = actor.host.message(&report_id).unwrap();
+        assert!(report.body.starts_with("[blocked] "));
+        assert!(report.body.ends_with("Codex is disabled on this machine. Enable it in Models, or choose another model for this agent."));
+        // Skip, through the same command the banner sends, drops the held input.
+        let skipped = actor.host.respond(Request {
+            version: PROTOCOL_VERSION,
+            id: new_id(),
+            command: Command::ReconcileSession {
+                session_id: reviewer.id.clone(),
+                retry: false,
+            },
+        });
+        assert_eq!(skipped.error, None);
+        assert_eq!(
+            actor.host.message(&assignment).unwrap().receipt,
+            Receipt::Cancelled
+        );
+        actor.schedule().unwrap();
+        assert_eq!(reports(&actor.host).len(), 1, "nothing left to hold");
+        // The human's own choice is never held.
+        actor.host.configure_session(&reviewer.id, sol).unwrap();
+        assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
+    }
+
+    #[test]
+    fn an_assignment_exists_only_with_its_model_and_an_unpinned_agent_never_runs() {
+        let (_home, mut actor, first, tester, coordinator) = ticket_in_turn();
+        let host = &mut actor.host;
+        for id in [&tester.id, &coordinator.id] {
+            host.set_status(id, Status::Paused).unwrap();
+        }
+        let ticket = host
+            .create_ticket(&coordinator.id, &first.repository_id, "Atomic", "Do")
+            .unwrap();
+        let opus = json!({"provider":"claude","model":"opus","effort":"high"});
+        let assign = json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Do",
+            "profile":opus,"reason":"Large change"});
+        // Fail the write that pins the model, after the session and its instruction were written.
+        host.db
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_pin_insert BEFORE INSERT ON runtimes
+                     WHEN json_extract(NEW.data,'$.selection') IS NOT NULL
+                     BEGIN SELECT RAISE(ABORT,'injected'); END;
+                 CREATE TEMP TRIGGER fail_pin_update BEFORE UPDATE ON runtimes
+                     WHEN json_extract(NEW.data,'$.selection') IS NOT NULL
+                     BEGIN SELECT RAISE(ABORT,'injected'); END;",
+            )
+            .unwrap();
+        let sessions = host.sessions().unwrap().len();
+        let count =
+            |host: &Host, sql: &str| -> i64 { host.db.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let messages = count(host, "SELECT COUNT(*) FROM messages");
+        assert!(
+            host.agent_tool(&coordinator.id, "assign_ticket", assign.clone())
+                .is_err()
+        );
+        assert_eq!(
+            host.sessions().unwrap().len(),
+            sessions,
+            "no agent without its model"
+        );
+        assert_eq!(
+            count(host, "SELECT COUNT(*) FROM messages"),
+            messages,
+            "no instruction"
+        );
+        assert_eq!(host.ticket(&ticket.id).unwrap().state, ticket.state);
+        assert_eq!(
+            count(
+                host,
+                "SELECT COUNT(*) FROM activity WHERE kind='model_selected'"
+            ),
+            0
+        );
+        // With the fault gone, retrying creates the agent with its model.
+        host.db
+            .execute_batch("DROP TRIGGER fail_pin_insert; DROP TRIGGER fail_pin_update;")
+            .unwrap();
+        let created: Session = serde_json::from_value(
+            host.agent_tool(&coordinator.id, "assign_ticket", assign)
+                .unwrap(),
+        )
+        .unwrap();
+        let runtime = host.session_runtime(&created.id).unwrap();
+        assert!(runtime.profile.is_some() && runtime.selection.is_some());
+        // Belt and braces: an agent below the coordinator without a pinned model is held
+        // visibly, never given a substitute.
+        let unpinned = host
+            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+            .unwrap();
+        assert!(host.turn_profile(&unpinned).is_err());
+        host.set_live(&unpinned.project_id, true).unwrap();
+        for id in host
+            .sessions()
+            .unwrap()
+            .iter()
+            .filter(|s| s.id != unpinned.id)
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+        {
+            host.set_status(&id, Status::Paused).unwrap();
+        }
+        actor.schedule().unwrap();
+        assert!(!actor.active.contains_key(&unpinned.id));
+        assert_eq!(
+            actor.host.session(&unpinned.id).unwrap().status,
+            Status::Blocked
+        );
+        assert_eq!(
+            actor
+                .host
+                .session_runtime(&unpinned.id)
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some(
+                "This agent has no pinned model. Choose one from its model menu; Wiffletree never substitutes a model."
+            )
+        );
+        assert_eq!(
+            actor.host.session_runtime(&unpinned.id).unwrap().profile,
+            None
+        );
+    }
+
+    /// A coordinator-chosen Codex reviewer with queued input, Codex disabled, and every other
+    /// session paused so nothing here can launch a real provider.
+    fn codex_reviewer_on_a_disabled_provider() -> (tempfile::TempDir, Actor, Session, Session) {
+        let (home, mut actor, first, tester, coordinator) = ticket_in_turn();
+        let host = &mut actor.host;
+        let ticket = host
+            .create_ticket(&coordinator.id, &first.repository_id, "Review", "Do")
+            .unwrap();
+        let reviewer = host
+            .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
+            .unwrap();
+        let sol = ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
+        };
+        host.pin(
+            &reviewer.id,
+            sol,
+            Chooser::Coordinator {
+                session_id: coordinator.id.clone(),
+            },
+            "Routine review",
+        )
+        .unwrap();
+        for id in [&tester.id, &coordinator.id] {
+            host.set_status(id, Status::Paused).unwrap();
+        }
+        set_codex(host, false);
+        host.set_live(&reviewer.project_id, true).unwrap();
+        (home, actor, reviewer, coordinator)
+    }
+    fn set_codex(host: &mut Host, enabled: bool) {
+        let mut selection = host.model_selection().unwrap();
+        selection
+            .providers
+            .get_mut(&Provider::Codex)
+            .unwrap()
+            .enabled = enabled;
+        if !enabled {
+            selection
+                .role_providers
+                .insert(Role::Tester, [Provider::Claude].into());
+        }
+        host.set_model_selection(&selection).unwrap();
+    }
+    fn turn_held_reports(host: &Host, from: &Session) -> i64 {
+        host.db
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender=?1 AND id LIKE 'report:%:turn-held:%'",
+                [&from.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_hold_report_that_failed_is_sent_on_a_later_pass() {
+        let (_home, mut actor, reviewer, _) = codex_reviewer_on_a_disabled_provider();
+        // The parent's queue refuses the report, say because it is full.
+        actor
+            .host
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse_report BEFORE INSERT ON messages
+                     WHEN NEW.id LIKE 'report:%:turn-held:%'
+                     BEGIN SELECT RAISE(ABORT,'queue full'); END;",
+            )
+            .unwrap();
+        actor.schedule().unwrap();
+        assert_eq!(
+            actor.host.session(&reviewer.id).unwrap().status,
+            Status::Blocked
+        );
+        assert_eq!(turn_held_reports(&actor.host, &reviewer), 0);
+        actor
+            .host
+            .db
+            .execute_batch("DROP TRIGGER refuse_report;")
+            .unwrap();
+        for _ in 0..2 {
+            actor.schedule().unwrap();
+            assert_eq!(turn_held_reports(&actor.host, &reviewer), 1);
+        }
+    }
+
+    #[test]
+    fn skip_drops_held_input_even_after_the_provider_is_back() {
+        let (_home, mut actor, reviewer, _) = codex_reviewer_on_a_disabled_provider();
+        actor.schedule().unwrap();
+        assert!(actor.host.session_runtime(&reviewer.id).unwrap().held);
+        // Stop the project, re-enable Codex, then Skip: the input must not run on resume.
+        actor.host.set_live(&reviewer.project_id, false).unwrap();
+        set_codex(&mut actor.host, true);
+        assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
+        let skipped = actor.host.respond(Request {
+            version: PROTOCOL_VERSION,
+            id: new_id(),
+            command: Command::ReconcileSession {
+                session_id: reviewer.id.clone(),
+                retry: false,
+            },
+        });
+        assert_eq!(skipped.error, None);
+        assert_eq!(
+            actor
+                .host
+                .message(&format!("assignment:{}", reviewer.id))
+                .unwrap()
+                .receipt,
+            Receipt::Cancelled
+        );
+        assert!(!actor.host.session_runtime(&reviewer.id).unwrap().held);
+        let queued: i64 = actor
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued'",
+                [&reviewer.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0, "nothing left to run on resume");
     }
 
     /// The same ticket closed, so its worktree removal waits for the tester's turn.

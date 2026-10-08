@@ -25,6 +25,7 @@ mod tree;
 mod ui;
 mod update;
 mod usage_view;
+mod verifiers;
 use bridge::Bridge;
 use creation::{Creation, CreationForm};
 use gpui::{prelude::*, *};
@@ -93,9 +94,15 @@ struct Workspace {
     brain_path: Entity<InputState>,
     answer: Entity<TextareaState>,
     answering: Option<String>,
-    role_defaults: Vec<RoleDefault>,
-    saved_role_defaults: Vec<RoleDefault>,
-    profile_tabs: [Provider; 4],
+    /// The Models page's draft and the host's saved copy.
+    model_selection: ModelSelection,
+    saved_model_selection: ModelSelection,
+    guide_input: Entity<TextareaState>,
+    verifiers: Entity<verifiers::VerifierEditor>,
+    /// Whether each provider's CLI was found when the model lists were last refreshed.
+    cli_found: BTreeMap<Provider, bool>,
+    /// The model each provider's Add row on the Providers card shows.
+    model_drafts: BTreeMap<Provider, String>,
     model_catalog: Vec<workspace_host::runtime::ModelOption>,
     catalog_pending: usize,
     catalog_loaded: bool,
@@ -147,6 +154,19 @@ impl Workspace {
             }
         })
         .detach();
+        let guide_input = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(8, 24).placeholder(
+                "e.g. Claude: small, contained change → sonnet; large or cross-cutting → opus.",
+            )
+        });
+        cx.subscribe(&guide_input, |view: &mut Self, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.model_selection.guide = input.read(cx).value().to_string();
+                cx.notify();
+            }
+        })
+        .detach();
+        let verifiers = cx.new(|cx| verifiers::VerifierEditor::new(bridge.clone(), window, cx));
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         cx.subscribe_in(
             &project_name,
@@ -193,9 +213,12 @@ impl Workspace {
             }),
             answer,
             answering: None,
-            role_defaults: vec![],
-            saved_role_defaults: vec![],
-            profile_tabs: [Provider::Claude; 4],
+            model_selection: ModelSelection::default(),
+            saved_model_selection: ModelSelection::default(),
+            guide_input,
+            verifiers,
+            cli_found: BTreeMap::new(),
+            model_drafts: BTreeMap::new(),
             model_catalog: models::fallback(),
             catalog_pending: 0,
             catalog_loaded: false,
@@ -644,9 +667,10 @@ impl Workspace {
                 }
                 self.request(Command::Snapshot, window, cx);
             }
-            Command::SetRoleDefaults { defaults } => {
-                self.saved_role_defaults = defaults;
-                self.toast("Role defaults saved", window, cx);
+            Command::SetModelSelection { selection } => {
+                // The draft was saved; the next snapshot carries its new revision.
+                self.saved_model_selection = *selection;
+                self.toast("Models saved", window, cx);
                 self.request(Command::Snapshot, window, cx);
             }
             Command::AppendLog { .. } => {
@@ -700,7 +724,7 @@ impl Workspace {
                 .find(|s| !s.archived)
                 .map(|s| s.id.clone());
         }
-        self.sync_role_defaults(&snapshot.policies);
+        self.sync_model_selection(&snapshot.model_selection, window, cx);
         self.snapshot = Some(snapshot);
         self.load_error = None;
         self.sync_composer(window, cx);
@@ -722,14 +746,6 @@ impl Workspace {
         }
         self.sync_activity_clock(window, cx);
         self.sync_context(window, cx);
-    }
-    /// Unsaved edits survive refreshes; an untouched editor follows the saved policy.
-    fn sync_role_defaults(&mut self, policies: &[RolePolicy]) {
-        let saved = models::role_defaults(policies);
-        if self.role_defaults == self.saved_role_defaults {
-            self.role_defaults = saved.clone();
-        }
-        self.saved_role_defaults = saved;
     }
     /// Transcript rows are the loaded messages plus a trailing activity row while the agent works.
     fn transcript_rows(&self) -> usize {
@@ -920,12 +936,23 @@ impl Workspace {
         self.runtime(&session.id)
             .and_then(|runtime| runtime.profile.clone())
             .or_else(|| {
-                self.snapshot
+                // Only an unpinned main coordinator runs on its provider's first allowed model;
+                // any other unpinned agent is held until it is given one.
+                if session.parent_id.is_some() {
+                    return None;
+                }
+                let model = self
+                    .snapshot
                     .as_ref()?
-                    .policies
-                    .iter()
-                    .find(|policy| policy.role == session.role)
-                    .map(|policy| policy.default.clone())
+                    .model_selection
+                    .allowed(session.provider)
+                    .first()?
+                    .clone();
+                Some(ModelProfile {
+                    provider: session.provider,
+                    model: model.model,
+                    effort: model.effort,
+                })
             })
     }
     fn toggle_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
@@ -1006,19 +1033,21 @@ impl Workspace {
         self.catalog_loaded = true;
         self.catalog_notice.clear();
         let (sender, receiver) = async_channel::bounded(2);
-        for provider in models::PROVIDERS {
+        for provider in PROVIDERS {
             let sender = sender.clone();
             std::thread::spawn(move || {
+                let found = workspace_host::provider::executable(provider).is_ok();
                 let result = workspace_host::runtime::models(provider).map_err(|e| e.to_string());
-                let _ = sender.send_blocking((provider, result));
+                let _ = sender.send_blocking((provider, found, result));
             });
         }
         drop(sender);
         cx.spawn_in(window, async move |this, cx| {
-            while let Ok((provider, result)) = receiver.recv().await {
+            while let Ok((provider, found, result)) = receiver.recv().await {
                 let updated = cx.update(|_, cx| {
                     this.update(cx, |view, cx| {
                         view.catalog_pending -= 1;
+                        view.cli_found.insert(provider, found);
                         match result {
                             Ok(models) if !models.is_empty() => {
                                 view.model_catalog
@@ -1045,10 +1074,10 @@ impl Workspace {
         .detach();
         cx.notify();
     }
-    fn save_role_defaults(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_model_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.request(
-            Command::SetRoleDefaults {
-                defaults: self.role_defaults.clone(),
+            Command::SetModelSelection {
+                selection: Box::new(self.model_selection.clone()),
             },
             window,
             cx,
@@ -1248,6 +1277,7 @@ impl Workspace {
                 window,
                 cx,
             )
+            .with_catalog(&self.model_catalog)
         });
         self.creation = Some(form.clone());
         let focused_form = form.clone();

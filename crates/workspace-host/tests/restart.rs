@@ -108,6 +108,16 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
         ] {
             host.advance_receipt(&assignment, receipt).unwrap();
         }
+        // Every real creation path gives an agent a model; an unpinned one would be held.
+        host.configure_session(
+            &worker.id,
+            ModelProfile {
+                provider: Provider::Claude,
+                model: "opus".into(),
+                effort: "high".into(),
+            },
+        )
+        .unwrap();
         let stopped = host.create_project("Stopped").unwrap();
         let other = host
             .sessions()

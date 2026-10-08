@@ -1,3 +1,4 @@
+mod common;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
 use workspace_core::{Provider, Receipt, Role, Session, Status, Ticket};
@@ -82,6 +83,7 @@ fn branch_exists(directory: &Path, ticket: &Ticket) -> bool {
 
 /// Starts verification of a ticket its implementer reported ready, returning the verifier.
 fn verifying(host: &mut Host, ticket: &Ticket) -> Session {
+    common::one_tester(host);
     let implementer = host
         .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
         .unwrap();
@@ -95,7 +97,7 @@ fn verifying(host: &mut Host, ticket: &Ticket) -> Session {
         host.agent_tool(
             &ticket.coordinator_id,
             "verify_ticket",
-            json!({"ticket_id":ticket.id}),
+            common::verify_args(host, &ticket.id),
         )
         .unwrap(),
     )

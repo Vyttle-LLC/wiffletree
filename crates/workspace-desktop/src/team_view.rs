@@ -28,6 +28,7 @@ impl Workspace {
         &self,
         session: &Session,
         label: String,
+        show_provider: bool,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -49,9 +50,50 @@ impl Workspace {
                     .text_color(p.subtle),
             )
             .child(div().flex_1().min_w_0().text_ellipsis().child(label))
-            .child(hint(format!("{:?}", session.provider), p))
+            .when(show_provider, |d| {
+                d.child(hint(session.provider.label(), p))
+            })
             .child(self.session_badge(session, p))
             .child(icon("chevron-right").size(px(12.)).text_color(p.subtle))
+    }
+
+    /// A ticket's agent with the model it runs and why that model was chosen.
+    fn ticket_agent(
+        &self,
+        agent: &Session,
+        snapshot: &Snapshot,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let runtime = self.runtime(&agent.id);
+        let label = agent
+            .role
+            .agent_label(runtime.and_then(|r| r.focus.as_deref()));
+        let mut entry = div()
+            .flex()
+            .flex_col()
+            .child(self.session_link(agent, label, false, p, cx));
+        if let Some(profile) = runtime.and_then(|r| r.profile.as_ref()) {
+            let reason =
+                runtime.and_then(|r| r.selection.as_ref()).map(|selection| {
+                    match selection.chosen_by {
+                        Chooser::Coordinator { .. } => selection.reason.clone(),
+                        _ => models::chosen_by(selection, &snapshot.sessions),
+                    }
+                });
+            entry = entry.child(
+                div()
+                    .pl(px(30.))
+                    .pr_2()
+                    .pb(px(6.))
+                    .mt(px(-4.))
+                    .flex()
+                    .flex_col()
+                    .child(hint(models::profile_label(&self.model_catalog, profile), p))
+                    .children(reason.map(|reason| hint(reason, p).italic().line_clamp(2))),
+            );
+        }
+        entry
     }
 
     fn tickets(
@@ -127,9 +169,7 @@ impl Workspace {
             if !agents.is_empty() {
                 let mut list = div().flex().flex_col().mx(px(-8.));
                 for agent in agents {
-                    let focus = self.runtime(&agent.id).and_then(|r| r.focus.as_deref());
-                    list =
-                        list.child(self.session_link(agent, agent.role.agent_label(focus), p, cx));
+                    list = list.child(self.ticket_agent(agent, snapshot, p, cx));
                 }
                 entry = entry.child(list);
             }
@@ -163,7 +203,7 @@ impl Workspace {
                 .flex_col()
                 .child(section("WITHOUT A TICKET", p));
             for agent in unassigned {
-                list = list.child(self.session_link(agent, agent.name.clone(), p, cx));
+                list = list.child(self.session_link(agent, agent.name.clone(), true, p, cx));
             }
             body = body.child(list);
         }

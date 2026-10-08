@@ -87,7 +87,9 @@ fn verifier_label(run: &VerifierRun) -> String {
 
 impl Host {
     /// Starts a cycle: pins HEAD and sends every configured verifier one message naming it.
-    pub fn verify_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
+    /// `choices` gives each verifier, by focus, the coordinator's exact model and reason; a new
+    /// verifier is pinned to it. An existing one is reused only at the same profile; otherwise it is archived and a fresh one takes the choice, so no pinned model ever changes.
+    pub fn verify_ticket(&mut self, ticket_id: &str, choices: &[VerifierChoice]) -> Result<Ticket> {
         let mut ticket = self.ticket(ticket_id)?;
         if let Some(cycle) = ticket.running_cycle() {
             bail!("Verification cycle {} is already running", cycle.cycle);
@@ -107,7 +109,8 @@ impl Host {
             "The worktree has uncommitted or untracked files; ask the implementer to commit or discard them"
         );
         let settings = self.settings().verification;
-        let project = self.project(&self.session(&ticket.coordinator_id)?.project_id)?;
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        let project = self.project(&coordinator.project_id)?;
         let count = settings.verifiers.len();
         let worker_turns = worker_turns(&project);
         ensure!(
@@ -119,37 +122,47 @@ impl Host {
             count <= HOST_WORKER_TURNS,
             "{count} verifiers cannot run at once: the host-wide limit is {HOST_WORKER_TURNS} worker turns"
         );
+        let chosen = self.verifier_choices(&coordinator, &settings.verifiers, choices)?;
         let commit = head(&ticket)?;
         let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
         self.atomically(|host| {
             let mut verifiers = vec![];
-            for config in &settings.verifiers {
-                let mut args = json!({});
-                if let Some(provider) = config.provider {
-                    args["provider"] = json!(provider);
-                }
-                if let Some(size) = config.size {
-                    args["size"] = json!(size);
-                }
-                let route = host.assignment_route(config.role, &args)?;
-                let (agent, _) = host.ticket_agent(
-                    &ticket,
-                    config.role,
-                    route.profile.provider,
-                    Some(&config.focus),
-                )?;
-                let mut runtime = host.session_runtime(&agent.id)?;
-                if runtime.profile.is_none() {
-                    runtime.profile = Some(route.profile);
-                    host.save_runtime(&runtime)?;
-                }
-                Self::event(
-                    &host.db,
-                    &project.id,
-                    Some(&agent.id),
-                    "model_routed",
-                    &route.reason,
-                )?;
+            for (config, (profile, reason)) in settings.verifiers.iter().zip(chosen) {
+                let existing =
+                    host.existing_assignment(&ticket.id, config.role, Some(&config.focus))?;
+                // A verifier keeps its model: one pinned to another profile is retired, and a
+                // fresh session takes the coordinator's choice, as in a first cycle.
+                let reused = match existing {
+                    Some(agent)
+                        if host.session_runtime(&agent.id)?.profile.as_ref() == Some(&profile) =>
+                    {
+                        Some(agent)
+                    }
+                    Some(retired) => {
+                        host.change_archived(&retired.id, true, Some("verifier_replaced"))?;
+                        None
+                    }
+                    None => None,
+                };
+                let agent = match reused {
+                    Some(agent) => {
+                        // Never start a round that a verifier could only run on a substitute.
+                        if let Some(reason) = host.hold_reason(&agent)? {
+                            bail!("{}: {reason}", agent.name);
+                        }
+                        agent
+                    }
+                    None => {
+                        let (agent, _) = host.ticket_agent(
+                            &ticket,
+                            config.role,
+                            profile.provider,
+                            Some(&config.focus),
+                        )?;
+                        host.record_choice(&coordinator, &agent, profile, &reason)?;
+                        agent
+                    }
+                };
                 verifiers.push(VerifierRun {
                     session_id: agent.id.clone(),
                     role: config.role,
@@ -185,6 +198,52 @@ impl Host {
             )?;
             Ok(ticket)
         })
+    }
+    /// Pairs every configured verifier with the coordinator's choice for it, checking each
+    /// against the machine's model selection and the verifier's provider. Nothing is substituted:
+    /// one refusal starts no verifier.
+    fn verifier_choices(
+        &self,
+        coordinator: &Session,
+        verifiers: &[VerifierConfig],
+        choices: &[VerifierChoice],
+    ) -> Result<Vec<(ModelProfile, String)>> {
+        let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+        if let Some(unknown) = choices
+            .iter()
+            .find(|c| !verifiers.iter().any(|v| same(&v.focus, &c.focus)))
+        {
+            bail!(
+                "No verifier has the focus \"{}\"; choose one model for each verifier in model_selection",
+                unknown.focus
+            );
+        }
+        let selection = self.model_selection()?;
+        let mut chosen = vec![];
+        for verifier in verifiers {
+            let label = verifier.role.agent_label(Some(&verifier.focus));
+            let mut matching = choices.iter().filter(|c| same(&c.focus, &verifier.focus));
+            let choice = matching
+                .next()
+                .with_context(|| format!("Choose a profile and reason for {label}"))?;
+            ensure!(matching.next().is_none(), "Choose {label}'s model once");
+            let reason = Selection::check_reason(&choice.reason)?.to_owned();
+            if let Err(rejection) = selection.permits_verifier(verifier, &choice.profile) {
+                Self::event(
+                    &self.db,
+                    &coordinator.project_id,
+                    Some(&coordinator.id),
+                    "model_rejected",
+                    &format!(
+                        "{} asked for {} ({label}). {rejection} No verifier was started.",
+                        coordinator.name, choice.profile
+                    ),
+                )?;
+                bail!("{rejection} No verifier was started.");
+            }
+            chosen.push((choice.profile.clone(), reason));
+        }
+        Ok(chosen)
     }
     /// Sends the current round's messages and marks the ticket `verifying`. `instructions` maps
     /// a focus to its configured instruction; later rounds have none.
