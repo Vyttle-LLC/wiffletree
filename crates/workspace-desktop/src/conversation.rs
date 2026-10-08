@@ -930,16 +930,21 @@ impl Workspace {
             .gap_2()
             .children(attached.iter().enumerate().map(|(index, attachment)| {
                 let path = attachment.path.clone();
-                attachment_chips::chip(("pending-attachment", index), attachment, p).child(
-                    div().absolute().top(px(2.)).right(px(2.)).child(
-                        button(("remove-attachment", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(icon("close"))
-                            .tooltip(format!("Remove {}", attachment.name()))
-                            .on_click(cx.listener(move |v, _, _, c| v.remove_attachment(&path, c))),
-                    ),
-                )
+                attachment_chips::chip(("pending-attachment", index), attachment, p)
+                    // Keeps a file's name clear of the remove button.
+                    .when(attachment.image.is_none(), |chip| chip.pr_7())
+                    .child(
+                        div().absolute().top(px(2.)).right(px(2.)).child(
+                            button(("remove-attachment", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("close"))
+                                .tooltip(format!("Remove {}", attachment.name()))
+                                .on_click(
+                                    cx.listener(move |v, _, _, c| v.remove_attachment(&path, c)),
+                                ),
+                        ),
+                    )
             }))
     }
 

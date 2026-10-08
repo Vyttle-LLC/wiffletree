@@ -90,6 +90,14 @@ The window uses a themed title bar. The conversation header carries the breadcru
 
 Enter sends a conversation draft; Shift Enter adds a newline. Command Enter also sends. These shortcuts are scoped to the composer and preserve IME composition. The Models editor uses full-width cards, labeled dropdowns and scrollable model menus so model choices and effort values remain readable when resizing the inspector.
 
+## Attachments
+
+Drop files from Finder onto the selected conversation to attach them to the draft. Each appears above the composer as a chip: a thumbnail for PNG, JPEG, GIF and WebP images (recognized by content, then extension), otherwise the name and size. A chip's × removes it. Folders and files over 50 MB are refused with a notice naming each one and why; the rest of the drop is still attached. Pending attachments belong to that session's draft, and a draft with attachments can be sent without text. Nothing is written until you send.
+
+Sending copies each file to `<data dir>/projects/<project-id>/attachments/<message-id>/<file name>` as read-only (0444), and the message stores those copies' paths, sizes and image formats (schema 5, an additive column on existing messages). If copying or storing the message fails, that message's folder is removed. Copies live as long as their message; archiving and restoring keep them. In the transcript a message's files show under its bubble, and clicking one opens it with its default application.
+
+The delivered prompt lists every attachment's absolute path after the message text. Images also reach the model as images. Codex gets `--image=<path>` before `resume <session> -`; the joined form matters because `--image` takes several values and would otherwise consume the stdin `-`. Claude gets `--input-format stream-json` and one stream-json user message on stdin whose content is the prompt plus a base64 image block per image; turns without images still send plain text. Both were verified on October 7 with Codex CLI 0.160.0 and Claude Code 2.1.293, for new and resumed sessions and for images up to 22 MB. Only the human's messages carry attachments; agents' `send_message` does not.
+
 ## Live work
 
 The adapters decode Claude stream-json and Codex `exec --json` into work steps (`crates/workspace-host/src/stream.rs`). Recorded and synthetic streams for both providers are in `crates/workspace-host/tests/fixtures/streams/`; when a CLI changes its output, record a new turn, sanitize paths and account details, and update the fixture tests. Claude currently streams redacted thinking, so thinking rarely appears. Codex command titles drop the `/bin/zsh -lc` wrapper.
@@ -134,10 +142,11 @@ python3 scripts/drive_desktop.py --socket /tmp/wiffletree-ui.sock click 1247 62
 python3 scripts/drive_desktop.py --socket /tmp/wiffletree-ui.sock type "Ship the toolbar"
 python3 scripts/drive_desktop.py --socket /tmp/wiffletree-ui.sock key enter
 python3 scripts/drive_desktop.py --socket /tmp/wiffletree-ui.sock scroll 1100 500 -300
+python3 scripts/drive_desktop.py --socket /tmp/wiffletree-ui.sock drop 740 400 shot.png notes.txt
 python3 scripts/drive_desktop.py --socket /tmp/wiffletree-ui.sock shot /tmp/window.png
 ```
 
-Coordinates are window points from the top-left corner. `shot` saves the window at one pixel per point, so a position read from a screenshot can be passed straight back to `click`. `key` takes GPUI binding syntax such as `cmd-n`. Keep the socket path short: macOS limits Unix socket paths to about 100 bytes. Captures need Screen Recording permission for the calling terminal and fail while the screen is locked; input still works. GPUI stops drawing a window that other windows fully cover, so each step draws a frame itself and captures stay current while you work in front of the app. Use an isolated `--data-dir` and, for runs that must not call a provider, point `WORKSPACE_CLAUDE_BIN` and `WORKSPACE_CODEX_BIN` at `crates/workspace-host/tests/fixtures/provider.py`.
+Coordinates are window points from the top-left corner. `shot` saves the window at one pixel per point, so a position read from a screenshot can be passed straight back to `click`. `key` takes GPUI binding syntax such as `cmd-n`. `drop` replays the file-drop events macOS sends for a Finder drag at that point, so the app's own drop handler receives the files. Keep the socket path short: macOS limits Unix socket paths to about 100 bytes. Captures need Screen Recording permission for the calling terminal and fail while the screen is locked; input still works. GPUI stops drawing a window that other windows fully cover, so each step draws a frame itself and captures stay current while you work in front of the app. Use an isolated `--data-dir` and, for runs that must not call a provider, point `WORKSPACE_CLAUDE_BIN` and `WORKSPACE_CODEX_BIN` at `crates/workspace-host/tests/fixtures/provider.py`.
 
 ## Releases and updates
 
@@ -185,7 +194,8 @@ Only builds with `WIFFLETREE_VERSION` embedded, meaning CI releases, update them
 ## Current limits
 
 - Acceptance preserves the tested branch. **Integration/merge is manual**; no automatic GitHub PR, push, merge, dependency rebase or combined integration testing is implemented. Tickets start from the repository attachment's configured base. Use independent tickets for the first trial; dependent tickets need an updated base and explicit integration planning.
-- No remote host, detached background operation, recurring work or full attachment workflow yet. Closing the app interrupts execution.
+- No remote host, detached background operation or recurring work yet. Closing the app interrupts execution.
+- Attachments only come from dropping files on a conversation: no paste, attach button, folders, task or project file library, or cleanup apart from the message's own lifetime.
 - Eight active turns globally and four per project by default, with coordinator capacity reserved. A project stops scheduling after 100 turns without a human message, retry or answer; each turn has a 30-minute limit. These are execution bounds, not a dollar-spend cap.
 - Host dispatch measurements exclude model startup/reasoning, a busy recipient's current turn, Git checkout and permission waits. Worktree creation currently runs on the host's database thread; large repository checkout can delay host commands, although it does not run on the UI thread. Moving that Git preparation off the actor remains performance work.
 - Full native responsiveness, long-document Markdown behavior, accessibility/IME, memory bounds under prolonged load and an eight-hour soak remain release gates. Compilation does not prove “no lag.”
