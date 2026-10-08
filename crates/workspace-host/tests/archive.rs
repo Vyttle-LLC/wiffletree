@@ -746,12 +746,12 @@ impl Orphan {
                 .unwrap(),
         )
     }
-    /// Records it on an interrupted run of `agent`, as startup leaves a crashed turn.
-    fn interrupt(&self, db: &rusqlite::Connection, agent: &Session) {
+    /// Records it on a finished run of `agent` with `outcome`, as a stopped host leaves it.
+    fn record(&self, db: &rusqlite::Connection, agent: &Session, outcome: &str) {
         db.execute(
             "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail,process_group)
-             VALUES (?1,?1,'[]',1,2,'interrupted','{}',?2)",
-            rusqlite::params![agent.id, self.0.id()],
+             VALUES (?1,?1,'[]',1,2,?3,'{}',?2)",
+            rusqlite::params![agent.id, self.0.id(), outcome],
         )
         .unwrap();
     }
@@ -775,7 +775,7 @@ fn an_orphaned_provider_process_defers_removal_until_it_exits() {
         .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
         .unwrap();
     let orphan = Orphan::spawn();
-    orphan.interrupt(&db, &tester);
+    orphan.record(&db, &tester, "interrupted");
 
     host.agent_tool(
         &coordinator.id,
@@ -797,7 +797,7 @@ fn an_orphaned_provider_process_defers_removal_until_it_exits() {
 }
 
 #[test]
-fn archiving_while_only_an_orphan_runs_defers_removal() {
+fn archiving_while_only_an_orphan_runs_defers_removal_whatever_its_run_outcome() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
@@ -807,7 +807,8 @@ fn archiving_while_only_an_orphan_runs_defers_removal() {
         .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
         .unwrap();
     let orphan = Orphan::spawn();
-    orphan.interrupt(&db, &agent);
+    // Shutdown finished the run as failed, then the host stopped before its process exited.
+    orphan.record(&db, &agent, "failed");
 
     host.set_archived(&coordinator.id, true).unwrap();
     host.settle_pending_worktrees();

@@ -210,8 +210,9 @@ impl Host {
         Ok(true)
     }
     /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
-    /// until it finishes, and an agent that has reported is Done but still in its turn. A run a
-    /// stopped host interrupted counts while its process group survives it; a recycled group id
+    /// until it finishes, and an agent that has reported is Done but still in its turn. A finished
+    /// run also counts while its process group exists, whatever its outcome: a stopped or crashed
+    /// host does not wait for the process. A normal finish reaps the group; a recycled group id
     /// only keeps the worktree longer, and runs recorded before groups were kept do not count.
     fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
         let runs = self
@@ -220,9 +221,11 @@ impl Host {
                 "SELECT r.finished_at IS NULL,r.process_group FROM provider_runs r
                  JOIN runtimes t ON t.session_id=r.session_id
                  WHERE json_extract(t.data,'$.ticket_id')=?1
-                 AND (r.finished_at IS NULL OR (r.outcome='interrupted' AND r.process_group IS NOT NULL))",
+                 AND (r.finished_at IS NULL OR r.process_group IS NOT NULL)",
             )?
-            .query_map([&ticket.id], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Option<i64>>(1)?)))?
+            .query_map([&ticket.id], |r| {
+                Ok((r.get::<_, bool>(0)?, r.get::<_, Option<i64>>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(runs
             .into_iter()

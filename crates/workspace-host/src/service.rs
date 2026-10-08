@@ -618,11 +618,6 @@ impl Actor {
                     usage: Value::Null,
                 },
             );
-            // Its process may outlive the host, like one a crash leaves behind.
-            let _ = self.host.db.execute(
-                "UPDATE provider_runs SET outcome='interrupted' WHERE id=?1",
-                [&run],
-            );
         }
     }
     /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
