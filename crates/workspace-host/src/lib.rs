@@ -14,6 +14,7 @@ mod steps;
 mod stream;
 mod telemetry;
 pub mod usage;
+mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -380,7 +381,8 @@ impl Host {
     }
     /// Archiving covers the session's whole tree and stops a project when its main coordinator is
     /// archived. Restoring also restores the owners above it, so the session is reachable again.
-    /// Messages, tickets, worktrees and provider conversations are kept either way.
+    /// Messages, tickets, branches and provider conversations are kept either way. Archiving
+    /// removes the worktrees of tickets the tree owns; restoring re-creates those of open tickets.
     pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Vec<Session>> {
         self.change_archived(id, archived, None)
     }
@@ -400,6 +402,17 @@ impl Host {
                 owner = session.parent_id.clone();
                 affected.push(session);
             }
+        }
+        let owners: Vec<&str> = affected.iter().map(|s| s.id.as_str()).collect();
+        let tickets: Vec<Ticket> = self
+            .tickets()?
+            .into_iter()
+            .filter(|t| owners.contains(&t.coordinator_id.as_str()) && (archived || t.is_open()))
+            .collect();
+        if archived {
+            self.remove_worktrees(&tickets)?;
+        } else {
+            self.restore_worktrees(&tickets)?;
         }
         let project = affected[0].project_id.clone();
         let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;

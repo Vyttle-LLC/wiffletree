@@ -1,32 +1,39 @@
-use std::{path::Path, process::Command};
-use workspace_core::{Provider, Role, Session};
+use serde_json::json;
+use std::{fs, path::Path, process::Command};
+use workspace_core::{Provider, Role, Session, Status, Ticket};
 use workspace_host::Host;
 
-fn repository(path: &Path) {
-    std::fs::create_dir_all(path).unwrap();
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec![
+fn git(path: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .current_dir(path)
+        .args([
             "-c",
             "user.name=Fixture",
             "-c",
             "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "Fixture",
-        ],
-    ] {
-        let output = Command::new("git")
-            .current_dir(path)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-    }
+        ])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn succeed(path: &Path, args: &[&str]) {
+    let output = git(path, args);
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// A repository whose build output under target/ is ignored.
+fn repository(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    fs::write(path.join(".gitignore"), "target/\n").unwrap();
+    succeed(path, &["init", "-q", "-b", "main"]);
+    succeed(path, &["add", ".gitignore"]);
+    succeed(path, &["commit", "-q", "-m", "Fixture"]);
 }
 
 fn team(host: &mut Host, directory: &Path) -> (Session, Session) {
+    host.set_workspaces_dir(directory.join("workspaces").to_str().unwrap())
+        .unwrap();
     let project = host.create_project("Theme rollout").unwrap();
     let root = host
         .sessions()
@@ -49,6 +56,46 @@ fn team(host: &mut Host, directory: &Path) -> (Session, Session) {
         )
         .unwrap();
     (root, coordinator)
+}
+
+/// A ticket with committed work and ignored build output in its worktree.
+fn worked_ticket(host: &mut Host, coordinator: &Session, title: &str) -> Ticket {
+    let ticket = host
+        .create_ticket(&coordinator.id, title, "Style it")
+        .unwrap();
+    let worktree = Path::new(&ticket.worktree);
+    fs::write(worktree.join("style.css"), "body {}\n").unwrap();
+    succeed(worktree, &["add", "style.css"]);
+    succeed(worktree, &["commit", "-q", "-m", "Style"]);
+    fs::create_dir_all(worktree.join("target")).unwrap();
+    fs::write(worktree.join("target/build.o"), "binary").unwrap();
+    ticket
+}
+
+fn branch_exists(directory: &Path, ticket: &Ticket) -> bool {
+    git(
+        &directory.join("web"),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", ticket.branch),
+        ],
+    )
+    .status
+    .success()
+}
+
+fn passed(host: &mut Host, ticket: &Ticket) {
+    let tester = host
+        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+        .unwrap();
+    host.agent_tool(
+        &tester.id,
+        "report",
+        json!({"message_id":"done","kind":"passed","body":"Green"}),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -94,4 +141,149 @@ fn restoring_a_team_restores_its_project_but_archiving_a_team_leaves_the_project
     assert!(!host.session(&coordinator.id).unwrap().archived);
     host.send("after", None, &coordinator.id, "Welcome back")
         .unwrap();
+}
+
+#[test]
+fn archiving_a_team_removes_clean_worktrees_and_restoring_re_creates_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    host.send("kept", None, &coordinator.id, "Keep this conversation")
+        .unwrap();
+
+    host.set_archived(&coordinator.id, true).unwrap();
+
+    assert!(!Path::new(&ticket.worktree).exists());
+    assert!(branch_exists(directory.path(), &ticket));
+    drop(host);
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "planned");
+    assert_eq!(
+        host.messages(&coordinator.id, None, 100).unwrap()[0].body,
+        "Keep this conversation"
+    );
+
+    host.set_archived(&coordinator.id, false).unwrap();
+
+    let worktree = Path::new(&ticket.worktree);
+    assert_eq!(
+        String::from_utf8(git(worktree, &["branch", "--show-current"]).stdout)
+            .unwrap()
+            .trim(),
+        ticket.branch
+    );
+    assert!(worktree.join("style.css").exists());
+    assert!(!host.session(&root.id).unwrap().archived);
+}
+
+#[test]
+fn restoring_without_the_ticket_branch_names_the_ticket() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    host.set_archived(&coordinator.id, true).unwrap();
+    succeed(
+        &directory.path().join("web"),
+        &["branch", "-D", &ticket.branch],
+    );
+
+    let refused = host
+        .set_archived(&coordinator.id, false)
+        .unwrap_err()
+        .to_string();
+
+    assert!(refused.contains(&ticket.id), "{refused}");
+    assert!(refused.contains("\"Toolbar\""), "{refused}");
+    assert!(host.session(&coordinator.id).unwrap().archived);
+}
+
+#[test]
+fn unsaved_work_or_a_working_agent_blocks_the_whole_archive() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let clean = worked_ticket(&mut host, &coordinator, "Clean");
+    let modified = worked_ticket(&mut host, &coordinator, "Modified");
+    let untracked = worked_ticket(&mut host, &coordinator, "Untracked");
+    fs::write(Path::new(&modified.worktree).join("style.css"), "edited").unwrap();
+    fs::write(Path::new(&untracked.worktree).join("notes.md"), "draft").unwrap();
+    let worker = host
+        .assign_ticket(&clean.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    host.set_status(&worker.id, Status::Working).unwrap();
+
+    let refused = host.set_archived(&root.id, true).unwrap_err().to_string();
+
+    for blocker in [
+        worker.name.as_str(),
+        &modified.id,
+        &untracked.id,
+        "\"Modified\"",
+    ] {
+        assert!(refused.contains(blocker), "{refused}");
+    }
+    for ticket in [&clean, &modified, &untracked] {
+        assert!(Path::new(&ticket.worktree).exists());
+    }
+    assert!(host.sessions().unwrap().iter().all(|s| !s.archived));
+}
+
+#[test]
+fn closing_or_accepting_removes_a_clean_worktree_and_refuses_unsaved_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let closing = worked_ticket(&mut host, &coordinator, "Review");
+    let accepting = worked_ticket(&mut host, &coordinator, "Toolbar");
+    passed(&mut host, &accepting);
+    let accept = json!({"ticket_id":accepting.id});
+    for ticket in [&closing, &accepting] {
+        fs::write(Path::new(&ticket.worktree).join("notes.md"), "draft").unwrap();
+    }
+
+    let refused = host.close_ticket(&closing.id).unwrap_err().to_string();
+    assert!(refused.contains(&closing.id), "{refused}");
+    let refused = host
+        .agent_tool(&coordinator.id, "accept_ticket", accept.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains(&accepting.id), "{refused}");
+    assert_eq!(host.ticket(&closing.id).unwrap().state, "planned");
+    assert_eq!(host.ticket(&accepting.id).unwrap().state, "passed");
+
+    for ticket in [&closing, &accepting] {
+        fs::remove_file(Path::new(&ticket.worktree).join("notes.md")).unwrap();
+    }
+    host.close_ticket(&closing.id).unwrap();
+    host.agent_tool(&coordinator.id, "accept_ticket", accept)
+        .unwrap();
+
+    for ticket in [&closing, &accepting] {
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(branch_exists(directory.path(), ticket));
+    }
+    assert_eq!(host.ticket(&accepting.id).unwrap().state, "accepted");
+}
+
+#[test]
+fn missing_worktrees_neither_block_archiving_nor_opening_and_restore_re_creates_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let open = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let closing = worked_ticket(&mut host, &coordinator, "Review");
+    for ticket in [&open, &closing] {
+        fs::remove_dir_all(&ticket.worktree).unwrap();
+    }
+
+    host.close_ticket(&closing.id).unwrap();
+    host.set_archived(&coordinator.id, true).unwrap();
+    drop(host);
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    host.set_archived(&coordinator.id, false).unwrap();
+
+    assert!(Path::new(&open.worktree).join("style.css").exists());
+    assert!(!Path::new(&closing.worktree).exists());
 }

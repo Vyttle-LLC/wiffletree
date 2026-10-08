@@ -110,18 +110,7 @@ impl Host {
         )?;
         let project = self.project(&coordinator.project_id)?;
         let (path, branch) = self.new_ticket_place(&project, &repo, title)?;
-        fs::create_dir_all(path.parent().unwrap())?;
-        runtime::git_output(
-            Path::new(&repo.path),
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                path.to_str().context("Invalid worktree path")?,
-                &repo.base,
-            ],
-        )?;
+        worktrees::ensure_worktree(Path::new(&repo.path), &path, &branch, Some(&repo.base))?;
         let ticket = Ticket {
             id: new_id(),
             coordinator_id: owner.into(),
@@ -224,24 +213,20 @@ impl Host {
         self.save_ticket(&ticket)?;
         Ok(session)
     }
-    /// Archives a finished ticket's agents. Their conversations, branch and worktree are kept.
+    /// Archives a finished ticket's agents and removes its worktree. Their conversations and the
+    /// branch are kept. Refuses while an agent is working or the worktree holds unsaved work.
     pub fn close_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
         let mut ticket = self.ticket(ticket_id)?;
         if ticket.state == "closed" {
             return Ok(ticket);
         }
+        self.remove_worktrees(std::slice::from_ref(&ticket))?;
         let agents: Vec<Session> = self
             .runtimes()?
             .into_iter()
             .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
             .map(|r| self.session(&r.session_id))
             .collect::<Result<_>>()?;
-        if let Some(busy) = agents.iter().find(|s| s.status == Status::Working) {
-            bail!(
-                "{} is still working; close the ticket after it reports",
-                busy.name
-            );
-        }
         for agent in &agents {
             self.set_archived(&agent.id, true)?;
         }
@@ -257,9 +242,10 @@ impl Host {
         )?;
         Ok(ticket)
     }
-    /// Archives a main coordinator's finished repository team: its accepted tickets are closed and
-    /// the coordinator's whole tree is archived. Retrying an archived team is harmless. Refuses
-    /// while any team member is working or any ticket is still open, naming every blocker.
+    /// Archives a main coordinator's finished repository team: its ticket worktrees are removed,
+    /// its accepted tickets are closed and the coordinator's whole tree is archived. Retrying an
+    /// archived team is harmless. Refuses while any team member is working, any ticket is still
+    /// open or any worktree holds unsaved work, naming every blocker.
     pub fn archive_team(&mut self, main: &str, coordinator_id: &str) -> Result<Vec<Session>> {
         ensure!(
             self.session(main)?.role == Role::ProjectOrchestrator,
@@ -294,6 +280,7 @@ impl Host {
             coordinator.name,
             blockers.join("; ")
         );
+        self.remove_worktrees(&tickets)?;
         for ticket in tickets.iter().filter(|t| t.state == "accepted") {
             self.close_ticket(&ticket.id)?;
         }
@@ -530,6 +517,7 @@ impl Host {
                     ticket.state == "passed",
                     "Independent verification must pass before acceptance"
                 );
+                self.remove_worktrees(std::slice::from_ref(&ticket))?;
                 ticket.state = "accepted".into();
                 self.save_ticket(&ticket)?;
                 Ok(serde_json::to_value(ticket)?)

@@ -296,16 +296,6 @@ impl Actor {
                                 active.cancel.store(true, Ordering::Relaxed);
                             }
                         }
-                        Command::SetArchived {
-                            session_id,
-                            archived: true,
-                        } => {
-                            for session in self.host.session_tree(session_id)? {
-                                if let Some(active) = self.active.get(&session.id) {
-                                    active.cancel.store(true, Ordering::Relaxed);
-                                }
-                            }
-                        }
                         Command::ConfigureSession { session_id, .. }
                         | Command::ReconcileSession { session_id, .. } => ensure!(
                             !self.active.contains_key(session_id),
@@ -331,6 +321,18 @@ impl Actor {
                         )?)?,
                         _ => self.host.execute(command.clone())?,
                     };
+                    // Stop turns only once the archive succeeded; a refusal leaves them running.
+                    if let Command::SetArchived {
+                        session_id,
+                        archived: true,
+                    } = &command
+                    {
+                        for session in self.host.session_tree(session_id)? {
+                            if let Some(active) = self.active.get(&session.id) {
+                                active.cancel.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     // Speaking to a project, retrying its work or answering its coordinator
                     // starts it; there is no separate step to go live.
                     let started = match &command {
@@ -766,6 +768,9 @@ impl Actor {
         };
         runtime.profile = Some(profile.clone());
         provider::executable(session.provider)?;
+        if let Some(ticket) = &runtime.ticket_id {
+            self.host.prepare_ticket_worktree(ticket)?;
+        }
         let cwd = if let Some(path) = &runtime.workdir {
             PathBuf::from(path)
         } else if session.role == Role::TaskOrchestrator {
