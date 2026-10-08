@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Configured verifiers
-The workspace SHALL hold one verification setting: an ordered list of verifiers and a round cap. Each verifier SHALL name a role (`tester` or `reviewer`), a short focus that is unique in the list, an optional instruction, and optionally the existing `provider` and `size` assignment arguments. The round cap SHALL default to 2 and accept values from 1 to 5. With no saved setting, the list SHALL be one tester using the tester role's default profile.
+The workspace SHALL hold one verification setting: an ordered list of verifiers and a round cap. Each verifier SHALL name a role (`tester` or `reviewer`), a short focus that is unique in the list, an optional instruction, and optionally the `provider` and `size` assignment arguments; no other model-selection argument is accepted. The round cap SHALL default to 2 and accept values from 1 to 5. With no saved setting, the list SHALL be one tester using the tester role's default profile.
 
 #### Scenario: Default setting
 - **WHEN** the human has never saved a verification setting
@@ -26,6 +26,21 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers 
 #### Scenario: Turn limit too small
 - **WHEN** three verifiers are configured and the project's turn limit is 3
 - **THEN** `verify_ticket` refuses, naming the verifier count and the turn limit
+
+### Requirement: Ticket state during a cycle
+While a verification cycle is running, the ticket's state SHALL change only when a round starts, to `verifying` (for round 1 and every later round), and when a round ends, to `passed`, `failed` or `blocked` as defined by the cycle outcome rules. An individual verifier's or the implementer's report SHALL NOT set the ticket's state during a cycle. Because `accept_ticket` requires `passed`, it SHALL refuse while any round is in progress.
+
+#### Scenario: First verdict does not pass the ticket
+- **WHEN** in a round of three verifiers the first verifier reports `passed` while the other two are still running
+- **THEN** the ticket's state stays `verifying`
+
+#### Scenario: Accept refused mid-round
+- **WHEN** the project coordinator calls `accept_ticket` after one of three verifiers has reported `passed` and the others are still running
+- **THEN** the host refuses because the ticket is `verifying`, and the ticket, its agents and its worktree are unchanged
+
+#### Scenario: Next round starts verifying again
+- **WHEN** the implementer reports `ready_for_testing` after a failed round 1
+- **THEN** the ticket's state becomes `verifying` when round 2 starts, never `ready_for_testing`
 
 ### Requirement: Verifiers run concurrently
 The host SHALL start all of a round's verifier turns together rather than one after another: testers and reviewers in a running cycle SHALL share the ticket worktree as readers, and the round SHALL be admitted only when every one of its verifiers can start, never partially. Each round's record SHALL store, per verifier, its `session_id` and the `message_id` of the message that started it; the verifier's run is the `provider_runs` row for that session whose `messages` list contains that `message_id`, and its interval is that row's `started_at` to `finished_at` (milliseconds since the Unix epoch).

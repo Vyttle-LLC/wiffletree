@@ -81,8 +81,12 @@ The bundled role instructions SHALL contain no repository coordinator contract. 
 - **AND** the project coordinator's instructions name `create_ticket`, `assign_ticket`, `verify_ticket`, `accept_ticket` and `close_ticket`
 
 ### Requirement: Model selection is unchanged
-`assign_ticket` and verifier configuration SHALL accept the same model-selection arguments as before this change (`provider`, `size`, `complexity` and `profile`) with the same resolution against the saved role policies, and the role policy shape SHALL NOT change.
+`assign_ticket` SHALL keep its model-selection arguments and their resolution against the saved role policies exactly as before this change. A configured verifier SHALL accept only `provider` and `size`, resolved the same way as on `assign_ticket`. The role policy shape SHALL NOT change.
 
 #### Scenario: Existing arguments resolve as before
 - **WHEN** the project coordinator calls `assign_ticket` with `role` `implementer`, `provider` `codex` and `size` `big`
 - **THEN** the agent receives the implementer policy's saved Codex Big profile, exactly as a repository coordinator's call did before this change
+
+#### Scenario: Verifier arguments resolve the same way
+- **WHEN** a configured verifier has `role` `tester`, `provider` `claude` and `size` `small`
+- **THEN** `verify_ticket` assigns it the tester policy's saved Claude Small profile

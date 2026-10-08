@@ -22,8 +22,8 @@
 
 - [ ] 4.1 Add the `verification` setting (verifiers, `max_rounds` default 2, range 1–5, unique focus) to host `settings.json` with a Settings editor; verify defaults and validation errors
 - [ ] 4.2 Implement `verify_ticket` with its preconditions (ownership, `ready_for_testing`, no running cycle, clean worktree, verifier count ≤ `turn_limit - 1`), the pinned commit, verifier reuse by (role, focus) and the `verify:` messages; verify each refusal and the three-verifier start
-- [ ] 4.3 In `service.rs::schedule`, treat a running cycle's testers and reviewers as readers and admit a round all-or-none; verify with the fake provider that three verifiers' `provider_runs` satisfy `MAX(started_at) < MIN(finished_at)`
-- [ ] 4.4 Route reports during a cycle: read-only check on verdicts, batch them to the coordinator, end the round, send one failure message to the implementer, re-run only failed verifiers on the implementer's next clean `ready_for_testing`, and block at the cap with one waking message; verify every scenario in `specs/ticket-verification`
+- [ ] 4.3 In `service.rs::schedule`, treat a running cycle's testers and reviewers as readers, admit a round all-or-none, and hold new worker turns in the project while a round waits so it cannot be starved; verify with the fake provider that three verifiers' `provider_runs` satisfy `MAX(started_at) < MIN(finished_at)`
+- [ ] 4.4 Route reports during a cycle: bypass the per-report `ticket.state = kind` update so state changes only at round start (`verifying`) and round end, read-only check on verdicts, batch them to the coordinator, end the round, send one failure message to the implementer, re-run only failed verifiers on the implementer's next clean `ready_for_testing`, and block at the cap with one waking message; verify every scenario in `specs/ticket-verification`, including that `accept_ticket` refuses after one of three verifiers passed
 - [ ] 4.5 Add an end-to-end SH-1171-sized test (one repository, one ticket, three verifiers, one failure fixed in round 2) asserting: no `task_orchestrator` session, every implementer or verifier input sent by the project coordinator, overlapping round-1 intervals, and exactly one worktree registered for the ticket
 
 ## 5. Role contracts
@@ -44,6 +44,8 @@
 - [ ] 7.3 Add the "Leftover worktrees…" sheet to the Repositories view (no default selection, protected rows not selectable, confirmation naming the count); verify in the running app against a copy of the real store before showing the human the dry-run list
 
 ## 8. Documentation
+
+These edits ship in the same phase and pull request as the role removal (groups 2, 3 and 5). They are never split into a separate or later change, so the docs and the running system always describe the same hierarchy.
 
 - [ ] 8.1 Change the hierarchy line in `openspec/config.yaml` to `Hierarchy: project coordinator -> tickets (one repository worktree each) -> agents.`
 - [ ] 8.2 Change `AGENTS.md` "Keep project → task orchestrator → agents semantics" to "Keep project → ticket → agents semantics", keeping the rest of the line

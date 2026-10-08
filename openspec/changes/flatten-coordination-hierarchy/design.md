@@ -40,7 +40,7 @@ Today's hierarchy is main coordinator (`Role::ProjectOrchestrator`, label "Main 
 | Tool | Change |
 | --- | --- |
 | `create_repo_coordinator` | **Removed.** |
-| `archive_team` | **Removed.** With no teams there is nothing to archive; accept and close already archive a ticket's agents. Archiving a whole project stays a human action. |
+| `archive_team` | **Removed.** With no teams there is nothing to archive; `close_ticket` already archives a ticket's agents, and this change makes `accept_ticket` do the same (today it only removes the worktree). Archiving a whole project stays a human action. |
 | `create_ticket` | Caller must be the project coordinator. New required `repository_id`. Idempotent per (coordinator, repository, title). |
 | `assign_ticket` | Caller must own the ticket (now the project coordinator). Model-selection arguments unchanged. Still used for implementers and for ad-hoc testers or reviewers outside a verification cycle. |
 | `verify_ticket` | **Added.** `{ticket_id}`. Starts a verification cycle (decision 4). Returns the cycle record. |
@@ -60,7 +60,7 @@ Desktop commands: `Command::CreateTicket` gains `repository_id`, and its `coordi
 - `skills/tester.md`, v3 (tester and reviewer): verify the pinned commit named in the message; never edit, stage, commit or switch branches (now enforced, decision 6); the coordinator owns acceptance.
 
 ### 4. Verification configuration and cycle
-**Configuration.** It lives workspace-wide in host `settings.json` beside `workspaces_dir`, as `verification: { verifiers: [{role, focus, instruction?, provider?, size?}], max_rounds: 2 }`. `provider` and `size` are passed through the existing assignment routing (`assignment_route`) untouched. It is edited in Settings. This is the simplest scope that serves the example (Claude tester, Codex tester, Reviso style reviewer as a `reviewer` with focus "Style" and an instruction to run the Reviso style review). Per-project or per-repository overrides are an open question rather than built now.
+**Configuration.** It lives workspace-wide in host `settings.json` beside `workspaces_dir`, as `verification: { verifiers: [{role, focus, instruction?, provider?, size?}], max_rounds: 2 }`. Only `provider` and `size` are accepted, not `complexity` or `profile`; they are passed through the existing assignment routing (`assignment_route`) untouched. It is edited in Settings. This is the simplest scope that serves the example (Claude tester, Codex tester, Reviso style reviewer as a `reviewer` with focus "Style" and an instruction to run the Reviso style review). Per-project or per-repository overrides are an open question rather than built now.
 
 **Cycle record.** `Ticket` gains `verification`:
 `{ cycle, max_rounds, outcome: running|passed|blocked, rounds: [{ round, commit, verifiers: [{ session_id, focus, message_id, result: pending|passed|failed|blocked, reason? }] }] }`
@@ -82,10 +82,11 @@ It then pins `git rev-parse HEAD`. For each verifier it reuses the (role, focus)
 
 The messages are queued in one transaction, so a single scheduling pass sees them together. The precondition above guarantees the project limit can be met.
 
-**Proof of overlap.** Uses only stored fields: for round *r*, take each `(session_id, message_id)` from `tickets.data.verification.rounds[r].verifiers` and select the `provider_runs` row with that `session_id` whose `messages` JSON array contains `message_id`. The round overlapped iff `MAX(started_at) < MIN(finished_at)`. Both are millisecond epoch values written by `record_turn_start` and the run's finish.
+**Proof of overlap.** It measures each verifier's first turn of the round, the one that consumed its `verify:` message. It uses only stored fields: for round *r*, take each `(session_id, message_id)` from `tickets.data.verification.rounds[r].verifiers` and select the `provider_runs` row with that `session_id` whose `messages` JSON array contains `message_id`. The round overlapped iff `MAX(started_at) < MIN(finished_at)`. Both are millisecond epoch values written by `record_turn_start` and the run's finish.
 
 ### 5. Report routing during a cycle
-While `verification.outcome == running`:
+While `verification.outcome == running`, the generic rule in `report` that sets `ticket.state` to the report's kind (`live.rs`) is bypassed for the ticket's verifiers and implementer. The cycle alone sets the state: `verifying` when a round starts (round 1 and every re-run round) and `passed`, `failed` or `blocked` when a round ends. A verifier's early `passed` therefore leaves the ticket `verifying`, and `accept_ticket`, which requires `passed`, refuses mid-round.
+
 
 - **Verifier `passed`, `failed` or `blocked`.** The host records the result on the current round, after the read-only check in decision 6. The message to the coordinator is still stored, but it is delivered in the next batch like progress and does not wake. The batching condition gains "or the sender is a verifier on a ticket whose cycle is running".
 - **Round end** (no `pending` result left):
@@ -93,7 +94,7 @@ While `verification.outcome == running`:
   - Any `blocked` → `outcome = blocked`, ticket `blocked`, and one waking message to the coordinator with the reports.
   - Any `failed` and `round < max_rounds` → ticket `failed`, and one message `verification:{ticket}:{cycle}:{round}` to the implementer session that last reported ready, listing each failed verifier's report.
   - Any `failed` and `round == max_rounds` → `outcome = blocked`, ticket `blocked`, and one waking message to the coordinator listing all unresolved failures, the rounds used and the cap.
-- **Implementer `ready_for_testing`.** The report fails as a tool error if the worktree is dirty. Otherwise it is batched to the coordinator, and the host starts round + 1 with only the verifiers whose latest result is `failed`, pinned to the new HEAD.
+- **Implementer `ready_for_testing`.** The report fails as a tool error if the worktree is dirty. Otherwise it is batched to the coordinator, and the host starts round + 1 with only the verifiers whose latest result is `failed`, pinned to the new HEAD, setting the ticket to `verifying` directly (never `ready_for_testing`).
 
 The cap is a status, not an escalation: the coordinator decides whether to fix further, call `verify_ticket` again (a new cycle with every verifier), close the ticket, or `ask_user`. This keeps the project rule that a blocked worker does not automatically need the human.
 
@@ -154,6 +155,7 @@ The historical mockups stay intact.
 
 - **Coordinator context grows** because it sees every ticket's reports directly. → Verification rounds are batched and only cycle outcomes wake it. The existing turn budget and progress batching still apply.
 - **Passed verifiers do not re-check later commits.** Only failed verifiers re-run, as requested, so a fix could regress what an earlier verifier passed. → The final summary names the commit each verifier passed. The coordinator can start a fresh full cycle before accepting.
+- **All-or-none admission can starve a round.** Other workers in the project can keep taking freed slots one at a time, so the round never finds all its slots free at once. → While a round is waiting, the scheduler admits no new worker turn in that project until the round has started; coordinators still get their reserved turn. Verifier rounds are short and rare, so the brief hold on other workers is accepted.
 - **Turn limit couples to verifier count.** → `verify_ticket` refuses with both numbers rather than silently serializing. Raising `turn_limit` is a project setting.
 - **Loss of per-repository coordinator memory** across tickets. → Ticket briefs and project memory carry context. The PRD's future integration-branch stage will need its own design without a standing coordinator.
 - **Migration rewrites ownership columns.** → One transaction, a version gate, a kept file backup, no deleted rows and no rewritten message bodies.
