@@ -287,3 +287,45 @@ fn missing_worktrees_neither_block_archiving_nor_opening_and_restore_re_creates_
     assert!(Path::new(&open.worktree).join("style.css").exists());
     assert!(!Path::new(&closing.worktree).exists());
 }
+
+#[test]
+fn an_agent_that_reported_but_is_still_in_its_turn_blocks_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let tester = host
+        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+        .unwrap();
+    let db = rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('live',?1,'[]',1,'{}')",
+        [&tester.id],
+    )
+    .unwrap();
+    host.set_status(&tester.id, Status::Working).unwrap();
+    host.agent_tool(
+        &tester.id,
+        "report",
+        json!({"message_id":"done","kind":"passed","body":"Green"}),
+    )
+    .unwrap();
+    let accept = json!({"ticket_id":ticket.id});
+
+    for refused in [
+        host.agent_tool(&coordinator.id, "accept_ticket", accept.clone())
+            .unwrap_err(),
+        host.close_ticket(&ticket.id).unwrap_err(),
+        host.set_archived(&coordinator.id, true).unwrap_err(),
+    ] {
+        assert!(refused.to_string().contains(&tester.name), "{refused}");
+    }
+    assert!(Path::new(&ticket.worktree).exists());
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "passed");
+
+    db.execute("UPDATE provider_runs SET finished_at=2 WHERE id='live'", [])
+        .unwrap();
+    host.agent_tool(&coordinator.id, "accept_ticket", accept)
+        .unwrap();
+    assert!(!Path::new(&ticket.worktree).exists());
+}

@@ -69,6 +69,7 @@ impl Host {
     /// Removes the tickets' worktrees, keeping their branches. Refuses without removing anything
     /// while an agent on one of them is working or one holds uncommitted or untracked work.
     /// Ignored files such as build output do not count. Missing worktrees are already done.
+    /// An agent that has reported is Done but still in its turn until its provider run finishes.
     pub(crate) fn remove_worktrees(&self, tickets: &[Ticket]) -> Result<()> {
         let runtimes = self.runtimes()?;
         let mut blockers = vec![];
@@ -78,7 +79,7 @@ impl Host {
                 .filter(|r| r.ticket_id.as_deref() == Some(&ticket.id))
             {
                 let agent = self.session(&runtime.session_id)?;
-                if agent.status == Status::Working {
+                if agent.status == Status::Working || self.in_turn(&agent.id)? {
                     blockers.push(format!(
                         "{} is still working on \"{}\" ({})",
                         agent.name, ticket.title, ticket.id
@@ -112,6 +113,15 @@ impl Host {
             }
         }
         Ok(())
+    }
+    /// A provider run is open from turn start until it finishes; service startup settles runs a
+    /// stopped host left open.
+    fn in_turn(&self, session_id: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_runs WHERE session_id=?1 AND finished_at IS NULL)",
+            [session_id],
+            |r| r.get(0),
+        )?)
     }
 }
 
@@ -147,4 +157,65 @@ pub(crate) fn ensure_worktree(
     }
     runtime::git_output(repository, &args)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(path)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn starting_an_agent_re_creates_an_open_ticket_worktree_but_not_a_finished_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("web");
+        fs::create_dir_all(&repository).unwrap();
+        git(&repository, &["init", "-q", "-b", "main"]);
+        git(
+            &repository,
+            &["commit", "-q", "--allow-empty", "-m", "Fixture"],
+        );
+        let mut host = Host::open(directory.path().join("home")).unwrap();
+        host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
+            .unwrap();
+        let project = host.create_project("Theme").unwrap();
+        let root = host.sessions().unwrap().remove(0);
+        let attached = host
+            .attach_repository(&project.id, repository.to_str().unwrap(), "HEAD")
+            .unwrap();
+        let coordinator = host
+            .create_session(
+                &project.id,
+                &root.id,
+                Some(&attached.id),
+                "Web",
+                Role::TaskOrchestrator,
+                Provider::Codex,
+            )
+            .unwrap();
+        let open = host.create_ticket(&coordinator.id, "Open", "Do").unwrap();
+        let closed = host.create_ticket(&coordinator.id, "Closed", "Do").unwrap();
+        host.close_ticket(&closed.id).unwrap();
+        fs::remove_dir_all(&open.worktree).unwrap();
+
+        host.prepare_ticket_worktree(&open.id).unwrap();
+        let refused = host.prepare_ticket_worktree(&closed.id).unwrap_err();
+
+        assert!(Path::new(&open.worktree).exists());
+        assert!(refused.to_string().contains(&closed.branch), "{refused}");
+        assert!(!Path::new(&closed.worktree).exists());
+    }
 }
