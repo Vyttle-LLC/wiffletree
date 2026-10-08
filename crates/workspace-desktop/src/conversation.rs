@@ -102,7 +102,7 @@ fn receipt_color(receipt: Receipt, p: Palette) -> Hsla {
     }
 }
 
-/// The human's own message: a right-aligned bubble with its delivery state.
+/// The human's own message: a right-aligned bubble and its files, with its delivery state.
 fn human_message(message: &Message, p: Palette) -> Div {
     div()
         .w_full()
@@ -110,15 +110,20 @@ fn human_message(message: &Message, p: Palette) -> Div {
         .flex_col()
         .items_end()
         .gap_1()
-        .child(
-            div()
-                .max_w(px(620.))
-                .px_4()
-                .py_2()
-                .rounded_xl()
-                .bg(p.overlay)
-                .child(markdown(&message.id, &message.body)),
-        )
+        .when(!message.body.trim().is_empty(), |row| {
+            row.child(
+                div()
+                    .max_w(px(620.))
+                    .px_4()
+                    .py_2()
+                    .rounded_xl()
+                    .bg(p.overlay)
+                    .child(markdown(&message.id, &message.body)),
+            )
+        })
+        .when(!message.attachments.is_empty(), |row| {
+            row.child(attachment_chips::sent(message, p).max_w(px(620.)))
+        })
         .child(
             div()
                 .flex()
@@ -321,6 +326,30 @@ impl Workspace {
             ];
         }
         let mut notices = vec![];
+        if !self.refused_files.is_empty() {
+            notices.push(
+                banner(p.yellow)
+                    .items_start()
+                    .child(icon("triangle-alert").text_color(p.yellow).mt(px(2.)))
+                    .child(
+                        div().flex_1().min_w_0().flex().flex_col().children(
+                            self.refused_files
+                                .iter()
+                                .map(|reason| div().child(reason.clone())),
+                        ),
+                    )
+                    .child(
+                        button("dismiss-refused")
+                            .ghost()
+                            .icon(icon("close"))
+                            .tooltip("Dismiss")
+                            .on_click(cx.listener(|v, _, _, c| {
+                                v.refused_files.clear();
+                                c.notify();
+                            })),
+                    ),
+            );
+        }
         if let Some(error) = self
             .runtime(&session.id)
             .and_then(|r| r.last_error.as_deref())
@@ -803,7 +832,8 @@ impl Workspace {
 
     fn composer(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let sending = self.sending.contains(&session.id);
-        let empty = self.input.read(cx).value().trim().is_empty();
+        let attached = self.attached.get(&session.id).cloned().unwrap_or_default();
+        let empty = self.input.read(cx).value().trim().is_empty() && attached.is_empty();
         div()
             .key_context("ChatComposer")
             .on_action(cx.listener(|v, _: &SendMessage, w, c| {
@@ -843,6 +873,9 @@ impl Workspace {
                     .px_3()
                     .pt_2()
                     .pb_2()
+                    .when(!attached.is_empty(), |composer| {
+                        composer.child(self.pending_attachments(&attached, p, cx))
+                    })
                     .child(
                         Textarea::new(&self.input)
                             .w_full()
@@ -882,6 +915,39 @@ impl Workspace {
             )
     }
 
+    /// Dropped files waiting in the composer, each with a button to take it back out.
+    fn pending_attachments(
+        &self,
+        attached: &[Attachment],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .pt_1()
+            .pb_2()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(attached.iter().enumerate().map(|(index, attachment)| {
+                let path = attachment.path.clone();
+                attachment_chips::chip(("pending-attachment", index), attachment, p)
+                    // Keeps a file's name clear of the remove button.
+                    .when(attachment.image.is_none(), |chip| chip.pr_7())
+                    .child(
+                        div().absolute().top(px(2.)).right(px(2.)).child(
+                            button(("remove-attachment", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(icon("close"))
+                                .tooltip(format!("Remove {}", attachment.name()))
+                                .on_click(
+                                    cx.listener(move |v, _, _, c| v.remove_attachment(&path, c)),
+                                ),
+                        ),
+                    )
+            }))
+    }
+
     pub(super) fn conversation(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let Some(session) = self.selected_session() else {
             return div();
@@ -891,6 +957,8 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(p.base)
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(p.overlay))
+            .on_drop(cx.listener(|v, paths: &ExternalPaths, _, c| v.attach_files(paths.paths(), c)))
             .child(self.conversation_header(session, p, cx))
             .children(self.pagination(p, cx))
             .child(if self.list.item_count() == 0 {
@@ -943,6 +1011,7 @@ mod tests {
             body: body.into(),
             receipt: Receipt::Completed,
             created_at: 0,
+            attachments: vec![],
         }
     }
 

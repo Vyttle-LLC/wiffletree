@@ -1,5 +1,6 @@
 mod activity;
 mod assets;
+mod attachment_chips;
 mod automation;
 mod bridge;
 mod context_view;
@@ -75,6 +76,10 @@ struct Workspace {
     messages: Rc<Vec<Message>>,
     list: ListState,
     drafts: BTreeMap<String, String>,
+    /// Files dropped on each session's conversation, waiting to go with its draft.
+    attached: BTreeMap<String, Vec<Attachment>>,
+    /// Why files in the selected conversation's last drop were not attached.
+    refused_files: Vec<String>,
     cached_pages: BTreeMap<String, Rc<Vec<Message>>>,
     cache_order: VecDeque<String>,
     input: Entity<TextareaState>,
@@ -165,6 +170,8 @@ impl Workspace {
             messages: Rc::new(vec![]),
             list: ListState::new(0, ListAlignment::Bottom, px(300.)),
             drafts: BTreeMap::new(),
+            attached: BTreeMap::new(),
+            refused_files: vec![],
             cached_pages: BTreeMap::new(),
             cache_order: VecDeque::new(),
             input,
@@ -468,8 +475,18 @@ impl Workspace {
                 }
             }
             Command::Send {
-                recipient, body, ..
+                recipient,
+                body,
+                attachments,
+                ..
             } => {
+                if self
+                    .attached
+                    .get(&recipient)
+                    .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
+                {
+                    self.attached.remove(&recipient);
+                }
                 if self.selected.as_deref() == Some(&recipient)
                     && self.input.read(cx).value().as_str() == body
                 {
@@ -772,6 +789,7 @@ impl Workspace {
                 .insert(old.clone(), self.input.read(cx).value().to_string());
         }
         let draft = self.drafts.get(&id).cloned().unwrap_or_default();
+        self.refused_files.clear();
         self.input
             .update(cx, |input, cx| input.set_value(draft, window, cx));
         self.messages = self
@@ -798,27 +816,52 @@ impl Workspace {
         self.sync_activity_clock(window, cx);
         cx.notify();
     }
+    /// Adds dropped files to the selected session's draft. Each refused file is named with
+    /// its reason; the rest are still attached.
+    fn attach_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let Some(session) = self.selected.clone() else {
+            return;
+        };
+        self.refused_files =
+            attachment_chips::add_dropped(self.attached.entry(session).or_default(), paths);
+        cx.notify();
+    }
+    fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        if let Some(files) = self
+            .selected
+            .as_ref()
+            .and_then(|s| self.attached.get_mut(s))
+        {
+            files.retain(|a| a.path != path);
+        }
+        cx.notify();
+    }
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let body = self.input.read(cx).value().to_string();
-        if body.trim().is_empty() {
+        let Some(recipient) = self.selected.clone() else {
+            return;
+        };
+        let attachments = self
+            .attached
+            .get(&recipient)
+            .map(|files| files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if (body.trim().is_empty() && attachments.is_empty()) || self.sending.contains(&recipient) {
             return;
         }
-        if let Some(recipient) = self.selected.clone() {
-            if self.sending.contains(&recipient) {
-                return;
-            }
-            self.drafts.insert(recipient.clone(), body.clone());
-            self.request(
-                Command::Send {
-                    id: new_id(),
-                    sender: None,
-                    recipient,
-                    body,
-                },
-                window,
-                cx,
-            );
-        }
+        self.drafts.insert(recipient.clone(), body.clone());
+        self.refused_files.clear();
+        self.request(
+            Command::Send {
+                id: new_id(),
+                sender: None,
+                recipient,
+                body,
+                attachments,
+            },
+            window,
+            cx,
+        );
     }
     fn set_live(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(project_id) = self.project_id() {

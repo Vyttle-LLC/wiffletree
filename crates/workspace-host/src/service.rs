@@ -792,12 +792,13 @@ impl Actor {
         let cancel = Arc::new(AtomicBool::new(false));
         let token = format!("{}{}", new_id(), new_id());
         let prompt = format!(
-            "Managed session {} ({})\nSender: {}\nMessage ID: {}\n\n{}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The main coordinator responds to the human directly. Never wait or poll for a reply.{}",
+            "Managed session {} ({})\nSender: {}\nMessage ID: {}\n\n{}{}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The main coordinator responds to the human directly. Never wait or poll for a reply.{}",
             session.name,
             session.role.label(),
             message.sender.as_deref().unwrap_or("human"),
             message.id,
             message.body,
+            provider::attachment_list(&message.attachments),
             open_questions_reminder(&self.host.open_questions(&session)?)
         );
         self.host.db.execute(
@@ -824,6 +825,7 @@ impl Actor {
             provider_session: runtime.provider_session_id,
             cwd,
             prompt,
+            attachments: message.attachments.clone(),
             socket: self.socket.clone(),
             token: token.clone(),
             helper: self.helper.clone(),
