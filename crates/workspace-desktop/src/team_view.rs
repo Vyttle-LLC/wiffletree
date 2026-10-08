@@ -150,6 +150,7 @@ impl Workspace {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(tree::ticket_label(snapshot, ticket)),
                         )
+                        .children(warning_badge(snapshot, ticket, p))
                         .child(pill(
                             humanize(&ticket.state),
                             ticket_state_color(&ticket.state, p),
@@ -208,5 +209,60 @@ impl Workspace {
             body = body.child(list);
         }
         body
+    }
+}
+
+/// Flags an open ticket whose branch has fallen behind its base or overlaps another open
+/// ticket's, or whose check could not run; hovering lists the warnings.
+fn warning_badge(snapshot: &Snapshot, ticket: &Ticket, p: Palette) -> Option<impl IntoElement> {
+    let warnings = snapshot
+        .branch_warnings
+        .iter()
+        .find(|w| w.ticket_id == ticket.id)
+        .filter(|_| ticket.is_open())?;
+    let label = warning_label(warnings);
+    let color = match label {
+        "Conflicts" => p.red,
+        "Behind" => p.subtle,
+        _ => p.yellow,
+    };
+    let lines = warnings.lines().join("\n");
+    Some(
+        pill(label, color)
+            .id(SharedString::from(format!("warnings-{}", ticket.id)))
+            .tooltip(move |w, c| gpui_component::tooltip::Tooltip::new(lines.clone()).build(w, c)),
+    )
+}
+
+/// The most pressing warning: a check that could not run outranks overlaps and drift.
+fn warning_label(warnings: &BranchWarnings) -> &'static str {
+    if warnings.has_conflicts() {
+        "Conflicts"
+    } else if !warnings.failures.is_empty() || warnings.overlaps.iter().any(|o| o.failure.is_some())
+    {
+        "Check failed"
+    } else if !warnings.overlaps.is_empty() {
+        "Overlaps"
+    } else {
+        "Behind"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::warning_label;
+    use workspace_core::{BranchOverlap, BranchWarnings};
+
+    #[test]
+    fn a_failed_check_outranks_overlaps_and_drift_but_not_conflicts() {
+        let mut warnings = BranchWarnings {
+            base_ahead: 1,
+            overlaps: vec![BranchOverlap::default()],
+            failures: vec!["last fetch failed".into()],
+            ..Default::default()
+        };
+        assert_eq!(warning_label(&warnings), "Check failed");
+        warnings.base_conflicts.push("a.rs".into());
+        assert_eq!(warning_label(&warnings), "Conflicts");
     }
 }

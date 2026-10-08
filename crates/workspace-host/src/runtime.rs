@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use workspace_core::{ModelCapability, Provider};
 
@@ -19,35 +19,111 @@ impl Drop for Process {
 }
 
 pub fn git_output(path: &Path, args: &[&str]) -> Result<String> {
+    let answer = git_answer(path, args)?;
+    ensure!(
+        answer.status.success(),
+        "Git query failed{}",
+        answer.reason()
+    );
+    Ok(answer.output)
+}
+
+/// A finished Git query. Its exit status can be part of the answer, as with `merge-tree`.
+pub struct GitAnswer {
+    pub status: ExitStatus,
+    pub output: String,
+    /// Git's first `fatal:` or `error:` line, or else the last line of its error output.
+    pub error: String,
+}
+impl GitAnswer {
+    /// The error line as a suffix for a failure message, or nothing.
+    pub fn reason(&self) -> String {
+        if self.error.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", self.error)
+        }
+    }
+}
+
+pub fn git_answer(path: &Path, args: &[&str]) -> Result<GitAnswer> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Queries must not take index.lock in checkouts people and agents are working in.
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    let (status, output, error) = bounded_output(command, GIT_TIMEOUT)?;
+    let error = String::from_utf8_lossy(&error);
+    let lines = || error.lines().map(str::trim).filter(|l| !l.is_empty());
+    let error = lines()
+        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+        .or_else(|| lines().next_back())
+        .unwrap_or_default()
+        .to_owned();
+    Ok(GitAnswer {
+        status,
+        output: String::from_utf8(output)?,
+        error,
+    })
+}
+
+const GIT_TIMEOUT: Duration = Duration::from_secs(15);
+const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
+
+/// Runs the command with one deadline for its output and its exit; a command still running
+/// at the deadline is killed and reaped.
+fn bounded_output(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let deadline = Instant::now() + timeout;
     let mut child = Process(
-        Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            // Queries must not take index.lock in checkouts people and agents are working in.
-            .env("GIT_OPTIONAL_LOCKS", "0")
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?,
     );
-    let stdout = child.0.stdout.take().context("Missing Git stdout")?;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout
-            .take(4 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes);
-        let _ = sender.send(result);
-    });
-    let bytes = receiver
-        .recv_timeout(Duration::from_secs(15))
+    let read = |pipe: Option<_>| -> Result<mpsc::Receiver<std::io::Result<Vec<u8>>>> {
+        let pipe: Box<dyn Read + Send> = pipe.context("Missing Git pipe")?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe
+                .take(OUTPUT_BOUND + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
+            let _ = sender.send(result);
+        });
+        Ok(receiver)
+    };
+    let stdout = read(child.0.stdout.take().map(|p| Box::new(p) as _))?;
+    let stderr = read(child.0.stderr.take().map(|p| Box::new(p) as _))?;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    let output = stdout
+        .recv_timeout(remaining())
         .context("Git query timed out")??;
-    ensure!(bytes.len() <= 4 * 1024 * 1024, "Git output exceeds bound");
-    ensure!(child.0.wait()?.success(), "Git query failed");
-    Ok(String::from_utf8(bytes)?)
+    ensure!(
+        output.len() as u64 <= OUTPUT_BOUND,
+        "Git output exceeds bound"
+    );
+    let status = loop {
+        if let Some(status) = child.0.try_wait()? {
+            break status;
+        }
+        ensure!(!remaining().is_zero(), "Git query timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    // Error output is only a hint; a descendant still holding it open must not hold us.
+    let error = stderr
+        .recv_timeout(remaining().min(Duration::from_millis(100)))
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    Ok((status, output, error))
 }
 
 #[derive(Clone, Debug)]
@@ -361,6 +437,26 @@ fn claude_version_label(id: &str) -> String {
 #[cfg(test)]
 mod model_tests {
     use super::*;
+
+    #[test]
+    fn a_command_that_closes_its_output_then_hangs_is_killed_at_the_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec >&- 2>&-; exec sleep 30"]);
+        let started = Instant::now();
+        let error = bounded_output(command, Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.to_string(), "Git query timed out");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_failed_git_query_says_why() {
+        let folder = tempfile::tempdir().unwrap();
+        let error = git_output(folder.path(), &["rev-parse", "HEAD"]).unwrap_err();
+        assert!(
+            error.to_string().starts_with("Git query failed: fatal:"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn claude_catalog_exposes_pinned_versions_and_skips_automatic_routing() {

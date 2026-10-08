@@ -5,6 +5,7 @@ mod flatten;
 pub mod live;
 pub mod mcp;
 mod memory;
+mod overlaps;
 mod policies;
 pub mod provider;
 mod repositories;
@@ -36,6 +37,10 @@ pub struct Host {
     pub home: PathBuf,
     /// When each timer whose last fire failed may try again; see `fire_due_schedules`.
     fire_retries: std::collections::HashMap<String, i64>,
+    /// Each repository's open-branch warnings from its latest check; see `overlaps`.
+    branch_warnings: std::collections::HashMap<String, Vec<BranchWarnings>>,
+    /// When this host last fetched each repository's base.
+    base_fetched_at: std::collections::HashMap<String, i64>,
 }
 struct StoreLock(File);
 impl Drop for StoreLock {
@@ -141,6 +146,8 @@ impl Host {
             _lock: lock,
             home: home.to_path_buf(),
             fire_retries: Default::default(),
+            branch_warnings: Default::default(),
+            base_fetched_at: Default::default(),
         };
         host.recover()?;
         host.migrate_opus_defaults()?;
@@ -226,7 +233,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()? })
     }
     fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
         Ok(self.db.prepare("SELECT recipient,SUM(receipt='held'),SUM(receipt='queued' AND quiet=0) FROM messages WHERE receipt IN ('held','queued') GROUP BY recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
