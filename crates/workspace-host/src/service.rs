@@ -250,6 +250,22 @@ fn runtime_stopped(error: &str) -> String {
         "Runtime stopped:\n{fence}text\n{error}\n{fence}\nInspect the worktree before retrying uncertain work."
     )
 }
+/// Runs a repository's check on its own thread and always reports back, even if it panics, so
+/// the repository is never left marked as running.
+fn spawn_overlap_check(
+    sender: Sender<Event>,
+    repository: String,
+    check: impl FnOnce() -> (Option<i64>, Vec<BranchWarnings>) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).ok();
+        let _ = sender.send_blocking(Event::Overlaps {
+            repository,
+            fetched_at: outcome.as_ref().and_then(|(at, _)| *at),
+            warnings: outcome.map(|(_, warnings)| warnings),
+        });
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -268,6 +284,14 @@ enum Event {
         session: String,
         run: String,
         event: ProviderEvent,
+    },
+    /// A repository's open-branch check finished on its own thread.
+    Overlaps {
+        repository: String,
+        /// When the check fetched the base, if it did.
+        fetched_at: Option<i64>,
+        /// `None` when the check panicked; the cached warnings then stand.
+        warnings: Option<Vec<BranchWarnings>>,
     },
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
@@ -359,6 +383,12 @@ struct Actor {
     resumed: HashSet<String>,
     /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
     stopping: bool,
+    /// When each repository's latest open-branch check started; see `refresh_overlaps`.
+    overlaps_checked: HashMap<String, i64>,
+    /// Repositories whose check has not reported yet.
+    overlaps_running: HashSet<String>,
+    /// No repository's check can be due before this.
+    overlaps_due_at: i64,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -455,20 +485,20 @@ impl Service {
                     started_at: now(),
                     resumed: HashSet::new(),
                     stopping: false,
+                    overlaps_checked: HashMap::new(),
+                    overlaps_running: HashSet::new(),
+                    overlaps_due_at: 0,
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
                     eprintln!("Workspace scheduler: {e:#}");
                 }
+                actor.refresh_overlaps(now());
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
                     }
-                    let dirty = actor.handle(event);
-                    if let Err(e) = actor.schedule() {
-                        eprintln!("Workspace scheduler: {e:#}");
-                    }
-                    actor.signal(dirty);
+                    actor.process(event);
                 }
                 actor.stop();
                 for (_, permission) in actor.permissions.drain() {
@@ -538,6 +568,53 @@ impl Actor {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// Handles one event, then starts what it made due.
+    fn process(&mut self, event: Event) {
+        let dirty = self.handle(event);
+        if let Err(e) = self.schedule() {
+            eprintln!("Workspace scheduler: {e:#}");
+        }
+        self.refresh_overlaps(now());
+        self.signal(dirty);
+    }
+
+    /// Checks each repository with open tickets at most every five minutes, after any event,
+    /// so reading `workspace_context` refreshes a stale cache. Fetching and comparing branches
+    /// can take seconds, so Git runs on its own thread, one check per repository at a time, and
+    /// the cached warnings stand until it reports.
+    fn refresh_overlaps(&mut self, at: i64) {
+        // Most events come well inside the interval; they must not cost a store read.
+        if at < self.overlaps_due_at {
+            return;
+        }
+        let checks = match self.host.overlap_checks() {
+            Ok(checks) => checks,
+            Err(e) => return eprintln!("Workspace overlap check: {e:#}"),
+        };
+        self.overlaps_due_at = at + overlaps::OVERLAP_REFRESH_MS;
+        for (repository, check) in checks {
+            if self.overlaps_running.contains(&repository) {
+                continue;
+            }
+            if let Some(&last) = self.overlaps_checked.get(&repository)
+                && at - last < overlaps::OVERLAP_REFRESH_MS
+            {
+                self.overlaps_due_at = self
+                    .overlaps_due_at
+                    .min(last + overlaps::OVERLAP_REFRESH_MS);
+                continue;
+            }
+            self.overlaps_checked.insert(repository.clone(), at);
+            self.overlaps_running.insert(repository.clone());
+            let sender = self.sender.clone();
+            spawn_overlap_check(sender, repository, move || {
+                let fetched = overlaps::fetch_base(&check.repository, &check.base);
+                let warnings = overlaps::check(&check, fetched.as_ref().err());
+                (matches!(fetched, Ok(true)).then_some(at), warnings)
+            });
+        }
     }
 
     fn handle(&mut self, event: Event) -> bool {
@@ -776,6 +853,22 @@ impl Actor {
                     eprintln!("Workspace provider event: {e:#}");
                 }
                 changes_state
+            }
+            Event::Overlaps {
+                repository,
+                fetched_at,
+                warnings,
+            } => {
+                self.overlaps_running.remove(&repository);
+                if let Some(&started) = self.overlaps_checked.get(&repository) {
+                    self.overlaps_due_at = self
+                        .overlaps_due_at
+                        .min(started + overlaps::OVERLAP_REFRESH_MS);
+                }
+                warnings.is_some_and(|warnings| {
+                    self.host
+                        .set_branch_warnings(repository, fetched_at, warnings)
+                })
             }
             Event::Wake(at) => {
                 if self.wake_at == Some(at) {
@@ -1888,6 +1981,9 @@ mod tests {
             started_at: now(),
             resumed: HashSet::new(),
             stopping: false,
+            overlaps_checked: HashMap::new(),
+            overlaps_running: HashSet::new(),
+            overlaps_due_at: 0,
         };
         (actor, changes, step_changes)
     }
@@ -1949,6 +2045,129 @@ mod tests {
             .create_ticket(&coordinator.id, &attached.id, "Toolbar", "Do")
             .unwrap();
         (home, host, ticket, coordinator)
+    }
+
+    fn warning(ticket: &str, overlapping: Option<&str>) -> BranchWarnings {
+        BranchWarnings {
+            ticket_id: ticket.into(),
+            base: "HEAD".into(),
+            base_ahead: 0,
+            overlaps: overlapping
+                .map(|other| BranchOverlap {
+                    ticket_id: other.into(),
+                    title: "Other".into(),
+                    project: "Start".into(),
+                    files: vec!["a.rs".into()],
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_repository_has_one_overlap_check_at_a_time_and_at_most_every_five_minutes() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        let next = 1_000 + overlaps::OVERLAP_REFRESH_MS;
+        actor.refresh_overlaps(1_000);
+        assert_eq!(actor.overlaps_due_at, next);
+        // Inside the interval nothing is read or started.
+        actor.refresh_overlaps(next - 1);
+        assert_eq!(actor.overlaps_checked[&repository], 1_000);
+        // A check still running when the interval ends is not joined by a second one.
+        actor.refresh_overlaps(next);
+        assert_eq!(actor.overlaps_checked[&repository], 1_000);
+        assert!(actor.handle(Event::Overlaps {
+            repository: repository.clone(),
+            fetched_at: None,
+            warnings: Some(vec![warning(&ticket.id, None)]),
+        }));
+        assert!(actor.overlaps_due_at <= next);
+        actor.refresh_overlaps(next);
+        assert_eq!(actor.overlaps_checked[&repository], next);
+        assert!(actor.overlaps_running.contains(&repository));
+    }
+
+    #[test]
+    fn reading_workspace_context_refreshes_a_stale_cache_and_returns_it_meanwhile() {
+        let (_home, host, ticket, coordinator) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        let mut stale = warning(&ticket.id, None);
+        stale.base_ahead = 2;
+        actor.refresh_overlaps(now() - overlaps::OVERLAP_REFRESH_MS);
+        actor.handle(Event::Overlaps {
+            repository: repository.clone(),
+            fetched_at: None,
+            warnings: Some(vec![stale]),
+        });
+        let mut turn = active_turn("coordinating", vec![]);
+        turn.token = "coordinator-token".into();
+        actor.active.insert(coordinator.id.clone(), turn);
+        let (reply, replies) = async_channel::bounded(1);
+        let before = now();
+        actor.process(Event::Tool {
+            token: "coordinator-token".into(),
+            name: "workspace_context".into(),
+            args: json!({}),
+            reply,
+        });
+        let context = replies.try_recv().unwrap().unwrap();
+        assert_eq!(
+            context["tickets"][0]["warnings"],
+            json!(["HEAD is 2 commits ahead"])
+        );
+        assert!(actor.overlaps_checked[&repository] >= before);
+        assert!(actor.overlaps_running.contains(&repository));
+    }
+
+    #[test]
+    fn a_check_that_panics_still_frees_its_repository_for_the_next_refresh() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(1);
+        let repository = ticket.repository_id.clone();
+        actor.overlaps_checked.insert(repository.clone(), 1_000);
+        actor.overlaps_running.insert(repository.clone());
+        spawn_overlap_check(sender, repository.clone(), || panic!("injected"));
+        assert!(!actor.handle(events.recv_blocking().unwrap()));
+        let next = 1_000 + overlaps::OVERLAP_REFRESH_MS;
+        actor.refresh_overlaps(next);
+        assert_eq!(actor.overlaps_checked[&repository], next);
+    }
+
+    #[test]
+    fn warnings_about_a_finished_ticket_are_dropped_even_from_a_late_check() {
+        let (_home, mut host, first, coordinator) = ticket_fixture();
+        let second = host
+            .create_ticket(&coordinator.id, &first.repository_id, "Menu", "Do")
+            .unwrap();
+        host.set_branch_warnings(
+            first.repository_id.clone(),
+            None,
+            vec![
+                warning(&first.id, Some(&second.id)),
+                warning(&second.id, Some(&first.id)),
+            ],
+        );
+        assert_eq!(host.snapshot().unwrap().branch_warnings.len(), 2);
+        host.close_ticket(&second.id).unwrap();
+        // A check that started before the close reports after it.
+        host.set_branch_warnings(
+            first.repository_id.clone(),
+            None,
+            vec![
+                warning(&first.id, Some(&second.id)),
+                warning(&second.id, Some(&first.id)),
+            ],
+        );
+        assert!(host.snapshot().unwrap().branch_warnings.is_empty());
+        let context = host.agent_context(&coordinator.id).unwrap();
+        let tickets = context["tickets"].as_array().unwrap();
+        assert!(tickets.iter().all(|t| t.get("warnings").is_none()));
     }
 
     /// A live project whose ticket has a verification round of `count` testers queued and not

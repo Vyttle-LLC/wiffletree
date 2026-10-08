@@ -458,10 +458,12 @@ impl Host {
         }
         Ok(context)
     }
-    /// The project's tickets, each with its repository name, agents and verification record.
+    /// The project's tickets, each with its repository name, agents, verification record and any
+    /// warnings about its branch.
     fn ticket_overview(&self, project: &str) -> Result<Vec<Value>> {
         let repositories = self.repositories()?;
         let runtimes = self.runtimes()?;
+        let warnings = self.open_branch_warnings()?;
         let mut overview = vec![];
         for ticket in self.tickets()? {
             if !self
@@ -486,6 +488,9 @@ impl Host {
                     .map(|r| r.name.as_str())
             );
             entry["agents"] = json!(agents);
+            if let Some(warnings) = warnings.iter().find(|w| w.ticket_id == ticket.id) {
+                entry["warnings"] = json!(warnings.lines());
+            }
             overview.push(entry);
         }
         Ok(overview)
