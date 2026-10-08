@@ -13,6 +13,7 @@ impl Host {
             defaults.len() == roles.len(),
             "Provide the four workspace role defaults"
         );
+        let saved = self.policies()?;
         let mut policies = Vec::new();
         for role in roles {
             let entries: Vec<_> = defaults.iter().filter(|entry| entry.role == role).collect();
@@ -46,6 +47,11 @@ impl Host {
                     standard: primary.big.clone(),
                     complex: primary.big.clone(),
                     provider_profiles: entry.profiles.clone(),
+                    turn_budget_minutes: saved
+                        .iter()
+                        .find(|p| p.role == role)
+                        .context("Role policy missing")?
+                        .turn_budget_minutes,
                 };
                 policy.validate()?;
                 policies.push(policy);
@@ -53,7 +59,6 @@ impl Host {
         }
         let sessions = self.sessions()?;
         let mut runtimes = self.runtimes()?;
-        let saved = self.policies()?;
         let tx = self.db.transaction()?;
         for policy in policies {
             let previous = saved
@@ -132,6 +137,7 @@ impl Host {
                 standard: sol.clone(),
                 complex,
                 provider_profiles: Vec::new(),
+                turn_budget_minutes: None,
             };
             let saved: RolePolicy = tx.query_row(
                 "SELECT data FROM policies WHERE role=?1",

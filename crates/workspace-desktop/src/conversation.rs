@@ -37,11 +37,11 @@ pub(super) fn transcript_overlap(
     Some((dropped, unchanged))
 }
 
-/// Agent reports arrive as `[kind] sender name\nbody`; returns the kind and body.
+/// Agent reports arrive as `[kind] sender name\nbody`, and timer fires as `[timer] label\nbody`;
+/// returns the kind and body.
 fn report(body: &str) -> Option<(&str, &str)> {
     let (kind, rest) = body.strip_prefix('[')?.split_once("] ")?;
-    REPORT_KINDS
-        .contains(&kind)
+    (REPORT_KINDS.contains(&kind) || kind == "timer")
         .then(|| (kind, rest.split_once('\n').map_or("", |(_, text)| text)))
 }
 
@@ -625,7 +625,9 @@ impl Workspace {
                     let sender = sessions
                         .iter()
                         .find(|s| Some(&s.id) == message.sender.as_ref());
-                    let own = message.sender.as_ref() == Some(&current.id);
+                    // A timer fire is addressed to the session by itself but is input, not a reply.
+                    let own = message.sender.as_ref() == Some(&current.id)
+                        && !message.id.starts_with("timer:");
                     let reply = agent_message(message, sender, own, p);
                     // A reply whose turn did something shows how long and how much, above it.
                     let summary = message

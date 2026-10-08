@@ -98,6 +98,16 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         time.sleep(.3)
         assert len(request({'type':'messages','session_id':main['id'],'before':None,'limit':100}))==delivered,'Dismissing does not wake the coordinator'
         print('Coordinator closes settled questions; the human can dismiss one without waking it',flush=True)
+        request({'type':'send','id':'timer','sender':None,'recipient':main['id'],'body':'SCHEDULE_TIMER'})
+        timer=until(lambda s:len(s['schedules'])==1)['schedules'][0]
+        until(lambda s:not s['schedules']);settled()
+        until(lambda _:any(m['body']=='TIMER_FIRED' for m in request({'type':'messages','session_id':main['id'],'before':None,'limit':100})))
+        fire=next(m for m in request({'type':'messages','session_id':main['id'],'before':None,'limit':100}) if m['id'].startswith(f"timer:{timer['id']}:"))
+        assert fire['sender']==main['id'] and fire['receipt']=='completed',fire
+        request({'type':'send','id':'monitor','sender':None,'recipient':main['id'],'body':'SCHEDULE_MONITOR'})
+        monitor=until(lambda s:len(s['schedules'])==1)['schedules'][0];settled()
+        assert monitor['every_ms']==30*60_000 and monitor['until']-monitor['first_at']==150*60_000,monitor
+        print('A coordinator timer fires between turns as its own message',flush=True)
         request({'type':'send','id':'hang','sender':None,'recipient':main['id'],'body':'HANG_UNTIL_CANCELLED'})
         until(lambda s:any(x['id']==main['id'] and x['status']=='working' for x in s['sessions']))
         until(lambda _:('command','running') in [(s['kind'],s['state']) for s in steps(main['id'])['steps']])
@@ -113,6 +123,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         assert not snapshot()['live_projects']
         assert next(r['profile'] for r in snapshot()['runtimes'] if r['session_id']==main['id'])==override
         assert steps(main['id'],run=hung['run_id'])['steps']==hung['steps'],'Steps survive a restart'
+        assert snapshot()['schedules']==[monitor],'Timers survive a restart'
         request({'type':'reconcile_session','session_id':main['id'],'retry':False})
         messages=request({'type':'messages','session_id':main['id'],'before':None,'limit':100})
         assert next(m for m in messages if m['id']=='hang')['receipt']=='cancelled'

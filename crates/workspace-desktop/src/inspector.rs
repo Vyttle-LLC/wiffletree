@@ -6,7 +6,10 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
-use ui::{card, empty_state, eyebrow, hint, icon, mono, pill, property, section, session_icon};
+use ui::{
+    card, empty_state, eyebrow, from_now, hint, icon, mono, pill, property, section, session_icon,
+};
+use workspace_host::usage::local_time;
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -277,6 +280,50 @@ impl Workspace {
             .child(pill(repository.base.clone(), p.subtle))
     }
 
+    /// A coordinator's timer: what it is, whose it is, its cadence and when it fires next.
+    fn schedule_row(&self, schedule: &Schedule, p: Palette) -> Div {
+        let local = |at| local_time(at, "America/New_York").unwrap_or_default();
+        let owner = self
+            .session(&schedule.session_id)
+            .map_or("Unknown session".into(), |s| s.name.clone());
+        let mut cadence = schedule
+            .every_ms
+            .map_or("Once".into(), |ms| format!("Every {}", duration_label(ms)));
+        if let Some(until) = schedule.until {
+            cadence = format!("{cadence} until {}", local(until));
+        }
+        let next = schedule.next_fire_at.unwrap_or_default();
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .py_2()
+            .border_b_1()
+            .border_color(p.edge.opacity(0.25))
+            .child(icon("clock").text_color(p.subtle))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_ellipsis()
+                            .child(schedule.label.clone()),
+                    )
+                    .child(hint(format!("{owner} · {cadence}"), p)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(from_now(next)))
+                    .child(hint(local(next), p)),
+            )
+    }
+
     fn overview(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let (Some(session), Some(snapshot)) = (self.selected_session(), self.snapshot.as_ref())
         else {
@@ -419,6 +466,18 @@ impl Workspace {
                 repositories = repositories.child(Self::repository_row(repository, p));
             }
             body = body.child(repositories);
+            let schedules: Vec<_> = snapshot
+                .schedules
+                .iter()
+                .filter(|s| s.project_id == session.project_id)
+                .collect();
+            if !schedules.is_empty() {
+                let mut list = div().flex().flex_col().child(section("SCHEDULES", p));
+                for schedule in schedules {
+                    list = list.child(self.schedule_row(schedule, p));
+                }
+                body = body.child(list);
+            }
         } else {
             if let Some(ticket) = self.ticket_of(&session.id) {
                 body = body.child(

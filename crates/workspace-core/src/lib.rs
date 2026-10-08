@@ -277,6 +277,8 @@ pub enum Complexity {
     Standard,
     Complex,
 }
+/// The longest turn budget a policy may set; the provider runner stops every turn at 30 minutes.
+pub const MAX_TURN_BUDGET_MINUTES: u32 = 30;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RolePolicy {
     pub role: Role,
@@ -288,6 +290,9 @@ pub struct RolePolicy {
     pub complex: ModelProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_profiles: Vec<ProviderProfiles>,
+    /// Overrides the role's default turn budget; see `turn_budget`.
+    #[serde(default)]
+    pub turn_budget_minutes: Option<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProfiles {
@@ -314,6 +319,15 @@ pub struct Route {
     pub catalog_verified: bool,
 }
 impl RolePolicy {
+    /// How long the host lets one coordinator turn run: the policy's own budget, else
+    /// 10 minutes so coordinators stay available. Workers have none, because a cut-off turn's
+    /// input is not retried and their uncertain write work must be held instead.
+    pub fn turn_budget(&self) -> Option<u32> {
+        if self.role.is_worker() {
+            return None;
+        }
+        Some(self.turn_budget_minutes.unwrap_or(10))
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             !self.allowed.is_empty() && self.allowed.len() <= 32,
@@ -340,6 +354,15 @@ impl RolePolicy {
                 "Invalid effort"
             );
         }
+        ensure!(
+            self.turn_budget_minutes.is_none() || !self.role.is_worker(),
+            "Only coordinator roles have a turn budget"
+        );
+        ensure!(
+            self.turn_budget_minutes
+                .is_none_or(|minutes| (1..=MAX_TURN_BUDGET_MINUTES).contains(&minutes)),
+            "Turn budget must be 1–{MAX_TURN_BUDGET_MINUTES} minutes"
+        );
         if !self.provider_profiles.is_empty() {
             ensure!(
                 self.provider_profiles.len() == 2,
@@ -465,6 +488,7 @@ pub fn default_policies() -> Vec<RolePolicy> {
                 standard: sol.clone(),
                 complex: astra.clone(),
                 provider_profiles: Vec::new(),
+                turn_budget_minutes: None,
             };
             if matches!(
                 role,
@@ -599,6 +623,9 @@ pub struct Snapshot {
     /// Workspace repositories whose folder no longer exists.
     #[serde(default)]
     pub missing_repositories: Vec<String>,
+    /// Coordinator timers that will still fire.
+    #[serde(default)]
+    pub schedules: Vec<Schedule>,
 }
 impl Snapshot {
     /// The workspace repositories a project uses, in the order they were added.
@@ -613,6 +640,31 @@ impl Snapshot {
     }
 }
 
+/// A coordinator's durable timer. Fires land at `first_at + k * every_ms`, up to `until`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub label: String,
+    pub prompt: String,
+    pub first_at: i64,
+    pub every_ms: Option<i64>,
+    pub until: Option<i64>,
+    /// `None` once the last slot has fired or the timer was stopped.
+    pub next_fire_at: Option<i64>,
+    pub created_at: i64,
+}
+/// A whole-unit duration such as `30m`, `2h` or `1d`.
+pub fn duration_label(ms: i64) -> String {
+    const MINUTE: i64 = 60_000;
+    match ms {
+        _ if ms % (24 * 60 * MINUTE) == 0 => format!("{}d", ms / (24 * 60 * MINUTE)),
+        _ if ms % (60 * MINUTE) == 0 => format!("{}h", ms / (60 * MINUTE)),
+        _ if ms % MINUTE == 0 => format!("{}m", ms / MINUTE),
+        _ => format!("{}s", ms / 1000),
+    }
+}
 /// Host-owned settings, kept in the host's `settings.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSettings {

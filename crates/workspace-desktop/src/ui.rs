@@ -157,6 +157,16 @@ pub(super) fn age(at: i64) -> String {
         format!("{}d ago", minutes / 1440)
     }
 }
+/// Time until a future moment, "in 25m"; "now" once it has come.
+pub(super) fn from_now(at: i64) -> String {
+    let minutes = ((at - now()).max(0) as u64).div_ceil(60_000);
+    match minutes {
+        0 => "now".into(),
+        1..60 => format!("in {minutes}m"),
+        60..1440 => format!("in {}h {:02}m", minutes / 60, minutes % 60),
+        _ => format!("in {}d", minutes / 1440),
+    }
+}
 /// Turns a host identifier such as `ready_for_testing` into a readable label.
 pub(super) fn humanize(identifier: &str) -> String {
     let text = identifier.replace('_', " ");

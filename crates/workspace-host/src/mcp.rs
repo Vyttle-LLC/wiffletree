@@ -50,9 +50,27 @@ pub fn tools() -> Value {
         ),
         tool(
             "report",
-            "Report progress, a blocker or a result to your coordinator immediately. Give concrete evidence. Never wait for discovery.",
+            "Report progress, a blocker or a result to your parent. Progress is batched into its next turn; other kinds wake it immediately. Ask for a decision with kind blocked and the exact question. Give concrete evidence. Never wait for discovery.",
             json!({"message_id":string,"kind":{"type":"string","enum":["progress","blocked","ready_for_testing","passed","failed","completed"]},"body":string}),
             vec!["message_id", "kind", "body"]
+        ),
+        tool(
+            "schedule",
+            "Coordinator: set a durable timer that sends you prompt at its time, as your own message, even between turns and across host restarts. Give at (RFC 3339 or an offset like +90m), every (e.g. 30m, 2h; at least 5m) or both, and optionally until. Fires that pile up while you are busy or the host is stopped arrive once, marked late. Provider-native schedulers do not fire between managed turns; use this instead. Returns the timer id and next fire time.",
+            json!({"label":string,"prompt":string,"at":string,"every":string,"until":string}),
+            vec!["label", "prompt"]
+        ),
+        tool(
+            "unschedule",
+            "Coordinator: stop one of your timers. A fire still waiting in your queue is withdrawn; one held after an interrupted turn stays for Retry or Skip.",
+            json!({"id":string}),
+            vec!["id"]
+        ),
+        tool(
+            "list_schedules",
+            "Coordinator: list your active timers with their cadence and next fire time.",
+            json!({}),
+            vec![]
         ),
         tool(
             "accept_ticket",

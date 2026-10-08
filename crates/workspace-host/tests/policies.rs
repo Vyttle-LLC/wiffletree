@@ -26,7 +26,41 @@ fn legacy(role: Role) -> RolePolicy {
         standard: default,
         complex,
         provider_profiles: Vec::new(),
+        turn_budget_minutes: None,
     }
+}
+
+#[test]
+fn stored_policies_without_a_turn_budget_load_with_their_role_default() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open(home.path()).unwrap();
+    let mut custom = legacy(Role::TaskOrchestrator);
+    custom.turn_budget_minutes = Some(25);
+    host.set_policy(&custom).unwrap();
+    drop(host);
+    // Strip the field the way a store written before turn budgets has it.
+    let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE policies SET data=json_remove(data,'$.turn_budget_minutes') WHERE role IN ('project_orchestrator','implementer')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let host = Host::open(home.path()).unwrap();
+    let budget = |role| host.policy(role).unwrap().turn_budget();
+    assert_eq!(budget(Role::ProjectOrchestrator), Some(10));
+    assert_eq!(budget(Role::Implementer), None);
+    assert_eq!(budget(Role::TaskOrchestrator), Some(25));
+    let mut over = legacy(Role::ProjectOrchestrator);
+    for minutes in [0, MAX_TURN_BUDGET_MINUTES + 1] {
+        over.turn_budget_minutes = Some(minutes);
+        assert!(over.validate().is_err(), "{minutes}");
+    }
+    // A worker's cut-off turn would complete uncertain write work instead of holding it.
+    let mut worker = legacy(Role::Implementer);
+    worker.turn_budget_minutes = Some(5);
+    assert!(worker.validate().is_err());
+    assert_eq!(worker.turn_budget(), None, "even if one was stored");
 }
 
 #[test]
@@ -147,7 +181,6 @@ fn four_role_defaults_save_atomically_and_keep_existing_agents() {
     let mut host = Host::open(home.path()).unwrap();
     host.create_project("Existing defaults").unwrap();
     let root = host.sessions().unwrap().remove(0);
-    let previous = host.policies().unwrap();
     let roles = [
         Role::ProjectOrchestrator,
         Role::Implementer,
@@ -184,6 +217,10 @@ fn four_role_defaults_save_atomically_and_keep_existing_agents() {
                 .collect(),
         })
         .collect();
+    let mut custom = host.policy(Role::TaskOrchestrator).unwrap();
+    custom.turn_budget_minutes = Some(3);
+    host.set_policy(&custom).unwrap();
+    let previous = host.policies().unwrap();
     let mut invalid = defaults.clone();
     invalid[3].profiles[1].small.effort.clear();
     assert!(host.set_role_defaults(&invalid).is_err());
@@ -219,6 +256,14 @@ fn four_role_defaults_save_atomically_and_keep_existing_agents() {
         host.policy(new_root.role).unwrap().default,
         defaults[0].profiles[0].big
     );
+    let budget = |role| host.policy(role).unwrap().turn_budget();
+    assert_eq!(
+        budget(Role::TaskOrchestrator),
+        Some(3),
+        "defaults keep budgets"
+    );
+    assert_eq!(budget(Role::ProjectOrchestrator), Some(10));
+    assert_eq!(budget(Role::Tester), None);
     drop(host);
     let host = Host::open(home.path()).unwrap();
     for entry in defaults {

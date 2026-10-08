@@ -1,10 +1,13 @@
 //! Noninteractive provider turns with the user's YOLO execution policy.
+mod output;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
+use output::{Next, Output, StopReading};
 use std::os::unix::process::CommandExt;
 use std::{
-    io::{BufRead, BufReader, Read, Write},
-    process::{Child, Command as ProcessCommand, Stdio},
+    io::{Read, Write},
+    process::{Child, Command as ProcessCommand, ExitStatus, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -30,6 +33,9 @@ pub enum ProviderEvent {
     Finished {
         error: Option<String>,
         usage: Value,
+        /// The turn stopped because its cancel flag was set, never because of what the
+        /// provider said; see `Cancelled`.
+        cancelled: bool,
     },
 }
 pub struct Turn {
@@ -39,7 +45,7 @@ pub struct Turn {
     pub provider_session: Option<String>,
     pub cwd: PathBuf,
     pub prompt: String,
-    /// The delivered message's stored files; images also go to the model as images.
+    /// The delivered messages' stored files, in order; images also go to the model as images.
     pub attachments: Vec<Attachment>,
     pub socket: PathBuf,
     pub token: String,
@@ -104,12 +110,17 @@ fn images(turn: &Turn) -> impl Iterator<Item = (&Path, ImageFormat)> {
         .iter()
         .filter_map(|a| Some((a.path.as_path(), a.image?)))
 }
+/// Each message's files share its own directory, and their Codex paths are chosen within it.
 fn codex_images(turn: &Turn) -> impl Iterator<Item = PathBuf> {
     turn.attachments
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| a.image.is_some())
-        .map(|(index, _)| crate::attachments::codex_image_path(&turn.attachments, index))
+        .chunk_by(|a, b| a.path.parent() == b.path.parent())
+        .flat_map(|message| {
+            message
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.image.is_some())
+                .map(|(index, _)| crate::attachments::codex_image_path(message, index))
+        })
 }
 /// What the provider reads on stdin. Claude takes images only as content blocks of a
 /// stream-json user message; otherwise the prompt is plain text.
@@ -180,16 +191,80 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         }
     }
 }
-struct Process(Child);
+/// How long a provider's process group may take to exit after SIGTERM before it is killed.
+const TERMINATION_GRACE: Duration = Duration::from_secs(1);
+/// How long a finished turn waits for the rest of the provider's stderr.
+const STDERR_DRAIN: Duration = Duration::from_millis(500);
+/// The provider and its tool subprocesses, one owned process group. The leader stays
+/// unreaped until `stop` has finished signalling: its zombie keeps its pid, which is also the
+/// group id, from being reused, so the signals can only reach this turn's processes.
+struct Process {
+    child: Child,
+    status: Option<ExitStatus>,
+}
 impl Drop for Process {
     fn drop(&mut self) {
-        // The provider and its tool subprocesses are one owned process group.
-        unsafe {
-            libc::kill(-(self.0.id() as i32), libc::SIGTERM);
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.stop();
     }
+}
+impl Process {
+    /// Whether the leader has exited, without reaping it.
+    fn exited(&self) -> Result<bool> {
+        if self.status.is_some() {
+            return Ok(true);
+        }
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+        if unsafe { libc::waitid(libc::P_PID, self.child.id(), &mut info, options) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(info.si_pid != 0)
+    }
+    /// Stops the whole group, SIGTERM and then SIGKILL after the grace period, and only then
+    /// reaps the leader. Later calls return its status without signalling again.
+    fn stop(&mut self) -> Result<ExitStatus> {
+        if let Some(status) = self.status {
+            return Ok(status);
+        }
+        let group = self.child.id() as i32;
+        unsafe {
+            libc::killpg(group, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + TERMINATION_GRACE;
+        // A group whose only member is the zombie leader answers EPERM, so this waits only
+        // while live members remain.
+        while unsafe { libc::killpg(group, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+        let status = self.child.wait()?;
+        self.status = Some(status);
+        Ok(status)
+    }
+}
+/// The error a running turn stops with when its cancel flag is set. Callers recognise it by
+/// type, so provider output with the same text cannot pass for it.
+#[derive(Debug)]
+pub struct Cancelled;
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Turn interrupted; inspect changes before retrying")
+    }
+}
+impl std::error::Error for Cancelled {}
+const TURN_LIMIT: Duration = Duration::from_secs(60 * 30);
+/// Stops a turn that was cancelled or ran past the provider limit, in any phase that waits.
+fn check_running(cancel: &AtomicBool, start: Instant) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Cancelled.into());
+    }
+    ensure!(
+        start.elapsed() < TURN_LIMIT,
+        "Provider turn exceeded 30-minute limit; inspect work before retrying"
+    );
+    Ok(())
 }
 pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEvent)) -> Result<()> {
     let quota_account = if turn.session.provider == Provider::Claude {
@@ -202,63 +277,40 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         "Turn interrupted before provider launch"
     );
     let input = input(&turn)?;
-    let mut process = Process(
-        command(&turn)?
+    let mut process = Process {
+        child: command(&turn)?
             .spawn()
             .context("Could not start provider")?,
-    );
-    emit(ProviderEvent::Spawned(process.0.id()));
-    let mut stdin = process.0.stdin.take().context("No provider stdin")?;
+        status: None,
+    };
+    emit(ProviderEvent::Spawned(process.child.id()));
+    let mut stdin = process.child.stdin.take().context("No provider stdin")?;
     // Images can make the input large; writing it alongside reading output cannot deadlock.
     // A provider that exits before reading it all is reported by its exit status.
     std::thread::spawn(move || {
         let _ = stdin.write_all(&input);
     });
-    let stderr = process.0.stderr.take().context("No provider stderr")?;
-    let errors = std::thread::spawn(move || {
-        let mut tail = Vec::new();
-        let mut reader = BufReader::new(stderr);
-        loop {
-            let mut line = Vec::new();
-            match reader.by_ref().take(65537).read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                _ => {
-                    tail.extend(line);
-                    if tail.len() > 16384 {
-                        tail.drain(..tail.len() - 16384);
-                    }
-                }
-            }
-        }
-        without_terminal_codes(&String::from_utf8_lossy(&tail))
-    });
-    let stdout = process.0.stdout.take().context("No provider stdout")?;
-    let (send, receive) = std::sync::mpsc::sync_channel(128);
+    let mut stderr = process.child.stderr.take().context("No provider stderr")?;
+    // The tail is kept as it arrives, so a process still holding stderr when the turn ends
+    // cannot withhold what was already written.
+    let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (errors_done, errors_closed) = std::sync::mpsc::sync_channel(1);
+    let tail = errors.clone();
     std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = Vec::new();
-            match reader
-                .by_ref()
-                .take(2 * 1024 * 1024 + 1)
-                .read_until(b'\n', &mut line)
-            {
-                Ok(0) => break,
-                Ok(_) if line.len() <= 2 * 1024 * 1024 => {
-                    if send
-                        .send(serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string()))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                _ => {
-                    let _ = send.send(Err("Provider event exceeds bound".into()));
-                    break;
-                }
+        let mut chunk = [0; 4096];
+        while let Ok(read @ 1..) = stderr.read(&mut chunk) {
+            let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+            tail.extend_from_slice(&chunk[..read]);
+            if tail.len() > 16384 {
+                let excess = tail.len() - 16384;
+                tail.drain(..excess);
             }
         }
+        let _ = errors_done.send(());
     });
+    let stdout = process.child.stdout.take().context("No provider stdout")?;
+    let output = Output::spawn(stdout)?;
+    let _stop_reading = StopReading(output.clone());
     let start = Instant::now();
     let mut terminal = false;
     let mut failure = None;
@@ -266,18 +318,27 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let mut requests = crate::telemetry::ClaudeRequests::default();
     let mut claude = ClaudeSteps::new(&turn.cwd);
     let mut codex = CodexSteps::new(&turn.cwd);
+    // The exit is checked on every pass, so a leftover process writing to stdout cannot hide
+    // it. Every event the reader accepted is handled; the reader decides when to stop.
+    let mut exited = false;
     loop {
-        if cancel.load(Ordering::Relaxed) {
-            anyhow::bail!("Turn interrupted; inspect changes before retrying")
+        check_running(&cancel, start)?;
+        if !exited && process.exited()? {
+            // First, so the reader never waits for room while the group is being stopped.
+            output.provider_exited();
+            process.stop()?;
+            exited = true;
         }
-        ensure!(
-            start.elapsed() < Duration::from_secs(60 * 30),
-            "Provider turn exceeded 30-minute limit; inspect work before retrying"
-        );
-        let value = match receive.recv_timeout(Duration::from_millis(50)) {
-            Ok(v) => v.map_err(anyhow::Error::msg)?,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(_) => break,
+        let event = match output.next(Duration::from_millis(50)) {
+            Next::Event(event) => event,
+            Next::Waiting => continue,
+            Next::Finished => break,
+        };
+        let value = match event {
+            Ok(value) => value,
+            // Stray output after the terminal result cannot change the turn's outcome.
+            Err(_) if terminal => continue,
+            Err(error) => anyhow::bail!(error),
         };
         match turn.session.provider {
             Provider::Codex => match value["type"].as_str().unwrap_or_default() {
@@ -369,8 +430,18 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
             },
         }
     }
-    let status = process.0.wait()?;
-    let stderr = errors.join().unwrap_or_default();
+    // A provider can close stdout and keep running; returning early drops `process`, which
+    // stops its whole process group.
+    while !process.exited()? {
+        check_running(&cancel, start)?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Stops tool subprocesses that outlived the provider.
+    let status = process.stop()?;
+    let _ = errors_closed.recv_timeout(STDERR_DRAIN);
+    let stderr = without_terminal_codes(&String::from_utf8_lossy(
+        &errors.lock().unwrap_or_else(|e| e.into_inner()),
+    ));
     if (!status.success() || !terminal) && failure.is_none() {
         failure = Some(format!(
             "Provider exited without a successful terminal result ({status}). {}",
@@ -380,6 +451,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     emit(ProviderEvent::Finished {
         error: failure,
         usage,
+        cancelled: false,
     });
     Ok(())
 }
@@ -419,6 +491,39 @@ fn without_terminal_codes(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_leader_stays_unreaped_until_its_group_has_been_signalled() {
+        let mut process = Process {
+            child: ProcessCommand::new("/bin/sh")
+                .args(["-c", "exit 3"])
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+            status: None,
+        };
+        let group = process.child.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process.exited().unwrap() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Seeing the exit does not reap: the zombie still holds the group id.
+        assert!(process.exited().unwrap());
+        assert_eq!(unsafe { libc::killpg(group, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
+        assert_eq!(process.stop().unwrap().code(), Some(3));
+        // Reaped: the group id is free for reuse, and stopping again signals nothing.
+        assert_eq!(unsafe { libc::killpg(group, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(process.stop().unwrap().code(), Some(3));
+    }
 
     #[test]
     fn claude_cannot_open_its_own_worktrees() {
@@ -578,6 +683,24 @@ mod tests {
                 .any(|a| a.contains(',') && a.starts_with("--image"))
         );
         assert!(turn.prompt.contains("odd,shot.png"));
+    }
+
+    #[test]
+    fn a_batched_turn_keeps_each_messages_codex_image_paths() {
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut files = attachments(first.path());
+        files[0].path = first.path().join("odd,shot.png");
+        let mut later = attachments(second.path());
+        later.swap(0, 1);
+        later[1].path = second.path().join("odd,shot.png");
+        files.extend(later);
+        let args = arguments(&turn(Provider::Codex, None, files));
+        let images = [
+            first.path().join(".codex-0.png"),
+            second.path().join(".codex-1.png"),
+        ]
+        .map(|path| format!("--image={}", path.display()));
+        assert_eq!(&args[args.len() - 3..args.len() - 1], images);
     }
 
     #[test]
