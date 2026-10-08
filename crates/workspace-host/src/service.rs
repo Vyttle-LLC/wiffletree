@@ -112,6 +112,15 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
         "UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?2)) WHERE finished_at IS NULL",
         params![now(), STOPPED_UNEXPECTEDLY],
     )?;
+    // No turn runs any more, so no check-in still says one does.
+    let check_ins = host
+        .db
+        .prepare(&format!("SELECT id FROM attention WHERE substr(operation_id,1,{})='{CHECK_IN}:' AND json_extract(data,'$.answer') IS NULL", CHECK_IN.len() + 1))?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in check_ins {
+        host.resolve_attention(&id, "Superseded by a host restart")?;
+    }
     Ok(())
 }
 /// Names the turn that took this message and stopped before finishing, so a retry can find its partial work.
@@ -1078,7 +1087,14 @@ impl Actor {
                 eprintln!("Workspace check-in: {e:#}");
             }
         }
-        if let Some(next) = self.active.values().map(|a| a.next_check_in).min() {
+        // A cancelled turn still winding down has no check-in to wake for.
+        let next = self
+            .active
+            .values()
+            .filter(|a| !a.cancel.load(Ordering::Relaxed))
+            .map(|a| a.next_check_in)
+            .min();
+        if let Some(next) = next {
             self.wake(next);
         }
     }
@@ -2102,6 +2118,43 @@ mod tests {
         assert!(
             open(&actor).is_empty(),
             "a finished turn clears its check-in"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_long_turn_winding_down_arms_no_wake_in_the_past() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        let mut active = active_turn(&run, vec![]);
+        active.started_at = now() - CHECK_IN_MS - 60_000;
+        active.next_check_in = active.started_at + CHECK_IN_MS;
+        active.cancel.store(true, Ordering::Relaxed);
+        actor.active.insert(session, active);
+
+        actor.check_in_long_turns(now());
+        assert_eq!(actor.wake_at, None);
+    }
+
+    #[test]
+    fn a_host_restart_clears_check_ins_for_turns_it_cut_off() {
+        let (_home, mut actor, session, _) = actor_with_turn();
+        let started = actor.active[&session].started_at;
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+        let project = actor.host.session(&session).unwrap().project_id;
+        assert_eq!(actor.host.open_attention(&project).unwrap().len(), 1);
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert!(actor.host.open_attention(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_turn_refuses_a_child_with_no_running_turn() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        actor.active.remove(&tester.id);
+        let args = json!({"session_id":tester.id,"reason":"Stop"});
+        let error = actor.stop_turn(&coordinator.id, &args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{} has no running turn", tester.name)
         );
     }
 
