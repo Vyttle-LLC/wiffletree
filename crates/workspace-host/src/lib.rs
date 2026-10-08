@@ -64,6 +64,15 @@ fn tag<T: Serialize>(value: &T) -> Result<String> {
         .context("Expected enum tag")?
         .to_owned())
 }
+/// Prefix of the inbox items the host raises for a long turn; agents and clients cannot use it.
+pub(crate) const CHECK_IN: &str = "check-in:";
+fn ensure_unreserved(operation: &str) -> Result<()> {
+    ensure!(
+        !operation.starts_with(CHECK_IN),
+        "IDs starting with \"{CHECK_IN}\" are reserved for workspace check-ins"
+    );
+    Ok(())
+}
 pub(crate) fn text(value: &str, maximum: usize) -> Result<()> {
     ensure!(
         !value.trim().is_empty() && value.len() <= maximum,
@@ -1085,13 +1094,10 @@ impl Host {
                 host,
                 operation_id,
                 prompt,
-            } => serde_json::to_value(self.request_attention(
-                &session_id,
-                &host,
-                &operation_id,
-                &prompt,
-                &[],
-            )?)?,
+            } => serde_json::to_value({
+                ensure_unreserved(&operation_id)?;
+                self.request_attention(&session_id, &host, &operation_id, &prompt, &[])?
+            })?,
             Command::ResolveAttention { id, answer } => {
                 serde_json::to_value(self.resolve_attention(&id, &answer)?)?
             }

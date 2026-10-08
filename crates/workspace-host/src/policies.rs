@@ -47,11 +47,6 @@ impl Host {
                     standard: primary.big.clone(),
                     complex: primary.big.clone(),
                     provider_profiles: entry.profiles.clone(),
-                    turn_budget_minutes: saved
-                        .iter()
-                        .find(|p| p.role == role)
-                        .context("Role policy missing")?
-                        .turn_budget_minutes,
                 };
                 policy.validate()?;
                 policies.push(policy);
@@ -137,7 +132,6 @@ impl Host {
                 standard: sol.clone(),
                 complex,
                 provider_profiles: Vec::new(),
-                turn_budget_minutes: None,
             };
             let saved: RolePolicy = tx.query_row(
                 "SELECT data FROM policies WHERE role=?1",

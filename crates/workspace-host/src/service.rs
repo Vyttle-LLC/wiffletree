@@ -16,6 +16,8 @@ use std::{
 type Reply = Sender<std::result::Result<Value, String>>;
 /// Operation prefix for the notice raised when a project pauses at its turn budget.
 const TURN_BUDGET: &str = "turn-budget";
+/// How long a turn runs before it checks in with its parent, and how often after that.
+const CHECK_IN_MS: i64 = 30 * 60_000;
 /// How long an idle parent waits after a child's first progress report, so a burst of
 /// them arrives in one turn.
 const PROGRESS_BATCH_MS: i64 = 20_000;
@@ -108,6 +110,15 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
         "UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?2)) WHERE finished_at IS NULL",
         params![now(), STOPPED_UNEXPECTEDLY],
     )?;
+    // No turn runs any more, so no check-in still says one does.
+    let check_ins = host
+        .db
+        .prepare("SELECT id FROM attention WHERE substr(operation_id,1,length(?1))=?1 AND json_extract(data,'$.answer') IS NULL")?
+        .query_map([CHECK_IN], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in check_ins {
+        host.resolve_attention(&id, "Superseded by a host restart")?;
+    }
     Ok(())
 }
 /// Names the turn that took this message and stopped before finishing, so a retry can find its partial work.
@@ -182,23 +193,24 @@ fn resume_note(
         )
     })
 }
-/// Tells a session that its last turn ran out of time, so it checks what that turn finished.
-fn over_budget_note(host: &Host, session: &str) -> Result<String> {
+/// Tells a session that its parent stopped its last turn, and why, so it checks what that turn
+/// finished. The stopped input is not retried: the parent chose to stop it and sends what next.
+fn stopped_by_parent_note(host: &Host, session: &str) -> Result<String> {
     let run = host.db.query_row(
-        "SELECT id,started_at,json_extract(detail,'$.turn_budget_minutes') FROM provider_runs WHERE session_id=?1 AND outcome='over_budget' AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1)",
+        "SELECT id,started_at,json_extract(detail,'$.stop_reason') FROM provider_runs WHERE session_id=?1 AND outcome='stopped_by_parent' AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1)",
         [session],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, u32>(2)?)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
     ).optional()?;
-    Ok(run.map_or_else(String::new, |(id, started_at, minutes)| {
+    Ok(run.map_or_else(String::new, |(id, started_at, reason)| {
         format!(
-            "\nYour previous turn {id} (started {}) was stopped at its {minutes}-minute turn budget, and its input was not retried. Check what it finished; delegate work that needs longer.",
+            "\nYour parent stopped your previous turn {id} (started {}). Reason: {reason}\nIts input was not retried. Check the worktree for its partial work before you continue.",
             schedules::rfc3339(started_at)
         )
     }))
 }
-fn over_budget_notice(minutes: u32) -> String {
+fn stopped_by_parent_notice(reason: &str) -> String {
     format!(
-        "Stopped at its {minutes}-minute turn budget. Its input will not be retried; the next message or timer runs normally. Partial work may remain."
+        "Stopped by its parent: {reason}\nIts input will not be retried; the next message runs normally. Partial work may remain."
     )
 }
 /// Provider output is not Markdown, so it is fenced to show verbatim.
@@ -257,17 +269,40 @@ struct Active {
     messages: Vec<String>,
     output: String,
     reported: bool,
-    /// The role's turn budget, and whether this turn was stopped for exceeding it.
-    budget: Option<Budget>,
-    over_budget: bool,
+    started_at: i64,
+    /// When this turn next checks in; see `check_in_long_turns`.
+    next_check_in: i64,
+    /// When the provider last sent an event, for check-ins.
+    last_event_at: i64,
+    /// Why the session's parent stopped this turn, once it has.
+    stopped_by_parent: Option<String>,
     /// This turn's steps; the store has each one as of its last start or state change.
     steps: Vec<Step>,
     omitted_steps: usize,
 }
-#[derive(Clone, Copy)]
-struct Budget {
-    minutes: u32,
-    deadline: i64,
+impl Active {
+    fn new(
+        run: String,
+        token: String,
+        cancel: Arc<AtomicBool>,
+        messages: Vec<String>,
+        started_at: i64,
+    ) -> Self {
+        Self {
+            run,
+            token,
+            cancel,
+            messages,
+            output: String::new(),
+            reported: false,
+            started_at,
+            next_check_in: started_at + CHECK_IN_MS,
+            last_event_at: started_at,
+            stopped_by_parent: None,
+            steps: vec![],
+            omitted_steps: 0,
+        }
+    }
 }
 struct Permission {
     session: String,
@@ -636,6 +671,9 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
+                    if name == "stop_turn" {
+                        return self.stop_turn(&id, &args).map(Some);
+                    }
                     if name == "request_permission" {
                         let tool = args["tool_name"].as_str().context("Missing tool name")?;
                         let input = args["input"].clone();
@@ -683,9 +721,10 @@ impl Actor {
                 run,
                 event,
             } => {
-                if !self.active.get(&session).is_some_and(|a| a.run == run) {
+                let Some(active) = self.active.get_mut(&session).filter(|a| a.run == run) else {
                     return false;
-                }
+                };
+                active.last_event_at = now();
                 let changes_state =
                     !matches!(event, ProviderEvent::Step(_) | ProviderEvent::Reply(_));
                 if let Err(e) = self.provider_event(&session, &run, event) {
@@ -745,28 +784,26 @@ impl Actor {
             } => {
                 let mut active = self.active.remove(id).unwrap();
                 let failed = error.is_some();
-                // A turn stopped at its budget is finished rather than held, so a coordinator
-                // never stalls its project; its next turn is told about the cut-off instead.
+                // A turn its parent stopped is finished rather than held: the parent decides
+                // what runs next, and the session's next turn is told about the stop instead.
                 // Only our own cancellation counts; a real failure keeps its error and held input.
-                let budget = active
-                    .budget
-                    .filter(|_| active.over_budget && cancelled)
-                    .map(|b| b.minutes);
-                let error = error.filter(|_| budget.is_none());
+                let stop_reason = active.stopped_by_parent.take().filter(|_| cancelled);
+                let error = error.filter(|_| stop_reason.is_none());
                 // Settle the run first so a later failure cannot leave it open. If this update
                 // fails, the run stays open and blocks worktree removal until restart: safe.
                 self.host.db.execute(
-                    "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5) WHERE id=?1",
+                    "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5,'$.stop_reason',?6) WHERE id=?1",
                     params![
                         run,
                         now(),
-                        match (budget, &error) {
-                            (Some(_), _) => "over_budget",
+                        match (&stop_reason, &error) {
+                            (Some(_), _) => "stopped_by_parent",
                             (None, Some(_)) => "failed",
                             (None, None) => "completed",
                         },
                         json!({"error":error,"usage":usage}).to_string(),
-                        active.omitted_steps as i64
+                        active.omitted_steps as i64,
+                        stop_reason
                     ],
                 )?;
                 self.settle_steps(id, &mut active, failed)?;
@@ -782,20 +819,21 @@ impl Actor {
                         params![message, if error.is_some() { "held" } else { "completed" }],
                     )?;
                 }
-                if let Some(minutes) = budget {
+                if let Some(reason) = &stop_reason {
                     self.host.append_output(
                         &session,
-                        &format!("budget:{run}"),
-                        &over_budget_notice(minutes),
+                        &format!("stopped:{run}"),
+                        &stopped_by_parent_notice(reason),
                     )?;
                     Host::event(
                         &self.host.db,
                         &session.project_id,
                         Some(id),
-                        "turn_over_budget",
-                        &format!("{run}; budget_minutes={minutes}"),
+                        "turn_stopped_by_parent",
+                        &format!("{run}; {reason}"),
                     )?;
                 }
+                self.settle_check_ins(&session)?;
                 if let Some(error) = &error {
                     self.host.append_output(
                         &session,
@@ -817,19 +855,14 @@ impl Actor {
                 if !self.stopping {
                     self.host.settle_pending_worktrees();
                 }
-                // A deliberately archived parent has no one to wake.
+                // A deliberately archived parent has no one to wake, and one that stopped
+                // the turn already knows.
                 if let Some(parent) = &session.parent_id
                     && !self.host.session(parent)?.archived
-                    && (error.is_some()
-                        || budget.is_some()
-                        || (session.role.is_worker() && !active.reported))
+                    && stop_reason.is_none()
+                    && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
-                    let body = if let Some(minutes) = budget {
-                        format!(
-                            "{} stopped at its {minutes}-minute turn budget; its input was not retried.",
-                            session.name
-                        )
-                    } else if let Some(error) = &error {
+                    let body = if let Some(error) = &error {
                         format!(
                             "{} stopped with an error: {error}. Inspect its runtime/worktree before resuming.",
                             session.name
@@ -1003,32 +1036,128 @@ impl Actor {
         page.omitted_steps = active.omitted_steps;
         Ok(page)
     }
-    /// Stops turns that ran past their role's turn budget through the same cancel flag a
-    /// human stop uses; the provider thread then finishes the turn. Keeps a wake-up armed for
-    /// the next deadline.
-    fn enforce_budgets(&mut self) {
-        let now = now();
-        let mut next = None;
-        for active in self.active.values_mut() {
-            let Some(budget) = active.budget else {
-                continue;
-            };
-            if active.over_budget || active.cancel.load(Ordering::Relaxed) {
-                continue;
-            }
-            if now >= budget.deadline {
-                active.over_budget = true;
-                active.cancel.store(true, Ordering::Relaxed);
-            } else {
-                next = Some(next.map_or(budget.deadline, |at: i64| at.min(budget.deadline)));
+    /// Lets a session's direct parent stop its running turn, through the same cancel flag a
+    /// human stop uses; the provider thread then finishes the turn.
+    fn stop_turn(&mut self, caller: &str, args: &Value) -> Result<Value> {
+        let target = self
+            .host
+            .session(args["session_id"].as_str().context("Missing session_id")?)?;
+        let reason = args["reason"].as_str().context("Missing reason")?.trim();
+        ensure!(!reason.is_empty(), "Give a reason for stopping the turn");
+        ensure!(
+            target.parent_id.as_deref() == Some(caller),
+            "Only {}'s direct parent can stop its turn",
+            target.name
+        );
+        let active = self
+            .active
+            .get_mut(&target.id)
+            .with_context(|| format!("{} has no running turn", target.name))?;
+        active
+            .stopped_by_parent
+            .get_or_insert_with(|| reason.chars().take(1000).collect());
+        active.cancel.store(true, Ordering::Relaxed);
+        let run = active.run.clone();
+        Host::event(
+            &self.host.db,
+            &target.project_id,
+            Some(&target.id),
+            "turn_stop_requested",
+            &format!("{run}; {reason}"),
+        )?;
+        Ok(json!({"session_id":target.id,"run_id":run,"stopping":true}))
+    }
+    /// Every `CHECK_IN_MS` of a running turn, tells the session's parent how it is going, or the
+    /// human when it has none. Turns are never stopped for time; the parent may call stop_turn.
+    /// Keeps a wake-up armed for the next check-in.
+    fn check_in_long_turns(&mut self, now: i64) {
+        let due = self
+            .active
+            .iter()
+            .filter(|(_, a)| now >= a.next_check_in && !a.cancel.load(Ordering::Relaxed))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in due {
+            let active = self.active.get_mut(&id).expect("due turns are active");
+            let checks = (now - active.started_at) / CHECK_IN_MS;
+            active.next_check_in = active.started_at + (checks + 1) * CHECK_IN_MS;
+            if let Err(e) = self.check_in(&id, now) {
+                eprintln!("Workspace check-in: {e:#}");
             }
         }
-        if let Some(at) = next {
-            self.wake(at);
+        // A cancelled turn still winding down has no check-in to wake for.
+        let next = self
+            .active
+            .values()
+            .filter(|a| !a.cancel.load(Ordering::Relaxed))
+            .map(|a| a.next_check_in)
+            .min();
+        if let Some(next) = next {
+            self.wake(next);
         }
     }
+    fn check_in(&mut self, id: &str, now: i64) -> Result<()> {
+        let session = self.host.session(id)?;
+        let active = &self.active[id];
+        let run = active.run.clone();
+        let minutes = (now - active.started_at) / 60_000;
+        let ticket = match self.host.session_runtime(id)?.ticket_id {
+            Some(ticket) => format!(" on ticket \"{}\"", self.host.ticket(&ticket)?.title),
+            None => String::new(),
+        };
+        let latest = active.steps.last().map_or_else(
+            || "no steps yet".to_owned(),
+            |step| {
+                format!(
+                    "latest step: {}",
+                    step.title.chars().take(300).collect::<String>()
+                )
+            },
+        );
+        let status = format!(
+            "{}{ticket} has been in one turn for {minutes} minutes, since {}. Last provider event {}; {latest}.",
+            session.name,
+            schedules::rfc3339(active.started_at),
+            schedules::rfc3339(active.last_event_at),
+        );
+        match &session.parent_id {
+            Some(parent) => {
+                if self.host.session(parent)?.archived {
+                    return Ok(());
+                }
+                self.host.send(
+                    &format!("{CHECK_IN}{run}:{minutes}"),
+                    Some(id),
+                    parent,
+                    &format!(
+                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_turn with session_id {id} and a reason."
+                    ),
+                )?;
+            }
+            None => {
+                self.settle_check_ins(&session)?;
+                self.host.request_attention(
+                    id,
+                    "local",
+                    &format!("{CHECK_IN}{run}:{minutes}"),
+                    &format!("{status} It keeps running; use Pause or Stop if it is stuck."),
+                    &[],
+                )?;
+            }
+        }
+        Ok(())
+    }
+    /// Clears a session's check-in inbox items once a newer one or the turn's end replaces them.
+    fn settle_check_ins(&mut self, session: &Session) -> Result<()> {
+        for item in self.host.open_attention(&session.project_id)? {
+            if item.session_id == session.id && item.operation_id.starts_with(CHECK_IN) {
+                self.host.resolve_attention(&item.id, "Superseded")?;
+            }
+        }
+        Ok(())
+    }
     fn schedule(&mut self) -> Result<()> {
-        self.enforce_budgets();
+        self.check_in_long_turns(now());
         // Timers fire into the queue whether or not the project is live.
         match self.host.fire_due_schedules(now()) {
             Ok(pass) => {
@@ -1200,7 +1329,7 @@ impl Actor {
                 notes.push(note);
             }
         }
-        notes.push(over_budget_note(&self.host, &session.id)?);
+        notes.push(stopped_by_parent_note(&self.host, &session.id)?);
         let delivered_at = now();
         let resume = if self.resumed.contains(&session.id) {
             String::new()
@@ -1267,11 +1396,7 @@ impl Actor {
         let prompt = self.prompt(&session, &input)?;
         let policy = self.host.policy(session.role)?;
         let started_at = now();
-        let budget = policy.turn_budget().map(|minutes| Budget {
-            minutes,
-            deadline: started_at + i64::from(minutes) * 60_000,
-        });
-        let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"policy":policy,"turn_budget_minutes":budget.map(|b| b.minutes)});
+        let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"policy":policy});
         runtime.last_error = None;
         runtime.last_started_at = Some(started_at);
         runtime.directory = Some(cwd.to_string_lossy().into_owned());
@@ -1290,24 +1415,15 @@ impl Actor {
             token: token.clone(),
             helper: self.helper.clone(),
         };
-        self.active.insert(
-            session.id.clone(),
-            Active {
-                run: run.clone(),
-                token,
-                cancel: cancel.clone(),
-                messages: input.into_iter().map(|m| m.id).collect(),
-                output: String::new(),
-                reported: false,
-                budget,
-                over_budget: false,
-                steps: vec![],
-                omitted_steps: 0,
-            },
+        let active = Active::new(
+            run.clone(),
+            token,
+            cancel.clone(),
+            input.into_iter().map(|m| m.id).collect(),
+            started_at,
         );
-        if let Some(budget) = budget {
-            self.wake(budget.deadline);
-        }
+        self.wake(active.next_check_in);
+        self.active.insert(session.id.clone(), active);
         let _ = self.changed.try_send(());
         *self.turns.entry(session.project_id).or_default() += 1;
         let sender = self.sender.clone();
@@ -1368,23 +1484,18 @@ mod tests {
         let (mut actor, changes, step_changes) = idle_actor(host);
         actor
             .active
-            .insert(session.clone(), active_turn(&run, vec![], None));
+            .insert(session.clone(), active_turn(&run, vec![]));
         (home, actor, session, run, changes, step_changes)
     }
 
-    fn active_turn(run: &str, messages: Vec<String>, budget: Option<Budget>) -> Active {
-        Active {
-            run: run.into(),
-            token: String::new(),
-            cancel: Arc::new(AtomicBool::new(false)),
+    fn active_turn(run: &str, messages: Vec<String>) -> Active {
+        Active::new(
+            run.into(),
+            String::new(),
+            Arc::new(AtomicBool::new(false)),
             messages,
-            output: String::new(),
-            reported: false,
-            budget,
-            over_budget: false,
-            steps: vec![],
-            omitted_steps: 0,
-        }
+            now(),
+        )
     }
 
     fn idle_actor(host: Host) -> (Actor, Receiver<()>, Receiver<()>) {
@@ -1482,7 +1593,7 @@ mod tests {
     }
 
     fn finish(actor: &mut Actor, session: &Session, reported: bool, error: Option<&str>) {
-        let mut active = active_turn("run", vec![], None);
+        let mut active = active_turn("run", vec![]);
         active.reported = reported;
         actor.active.insert(session.id.clone(), active);
         actor
@@ -1536,7 +1647,7 @@ mod tests {
     #[test]
     fn shutdown_leaves_a_pending_removal_for_startup() {
         let (_home, mut actor, ticket, tester) = ticket_pending_removal();
-        let mut active = active_turn("run", vec![], None);
+        let mut active = active_turn("run", vec![]);
         active.reported = true;
         actor.active.insert(tester.id.clone(), active);
 
@@ -1882,168 +1993,372 @@ mod tests {
         assert!(actor.wake_at.is_none());
     }
 
+    /// A tester in a turn that started `started_at`, with one step under way.
+    fn tester_in_long_turn(started_at: i64) -> (tempfile::TempDir, Actor, Session, Session) {
+        let (home, mut actor, _, tester, coordinator) = ticket_in_turn();
+        let mut active = Active::new(
+            "run".into(),
+            String::new(),
+            Arc::new(AtomicBool::new(false)),
+            vec![],
+            started_at,
+        );
+        active.steps.push(Step {
+            run_id: "run".into(),
+            id: "test".into(),
+            parent_id: None,
+            kind: StepKind::Command,
+            state: StepState::Running,
+            title: "cargo test".into(),
+            note: None,
+            detail: None,
+            omitted: 0,
+            seq: 0,
+            revision: 1,
+            started_at,
+            finished_at: None,
+        });
+        actor.active.insert(tester.id.clone(), active);
+        (home, actor, tester, coordinator)
+    }
+
+    fn check_ins(actor: &Actor, parent: &Session) -> Vec<Message> {
+        actor
+            .host
+            .messages(&parent.id, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.id.starts_with(CHECK_IN))
+            .collect()
+    }
+
     #[test]
-    fn a_coordinator_turn_over_its_budget_stops_without_holding_its_project() {
-        let (_home, mut actor, parent, child) = actor_with_child();
-        let coordinator = actor.host.session(&parent).unwrap();
-        actor.host.set_live(&coordinator.project_id, true).unwrap();
-        let worker = actor
+    fn a_long_turn_checks_in_with_its_parent_every_half_hour_and_keeps_running() {
+        let started = now();
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(started);
+        let minutes = |m: i64| started + m * 60_000;
+
+        actor.check_in_long_turns(minutes(29));
+        assert!(check_ins(&actor, &coordinator).is_empty());
+        assert_eq!(actor.wake_at, Some(minutes(30)));
+
+        actor.check_in_long_turns(minutes(30));
+        let first = check_ins(&actor, &coordinator);
+        assert_eq!(first.len(), 1);
+        for expected in [
+            &format!("[check-in] {} on ticket \"Toolbar\"", tester.name),
+            "for 30 minutes",
+            "latest step: cargo test",
+            &format!("stop_turn with session_id {}", tester.id),
+        ] {
+            assert!(
+                first[0].body.contains(expected),
+                "{expected}\n{}",
+                first[0].body
+            );
+        }
+        assert_eq!(first[0].sender.as_deref(), Some(tester.id.as_str()));
+        assert_eq!(first[0].receipt, Receipt::Queued);
+
+        actor.check_in_long_turns(minutes(45));
+        assert_eq!(check_ins(&actor, &coordinator).len(), 1);
+        actor.check_in_long_turns(minutes(61));
+        let second = check_ins(&actor, &coordinator);
+        assert_eq!(second.len(), 2);
+        assert!(
+            second[1].body.contains("for 61 minutes"),
+            "{}",
+            second[1].body
+        );
+        assert!(!actor.active[&tester.id].cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_long_turn_without_a_parent_asks_the_human_once_at_a_time() {
+        let (_home, mut actor, session, _) = actor_with_turn();
+        let root = actor.host.session(&session).unwrap();
+        let started = actor.active[&session].started_at;
+        let open = |actor: &Actor| {
+            actor
+                .host
+                .open_attention(&root.project_id)
+                .unwrap()
+                .into_iter()
+                .filter(|a| a.operation_id.starts_with(CHECK_IN))
+                .collect::<Vec<_>>()
+        };
+
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+        let first = open(&actor);
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0].prompt.contains("for 30 minutes"),
+            "{}",
+            first[0].prompt
+        );
+        actor.check_in_long_turns(started + 2 * CHECK_IN_MS);
+        let second = open(&actor);
+        assert_eq!(second.len(), 1, "the newer check-in replaces the older");
+        assert!(second[0].prompt.contains("for 60 minutes"));
+
+        let run = actor.active[&session].run.clone();
+        actor
+            .provider_event(
+                &session,
+                &run,
+                ProviderEvent::Finished {
+                    error: None,
+                    usage: Value::Null,
+                    cancelled: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            open(&actor).is_empty(),
+            "a finished turn clears its check-in"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_long_turn_winding_down_arms_no_wake_in_the_past() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        let mut active = active_turn(&run, vec![]);
+        active.started_at = now() - CHECK_IN_MS - 60_000;
+        active.next_check_in = active.started_at + CHECK_IN_MS;
+        active.cancel.store(true, Ordering::Relaxed);
+        actor.active.insert(session, active);
+
+        actor.check_in_long_turns(now());
+        assert_eq!(actor.wake_at, None);
+    }
+
+    #[test]
+    fn a_host_restart_clears_check_ins_for_turns_it_cut_off() {
+        let (_home, mut actor, session, _) = actor_with_turn();
+        let started = actor.active[&session].started_at;
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+        let project = actor.host.session(&session).unwrap().project_id;
+        assert_eq!(actor.host.open_attention(&project).unwrap().len(), 1);
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert!(actor.host.open_attention(&project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn check_in_cleanup_leaves_human_questions_alone() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        let project = actor.host.session(&session).unwrap().project_id;
+        let ask = |request_id: &str| json!({"request_id":request_id,"question":"Deploy?"});
+        actor
+            .host
+            .agent_tool(&session, "ask_user", ask("check-in-deploy"))
+            .unwrap();
+        let refused = actor
+            .host
+            .agent_tool(&session, "ask_user", ask("check-in:deploy"))
+            .unwrap_err();
+        assert!(refused.to_string().contains("reserved"), "{refused}");
+        let command = Command::RequestAttention {
+            session_id: session.clone(),
+            host: "local".into(),
+            operation_id: "check-in:deploy".into(),
+            prompt: "Deploy?".into(),
+        };
+        assert!(actor.host.execute(command).is_err());
+        let open = |actor: &Actor| {
+            actor
+                .host
+                .open_attention(&project)
+                .unwrap()
+                .into_iter()
+                .map(|a| a.operation_id)
+                .collect::<Vec<_>>()
+        };
+
+        let started = actor.active[&session].started_at;
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+        assert_eq!(open(&actor).len(), 2);
+        actor
+            .provider_event(
+                &session,
+                &run,
+                ProviderEvent::Finished {
+                    error: None,
+                    usage: Value::Null,
+                    cancelled: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(open(&actor), ["check-in-deploy"]);
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert_eq!(open(&actor), ["check-in-deploy"]);
+    }
+
+    #[test]
+    fn stop_turn_refuses_a_child_with_no_running_turn() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        actor.active.remove(&tester.id);
+        let args = json!({"session_id":tester.id,"reason":"Stop"});
+        let error = actor.stop_turn(&coordinator.id, &args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{} has no running turn", tester.name)
+        );
+    }
+
+    #[test]
+    fn only_the_direct_parent_can_stop_a_turn() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let sibling = actor
             .host
             .create_session(
                 &coordinator.project_id,
-                &child,
+                &coordinator.id,
                 None,
-                "Worker",
+                "Sibling",
                 Role::Implementer,
                 Provider::Codex,
             )
             .unwrap();
-        assert_eq!(
-            actor.host.policy(Role::Implementer).unwrap().turn_budget(),
-            None,
-            "workers have no budget by default"
-        );
-        actor
-            .active
-            .insert(worker.id.clone(), active_turn("work", vec![], None));
-        let check = actor.host.send("check", None, &parent, "Check").unwrap();
-        let input = actor.due_input(&parent).unwrap().unwrap();
-        let policy = actor.host.policy(coordinator.role).unwrap();
-        assert_eq!(policy.turn_budget(), Some(10));
-        let runtime = actor.host.session_runtime(&parent).unwrap();
-        actor
-            .record_turn_start(
-                "slow",
-                &coordinator,
-                &input,
-                &json!({"turn_budget_minutes":10}),
-                &runtime,
-            )
-            .unwrap();
-        // Ten minutes have passed since the turn started.
-        let budget = Budget {
-            minutes: 10,
-            deadline: now() - 1,
-        };
-        actor.active.insert(
-            parent.clone(),
-            active_turn("slow", vec![check.id.clone()], Some(budget)),
-        );
+        let grandparent = coordinator.parent_id.clone().unwrap();
+        let args = json!({"session_id":tester.id,"reason":"Wrong approach"});
+        for caller in [grandparent.as_str(), &sibling.id, &tester.id] {
+            let error = actor.stop_turn(caller, &args).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                format!("Only {}'s direct parent can stop its turn", tester.name)
+            );
+        }
+        assert!(!actor.active[&tester.id].cancel.load(Ordering::Relaxed));
 
-        actor.enforce_budgets();
-        assert!(actor.active[&parent].cancel.load(Ordering::Relaxed));
-        assert!(!actor.active[&worker.id].cancel.load(Ordering::Relaxed));
-        let error = Some(provider::Cancelled.to_string());
+        // The parent calls the tool from its own turn.
+        let mut turn = active_turn("coordinating", vec![]);
+        turn.token = "parent-token".into();
+        actor.active.insert(coordinator.id.clone(), turn);
+        let (reply, replies) = async_channel::bounded(1);
+        actor.handle(Event::Tool {
+            token: "parent-token".into(),
+            name: "stop_turn".into(),
+            args,
+            reply,
+        });
+        assert_eq!(replies.try_recv().unwrap().unwrap()["stopping"], true);
+        assert!(actor.active[&tester.id].cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_turn_its_parent_stopped_completes_its_input_and_tells_the_next_turn_why() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let input = actor
+            .host
+            .send("work", Some(&coordinator.id), &tester.id, "Work")
+            .unwrap();
+        actor.active.get_mut(&tester.id).unwrap().messages = vec![input.id.clone()];
+        let args = json!({"session_id":tester.id,"reason":"Use the staging data instead"});
+        actor.stop_turn(&coordinator.id, &args).unwrap();
         actor
             .provider_event(
-                &parent,
-                "slow",
+                &tester.id,
+                "run",
                 ProviderEvent::Finished {
-                    error,
+                    error: Some(provider::Cancelled.to_string()),
                     usage: Value::Null,
                     cancelled: true,
                 },
             )
             .unwrap();
 
-        let chat = actor.host.messages(&parent, None, 100).unwrap();
+        let (outcome, reason): (String, String) = actor
+            .host
+            .db
+            .query_row(
+                "SELECT outcome,json_extract(detail,'$.stop_reason') FROM provider_runs WHERE id='run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(
-            chat.iter().find(|m| m.id == "check").unwrap().receipt,
+            (outcome.as_str(), reason.as_str()),
+            ("stopped_by_parent", "Use the staging data instead")
+        );
+        assert_eq!(
+            actor.host.message("work").unwrap().receipt,
             Receipt::Completed
         );
-        let notice = chat.iter().find(|m| m.id == "output:budget:slow").unwrap();
-        assert!(
-            notice
-                .body
-                .starts_with("Stopped at its 10-minute turn budget"),
-            "{}",
-            notice.body
-        );
-        let activity = actor
-            .host
-            .activity(&coordinator.project_id, None, 100)
-            .unwrap();
-        assert!(
-            activity
-                .iter()
-                .any(|a| a.kind == "turn_over_budget" && a.detail.starts_with("slow;"))
-        );
-        assert_eq!(actor.host.session(&parent).unwrap().status, Status::Ready);
         assert_eq!(
-            actor.host.session_runtime(&parent).unwrap().last_error,
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Ready
+        );
+        assert_eq!(
+            actor.host.session_runtime(&tester.id).unwrap().last_error,
             None
         );
-
-        actor.host.send("next", None, &parent, "Next").unwrap();
-        let next = actor
-            .due_input(&parent)
-            .unwrap()
-            .expect("the next message runs");
-        assert_eq!(next[0].id, "next");
-        let prompt = actor.prompt(&coordinator, &next).unwrap();
+        let parent_inbox = actor.host.messages(&coordinator.id, None, 100).unwrap();
         assert!(
-            prompt.contains("previous turn slow") && prompt.contains("10-minute turn budget"),
-            "{prompt}"
+            !parent_inbox
+                .iter()
+                .any(|m| m.id.starts_with("turn-result:")),
+            "the parent that stopped it is not told again"
         );
+
+        actor
+            .host
+            .send("next", Some(&coordinator.id), &tester.id, "Next")
+            .unwrap();
+        let next = vec![actor.host.message("next").unwrap()];
+        let prompt = actor.prompt(&tester, &next).unwrap();
+        for expected in [
+            "Your parent stopped your previous turn run",
+            "Reason: Use the staging data instead",
+            "not retried",
+        ] {
+            assert!(prompt.contains(expected), "{expected}\n{prompt}");
+        }
     }
 
     #[test]
-    fn a_real_failure_racing_the_budget_keeps_its_error_and_held_input() {
-        // A crash, and a provider failure whose text happens to match our own cancellation.
+    fn a_real_failure_racing_a_parent_stop_keeps_its_error_and_held_input() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        actor
+            .host
+            .send("work", Some(&coordinator.id), &tester.id, "Work")
+            .unwrap();
+        actor.active.get_mut(&tester.id).unwrap().messages = vec!["work".into()];
+        let args = json!({"session_id":tester.id,"reason":"Stop"});
+        actor.stop_turn(&coordinator.id, &args).unwrap();
+        // The provider failed on its own before it saw the cancel flag.
         let crash = "Provider exited without a successful terminal result (exit status: 1)";
-        for error in [crash.to_owned(), provider::Cancelled.to_string()] {
-            let (_home, mut actor, parent, _child) = actor_with_child();
-            let coordinator = actor.host.session(&parent).unwrap();
-            let check = actor.host.send("check", None, &parent, "Check").unwrap();
-            let input = actor.due_input(&parent).unwrap().unwrap();
-            let runtime = actor.host.session_runtime(&parent).unwrap();
+        actor
+            .provider_event(
+                &tester.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: Some(crash.into()),
+                    usage: Value::Null,
+                    cancelled: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(actor.host.message("work").unwrap().receipt, Receipt::Held);
+        assert_eq!(
             actor
-                .record_turn_start("racing", &coordinator, &input, &json!({}), &runtime)
-                .unwrap();
-            let budget = Budget {
-                minutes: 10,
-                deadline: now() - 1,
-            };
-            actor.active.insert(
-                parent.clone(),
-                active_turn("racing", vec![check.id.clone()], Some(budget)),
-            );
-            actor.enforce_budgets();
-            // The provider failed on its own before it saw the cancel flag.
-            actor
-                .provider_event(
-                    &parent,
-                    "racing",
-                    ProviderEvent::Finished {
-                        error: Some(error.clone()),
-                        usage: Value::Null,
-                        cancelled: false,
-                    },
-                )
-                .unwrap();
-            let chat = actor.host.messages(&parent, None, 100).unwrap();
-            assert_eq!(
-                chat.iter().find(|m| m.id == "check").unwrap().receipt,
-                Receipt::Held
-            );
-            assert!(!chat.iter().any(|m| m.id == "output:budget:racing"));
-            let runtime = actor.host.session_runtime(&parent).unwrap();
-            assert_eq!(runtime.last_error.as_deref(), Some(error.as_str()));
-            assert_eq!(
-                actor.host.session(&parent).unwrap().status,
-                Status::Disconnected
-            );
-            let outcome: String = actor
                 .host
-                .db
-                .query_row(
-                    "SELECT outcome FROM provider_runs WHERE id='racing'",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(outcome, "failed");
-        }
+                .session_runtime(&tester.id)
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some(crash)
+        );
+        let outcome: String = actor
+            .host
+            .db
+            .query_row(
+                "SELECT outcome FROM provider_runs WHERE id='run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome, "failed");
     }
 
     fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {

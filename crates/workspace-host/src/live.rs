@@ -604,6 +604,7 @@ impl Host {
                     session.role == Role::ProjectOrchestrator,
                     "Escalate to your coordinator first"
                 );
+                ensure_unreserved(string("request_id")?)?;
                 let options = match args.get("options") {
                     Some(options) => serde_json::from_value(options.clone())
                         .context("options must be a list of strings")?,
