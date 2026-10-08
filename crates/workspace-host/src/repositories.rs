@@ -97,13 +97,7 @@ pub(crate) fn migrate_to_workspace(db: &Connection) -> Result<()> {
 fn folder_path(value: &str) -> Result<PathBuf> {
     let value = value.trim().strip_suffix("/*").unwrap_or(value.trim());
     text(value, 4096)?;
-    let path = if value == "~" || value.starts_with("~/") {
-        PathBuf::from(std::env::var_os("HOME").context("Home directory unavailable")?)
-            .join(value.strip_prefix("~/").unwrap_or(""))
-    } else {
-        PathBuf::from(value)
-    };
-    fs::canonicalize(path).context("Folder does not exist")
+    fs::canonicalize(settings::expand_home(value)?).context("Folder does not exist")
 }
 
 fn candidate(path: &Path, known: &BTreeSet<String>) -> Result<RepositoryCandidate> {

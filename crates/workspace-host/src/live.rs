@@ -108,10 +108,9 @@ impl Host {
                 .as_deref()
                 .context("Missing repository")?,
         )?;
-        let id = new_id();
-        let path = self.home.join("worktrees").join(&id);
+        let project = self.project(&coordinator.project_id)?;
+        let (path, branch) = self.new_ticket_place(&project, &repo, title)?;
         fs::create_dir_all(path.parent().unwrap())?;
-        let branch = format!("codex/workspace-{}", &id[..12]);
         runtime::git_output(
             Path::new(&repo.path),
             &[
@@ -124,7 +123,7 @@ impl Host {
             ],
         )?;
         let ticket = Ticket {
-            id,
+            id: new_id(),
             coordinator_id: owner.into(),
             title: title.into(),
             brief: brief.into(),

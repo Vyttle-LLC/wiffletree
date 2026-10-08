@@ -298,8 +298,9 @@ impl Workspace {
     }
 
     fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        self.preferences.minimize_activity = !self.preferences.minimize_activity;
-        if let Err(error) = self.preferences.save() {
+        let preferences = cx.global_mut::<Preferences>();
+        preferences.minimize_activity = !preferences.minimize_activity;
+        if let Err(error) = preferences.save() {
             eprintln!("Saving preferences: {error}");
         }
         // The trailing row changed height; the list measures it again.

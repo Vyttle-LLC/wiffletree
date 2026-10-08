@@ -14,14 +14,14 @@ use ui::{
 const INDENT: f32 = 14.;
 
 impl Appearance {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Light => "Light",
             Self::Dark => "Dark",
         }
     }
-    fn icon(self) -> &'static str {
+    pub(super) fn icon(self) -> &'static str {
         match self {
             Self::System => "monitor",
             Self::Light => "sun",
@@ -32,7 +32,7 @@ impl Appearance {
 
 impl Workspace {
     pub(super) fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let dark = self.is_dark(cx);
+        let dark = is_dark(cx);
         let roots = || {
             self.snapshot
                 .iter()
@@ -324,24 +324,18 @@ impl Workspace {
     }
 
     fn appearance_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.appearance;
-        let weak = cx.weak_entity();
+        let current = cx.global::<Preferences>().appearance;
         button("appearance")
             .ghost()
             .icon(icon(current.icon()))
             .tooltip("Appearance")
             .dropdown_menu(move |mut menu, _, _| {
                 for appearance in [Appearance::System, Appearance::Light, Appearance::Dark] {
-                    let weak = weak.clone();
                     menu = menu.item(
                         PopupMenuItem::new(appearance.label())
                             .icon(icon(appearance.icon()))
                             .checked(appearance == current)
-                            .on_click(move |_, window, cx| {
-                                let _ = weak.update(cx, |view, cx| {
-                                    view.set_appearance(appearance, window, cx)
-                                });
-                            }),
+                            .on_click(move |_, _, cx| set_appearance(appearance, cx)),
                     );
                 }
                 menu

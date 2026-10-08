@@ -29,6 +29,8 @@ fn fixture() -> (tempfile::TempDir, tempfile::TempDir, Host, Session, Session) {
         );
     }
     let mut host = Host::open(home.path()).unwrap();
+    host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+        .unwrap();
     let project = host.create_project("Feature").unwrap();
     let root = host.sessions().unwrap().remove(0);
     let attachment = host

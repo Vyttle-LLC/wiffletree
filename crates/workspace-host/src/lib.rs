@@ -8,6 +8,7 @@ pub mod provider;
 mod repositories;
 pub mod runtime;
 pub mod service;
+mod settings;
 mod steps;
 mod stream;
 mod telemetry;
@@ -210,6 +211,8 @@ impl Host {
             brain: None,
             turn_limit: 4,
             repositories: None,
+            home: Some(self.new_project_home(name)?),
+            slug: None,
         };
         let session = Session {
             id: new_id(),
@@ -1014,6 +1017,10 @@ impl Host {
                 session_id,
                 run_ids,
             } => serde_json::to_value(self.run_summaries(&session_id, &run_ids)?)?,
+            Command::Settings => serde_json::to_value(self.settings())?,
+            Command::SetWorkspacesDir { path } => {
+                serde_json::to_value(self.set_workspaces_dir(&path)?)?
+            }
         })
     }
 }
