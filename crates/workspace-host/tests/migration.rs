@@ -494,3 +494,43 @@ fn an_implementer_mid_turn_at_upgrade_resumes_in_its_conversation_and_reports_to
         .unwrap();
     assert_eq!(report.recipient, f.main.id);
 }
+
+#[test]
+fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
+    let f = fixture();
+    raw(&f.home)
+        .execute(
+            "UPDATE tickets SET data=json_set(data,'$.state','passed') WHERE id=?1",
+            [&f.open.id],
+        )
+        .unwrap();
+    let mut host = Host::open(&f.home).unwrap();
+    let accept = json!({"ticket_id":f.open.id});
+    let refused = host
+        .agent_tool(&f.main.id, "accept_ticket", accept.clone())
+        .unwrap_err();
+    assert!(refused.to_string().contains("verify_ticket"), "{refused}");
+
+    let cycle: Ticket = serde_json::from_value(
+        host.agent_tool(&f.main.id, "verify_ticket", accept.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cycle.state, "verifying");
+    let run = cycle.verification.unwrap().rounds[0].verifiers[0].clone();
+    host.advance_receipt(&run.message_id, Receipt::Delivered)
+        .unwrap();
+    host.agent_tool(
+        &run.session_id,
+        "report",
+        json!({"message_id":"checked","kind":"passed","body":"Still green"}),
+    )
+    .unwrap();
+
+    let accepted: Ticket = serde_json::from_value(
+        host.agent_tool(&f.main.id, "accept_ticket", accept)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(accepted.state, "accepted");
+}

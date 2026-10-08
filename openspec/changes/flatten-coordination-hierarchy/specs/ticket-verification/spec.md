@@ -12,7 +12,7 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers 
 - **THEN** the setting is rejected and the previous setting stays in effect
 
 ### Requirement: One call starts every verifier
-`verify_ticket` with a `ticket_id` SHALL start a verification cycle: it SHALL record the ticket worktree's HEAD commit as the round's pinned commit, assign or resume one agent per configured verifier on the ticket, send each one message naming the pinned commit, and set the ticket's state to `verifying`. A verifier with the same role and focus on the ticket SHALL be the same session in every round. `verify_ticket` SHALL refuse when the ticket's state is not `ready_for_testing`, when its worktree holds uncommitted or untracked files, when a cycle is already running, or when the number of verifiers exceeds the worker turns that can run at once, which is the smaller of the project's turn limit less the one turn reserved for coordinators and the host-wide worker turn limit, naming the reason.
+`verify_ticket` with a `ticket_id` SHALL start a verification cycle: it SHALL record the ticket worktree's HEAD commit as the round's pinned commit, assign or resume one agent per configured verifier on the ticket, send each one message naming the pinned commit, and set the ticket's state to `verifying`. A verifier with the same role and focus on the ticket SHALL be the same session in every round. `verify_ticket` SHALL refuse when the ticket's state is not `ready_for_testing`, except a ticket without any verification record whose state is `passed` or `failed` (one migrated from a repository coordinator), when its worktree holds uncommitted or untracked files, when a cycle is already running, or when the number of verifiers exceeds the worker turns that can run at once, which is the smaller of the project's turn limit less the one turn reserved for coordinators and the host-wide worker turn limit, naming the reason.
 
 #### Scenario: Three verifiers from one call
 - **WHEN** the configured verifiers are a Claude tester, a Codex tester and a style reviewer, and the project coordinator calls `verify_ticket` once on a ticket that is `ready_for_testing`
@@ -50,6 +50,18 @@ While a verification cycle is running, the ticket's state SHALL change only when
 - **WHEN** a verifier reports `failed` after the implementer's `blocked` report ended the cycle
 - **THEN** the verdict is recorded on its round and reaches the project coordinator in its next batch
 - **AND** the ticket stays `blocked` and the cycle's outcome stays `blocked`
+
+#### Scenario: Verdict answering an earlier cycle
+- **WHEN** a verifier's turn took cycle 1's input, cycle 2 starts while that turn runs, and the turn then reports `passed` before the verifier has taken cycle 2's input
+- **THEN** the verdict is stored quietly and cycle 2's round keeps that verifier pending, with the ticket `verifying`
+
+#### Scenario: Verdict after the cycle passed
+- **WHEN** a verifier reports again after its cycle passed
+- **THEN** the report reaches the project coordinator with its next turn without waking it, and the ticket and cycle are unchanged
+
+#### Scenario: Migrated passed ticket
+- **WHEN** a ticket migrated in state `passed` has no verification record
+- **THEN** `accept_ticket` refuses it and `verify_ticket` starts its first cycle
 
 #### Scenario: Next round starts verifying again
 - **WHEN** the implementer reports `ready_for_testing` after a failed round 1

@@ -69,7 +69,7 @@ It is stored in `tickets.data`, which needs no new table. `max_rounds` is copied
 
 **Start.** `verify_ticket` checks, in order:
 1. Ownership.
-2. State is `ready_for_testing`.
+2. State is `ready_for_testing`, or, for a ticket migrated without a verification record, `passed` or `failed` (decision 7).
 3. No running cycle.
 4. `git status --porcelain` in the worktree is empty.
 5. Verifier count ≤ min(`turn_limit - 1`, host worker limit). `turn_limit - 1` is the worker share of the project's turns (`service.rs` reserves one turn for coordinators). The host worker limit is the host-wide cap on active turns that workers respect, today the literal `6` in `service.rs::schedule`; this change extracts it as the named constant `HOST_WORKER_TURNS`, and both the scheduler and this check use it.
@@ -88,6 +88,8 @@ The messages are queued in one transaction, so a single scheduling pass sees the
 While `verification.outcome == running`, the generic rule in `report` that sets `ticket.state` to the report's kind (`live.rs`) is bypassed for the ticket's verifiers and implementer. The cycle alone sets the state: `verifying` when a round starts (round 1 and every re-run round) and `passed`, `failed` or `blocked` when a round ends. A verifier's early `passed` therefore leaves the ticket `verifying`, and `accept_ticket`, which requires `passed`, refuses mid-round.
 
 Only verifier verdicts and the implementer's `ready_for_testing` are routed by the cycle. Any other non-progress implementer report (for example `blocked` while fixing) ends the cycle at once: `outcome = blocked`, ticket `blocked`, and the report wakes the coordinator immediately. A verifier verdict that arrives after its cycle has ended, for example after the implementer reported `blocked`, is recorded on its round and stored for the coordinator's next batch, but it changes neither the ticket's state nor the cycle's outcome.
+
+**Which input a verdict answers.** Verifier sessions are reused across rounds and cycles, so a verdict is tied to the round input it answers: the verifier's latest `verify:` message on the ticket that a turn has taken (receipt delivered, acknowledged, completed or held). A verdict counts for the current round only when that message is the verifier's message in the current round and its result is still pending. Every other verdict from one of the ticket's verifiers is late: for example a turn that took cycle 1's input reporting after cycle 2 started, or a second verdict after the cycle passed. A late verdict is stored quietly for the coordinator's next turn and changes neither the ticket's state nor any cycle.
 
 - **Verifier `passed`, `failed` or `blocked`.** The host records the result on the current round, after the read-only check in decision 6. The message to the coordinator is still stored, but it is *quiet*: it rides along with the coordinator's next turn and never starts one.
 
@@ -121,7 +123,7 @@ This runs in `Host::open` after the existing migrations and before `recover` sch
 
 The version guard `ensure!(version <= 5)` becomes `<= 6`, so an older app refuses a migrated store instead of misreading it. `change_archived(false)` refuses `task_orchestrator` sessions, so they stay read-only history. Archived repository coordinators are migrated too, so their tickets show under the coordinator's archived history.
 
-**In-flight tickets** (decided, Q3): migrate immediately. At host start no turn is running. Interrupted turns already come back held for Retry or Skip (`recover_unfinished_turns`), worktrees and branches are untouched, and agents keep their provider conversations. Their next report simply reaches M. Unread instructions from M to R are cancelled and listed in M's notice; they are not re-sent to any agent, so M decides what still applies.
+**In-flight tickets** (decided, Q3): migrate immediately. At host start no turn is running. Interrupted turns already come back held for Retry or Skip (`recover_unfinished_turns`), worktrees and branches are untouched, and agents keep their provider conversations. Their next report simply reaches M. A ticket migrated as `passed` or `failed` has no verification record, so `accept_ticket` refuses it; `verify_ticket` accepts such a ticket (after the ownership and clean-worktree checks) and starts its first cycle. There is no bypass in `accept_ticket`. Unread instructions from M to R are cancelled and listed in M's notice; they are not re-sent to any agent, so M decides what still applies.
 
 ### 8. Leftover worktree cleanup
 **Identification** (`Command::LeftoverWorktrees`, read-only). A ticket is a leftover when its state is `accepted` or `closed`, or all its agents are archived, `Path::new(&ticket.worktree).exists()`, and it has no `pending_worktree_removals` row. The listing also scans `git worktree list --porcelain` of every workspace repository and adds worktrees under `<workspaces_dir>/tasks/` on `refs/heads/wiffletree/*` that no ticket records, as `untracked_by_wiffletree`.

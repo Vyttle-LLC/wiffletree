@@ -281,6 +281,9 @@ mod tests {
         assert!(verification_lines(&host.ticket(&ticket.id).unwrap()).is_empty());
         let verifying = host.verify_ticket(&ticket.id).unwrap();
         let round = &verifying.verification.as_ref().unwrap().rounds[0];
+        // The verifier's turn takes its round input before it reports.
+        host.advance_receipt(&round.verifiers[0].message_id, Receipt::Delivered)
+            .unwrap();
         host.agent_tool(
             &round.verifiers[0].session_id,
             "report",

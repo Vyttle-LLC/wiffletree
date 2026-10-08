@@ -80,6 +80,16 @@ fn three_verifiers() -> Vec<VerifierConfig> {
     ]
 }
 
+/// What a turn does first: takes every queued message as its input.
+fn take_input(host: &mut Host, session: &str) {
+    for message in host.messages(session, None, 100).unwrap() {
+        if message.receipt == Receipt::Queued {
+            host.advance_receipt(&message.id, Receipt::Delivered)
+                .unwrap();
+        }
+    }
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     host: Host,
@@ -147,7 +157,9 @@ impl Fixture {
         git(self.worktree(), &["commit", "-q", "-m", content]);
         git(self.worktree(), &["rev-parse", "HEAD"])
     }
+    /// Reports from within `session`'s turn, which first took its queued input.
     fn report(&mut self, session: &str, id: &str, kind: &str) -> anyhow::Result<Value> {
+        take_input(&mut self.host, session);
         self.host.agent_tool(
             session,
             "report",
@@ -772,4 +784,65 @@ fn without_a_saved_setting_one_tester_verifies_with_a_cap_of_two() {
     assert_eq!(settings.verifiers.len(), 1);
     assert_eq!(settings.verifiers[0].role, Role::Tester);
     assert_eq!(settings.verifiers[0].provider, None);
+}
+
+#[test]
+fn a_verdict_answering_an_earlier_cycle_cannot_pass_the_next_one() {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 2);
+    f.verify().unwrap();
+    let codex = f.verifier("Codex");
+    // Its turn takes cycle 1's input, then the implementer ends that cycle.
+    take_input(&mut f.host, &codex);
+    f.report(&f.implementer.id.clone(), "stuck", "blocked")
+        .unwrap();
+    f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
+        .unwrap();
+    f.coordinator_reads();
+    let cycle_two = f.verify().unwrap().verification.unwrap();
+    assert_eq!(cycle_two.cycle, 2);
+
+    // The cycle-1 turn now passes, while cycle 2's input still waits in its queue.
+    f.host
+        .agent_tool(
+            &codex,
+            "report",
+            json!({"message_id":"late-pass","kind":"passed","body":"Green on the old commit"}),
+        )
+        .unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "verifying");
+    let verification = ticket.verification.unwrap();
+    assert_eq!(verification.outcome, VerificationOutcome::Running);
+    assert_eq!(
+        verification.rounds[0].verifiers[0].result,
+        VerifierResult::Pending
+    );
+    assert!(f.waking(&f.coordinator.id).is_empty());
+
+    // Its turn on cycle 2's input is the one that counts.
+    f.report(&codex, "pass-2", "passed").unwrap();
+    assert_eq!(f.current().state, "passed");
+}
+
+#[test]
+fn a_verdict_after_the_cycle_passed_changes_nothing_and_wakes_no_one() {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 2);
+    f.verify().unwrap();
+    let codex = f.verifier("Codex");
+    f.report(&codex, "pass", "passed").unwrap();
+    f.coordinator_reads();
+    let passed = f.current().verification;
+
+    f.report(&codex, "second-thoughts", "failed").unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.verification, passed);
+    assert!(f.waking(&f.coordinator.id).is_empty());
+    assert!(
+        f.quiet_ids(&f.coordinator.id)
+            .contains(&format!("report:{codex}:second-thoughts")),
+        "it is stored for the coordinator's next turn"
+    );
 }

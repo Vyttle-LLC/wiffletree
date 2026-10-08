@@ -58,6 +58,16 @@ fn implementer(host: &mut Host, ticket: &Ticket) -> Session {
 }
 
 /// Reports the implementer ready, verifies with the default single tester and passes it.
+/// What a turn does first: takes every queued message as its input.
+fn take_input(host: &mut Host, session: &str) {
+    for message in host.messages(session, None, 100).unwrap() {
+        if message.receipt == Receipt::Queued {
+            host.advance_receipt(&message.id, Receipt::Delivered)
+                .unwrap();
+        }
+    }
+}
+
 fn verified(host: &mut Host, ticket: &Ticket, implementer: &Session) -> Session {
     host.agent_tool(
         &implementer.id,
@@ -77,6 +87,7 @@ fn verified(host: &mut Host, ticket: &Ticket, implementer: &Session) -> Session 
     let verifier = host
         .session(&cycle.verification.unwrap().rounds[0].verifiers[0].session_id)
         .unwrap();
+    take_input(host, &verifier.id);
     host.agent_tool(
         &verifier.id,
         "report",
@@ -271,6 +282,7 @@ fn ticket_agents_are_scoped_and_reports_are_immediate_and_idempotent() {
     )
     .unwrap();
     let verifier = &cycle.verification.unwrap().rounds[0].verifiers[0].session_id;
+    take_input(&mut host, verifier);
     host.agent_tool(
         verifier,
         "report",

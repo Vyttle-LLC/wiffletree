@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
-use workspace_core::{Provider, Role, Session, Status, Ticket};
+use workspace_core::{Provider, Receipt, Role, Session, Status, Ticket};
 use workspace_host::Host;
 
 fn git(path: &Path, args: &[&str]) -> std::process::Output {
@@ -104,7 +104,18 @@ fn verifying(host: &mut Host, ticket: &Ticket) -> Session {
     host.session(&verifier.session_id).unwrap()
 }
 
+/// What a turn does first: takes every queued message as its input.
+fn take_input(host: &mut Host, session: &str) {
+    for message in host.messages(session, None, 100).unwrap() {
+        if message.receipt == Receipt::Queued {
+            host.advance_receipt(&message.id, Receipt::Delivered)
+                .unwrap();
+        }
+    }
+}
+
 fn pass(host: &mut Host, verifier: &Session) {
+    take_input(host, &verifier.id);
     host.agent_tool(
         &verifier.id,
         "report",

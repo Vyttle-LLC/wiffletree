@@ -21,26 +21,41 @@ enum Routing {
     Plain,
     /// A cycle is running but does not route this report; it wakes the coordinator as usual.
     Unrouted,
-    /// A verifier's result for its round, recorded even after the cycle ended.
+    /// A verifier's result for the round input it last took, recorded even after the cycle ended.
     Verdict,
+    /// Any other verdict from one of the cycle's verifiers, such as one answering an earlier
+    /// cycle's input: stored quietly, changing neither the ticket nor the cycle.
+    Late,
     /// The implementer is ready again after a failed round.
     Ready,
     /// Any other implementer report ends the cycle as blocked.
     Ends,
 }
 
-fn routing(ticket: &Ticket, session: &Session, kind: &str) -> Routing {
+/// `answered` is the round input the reporter last took: its latest consumed `verify:` message.
+fn routing(ticket: &Ticket, session: &Session, kind: &str, answered: Option<&str>) -> Routing {
     let Some(verification) = &ticket.verification else {
         return Routing::Plain;
     };
-    let pending = verification.current_round().is_some_and(|round| {
-        round
-            .verifiers
-            .iter()
-            .any(|v| v.session_id == session.id && v.result == VerifierResult::Pending)
-    });
-    if pending && matches!(kind, "passed" | "failed" | "blocked") {
-        return Routing::Verdict;
+    let verifier = verification
+        .rounds
+        .iter()
+        .flat_map(|r| &r.verifiers)
+        .any(|v| v.session_id == session.id);
+    if verifier && matches!(kind, "passed" | "failed" | "blocked") {
+        // Sessions are reused across cycles, so a verdict counts only for the input it answers.
+        let current = verification.current_round().is_some_and(|round| {
+            round.verifiers.iter().any(|v| {
+                v.session_id == session.id
+                    && v.result == VerifierResult::Pending
+                    && Some(v.message_id.as_str()) == answered
+            })
+        });
+        return if current {
+            Routing::Verdict
+        } else {
+            Routing::Late
+        };
     }
     if verification.outcome != VerificationOutcome::Running {
         return Routing::Plain;
@@ -82,8 +97,11 @@ impl Host {
         if let Some(cycle) = ticket.running_cycle() {
             bail!("Verification cycle {} is already running", cycle.cycle);
         }
+        // A ticket migrated in a finished state has no cycle to accept against yet.
+        let migrated =
+            ticket.verification.is_none() && matches!(ticket.state.as_str(), "passed" | "failed");
         ensure!(
-            ticket.state == "ready_for_testing",
+            ticket.state == "ready_for_testing" || migrated,
             "Ticket is {}; verify it once its implementer reports ready_for_testing",
             ticket.state
         );
@@ -249,7 +267,10 @@ impl Host {
             .map(|id| self.ticket(&id))
             .transpose()?;
         let routing = match &ticket {
-            Some(ticket) if kind != "progress" => routing(ticket, session, kind),
+            Some(ticket) if kind != "progress" => {
+                let answered = self.answered_round(ticket, &session.id)?;
+                routing(ticket, session, kind, answered.as_deref())
+            }
             _ => Routing::Plain,
         };
         if let (Routing::Ready, Some(ticket)) = (&routing, &ticket) {
@@ -264,7 +285,7 @@ impl Host {
         }
         self.atomically(|host| {
             let message = match routing {
-                Routing::Verdict | Routing::Ready => {
+                Routing::Verdict | Routing::Late | Routing::Ready => {
                     host.send_quietly(&report_id, Some(&session.id), &parent, &content)?
                 }
                 _ => host.send(&report_id, Some(&session.id), &parent, &content)?,
@@ -287,7 +308,7 @@ impl Host {
                         ticket.state = kind.into();
                         host.save_ticket(&ticket)?;
                     }
-                    Routing::Plain | Routing::Unrouted => {}
+                    Routing::Plain | Routing::Unrouted | Routing::Late => {}
                     Routing::Verdict => {
                         host.record_verdict(ticket, &session.id, kind, &report_id)?
                     }
@@ -310,6 +331,17 @@ impl Host {
             )?;
             Ok(serde_json::to_value(message)?)
         })
+    }
+    /// The verifier's latest `verify:` message on this ticket that a turn has taken.
+    fn answered_round(&self, ticket: &Ticket, session: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT id FROM messages WHERE recipient=?1 AND substr(id,1,length(?2))=?2 AND receipt IN ('delivered','acknowledged','completed','held') ORDER BY sequence DESC LIMIT 1",
+                params![session, format!("verify:{}:", ticket.id)],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
     /// Records a verifier's result on its round, failing a pass or failure that changed the
     /// worktree. Ends the round once nobody is pending, unless the cycle already ended.
