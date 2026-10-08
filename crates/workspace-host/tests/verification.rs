@@ -194,6 +194,9 @@ impl Fixture {
             .unwrap()
             .session_id
     }
+    fn archived(&self, session: &str) -> bool {
+        self.host.session(session).unwrap().archived
+    }
     fn round(&self) -> VerificationRound {
         self.current()
             .verification
@@ -874,6 +877,16 @@ fn a_verdict_answering_an_earlier_cycle_cannot_pass_the_next_one() {
     f.coordinator_reads();
     let cycle_two = f.verify().unwrap().verification.unwrap();
     assert_eq!(cycle_two.cycle, 2);
+    assert!(f.archived(&codex), "the ended cycle retired its verifier");
+    assert_ne!(f.verifier("Codex"), codex, "cycle 2 starts a fresh session");
+    assert!(
+        f.host
+            .messages(&codex, None, 100)
+            .unwrap()
+            .iter()
+            .all(|m| !m.id.contains(":2:")),
+        "no cycle 2 input reaches the archived session"
+    );
 
     // The cycle-1 turn now passes, while cycle 2's input still waits in its queue.
     f.host
@@ -894,8 +907,14 @@ fn a_verdict_answering_an_earlier_cycle_cannot_pass_the_next_one() {
     );
     assert!(f.waking(&f.coordinator.id).is_empty());
 
-    // Its turn on cycle 2's input is the one that counts.
-    f.report(&codex, "pass-2", "passed").unwrap();
+    assert!(
+        f.quiet_ids(&f.coordinator.id)
+            .contains(&format!("report:{codex}:late-pass")),
+        "the archived verifier's verdict still reaches the coordinator's next batch"
+    );
+
+    // Cycle 2 runs in a fresh session; its verdict is the one that counts.
+    f.report(&f.verifier("Codex"), "pass-2", "passed").unwrap();
     assert_eq!(f.current().state, "passed");
 }
 
@@ -1025,12 +1044,15 @@ fn a_verifier_whose_provider_changed_starts_a_fresh_session_and_retires_the_old_
 }
 
 #[test]
-fn a_verifier_at_the_same_profile_reuses_its_session() {
+fn a_restored_verifier_at_the_same_profile_reuses_its_session() {
     let mut f = Fixture::ready(vec![verifier(Role::Reviewer, "Review", None)], 2);
     let sonnet = profile(Provider::Claude, "sonnet", "high");
     verify_review(&mut f, sonnet.clone()).unwrap();
     let first = current_review(&f);
     ready_for_cycle_two(&mut f);
+    // The ended cycle retired it; only a session the human restores can be reused.
+    assert!(f.archived(&first));
+    f.host.set_archived(&first, false).unwrap();
     verify_review(&mut f, sonnet.clone()).unwrap();
     assert_eq!(f.current().verification.unwrap().cycle, 2);
     assert_eq!(current_review(&f), first);
@@ -1038,5 +1060,154 @@ fn a_verifier_at_the_same_profile_reuses_its_session() {
     assert_eq!(
         f.host.session_runtime(&first).unwrap().profile,
         Some(sonnet)
+    );
+}
+
+#[test]
+fn passed_verifiers_retire_after_their_round_and_the_rest_when_the_cycle_ends() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    f.verify().unwrap();
+    let (claude, codex, style) = (
+        f.verifier("Claude"),
+        f.verifier("Codex"),
+        f.verifier("Style"),
+    );
+    f.report(&claude, "pass", "passed").unwrap();
+    assert!(!f.archived(&claude), "a pass mid-round retires nothing");
+    f.report(&codex, "fail", "failed").unwrap();
+    f.report(&style, "pass", "passed").unwrap();
+
+    assert!(f.archived(&claude) && f.archived(&style));
+    assert!(!f.archived(&codex), "the failed verifier re-checks the fix");
+    f.commit("fix.txt", "two");
+    f.report(&f.implementer.id.clone(), "fixed", "ready_for_testing")
+        .unwrap();
+    f.report(&codex, "pass-2", "passed").unwrap();
+
+    assert_eq!(f.current().state, "passed");
+    assert!(f.archived(&codex));
+    assert!(!f.archived(&f.implementer.id), "the implementer stays");
+}
+
+#[test]
+fn a_cycle_blocked_by_its_implementer_retires_even_pending_verifiers() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    f.verify().unwrap();
+    f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
+    let codex = f.verifier("Codex");
+
+    f.report(&f.implementer.id.clone(), "stuck", "blocked")
+        .unwrap();
+
+    for focus in ["Claude", "Codex", "Style"] {
+        assert!(f.archived(&f.verifier(focus)), "{focus}");
+    }
+    assert!(!f.archived(&f.implementer.id));
+
+    // The archived verifier's turn still reports; it is recorded and wakes no one.
+    f.coordinator_reads();
+    f.report(&codex, "late", "failed").unwrap();
+    let ticket = f.current();
+    assert_eq!(ticket.state, "blocked");
+    let verification = ticket.verification.unwrap();
+    assert_eq!(verification.outcome, VerificationOutcome::Blocked);
+    assert_eq!(verification.rounds.len(), 1, "no new round");
+    let run = verification.rounds[0]
+        .verifiers
+        .iter()
+        .find(|v| v.session_id == codex)
+        .unwrap();
+    assert_eq!(
+        run.result,
+        VerifierResult::Failed,
+        "recorded for the record"
+    );
+    assert!(f.waking(&f.coordinator.id).is_empty());
+    assert!(f.waking(&f.implementer.id).is_empty());
+}
+
+/// Calls `archive_agent` as `caller` on `session`.
+fn archive_agent(f: &mut Fixture, caller: &str, session: &str) -> anyhow::Result<Value> {
+    f.host
+        .agent_tool(caller, "archive_agent", json!({"session_id":session}))
+}
+
+#[test]
+fn archive_agent_retires_an_idle_reviewer_and_keeps_it_restorable() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    let reviewer = f
+        .host
+        .assign_ticket(
+            &f.ticket.id,
+            Role::Reviewer,
+            Provider::Codex,
+            "Review",
+            Some("Security"),
+        )
+        .unwrap();
+    f.report(&reviewer.id, "findings", "failed").unwrap();
+    let coordinator = f.coordinator.id.clone();
+
+    archive_agent(&mut f, &coordinator, &reviewer.id).unwrap();
+
+    assert!(f.archived(&reviewer.id));
+    assert!(!f.host.messages(&reviewer.id, None, 100).unwrap().is_empty());
+    f.host.set_archived(&reviewer.id, false).unwrap();
+    assert!(!f.archived(&reviewer.id));
+}
+
+#[test]
+fn archive_agent_refuses_each_agent_still_needed() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    let coordinator = f.coordinator.id.clone();
+    let implementer = f.implementer.id.clone();
+    let refused = |f: &mut Fixture, caller: &str, session: &str| {
+        let error = archive_agent(f, caller, session).unwrap_err().to_string();
+        assert!(!f.archived(session), "{error}");
+        error
+    };
+
+    let error = refused(&mut f, &coordinator, &implementer);
+    assert!(error.contains("implementer of open ticket"), "{error}");
+
+    f.verify().unwrap();
+    let codex = f.verifier("Codex");
+    let error = refused(&mut f, &coordinator, &codex);
+    assert!(error.contains("owes verification cycle 1"), "{error}");
+    f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
+    f.report(&f.verifier("Style"), "pass", "passed").unwrap();
+    f.report(&codex, "fail", "failed").unwrap();
+    let error = refused(&mut f, &coordinator, &codex);
+    assert!(
+        error.contains("owes verification cycle 1"),
+        "a failed verifier still re-checks the fix: {error}"
+    );
+
+    f.host.set_status(&codex, Status::Working).unwrap();
+    let error = refused(&mut f, &coordinator, &codex);
+    assert!(error.contains("mid-turn"), "{error}");
+
+    let error = refused(&mut f, &implementer, &codex);
+    assert!(
+        error.contains("not an agent of a ticket you own"),
+        "{error}"
+    );
+    let other = f.host.create_project("Billing").unwrap();
+    let stranger = f
+        .host
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.project_id == other.id)
+        .unwrap();
+    let error = refused(&mut f, &stranger.id, &codex);
+    assert!(
+        error.contains("not an agent of a ticket you own"),
+        "{error}"
+    );
+    let error = refused(&mut f, &coordinator, &coordinator);
+    assert!(
+        error.contains("not an agent of a ticket you own"),
+        "{error}"
     );
 }
