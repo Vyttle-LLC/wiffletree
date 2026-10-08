@@ -107,6 +107,7 @@ impl Host {
         db.execute_batch(include_str!("steps.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
+        worktrees::migrate(&db)?;
         let mut host = Self {
             db,
             _lock: lock,

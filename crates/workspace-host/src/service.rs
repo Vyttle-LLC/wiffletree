@@ -466,6 +466,12 @@ impl Actor {
         let session = self.host.session(id)?;
         let mut runtime = self.host.session_runtime(id)?;
         match event {
+            ProviderEvent::Spawned(process_group) => {
+                self.host.db.execute(
+                    "UPDATE provider_runs SET process_group=?2 WHERE id=?1",
+                    params![run, process_group],
+                )?;
+            }
             ProviderEvent::Session(provider_id) => {
                 self.host.db.execute("UPDATE provider_runs SET detail=json_set(detail,'$.provider_thread_id',?2) WHERE id=?1",params![run,provider_id])?;
                 runtime.provider_session_id = Some(provider_id);
@@ -611,6 +617,11 @@ impl Actor {
                     error: Some("Host stopped during a turn; inspect work before retrying".into()),
                     usage: Value::Null,
                 },
+            );
+            // Its process may outlive the host, like one a crash leaves behind.
+            let _ = self.host.db.execute(
+                "UPDATE provider_runs SET outcome='interrupted' WHERE id=?1",
+                [&run],
             );
         }
     }

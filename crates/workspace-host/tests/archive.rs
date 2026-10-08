@@ -732,3 +732,88 @@ fn a_refused_notice_falls_back_to_the_inbox_and_settles_once() {
         .count();
     assert_eq!(kept, 1);
 }
+
+/// A provider process a crashed host left running in its own process group.
+struct Orphan(std::process::Child);
+impl Orphan {
+    fn spawn() -> Self {
+        use std::os::unix::process::CommandExt;
+        Self(
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        )
+    }
+    /// Records it on an interrupted run of `agent`, as startup leaves a crashed turn.
+    fn interrupt(&self, db: &rusqlite::Connection, agent: &Session) {
+        db.execute(
+            "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail,process_group)
+             VALUES (?1,?1,'[]',1,2,'interrupted','{}',?2)",
+            rusqlite::params![agent.id, self.0.id()],
+        )
+        .unwrap();
+    }
+}
+impl Drop for Orphan {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn an_orphaned_provider_process_defers_removal_until_it_exits() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    passed(&mut host, &ticket);
+    let tester = host
+        .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+        .unwrap();
+    let orphan = Orphan::spawn();
+    orphan.interrupt(&db, &tester);
+
+    host.agent_tool(
+        &coordinator.id,
+        "accept_ticket",
+        json!({"ticket_id":ticket.id}),
+    )
+    .unwrap();
+    host.settle_pending_worktrees();
+    assert!(Path::new(&ticket.worktree).exists());
+    assert_eq!(
+        host.pending_worktree_removals().unwrap(),
+        std::slice::from_ref(&ticket.id)
+    );
+
+    drop(orphan);
+    host.settle_pending_worktrees();
+    assert!(!Path::new(&ticket.worktree).exists());
+    assert!(host.pending_worktree_removals().unwrap().is_empty());
+}
+
+#[test]
+fn archiving_while_only_an_orphan_runs_defers_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let agent = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    let orphan = Orphan::spawn();
+    orphan.interrupt(&db, &agent);
+
+    host.set_archived(&coordinator.id, true).unwrap();
+    host.settle_pending_worktrees();
+
+    assert!(Path::new(&ticket.worktree).exists());
+    drop(orphan);
+    host.settle_pending_worktrees();
+    assert!(!Path::new(&ticket.worktree).exists());
+}

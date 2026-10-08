@@ -210,15 +210,23 @@ impl Host {
         Ok(true)
     }
     /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
-    /// until it finishes, and service startup settles runs a stopped host left open. An agent
-    /// that has reported is Done but still in its turn.
+    /// until it finishes, and an agent that has reported is Done but still in its turn. A run a
+    /// stopped host interrupted counts while its process group survives it; a recycled group id
+    /// only keeps the worktree longer, and runs recorded before groups were kept do not count.
     fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
-        Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
-             WHERE r.finished_at IS NULL AND json_extract(t.data,'$.ticket_id')=?1)",
-            [&ticket.id],
-            |r| r.get(0),
-        )?)
+        let runs = self
+            .db
+            .prepare(
+                "SELECT r.finished_at IS NULL,r.process_group FROM provider_runs r
+                 JOIN runtimes t ON t.session_id=r.session_id
+                 WHERE json_extract(t.data,'$.ticket_id')=?1
+                 AND (r.finished_at IS NULL OR (r.outcome='interrupted' AND r.process_group IS NOT NULL))",
+            )?
+            .query_map([&ticket.id], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Option<i64>>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(runs
+            .into_iter()
+            .any(|(open, group)| open || group.is_some_and(process_group_exists)))
     }
     /// Tickets whose worktree removal waits for an agent's turn to end.
     pub fn pending_worktree_removals(&self) -> Result<Vec<String>> {
@@ -329,6 +337,31 @@ impl Host {
         self.request_attention(&ticket.coordinator_id, "local", &id, notice, &[])?;
         Ok(())
     }
+}
+
+/// Adds provider runs' process group, recorded when the provider starts.
+pub(crate) fn migrate(db: &Connection) -> Result<()> {
+    let present: i64 = db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('provider_runs') WHERE name='process_group'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        db.execute_batch("ALTER TABLE provider_runs ADD COLUMN process_group INTEGER")?;
+    }
+    Ok(())
+}
+
+/// Probes with signal 0, which delivers nothing. EPERM still means the group exists.
+fn process_group_exists(group: i64) -> bool {
+    let Ok(group) = i32::try_from(group) else {
+        return false;
+    };
+    if group <= 1 {
+        return false;
+    }
+    let probe = unsafe { libc::kill(-group, 0) };
+    probe == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 struct RegisteredWorktree {
