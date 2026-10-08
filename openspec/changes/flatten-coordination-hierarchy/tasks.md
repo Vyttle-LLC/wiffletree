@@ -34,7 +34,7 @@
 ## 6. Desktop
 
 - [x] 6.1 Rebuild `sidebar.rs::tree` as coordinator → "repository · ticket" rows → agents; verify in the running app with a migrated store (deviation: verified by view-model tests in `tree.rs` against a temporary, migrated store; the app was not launched)
-- [x] 6.2 Remove "Add repository team" from `creation.rs` and add a repository picker to New ticket; update `conversation.rs`, `main.rs`, `inspector.rs`, `team_view.rs` and `usage_view.rs` references to `TaskOrchestrator`; verify in the running app (deviation: verified by compiling, clippy and the creation and tree view-model tests; the app was not launched)
+- [x] 6.2 Remove "Add repository team" from `creation.rs` and add a repository picker to New ticket; update `conversation.rs`, `main.rs`, `inspector.rs`, `team_view.rs` and `usage_view.rs` references to `TaskOrchestrator`; verify in the running app (deviation: verified only by compiling and clippy, plus the tree view-model tests for the ticket labels it uses; the New ticket form has no automated test and the app was not launched)
 - [x] 6.3 Show verification rounds (commit, verifier results) in the coordinator's Tickets inspector; verify in the running app (deviation: verified by a view-model test of `tree::verification_lines` against a temporary store; the app was not launched)
 
 ## 7. Leftover worktree cleanup
