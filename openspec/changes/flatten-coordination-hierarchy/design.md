@@ -60,7 +60,7 @@ Desktop commands: `Command::CreateTicket` gains `repository_id`, and its `coordi
 - `skills/tester.md`, v3 (tester and reviewer): verify the pinned commit named in the message; never edit, stage, commit or switch branches (now enforced, decision 6); the coordinator owns acceptance.
 
 ### 4. Verification configuration and cycle
-**Configuration.** It lives workspace-wide in host `settings.json` beside `workspaces_dir`, as `verification: { verifiers: [{role, focus, instruction?, provider?, size?}], max_rounds: 2 }`. Only `provider` and `size` are accepted, not `complexity` or `profile`; they are passed through the existing assignment routing (`assignment_route`) untouched. It is edited in Settings. This is the simplest scope that serves the example (Claude tester, Codex tester, Reviso style reviewer as a `reviewer` with focus "Style" and an instruction to run the Reviso style review). Per-project or per-repository overrides are an open question rather than built now.
+**Configuration.** It lives workspace-wide in host `settings.json` beside `workspaces_dir`, as `verification: { verifiers: [{role, focus, instruction?, provider?, size?}], max_rounds: 2 }`. Only `provider` and `size` are accepted, not `complexity` or `profile`; they are passed through the existing assignment routing (`assignment_route`) untouched. It is edited in Settings. This is the simplest scope that serves the example (Claude tester, Codex tester, Reviso style reviewer as a `reviewer` with focus "Style" and an instruction to run the Reviso style review). Per-project or per-repository overrides are not built (decision Q1 below).
 
 **Cycle record.** `Ticket` gains `verification`:
 `{ cycle, max_rounds, outcome: running|passed|blocked, rounds: [{ round, commit, verifiers: [{ session_id, focus, message_id, result: pending|passed|failed|blocked, reason? }] }] }`
@@ -87,7 +87,7 @@ The messages are queued in one transaction, so a single scheduling pass sees the
 ### 5. Report routing during a cycle
 While `verification.outcome == running`, the generic rule in `report` that sets `ticket.state` to the report's kind (`live.rs`) is bypassed for the ticket's verifiers and implementer. The cycle alone sets the state: `verifying` when a round starts (round 1 and every re-run round) and `passed`, `failed` or `blocked` when a round ends. A verifier's early `passed` therefore leaves the ticket `verifying`, and `accept_ticket`, which requires `passed`, refuses mid-round.
 
-Only verifier verdicts and the implementer's `ready_for_testing` are routed by the cycle. Any other non-progress implementer report (for example `blocked` while fixing) ends the cycle at once: `outcome = blocked`, ticket `blocked`, and the report wakes the coordinator as usual.
+Only verifier verdicts and the implementer's `ready_for_testing` are routed by the cycle. Any other non-progress implementer report (for example `blocked` while fixing) ends the cycle at once: `outcome = blocked`, ticket `blocked`, and the report wakes the coordinator immediately. A verifier verdict that arrives after its cycle has ended, for example after the implementer reported `blocked`, is recorded on its round and stored for the coordinator's next batch, but it changes neither the ticket's state nor the cycle's outcome.
 
 - **Verifier `passed`, `failed` or `blocked`.** The host records the result on the current round, after the read-only check in decision 6. The message to the coordinator is still stored, but it is delivered in the next batch like progress and does not wake. The batching condition gains "or the sender is a verifier on a ticket whose cycle is running".
 - **Round end** (no `pending` result left):
@@ -119,7 +119,7 @@ This runs in `Host::open` after the existing migrations and before `recover` sch
 
 The version guard `ensure!(version <= 5)` becomes `<= 6`, so an older app refuses a migrated store instead of misreading it. `change_archived(false)` refuses `task_orchestrator` sessions, so they stay read-only history. Archived repository coordinators are migrated too, so their tickets show under the coordinator's archived history.
 
-**In-flight tickets** (proposed default): migrate immediately. At host start no turn is running. Interrupted turns already come back held for Retry or Skip (`recover_unfinished_turns`), worktrees and branches are untouched, and agents keep their provider conversations. Their next report simply reaches M.
+**In-flight tickets** (decided, Q3): migrate immediately. At host start no turn is running. Interrupted turns already come back held for Retry or Skip (`recover_unfinished_turns`), worktrees and branches are untouched, and agents keep their provider conversations. Their next report simply reaches M. Unread instructions from M to R are cancelled and listed in M's notice; they are not re-sent to any agent, so M decides what still applies.
 
 ### 8. Leftover worktree cleanup
 **Identification** (`Command::LeftoverWorktrees`, read-only). A ticket is a leftover when its state is `accepted` or `closed`, or all its agents are archived, `Path::new(&ticket.worktree).exists()`, and it has no `pending_worktree_removals` row. The listing also scans `git worktree list --porcelain` of every workspace repository and adds worktrees under `<workspaces_dir>/tasks/` on `refs/heads/wiffletree/*` that no ticket records, as `untracked_by_wiffletree`.
@@ -156,7 +156,7 @@ The historical mockups stay intact.
 
 - **Coordinator context grows** because it sees every ticket's reports directly. → Verification rounds are batched and only cycle outcomes wake it. The existing turn budget and progress batching still apply.
 - **Passed verifiers do not re-check later commits.** Only failed verifiers re-run, as requested, so a fix could regress what an earlier verifier passed. → The final summary names the commit each verifier passed. The coordinator can start a fresh full cycle before accepting.
-- **All-or-none admission can starve a round.** Other workers in the project can keep taking freed slots one at a time, so the round never finds all its slots free at once. → While a round is waiting, the scheduler admits no new worker turn host-wide, in any project, until the round has started; coordinators still get their reserved turn. The verifier-count precondition (≤ min(`turn_limit - 1`, `HOST_WORKER_TURNS`)) guarantees the round eventually fits. Verifier rounds are short and rare, so the brief hold on other workers is accepted.
+- **All-or-none admission can starve a round.** Other workers anywhere on the host can keep taking freed slots one at a time, so the round never finds all its slots free at once. → While a round is waiting, the scheduler admits no new worker turn host-wide, in any project, until the round has started; coordinators still get their reserved turn. The verifier-count precondition (≤ min(`turn_limit - 1`, `HOST_WORKER_TURNS`)) guarantees the round eventually fits. Verifier rounds are short and rare, so the brief hold on other workers is accepted.
 - **Turn limit couples to verifier count.** → `verify_ticket` refuses with both numbers rather than silently serializing. Raising `turn_limit` is a project setting.
 - **Loss of per-repository coordinator memory** across tickets. → Ticket briefs and project memory carry context. The PRD's future integration-branch stage will need its own design without a standing coordinator.
 - **Migration rewrites ownership columns.** → One transaction, a version gate, a kept file backup, no deleted rows and no rewritten message bodies.
@@ -169,13 +169,17 @@ The historical mockups stay intact.
 3. The human optionally opens "Leftover worktrees…" and removes approved entries.
 4. Rollback: restore `workspace.sqlite3.pre-flatten` with the previous app version. Worktrees and branches are unaffected by the migration itself.
 
-## Open Questions
+## Decisions on the open questions
 
-1. **Verifier configuration scope.** Workspace-wide (proposed, one setting in `settings.json`), per project, or per repository? Per repository fits repository-specific style reviewers. Per project fits feature-specific test plans.
-2. **Multi-repository features.** Proposed: one ticket per repository under the same project coordinator, with cross-repository contracts in each brief. Is that enough, or do linked tickets need an explicit grouping or dependency field?
-3. **In-flight tickets at migration.** Proposed: migrate immediately at startup and re-send unread worker reports to the project coordinator. Alternatives: let existing repository teams finish on the old model and migrate once idle, or refuse to upgrade while any team has open tickets. Also, should unread instructions from the main coordinator to its repository coordinator be re-sent to the affected implementer instead of only listed?
-4. **Automatic verification.** Should an implementer's first `ready_for_testing` start the cycle by itself, saving the coordinator's turn, or keep the explicit `verify_ticket` call (proposed, as requested)?
-5. **Accept archives agents.** Proposed so that `archive_team` can go. Should accepted tickets' agents instead stay visible until the project is archived?
-6. **Unpushed leftover worktrees.** Selectable (proposed, branch kept) or never removable by the cleanup?
-7. **Stale verifier passes.** Should a later round re-run passed verifiers when the fix touches files they covered, or is "only failed verifiers re-run" final?
-8. **Unused `task_orchestrator` policy.** Its saved policy row stays untouched. Should the Model guide project remove it from the Models view's Coordinator settings?
+The human and the coordinator settled every open question before implementation:
+
+1. **Verifier configuration scope.** Workspace-wide, in host `settings.json` (decision 4). No per-project or per-repository override.
+2. **Multi-repository features.** One ticket per repository under the project coordinator, with cross-repository contracts in each brief. No grouping or dependency field.
+3. **In-flight tickets at migration.** Migrate immediately at startup. Unread worker reports to a repository coordinator are re-sent to the project coordinator. Unread instructions from the project coordinator to its repository coordinator are listed in the migration notice but not re-sent.
+4. **Automatic verification.** Keep the explicit `verify_ticket` call.
+5. **Accept archives agents.** `accept_ticket` archives the ticket's agents, and `archive_team` is removed.
+6. **Unpushed leftover worktrees.** Removable only when individually selected. Branches are always kept.
+7. **Stale verifier passes.** Only failed verifiers re-run.
+8. **Unused `task_orchestrator` policy.** Its policy row stays untouched; the Model guide project owns it.
+
+The host-wide hold on new worker turns while a round waits for capacity is approved.

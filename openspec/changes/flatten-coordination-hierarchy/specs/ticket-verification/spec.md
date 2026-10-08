@@ -46,6 +46,11 @@ While a verification cycle is running, the ticket's state SHALL change only when
 - **WHEN** round 1 fails and the implementer then reports `blocked` instead of `ready_for_testing`
 - **THEN** the cycle ends with outcome `blocked`, the ticket is `blocked`, no further round starts, and the project coordinator wakes at once with the implementer's report
 
+#### Scenario: Verdict after the cycle ended
+- **WHEN** a verifier reports `failed` after the implementer's `blocked` report ended the cycle
+- **THEN** the verdict is recorded on its round and reaches the project coordinator in its next batch
+- **AND** the ticket stays `blocked` and the cycle's outcome stays `blocked`
+
 #### Scenario: Next round starts verifying again
 - **WHEN** the implementer reports `ready_for_testing` after a failed round 1
 - **THEN** the ticket's state becomes `verifying` when round 2 starts, never `ready_for_testing`

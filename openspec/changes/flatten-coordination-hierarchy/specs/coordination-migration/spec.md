@@ -27,11 +27,15 @@ Each migrated repository coordinator SHALL be archived. Its session, messages, r
 - **THEN** a copy of the pre-migration store exists beside `workspace.sqlite3`
 
 ### Requirement: Undelivered messages are not lost
-Messages addressed to a migrated repository coordinator that are still queued or held SHALL be cancelled. Those sent by its agents SHALL be re-sent to the project coordinator as new messages that name the original; those sent by the project coordinator SHALL be listed in the migration notice. Stored message bodies and senders SHALL NOT be rewritten.
+Messages addressed to a migrated repository coordinator that are still queued or held SHALL be cancelled. Those sent by its agents SHALL be re-sent to the project coordinator as new messages that name the original; those sent by the project coordinator SHALL be listed in the migration notice and SHALL NOT be re-sent to any agent. Stored message bodies and senders SHALL NOT be rewritten.
 
 #### Scenario: Unread report
 - **WHEN** an implementer's `ready_for_testing` report to R is still queued at upgrade
 - **THEN** the original is cancelled and M receives a new message carrying that report and naming the original message id
+
+#### Scenario: Unread instruction from the project coordinator
+- **WHEN** an instruction from M to R is still queued at upgrade
+- **THEN** the original is cancelled, M's migration notice lists it with its id, and no agent receives a copy of it
 
 ### Requirement: Migration notice
 For each migrated repository coordinator, the host SHALL give its project coordinator one notice, delivered with that coordinator's next turn without waking it, listing the inherited tickets with state, branch and worktree, their agents, re-sent and cancelled messages, and stopped timers.
