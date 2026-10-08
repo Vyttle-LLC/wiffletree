@@ -14,6 +14,12 @@ impl Workspace {
                 p,
             )
             .child(
+                button("leftover-worktrees")
+                    .ghost()
+                    .label("Leftover worktrees…")
+                    .on_click(cx.listener(|v, _, w, c| v.open_leftovers(w, c))),
+            )
+            .child(
                 button("add-workspace-repositories")
                     .primary()
                     .icon(icon("plus"))
@@ -113,6 +119,20 @@ impl Workspace {
         }
         body.child(list)
             .child(self.repository_roots(snapshot, p, cx))
+    }
+
+    /// Lists leftover worktrees in a sheet; removal happens there only after confirmation.
+    fn open_leftovers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        let sheet = cx.new(|cx| leftovers::LeftoverSheet::new(bridge, cx));
+        window.open_alert_dialog(cx, move |dialog, window, _| {
+            dialog
+                .title("Leftover worktrees")
+                .width(px(640.).min(window.viewport_size().width - px(48.)))
+                .max_h(window.viewport_size().height - px(100.))
+                .ok_text("Close")
+                .child(sheet.clone())
+        });
     }
 
     fn repository_roots(&self, snapshot: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Div {

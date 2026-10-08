@@ -39,9 +39,9 @@
 
 ## 7. Leftover worktree cleanup
 
-- [ ] 7.1 Implement `LeftoverWorktrees` (identification and classification as in design decision 8, read-only); verify with fixtures for each class, and that listing changes no file or row
-- [ ] 7.2 Implement `RemoveLeftoverWorktrees`: re-classify, skip changed rows, non-forced `git worktree remove`, branches kept, activity recorded; verify each spec scenario
-- [ ] 7.3 Add the "Leftover worktrees…" sheet to the Repositories view (no default selection, protected rows not selectable, confirmation naming the count); verify in the running app against a copy of the real store before showing the human the dry-run list
+- [x] 7.1 Implement `LeftoverWorktrees` (identification and classification as in design decision 8, read-only); verify with fixtures for each class, and that listing changes no file or row
+- [x] 7.2 Implement `RemoveLeftoverWorktrees`: re-classify, skip changed rows, non-forced `git worktree remove`, branches kept, activity recorded; verify each spec scenario
+- [x] 7.3 Add the "Leftover worktrees…" sheet to the Repositories view (no default selection, protected rows not selectable, confirmation naming the count); verify in the running app against a copy of the real store before showing the human the dry-run list (deviation: verified by view-model tests of the selection and confirmation logic against a temporary store and temporary git repositories; the app was not launched and no real store or worktree was listed or touched, so the human's dry-run list is still to be produced)
 
 ## 8. Documentation
 
