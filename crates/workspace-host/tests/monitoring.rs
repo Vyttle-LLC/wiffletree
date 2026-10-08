@@ -1,6 +1,6 @@
 //! Coordinator-run monitoring through the real Service, with the fake provider standing in for
 //! the CLIs. Kept in its own test binary because it sets the provider environment for the process.
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{path::Path, time::Duration};
 use workspace_core::*;
 use workspace_host::{Host, now, service::Service};
@@ -89,38 +89,9 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
             .unwrap();
         assert!(git.success());
     }
-    // A second project has a repository coordinator with its own monitoring timer.
-    let (monitored, team, parent) = {
+    let monitored = {
         let mut host = Host::open(home.path()).unwrap();
-        let monitored = host.create_project("Monitor").unwrap();
-        let other = host.create_project("Team check").unwrap();
-        let parent = host
-            .sessions()
-            .unwrap()
-            .into_iter()
-            .find(|s| s.project_id == other.id)
-            .unwrap();
-        let repository = host
-            .attach_repository(&other.id, repo.to_str().unwrap(), "HEAD")
-            .unwrap();
-        let team = host
-            .create_session(
-                &other.id,
-                &parent.id,
-                Some(&repository.id),
-                "Backend",
-                Role::TaskOrchestrator,
-                Provider::Claude,
-            )
-            .unwrap();
-        host.agent_tool(
-            &team.id,
-            "schedule",
-            json!({"label":"Service check","prompt":"CHECK_SERVICE","every":"30m"}),
-        )
-        .unwrap();
-        host.set_live(&other.id, true).unwrap();
-        (monitored, team, parent)
+        host.create_project("Monitor").unwrap()
     };
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
     // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
@@ -187,24 +158,4 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
         .collect::<Vec<_>>();
     assert_eq!(fires.len(), 6);
     assert!(fires.iter().all(|m| m.receipt == Receipt::Completed));
-
-    // A repository coordinator's check reaches its parent as a report.
-    let team_timer = snapshot
-        .schedules
-        .iter()
-        .find(|t| t.session_id == team.id)
-        .unwrap()
-        .id
-        .clone();
-    advance_to_next_fire(&db, &team_timer);
-    let reported = || {
-        messages(&service, &parent.id).into_iter().any(|m| {
-            m.id.starts_with(&format!("report:{}:", team.id))
-                && m.sender.as_deref() == Some(team.id.as_str())
-                && m.body == "[progress] Backend\nService healthy"
-        })
-    };
-    until(&service, "the team's report", |_| {
-        reported() && outputs(&service, &team.id, "CHECK_REPORTED") == 1
-    });
 }

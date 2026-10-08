@@ -1,5 +1,5 @@
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Command as Git};
-use workspace_core::{Command, HostSettings, Project, Provider, Role, Session};
+use workspace_core::{Command, HostSettings, Project};
 use workspace_host::Host;
 
 fn git(path: &Path, args: &[&str]) {
@@ -30,9 +30,15 @@ fn repository(path: &Path) {
     );
 }
 
-/// A host whose workspaces live in `<directory>/workspaces`, with one project and a team for
-/// the repository folder `Web App`.
-fn team(directory: &Path, project: &str) -> (Host, Project, Session) {
+/// The project coordinator and the repository its tickets are created in.
+struct Owner {
+    id: String,
+    repository_id: String,
+}
+
+/// A host whose workspaces live in `<directory>/workspaces`, with one project using the
+/// repository folder `Web App`.
+fn team(directory: &Path, project: &str) -> (Host, Project, Owner) {
     let mut host = Host::open(directory.join("home")).unwrap();
     host.set_workspaces_dir(directory.join("workspaces").to_str().unwrap())
         .unwrap();
@@ -41,7 +47,7 @@ fn team(directory: &Path, project: &str) -> (Host, Project, Session) {
     (host, project, coordinator)
 }
 
-fn coordinator(host: &mut Host, project: &Project, repo: &Path) -> Session {
+fn coordinator(host: &mut Host, project: &Project, repo: &Path) -> Owner {
     if !repo.exists() {
         repository(repo);
     }
@@ -54,15 +60,10 @@ fn coordinator(host: &mut Host, project: &Project, repo: &Path) -> Session {
     let attached = host
         .attach_repository(&project.id, repo.to_str().unwrap(), "HEAD")
         .unwrap();
-    host.create_session(
-        &project.id,
-        &root.id,
-        Some(&attached.id),
-        "Web",
-        Role::TaskOrchestrator,
-        Provider::Claude,
-    )
-    .unwrap()
+    Owner {
+        id: root.id,
+        repository_id: attached.id,
+    }
 }
 
 fn current_branch(path: &str) -> String {
@@ -89,7 +90,12 @@ fn new_projects_and_tickets_get_readable_folders_and_branches() {
     );
 
     let ticket = host
-        .create_ticket(&coordinator.id, "Fix: Toolbar colours", "Style it")
+        .create_ticket(
+            &coordinator.id,
+            &coordinator.repository_id,
+            "Fix: Toolbar colours",
+            "Style it",
+        )
         .unwrap();
 
     let expected = workspaces.join("tasks/theme-rollout/web-app/fix-toolbar-colours");
@@ -125,8 +131,13 @@ fn slugs_never_collide_with_projects_folders_tickets_or_branches() {
     let tickets: Vec<_> = ["Sidebar", "sidebar", "Sidebar?"]
         .into_iter()
         .map(|title| {
-            host.create_ticket(&coordinator.id, title, "Style it")
-                .unwrap()
+            host.create_ticket(
+                &coordinator.id,
+                &coordinator.repository_id,
+                title,
+                "Style it",
+            )
+            .unwrap()
         })
         .collect();
     let branches: Vec<_> = tickets.iter().map(|t| t.branch.as_str()).collect();
@@ -157,7 +168,12 @@ fn renaming_or_moving_workspaces_keeps_existing_folders() {
 
     assert_eq!(host.project(&project.id).unwrap().home, home);
     let ticket = host
-        .create_ticket(&coordinator.id, "Invoices", "Send them")
+        .create_ticket(
+            &coordinator.id,
+            &coordinator.repository_id,
+            "Invoices",
+            "Send them",
+        )
         .unwrap();
     assert_eq!(
         Path::new(&ticket.worktree),
@@ -173,7 +189,12 @@ fn legacy_projects_and_tickets_keep_their_stored_paths() {
     let (mut host, project, coordinator) = team(directory.path(), "Legacy");
     let legacy_worktree = directory.path().join("home/worktrees/0b7c1a2e-uuid");
     let ticket = host
-        .create_ticket(&coordinator.id, "Old work", "Kept")
+        .create_ticket(
+            &coordinator.id,
+            &coordinator.repository_id,
+            "Old work",
+            "Kept",
+        )
         .unwrap();
     drop(host);
     let db = rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
@@ -201,11 +222,21 @@ fn legacy_projects_and_tickets_keep_their_stored_paths() {
 
     // Its first new ticket fixes a slug; `legacy` is taken by the folder made before the downgrade.
     let first = host
-        .create_ticket(&coordinator.id, "Before rename", "Kept")
+        .create_ticket(
+            &coordinator.id,
+            &coordinator.repository_id,
+            "Before rename",
+            "Kept",
+        )
         .unwrap();
     host.rename_project(&project.id, "Renamed").unwrap();
     let second = host
-        .create_ticket(&coordinator.id, "After rename", "Kept")
+        .create_ticket(
+            &coordinator.id,
+            &coordinator.repository_id,
+            "After rename",
+            "Kept",
+        )
         .unwrap();
     let tasks = directory.path().join("workspaces/tasks/legacy-2/web-app");
     assert_eq!(Path::new(&first.worktree), tasks.join("before-rename"));
@@ -327,7 +358,9 @@ fn nested_branches_take_their_prefix_and_a_wiffletree_branch_is_reported() {
         &directory.path().join("Web App"),
         &["branch", "wiffletree/fix/nested"],
     );
-    let ticket = host.create_ticket(&web.id, "Fix", "Fix it").unwrap();
+    let ticket = host
+        .create_ticket(&web.id, &web.repository_id, "Fix", "Fix it")
+        .unwrap();
     assert_eq!(ticket.branch, "wiffletree/fix-2");
 
     let blocked = directory.path().join("Blocked");
@@ -335,7 +368,7 @@ fn nested_branches_take_their_prefix_and_a_wiffletree_branch_is_reported() {
     git(&blocked, &["branch", "wiffletree"]);
     let other = coordinator(&mut host, &project, &blocked);
     let error = host
-        .create_ticket(&other.id, "Fix", "Fix it")
+        .create_ticket(&other.id, &other.repository_id, "Fix", "Fix it")
         .unwrap_err()
         .to_string();
     assert!(error.contains("branch named \"wiffletree\""), "{error}");

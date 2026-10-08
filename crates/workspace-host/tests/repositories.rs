@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::{fs, os::unix::fs::symlink, path::Path, process::Command};
-use workspace_core::{Provider, Role, Session, Status};
+use workspace_core::{Provider, Role, Session, Status, Ticket};
 use workspace_host::Host;
 
 fn git(path: &Path, args: &[&str]) {
@@ -131,20 +131,20 @@ fn bulk_import_keeps_successes_and_existing_bases_and_is_retry_safe() {
     assert_eq!(host.repositories().unwrap().len(), 2);
 }
 
-fn team(host: &mut Host, project: &str, repository: &str) -> anyhow::Result<Session> {
+/// A ticket in `repository`, whose worktree goes under `workspaces`.
+fn ticket(
+    host: &mut Host,
+    workspaces: &Path,
+    project: &str,
+    repository: &str,
+) -> anyhow::Result<Ticket> {
+    host.set_workspaces_dir(workspaces.to_str().unwrap())?;
     let root = host
         .sessions()?
         .into_iter()
         .find(|s| s.project_id == project && s.role == Role::ProjectOrchestrator)
         .unwrap();
-    host.create_session(
-        project,
-        &root.id,
-        Some(repository),
-        "Team",
-        Role::TaskOrchestrator,
-        Provider::Claude,
-    )
+    host.create_ticket(&root.id, repository, "Work", "Do it")
 }
 
 #[test]
@@ -178,20 +178,21 @@ fn projects_use_every_repository_until_they_choose_some() {
         host.project_repositories(&custom.id).unwrap(),
         vec![first.clone()]
     );
-    assert!(team(&mut host, &custom.id, &second.id).is_err());
-    team(&mut host, &all.id, &second.id).unwrap();
+    let workspaces = home.path().join("workspaces");
+    assert!(ticket(&mut host, &workspaces, &custom.id, &second.id).is_err());
+    ticket(&mut host, &workspaces, &all.id, &second.id).unwrap();
 
     // Adding from inside a choosing project includes the repository there too.
     host.attach_repository(&custom.id, three.to_str().unwrap(), "HEAD")
         .unwrap();
     assert!(host.project(&custom.id).unwrap().uses(&third.id));
 
-    let working = team(&mut host, &custom.id, &first.id).unwrap();
+    let working = ticket(&mut host, &workspaces, &custom.id, &first.id).unwrap();
     assert!(
         host.set_project_repositories(&custom.id, Some(vec![third.id.clone()]))
             .is_err()
     );
-    host.set_archived(&working.id, true).unwrap();
+    host.close_ticket(&working.id).unwrap();
     host.set_project_repositories(&custom.id, Some(vec![third.id.clone()]))
         .unwrap();
     host.set_project_repositories(&custom.id, None).unwrap();
@@ -203,7 +204,7 @@ fn projects_use_every_repository_until_they_choose_some() {
 }
 
 #[test]
-fn repositories_with_teams_stay_in_the_workspace() {
+fn repositories_with_tickets_stay_in_the_workspace() {
     let folder = tempfile::tempdir().unwrap();
     let (used, idle) = (folder.path().join("used"), folder.path().join("idle"));
     repo(&used, true);
@@ -215,8 +216,9 @@ fn repositories_with_teams_stay_in_the_workspace() {
     let idle = host.add_repository(idle.to_str().unwrap(), "HEAD").unwrap();
     host.set_project_repositories(&project.id, Some(vec![used.id.clone(), idle.id.clone()]))
         .unwrap();
-    let working = team(&mut host, &project.id, &used.id).unwrap();
-    host.set_archived(&working.id, true).unwrap();
+    let workspaces = home.path().join("workspaces");
+    let working = ticket(&mut host, &workspaces, &project.id, &used.id).unwrap();
+    host.close_ticket(&working.id).unwrap();
     assert!(host.remove_repository(&used.id).is_err());
     host.remove_repository(&idle.id).unwrap();
     assert_eq!(host.repositories().unwrap(), vec![used.clone()]);

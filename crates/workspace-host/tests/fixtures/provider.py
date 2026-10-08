@@ -103,8 +103,14 @@ try:
                 assert question['operation_id'] in prompt and 'close_question' in prompt, prompt
                 tool('close_question',request_id=question['operation_id'],resolution='Repository attached')
         if 'START_HANDOFF' in prompt:
-            team=tool('create_repo_coordinator',repository_id=ctx['repositories'][0]['id'],provider='codex')
-            tool('send_message',recipient=team['id'],message_id='start',body='Run the fixture ticket.')
+            ticket=tool('create_ticket',repository_id=ctx['repositories'][0]['id'],title='Fixture ticket',brief='Create result.txt containing verified')
+            tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture')
+        for ticket in ctx['tickets']:
+            if ticket['state']=='ready_for_testing':
+                assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
+                tool('verify_ticket',ticket_id=ticket['id'])
+            elif ticket['state']=='passed':
+                tool('accept_ticket',ticket_id=ticket['id'])
         if 'SCHEDULE_TIMER' in prompt:
             tool('schedule',label='Fixture check',prompt='TIMER_CHECK',at='+2s')
         if 'SCHEDULE_MONITOR' in prompt:
@@ -113,22 +119,6 @@ try:
         # A coordinator's own read-only check: its final message is the result in the human's chat.
         check='Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt
         result='TIMER_FIRED' if timer_fire else 'SERVICE_HEALTHY' if check else 'MAIN_READY'
-    elif role=='task_orchestrator' and 'Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt:
-        # A repository coordinator reports its check to its parent.
-        tool('report',message_id=str(uuid.uuid4()),kind='progress',body='Service healthy')
-        result='CHECK_REPORTED'
-    elif role=='task_orchestrator':
-        tickets=ctx['tickets']
-        if not tickets:
-            ticket=tool('create_ticket',title='Fixture ticket',brief='Create result.txt containing verified')
-            tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture')
-        elif tickets[0]['state']=='ready_for_testing':
-            assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
-            tool('assign_ticket',ticket_id=tickets[0]['id'],role='tester',instruction='Verify fixture')
-        elif tickets[0]['state']=='passed':
-            tool('accept_ticket',ticket_id=tickets[0]['id'])
-            tool('report',message_id='accepted',kind='completed',body='Independent verification passed')
-        result='COORDINATED'
     elif role=='implementer':
         tool('report',message_id='planned',kind='progress',body='Fixture planned')
         Path('result.txt').write_text('verified')

@@ -87,8 +87,10 @@ pub fn skill(role: Role) -> String {
         "{}\n{}",
         include_str!("../skills/communication.md"),
         match role {
-            Role::ProjectOrchestrator => include_str!("../skills/main-coordinator.md"),
-            Role::TaskOrchestrator => include_str!("../skills/repository-coordinator.md"),
+            // Retired repository coordinators never run again; their archived sessions remain.
+            Role::ProjectOrchestrator | Role::TaskOrchestrator => {
+                include_str!("../skills/main-coordinator.md")
+            }
             Role::Implementer | Role::Maintenance => include_str!("../skills/implementer.md"),
             _ => include_str!("../skills/tester.md"),
         }

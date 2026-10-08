@@ -25,22 +25,22 @@ pub fn tools() -> Value {
             vec![]
         ),
         tool(
-            "create_repo_coordinator",
-            "Main coordinator: create one persistent repository coordinator using its saved provider and Big/Small profile. Existing coordinators keep their profile. Then send its brief.",
-            json!({"repository_id":string,"provider":{"type":"string","enum":["claude","codex"]},"size":{"type":"string","enum":["big","small"]}}),
-            vec!["repository_id"]
-        ),
-        tool(
             "create_ticket",
-            "Repository coordinator: create a ticket with an isolated branch and worktree. Repeated identical titles are idempotent.",
-            json!({"title":string,"brief":string}),
-            vec!["title", "brief"]
+            "Coordinator: create a ticket in one of the project's repositories, with its own branch and worktree. Repeating the same repository and title returns the existing ticket.",
+            json!({"repository_id":string,"title":string,"brief":string}),
+            vec!["repository_id", "title", "brief"]
         ),
         tool(
             "assign_ticket",
-            "Repository coordinator: assign a dedicated agent using its saved provider and Big/Small profile. Exact proposals must be approved in the role policy; no model substitution is allowed. Existing assignments with the same role and focus are returned; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
+            "Coordinator: assign a dedicated agent using its saved provider and Big/Small profile. Exact proposals must be approved in the role policy; no model substitution is allowed. Existing assignments with the same role and focus are returned; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
             json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"provider":{"type":"string","enum":["claude","codex"]},"instruction":string,"size":{"type":"string","enum":["big","small"]},"complexity":{"type":"string","enum":["small","standard","complex"]},"profile":{"type":"object","properties":{"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string},"required":["provider","model","effort"],"additionalProperties":false}}),
             vec!["ticket_id", "role", "instruction"]
+        ),
+        tool(
+            "verify_ticket",
+            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked.",
+            json!({"ticket_id":string}),
+            vec!["ticket_id"]
         ),
         tool(
             "send_message",
@@ -80,31 +80,25 @@ pub fn tools() -> Value {
         ),
         tool(
             "accept_ticket",
-            "Repository coordinator: accept a ticket only after independent verification passed. Does not merge or publish. Removes the ticket's worktree and keeps its branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
+            "Coordinator: accept a ticket whose verification passed at the commit still checked out. Does not merge or publish. Archives its agents and removes its worktree, keeping conversations and branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
             json!({"ticket_id":string}),
             vec!["ticket_id"]
         ),
         tool(
             "close_ticket",
-            "Repository coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent has not reported; an agent that reported and is still finishing its turn delays only the removal.",
+            "Coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent has not reported; an agent that reported and is still finishing its turn delays only the removal.",
             json!({"ticket_id":string}),
             vec!["ticket_id"]
         ),
         tool(
-            "archive_team",
-            "Main coordinator: archive one of your repository coordinators and its agents once every ticket is accepted, or closed if abandoned. Refuses, listing every blocker, while a team member is working or a ticket is not accepted or closed. Closes accepted tickets and removes the team's ticket worktrees; conversations and branches are kept and the human can restore the team from the sidebar. Repeating it for an archived team is harmless.",
-            json!({"session_id":string}),
-            vec!["session_id"]
-        ),
-        tool(
             "ask_user",
-            "Main coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
+            "Coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
             json!({"request_id":string,"question":string,"options":{"type":"array","items":{"type":"string"},"maxItems":6}}),
             vec!["request_id", "question"]
         ),
         tool(
             "close_question",
-            "Main coordinator: remove your own open inbox question once it no longer needs the human, e.g. their message or new evidence already settled it.",
+            "Coordinator: remove your own open inbox question once it no longer needs the human, e.g. their message or new evidence already settled it.",
             json!({"request_id":string,"resolution":string}),
             vec!["request_id", "resolution"]
         ),

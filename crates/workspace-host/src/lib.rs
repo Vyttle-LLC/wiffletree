@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 pub mod attachments;
 pub mod context;
+mod flatten;
 pub mod live;
 pub mod mcp;
 mod memory;
@@ -16,6 +17,7 @@ mod steps;
 mod stream;
 mod telemetry;
 pub mod usage;
+mod verification;
 mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -108,7 +110,7 @@ impl Host {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 5, "Store schema is newer than this application");
+        ensure!(version <= 6, "Store schema is newer than this application");
         if version == 0 {
             db.execute_batch(&format!(
                 "BEGIN IMMEDIATE; {} COMMIT;",
@@ -122,6 +124,7 @@ impl Host {
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
+        flatten::migrate(&home, &db, version)?;
         let mut host = Self {
             db,
             _lock: lock,
@@ -307,42 +310,26 @@ impl Host {
             "{} is archived; restore it before adding to it",
             owner.name
         );
-        let repository_id = match role {
+        match role {
             Role::ProjectOrchestrator => {
-                bail!("Project orchestrators are created with their project")
+                bail!("Project coordinators are created with their project")
             }
             Role::TaskOrchestrator => {
-                ensure!(
-                    owner.role == Role::ProjectOrchestrator,
-                    "Repository coordinator must belong to the main coordinator"
-                );
-                let repository =
-                    repository.context("Coordinator requires a repository attachment")?;
-                self.repository(repository)?;
-                ensure!(
-                    self.project(project)?.uses(repository),
-                    "This project does not use that repository"
-                );
-                ensure!(
-                    !self.sessions()?.iter().any(|s| s.project_id == project
-                        && s.role == Role::TaskOrchestrator
-                        && s.repository_id.as_deref() == Some(repository)),
-                    "This project already has a coordinator for this repository; create a ticket in its team"
-                );
-                Some(repository.to_owned())
+                bail!("Repository coordinators were removed; create a ticket for the repository")
             }
-            _ => {
-                ensure!(
-                    owner.role == Role::TaskOrchestrator,
-                    "Worker must belong to a repository coordinator"
-                );
-                ensure!(
-                    repository.is_none() || repository == owner.repository_id.as_deref(),
-                    "Worker repository must match its coordinator"
-                );
-                owner.repository_id.clone()
-            }
-        };
+            _ => ensure!(
+                owner.role == Role::ProjectOrchestrator,
+                "Agents belong to their project's coordinator"
+            ),
+        }
+        if let Some(repository) = repository {
+            self.repository(repository)?;
+            ensure!(
+                self.project(project)?.uses(repository),
+                "This project does not use that repository"
+            );
+        }
+        let repository_id = repository.map(str::to_owned);
         let session = Session {
             id: new_id(),
             project_id: project.into(),
@@ -354,7 +341,8 @@ impl Host {
             status: Status::Ready,
             archived: false,
         };
-        let tx = self.db.transaction()?;
+        // A savepoint, so assigning a ticket agent can include this in its own change.
+        let tx = self.db.savepoint()?;
         Self::insert_session(&tx, &session)?;
         Self::event(
             &tx,
@@ -411,6 +399,11 @@ impl Host {
         milestone: Option<&str>,
     ) -> Result<Vec<Session>> {
         let mut affected = self.session_tree(id)?;
+        ensure!(
+            archived || affected[0].role != Role::TaskOrchestrator,
+            "{} is a retired repository coordinator; its conversation stays read-only",
+            affected[0].name
+        );
         if !archived {
             let mut owner = affected[0].parent_id.clone();
             while let Some(parent) = owner {
@@ -432,7 +425,7 @@ impl Host {
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
-            // A savepoint, so a ticket close or team archive can include this in its own change.
+            // A savepoint, so a ticket close or accept can include this in its own change.
             let tx = host.db.savepoint()?;
             for session in &mut affected {
                 if session.archived == archived {
@@ -526,7 +519,8 @@ impl Host {
             body: row.get(5)?,
             receipt,
             created_at: row.get(7)?,
-            attachments: decode(row, 8)?,
+            // By name: columns added by migrations can arrive in either order.
+            attachments: decode(row, row.as_ref().column_index("attachments")?)?,
         })
     }
     pub fn message(&self, id: &str) -> Result<Message> {
@@ -610,15 +604,44 @@ impl Host {
             "Recipient queue is full; accepted messages are preserved"
         );
         if files.is_empty() {
-            self.insert_message(id, &target, sender, body, &[])?;
+            self.insert_message(id, &target, sender, body, &[], false)?;
         } else {
             let directory = attachments::directory(&self.home, &target.project_id, id)?;
             let stored = attachments::store(&directory, files)?;
-            if let Err(error) = self.insert_message(id, &target, sender, body, &stored) {
+            if let Err(error) = self.insert_message(id, &target, sender, body, &stored, false) {
                 let _ = fs::remove_dir_all(&directory);
                 return Err(error);
             }
         }
+        self.message(id)
+    }
+    /// Queues a message that rides along with the recipient's next turn without starting one.
+    /// Like `send`, retrying the same id with the same content returns the stored message.
+    pub(crate) fn send_quietly(
+        &mut self,
+        id: &str,
+        sender: Option<&str>,
+        recipient: &str,
+        body: &str,
+    ) -> Result<Message> {
+        text(id, 128)?;
+        text(body, MAX_TEXT_BYTES)?;
+        if let Ok(existing) = self.message(id) {
+            ensure!(
+                existing.sender.as_deref() == sender
+                    && existing.recipient == recipient
+                    && existing.body == body,
+                "Message ID reused with a different payload"
+            );
+            return Ok(existing);
+        }
+        let target = self.session(recipient)?;
+        ensure!(
+            !target.archived,
+            "{} is archived; restore it before sending",
+            target.name
+        );
+        self.insert_message(id, &target, sender, body, &[], true)?;
         self.message(id)
     }
     fn insert_message(
@@ -628,10 +651,11 @@ impl Host {
         sender: Option<&str>,
         body: &str,
         attachments: &[Attachment],
+        quiet: bool,
     ) -> Result<()> {
         let recipient = target.id.as_str();
         let tx = self.db.savepoint()?;
-        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7)", params![id, target.project_id, sender, recipient, body, now(), encode(&attachments)?])?;
+        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments,quiet) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7,?8)", params![id, target.project_id, sender, recipient, body, now(), encode(&attachments)?, quiet])?;
         Self::event(
             &tx,
             &target.project_id,
@@ -955,9 +979,15 @@ impl Host {
             }
             Command::CreateTicket {
                 coordinator_id,
+                repository_id,
                 title,
                 brief,
-            } => serde_json::to_value(self.create_ticket(&coordinator_id, &title, &brief)?)?,
+            } => serde_json::to_value(self.create_ticket(
+                &coordinator_id,
+                &repository_id,
+                &title,
+                &brief,
+            )?)?,
             Command::AssignTicket {
                 ticket_id,
                 role,
@@ -1138,6 +1168,13 @@ impl Host {
             Command::Settings => serde_json::to_value(self.settings())?,
             Command::SetWorkspacesDir { path } => {
                 serde_json::to_value(self.set_workspaces_dir(&path)?)?
+            }
+            Command::SetVerification { verification } => {
+                serde_json::to_value(self.set_verification(verification)?)?
+            }
+            Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
+            Command::RemoveLeftoverWorktrees { ticket_ids } => {
+                serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?
             }
         })
     }

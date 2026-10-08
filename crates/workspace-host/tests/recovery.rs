@@ -103,17 +103,6 @@ fn messages_and_logs_do_not_cross_project_boundaries() {
             &one.id,
             &a.id,
             None,
-            "Worker",
-            Role::Implementer,
-            Provider::Codex
-        )
-        .is_err()
-    );
-    assert!(
-        host.create_session(
-            &one.id,
-            &a.id,
-            None,
             "Task",
             Role::TaskOrchestrator,
             Provider::Codex
@@ -264,7 +253,7 @@ fn role_settings_and_versioned_commands_survive_restart() {
 }
 
 #[test]
-fn repository_coordinators_are_unique_per_project_and_workers_keep_ownership() {
+fn repository_coordinators_cannot_be_created_and_workers_keep_ownership() {
     use std::process::Command;
     let directory = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -296,7 +285,8 @@ fn repository_coordinators_are_unique_per_project_and_workers_keep_ownership() {
     let repository = host
         .attach_repository(&project.id, repo.path().to_str().unwrap(), "HEAD")
         .unwrap();
-    let first = host
+    let sessions = host.sessions().unwrap().len();
+    let refused = host
         .create_session(
             &project.id,
             &root.id,
@@ -305,17 +295,12 @@ fn repository_coordinators_are_unique_per_project_and_workers_keep_ownership() {
             Role::TaskOrchestrator,
             Provider::Codex,
         )
-        .unwrap();
-    assert!(
-        host.create_session(
-            &project.id,
-            &root.id,
-            Some(&repository.id),
-            "Two",
-            Role::TaskOrchestrator,
-            Provider::Claude,
-        )
-        .is_err()
+        .unwrap_err();
+    assert!(refused.to_string().contains("removed"), "{refused}");
+    assert_eq!(
+        host.sessions().unwrap().len(),
+        sessions,
+        "no session stored"
     );
     let other = host.create_project("Another outcome").unwrap();
     let other_root = host
@@ -327,38 +312,31 @@ fn repository_coordinators_are_unique_per_project_and_workers_keep_ownership() {
     let other_repository = host
         .attach_repository(&other.id, repo.path().to_str().unwrap(), "HEAD")
         .unwrap();
-    let second = host
+    let worker = host
         .create_session(
             &other.id,
             &other_root.id,
             Some(&other_repository.id),
-            "Repository team",
-            Role::TaskOrchestrator,
-            Provider::Claude,
-        )
-        .unwrap();
-    let worker = host
-        .create_session(
-            &other.id,
-            &second.id,
-            None,
             "Tester",
             Role::Tester,
             Provider::Codex,
         )
         .unwrap();
-    // Projects share the workspace's repository while keeping their own teams.
+    // Projects share the workspace's repository while keeping their own agents.
     assert_eq!(repository, other_repository);
-    assert_ne!(first.id, second.id);
-    assert_eq!(worker.parent_id.as_deref(), Some(second.id.as_str()));
-    assert_eq!(worker.repository_id, second.repository_id);
+    assert_eq!(worker.parent_id.as_deref(), Some(other_root.id.as_str()));
+    assert_eq!(
+        worker.repository_id.as_deref(),
+        Some(other_repository.id.as_str())
+    );
     host.send("direct", None, &worker.id, "Inspect tests")
         .unwrap();
     assert!(
         host.activity(&other.id, None, 100)
             .unwrap()
             .iter()
-            .any(|e| e.kind == "direct_instruction" && e.session_id.as_deref() == Some(&second.id))
+            .any(|e| e.kind == "direct_instruction"
+                && e.session_id.as_deref() == Some(&other_root.id))
     );
     assert_eq!(
         host.git_history(&repository.id, 0, 10).unwrap()["commits"]

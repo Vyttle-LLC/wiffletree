@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         raise AssertionError(value)
     try:
         profile={'provider':'codex','model':'gpt-6.1-sol','effort':'medium'}
-        for role in ['implementer','task_orchestrator']:
+        for role in ['implementer']:
             request({'type':'set_policy','policy':{'role':role,'mode':'fixed','default':profile,'allowed':[profile],'small':profile,'standard':profile,'complex':profile}})
         profile={'provider':'claude','model':'sonnet','effort':'low'}
         request({'type':'set_policy','policy':{'role':'tester','mode':'fixed','default':profile,'allowed':[profile],'small':profile,'standard':profile,'complex':profile}})
@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         for provider,input_per_request in [('claude',125),('codex',100)]:
             selected=request({**usage_command,'provider':provider})
             assert selected['totals']['input']==input_per_request*selected['totals']['requests'],selected
-            if provider=='codex': assert selected['totals']['requests']>=3,selected
+            if provider=='codex': assert selected['totals']['requests']>=1,selected
         quota=next(q for q in request({'type':'quotas'}) if q['provider']=='claude')
         assert quota['windows'][0]['used_percent']==25,quota
         print('Live request ledger and streamed quota reporting reconcile across coordinators',flush=True)

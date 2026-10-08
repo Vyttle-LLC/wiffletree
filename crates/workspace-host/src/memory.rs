@@ -116,10 +116,9 @@ impl Host {
             .map(|r| r.name)
             .unwrap_or_else(|| "project".into());
         safe_log_name(&repo)?;
-        let task_id = if session.role == Role::TaskOrchestrator {
-            Some(session.id.clone())
-        } else if session.role.is_worker() {
-            session.parent_id.clone()
+        // A worker's task is its ticket.
+        let task_id = if session.role.is_worker() {
+            self.session_runtime(&session.id)?.ticket_id
         } else {
             None
         };

@@ -23,6 +23,11 @@ const CHECK_IN_MS: i64 = 30 * 60_000;
 const PROGRESS_BATCH_MS: i64 = 20_000;
 /// Bounds one turn's prompt; any further queued messages go to the next turn.
 const MAX_TURN_MESSAGES: usize = 20;
+/// The host-wide cap on active turns.
+const HOST_TURNS: usize = 8;
+/// The host-wide cap on active turns that a worker may join; `verify_ticket` refuses rounds
+/// larger than this, so a waiting round always fits eventually.
+pub(crate) const HOST_WORKER_TURNS: usize = 6;
 
 /// Longest a wake-up sleeps before the actor looks again; macOS suspends sleeping threads
 /// while the Mac sleeps, so a long sleep could miss a timer by hours.
@@ -37,6 +42,14 @@ fn is_turn_input(table: &str) -> String {
 /// SQL condition for a message that is a child's progress report: live.rs "report" writes
 /// the id `report:{sender}:…`, so a human message cannot pass for one.
 const IS_PROGRESS_REPORT: &str = "sender IS NOT NULL AND substr(id,1,length(sender)+8)='report:'||sender||':' AND substr(body,1,11)='[progress] '";
+
+/// Whether a queued verification round could start now, must wait for capacity, or cannot start
+/// until someone intervenes (a verifier is paused, disconnected or holding input).
+enum Admission {
+    Started,
+    Waiting,
+    Stuck,
+}
 /// `input` pairs each message with a status line rendered under its id, such as a timer
 /// fire's lateness; most messages have none.
 fn turn_prompt(
@@ -64,7 +77,7 @@ fn turn_prompt(
         .collect::<Vec<_>>()
         .join("\n\n---\n\n");
     format!(
-        "Managed session {} ({}){preamble}\n{messages}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The main coordinator responds to the human directly. Never wait or poll for a reply.{reminder}",
+        "Managed session {} ({}){preamble}\n{messages}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The coordinator responds to the human directly. Never wait or poll for a reply.{reminder}",
         session.name,
         session.role.label(),
     )
@@ -475,6 +488,10 @@ impl Service {
     pub fn step_changes(&self) -> Receiver<()> {
         self.step_changes.clone()
     }
+}
+/// The project's turns a worker may take; one is kept for its coordinator.
+fn worker_turns(project: &Project) -> usize {
+    project.turn_limit.saturating_sub(1).max(1)
 }
 impl Actor {
     /// Repository scans run Git once per new repository, so they leave the host thread free
@@ -1171,21 +1188,37 @@ impl Actor {
             }
             Err(e) => eprintln!("Workspace timers: {e:#}"),
         }
-        if self.active.len() >= 8 {
+        if self.active.len() >= HOST_TURNS {
             return Ok(());
         }
-        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        // A round's verifiers start together or not at all. While a round waits for capacity,
+        // no other worker turn starts anywhere, so freed slots accumulate until it fits.
+        let mut in_rounds = HashSet::new();
+        let mut hold_workers = false;
+        for (ticket, members) in self.waiting_rounds()? {
+            match self.admit_round(&ticket, &members)? {
+                Admission::Started => {}
+                Admission::Waiting => hold_workers = true,
+                Admission::Stuck => {}
+            }
+            in_rounds.extend(members.into_iter().map(|s| s.id));
+        }
+        // Quiet messages ride along with the next turn but never start one.
+        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut considered = HashSet::new();
         for message in messages {
-            if self.active.len() >= 8 {
+            if self.active.len() >= HOST_TURNS {
                 break;
             }
-            if !considered.insert(message.recipient.clone()) {
+            if !considered.insert(message.recipient.clone())
+                || in_rounds.contains(&message.recipient)
+            {
                 continue;
             }
             let session = self.host.session(&message.recipient)?;
             if self.active.contains_key(&session.id)
                 || matches!(session.status, Status::Paused | Status::Disconnected)
+                || (hold_workers && session.role.is_worker())
             {
                 continue;
             }
@@ -1193,20 +1226,12 @@ impl Actor {
                 continue;
             };
             let project = self.host.project(&session.project_id)?;
-            let project_active = self
-                .active
-                .keys()
-                .filter(|id| {
-                    self.host
-                        .session(id)
-                        .is_ok_and(|s| s.project_id == project.id)
-                })
-                .count();
+            let project_active = self.project_active(&project.id);
             // Reserve capacity for coordinators so a full worker pool cannot starve handoffs.
             if project_active >= project.turn_limit
                 || (session.role.is_worker()
-                    && (project_active >= project.turn_limit.saturating_sub(1).max(1)
-                        || self.active.len() >= 6))
+                    && (project_active >= worker_turns(&project)
+                        || self.active.len() >= HOST_WORKER_TURNS))
             {
                 continue;
             }
@@ -1216,16 +1241,8 @@ impl Actor {
                 continue;
             }
             let runtime = self.host.session_runtime(&session.id)?;
-            // A ticket's worktree has one writer at a time; reviewers only read, so they run together.
             if let Some(ticket) = &runtime.ticket_id
-                && self.active.keys().any(|id| {
-                    self.host
-                        .session_runtime(id)
-                        .is_ok_and(|r| r.ticket_id.as_ref() == Some(ticket))
-                        && self.host.session(id).is_ok_and(|active| {
-                            !(session.role == Role::Reviewer && active.role == Role::Reviewer)
-                        })
-                })
+                && self.worktree_busy(ticket, &session)?
             {
                 continue;
             }
@@ -1234,6 +1251,114 @@ impl Actor {
             }
         }
         Ok(())
+    }
+    fn project_active(&self, project: &str) -> usize {
+        self.active
+            .keys()
+            .filter(|id| self.host.session(id).is_ok_and(|s| s.project_id == project))
+            .count()
+    }
+    /// A ticket's worktree has one writer at a time. Readers run together: reviewers, and the
+    /// testers verifying the ticket in its running cycle.
+    fn worktree_busy(&self, ticket_id: &str, session: &Session) -> Result<bool> {
+        let ticket = self.host.ticket(ticket_id)?;
+        let reader = |session: &Session| {
+            session.role == Role::Reviewer
+                || ticket.running_cycle().is_some_and(|cycle| {
+                    cycle
+                        .rounds
+                        .iter()
+                        .flat_map(|r| &r.verifiers)
+                        .any(|v| v.session_id == session.id)
+                })
+        };
+        for id in self.active.keys() {
+            if self
+                .host
+                .session_runtime(id)?
+                .ticket_id
+                .is_some_and(|t| t == ticket_id)
+            {
+                let active = self.host.session(id)?;
+                if !(reader(session) && reader(&active)) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+    /// Each running cycle's current round whose verifiers still have their round message queued.
+    fn waiting_rounds(&self) -> Result<Vec<(Ticket, Vec<Session>)>> {
+        let mut rounds = vec![];
+        for ticket in self.host.tickets()? {
+            let Some(round) = ticket.running_cycle().and_then(Verification::current_round) else {
+                continue;
+            };
+            let mut members = vec![];
+            for run in &round.verifiers {
+                if self
+                    .host
+                    .message(&run.message_id)
+                    .is_ok_and(|m| m.receipt == Receipt::Queued)
+                {
+                    members.push(self.host.session(&run.session_id)?);
+                }
+            }
+            if !members.is_empty() {
+                rounds.push((ticket, members));
+            }
+        }
+        Ok(rounds)
+    }
+    /// Starts every member of a round, or none of them.
+    fn admit_round(&mut self, ticket: &Ticket, members: &[Session]) -> Result<Admission> {
+        let project = self.host.project(&members[0].project_id)?;
+        let held = |id: &str| -> Result<bool> {
+            Ok(self.host.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='held')",
+                [id],
+                |r| r.get(0),
+            )?)
+        };
+        if !self.host.live_projects()?.contains(&project.id)
+            || self.turns.get(&project.id).copied().unwrap_or_default() >= 100
+        {
+            return Ok(Admission::Stuck);
+        }
+        for member in members {
+            if member.archived
+                || matches!(member.status, Status::Paused | Status::Disconnected)
+                || held(&member.id)?
+            {
+                return Ok(Admission::Stuck);
+            }
+        }
+        let count = members.len();
+        if members.iter().any(|m| self.active.contains_key(&m.id))
+            || self.active.len() + count > HOST_WORKER_TURNS
+            || self.project_active(&project.id) + count > worker_turns(&project)
+        {
+            return Ok(Admission::Waiting);
+        }
+        for member in members {
+            if self.worktree_busy(&ticket.id, member)? {
+                return Ok(Admission::Waiting);
+            }
+        }
+        let mut inputs = vec![];
+        for member in members {
+            match self.due_input(&member.id)? {
+                Some(input) => inputs.push((member.clone(), input)),
+                None => return Ok(Admission::Waiting),
+            }
+        }
+        for (member, input) in inputs {
+            let first = input[0].clone();
+            if let Err(error) = self.start_turn(member.clone(), input) {
+                self.start_failed(&member, &first, &error)?;
+            }
+        }
+        Ok(Admission::Started)
     }
     /// Records why a turn could not start and settles any run it opened.
     fn start_failed(
@@ -1265,7 +1390,7 @@ impl Actor {
     fn due_input(&mut self, recipient: &str) -> Result<Option<Vec<Message>>> {
         let input = self.host.db.prepare(&format!("SELECT * FROM messages WHERE recipient=?1 AND receipt='queued' AND {} ORDER BY sequence LIMIT ?2", is_turn_input("messages")))?.query_map(params![recipient, MAX_TURN_MESSAGES],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         // Urgency covers the whole queue, not just the bounded input.
-        let urgent: bool = self.host.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='queued' AND {} AND NOT ({IS_PROGRESS_REPORT}))", is_turn_input("messages")), [recipient], |r| r.get(0))?;
+        let urgent: bool = self.host.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0 AND {} AND NOT ({IS_PROGRESS_REPORT}))", is_turn_input("messages")), [recipient], |r| r.get(0))?;
         let due = input
             .first()
             .map_or(0, |m| m.created_at + PROGRESS_BATCH_MS);
@@ -1370,17 +1495,6 @@ impl Actor {
         }
         let cwd = if let Some(path) = &runtime.workdir {
             PathBuf::from(path)
-        } else if session.role == Role::TaskOrchestrator {
-            PathBuf::from(
-                self.host
-                    .repository(
-                        session
-                            .repository_id
-                            .as_deref()
-                            .context("Missing repository")?,
-                    )?
-                    .path,
-            )
         } else {
             ensure!(
                 !session.role.is_worker(),
@@ -1522,7 +1636,7 @@ mod tests {
         (actor, changes, step_changes)
     }
 
-    /// A ticket whose tester is in its turn, run `run`, under its repository coordinator.
+    /// A ticket whose tester is in its turn, run `run`, under its project coordinator.
     fn ticket_in_turn() -> (tempfile::TempDir, Actor, Ticket, Session, Session) {
         let home = tempfile::tempdir().unwrap();
         let repository = home.path().join("web");
@@ -1558,18 +1672,9 @@ mod tests {
         let attached = host
             .attach_repository(&project.id, repository.to_str().unwrap(), "HEAD")
             .unwrap();
-        let coordinator = host
-            .create_session(
-                &project.id,
-                &root.id,
-                Some(&attached.id),
-                "Web",
-                Role::TaskOrchestrator,
-                Provider::Codex,
-            )
-            .unwrap();
+        let coordinator = root;
         let ticket = host
-            .create_ticket(&coordinator.id, "Toolbar", "Do")
+            .create_ticket(&coordinator.id, &attached.id, "Toolbar", "Do")
             .unwrap();
         let tester = host
             .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
@@ -1610,22 +1715,15 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_turn_under_an_archived_team_performs_its_pending_removal() {
-        for archive_root in [true, false] {
-            let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
-            let archived = if archive_root {
-                coordinator.parent_id.clone().unwrap()
-            } else {
-                coordinator.id.clone()
-            };
-            actor.host.set_archived(&archived, true).unwrap();
-            assert!(Path::new(&ticket.worktree).exists());
+    fn an_interrupted_turn_under_an_archived_project_performs_its_pending_removal() {
+        let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
+        actor.host.set_archived(&coordinator.id, true).unwrap();
+        assert!(Path::new(&ticket.worktree).exists());
 
-            finish(&mut actor, &tester, false, Some("Turn interrupted"));
+        finish(&mut actor, &tester, false, Some("Turn interrupted"));
 
-            assert!(!Path::new(&ticket.worktree).exists());
-            assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
-        }
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
     }
 
     #[test]
@@ -1670,7 +1768,7 @@ mod tests {
         assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
     }
 
-    /// An idle main coordinator with one child that reports to it.
+    /// An idle coordinator with one child that reports to it.
     fn actor_with_child() -> (tempfile::TempDir, Actor, String, String) {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open(home.path()).unwrap();
@@ -1706,7 +1804,7 @@ mod tests {
                 &parent,
                 Some(&repo.id),
                 "Child",
-                Role::TaskOrchestrator,
+                Role::Implementer,
                 Provider::Codex,
             )
             .unwrap()
