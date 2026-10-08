@@ -37,6 +37,8 @@ pub struct Turn {
     pub provider_session: Option<String>,
     pub cwd: PathBuf,
     pub prompt: String,
+    /// The delivered message's stored files; images also go to the model as images.
+    pub attachments: Vec<Attachment>,
     pub socket: PathBuf,
     pub token: String,
     pub helper: PathBuf,
@@ -84,6 +86,46 @@ pub fn skill(role: Role) -> String {
         }
     )
 }
+/// Lists every attachment's absolute path, to follow the message body in the prompt.
+pub fn attachment_list(attachments: &[Attachment]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let lines = attachments
+        .iter()
+        .map(|a| format!("\n- {}", a.path.display()))
+        .collect::<String>();
+    format!("\n\nAttached files (read-only copies):{lines}")
+}
+fn images(turn: &Turn) -> impl Iterator<Item = (&Path, ImageFormat)> {
+    turn.attachments
+        .iter()
+        .filter_map(|a| Some((a.path.as_path(), a.image?)))
+}
+fn codex_images(turn: &Turn) -> impl Iterator<Item = PathBuf> {
+    turn.attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.image.is_some())
+        .map(|(index, _)| crate::attachments::codex_image_path(&turn.attachments, index))
+}
+/// What the provider reads on stdin. Claude takes images only as content blocks of a
+/// stream-json user message; otherwise the prompt is plain text.
+fn input(turn: &Turn) -> Result<Vec<u8>> {
+    if turn.session.provider == Provider::Codex || images(turn).next().is_none() {
+        return Ok(turn.prompt.clone().into_bytes());
+    }
+    use base64::Engine as _;
+    let mut content = vec![json!({"type":"text","text":turn.prompt})];
+    for (path, format) in images(turn) {
+        let data = base64::engine::general_purpose::STANDARD.encode(fs::read(path)?);
+        content.push(json!({"type":"image","source":{"type":"base64","media_type":format.media_type(),"data":data}}));
+    }
+    let mut line =
+        serde_json::to_vec(&json!({"type":"user","message":{"role":"user","content":content}}))?;
+    line.push(b'\n');
+    Ok(line)
+}
 pub fn command(turn: &Turn) -> Result<ProcessCommand> {
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);
@@ -109,6 +151,9 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
                 // Agents work only in the directory Wiffletree assigned them.
                 .args(["--disallowedTools","EnterWorktree,ExitWorktree"]);
             cmd.args(["--dangerously-skip-permissions", "--tools", "default"]);
+            if images(turn).next().is_some() {
+                cmd.args(["--input-format", "stream-json"]);
+            }
             if let Some(id) = &turn.provider_session {
                 cmd.args(["--resume", id]);
             }
@@ -119,6 +164,13 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
                 .args(["-m",&turn.profile.model,"-c",&format!("model_reasoning_effort={}",json!(turn.profile.effort))])
                 .args(["-c",&format!("developer_instructions={}",json!(instructions))])
                 .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\"], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper))]);
+            // `--image` takes several values: the joined form keeps it from consuming `-`, and
+            // `codex_images` avoids the commas it also splits on.
+            for path in codex_images(turn) {
+                let mut image = std::ffi::OsString::from("--image=");
+                image.push(path);
+                cmd.arg(image);
+            }
             if let Some(id) = &turn.provider_session {
                 cmd.args(["resume", id]);
             }
@@ -147,14 +199,18 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         !cancel.load(Ordering::Relaxed),
         "Turn interrupted before provider launch"
     );
+    let input = input(&turn)?;
     let mut process = Process(
         command(&turn)?
             .spawn()
             .context("Could not start provider")?,
     );
     let mut stdin = process.0.stdin.take().context("No provider stdin")?;
-    stdin.write_all(turn.prompt.as_bytes())?;
-    drop(stdin);
+    // Images can make the input large; writing it alongside reading output cannot deadlock.
+    // A provider that exits before reading it all is reported by its exit status.
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
     let stderr = process.0.stderr.take().context("No provider stderr")?;
     let errors = std::thread::spawn(move || {
         let mut tail = Vec::new();
@@ -384,6 +440,7 @@ mod tests {
             provider_session: None,
             cwd: PathBuf::from("/tmp"),
             prompt: String::new(),
+            attachments: vec![],
             socket: PathBuf::new(),
             token: String::new(),
             helper: PathBuf::new(),
@@ -394,6 +451,147 @@ mod tests {
         let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
         assert_eq!(args[denied + 1], "EnterWorktree,ExitWorktree");
         assert!(args.iter().any(|a| a == "--allowedTools"));
+    }
+
+    fn turn(provider: Provider, resume: Option<&str>, attachments: Vec<Attachment>) -> Turn {
+        Turn {
+            run_id: "run".into(),
+            session: Session {
+                id: "s".into(),
+                project_id: "p".into(),
+                parent_id: None,
+                repository_id: None,
+                name: "Main".into(),
+                role: Role::ProjectOrchestrator,
+                provider,
+                status: Status::Ready,
+                archived: false,
+            },
+            profile: ModelProfile {
+                provider,
+                model: "m".into(),
+                effort: "high".into(),
+            },
+            provider_session: resume.map(str::to_owned),
+            cwd: "/tmp".into(),
+            prompt: "Look".into(),
+            attachments,
+            socket: "/tmp/socket".into(),
+            token: "t".into(),
+            helper: "/tmp/helper".into(),
+        }
+    }
+
+    /// A stored screenshot and a text file, as delivered with one message.
+    fn attachments(dir: &Path) -> Vec<Attachment> {
+        let shot = dir.join("shot.png");
+        fs::write(&shot, b"\x89PNG\r\n\x1a\nimage").unwrap();
+        vec![
+            Attachment {
+                path: shot,
+                size: 13,
+                image: Some(ImageFormat::Png),
+            },
+            Attachment {
+                path: dir.join("notes.txt"),
+                size: 5,
+                image: None,
+            },
+        ]
+    }
+
+    fn arguments(turn: &Turn) -> Vec<String> {
+        let mut cmd = ProcessCommand::new("provider");
+        configure(&mut cmd, turn);
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_prompt_lists_every_attachment_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = attachment_list(&attachments(dir.path()));
+        assert_eq!(
+            list,
+            format!(
+                "\n\nAttached files (read-only copies):\n- {}\n- {}",
+                dir.path().join("shot.png").display(),
+                dir.path().join("notes.txt").display()
+            )
+        );
+        assert_eq!(attachment_list(&[]), "");
+    }
+
+    #[test]
+    fn codex_attaches_images_before_resuming_from_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let turn = turn(Provider::Codex, Some("thread"), attachments(dir.path()));
+        let args = arguments(&turn);
+        let image = format!("--image={}", dir.path().join("shot.png").display());
+        assert_eq!(
+            &args[args.len() - 4..],
+            [image, "resume".into(), "thread".into(), "-".into()]
+        );
+        assert!(!args.iter().any(|a| a.contains("notes.txt")));
+        assert_eq!(input(&turn).unwrap(), b"Look");
+    }
+
+    #[test]
+    fn claude_sends_images_as_stream_json_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let turn = turn(Provider::Claude, Some("session"), attachments(dir.path()));
+        let args = arguments(&turn);
+        let format = args.iter().position(|a| a == "--input-format").unwrap();
+        assert_eq!(args[format + 1], "stream-json");
+        let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[denied + 1], "EnterWorktree,ExitWorktree");
+        assert_eq!(&args[args.len() - 2..], ["--resume", "session"]);
+        let line = input(&turn).unwrap();
+        assert_eq!(line.last(), Some(&b'\n'));
+        let message: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(
+            message,
+            json!({"type":"user","message":{"role":"user","content":[
+                {"type":"text","text":"Look"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgppbWFnZQ=="}}
+            ]}})
+        );
+    }
+
+    #[test]
+    fn codex_gets_comma_free_image_paths_while_the_prompt_keeps_the_originals() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = attachments(dir.path());
+        files[0].path = dir.path().join("odd,shot.png");
+        let mut turn = turn(Provider::Codex, None, files);
+        turn.prompt = attachment_list(&turn.attachments);
+        let args = arguments(&turn);
+        let image = format!("--image={}", dir.path().join(".codex-0.png").display());
+        assert_eq!(&args[args.len() - 2..], [image, "-".into()]);
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains(',') && a.starts_with("--image"))
+        );
+        assert!(turn.prompt.contains("odd,shot.png"));
+    }
+
+    #[test]
+    fn turns_without_images_keep_plain_text_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = attachments(dir.path());
+        files.remove(0);
+        for provider in [Provider::Claude, Provider::Codex] {
+            let turn = turn(provider, None, files.clone());
+            let args = arguments(&turn);
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == "--input-format" || a.starts_with("--image"))
+            );
+            assert_eq!(input(&turn).unwrap(), b"Look");
+        }
     }
 
     #[test]

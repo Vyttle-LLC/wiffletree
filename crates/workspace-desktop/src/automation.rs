@@ -2,21 +2,24 @@
 //!
 //! Each JSON line received on the Unix socket becomes real input: mouse events are posted to the
 //! application's AppKit queue, so hit-testing and focus behave as they do for a person, and keys
-//! go through GPUI's keystroke dispatch. The pointer and other applications are not involved.
+//! go through GPUI's keystroke dispatch, and file drops replay the events the macOS platform
+//! sends for a Finder drag. The pointer and other applications are not involved.
 //! Nothing listens unless the flag is passed.
 
 // objc 0.2's macros test a `cargo-clippy` feature this crate does not declare.
 #![allow(unexpected_cfgs)]
 use anyhow::Context as _;
 use async_channel::{Receiver, Sender};
-use gpui::{App, Keystroke, Modifiers, Window};
+use gpui::{
+    App, ExternalPaths, FileDropEvent, Keystroke, Modifiers, PlatformInput, Window, point, px,
+};
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::{fs::PermissionsExt, net::UnixListener},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Deserialize)]
@@ -43,6 +46,12 @@ pub enum Step {
     },
     Type {
         text: String,
+    },
+    /// Files dragged from Finder and dropped at a point.
+    Drop {
+        x: f64,
+        y: f64,
+        paths: Vec<PathBuf>,
     },
     /// Reports the window's number and size so a caller can capture it.
     Window,
@@ -298,6 +307,20 @@ impl Step {
                         },
                         cx,
                     );
+                }
+            }
+            Self::Drop { x, y, paths } => {
+                let position = point(px(x as f32), px(y as f32));
+                for event in [
+                    FileDropEvent::Entered {
+                        position,
+                        paths: ExternalPaths(paths.into()),
+                    },
+                    FileDropEvent::Pending { position },
+                    FileDropEvent::Submit { position },
+                    FileDropEvent::Exited,
+                ] {
+                    window.dispatch_event(PlatformInput::FileDrop(event), cx);
                 }
             }
             Self::Window => {

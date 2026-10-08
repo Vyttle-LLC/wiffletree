@@ -1,4 +1,5 @@
 //! Single-writer durable host, independent of graphics and provider inference.
+pub mod attachments;
 pub mod context;
 pub mod live;
 pub mod mcp;
@@ -93,7 +94,7 @@ impl Host {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 4, "Store schema is newer than this application");
+        ensure!(version <= 5, "Store schema is newer than this application");
         if version == 0 {
             db.execute_batch(&format!(
                 "BEGIN IMMEDIATE; {} COMMIT;",
@@ -104,6 +105,7 @@ impl Host {
         db.execute_batch(include_str!("usage.sql"))?;
         db.execute_batch(include_str!("steps.sql"))?;
         repositories::migrate_to_workspace(&db)?;
+        attachments::migrate(&db)?;
         let mut host = Self {
             db,
             _lock: lock,
@@ -460,6 +462,7 @@ impl Host {
             body: row.get(5)?,
             receipt,
             created_at: row.get(7)?,
+            attachments: decode(row, 8)?,
         })
     }
     pub fn message(&self, id: &str) -> Result<Message> {
@@ -476,8 +479,28 @@ impl Host {
         recipient: &str,
         body: &str,
     ) -> Result<Message> {
+        self.send_with_files(id, sender, recipient, body, &[])
+    }
+    /// Sends a message whose `files` are copied into the store with it. Only the human
+    /// attaches files, and with them the body may be empty.
+    pub fn send_with_files(
+        &mut self,
+        id: &str,
+        sender: Option<&str>,
+        recipient: &str,
+        body: &str,
+        files: &[PathBuf],
+    ) -> Result<Message> {
         text(id, 128)?;
-        text(body, MAX_TEXT_BYTES)?;
+        if files.is_empty() {
+            text(body, MAX_TEXT_BYTES)?;
+        } else {
+            ensure!(sender.is_none(), "Only the human can attach files");
+            ensure!(
+                body.len() <= MAX_TEXT_BYTES,
+                "Text must contain at most {MAX_TEXT_BYTES} bytes"
+            );
+        }
         let target = self.session(recipient)?;
         ensure!(
             !target.archived,
@@ -499,10 +522,16 @@ impl Host {
             )
             .optional()?
         {
+            let names = files.iter().map(|f| f.file_name()).collect::<Vec<_>>();
             ensure!(
                 existing.sender.as_deref() == sender
                     && existing.recipient == recipient
-                    && existing.body == body,
+                    && existing.body == body
+                    && existing
+                        .attachments
+                        .iter()
+                        .map(|a| a.path.file_name())
+                        .eq(names),
                 "Message ID reused with a different payload"
             );
             return Ok(existing);
@@ -516,8 +545,29 @@ impl Host {
             queued < 1024,
             "Recipient queue is full; accepted messages are preserved"
         );
+        if files.is_empty() {
+            self.insert_message(id, &target, sender, body, &[])?;
+        } else {
+            let directory = attachments::directory(&self.home, &target.project_id, id)?;
+            let stored = attachments::store(&directory, files)?;
+            if let Err(error) = self.insert_message(id, &target, sender, body, &stored) {
+                let _ = fs::remove_dir_all(&directory);
+                return Err(error);
+            }
+        }
+        self.message(id)
+    }
+    fn insert_message(
+        &mut self,
+        id: &str,
+        target: &Session,
+        sender: Option<&str>,
+        body: &str,
+        attachments: &[Attachment],
+    ) -> Result<()> {
+        let recipient = target.id.as_str();
         let tx = self.db.transaction()?;
-        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?4,?5,'queued',?6)", params![id, target.project_id, sender, recipient, body, now()])?;
+        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7)", params![id, target.project_id, sender, recipient, body, now(), encode(&attachments)?])?;
         Self::event(
             &tx,
             &target.project_id,
@@ -537,7 +587,7 @@ impl Host {
             )?;
         }
         tx.commit()?;
-        self.message(id)
+        Ok(())
     }
     pub fn messages(
         &self,
@@ -942,7 +992,14 @@ impl Host {
                 sender,
                 recipient,
                 body,
-            } => serde_json::to_value(self.send(&id, sender.as_deref(), &recipient, &body)?)?,
+                attachments,
+            } => serde_json::to_value(self.send_with_files(
+                &id,
+                sender.as_deref(),
+                &recipient,
+                &body,
+                &attachments,
+            )?)?,
             Command::Messages {
                 session_id,
                 before,

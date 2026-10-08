@@ -3,7 +3,10 @@ mod steps;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 pub use steps::*;
 pub use usage::*;
 
@@ -188,6 +191,43 @@ pub struct Message {
     pub body: String,
     pub receipt: Receipt,
     pub created_at: i64,
+    /// Only the human's messages carry attachments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+/// A file on a message: before sending, the dropped file; after, the stored read-only copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub path: PathBuf,
+    pub size: u64,
+    pub image: Option<ImageFormat>,
+}
+impl Attachment {
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+/// Image formats both providers accept as images rather than files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+impl ImageFormat {
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attention {
@@ -717,6 +757,9 @@ pub enum Command {
         sender: Option<String>,
         recipient: String,
         body: String,
+        /// Files the human attached; the host stores copies of them with the message.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PathBuf>,
     },
     Messages {
         session_id: String,

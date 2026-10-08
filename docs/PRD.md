@@ -297,6 +297,8 @@ Import files as owned copies by default so moving the source file does not break
 
 The Context panel lists available project, task and conversation files, origin, version, size and inclusion state. Available is distinct from selected for the next message. The composer shows selected file chips, and sent messages retain their exact attachment references. Removing a chip removes it from the draft, not from the project library.
 
+The first slice implements conversation scope only: files dropped onto a conversation travel with one human message as owned, read-only copies (at most 50 MB each, no folders). Agents receive their paths and see images directly. File selection, task and project scopes, the Context panel and revisions remain to be built.
+
 Each model turn records a context manifest: selected file versions, retrieved excerpts, source references, instructions and summary version. Delegation passes a bounded assignment plus references, not every transcript and file. Show preparation errors, unsupported formats and transfer progress before claiming a file is usable. Include a context-size estimate when available; actual provider token accounting remains authoritative. Show each session's context window use as a segmented bar by category with the total, window size and compaction point. Use the provider's own breakdown where it offers one and label app-side estimates as estimates; measuring must not start inference or alter the provider's session.
 
 ### Headless ownership, recovery and performance

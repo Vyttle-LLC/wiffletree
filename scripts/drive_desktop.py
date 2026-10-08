@@ -7,6 +7,7 @@ Start the app with `--automation-socket <path>`, then:
     drive_desktop.py --socket <path> type "Ship the toolbar"
     drive_desktop.py --socket <path> key enter
     drive_desktop.py --socket <path> scroll 1100 500 -300
+    drive_desktop.py --socket <path> drop 640 400 ~/Desktop/shot.png notes.txt
     drive_desktop.py --socket <path> shot /tmp/window.png
 
 Coordinates are window points from the top-left corner. `shot` saves the window at one pixel
@@ -14,6 +15,7 @@ per point, so positions read from a screenshot can be passed straight back to `c
 """
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -56,6 +58,10 @@ def main():
         scroll.add_argument(name, type=kind)
     commands.add_parser("key").add_argument("keystroke")
     commands.add_parser("type").add_argument("text")
+    drop = commands.add_parser("drop")
+    drop.add_argument("x", type=float)
+    drop.add_argument("y", type=float)
+    drop.add_argument("paths", nargs="+", type=lambda p: os.path.abspath(os.path.expanduser(p)))
     commands.add_parser("shot").add_argument("output")
     args = parser.parse_args()
     if args.command == "shot":
