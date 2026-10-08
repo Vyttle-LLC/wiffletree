@@ -2,17 +2,19 @@
 //! sent with a message.
 use super::*;
 use ui::icon;
+use workspace_host::attachments::same_name;
 
 const THUMBNAIL: f32 = 56.;
 
 /// Adds dropped files to a draft's attachments and returns why any were refused. A file
-/// whose name is already attached is refused, the same file again included, since a
-/// message stores its files by name.
+/// whose name is already attached, ignoring case, is refused (the same file again included),
+/// since a message stores its files by name.
 pub(super) fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
     let mut refused = vec![];
     for path in paths {
         let name = path.file_name().map(|n| n.to_string_lossy());
-        if let Some(name) = name.filter(|n| attached.iter().any(|a| a.name() == *n)) {
+        let taken = |name: &str| attached.iter().any(|a| same_name(&a.name(), name));
+        if let Some(name) = name.filter(|n| taken(n)) {
             refused.push(format!("{name}: a file with this name is already attached"));
             continue;
         }
@@ -145,6 +147,19 @@ mod tests {
         let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
         assert_eq!(names, ["notes.txt", "shot.png"]);
         assert_eq!(attached[0].path, dir.path().join("a/notes.txt"));
+
+        fs::write(dir.path().join("Notes.txt"), b"capital").unwrap();
+        fs::write(dir.path().join("plan.md"), b"plan").unwrap();
+        let refused = add_dropped(
+            &mut attached,
+            &[dir.path().join("Notes.txt"), dir.path().join("plan.md")],
+        );
+        assert_eq!(
+            refused,
+            ["Notes.txt: a file with this name is already attached"]
+        );
+        let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
+        assert_eq!(names, ["notes.txt", "shot.png", "plan.md"]);
     }
 
     #[test]

@@ -74,6 +74,12 @@ pub fn directory(home: &Path, project: &str, message: &str) -> Result<PathBuf> {
         .join(message))
 }
 
+/// Whether two file names would name the same file. macOS volumes ignore case by default,
+/// so neither may `Notes.txt` and `notes.txt` share a message.
+pub fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
 /// The path Codex is given for a message's `index`th attachment. Codex splits `--image`
 /// values at commas, so an image named with one is reached through a comma-free hard link
 /// that `store` makes beside it: `.codex-<index>.<ext>`, with underscores added after the
@@ -86,7 +92,7 @@ pub(crate) fn codex_image_path(attachments: &[Attachment], index: usize) -> Path
             let mut stem = format!(".codex-{index}");
             while attachments
                 .iter()
-                .any(|a| a.name() == format!("{stem}.{extension}"))
+                .any(|a| same_name(&a.name(), &format!("{stem}.{extension}")))
             {
                 stem.push('_');
             }
@@ -102,25 +108,25 @@ pub(crate) fn codex_image_path(attachments: &[Attachment], index: usize) -> Path
 pub(crate) fn store(directory: &Path, sources: &[PathBuf]) -> Result<Vec<Attachment>> {
     let copied = (|| -> Result<Vec<Attachment>> {
         fs::create_dir_all(directory)?;
-        let stored = sources
-            .iter()
-            .map(|source| {
-                let original = inspect(source)?;
-                let copy = directory.join(original.name());
-                ensure!(
-                    !copy.exists(),
-                    "Two attachments are named {}",
-                    original.name()
-                );
-                fs::copy(source, &copy)
-                    .with_context(|| format!("Could not copy {}", original.name()))?;
-                fs::set_permissions(&copy, fs::Permissions::from_mode(0o444))?;
-                Ok(Attachment {
-                    path: copy,
-                    ..original
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut stored: Vec<Attachment> = vec![];
+        for source in sources {
+            let original = inspect(source)?;
+            ensure!(
+                !stored
+                    .iter()
+                    .any(|a| same_name(&a.name(), &original.name())),
+                "Two attachments are named {}",
+                original.name()
+            );
+            let copy = directory.join(original.name());
+            fs::copy(source, &copy)
+                .with_context(|| format!("Could not copy {}", original.name()))?;
+            fs::set_permissions(&copy, fs::Permissions::from_mode(0o444))?;
+            stored.push(Attachment {
+                path: copy,
+                ..original
+            });
+        }
         // Links come after every copy, so their names can avoid all of the message's files.
         for (index, attachment) in stored.iter().enumerate() {
             let link = codex_image_path(&stored, index);
@@ -276,6 +282,30 @@ mod tests {
         );
         assert_eq!(fs::read(&links[0]).unwrap(), [png, b"odd"].concat());
         assert_eq!(fs::read(&links[1]).unwrap(), [png, b"other"].concat());
+    }
+
+    #[test]
+    fn codex_links_and_copies_compare_names_without_case() {
+        let source = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let png = b"\x89PNG\r\n\x1a\n".as_slice();
+        let odd = file(source.path(), "odd,shot.png", &[png, b"odd"].concat());
+        let upper = file(source.path(), ".CODEX-0.png", &[png, b"upper"].concat());
+        let target = directory(home.path(), "project", "message").unwrap();
+        let stored = store(&target, &[odd, upper]).unwrap();
+        assert_eq!(codex_image_path(&stored, 0), target.join(".codex-0_.png"));
+        assert_eq!(fs::read(&stored[1].path).unwrap(), [png, b"upper"].concat());
+
+        for folder in ["a", "b"] {
+            fs::create_dir(source.path().join(folder)).unwrap();
+        }
+        let lower = file(&source.path().join("a"), "notes.txt", b"lower");
+        let capital = file(&source.path().join("b"), "Notes.txt", b"capital");
+        let other = directory(home.path(), "project", "other").unwrap();
+        let error = store(&other, &[lower, capital]).unwrap_err().to_string();
+        assert_eq!(error, "Two attachments are named Notes.txt");
+        assert!(!other.exists());
+        assert!(same_name("Notes.TXT", "notes.txt") && !same_name("a.txt", "b.txt"));
     }
 
     #[test]
