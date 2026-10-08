@@ -107,7 +107,7 @@ fn codex_images(turn: &Turn) -> impl Iterator<Item = PathBuf> {
         .iter()
         .enumerate()
         .filter(|(_, a)| a.image.is_some())
-        .map(|(index, a)| crate::attachments::codex_image_path(a, index))
+        .map(|(index, _)| crate::attachments::codex_image_path(&turn.attachments, index))
 }
 /// What the provider reads on stdin. Claude takes images only as content blocks of a
 /// stream-json user message; otherwise the prompt is plain text.

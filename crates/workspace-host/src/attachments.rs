@@ -76,14 +76,23 @@ pub fn directory(home: &Path, project: &str, message: &str) -> Result<PathBuf> {
 
 /// The path Codex is given for a message's `index`th attachment. Codex splits `--image`
 /// values at commas, so an image named with one is reached through a comma-free hard link
-/// that `store` makes beside it.
-pub(crate) fn codex_image_path(attachment: &Attachment, index: usize) -> PathBuf {
+/// that `store` makes beside it: `.codex-<index>.<ext>`, with underscores added after the
+/// index until no attachment of the message has that name. The index keeps links distinct.
+pub(crate) fn codex_image_path(attachments: &[Attachment], index: usize) -> PathBuf {
+    let attachment = &attachments[index];
     match attachment.image {
         Some(format) if attachment.name().contains(',') => {
             let extension = format.media_type().trim_start_matches("image/");
+            let mut stem = format!(".codex-{index}");
+            while attachments
+                .iter()
+                .any(|a| a.name() == format!("{stem}.{extension}"))
+            {
+                stem.push('_');
+            }
             attachment
                 .path
-                .with_file_name(format!(".codex-{index}.{extension}"))
+                .with_file_name(format!("{stem}.{extension}"))
         }
         _ => attachment.path.clone(),
     }
@@ -93,10 +102,9 @@ pub(crate) fn codex_image_path(attachment: &Attachment, index: usize) -> PathBuf
 pub(crate) fn store(directory: &Path, sources: &[PathBuf]) -> Result<Vec<Attachment>> {
     let copied = (|| -> Result<Vec<Attachment>> {
         fs::create_dir_all(directory)?;
-        sources
+        let stored = sources
             .iter()
-            .enumerate()
-            .map(|(index, source)| {
+            .map(|source| {
                 let original = inspect(source)?;
                 let copy = directory.join(original.name());
                 ensure!(
@@ -107,17 +115,20 @@ pub(crate) fn store(directory: &Path, sources: &[PathBuf]) -> Result<Vec<Attachm
                 fs::copy(source, &copy)
                     .with_context(|| format!("Could not copy {}", original.name()))?;
                 fs::set_permissions(&copy, fs::Permissions::from_mode(0o444))?;
-                let stored = Attachment {
+                Ok(Attachment {
                     path: copy,
                     ..original
-                };
-                let link = codex_image_path(&stored, index);
-                if link != stored.path {
-                    fs::hard_link(&stored.path, &link)?;
-                }
-                Ok(stored)
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        // Links come after every copy, so their names can avoid all of the message's files.
+        for (index, attachment) in stored.iter().enumerate() {
+            let link = codex_image_path(&stored, index);
+            if link != attachment.path {
+                fs::hard_link(&attachment.path, &link)?;
+            }
+        }
+        Ok(stored)
     })();
     if copied.is_err() {
         let _ = fs::remove_dir_all(directory);
@@ -237,13 +248,34 @@ mod tests {
         let target = directory(home.path(), "project", "message").unwrap();
         let stored = store(&target, &[shot, notes, plain]).unwrap();
         assert_eq!(stored[0].path, target.join("odd,shot.png"));
-        let link = codex_image_path(&stored[0], 0);
+        let link = codex_image_path(&stored, 0);
         assert_eq!(link, target.join(".codex-0.png"));
         assert_eq!(fs::read(&link).unwrap(), fs::read(&stored[0].path).unwrap());
         // Only comma-named images need a link.
-        assert_eq!(codex_image_path(&stored[1], 1), stored[1].path);
-        assert_eq!(codex_image_path(&stored[2], 2), stored[2].path);
+        assert_eq!(codex_image_path(&stored, 1), stored[1].path);
+        assert_eq!(codex_image_path(&stored, 2), stored[2].path);
         assert_eq!(fs::read_dir(&target).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn codex_links_avoid_the_names_of_the_message_files() {
+        let source = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let png = b"\x89PNG\r\n\x1a\n".as_slice();
+        let odd = file(source.path(), "odd,shot.png", &[png, b"odd"].concat());
+        let taken = file(source.path(), ".codex-0.png", &[png, b"taken"].concat());
+        let other = file(source.path(), "b,c.png", &[png, b"other"].concat());
+        let target = directory(home.path(), "project", "message").unwrap();
+        let stored = store(&target, &[odd, taken, other]).unwrap();
+        assert_eq!(stored[1].path, target.join(".codex-0.png"));
+        assert_eq!(fs::read(&stored[1].path).unwrap(), [png, b"taken"].concat());
+        let links = [0, 2].map(|index| codex_image_path(&stored, index));
+        assert_eq!(
+            links,
+            [target.join(".codex-0_.png"), target.join(".codex-2.png")]
+        );
+        assert_eq!(fs::read(&links[0]).unwrap(), [png, b"odd"].concat());
+        assert_eq!(fs::read(&links[1]).unwrap(), [png, b"other"].concat());
     }
 
     #[test]
