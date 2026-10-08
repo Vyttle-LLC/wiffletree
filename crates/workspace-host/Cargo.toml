@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 workspace-core.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

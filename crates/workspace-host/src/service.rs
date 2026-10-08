@@ -797,7 +797,11 @@ impl Actor {
             session.role.label(),
             message.sender.as_deref().unwrap_or("human"),
             message.id,
-            message.body,
+            format!(
+                "{}{}",
+                message.body,
+                provider::attachment_list(&message.attachments)
+            ),
             open_questions_reminder(&self.host.open_questions(&session)?)
         );
         self.host.db.execute(
@@ -824,6 +828,7 @@ impl Actor {
             provider_session: runtime.provider_session_id,
             cwd,
             prompt,
+            attachments: message.attachments.clone(),
             socket: self.socket.clone(),
             token: token.clone(),
             helper: self.helper.clone(),

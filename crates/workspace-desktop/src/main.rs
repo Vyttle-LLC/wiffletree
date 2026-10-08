@@ -814,6 +814,7 @@ impl Workspace {
                     sender: None,
                     recipient,
                     body,
+                    attachments: vec![],
                 },
                 window,
                 cx,

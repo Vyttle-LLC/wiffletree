@@ -943,6 +943,7 @@ mod tests {
             body: body.into(),
             receipt: Receipt::Completed,
             created_at: 0,
+            attachments: vec![],
         }
     }
 
