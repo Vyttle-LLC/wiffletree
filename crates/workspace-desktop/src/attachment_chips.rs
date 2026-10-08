@@ -6,19 +6,17 @@ use ui::icon;
 const THUMBNAIL: f32 = 56.;
 
 /// Adds dropped files to a draft's attachments and returns why any were refused. A file
-/// already attached is skipped; another file with the same name is refused, since both
-/// would be stored under that name.
+/// whose name is already attached is refused, the same file again included, since a
+/// message stores its files by name.
 pub(super) fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
     let mut refused = vec![];
     for path in paths {
-        if attached.iter().any(|a| &a.path == path) {
+        let name = path.file_name().map(|n| n.to_string_lossy());
+        if let Some(name) = name.filter(|n| attached.iter().any(|a| a.name() == *n)) {
+            refused.push(format!("{name}: a file with this name is already attached"));
             continue;
         }
         match workspace_host::attachments::inspect(path) {
-            Ok(file) if attached.iter().any(|a| a.name() == file.name()) => refused.push(format!(
-                "{}: a file with this name is already attached",
-                file.name()
-            )),
             Ok(file) => attached.push(file),
             Err(error) => refused.push(error.to_string()),
         }
@@ -120,7 +118,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn a_second_file_with_an_attached_name_is_refused_and_the_rest_attach() {
+    fn a_file_with_an_attached_name_is_refused_and_the_rest_attach() {
         let dir = tempfile::tempdir().unwrap();
         for folder in ["a", "b"] {
             fs::create_dir(dir.path().join(folder)).unwrap();
@@ -139,9 +137,10 @@ mod tests {
                 dir.path().join("shot.png"),
             ],
         );
+        // The same file dropped again and another file with its name read alike.
         assert_eq!(
             refused,
-            ["notes.txt: a file with this name is already attached"]
+            ["notes.txt: a file with this name is already attached"; 2]
         );
         let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
         assert_eq!(names, ["notes.txt", "shot.png"]);

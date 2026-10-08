@@ -92,7 +92,7 @@ Enter sends a conversation draft; Shift Enter adds a newline. Command Enter also
 
 ## Attachments
 
-Drop files from Finder onto the selected conversation to attach them to the draft. Each appears above the composer as a chip: a thumbnail for PNG, JPEG, GIF and WebP images (recognized by content, then extension), otherwise the name and size. A chip's × removes it. Folders, files over 50 MB and a second file with an already attached name are refused with a notice naming each one and why; the rest of the drop is still attached. Pending attachments belong to that session's draft, and a draft with attachments can be sent without text. Nothing is written until you send.
+Drop files from Finder onto the selected conversation to attach them to the draft. Each appears above the composer as a chip: a thumbnail for PNG, JPEG, GIF and WebP images (recognized by content, then extension), otherwise the name and size. A chip's × removes it. Folders, files over 50 MB and any file whose name is already attached, the same file included, are refused with a notice naming each one and why; the rest of the drop is still attached. Pending attachments belong to that session's draft, and a draft with attachments can be sent without text. Nothing is written until you send.
 
 Sending copies each file to `<data dir>/projects/<project-id>/attachments/<message-id>/<file name>` as read-only (0444), and the message stores those copies' paths, sizes and image formats (schema 5, an additive column on existing messages). If copying or storing the message fails, that message's folder is removed. Copies live as long as their message; archiving and restoring keep them. In the transcript a message's files show under its bubble, and clicking one opens it with its default application.
 
