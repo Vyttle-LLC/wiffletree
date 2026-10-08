@@ -822,17 +822,8 @@ impl Workspace {
         let Some(session) = self.selected.clone() else {
             return;
         };
-        let attached = self.attached.entry(session).or_default();
-        self.refused_files.clear();
-        for path in paths {
-            if attached.iter().any(|a| &a.path == path) {
-                continue;
-            }
-            match workspace_host::attachments::inspect(path) {
-                Ok(attachment) => attached.push(attachment),
-                Err(error) => self.refused_files.push(error.to_string()),
-            }
-        }
+        self.refused_files =
+            attachment_chips::add_dropped(self.attached.entry(session).or_default(), paths);
         cx.notify();
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {

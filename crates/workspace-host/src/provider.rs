@@ -102,6 +102,13 @@ fn images(turn: &Turn) -> impl Iterator<Item = (&Path, ImageFormat)> {
         .iter()
         .filter_map(|a| Some((a.path.as_path(), a.image?)))
 }
+fn codex_images(turn: &Turn) -> impl Iterator<Item = PathBuf> {
+    turn.attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.image.is_some())
+        .map(|(index, a)| crate::attachments::codex_image_path(a, index))
+}
 /// What the provider reads on stdin. Claude takes images only as content blocks of a
 /// stream-json user message; otherwise the prompt is plain text.
 fn input(turn: &Turn) -> Result<Vec<u8>> {
@@ -157,8 +164,9 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
                 .args(["-m",&turn.profile.model,"-c",&format!("model_reasoning_effort={}",json!(turn.profile.effort))])
                 .args(["-c",&format!("developer_instructions={}",json!(instructions))])
                 .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\"], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper))]);
-            // `--image` takes several values, so the joined form keeps it from consuming `-`.
-            for (path, _) in images(turn) {
+            // `--image` takes several values: the joined form keeps it from consuming `-`, and
+            // `codex_images` avoids the commas it also splits on.
+            for path in codex_images(turn) {
                 let mut image = std::ffi::OsString::from("--image=");
                 image.push(path);
                 cmd.arg(image);
@@ -549,6 +557,24 @@ mod tests {
                 {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgppbWFnZQ=="}}
             ]}})
         );
+    }
+
+    #[test]
+    fn codex_gets_comma_free_image_paths_while_the_prompt_keeps_the_originals() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = attachments(dir.path());
+        files[0].path = dir.path().join("odd,shot.png");
+        let mut turn = turn(Provider::Codex, None, files);
+        turn.prompt = attachment_list(&turn.attachments);
+        let args = arguments(&turn);
+        let image = format!("--image={}", dir.path().join(".codex-0.png").display());
+        assert_eq!(&args[args.len() - 2..], [image, "-".into()]);
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains(',') && a.starts_with("--image"))
+        );
+        assert!(turn.prompt.contains("odd,shot.png"));
     }
 
     #[test]

@@ -1,8 +1,30 @@
-//! Attached files as chips: pending in the composer, or sent with a message.
+//! Attached files: dropped into a draft, and shown as chips pending in the composer or
+//! sent with a message.
 use super::*;
 use ui::icon;
 
 const THUMBNAIL: f32 = 56.;
+
+/// Adds dropped files to a draft's attachments and returns why any were refused. A file
+/// already attached is skipped; another file with the same name is refused, since both
+/// would be stored under that name.
+pub(super) fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
+    let mut refused = vec![];
+    for path in paths {
+        if attached.iter().any(|a| &a.path == path) {
+            continue;
+        }
+        match workspace_host::attachments::inspect(path) {
+            Ok(file) if attached.iter().any(|a| a.name() == file.name()) => refused.push(format!(
+                "{}: a file with this name is already attached",
+                file.name()
+            )),
+            Ok(file) => attached.push(file),
+            Err(error) => refused.push(error.to_string()),
+        }
+    }
+    refused
+}
 
 /// A size such as `512 B`, `14 KB` or `3.2 MB`.
 pub(super) fn file_size(bytes: u64) -> String {
@@ -94,7 +116,37 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::file_size;
+    use super::{add_dropped, file_size};
+    use std::fs;
+
+    #[test]
+    fn a_second_file_with_an_attached_name_is_refused_and_the_rest_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        for folder in ["a", "b"] {
+            fs::create_dir(dir.path().join(folder)).unwrap();
+            fs::write(dir.path().join(folder).join("notes.txt"), folder).unwrap();
+        }
+        fs::write(dir.path().join("shot.png"), b"png").unwrap();
+        let first = dir.path().join("a/notes.txt");
+        let mut attached = vec![];
+        assert!(add_dropped(&mut attached, std::slice::from_ref(&first)).is_empty());
+
+        let refused = add_dropped(
+            &mut attached,
+            &[
+                first,
+                dir.path().join("b/notes.txt"),
+                dir.path().join("shot.png"),
+            ],
+        );
+        assert_eq!(
+            refused,
+            ["notes.txt: a file with this name is already attached"]
+        );
+        let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
+        assert_eq!(names, ["notes.txt", "shot.png"]);
+        assert_eq!(attached[0].path, dir.path().join("a/notes.txt"));
+    }
 
     #[test]
     fn sizes_read_in_the_nearest_unit() {

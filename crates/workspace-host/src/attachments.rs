@@ -74,13 +74,29 @@ pub fn directory(home: &Path, project: &str, message: &str) -> Result<PathBuf> {
         .join(message))
 }
 
+/// The path Codex is given for a message's `index`th attachment. Codex splits `--image`
+/// values at commas, so an image named with one is reached through a comma-free hard link
+/// that `store` makes beside it.
+pub(crate) fn codex_image_path(attachment: &Attachment, index: usize) -> PathBuf {
+    match attachment.image {
+        Some(format) if attachment.name().contains(',') => {
+            let extension = format.media_type().trim_start_matches("image/");
+            attachment
+                .path
+                .with_file_name(format!(".codex-{index}.{extension}"))
+        }
+        _ => attachment.path.clone(),
+    }
+}
+
 /// Copies `sources` into `directory` as read-only files. On failure nothing is left behind.
 pub(crate) fn store(directory: &Path, sources: &[PathBuf]) -> Result<Vec<Attachment>> {
     let copied = (|| -> Result<Vec<Attachment>> {
         fs::create_dir_all(directory)?;
         sources
             .iter()
-            .map(|source| {
+            .enumerate()
+            .map(|(index, source)| {
                 let original = inspect(source)?;
                 let copy = directory.join(original.name());
                 ensure!(
@@ -91,10 +107,15 @@ pub(crate) fn store(directory: &Path, sources: &[PathBuf]) -> Result<Vec<Attachm
                 fs::copy(source, &copy)
                     .with_context(|| format!("Could not copy {}", original.name()))?;
                 fs::set_permissions(&copy, fs::Permissions::from_mode(0o444))?;
-                Ok(Attachment {
+                let stored = Attachment {
                     path: copy,
                     ..original
-                })
+                };
+                let link = codex_image_path(&stored, index);
+                if link != stored.path {
+                    fs::hard_link(&stored.path, &link)?;
+                }
+                Ok(stored)
             })
             .collect()
     })();
@@ -204,6 +225,25 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o444);
         assert!(notes.exists(), "the original stays where it was");
+    }
+
+    #[test]
+    fn codex_reaches_comma_named_images_through_a_link() {
+        let source = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let shot = file(source.path(), "odd,shot.png", b"\x89PNG\r\n\x1a\nimage");
+        let notes = file(source.path(), "a,b.txt", b"hello");
+        let plain = file(source.path(), "plain.png", b"\x89PNG\r\n\x1a\nimage");
+        let target = directory(home.path(), "project", "message").unwrap();
+        let stored = store(&target, &[shot, notes, plain]).unwrap();
+        assert_eq!(stored[0].path, target.join("odd,shot.png"));
+        let link = codex_image_path(&stored[0], 0);
+        assert_eq!(link, target.join(".codex-0.png"));
+        assert_eq!(fs::read(&link).unwrap(), fs::read(&stored[0].path).unwrap());
+        // Only comma-named images need a link.
+        assert_eq!(codex_image_path(&stored[1], 1), stored[1].path);
+        assert_eq!(codex_image_path(&stored[2], 2), stored[2].path);
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 4);
     }
 
     #[test]
