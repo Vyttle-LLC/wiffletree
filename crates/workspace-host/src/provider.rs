@@ -536,6 +536,8 @@ mod tests {
         let args = arguments(&turn);
         let format = args.iter().position(|a| a == "--input-format").unwrap();
         assert_eq!(args[format + 1], "stream-json");
+        let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[denied + 1], "EnterWorktree,ExitWorktree");
         assert_eq!(&args[args.len() - 2..], ["--resume", "session"]);
         let line = input(&turn).unwrap();
         assert_eq!(line.last(), Some(&b'\n'));
