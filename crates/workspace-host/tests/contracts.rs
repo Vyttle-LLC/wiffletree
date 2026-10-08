@@ -23,6 +23,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         "verify_ticket",
         "accept_ticket",
         "close_ticket",
+        "archive_agent",
     ] {
         assert!(names.contains(&name), "{name}");
     }
@@ -57,6 +58,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         "verify_ticket",
         "accept_ticket",
         "close_ticket",
+        "archive_agent",
     ] {
         assert!(coordinator.contains(tool), "{tool}");
     }

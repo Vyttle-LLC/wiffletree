@@ -1,7 +1,8 @@
 //! Ticket verification. One call starts every configured verifier on the ticket's current
 //! commit; the scheduler runs a round's verifiers together. Verifiers are read-only. Failures go
 //! back to the implementer, only failed verifiers re-run, rounds are capped, and the project
-//! coordinator wakes once, when the cycle ends.
+//! coordinator wakes once, when the cycle ends. Verifiers are archived once the cycle no longer
+//! needs them, so every cycle starts fresh sessions.
 use crate::service::{HOST_WORKER_TURNS, worker_turns};
 use crate::*;
 
@@ -46,7 +47,8 @@ fn routing(ticket: &Ticket, session: &Session, kind: &str, answered: Option<&str
             .flat_map(|r| &r.verifiers)
             .any(|v| v.session_id == session.id);
     if verifier && matches!(kind, "passed" | "failed" | "blocked") {
-        // Sessions are reused across cycles, so a verdict counts only for the input it answers.
+        // Sessions are reused across rounds, and a restored archived verifier can reappear in a
+        // later cycle, so a verdict counts only for the input it answers.
         let current = verification.current_round().is_some_and(|round| {
             round.verifiers.iter().any(|v| {
                 v.session_id == session.id
@@ -79,6 +81,16 @@ pub(crate) fn head(ticket: &Ticket) -> Result<String> {
 fn is_clean(ticket: &Ticket) -> Result<bool> {
     worktrees::is_clean(Path::new(&ticket.worktree))
         .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))
+}
+
+/// Every verifier session of the ticket's latest cycle.
+fn cycle_verifiers(ticket: &Ticket) -> Vec<String> {
+    ticket.verification.as_ref().map_or(vec![], |v| {
+        v.latest_results()
+            .into_iter()
+            .map(|run| run.session_id.clone())
+            .collect()
+    })
 }
 
 fn verifier_label(run: &VerifierRun) -> String {
@@ -373,6 +385,7 @@ impl Host {
                         }
                         ticket.state = "blocked".into();
                         host.save_ticket(&ticket)?;
+                        host.retire(&cycle_verifiers(&ticket))?;
                     }
                 }
             }
@@ -473,10 +486,16 @@ impl Host {
                 self.findings(&failed)?
             );
             let id = format!("verification:{}:{cycle}:{}", ticket.id, round.round);
+            let passed: Vec<String> = round
+                .verifiers
+                .iter()
+                .filter(|v| v.result == VerifierResult::Passed)
+                .map(|v| v.session_id.clone())
+                .collect();
             ticket.state = "failed".into();
             self.save_ticket(&ticket)?;
             self.send(&id, Some(&ticket.coordinator_id), &implementer, &body)?;
-            return Ok(());
+            return self.retire(&passed);
         }
         let (outcome, summary) = if blocked || !failed.is_empty() {
             let unresolved: Vec<&VerifierRun> = round
@@ -537,6 +556,17 @@ impl Host {
         }
         self.save_ticket(&ticket)?;
         self.send(&id, None, &coordinator, &summary)?;
+        self.retire(&cycle_verifiers(&ticket))
+    }
+    /// Archives verifiers the cycle no longer needs, keeping their conversations. Implementers
+    /// are never retired here; they live until the ticket is accepted or closed.
+    fn retire(&mut self, sessions: &[String]) -> Result<()> {
+        for id in sessions {
+            let session = self.session(id)?;
+            if !session.archived && matches!(session.role, Role::Tester | Role::Reviewer) {
+                self.set_archived(id, true)?;
+            }
+        }
         Ok(())
     }
     /// Starts the next round with only the verifiers whose latest result failed, pinned to the

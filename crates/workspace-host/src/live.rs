@@ -285,6 +285,45 @@ impl Host {
             .map(|r| self.session(&r.session_id))
             .transpose()
     }
+    /// Retires one ticket agent the coordinator no longer needs, keeping it restorable. Refuses
+    /// an agent in its turn, an open ticket's implementer, and a verifier whose result the
+    /// running cycle still needs: pending, or failed and due to re-check the fix.
+    pub fn archive_agent(&mut self, session_id: &str) -> Result<Session> {
+        let agent = self.session(session_id)?;
+        if agent.archived {
+            return Ok(agent);
+        }
+        let ticket = self
+            .session_runtime(&agent.id)?
+            .ticket_id
+            .map(|id| self.ticket(&id))
+            .transpose()?
+            .with_context(|| format!("{} is not a ticket agent", agent.name))?;
+        ensure!(
+            agent.status != Status::Working,
+            "{} is mid-turn; wait for its report or stop it with stop_turn, then archive it",
+            agent.name
+        );
+        ensure!(
+            agent.role != Role::Implementer || !ticket.is_open(),
+            "{} is the implementer of open ticket \"{}\"; it stays until the ticket is accepted or closed",
+            agent.name,
+            ticket.title
+        );
+        if let Some(cycle) = ticket.running_cycle() {
+            ensure!(
+                !cycle
+                    .latest_results()
+                    .iter()
+                    .any(|run| run.session_id == agent.id && run.result != VerifierResult::Passed),
+                "{} still owes verification cycle {} a result; it is archived when the cycle ends",
+                agent.name,
+                cycle.cycle
+            );
+        }
+        self.set_archived(&agent.id, true)?;
+        self.session(&agent.id)
+    }
     /// Archives a finished ticket's agents and removes its worktree. Their conversations and the
     /// branch are kept. Refuses while an agent is working or the worktree holds unsaved work.
     pub fn close_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
@@ -611,6 +650,15 @@ impl Host {
             "close_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 Ok(serde_json::to_value(self.close_ticket(&ticket.id)?)?)
+            }
+            "archive_agent" => {
+                let agent = self.session(string("session_id")?)?;
+                let owned = self
+                    .session_runtime(&agent.id)?
+                    .ticket_id
+                    .is_some_and(|ticket| self.owned_ticket(id, &ticket).is_ok());
+                ensure!(owned, "{} is not an agent of a ticket you own", agent.name);
+                Ok(serde_json::to_value(self.archive_agent(&agent.id)?)?)
             }
             "ask_user" => {
                 ensure!(

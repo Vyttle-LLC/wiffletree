@@ -92,6 +92,12 @@ pub fn tools() -> Value {
             vec!["ticket_id"]
         ),
         tool(
+            "archive_agent",
+            "Coordinator: archive one agent of a ticket you own once you no longer need it, such as a reviewer whose findings the implementer has. Its conversation is kept and it can be restored. Refuses an agent mid-turn, an open ticket's implementer (accept or close the ticket instead) and a verifier the running cycle still needs; verifiers are archived automatically when their cycle no longer needs them.",
+            json!({"session_id":string}),
+            vec!["session_id"]
+        ),
+        tool(
             "ask_user",
             "Coordinator: place one decision in front of the human, then finish your turn. The answer resumes you. When there are distinct choices, list them as options: short, self-explanatory labels the human can pick with one click. They can always answer in their own words instead.",
             json!({"request_id":string,"question":string,"options":{"type":"array","items":{"type":"string"},"maxItems":6}}),
