@@ -221,7 +221,7 @@ impl Workspace {
             .flex_col()
             .gap_3()
             .child(hint(
-                "Pick each role’s default provider and approve a Big and a Small profile per provider. New agents start on the default provider’s Big profile; coordinators may only choose saved profiles. Coordinator covers main and repository coordinators.",
+                "Pick each role’s default provider and approve a Big and a Small profile per provider. New agents start on the default provider’s Big profile; coordinators may only choose saved profiles. Coordinator is each project's coordinator.",
                 p,
             ));
         if !self.catalog_notice.is_empty() {

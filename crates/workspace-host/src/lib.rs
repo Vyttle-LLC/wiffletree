@@ -549,6 +549,27 @@ impl Host {
         body: &str,
         files: &[PathBuf],
     ) -> Result<Message> {
+        self.queue(id, sender, recipient, body, files, false)
+    }
+    /// Queues a message that rides along with the recipient's next turn without starting one.
+    pub(crate) fn send_quietly(
+        &mut self,
+        id: &str,
+        sender: Option<&str>,
+        recipient: &str,
+        body: &str,
+    ) -> Result<Message> {
+        self.queue(id, sender, recipient, body, &[], true)
+    }
+    fn queue(
+        &mut self,
+        id: &str,
+        sender: Option<&str>,
+        recipient: &str,
+        body: &str,
+        files: &[PathBuf],
+        quiet: bool,
+    ) -> Result<Message> {
         text(id, 128)?;
         if files.is_empty() {
             text(body, MAX_TEXT_BYTES)?;
@@ -604,44 +625,15 @@ impl Host {
             "Recipient queue is full; accepted messages are preserved"
         );
         if files.is_empty() {
-            self.insert_message(id, &target, sender, body, &[], false)?;
+            self.insert_message(id, &target, sender, body, &[], quiet)?;
         } else {
             let directory = attachments::directory(&self.home, &target.project_id, id)?;
             let stored = attachments::store(&directory, files)?;
-            if let Err(error) = self.insert_message(id, &target, sender, body, &stored, false) {
+            if let Err(error) = self.insert_message(id, &target, sender, body, &stored, quiet) {
                 let _ = fs::remove_dir_all(&directory);
                 return Err(error);
             }
         }
-        self.message(id)
-    }
-    /// Queues a message that rides along with the recipient's next turn without starting one.
-    /// Like `send`, retrying the same id with the same content returns the stored message.
-    pub(crate) fn send_quietly(
-        &mut self,
-        id: &str,
-        sender: Option<&str>,
-        recipient: &str,
-        body: &str,
-    ) -> Result<Message> {
-        text(id, 128)?;
-        text(body, MAX_TEXT_BYTES)?;
-        if let Ok(existing) = self.message(id) {
-            ensure!(
-                existing.sender.as_deref() == sender
-                    && existing.recipient == recipient
-                    && existing.body == body,
-                "Message ID reused with a different payload"
-            );
-            return Ok(existing);
-        }
-        let target = self.session(recipient)?;
-        ensure!(
-            !target.archived,
-            "{} is archived; restore it before sending",
-            target.name
-        );
-        self.insert_message(id, &target, sender, body, &[], true)?;
         self.message(id)
     }
     fn insert_message(

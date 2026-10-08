@@ -182,9 +182,8 @@ impl Host {
                     ticket.title, ticket.id, ticket.worktree
                 ));
             }
-            if !runtime::git_output(path, &["status", "--porcelain"])
+            if !is_clean(path)
                 .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))?
-                .is_empty()
             {
                 blockers.push(format!(
                     "ticket \"{}\" ({}) has uncommitted or untracked changes in {}",
@@ -348,9 +347,7 @@ impl Host {
             state: ticket.state.clone(),
             worktree: ticket.worktree.clone(),
             branch: ticket.branch.clone(),
-            head: runtime::git_output(Path::new(&ticket.worktree), &["rev-parse", "HEAD"])
-                .map(|h| h.trim().to_owned())
-                .unwrap_or_default(),
+            head: head(Path::new(&ticket.worktree)).unwrap_or_default(),
             class: self.classify(ticket)?,
         })
     }
@@ -361,10 +358,11 @@ impl Host {
         let worktree = Path::new(&ticket.worktree);
         let canonical = fs::canonicalize(worktree)?;
         let branch = format!("refs/heads/{}", ticket.branch);
-        let git = |path: &Path, args: &[&str]| runtime::git_output(path, args);
         let off_branch = || {
-            git(worktree, &["symbolic-ref", "-q", "HEAD"]).map_or(true, |h| h.trim() != branch)
-                && git(worktree, &["merge-base", "--is-ancestor", "HEAD", &branch]).is_err()
+            runtime::git_output(worktree, &["symbolic-ref", "-q", "HEAD"])
+                .map_or(true, |h| h.trim() != branch)
+                && runtime::git_output(worktree, &["merge-base", "--is-ancestor", "HEAD", &branch])
+                    .is_err()
         };
         Ok(if self.agent_in_turn(ticket)? {
             LeftoverClass::InTurn
@@ -373,11 +371,11 @@ impl Host {
             .any(|w| w.path == canonical && w.locked)
         {
             LeftoverClass::Locked
-        } else if !git(worktree, &["status", "--porcelain"])?.is_empty() {
+        } else if !is_clean(worktree)? {
             LeftoverClass::Dirty
         } else if off_branch() {
             LeftoverClass::Detached
-        } else if git(
+        } else if runtime::git_output(
             repository,
             &["rev-list", "--count", &branch, "--not", "--remotes"],
         )?
@@ -477,11 +475,7 @@ impl Host {
             ticket.title, ticket.id, ticket.worktree, ticket.branch
         );
         // Attention prompts allow 4096 bytes; cut on a character boundary within that.
-        let mut end = notice.len().min(4096);
-        while !notice.is_char_boundary(end) {
-            end -= 1;
-        }
-        let notice = &notice[..end];
+        let notice = &notice[..steps::floor_boundary(&notice, notice.len().min(4096))];
         let mut owner = Some(self.session(&ticket.coordinator_id)?);
         while let Some(session) = owner.take_if(|s| s.archived) {
             owner = session
@@ -511,6 +505,18 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
         db.execute_batch("ALTER TABLE provider_runs ADD COLUMN process_group INTEGER")?;
     }
     Ok(())
+}
+
+/// The checked-out commit.
+pub(crate) fn head(worktree: &Path) -> Result<String> {
+    Ok(runtime::git_output(worktree, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_owned())
+}
+
+/// No uncommitted or untracked files; ignored files such as build output do not count.
+pub(crate) fn is_clean(worktree: &Path) -> Result<bool> {
+    Ok(runtime::git_output(worktree, &["status", "--porcelain"])?.is_empty())
 }
 
 /// Probes with signal 0, which delivers nothing. EPERM still means the group exists.

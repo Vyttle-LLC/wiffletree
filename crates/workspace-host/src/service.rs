@@ -490,7 +490,7 @@ impl Service {
     }
 }
 /// The project's turns a worker may take; one is kept for its coordinator.
-fn worker_turns(project: &Project) -> usize {
+pub(crate) fn worker_turns(project: &Project) -> usize {
     project.turn_limit.saturating_sub(1).max(1)
 }
 impl Actor {
@@ -1193,7 +1193,7 @@ impl Actor {
         }
         let (in_rounds, hold_workers) = self.admit_rounds()?;
         // Quiet messages ride along with the next turn but never start one.
-        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY s.role<>'project_orchestrator',m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut considered = HashSet::new();
         for message in messages {
             if self.active.len() >= HOST_TURNS {

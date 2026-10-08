@@ -827,6 +827,16 @@ pub enum VerifierResult {
     Failed,
     Blocked,
 }
+impl VerifierResult {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+        }
+    }
+}
 /// Why a leftover worktree may or may not be removed; earlier classes take precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

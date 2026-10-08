@@ -28,7 +28,7 @@ impl LeftoverSelection {
         let mut groups: Vec<(String, Vec<&LeftoverWorktree>)> = vec![];
         for leftover in &self.listing {
             let project = if leftover.project.is_empty() {
-                "Not recorded by any ticket".to_owned()
+                LeftoverClass::UntrackedByWiffletree.label().to_owned()
             } else {
                 leftover.project.clone()
             };

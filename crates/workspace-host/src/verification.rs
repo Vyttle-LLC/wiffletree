@@ -2,7 +2,7 @@
 //! commit; the scheduler runs a round's verifiers together. Verifiers are read-only. Failures go
 //! back to the implementer, only failed verifiers re-run, rounds are capped, and the project
 //! coordinator wakes once, when the cycle ends.
-use crate::service::HOST_WORKER_TURNS;
+use crate::service::{HOST_WORKER_TURNS, worker_turns};
 use crate::*;
 
 const REPORT_KINDS: [&str; 6] = [
@@ -67,23 +67,15 @@ fn routing(ticket: &Ticket, session: &Session, kind: &str, answered: Option<&str
     }
 }
 
-/// The worktree's checked-out commit.
+/// The ticket worktree's checked-out commit.
 pub(crate) fn head(ticket: &Ticket) -> Result<String> {
-    Ok(
-        runtime::git_output(Path::new(&ticket.worktree), &["rev-parse", "HEAD"])
-            .with_context(|| format!("Read HEAD of \"{}\" ({})", ticket.title, ticket.id))?
-            .trim()
-            .to_owned(),
-    )
+    worktrees::head(Path::new(&ticket.worktree))
+        .with_context(|| format!("Read HEAD of \"{}\" ({})", ticket.title, ticket.id))
 }
 
-/// No uncommitted or untracked files; ignored files such as build output do not count.
 fn is_clean(ticket: &Ticket) -> Result<bool> {
-    Ok(
-        runtime::git_output(Path::new(&ticket.worktree), &["status", "--porcelain"])
-            .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))?
-            .is_empty(),
-    )
+    worktrees::is_clean(Path::new(&ticket.worktree))
+        .with_context(|| format!("Check \"{}\" ({})", ticket.title, ticket.id))
 }
 
 fn verifier_label(run: &VerifierRun) -> String {
@@ -113,8 +105,7 @@ impl Host {
         let settings = self.settings().verification;
         let project = self.project(&self.session(&ticket.coordinator_id)?.project_id)?;
         let count = settings.verifiers.len();
-        // The scheduler keeps one of the project's turns for its coordinator.
-        let worker_turns = project.turn_limit.saturating_sub(1).max(1);
+        let worker_turns = worker_turns(&project);
         ensure!(
             count <= worker_turns,
             "{count} verifiers cannot run at once: the project's turn limit of {} leaves {worker_turns} worker turns",
@@ -546,17 +537,16 @@ impl Host {
                 .as_ref()
                 .map_or(String::new(), |r| format!(" ({r})"));
             findings.push(format!(
-                "{} [{:?}{reason}]:\n{report}",
+                "{} [{}{reason}]:\n{report}",
                 verifier_label(run),
-                run.result
+                run.result.label()
             ));
         }
         let mut findings = findings.join("\n\n");
-        let mut end = findings.len().min(MAX_TEXT_BYTES / 2);
-        while !findings.is_char_boundary(end) {
-            end -= 1;
-        }
-        findings.truncate(end);
+        findings.truncate(steps::floor_boundary(
+            &findings,
+            findings.len().min(MAX_TEXT_BYTES / 2),
+        ));
         Ok(findings)
     }
 }

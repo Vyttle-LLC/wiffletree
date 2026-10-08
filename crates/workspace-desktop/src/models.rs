@@ -1,7 +1,7 @@
 use workspace_core::{ModelProfile, Provider, ProviderProfiles, Role, RoleDefault, RolePolicy};
 use workspace_host::runtime::ModelOption;
 
-/// Roles with editable defaults. Coordinator covers main and repository coordinators.
+/// Roles with editable defaults. Coordinator is the project coordinator.
 pub const ROLES: [(Role, &str); 4] = [
     (Role::ProjectOrchestrator, "Coordinator"),
     (Role::Implementer, "Implementer"),

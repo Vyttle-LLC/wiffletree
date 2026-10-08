@@ -138,7 +138,8 @@ fn clip(text: &str, chars: usize) -> String {
     clipped.push('…');
     clipped
 }
-fn floor_boundary(text: &str, mut index: usize) -> usize {
+/// The nearest character boundary at or before `index`.
+pub(crate) fn floor_boundary(text: &str, mut index: usize) -> usize {
     while !text.is_char_boundary(index) {
         index -= 1;
     }

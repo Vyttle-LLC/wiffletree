@@ -48,13 +48,11 @@ pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
             .verifiers
             .iter()
             .map(|v| {
-                let result = match v.result {
-                    VerifierResult::Pending => "pending",
-                    VerifierResult::Passed => "passed",
-                    VerifierResult::Failed => "failed",
-                    VerifierResult::Blocked => "blocked",
-                };
-                format!("{} {result}", v.role.agent_label(Some(&v.focus)))
+                format!(
+                    "{} {}",
+                    v.role.agent_label(Some(&v.focus)),
+                    v.result.label()
+                )
             })
             .collect::<Vec<_>>()
             .join(", ");

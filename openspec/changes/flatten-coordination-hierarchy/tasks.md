@@ -51,4 +51,4 @@ These edits ship in the same phase and pull request as the role removal (groups 
 - [x] 8.2 Change `AGENTS.md` "Keep project → task orchestrator → agents semantics" to "Keep project → ticket → agents semantics", keeping the rest of the line
 - [x] 8.3 Update `docs/PRD.md` (principles, hierarchy table and example tree, interface, reviewers paragraph, agent communication, usage scopes and delivery stages), `README.md`, `design/README.md` and `docs/DEVELOPMENT.md`, leaving the historical mockups untouched
 - [x] 8.4 Reword the "Enforced hierarchy" requirement in `native-workspace-foundation` to tickets before that change is archived
-- [ ] 8.5 Run `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` and `scripts/test_communications.py`
+- [x] 8.5 Run `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` and `scripts/test_communications.py`

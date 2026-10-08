@@ -343,6 +343,7 @@ impl Host {
     /// The project's tickets, each with its repository name, agents and verification record.
     fn ticket_overview(&self, project: &str) -> Result<Vec<Value>> {
         let repositories = self.repositories()?;
+        let runtimes = self.runtimes()?;
         let mut overview = vec![];
         for ticket in self.tickets()? {
             if !self
@@ -351,18 +352,14 @@ impl Host {
             {
                 continue;
             }
-            let runtimes = self.runtimes()?;
-            let agents = self
-                .ticket_agents(&ticket.id)?
-                .into_iter()
-                .map(|s| {
-                    let focus = runtimes
-                        .iter()
-                        .find(|r| r.session_id == s.id)
-                        .and_then(|r| r.focus.clone());
-                    json!({"id":s.id,"name":s.name,"role":s.role,"focus":focus,"status":s.status,"archived":s.archived})
-                })
-                .collect::<Vec<_>>();
+            let mut agents = vec![];
+            for runtime in runtimes
+                .iter()
+                .filter(|r| r.ticket_id.as_ref() == Some(&ticket.id))
+            {
+                let s = self.session(&runtime.session_id)?;
+                agents.push(json!({"id":s.id,"name":s.name,"role":s.role,"focus":runtime.focus,"status":s.status,"archived":s.archived}));
+            }
             let mut entry = serde_json::to_value(&ticket)?;
             entry["repository"] = json!(
                 repositories

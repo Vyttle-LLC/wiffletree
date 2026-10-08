@@ -265,11 +265,10 @@ fn notice(
         }
     }
     let mut notice = lines.join("\n");
-    let mut end = notice.len().min(MAX_TEXT_BYTES);
-    while !notice.is_char_boundary(end) {
-        end -= 1;
-    }
-    notice.truncate(end);
+    notice.truncate(steps::floor_boundary(
+        &notice,
+        notice.len().min(MAX_TEXT_BYTES),
+    ));
     Ok(notice)
 }
 
