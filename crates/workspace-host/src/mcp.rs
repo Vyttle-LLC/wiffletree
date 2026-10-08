@@ -56,19 +56,19 @@ pub fn tools() -> Value {
         ),
         tool(
             "accept_ticket",
-            "Repository coordinator: accept a ticket only after independent verification passed. Does not merge or publish.",
+            "Repository coordinator: accept a ticket only after independent verification passed. Does not merge or publish. Removes the ticket's worktree and keeps its branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
             json!({"ticket_id":string}),
             vec!["ticket_id"]
         ),
         tool(
             "close_ticket",
-            "Repository coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents; conversations, branch and worktree are kept.",
+            "Repository coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent has not reported; an agent that reported and is still finishing its turn delays only the removal.",
             json!({"ticket_id":string}),
             vec!["ticket_id"]
         ),
         tool(
             "archive_team",
-            "Main coordinator: archive one of your repository coordinators and its agents once every ticket is accepted, or closed if abandoned. Refuses, listing every blocker, while a team member is working or a ticket is not accepted or closed. Closes accepted tickets; conversations, branches and worktrees are kept and the human can restore the team from the sidebar. Repeating it for an archived team is harmless.",
+            "Main coordinator: archive one of your repository coordinators and its agents once every ticket is accepted, or closed if abandoned. Refuses, listing every blocker, while a team member is working or a ticket is not accepted or closed. Closes accepted tickets and removes the team's ticket worktrees; conversations and branches are kept and the human can restore the team from the sidebar. Repeating it for an archived team is harmless.",
             json!({"session_id":string}),
             vec!["session_id"]
         ),

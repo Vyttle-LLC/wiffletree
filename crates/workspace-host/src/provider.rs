@@ -14,6 +14,8 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub enum ProviderEvent {
+    /// The provider process started; it leads its own process group.
+    Spawned(u32),
     Session(String),
     Step(StepUpdate),
     /// The turn's final text, sent once before `Finished` when the turn succeeds.
@@ -205,6 +207,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
             .spawn()
             .context("Could not start provider")?,
     );
+    emit(ProviderEvent::Spawned(process.0.id()));
     let mut stdin = process.0.stdin.take().context("No provider stdin")?;
     // Images can make the input large; writing it alongside reading output cannot deadlock.
     // A provider that exits before reading it all is reported by its exit status.

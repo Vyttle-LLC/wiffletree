@@ -14,6 +14,7 @@ mod steps;
 mod stream;
 mod telemetry;
 pub mod usage;
+mod worktrees;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -106,6 +107,7 @@ impl Host {
         db.execute_batch(include_str!("steps.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
+        worktrees::migrate(&db)?;
         let mut host = Self {
             db,
             _lock: lock,
@@ -380,7 +382,8 @@ impl Host {
     }
     /// Archiving covers the session's whole tree and stops a project when its main coordinator is
     /// archived. Restoring also restores the owners above it, so the session is reachable again.
-    /// Messages, tickets, worktrees and provider conversations are kept either way.
+    /// Messages, tickets, branches and provider conversations are kept either way. Archiving
+    /// removes the worktrees of tickets the tree owns; restoring re-creates those of open tickets.
     pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<Vec<Session>> {
         self.change_archived(id, archived, None)
     }
@@ -401,40 +404,66 @@ impl Host {
                 affected.push(session);
             }
         }
-        let project = affected[0].project_id.clone();
-        let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
-        let tx = self.db.transaction()?;
-        for session in &mut affected {
-            if session.archived == archived {
-                continue;
+        let owners: Vec<&str> = affected.iter().map(|s| s.id.as_str()).collect();
+        let tickets: Vec<Ticket> = self
+            .tickets()?
+            .into_iter()
+            .filter(|t| owners.contains(&t.coordinator_id.as_str()) && (archived || t.is_open()))
+            .collect();
+        let restored: Vec<String> = match archived {
+            true => vec![],
+            false => tickets.iter().map(|t| t.id.clone()).collect(),
+        };
+        let save = move |host: &mut Self| -> Result<Vec<Session>> {
+            let project = affected[0].project_id.clone();
+            let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
+            // A savepoint, so a ticket close or team archive can include this in its own change.
+            let tx = host.db.savepoint()?;
+            for session in &mut affected {
+                if session.archived == archived {
+                    continue;
+                }
+                session.archived = archived;
+                if archived && session.status == Status::Working {
+                    session.status = Status::Ready;
+                }
+                tx.execute(
+                    "UPDATE sessions SET data=?2 WHERE id=?1",
+                    params![session.id, encode(&*session)?],
+                )?;
+                Self::event(
+                    &tx,
+                    &project,
+                    Some(&session.id),
+                    if archived { "archived" } else { "restored" },
+                    &session.name,
+                )?;
+                if let Some(kind) = milestone.filter(|_| session.id == id) {
+                    Self::event(&tx, &project, Some(id), kind, &session.name)?;
+                }
             }
-            session.archived = archived;
-            if archived && session.status == Status::Working {
-                session.status = Status::Ready;
+            if stops_project {
+                tx.execute(
+                    "UPDATE live_projects SET enabled=0 WHERE project_id=?1",
+                    [&project],
+                )?;
             }
-            tx.execute(
-                "UPDATE sessions SET data=?2 WHERE id=?1",
-                params![session.id, encode(&*session)?],
-            )?;
-            Self::event(
-                &tx,
-                &project,
-                Some(&session.id),
-                if archived { "archived" } else { "restored" },
-                &session.name,
-            )?;
-            if let Some(kind) = milestone.filter(|_| session.id == id) {
-                Self::event(&tx, &project, Some(id), kind, &session.name)?;
+            // Restoring cancels the restored tickets' pending worktree removals.
+            for ticket in &restored {
+                tx.execute(
+                    "DELETE FROM pending_worktree_removals WHERE ticket_id=?1",
+                    [ticket],
+                )?;
             }
+            tx.commit()?;
+            Ok(affected)
+        };
+        if archived {
+            self.with_worktrees_removed(&tickets, save)
+        } else {
+            self.restore_worktrees(&tickets)?;
+            save(self)
         }
-        if stops_project {
-            tx.execute(
-                "UPDATE live_projects SET enabled=0 WHERE project_id=?1",
-                [&project],
-            )?;
-        }
-        tx.commit()?;
-        Ok(affected)
     }
     pub fn set_status(&mut self, id: &str, status: Status) -> Result<()> {
         let mut session = self.session(id)?;

@@ -109,6 +109,8 @@ struct Actor {
     socket: PathBuf,
     helper: PathBuf,
     turns: HashMap<String, usize>,
+    /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
+    stopping: bool,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -134,6 +136,7 @@ impl Service {
                 // A host restart never silently resumes uncertain provider side effects.
                 host.db.execute("UPDATE live_projects SET enabled=0",[])?;
                 host.db.execute("UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail='Host restarted; reconcile before retry' WHERE finished_at IS NULL",[now()])?;
+                host.settle_pending_worktrees();
                 let directory=tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
                 let socket=directory.path().join("ipc");
                 let listener=UnixListener::bind(&socket)?;
@@ -165,15 +168,14 @@ impl Service {
                     });
                 }
             });
-            let mut actor=Actor {host,sender:worker,changed,steps_changed,steps_dirty:false,revisions:HashMap::new(),active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new()};
+            let mut actor=Actor {host,sender:worker,changed,steps_changed,steps_dirty:false,revisions:HashMap::new(),active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new(),stopping:false};
             while let Ok(event)=receiver.recv_blocking(){
                 if matches!(event,Event::Shutdown){break}
                 let dirty=actor.handle(event);
                 if let Err(e)=actor.schedule(){eprintln!("Workspace scheduler: {e:#}");}
                 actor.signal(dirty);
             }
-            let interrupted=actor.active.iter().map(|(id,a)|{a.cancel.store(true,Ordering::Relaxed);(id.clone(),a.run.clone())}).collect::<Vec<_>>();
-            for (id,run) in interrupted {let _=actor.provider_event(&id,&run,ProviderEvent::Finished{error:Some("Host stopped during a turn; inspect work before retrying".into()),usage:Value::Null});}
+            actor.stop();
             for (_,permission) in actor.permissions.drain(){let _=permission.reply.try_send(Err("Workspace stopped".into()));}
             stop_listener.store(true,Ordering::Relaxed);
             let _=std::os::unix::net::UnixStream::connect(&socket);
@@ -296,16 +298,6 @@ impl Actor {
                                 active.cancel.store(true, Ordering::Relaxed);
                             }
                         }
-                        Command::SetArchived {
-                            session_id,
-                            archived: true,
-                        } => {
-                            for session in self.host.session_tree(session_id)? {
-                                if let Some(active) = self.active.get(&session.id) {
-                                    active.cancel.store(true, Ordering::Relaxed);
-                                }
-                            }
-                        }
                         Command::ConfigureSession { session_id, .. }
                         | Command::ReconcileSession { session_id, .. } => ensure!(
                             !self.active.contains_key(session_id),
@@ -331,6 +323,18 @@ impl Actor {
                         )?)?,
                         _ => self.host.execute(command.clone())?,
                     };
+                    // Stop turns only once the archive succeeded; a refusal leaves them running.
+                    if let Command::SetArchived {
+                        session_id,
+                        archived: true,
+                    } = &command
+                    {
+                        for session in self.host.session_tree(session_id)? {
+                            if let Some(active) = self.active.get(&session.id) {
+                                active.cancel.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     // Speaking to a project, retrying its work or answering its coordinator
                     // starts it; there is no separate step to go live.
                     let started = match &command {
@@ -462,6 +466,12 @@ impl Actor {
         let session = self.host.session(id)?;
         let mut runtime = self.host.session_runtime(id)?;
         match event {
+            ProviderEvent::Spawned(process_group) => {
+                self.host.db.execute(
+                    "UPDATE provider_runs SET process_group=?2 WHERE id=?1",
+                    params![run, process_group],
+                )?;
+            }
             ProviderEvent::Session(provider_id) => {
                 self.host.db.execute("UPDATE provider_runs SET detail=json_set(detail,'$.provider_thread_id',?2) WHERE id=?1",params![run,provider_id])?;
                 runtime.provider_session_id = Some(provider_id);
@@ -490,13 +500,8 @@ impl Actor {
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
             ProviderEvent::Finished { error, usage } => {
                 let mut active = self.active.remove(id).unwrap();
-                self.settle_steps(id, &mut active, error.is_some())?;
-                if error.is_none() {
-                    self.host.append_output(&session, run, &active.output)?;
-                }
-                runtime.last_finished_at = Some(now());
-                runtime.last_error = error.clone();
-                self.host.save_runtime(&runtime)?;
+                // Settle the run first so a later failure cannot leave it open. If this update
+                // fails, the run stays open and blocks worktree removal until restart: safe.
                 self.host.db.execute(
                     "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5) WHERE id=?1",
                     params![
@@ -511,6 +516,13 @@ impl Actor {
                         active.omitted_steps as i64
                     ],
                 )?;
+                self.settle_steps(id, &mut active, error.is_some())?;
+                if error.is_none() {
+                    self.host.append_output(&session, run, &active.output)?;
+                }
+                runtime.last_finished_at = Some(now());
+                runtime.last_error = error.clone();
+                self.host.save_runtime(&runtime)?;
                 for message in &active.messages {
                     self.host.db.execute(
                         "UPDATE messages SET receipt=?2 WHERE id=?1",
@@ -534,7 +546,13 @@ impl Actor {
                 } else if session.status == Status::Working {
                     self.host.set_status(id, Status::Ready)?;
                 }
+                // Shutdown finishes turns without waiting for their processes; startup settles.
+                if !self.stopping {
+                    self.host.settle_pending_worktrees();
+                }
+                // A deliberately archived parent has no one to wake.
                 if let Some(parent) = &session.parent_id
+                    && !self.host.session(parent)?.archived
                     && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
                     let body = if let Some(error) = &error {
@@ -579,6 +597,28 @@ impl Actor {
             }
         }
         Ok(())
+    }
+    /// Cancels every active turn and records it finished without waiting for its process.
+    fn stop(&mut self) {
+        self.stopping = true;
+        let interrupted = self
+            .active
+            .iter()
+            .map(|(id, a)| {
+                a.cancel.store(true, Ordering::Relaxed);
+                (id.clone(), a.run.clone())
+            })
+            .collect::<Vec<_>>();
+        for (id, run) in interrupted {
+            let _ = self.provider_event(
+                &id,
+                &run,
+                ProviderEvent::Finished {
+                    error: Some("Host stopped during a turn; inspect work before retrying".into()),
+                    usage: Value::Null,
+                },
+            );
+        }
     }
     /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
     fn signal(&mut self, state_changed: bool) {
@@ -741,17 +781,33 @@ impl Actor {
                 continue;
             }
             if let Err(error) = self.start_turn(session.clone(), message.clone()) {
-                let mut runtime = self.host.session_runtime(&session.id)?;
-                runtime.last_error = Some(format!("{error:#}"));
-                self.host.save_runtime(&runtime)?;
-                self.host.set_status(&session.id, Status::Disconnected)?;
-                self.host.append_output(
-                    &session,
-                    &format!("start-error:{}", message.id),
-                    &format!("Could not start: {error:#}"),
-                )?;
+                self.start_failed(&session, &message, &error)?;
             }
         }
+        Ok(())
+    }
+    /// Records why a turn could not start and settles any run it opened.
+    fn start_failed(
+        &mut self,
+        session: &Session,
+        message: &Message,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        // A turn that never launched must not look active to the worktree guard.
+        self.host.db.execute(
+            "UPDATE provider_runs SET finished_at=?2,outcome='failed',detail=json_set(detail,'$.result',json(?3)) WHERE session_id=?1 AND finished_at IS NULL",
+            params![session.id, now(), json!({"error":format!("{error:#}")}).to_string()],
+        )?;
+        let mut runtime = self.host.session_runtime(&session.id)?;
+        runtime.last_error = Some(format!("{error:#}"));
+        self.host.save_runtime(&runtime)?;
+        self.host.set_status(&session.id, Status::Disconnected)?;
+        self.host.append_output(
+            session,
+            &format!("start-error:{}", message.id),
+            &format!("Could not start: {error:#}"),
+        )?;
+        self.host.settle_pending_worktrees();
         Ok(())
     }
     fn start_turn(&mut self, session: Session, message: Message) -> Result<()> {
@@ -766,6 +822,9 @@ impl Actor {
         };
         runtime.profile = Some(profile.clone());
         provider::executable(session.provider)?;
+        if let Some(ticket) = &runtime.ticket_id {
+            self.host.prepare_ticket_worktree(ticket)?;
+        }
         let cwd = if let Some(path) = &runtime.workdir {
             PathBuf::from(path)
         } else if session.role == Role::TaskOrchestrator {
@@ -899,22 +958,7 @@ mod tests {
                 params![run, session, now()],
             )
             .unwrap();
-        let (sender, _) = async_channel::bounded(1);
-        let (changed, changes) = async_channel::bounded(1);
-        let (steps_changed, step_changes) = async_channel::bounded(1);
-        let mut actor = Actor {
-            host,
-            sender,
-            changed,
-            steps_changed,
-            steps_dirty: false,
-            revisions: HashMap::new(),
-            active: HashMap::new(),
-            permissions: HashMap::new(),
-            socket: PathBuf::new(),
-            helper: PathBuf::new(),
-            turns: HashMap::new(),
-        };
+        let (mut actor, changes, step_changes) = idle_actor(host);
         actor.active.insert(
             session.clone(),
             Active {
@@ -929,6 +973,195 @@ mod tests {
             },
         );
         (home, actor, session, run, changes, step_changes)
+    }
+
+    /// An actor with no turns, its change and step-change receivers.
+    fn idle_actor(host: Host) -> (Actor, Receiver<()>, Receiver<()>) {
+        let (sender, _) = async_channel::bounded(1);
+        let (changed, changes) = async_channel::bounded(1);
+        let (steps_changed, step_changes) = async_channel::bounded(1);
+        let actor = Actor {
+            host,
+            sender,
+            changed,
+            steps_changed,
+            steps_dirty: false,
+            revisions: HashMap::new(),
+            active: HashMap::new(),
+            permissions: HashMap::new(),
+            socket: PathBuf::new(),
+            helper: PathBuf::new(),
+            turns: HashMap::new(),
+            stopping: false,
+        };
+        (actor, changes, step_changes)
+    }
+
+    /// A ticket whose tester is in its turn, run `run`, under its repository coordinator.
+    fn ticket_in_turn() -> (tempfile::TempDir, Actor, Ticket, Session, Session) {
+        let home = tempfile::tempdir().unwrap();
+        let repository = home.path().join("web");
+        fs::create_dir_all(&repository).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=F",
+                "-c",
+                "user.email=f@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "F",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(&repository)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let mut host = Host::open(home.path().join("home")).unwrap();
+        host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+            .unwrap();
+        let project = host.create_project("Start").unwrap();
+        let root = host.sessions().unwrap().remove(0);
+        let attached = host
+            .attach_repository(&project.id, repository.to_str().unwrap(), "HEAD")
+            .unwrap();
+        let coordinator = host
+            .create_session(
+                &project.id,
+                &root.id,
+                Some(&attached.id),
+                "Web",
+                Role::TaskOrchestrator,
+                Provider::Codex,
+            )
+            .unwrap();
+        let ticket = host
+            .create_ticket(&coordinator.id, "Toolbar", "Do")
+            .unwrap();
+        let tester = host
+            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+            .unwrap();
+        host.db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
+                [&tester.id],
+            )
+            .unwrap();
+        let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, tester, coordinator)
+    }
+
+    /// The same ticket closed, so its worktree removal waits for the tester's turn.
+    fn ticket_pending_removal() -> (tempfile::TempDir, Actor, Ticket, Session) {
+        let (home, mut actor, ticket, tester, _) = ticket_in_turn();
+        actor.host.close_ticket(&ticket.id).unwrap();
+        assert!(Path::new(&ticket.worktree).exists());
+        (home, actor, ticket, tester)
+    }
+
+    fn finish(actor: &mut Actor, session: &Session, reported: bool, error: Option<&str>) {
+        actor.active.insert(
+            session.id.clone(),
+            Active {
+                run: "run".into(),
+                token: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                messages: vec![],
+                output: String::new(),
+                reported,
+                steps: vec![],
+                omitted_steps: 0,
+            },
+        );
+        actor
+            .provider_event(
+                &session.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: error.map(Into::into),
+                    usage: Value::Null,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_turn_under_an_archived_team_performs_its_pending_removal() {
+        for archive_root in [true, false] {
+            let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
+            let archived = if archive_root {
+                coordinator.parent_id.clone().unwrap()
+            } else {
+                coordinator.id.clone()
+            };
+            actor.host.set_archived(&archived, true).unwrap();
+            assert!(Path::new(&ticket.worktree).exists());
+
+            finish(&mut actor, &tester, false, Some("Turn interrupted"));
+
+            assert!(!Path::new(&ticket.worktree).exists());
+            assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_turn_that_failed_to_start_performs_its_ticket_pending_removal() {
+        let (_home, mut actor, ticket, tester) = ticket_pending_removal();
+        let assignment = actor.host.messages(&tester.id, None, 10).unwrap().remove(0);
+
+        actor
+            .start_failed(&tester, &assignment, &anyhow::anyhow!("injected"))
+            .unwrap();
+
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Disconnected
+        );
+    }
+
+    #[test]
+    fn shutdown_leaves_a_pending_removal_for_startup() {
+        let (_home, mut actor, ticket, tester) = ticket_pending_removal();
+        actor.active.insert(
+            tester.id.clone(),
+            Active {
+                run: "run".into(),
+                token: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                messages: vec![],
+                output: String::new(),
+                reported: true,
+                steps: vec![],
+                omitted_steps: 0,
+            },
+        );
+
+        actor.stop();
+
+        assert!(Path::new(&ticket.worktree).exists());
+        assert_eq!(
+            actor.host.pending_worktree_removals().unwrap(),
+            std::slice::from_ref(&ticket.id)
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_performs_its_ticket_pending_removal() {
+        let (_home, mut actor, ticket, tester) = ticket_pending_removal();
+
+        finish(&mut actor, &tester, true, None);
+
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
     }
 
     fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {
