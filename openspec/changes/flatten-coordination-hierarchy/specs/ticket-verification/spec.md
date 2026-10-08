@@ -12,7 +12,7 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers 
 - **THEN** the setting is rejected and the previous setting stays in effect
 
 ### Requirement: One call starts every verifier
-`verify_ticket` with a `ticket_id` SHALL start a verification cycle: it SHALL record the ticket worktree's HEAD commit as the round's pinned commit, assign or resume one agent per configured verifier on the ticket, send each one message naming the pinned commit, and set the ticket's state to `verifying`. A verifier with the same role and focus on the ticket SHALL be the same session in every round. `verify_ticket` SHALL refuse when the ticket's state is not `ready_for_testing`, when its worktree holds uncommitted or untracked files, when a cycle is already running, or when the number of verifiers exceeds the worker turns the project allows at once (its turn limit less the one turn reserved for coordinators), naming the reason.
+`verify_ticket` with a `ticket_id` SHALL start a verification cycle: it SHALL record the ticket worktree's HEAD commit as the round's pinned commit, assign or resume one agent per configured verifier on the ticket, send each one message naming the pinned commit, and set the ticket's state to `verifying`. A verifier with the same role and focus on the ticket SHALL be the same session in every round. `verify_ticket` SHALL refuse when the ticket's state is not `ready_for_testing`, when its worktree holds uncommitted or untracked files, when a cycle is already running, or when the number of verifiers exceeds the worker turns that can run at once, which is the smaller of the project's turn limit less the one turn reserved for coordinators and the host-wide worker turn limit, naming the reason.
 
 #### Scenario: Three verifiers from one call
 - **WHEN** the configured verifiers are a Claude tester, a Codex tester and a style reviewer, and the project coordinator calls `verify_ticket` once on a ticket that is `ready_for_testing`
@@ -27,8 +27,12 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers 
 - **WHEN** three verifiers are configured and the project's turn limit is 3
 - **THEN** `verify_ticket` refuses, naming the verifier count and the turn limit
 
+#### Scenario: More verifiers than the host can run
+- **WHEN** the project's turn limit is 20 and more verifiers are configured than the host-wide worker turn limit
+- **THEN** `verify_ticket` refuses, naming the verifier count and the host-wide limit
+
 ### Requirement: Ticket state during a cycle
-While a verification cycle is running, the ticket's state SHALL change only when a round starts, to `verifying` (for round 1 and every later round), and when a round ends, to `passed`, `failed` or `blocked` as defined by the cycle outcome rules. An individual verifier's or the implementer's report SHALL NOT set the ticket's state during a cycle. Because `accept_ticket` requires `passed`, it SHALL refuse while any round is in progress.
+While a verification cycle is running, the ticket's state SHALL change only when a round starts, to `verifying` (for round 1 and every later round), and when a round ends, to `passed`, `failed` or `blocked` as defined by the cycle outcome rules. A verifier's verdict or the implementer's `ready_for_testing` SHALL NOT set the ticket's state during a cycle. Any other implementer report except `progress`, such as `blocked`, SHALL end the cycle immediately with outcome `blocked`, set the ticket to `blocked`, and wake the project coordinator with that report. Because `accept_ticket` requires `passed`, it SHALL refuse while any round is in progress.
 
 #### Scenario: First verdict does not pass the ticket
 - **WHEN** in a round of three verifiers the first verifier reports `passed` while the other two are still running
@@ -38,12 +42,16 @@ While a verification cycle is running, the ticket's state SHALL change only when
 - **WHEN** the project coordinator calls `accept_ticket` after one of three verifiers has reported `passed` and the others are still running
 - **THEN** the host refuses because the ticket is `verifying`, and the ticket, its agents and its worktree are unchanged
 
+#### Scenario: Implementer blocked between rounds
+- **WHEN** round 1 fails and the implementer then reports `blocked` instead of `ready_for_testing`
+- **THEN** the cycle ends with outcome `blocked`, the ticket is `blocked`, no further round starts, and the project coordinator wakes at once with the implementer's report
+
 #### Scenario: Next round starts verifying again
 - **WHEN** the implementer reports `ready_for_testing` after a failed round 1
 - **THEN** the ticket's state becomes `verifying` when round 2 starts, never `ready_for_testing`
 
 ### Requirement: Verifiers run concurrently
-The host SHALL start all of a round's verifier turns together rather than one after another: testers and reviewers in a running cycle SHALL share the ticket worktree as readers, and the round SHALL be admitted only when every one of its verifiers can start, never partially. Each round's record SHALL store, per verifier, its `session_id` and the `message_id` of the message that started it; the verifier's run is the `provider_runs` row for that session whose `messages` list contains that `message_id`, and its interval is that row's `started_at` to `finished_at` (milliseconds since the Unix epoch).
+The host SHALL start all of a round's verifier turns together rather than one after another: testers and reviewers in a running cycle SHALL share the ticket worktree as readers, and the round SHALL be admitted only when every one of its verifiers can start, never partially. While a round waits for capacity, the host SHALL start no new worker turn in any project, so other work cannot starve it; coordinator turns are unaffected. Each round's record SHALL store, per verifier, its `session_id` and the `message_id` of the message that started it; the verifier's run is the `provider_runs` row for that session whose `messages` list contains that `message_id`, and its interval is that row's `started_at` to `finished_at` (milliseconds since the Unix epoch).
 
 #### Scenario: Two testers share the worktree
 - **WHEN** a round contains a Claude tester and a Codex tester on the same ticket
@@ -83,7 +91,7 @@ A round SHALL end when every verifier in it has reported. If any verifier failed
 - **THEN** the report fails with an instruction to commit or discard them, and no round starts
 
 ### Requirement: Cycle outcomes reach the coordinator once
-Reports from verifiers and the implementer during a running cycle SHALL reach the project coordinator in the next batch, like progress, and SHALL NOT wake it. The host SHALL wake the project coordinator once when the cycle ends: with state `passed` when every configured verifier's latest result passed, or with state `blocked` when a round at the cap still has a failure or any verifier reported `blocked`. The `blocked` message SHALL list every unresolved failure, the rounds used and the cap. Reaching the cap SHALL NOT create a question for the human; the project coordinator decides whether to ask. A later `verify_ticket` call SHALL start a new cycle with every configured verifier.
+Verifier verdicts and the implementer's `ready_for_testing` reports during a running cycle SHALL reach the project coordinator in the next batch, like progress, and SHALL NOT wake it. Other implementer reports follow the ticket-state rule above and wake it. The host SHALL wake the project coordinator once when the cycle ends: with state `passed` when every configured verifier's latest result passed, or with state `blocked` when a round at the cap still has a failure or any verifier reported `blocked`. The `blocked` message SHALL list every unresolved failure, the rounds used and the cap. Reaching the cap SHALL NOT create a question for the human; the project coordinator decides whether to ask. A later `verify_ticket` call SHALL start a new cycle with every configured verifier.
 
 #### Scenario: All pass
 - **WHEN** every verifier passes in round 1

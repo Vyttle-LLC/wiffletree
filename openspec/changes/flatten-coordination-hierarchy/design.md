@@ -72,21 +72,22 @@ It is stored in `tickets.data`, which needs no new table. `max_rounds` is copied
 2. State is `ready_for_testing`.
 3. No running cycle.
 4. `git status --porcelain` in the worktree is empty.
-5. Verifier count ≤ `turn_limit - 1`, the worker share of the project's turns (`service.rs` reserves one turn for coordinators).
+5. Verifier count ≤ min(`turn_limit - 1`, host worker limit). `turn_limit - 1` is the worker share of the project's turns (`service.rs` reserves one turn for coordinators). The host worker limit is the host-wide cap on active turns that workers respect, today the literal `6` in `service.rs::schedule`; this change extracts it as the named constant `HOST_WORKER_TURNS`, and both the scheduler and this check use it.
 
 It then pins `git rev-parse HEAD`. For each verifier it reuses the (role, focus) session through `assign_ticket`'s idempotency or creates it, and sends `verify:{ticket}:{cycle}:{round}:{session}` with the coordinator as sender, naming the commit and the verifier's instruction. Finally it sets state `verifying`.
 
-**Concurrency.** Today `service.rs::schedule` lets only reviewers share a ticket's worktree. Testers are treated as writers and serialize, and workers get at most `turn_limit - 1` project turns and 6 host-wide. Two changes make a round run together:
+**Concurrency.** Today `service.rs::schedule` lets only reviewers share a ticket's worktree. Testers are treated as writers and serialize, and workers get at most `turn_limit - 1` project turns and `HOST_WORKER_TURNS` host-wide. Two changes make a round run together:
 - Every tester and reviewer in a running cycle counts as a reader. The implementer has no due input during a round, so it never contends.
 - A round is admitted all-or-none. If not every verifier of the round fits under the project and host-wide limits, none start until all fit.
 
-The messages are queued in one transaction, so a single scheduling pass sees them together. The precondition above guarantees the project limit can be met.
+The messages are queued in one transaction, so a single scheduling pass sees them together. The precondition above guarantees the round can fit under both limits. While a round waits, the scheduler starts no new worker turn host-wide (any project), so freed slots accumulate until the round fits.
 
 **Proof of overlap.** It measures each verifier's first turn of the round, the one that consumed its `verify:` message. It uses only stored fields: for round *r*, take each `(session_id, message_id)` from `tickets.data.verification.rounds[r].verifiers` and select the `provider_runs` row with that `session_id` whose `messages` JSON array contains `message_id`. The round overlapped iff `MAX(started_at) < MIN(finished_at)`. Both are millisecond epoch values written by `record_turn_start` and the run's finish.
 
 ### 5. Report routing during a cycle
 While `verification.outcome == running`, the generic rule in `report` that sets `ticket.state` to the report's kind (`live.rs`) is bypassed for the ticket's verifiers and implementer. The cycle alone sets the state: `verifying` when a round starts (round 1 and every re-run round) and `passed`, `failed` or `blocked` when a round ends. A verifier's early `passed` therefore leaves the ticket `verifying`, and `accept_ticket`, which requires `passed`, refuses mid-round.
 
+Only verifier verdicts and the implementer's `ready_for_testing` are routed by the cycle. Any other non-progress implementer report (for example `blocked` while fixing) ends the cycle at once: `outcome = blocked`, ticket `blocked`, and the report wakes the coordinator as usual.
 
 - **Verifier `passed`, `failed` or `blocked`.** The host records the result on the current round, after the read-only check in decision 6. The message to the coordinator is still stored, but it is delivered in the next batch like progress and does not wake. The batching condition gains "or the sender is a verifier on a ticket whose cycle is running".
 - **Round end** (no `pending` result left):
@@ -155,7 +156,7 @@ The historical mockups stay intact.
 
 - **Coordinator context grows** because it sees every ticket's reports directly. → Verification rounds are batched and only cycle outcomes wake it. The existing turn budget and progress batching still apply.
 - **Passed verifiers do not re-check later commits.** Only failed verifiers re-run, as requested, so a fix could regress what an earlier verifier passed. → The final summary names the commit each verifier passed. The coordinator can start a fresh full cycle before accepting.
-- **All-or-none admission can starve a round.** Other workers in the project can keep taking freed slots one at a time, so the round never finds all its slots free at once. → While a round is waiting, the scheduler admits no new worker turn in that project until the round has started; coordinators still get their reserved turn. Verifier rounds are short and rare, so the brief hold on other workers is accepted.
+- **All-or-none admission can starve a round.** Other workers in the project can keep taking freed slots one at a time, so the round never finds all its slots free at once. → While a round is waiting, the scheduler admits no new worker turn host-wide, in any project, until the round has started; coordinators still get their reserved turn. The verifier-count precondition (≤ min(`turn_limit - 1`, `HOST_WORKER_TURNS`)) guarantees the round eventually fits. Verifier rounds are short and rare, so the brief hold on other workers is accepted.
 - **Turn limit couples to verifier count.** → `verify_ticket` refuses with both numbers rather than silently serializing. Raising `turn_limit` is a project setting.
 - **Loss of per-repository coordinator memory** across tickets. → Ticket briefs and project memory carry context. The PRD's future integration-branch stage will need its own design without a standing coordinator.
 - **Migration rewrites ownership columns.** → One transaction, a version gate, a kept file backup, no deleted rows and no rewritten message bodies.
