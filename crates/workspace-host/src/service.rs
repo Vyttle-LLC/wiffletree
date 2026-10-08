@@ -226,6 +226,18 @@ fn stopped_by_parent_notice(reason: &str) -> String {
         "Stopped by its parent: {reason}\nIts input will not be retried; the next message runs normally. Partial work may remain."
     )
 }
+/// Refuses arguments a tool does not take, so a misspelt one is not silently ignored.
+fn only_arguments(tool: &str, args: &Value, allowed: &[&str]) -> Result<()> {
+    if let Some(unknown) = args
+        .as_object()
+        .into_iter()
+        .flat_map(|args| args.keys())
+        .find(|key| !allowed.contains(&key.as_str()))
+    {
+        bail!("{tool} takes {}, not {unknown}", allowed.join(", "));
+    }
+    Ok(())
+}
 /// Provider output is not Markdown, so it is fenced to show verbatim.
 fn runtime_stopped(error: &str) -> String {
     let longest = error
@@ -237,6 +249,22 @@ fn runtime_stopped(error: &str) -> String {
     format!(
         "Runtime stopped:\n{fence}text\n{error}\n{fence}\nInspect the worktree before retrying uncertain work."
     )
+}
+/// Runs a repository's check on its own thread and always reports back, even if it panics, so
+/// the repository is never left marked as running.
+fn spawn_overlap_check(
+    sender: Sender<Event>,
+    repository: String,
+    check: impl FnOnce() -> (Option<i64>, Vec<BranchWarnings>) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).ok();
+        let _ = sender.send_blocking(Event::Overlaps {
+            repository,
+            fetched_at: outcome.as_ref().and_then(|(at, _)| *at),
+            warnings: outcome.map(|(_, warnings)| warnings),
+        });
+    });
 }
 enum Event {
     Command(Command, Reply),
@@ -256,6 +284,14 @@ enum Event {
         session: String,
         run: String,
         event: ProviderEvent,
+    },
+    /// A repository's open-branch check finished on its own thread.
+    Overlaps {
+        repository: String,
+        /// When the check fetched the base, if it did.
+        fetched_at: Option<i64>,
+        /// `None` when the check panicked; the cached warnings then stand.
+        warnings: Option<Vec<BranchWarnings>>,
     },
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
@@ -289,6 +325,8 @@ struct Active {
     last_event_at: i64,
     /// Why the session's parent stopped this turn, once it has.
     stopped_by_parent: Option<String>,
+    /// The human stopped this turn; its parent has already been told.
+    stopped_by_human: bool,
     /// This turn's steps; the store has each one as of its last start or state change.
     steps: Vec<Step>,
     omitted_steps: usize,
@@ -312,6 +350,7 @@ impl Active {
             next_check_in: started_at + CHECK_IN_MS,
             last_event_at: started_at,
             stopped_by_parent: None,
+            stopped_by_human: false,
             steps: vec![],
             omitted_steps: 0,
         }
@@ -344,6 +383,12 @@ struct Actor {
     resumed: HashSet<String>,
     /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
     stopping: bool,
+    /// When each repository's latest open-branch check started; see `refresh_overlaps`.
+    overlaps_checked: HashMap<String, i64>,
+    /// Repositories whose check has not reported yet.
+    overlaps_running: HashSet<String>,
+    /// No repository's check can be due before this.
+    overlaps_due_at: i64,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -440,20 +485,20 @@ impl Service {
                     started_at: now(),
                     resumed: HashSet::new(),
                     stopping: false,
+                    overlaps_checked: HashMap::new(),
+                    overlaps_running: HashSet::new(),
+                    overlaps_due_at: 0,
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
                     eprintln!("Workspace scheduler: {e:#}");
                 }
+                actor.refresh_overlaps(now());
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
                     }
-                    let dirty = actor.handle(event);
-                    if let Err(e) = actor.schedule() {
-                        eprintln!("Workspace scheduler: {e:#}");
-                    }
-                    actor.signal(dirty);
+                    actor.process(event);
                 }
                 actor.stop();
                 for (_, permission) in actor.permissions.drain() {
@@ -525,6 +570,53 @@ impl Actor {
         Ok(true)
     }
 
+    /// Handles one event, then starts what it made due.
+    fn process(&mut self, event: Event) {
+        let dirty = self.handle(event);
+        if let Err(e) = self.schedule() {
+            eprintln!("Workspace scheduler: {e:#}");
+        }
+        self.refresh_overlaps(now());
+        self.signal(dirty);
+    }
+
+    /// Checks each repository with open tickets at most every five minutes, after any event,
+    /// so reading `workspace_context` refreshes a stale cache. Fetching and comparing branches
+    /// can take seconds, so Git runs on its own thread, one check per repository at a time, and
+    /// the cached warnings stand until it reports.
+    fn refresh_overlaps(&mut self, at: i64) {
+        // Most events come well inside the interval; they must not cost a store read.
+        if at < self.overlaps_due_at {
+            return;
+        }
+        let checks = match self.host.overlap_checks() {
+            Ok(checks) => checks,
+            Err(e) => return eprintln!("Workspace overlap check: {e:#}"),
+        };
+        self.overlaps_due_at = at + overlaps::OVERLAP_REFRESH_MS;
+        for (repository, check) in checks {
+            if self.overlaps_running.contains(&repository) {
+                continue;
+            }
+            if let Some(&last) = self.overlaps_checked.get(&repository)
+                && at - last < overlaps::OVERLAP_REFRESH_MS
+            {
+                self.overlaps_due_at = self
+                    .overlaps_due_at
+                    .min(last + overlaps::OVERLAP_REFRESH_MS);
+                continue;
+            }
+            self.overlaps_checked.insert(repository.clone(), at);
+            self.overlaps_running.insert(repository.clone());
+            let sender = self.sender.clone();
+            spawn_overlap_check(sender, repository, move || {
+                let fetched = overlaps::fetch_base(&check.repository, &check.base);
+                let warnings = overlaps::check(&check, fetched.as_ref().err());
+                (matches!(fetched, Ok(true)).then_some(at), warnings)
+            });
+        }
+    }
+
     fn handle(&mut self, event: Event) -> bool {
         match event {
             Event::Discovered {
@@ -565,6 +657,8 @@ impl Actor {
                         | Command::Settings
                 );
                 let result = (|| -> Result<Value> {
+                    // Sessions this command stops on the human's behalf.
+                    let mut human_stops = Vec::new();
                     match &command {
                         Command::SetLive {
                             project_id,
@@ -573,6 +667,7 @@ impl Actor {
                             for (id, active) in &self.active {
                                 if self.host.session(id)?.project_id == *project_id {
                                     active.cancel.store(true, Ordering::Relaxed);
+                                    human_stops.push(id.clone());
                                 }
                             }
                         }
@@ -583,6 +678,7 @@ impl Actor {
                             if let Some(active) = self.active.get(session_id) {
                                 active.cancel.store(true, Ordering::Relaxed);
                             }
+                            human_stops.push(session_id.clone());
                         }
                         Command::ConfigureSession { session_id, .. }
                         | Command::ReconcileSession { session_id, .. } => ensure!(
@@ -609,6 +705,13 @@ impl Actor {
                         )?)?,
                         _ => self.host.execute(command.clone())?,
                     };
+                    // The stop itself has happened, and human_stopped records who made it before
+                    // the notice; a notice that cannot be sent is only logged.
+                    for id in human_stops {
+                        if let Err(error) = self.human_stopped(&id) {
+                            eprintln!("Recording the human's stop of {id}: {error:#}");
+                        }
+                    }
                     // Stop turns only once the archive succeeded; a refusal leaves them running.
                     if let Command::SetArchived {
                         session_id,
@@ -688,8 +791,10 @@ impl Actor {
                     .map(|(id, _)| id.clone());
                 let result = (|| -> Result<Option<Value>> {
                     let id = identity.context("Expired or invalid session credential")?;
-                    if name == "stop_turn" {
-                        return self.stop_turn(&id, &args).map(Some);
+                    match name.as_str() {
+                        "stop_agents" => return self.stop_agents(&id, &args).map(Some),
+                        "resume_agent" => return self.resume_agent(&id, &args).map(Some),
+                        _ => {}
                     }
                     if name == "request_permission" {
                         let tool = args["tool_name"].as_str().context("Missing tool name")?;
@@ -748,6 +853,22 @@ impl Actor {
                     eprintln!("Workspace provider event: {e:#}");
                 }
                 changes_state
+            }
+            Event::Overlaps {
+                repository,
+                fetched_at,
+                warnings,
+            } => {
+                self.overlaps_running.remove(&repository);
+                if let Some(&started) = self.overlaps_checked.get(&repository) {
+                    self.overlaps_due_at = self
+                        .overlaps_due_at
+                        .min(started + overlaps::OVERLAP_REFRESH_MS);
+                }
+                warnings.is_some_and(|warnings| {
+                    self.host
+                        .set_branch_warnings(repository, fetched_at, warnings)
+                })
             }
             Event::Wake(at) => {
                 if self.wake_at == Some(at) {
@@ -873,15 +994,16 @@ impl Actor {
                     self.host.settle_pending_worktrees();
                 }
                 // A deliberately archived parent has no one to wake, and one that stopped
-                // the turn already knows.
+                // the turn, or was told the human did, already knows.
                 if let Some(parent) = &session.parent_id
                     && !self.host.session(parent)?.archived
                     && stop_reason.is_none()
+                    && !active.stopped_by_human
                     && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
                     let body = if let Some(error) = &error {
                         format!(
-                            "{} stopped with an error: {error}. Inspect its runtime/worktree before resuming.",
+                            "{} stopped with an error: {error}. Inspect its worktree, then resume it with resume_agent, choosing held: retry or skip.",
                             session.name
                         )
                     } else {
@@ -1053,39 +1175,214 @@ impl Actor {
         page.omitted_steps = active.omitted_steps;
         Ok(page)
     }
-    /// Lets a session's direct parent stop its running turn, through the same cancel flag a
-    /// human stop uses; the provider thread then finishes the turn.
-    fn stop_turn(&mut self, caller: &str, args: &Value) -> Result<Value> {
-        let target = self
-            .host
-            .session(args["session_id"].as_str().context("Missing session_id")?)?;
+    /// Lets a coordinator stop its direct children, or all of them when none are named, and
+    /// keeps them paused so queued messages and timer fires wait for resume_agent. A running
+    /// turn stops through the same cancel flag a human stop uses; the provider thread then
+    /// finishes it.
+    fn stop_agents(&mut self, caller: &str, args: &Value) -> Result<Value> {
+        // A misspelt session_ids must not silently widen the stop to every child.
+        only_arguments("stop_agents", args, &["session_ids", "reason"])?;
         let reason = args["reason"].as_str().context("Missing reason")?.trim();
-        ensure!(!reason.is_empty(), "Give a reason for stopping the turn");
+        ensure!(!reason.is_empty(), "Give a reason for stopping");
+        let reason = reason.chars().take(1000).collect::<String>();
+        // Only a missing session_ids means every child; null or a non-list is refused.
+        let targets = match args.get("session_ids") {
+            Some(ids) => serde_json::from_value::<Vec<String>>(ids.clone())
+                .context("session_ids must be a list of session ids")?
+                .iter()
+                .map(|id| self.direct_child(caller, id, "stop"))
+                .collect::<Result<Vec<_>>>()?,
+            None => self
+                .host
+                .sessions()?
+                .into_iter()
+                .filter(|s| s.parent_id.as_deref() == Some(caller) && !s.archived)
+                .collect(),
+        };
+        let mut results = Vec::new();
+        for target in targets {
+            let running = self
+                .active
+                .get_mut(&target.id)
+                .filter(|a| !a.cancel.load(Ordering::Relaxed));
+            let result = if let Some(active) = running {
+                active.stopped_by_parent = Some(reason.clone());
+                active.cancel.store(true, Ordering::Relaxed);
+                let run = active.run.clone();
+                Host::event(
+                    &self.host.db,
+                    &target.project_id,
+                    Some(&target.id),
+                    "turn_stop_requested",
+                    &format!("{run}; {reason}"),
+                )?;
+                "stopped"
+            } else if matches!(target.status, Status::Paused | Status::Disconnected)
+                || self.active.contains_key(&target.id)
+            {
+                "already_paused"
+            } else {
+                Host::event(
+                    &self.host.db,
+                    &target.project_id,
+                    Some(&target.id),
+                    "paused_by_parent",
+                    &reason,
+                )?;
+                "paused_idle"
+            };
+            if result != "already_paused" {
+                self.host.set_status(&target.id, Status::Paused)?;
+                self.host.record_stop(&target.id, Stopper::Parent)?;
+            }
+            results.push(json!({"session_id":target.id,"name":target.name,"result":result}));
+        }
+        Ok(json!({ "agents": results }))
+    }
+    /// Lets a coordinator release a direct child that is paused or interrupted, through the same
+    /// reconciliation as the human's Retry and Skip. Held input must be retried or skipped
+    /// explicitly; a retried turn's prompt says it was interrupted. Nothing changes unless all
+    /// of it succeeds.
+    fn resume_agent(&mut self, caller: &str, args: &Value) -> Result<Value> {
+        only_arguments("resume_agent", args, &["session_id", "held", "message"])?;
+        let target = self.direct_child(
+            caller,
+            args["session_id"].as_str().context("Missing session_id")?,
+            "resume",
+        )?;
         ensure!(
-            target.parent_id.as_deref() == Some(caller),
-            "Only {}'s direct parent can stop its turn",
+            !self.active.contains_key(&target.id),
+            "{} is still finishing its turn; resume it once it has stopped",
             target.name
         );
-        let active = self
-            .active
-            .get_mut(&target.id)
-            .with_context(|| format!("{} has no running turn", target.name))?;
-        active
-            .stopped_by_parent
-            .get_or_insert_with(|| reason.chars().take(1000).collect());
-        active.cancel.store(true, Ordering::Relaxed);
-        let run = active.run.clone();
+        ensure!(
+            matches!(target.status, Status::Paused | Status::Disconnected),
+            "{} is {}, not stopped; send_message reaches it without resuming",
+            target.name,
+            target.status.label()
+        );
+        let held = self.host.held_input(&target.id)?;
+        let retry = match args.get("held").filter(|h| !h.is_null()) {
+            None => {
+                ensure!(
+                    held == 0,
+                    "{} has {held} held input message(s); inspect its worktree, then pass held: retry or skip",
+                    target.name
+                );
+                true
+            }
+            Some(held) => match held.as_str() {
+                Some("retry") => true,
+                Some("skip") => false,
+                _ => bail!("held must be retry or skip"),
+            },
+        };
+        let message = match args.get("message").filter(|m| !m.is_null()) {
+            Some(message) => {
+                let message = message.as_str().context("message must be text")?;
+                text(message, MAX_TEXT_BYTES).context("Invalid message")?;
+                Some(message)
+            }
+            None => None,
+        };
+        let stopped_by = self.host.session_runtime(&target.id)?.stopped_by;
+        self.host.atomically(|host| {
+            host.reconcile_session(&target.id, retry)?;
+            if let Some(body) = message {
+                host.send(
+                    &format!("resume:{}", new_id()),
+                    Some(caller),
+                    &target.id,
+                    body,
+                )?;
+            }
+            Host::event(
+                &host.db,
+                &target.project_id,
+                Some(&target.id),
+                "resumed_by_parent",
+                if held == 0 {
+                    "no held input"
+                } else if retry {
+                    "held input retried"
+                } else {
+                    "held input skipped"
+                },
+            )
+        })?;
+        let queued = self.host.queued_input(&target.id)?;
+        let mut result = json!({"session_id":target.id,"status":"ready","queued":queued,"turn_scheduled":queued > 0});
+        if let Some(by) = stopped_by {
+            result["stopped_by"] = json!(by);
+            result["note"] = json!(format!("{} was stopped by {}.", target.name, by.label()));
+        }
+        Ok(result)
+    }
+    /// The caller's direct child, if it is not archived.
+    fn direct_child(&self, caller: &str, id: &str, action: &str) -> Result<Session> {
+        let target = self.host.session(id)?;
+        ensure!(
+            target.parent_id.as_deref() == Some(caller),
+            "Only {}'s direct parent can {action} it",
+            target.name
+        );
+        ensure!(
+            !target.archived,
+            "{} is archived; restore it before you {action} it",
+            target.name
+        );
+        Ok(target)
+    }
+    /// Records a human Stop or Pause and tells the session's parent once, whether or not a turn
+    /// was running. It overrides a parent's stop still winding down, so the turn's input is held
+    /// and the turn's end sends no second notice.
+    fn human_stopped(&mut self, id: &str) -> Result<()> {
+        let running = match self.active.get_mut(id) {
+            Some(active) => {
+                active.stopped_by_parent = None;
+                active.stopped_by_human = true;
+                true
+            }
+            None => false,
+        };
+        // Who stopped the session never depends on the notice: send_message and resume_agent
+        // name the human even if the notice cannot be sent. The record also keeps it to one
+        // notice per stop.
+        if !self.host.record_stop(id, Stopper::Human)? {
+            return Ok(());
+        }
+        let session = self.host.session(id)?;
         Host::event(
             &self.host.db,
-            &target.project_id,
-            Some(&target.id),
-            "turn_stop_requested",
-            &format!("{run}; {reason}"),
+            &session.project_id,
+            Some(id),
+            "stopped_by_human",
+            if running { "running turn" } else { "idle" },
         )?;
-        Ok(json!({"session_id":target.id,"run_id":run,"stopping":true}))
+        let Some(parent) = &session.parent_id else {
+            return Ok(());
+        };
+        if session.archived || self.host.session(parent)?.archived {
+            return Ok(());
+        }
+        let held = if running {
+            "; its interrupted turn's input is held"
+        } else {
+            ""
+        };
+        self.host.send_human_notice(
+            &format!("human-stop:{id}:{}", new_id()),
+            Some(id),
+            parent,
+            &format!(
+                "{} was stopped by the human{held}. This is an emergency stop: resume it with resume_agent only when the human says so.",
+                session.name
+            ),
+        )?;
+        Ok(())
     }
     /// Every `CHECK_IN_MS` of a running turn, tells the session's parent how it is going, or the
-    /// human when it has none. Turns are never stopped for time; the parent may call stop_turn.
+    /// human when it has none. Turns are never stopped for time; the parent may call stop_agents.
     /// Keeps a wake-up armed for the next check-in.
     fn check_in_long_turns(&mut self, now: i64) {
         let due = self
@@ -1147,7 +1444,7 @@ impl Actor {
                     Some(id),
                     parent,
                     &format!(
-                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_turn with session_id {id} and a reason."
+                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{id}] and a reason."
                     ),
                 )?;
             }
@@ -1684,6 +1981,9 @@ mod tests {
             started_at: now(),
             resumed: HashSet::new(),
             stopping: false,
+            overlaps_checked: HashMap::new(),
+            overlaps_running: HashSet::new(),
+            overlaps_due_at: 0,
         };
         (actor, changes, step_changes)
     }
@@ -1745,6 +2045,129 @@ mod tests {
             .create_ticket(&coordinator.id, &attached.id, "Toolbar", "Do")
             .unwrap();
         (home, host, ticket, coordinator)
+    }
+
+    fn warning(ticket: &str, overlapping: Option<&str>) -> BranchWarnings {
+        BranchWarnings {
+            ticket_id: ticket.into(),
+            base: "HEAD".into(),
+            base_ahead: 0,
+            overlaps: overlapping
+                .map(|other| BranchOverlap {
+                    ticket_id: other.into(),
+                    title: "Other".into(),
+                    project: "Start".into(),
+                    files: vec!["a.rs".into()],
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_repository_has_one_overlap_check_at_a_time_and_at_most_every_five_minutes() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        let next = 1_000 + overlaps::OVERLAP_REFRESH_MS;
+        actor.refresh_overlaps(1_000);
+        assert_eq!(actor.overlaps_due_at, next);
+        // Inside the interval nothing is read or started.
+        actor.refresh_overlaps(next - 1);
+        assert_eq!(actor.overlaps_checked[&repository], 1_000);
+        // A check still running when the interval ends is not joined by a second one.
+        actor.refresh_overlaps(next);
+        assert_eq!(actor.overlaps_checked[&repository], 1_000);
+        assert!(actor.handle(Event::Overlaps {
+            repository: repository.clone(),
+            fetched_at: None,
+            warnings: Some(vec![warning(&ticket.id, None)]),
+        }));
+        assert!(actor.overlaps_due_at <= next);
+        actor.refresh_overlaps(next);
+        assert_eq!(actor.overlaps_checked[&repository], next);
+        assert!(actor.overlaps_running.contains(&repository));
+    }
+
+    #[test]
+    fn reading_workspace_context_refreshes_a_stale_cache_and_returns_it_meanwhile() {
+        let (_home, host, ticket, coordinator) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        let mut stale = warning(&ticket.id, None);
+        stale.base_ahead = 2;
+        actor.refresh_overlaps(now() - overlaps::OVERLAP_REFRESH_MS);
+        actor.handle(Event::Overlaps {
+            repository: repository.clone(),
+            fetched_at: None,
+            warnings: Some(vec![stale]),
+        });
+        let mut turn = active_turn("coordinating", vec![]);
+        turn.token = "coordinator-token".into();
+        actor.active.insert(coordinator.id.clone(), turn);
+        let (reply, replies) = async_channel::bounded(1);
+        let before = now();
+        actor.process(Event::Tool {
+            token: "coordinator-token".into(),
+            name: "workspace_context".into(),
+            args: json!({}),
+            reply,
+        });
+        let context = replies.try_recv().unwrap().unwrap();
+        assert_eq!(
+            context["tickets"][0]["warnings"],
+            json!(["HEAD is 2 commits ahead"])
+        );
+        assert!(actor.overlaps_checked[&repository] >= before);
+        assert!(actor.overlaps_running.contains(&repository));
+    }
+
+    #[test]
+    fn a_check_that_panics_still_frees_its_repository_for_the_next_refresh() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(1);
+        let repository = ticket.repository_id.clone();
+        actor.overlaps_checked.insert(repository.clone(), 1_000);
+        actor.overlaps_running.insert(repository.clone());
+        spawn_overlap_check(sender, repository.clone(), || panic!("injected"));
+        assert!(!actor.handle(events.recv_blocking().unwrap()));
+        let next = 1_000 + overlaps::OVERLAP_REFRESH_MS;
+        actor.refresh_overlaps(next);
+        assert_eq!(actor.overlaps_checked[&repository], next);
+    }
+
+    #[test]
+    fn warnings_about_a_finished_ticket_are_dropped_even_from_a_late_check() {
+        let (_home, mut host, first, coordinator) = ticket_fixture();
+        let second = host
+            .create_ticket(&coordinator.id, &first.repository_id, "Menu", "Do")
+            .unwrap();
+        host.set_branch_warnings(
+            first.repository_id.clone(),
+            None,
+            vec![
+                warning(&first.id, Some(&second.id)),
+                warning(&second.id, Some(&first.id)),
+            ],
+        );
+        assert_eq!(host.snapshot().unwrap().branch_warnings.len(), 2);
+        host.close_ticket(&second.id).unwrap();
+        // A check that started before the close reports after it.
+        host.set_branch_warnings(
+            first.repository_id.clone(),
+            None,
+            vec![
+                warning(&first.id, Some(&second.id)),
+                warning(&second.id, Some(&first.id)),
+            ],
+        );
+        assert!(host.snapshot().unwrap().branch_warnings.is_empty());
+        let context = host.agent_context(&coordinator.id).unwrap();
+        let tickets = context["tickets"].as_array().unwrap();
+        assert!(tickets.iter().all(|t| t.get("warnings").is_none()));
     }
 
     /// A live project whose ticket has a verification round of `count` testers queued and not
@@ -2735,7 +3158,7 @@ mod tests {
             &format!("[check-in] {} on ticket \"Toolbar\"", tester.name),
             "for 30 minutes",
             "latest step: cargo test",
-            &format!("stop_turn with session_id {}", tester.id),
+            &format!("stop_agents with session_ids [{}]", tester.id),
         ] {
             assert!(
                 first[0].body.contains(expected),
@@ -2920,15 +3343,461 @@ mod tests {
     }
 
     #[test]
-    fn stop_turn_refuses_a_child_with_no_running_turn() {
+    fn stop_agents_keeps_every_child_paused_while_input_queues() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let idle = actor
+            .host
+            .create_session(
+                &coordinator.project_id,
+                &coordinator.id,
+                None,
+                "Idle",
+                Role::Reviewer,
+                Provider::Codex,
+            )
+            .unwrap();
+        let args = json!({"reason":"Wrong approach"});
+        let stopped = actor.stop_agents(&coordinator.id, &args).unwrap();
+        let result = |stopped: &Value, id: &str| {
+            stopped["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["session_id"] == id)
+                .unwrap()["result"]
+                .clone()
+        };
+        assert_eq!(result(&stopped, &tester.id), "stopped");
+        assert_eq!(result(&stopped, &idle.id), "paused_idle");
+        assert!(actor.active[&tester.id].cancel.load(Ordering::Relaxed));
+        actor
+            .provider_event(
+                &tester.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: Some(provider::Cancelled.to_string()),
+                    usage: Value::Null,
+                    cancelled: true,
+                },
+            )
+            .unwrap();
+        for child in [&tester, &idle] {
+            assert_eq!(
+                actor.host.session(&child.id).unwrap().status,
+                Status::Paused
+            );
+        }
+
+        // Neither a message nor a timer-fired coordinator turn starts a stopped child's turn.
+        actor.host.set_live(&coordinator.project_id, true).unwrap();
+        for child in [&tester, &idle] {
+            actor
+                .host
+                .send(&new_id(), Some(&coordinator.id), &child.id, "Work")
+                .unwrap();
+        }
+        actor.schedule().unwrap();
+        assert!(actor.active.is_empty());
+
+        let again = actor.stop_agents(&coordinator.id, &args).unwrap();
+        assert_eq!(result(&again, &tester.id), "already_paused");
+        assert_eq!(result(&again, &idle.id), "already_paused");
+    }
+
+    /// Runs a client command through the actor, as the desktop sends it.
+    fn command(actor: &mut Actor, command: Command) -> std::result::Result<Value, String> {
+        let (reply, replies) = async_channel::bounded(1);
+        actor.handle(Event::Command(command, reply));
+        replies.try_recv().unwrap()
+    }
+
+    fn pause(actor: &mut Actor, session: &Session) {
+        let paused = Command::SetStatus {
+            session_id: session.id.clone(),
+            status: Status::Paused,
+        };
+        command(actor, paused).unwrap();
+    }
+
+    fn cancelled_turn_ends(actor: &mut Actor, session: &Session) {
+        actor
+            .provider_event(
+                &session.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: Some(provider::Cancelled.to_string()),
+                    usage: Value::Null,
+                    cancelled: true,
+                },
+            )
+            .unwrap();
+    }
+
+    /// What the parent was told about its children's turns ending or being stopped.
+    fn stop_notices(actor: &Actor, parent: &Session) -> Vec<String> {
+        actor
+            .host
+            .messages(&parent.id, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.id.starts_with("human-stop:") || m.id.starts_with("turn-result:"))
+            .map(|m| m.body)
+            .collect()
+    }
+
+    #[test]
+    fn resume_agent_reconciles_held_input_like_retry_and_skip() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let resume = |actor: &mut Actor, args: Value| {
+            actor
+                .resume_agent(&coordinator.id, &args)
+                .map_err(|e| e.to_string())
+        };
+        let refused = resume(&mut actor, json!({"session_id":tester.id})).unwrap_err();
+        assert!(refused.contains("still finishing its turn"), "{refused}");
+
+        // The human stops its turn; its input is held and the parent is told once.
+        actor
+            .host
+            .send("work", Some(&coordinator.id), &tester.id, "Work")
+            .unwrap();
+        actor.active.get_mut(&tester.id).unwrap().messages = vec!["work".into()];
+        pause(&mut actor, &tester);
+        cancelled_turn_ends(&mut actor, &tester);
+        let notices = stop_notices(&actor, &coordinator);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].starts_with(&format!("{} was stopped by the human", tester.name)),
+            "{notices:?}"
+        );
+
+        let refused = resume(&mut actor, json!({"session_id":tester.id})).unwrap_err();
+        assert!(refused.contains("1 held input message"), "{refused}");
+        // A resume that fails changes nothing: the child stays stopped with its input held.
+        for invalid in [
+            json!({"session_id":tester.id,"held":"skip","message":""}),
+            json!({"session_id":tester.id,"held":"later"}),
+        ] {
+            resume(&mut actor, invalid).unwrap_err();
+            assert_eq!(
+                actor.host.session(&tester.id).unwrap().status,
+                Status::Paused
+            );
+            assert_eq!(actor.host.message("work").unwrap().receipt, Receipt::Held);
+        }
+
+        let resumed = resume(&mut actor, json!({"session_id":tester.id,"held":"skip"})).unwrap();
+        assert_eq!(resumed["stopped_by"], "human");
+        assert!(
+            resumed["note"]
+                .as_str()
+                .unwrap()
+                .contains("stopped by the human"),
+            "{resumed}"
+        );
+        assert_eq!(
+            actor.host.message("work").unwrap().receipt,
+            Receipt::Cancelled
+        );
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Ready
+        );
+        let runtime = actor.host.session_runtime(&tester.id).unwrap();
+        assert_eq!((runtime.last_error, runtime.stopped_by), (None, None));
+
+        let refused = resume(&mut actor, json!({"session_id":tester.id})).unwrap_err();
+        assert!(refused.contains("not stopped"), "{refused}");
+        let sibling = actor
+            .host
+            .create_session(
+                &coordinator.project_id,
+                &coordinator.id,
+                None,
+                "Sibling",
+                Role::Implementer,
+                Provider::Codex,
+            )
+            .unwrap();
+        let refused = actor
+            .resume_agent(&sibling.id, &json!({"session_id":tester.id}))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            format!("Only {}'s direct parent can resume it", tester.name)
+        );
+    }
+
+    #[test]
+    fn a_human_pause_of_an_idle_child_tells_its_parent_and_the_held_hint_names_the_human() {
         let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
         actor.active.remove(&tester.id);
-        let args = json!({"session_id":tester.id,"reason":"Stop"});
-        let error = actor.stop_turn(&coordinator.id, &args).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("{} has no running turn", tester.name)
+        pause(&mut actor, &tester);
+        pause(&mut actor, &tester);
+        let notices = stop_notices(&actor, &coordinator);
+        assert_eq!(notices.len(), 1, "told once: {notices:?}");
+        assert!(
+            notices[0].starts_with(&format!("{} was stopped by the human.", tester.name)),
+            "{notices:?}"
         );
+
+        let args = json!({"recipient":tester.id,"message_id":"next","body":"Next"});
+        let sent = actor
+            .host
+            .agent_tool(&coordinator.id, "send_message", args)
+            .unwrap();
+        assert_eq!(sent["receipt"], "queued_while_held");
+        assert!(
+            sent["hint"]
+                .as_str()
+                .unwrap()
+                .contains("stopped by the human"),
+            "{sent}"
+        );
+
+        // A parent's stop never relabels the human's.
+        actor
+            .stop_agents(&coordinator.id, &json!({"reason":"Tidy up"}))
+            .unwrap();
+        assert_eq!(
+            actor.host.session_runtime(&tester.id).unwrap().stopped_by,
+            Some(Stopper::Human)
+        );
+    }
+
+    #[test]
+    fn a_human_stop_reaches_a_parent_whose_queue_is_full() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let idle = actor
+            .host
+            .create_session(
+                &coordinator.project_id,
+                &coordinator.id,
+                None,
+                "Idle",
+                Role::Reviewer,
+                Provider::Codex,
+            )
+            .unwrap();
+        for n in 0..1024 {
+            actor
+                .host
+                .send(&format!("busy-{n}"), None, &coordinator.id, "Busy")
+                .unwrap();
+        }
+
+        pause(&mut actor, &idle);
+        pause(&mut actor, &tester);
+        cancelled_turn_ends(&mut actor, &tester);
+        pause(&mut actor, &idle);
+        let notices = stop_notices(&actor, &coordinator);
+        assert_eq!(notices.len(), 2, "one per child: {notices:?}");
+        for child in [&idle, &tester] {
+            let named = format!("{} was stopped by the human", child.name);
+            assert!(notices.iter().any(|n| n.starts_with(&named)), "{notices:?}");
+        }
+
+        // Agents still cannot flood the full queue.
+        let args = json!({"recipient":coordinator.id,"message_id":"more","body":"More"});
+        let refused = actor
+            .host
+            .agent_tool(&idle.id, "send_message", args)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("Recipient queue is full"), "{refused}");
+    }
+
+    #[test]
+    fn a_human_stop_whose_notice_fails_still_names_the_human() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        actor.active.remove(&tester.id);
+        actor
+            .host
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse_notice BEFORE INSERT ON messages
+                     WHEN NEW.id LIKE 'human-stop:%'
+                     BEGIN SELECT RAISE(ABORT,'disk full'); END;",
+            )
+            .unwrap();
+        pause(&mut actor, &tester);
+        assert!(stop_notices(&actor, &coordinator).is_empty());
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Paused
+        );
+        assert_eq!(
+            actor.host.session_runtime(&tester.id).unwrap().stopped_by,
+            Some(Stopper::Human)
+        );
+
+        let args = json!({"recipient":tester.id,"message_id":"next","body":"Next"});
+        let sent = actor
+            .host
+            .agent_tool(&coordinator.id, "send_message", args)
+            .unwrap();
+        assert!(
+            sent["hint"]
+                .as_str()
+                .unwrap()
+                .contains("stopped by the human"),
+            "{sent}"
+        );
+        let resumed = actor
+            .resume_agent(&coordinator.id, &json!({"session_id":tester.id}))
+            .unwrap();
+        assert!(
+            resumed["note"]
+                .as_str()
+                .unwrap()
+                .contains("stopped by the human"),
+            "{resumed}"
+        );
+    }
+
+    #[test]
+    fn a_human_pause_overrides_a_parent_stop_still_winding_down() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        actor
+            .host
+            .send("work", Some(&coordinator.id), &tester.id, "Work")
+            .unwrap();
+        actor.active.get_mut(&tester.id).unwrap().messages = vec!["work".into()];
+        let args = json!({"session_ids":[tester.id],"reason":"Wrong approach"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
+        pause(&mut actor, &tester);
+        cancelled_turn_ends(&mut actor, &tester);
+
+        assert_eq!(actor.host.message("work").unwrap().receipt, Receipt::Held);
+        let notices = stop_notices(&actor, &coordinator);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("stopped by the human"), "{notices:?}");
+        assert_eq!(
+            actor.host.session_runtime(&tester.id).unwrap().stopped_by,
+            Some(Stopper::Human)
+        );
+    }
+
+    #[test]
+    fn a_human_project_stop_tells_the_parent_once_per_running_child() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let stop = Command::SetLive {
+            project_id: coordinator.project_id.clone(),
+            enabled: false,
+        };
+        command(&mut actor, stop).unwrap();
+        cancelled_turn_ends(&mut actor, &tester);
+        let notices = stop_notices(&actor, &coordinator);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("its interrupted turn's input is held"),
+            "{notices:?}"
+        );
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Disconnected
+        );
+    }
+
+    #[test]
+    fn a_report_from_a_turn_being_stopped_leaves_the_child_paused() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let args = json!({"session_ids":[tester.id],"reason":"Wrong approach"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
+        let report = json!({"message_id":"late","kind":"completed","body":"Done anyway"});
+        actor.host.agent_tool(&tester.id, "report", report).unwrap();
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Paused
+        );
+        cancelled_turn_ends(&mut actor, &tester);
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Paused
+        );
+
+        actor.host.set_live(&coordinator.project_id, true).unwrap();
+        actor
+            .host
+            .send("queued", Some(&coordinator.id), &tester.id, "Work")
+            .unwrap();
+        // The report woke the coordinator; keep its turn out of this test.
+        actor
+            .host
+            .set_status(&coordinator.id, Status::Paused)
+            .unwrap();
+        actor.schedule().unwrap();
+        assert!(
+            actor.active.is_empty(),
+            "no turn starts without resume_agent"
+        );
+    }
+
+    #[test]
+    fn stop_and_resume_refuse_archived_children_and_unknown_arguments() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        actor.active.remove(&tester.id);
+        let archived = actor
+            .host
+            .create_session(
+                &coordinator.project_id,
+                &coordinator.id,
+                None,
+                "Archived",
+                Role::Reviewer,
+                Provider::Codex,
+            )
+            .unwrap();
+        actor.host.set_status(&archived.id, Status::Paused).unwrap();
+        actor.host.set_archived(&archived.id, true).unwrap();
+
+        let stop = json!({"session_ids":[tester.id, archived.id],"reason":"Stop"});
+        let refused = actor
+            .stop_agents(&coordinator.id, &stop)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "Archived is archived; restore it before you stop it"
+        );
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Ready,
+            "a refused stop changes nothing"
+        );
+        let refused = actor
+            .resume_agent(&coordinator.id, &json!({"session_id":archived.id}))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "Archived is archived; restore it before you resume it"
+        );
+
+        // A singular session_id must not widen into stopping every child.
+        let singular = json!({"session_id":tester.id,"reason":"Stop"});
+        let refused = actor
+            .stop_agents(&coordinator.id, &singular)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refused,
+            "stop_agents takes session_ids, reason, not session_id"
+        );
+        let null = json!({"session_ids":null,"reason":"Stop"});
+        actor.stop_agents(&coordinator.id, &null).unwrap_err();
+        for child in [&tester, &archived] {
+            assert_eq!(
+                actor.host.session(&child.id).unwrap().status,
+                if child.id == tester.id {
+                    Status::Ready
+                } else {
+                    Status::Paused
+                },
+                "a refused stop changes no child"
+            );
+        }
     }
 
     #[test]
@@ -2948,12 +3817,12 @@ mod tests {
         // A ticket agent's parent is the project coordinator itself.
         assert_eq!(coordinator.role, Role::ProjectOrchestrator);
         assert_eq!(tester.parent_id.as_deref(), Some(coordinator.id.as_str()));
-        let args = json!({"session_id":tester.id,"reason":"Wrong approach"});
+        let args = json!({"session_ids":[tester.id],"reason":"Wrong approach"});
         for caller in [&sibling.id, &tester.id] {
-            let error = actor.stop_turn(caller, &args).unwrap_err().to_string();
+            let error = actor.stop_agents(caller, &args).unwrap_err().to_string();
             assert_eq!(
                 error,
-                format!("Only {}'s direct parent can stop its turn", tester.name)
+                format!("Only {}'s direct parent can stop it", tester.name)
             );
         }
         assert!(!actor.active[&tester.id].cancel.load(Ordering::Relaxed));
@@ -2965,24 +3834,25 @@ mod tests {
         let (reply, replies) = async_channel::bounded(1);
         actor.handle(Event::Tool {
             token: "parent-token".into(),
-            name: "stop_turn".into(),
+            name: "stop_agents".into(),
             args,
             reply,
         });
-        assert_eq!(replies.try_recv().unwrap().unwrap()["stopping"], true);
+        let reply = replies.try_recv().unwrap().unwrap();
+        assert_eq!(reply["agents"][0]["result"], "stopped");
         assert!(actor.active[&tester.id].cancel.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn a_turn_its_parent_stopped_completes_its_input_and_tells_the_next_turn_why() {
+    fn a_turn_its_parent_stopped_completes_its_input_stays_paused_and_tells_the_next_turn_why() {
         let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
         let input = actor
             .host
             .send("work", Some(&coordinator.id), &tester.id, "Work")
             .unwrap();
         actor.active.get_mut(&tester.id).unwrap().messages = vec![input.id.clone()];
-        let args = json!({"session_id":tester.id,"reason":"Use the staging data instead"});
-        actor.stop_turn(&coordinator.id, &args).unwrap();
+        let args = json!({"session_ids":[tester.id],"reason":"Use the staging data instead"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
         actor
             .provider_event(
                 &tester.id,
@@ -3014,7 +3884,8 @@ mod tests {
         );
         assert_eq!(
             actor.host.session(&tester.id).unwrap().status,
-            Status::Ready
+            Status::Paused,
+            "it stays stopped until its parent resumes it"
         );
         assert_eq!(
             actor.host.session_runtime(&tester.id).unwrap().last_error,
@@ -3051,8 +3922,8 @@ mod tests {
             .send("work", Some(&coordinator.id), &tester.id, "Work")
             .unwrap();
         actor.active.get_mut(&tester.id).unwrap().messages = vec!["work".into()];
-        let args = json!({"session_id":tester.id,"reason":"Stop"});
-        actor.stop_turn(&coordinator.id, &args).unwrap();
+        let args = json!({"session_ids":[tester.id],"reason":"Stop"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
         // The provider failed on its own before it saw the cancel flag.
         let crash = "Provider exited without a successful terminal result (exit status: 1)";
         actor

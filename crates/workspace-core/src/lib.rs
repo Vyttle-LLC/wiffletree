@@ -374,6 +374,95 @@ pub struct Snapshot {
     pub schedules: Vec<Schedule>,
     #[serde(default)]
     pub model_selection: ModelSelection,
+    /// Sessions whose input has not reached a turn yet.
+    #[serde(default)]
+    pub undelivered: Vec<UndeliveredInput>,
+    /// Open tickets whose branch has fallen behind its base or overlaps another's.
+    #[serde(default)]
+    pub branch_warnings: Vec<BranchWarnings>,
+}
+/// A session's input waiting for a turn: held after an interrupted turn, or queued.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndeliveredInput {
+    pub session_id: String,
+    pub held: u32,
+    pub queued: u32,
+}
+/// What an open ticket's branch risks when it lands: its base moving on, and other open
+/// tickets in the same repository changing the same files. Read from committed work only.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchWarnings {
+    pub ticket_id: String,
+    /// The repository's base ref, such as `origin/main`.
+    pub base: String,
+    /// Commits on the base since the branch's merge-base.
+    pub base_ahead: u32,
+    /// Files that would conflict when merging the base into the branch.
+    pub base_conflicts: Vec<String>,
+    pub overlaps: Vec<BranchOverlap>,
+    /// Checks that could not run: a failed fetch of the base, or a failed conflict check.
+    #[serde(default)]
+    pub failures: Vec<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchOverlap {
+    pub ticket_id: String,
+    pub title: String,
+    pub project: String,
+    /// Files both branches changed since leaving the base.
+    pub files: Vec<String>,
+    /// Those of them that would conflict when merging the two branches.
+    pub conflicts: Vec<String>,
+    /// Why the conflict check between the two branches could not run.
+    #[serde(default)]
+    pub failure: Option<String>,
+}
+impl BranchWarnings {
+    pub fn has_conflicts(&self) -> bool {
+        !self.base_conflicts.is_empty() || self.overlaps.iter().any(|o| !o.conflicts.is_empty())
+    }
+    /// One sentence per warning, such as "origin/main is 3 commits ahead; conflicts in a.rs".
+    pub fn lines(&self) -> Vec<String> {
+        let conflicts = |files: &[String], failure: Option<&String>| match failure {
+            Some(reason) => format!("; conflict check failed: {reason}"),
+            None if files.is_empty() => String::new(),
+            None => format!("; conflicts in {}", file_list(files)),
+        };
+        let mut lines = vec![];
+        if self.base_ahead > 0 {
+            let commits = if self.base_ahead == 1 {
+                "commit"
+            } else {
+                "commits"
+            };
+            lines.push(format!(
+                "{} is {} {commits} ahead{}",
+                self.base,
+                self.base_ahead,
+                conflicts(&self.base_conflicts, None)
+            ));
+        }
+        for overlap in &self.overlaps {
+            lines.push(format!(
+                "overlaps ticket {} (project {}) in {}{}",
+                overlap.title,
+                overlap.project,
+                file_list(&overlap.files),
+                conflicts(&overlap.conflicts, overlap.failure.as_ref())
+            ));
+        }
+        lines.extend(self.failures.iter().cloned());
+        lines
+    }
+}
+/// Names the first few files and counts the rest.
+fn file_list(files: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut list = files[..files.len().min(SHOWN)].join(", ");
+    if files.len() > SHOWN {
+        list.push_str(&format!(" and {} more", files.len() - SHOWN));
+    }
+    list
 }
 impl Snapshot {
     /// The workspace repositories a project uses, in the order they were added.
@@ -683,8 +772,27 @@ pub struct SessionRuntime {
     /// Cleared when Skip cancels that input or a turn starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    /// Who stopped the session, while it stays paused or interrupted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<Stopper>,
     pub last_started_at: Option<i64>,
     pub last_finished_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stopper {
+    /// An emergency stop: the session resumes only when the human says so.
+    Human,
+    Parent,
+}
+impl Stopper {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Human => "the human",
+            Self::Parent => "its parent",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

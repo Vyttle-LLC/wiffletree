@@ -75,6 +75,8 @@ impl Host {
         )?;
         self.save_runtime(&runtime)
     }
+    /// Releases a paused or interrupted session: its held input is queued again or dropped.
+    /// Both the human's Retry and Skip and a coordinator's resume_agent come through here.
     pub fn reconcile_session(&mut self, id: &str, retry: bool) -> Result<()> {
         let session = self.session(id)?;
         ensure!(
@@ -96,8 +98,44 @@ impl Host {
             runtime.held = false;
         }
         runtime.last_error = None;
+        runtime.stopped_by = None;
         self.save_runtime(&runtime)?;
         self.set_status(id, Status::Ready)
+    }
+    /// Records who stopped a session, and whether this is news. A parent's stop never replaces
+    /// the human's emergency stop.
+    pub fn record_stop(&mut self, id: &str, by: Stopper) -> Result<bool> {
+        let mut runtime = self.session_runtime(id)?;
+        if runtime.stopped_by == Some(by) || runtime.stopped_by == Some(Stopper::Human) {
+            return Ok(false);
+        }
+        runtime.stopped_by = Some(by);
+        self.save_runtime(&runtime)?;
+        Ok(true)
+    }
+    /// Forgets who stopped a session once it runs again.
+    pub(crate) fn clear_stop(&mut self, id: &str) -> Result<()> {
+        let mut runtime = self.session_runtime(id)?;
+        if runtime.stopped_by.take().is_some() {
+            self.save_runtime(&runtime)?;
+        }
+        Ok(())
+    }
+    /// Input an interrupted turn left held for Retry or Skip.
+    pub fn held_input(&self, id: &str) -> Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='held'",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+    /// Input waiting to start the session's next turn; quiet messages never start one.
+    pub fn queued_input(&self, id: &str) -> Result<i64> {
+        Ok(self.db.query_row(
+            "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0",
+            [id],
+            |r| r.get(0),
+        )?)
     }
     /// A ticket is a workspace: one repository the project uses, one worktree and branch. Repeating
     /// the same coordinator, repository and title returns the existing ticket.
@@ -301,7 +339,7 @@ impl Host {
             .with_context(|| format!("{} is not a ticket agent", agent.name))?;
         ensure!(
             agent.status != Status::Working,
-            "{} is mid-turn; wait for its report or stop it with stop_turn, then archive it",
+            "{} is mid-turn; wait for its report or stop it with stop_agents, then archive it",
             agent.name
         );
         ensure!(
@@ -420,10 +458,12 @@ impl Host {
         }
         Ok(context)
     }
-    /// The project's tickets, each with its repository name, agents and verification record.
+    /// The project's tickets, each with its repository name, agents, verification record and any
+    /// warnings about its branch.
     fn ticket_overview(&self, project: &str) -> Result<Vec<Value>> {
         let repositories = self.repositories()?;
         let runtimes = self.runtimes()?;
+        let warnings = self.open_branch_warnings()?;
         let mut overview = vec![];
         for ticket in self.tickets()? {
             if !self
@@ -448,6 +488,9 @@ impl Host {
                     .map(|r| r.name.as_str())
             );
             entry["agents"] = json!(agents);
+            if let Some(warnings) = warnings.iter().find(|w| w.ticket_id == ticket.id) {
+                entry["warnings"] = json!(warnings.lines());
+            }
             overview.push(entry);
         }
         Ok(overview)
@@ -592,6 +635,23 @@ impl Host {
                     receipt["receipt"] = json!("queued_behind_turn");
                     receipt["recipient_turn_started_at"] =
                         json!(self.session_runtime(&recipient.id)?.last_started_at);
+                }
+                if message.receipt == Receipt::Queued
+                    && matches!(recipient.status, Status::Paused | Status::Disconnected)
+                {
+                    receipt["receipt"] = json!("queued_while_held");
+                    receipt["hint"] = json!(
+                        match self.session_runtime(&recipient.id)?.stopped_by {
+                            Some(Stopper::Human) => format!(
+                                "{} was stopped by the human, so this waits until it is resumed. If it is your child, call resume_agent with session_id {} only when the human says so.",
+                                recipient.name, recipient.id
+                            ),
+                            _ => format!(
+                                "{} is stopped, so this waits until it is resumed. If it is your child, call resume_agent with session_id {}.",
+                                recipient.name, recipient.id
+                            ),
+                        }
+                    );
                 }
                 Ok(receipt)
             }
