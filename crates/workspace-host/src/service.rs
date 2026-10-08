@@ -1119,13 +1119,9 @@ impl Actor {
         let run = active.run.clone();
         let minutes = (now - active.started_at) / 60_000;
         let ticket = match self.host.session_runtime(id)?.ticket_id {
-            Some(ticket) => Some(self.host.ticket(&ticket)?),
-            None => None,
+            Some(ticket) => format!(" on ticket \"{}\"", self.host.ticket(&ticket)?.title),
+            None => String::new(),
         };
-        // A running verification cycle wakes the coordinator only with its outcome, so a
-        // check-in from one of its agents rides along with the coordinator's next turn instead.
-        let quiet = ticket.as_ref().is_some_and(|t| t.running_cycle().is_some());
-        let ticket = ticket.map_or_else(String::new, |t| format!(" on ticket \"{}\"", t.title));
         let latest = active.steps.last().map_or_else(
             || "no steps yet".to_owned(),
             |step| {
@@ -1146,16 +1142,14 @@ impl Actor {
                 if self.host.session(parent)?.archived {
                     return Ok(());
                 }
-                let id_of_check_in = format!("{CHECK_IN}{run}:{minutes}");
-                let body = format!(
-                    "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_turn with session_id {id} and a reason."
-                );
-                if quiet {
-                    self.host
-                        .send_quietly(&id_of_check_in, Some(id), parent, &body)?;
-                } else {
-                    self.host.send(&id_of_check_in, Some(id), parent, &body)?;
-                }
+                self.host.send(
+                    &format!("{CHECK_IN}{run}:{minutes}"),
+                    Some(id),
+                    parent,
+                    &format!(
+                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_turn with session_id {id} and a reason."
+                    ),
+                )?;
             }
             None => {
                 self.settle_check_ins(&session)?;
@@ -2348,7 +2342,7 @@ mod tests {
     }
 
     #[test]
-    fn a_check_in_during_a_verification_round_is_quiet_and_leaves_the_cycle_alone() {
+    fn a_check_in_during_a_verification_round_wakes_the_coordinator_and_leaves_the_cycle_alone() {
         let (_home, mut actor, ticket, verifiers) = waiting_round(1);
         let started = now();
         actor.active.insert(
@@ -2380,7 +2374,7 @@ mod tests {
         let check_in = check_ins(&actor, &coordinator);
         assert_eq!(check_in.len(), 1, "the project coordinator receives it");
         assert_eq!(check_in[0].sender.as_deref(), Some(verifiers[0].as_str()));
-        assert_eq!(waking(&actor), before, "it starts no coordinator turn");
+        assert_eq!(waking(&actor), before + 1, "it wakes the coordinator");
         let after = actor.host.ticket(&ticket.id).unwrap();
         assert_eq!(after.state, ticket.state);
         assert_eq!(after.verification, ticket.verification);

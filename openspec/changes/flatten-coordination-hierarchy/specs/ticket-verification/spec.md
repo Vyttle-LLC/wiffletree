@@ -108,7 +108,7 @@ A round SHALL end when every verifier in it has reported. If any verifier failed
 - **THEN** the report fails with an instruction to commit or discard them, and no round starts
 
 ### Requirement: Cycle outcomes reach the coordinator once
-Verifier verdicts and the implementer's `ready_for_testing` reports during a running cycle SHALL reach the project coordinator in the next batch, like progress, and SHALL NOT wake it. The same SHALL hold for the 30-minute check-in of any agent on a ticket whose cycle is running; a check-in SHALL NOT count as a verdict or change the ticket's state or cycle. Other implementer reports follow the ticket-state rule above and wake it. The host SHALL wake the project coordinator once when the cycle ends: with state `passed` when every configured verifier's latest result passed, or with state `blocked` when a round at the cap still has a failure or any verifier reported `blocked`. The `blocked` message SHALL list every unresolved failure, the rounds used and the cap. Reaching the cap SHALL NOT create a question for the human; the project coordinator decides whether to ask. A later `verify_ticket` call SHALL start a new cycle with every configured verifier.
+Verifier verdicts and the implementer's `ready_for_testing` reports during a running cycle SHALL reach the project coordinator in the next batch, like progress, and SHALL NOT wake it. Check-ins are the one exception to this rule against a coordinator turn during a round: an agent's 30-minute check-in SHALL wake the project coordinator even while its ticket's cycle is running, and SHALL NOT count as a verdict or change the ticket's state or cycle. Other implementer reports follow the ticket-state rule above and wake it. The host SHALL wake the project coordinator once when the cycle ends: with state `passed` when every configured verifier's latest result passed, or with state `blocked` when a round at the cap still has a failure or any verifier reported `blocked`. The `blocked` message SHALL list every unresolved failure, the rounds used and the cap. Reaching the cap SHALL NOT create a question for the human; the project coordinator decides whether to ask. A later `verify_ticket` call SHALL start a new cycle with every configured verifier.
 
 #### Scenario: All pass
 - **WHEN** every verifier passes in round 1
@@ -116,7 +116,7 @@ Verifier verdicts and the implementer's `ready_for_testing` reports during a run
 
 #### Scenario: Check-in during a round
 - **WHEN** a verifier's turn in a running round reaches 30 minutes
-- **THEN** the project coordinator receives its check-in with its next turn without being woken, and the ticket's state and verification record are unchanged
+- **THEN** the project coordinator wakes with its check-in, and the ticket's state and verification record are unchanged
 
 #### Scenario: Cap reached
 - **WHEN** with a cap of 2 the Codex tester fails in rounds 1 and 2
