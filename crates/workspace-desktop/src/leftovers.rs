@@ -372,7 +372,7 @@ mod tests {
         let Some(Command::RemoveLeftoverWorktrees { ticket_ids }) = selection.command() else {
             panic!("removal command")
         };
-        assert_eq!(ticket_ids, [clean.id.clone()]);
+        assert_eq!(ticket_ids, std::slice::from_ref(&clean.id));
         selection.cancel();
         assert!(selection.command().is_none(), "cancelling withdraws it");
 
