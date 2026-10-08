@@ -227,9 +227,7 @@ impl Host {
         let session = self.create_session(
             &owner.project_id,
             &owner.id,
-            Some(&ticket.repository_id)
-                .filter(|r| !r.is_empty())
-                .map(String::as_str),
+            Some(&ticket.repository_id),
             &format!(
                 "{} · {}",
                 role.agent_label(focus),

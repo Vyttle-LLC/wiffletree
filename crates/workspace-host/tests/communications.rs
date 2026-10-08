@@ -57,7 +57,6 @@ fn implementer(host: &mut Host, ticket: &Ticket) -> Session {
     .unwrap()
 }
 
-/// Reports the implementer ready, verifies with the default single tester and passes it.
 /// What a turn does first: takes every queued message as its input.
 fn take_input(host: &mut Host, session: &str) {
     for message in host.messages(session, None, 100).unwrap() {
@@ -68,6 +67,7 @@ fn take_input(host: &mut Host, session: &str) {
     }
 }
 
+/// Reports the implementer ready, verifies with the default single tester and passes it.
 fn verified(host: &mut Host, ticket: &Ticket, implementer: &Session) -> Session {
     host.agent_tool(
         &implementer.id,

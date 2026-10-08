@@ -846,3 +846,48 @@ fn a_verdict_after_the_cycle_passed_changes_nothing_and_wakes_no_one() {
         "it is stored for the coordinator's next turn"
     );
 }
+
+#[test]
+fn a_verifier_dropped_from_the_settings_stays_quiet_when_it_reports_late() {
+    let mut f = Fixture::ready(vec![verifier(Role::Reviewer, "Old", None)], 2);
+    f.verify().unwrap();
+    let old = f.verifier("Old");
+    take_input(&mut f.host, &old);
+    f.report(&f.implementer.id.clone(), "stuck", "blocked")
+        .unwrap();
+    f.host
+        .set_verification(VerificationSettings {
+            verifiers: vec![verifier(Role::Tester, "New", None)],
+            max_rounds: 2,
+        })
+        .unwrap();
+    f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
+        .unwrap();
+    f.verify().unwrap();
+    let new = f.verifier("New");
+    f.report(&new, "pass", "passed").unwrap();
+    f.coordinator_reads();
+    let passed = f.current().verification;
+    assert_eq!(
+        passed.as_ref().unwrap().outcome,
+        VerificationOutcome::Passed
+    );
+
+    // The dropped reviewer's cycle-1 turn reports at last.
+    f.host
+        .agent_tool(
+            &old,
+            "report",
+            json!({"message_id":"late-fail","kind":"failed","body":"Style problems on the old commit"}),
+        )
+        .unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.verification, passed);
+    assert!(f.waking(&f.coordinator.id).is_empty());
+    assert!(
+        f.quiet_ids(&f.coordinator.id)
+            .contains(&format!("report:{old}:late-fail"))
+    );
+}

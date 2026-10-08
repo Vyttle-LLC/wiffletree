@@ -37,11 +37,14 @@ fn routing(ticket: &Ticket, session: &Session, kind: &str, answered: Option<&str
     let Some(verification) = &ticket.verification else {
         return Routing::Plain;
     };
-    let verifier = verification
-        .rounds
-        .iter()
-        .flat_map(|r| &r.verifiers)
-        .any(|v| v.session_id == session.id);
+    // A session that ever took round input is one of the ticket's verifiers, even after the
+    // settings dropped it and a later cycle's record no longer lists it.
+    let verifier = answered.is_some()
+        || verification
+            .rounds
+            .iter()
+            .flat_map(|r| &r.verifiers)
+            .any(|v| v.session_id == session.id);
     if verifier && matches!(kind, "passed" | "failed" | "blocked") {
         // Sessions are reused across cycles, so a verdict counts only for the input it answers.
         let current = verification.current_round().is_some_and(|round| {
@@ -89,11 +92,12 @@ impl Host {
         if let Some(cycle) = ticket.running_cycle() {
             bail!("Verification cycle {} is already running", cycle.cycle);
         }
-        // A ticket migrated in a finished state has no cycle to accept against yet.
-        let migrated =
+        // A finished ticket that was never verified, for example a migrated one, has no cycle to
+        // accept against yet.
+        let finished_unverified =
             ticket.verification.is_none() && matches!(ticket.state.as_str(), "passed" | "failed");
         ensure!(
-            ticket.state == "ready_for_testing" || migrated,
+            ticket.state == "ready_for_testing" || finished_unverified,
             "Ticket is {}; verify it once its implementer reports ready_for_testing",
             ticket.state
         );
