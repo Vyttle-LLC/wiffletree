@@ -212,8 +212,9 @@ impl Host {
     /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
     /// until it finishes, and an agent that has reported is Done but still in its turn. A finished
     /// run also counts while its process group exists, whatever its outcome: a stopped or crashed
-    /// host does not wait for the process. A normal finish reaps the group; a recycled group id
-    /// only keeps the worktree longer, and runs recorded before groups were kept do not count.
+    /// host does not wait for the process. A normal finish signals the group and reaps its leader,
+    /// so only a descendant that ignored the signal or a recycled group id keeps the worktree
+    /// longer. Runs recorded before groups were kept do not count.
     fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
         let runs = self
             .db
