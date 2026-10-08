@@ -92,13 +92,15 @@ impl Host {
         }
         let result = result.and_then(|()| {
             self.db.execute_batch("SAVEPOINT worktrees")?;
-            let changed = change(self);
-            let _ = self.db.execute_batch(if changed.is_ok() {
-                "RELEASE worktrees"
-            } else {
-                "ROLLBACK TO worktrees; RELEASE worktrees"
+            let changed = change(self).and_then(|value| {
+                // Releasing the outermost savepoint commits, which can still fail.
+                self.db.execute_batch("RELEASE worktrees")?;
+                Ok(value)
             });
-            changed
+            changed.map_err(|error| match self.roll_back_change() {
+                Ok(()) => error,
+                Err(rollback) => error.context(format!("Could not roll back: {rollback:#}")),
+            })
         });
         let Err(error) = result else {
             return result;
@@ -125,6 +127,16 @@ impl Host {
                 unrestored.join("; ")
             )))
         }
+    }
+    /// Undoes the `worktrees` savepoint, or the whole transaction if the savepoint is gone.
+    fn roll_back_change(&self) -> Result<()> {
+        let undone = self
+            .db
+            .execute_batch("ROLLBACK TO worktrees; RELEASE worktrees");
+        if undone.is_err() && !self.db.is_autocommit() {
+            self.db.execute_batch("ROLLBACK")?;
+        }
+        Ok(undone?)
     }
     fn check_removable(&self, tickets: &[Ticket]) -> Result<()> {
         let runtimes = self.runtimes()?;

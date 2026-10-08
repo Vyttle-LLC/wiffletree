@@ -463,3 +463,33 @@ fn a_failed_team_archive_keeps_accepted_tickets_open_to_retry() {
     assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
     assert!(host.session(&coordinator.id).unwrap().archived);
 }
+
+#[test]
+fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Review");
+    let db = rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
+    // Only the commit checks the deferred key, after close_ticket's change succeeded.
+    db.execute_batch(
+        "CREATE TABLE commit_check (ticket TEXT REFERENCES tickets(id) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TRIGGER fail_commit AFTER INSERT ON activity WHEN NEW.kind='ticket_closed'
+         BEGIN INSERT INTO commit_check VALUES ('missing'); END;",
+    )
+    .unwrap();
+
+    let refused = host.close_ticket(&ticket.id).unwrap_err().to_string();
+
+    assert!(refused.contains("FOREIGN KEY"), "{refused}");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "planned");
+    assert!(Path::new(&ticket.worktree).join("style.css").exists());
+    host.send("after", None, &root.id, "Still writable")
+        .unwrap();
+    drop(host);
+    let host = Host::open(directory.path().join("home")).unwrap();
+    assert_eq!(
+        host.messages(&root.id, None, 10).unwrap()[0].body,
+        "Still writable"
+    );
+}

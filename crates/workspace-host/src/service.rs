@@ -492,7 +492,8 @@ impl Actor {
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
             ProviderEvent::Finished { error, usage } => {
                 let mut active = self.active.remove(id).unwrap();
-                // Settle the run first so a later failure cannot leave it open.
+                // Settle the run first so a later failure cannot leave it open. If this update
+                // fails, the run stays open and blocks worktree removal until restart: safe.
                 self.host.db.execute(
                     "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5) WHERE id=?1",
                     params![
