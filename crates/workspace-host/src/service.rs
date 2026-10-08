@@ -134,6 +134,7 @@ impl Service {
                 // A host restart never silently resumes uncertain provider side effects.
                 host.db.execute("UPDATE live_projects SET enabled=0",[])?;
                 host.db.execute("UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail='Host restarted; reconcile before retry' WHERE finished_at IS NULL",[now()])?;
+                host.settle_pending_worktrees()?;
                 let directory=tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
                 let socket=directory.path().join("ipc");
                 let listener=UnixListener::bind(&socket)?;
@@ -580,6 +581,7 @@ impl Actor {
                     "turn_finished",
                     run,
                 )?;
+                self.host.settle_pending_worktrees()?;
             }
         }
         Ok(())
@@ -771,7 +773,7 @@ impl Actor {
             &format!("start-error:{}", message.id),
             &format!("Could not start: {error:#}"),
         )?;
-        Ok(())
+        self.host.settle_pending_worktrees()
     }
     fn start_turn(&mut self, session: Session, message: Message) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
@@ -959,8 +961,8 @@ mod tests {
         (actor, changes, step_changes)
     }
 
-    #[test]
-    fn a_turn_that_failed_to_start_does_not_block_its_ticket_worktree() {
+    /// A closed ticket whose tester is still in its turn, run `run`, so removal is pending.
+    fn ticket_pending_removal() -> (tempfile::TempDir, Actor, Ticket, Session) {
         let home = tempfile::tempdir().unwrap();
         let repository = home.path().join("web");
         fs::create_dir_all(&repository).unwrap();
@@ -1011,26 +1013,64 @@ mod tests {
         let tester = host
             .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
             .unwrap();
-        let assignment = host.messages(&tester.id, None, 10).unwrap().remove(0);
-        // The run start_turn opens before a later step, such as recording turn_scheduled, fails.
         host.db
             .execute(
                 "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
                 [&tester.id],
             )
             .unwrap();
-        let (mut actor, _, _) = idle_actor(host);
+        host.close_ticket(&ticket.id).unwrap();
+        assert!(Path::new(&ticket.worktree).exists());
+        let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, tester)
+    }
+
+    #[test]
+    fn a_turn_that_failed_to_start_performs_its_ticket_pending_removal() {
+        let (_home, mut actor, ticket, tester) = ticket_pending_removal();
+        let assignment = actor.host.messages(&tester.id, None, 10).unwrap().remove(0);
 
         actor
             .start_failed(&tester, &assignment, &anyhow::anyhow!("injected"))
             .unwrap();
 
-        actor.host.close_ticket(&ticket.id).unwrap();
         assert!(!Path::new(&ticket.worktree).exists());
         assert_eq!(
             actor.host.session(&tester.id).unwrap().status,
             Status::Disconnected
         );
+    }
+
+    #[test]
+    fn a_finished_turn_performs_its_ticket_pending_removal() {
+        let (_home, mut actor, ticket, tester) = ticket_pending_removal();
+        actor.active.insert(
+            tester.id.clone(),
+            Active {
+                run: "run".into(),
+                token: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                messages: vec![],
+                output: String::new(),
+                reported: true,
+                steps: vec![],
+                omitted_steps: 0,
+            },
+        );
+
+        actor
+            .provider_event(
+                &tester.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: None,
+                    usage: Value::Null,
+                },
+            )
+            .unwrap();
+
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
     }
 
     fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {

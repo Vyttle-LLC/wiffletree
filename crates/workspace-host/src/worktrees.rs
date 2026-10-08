@@ -1,7 +1,9 @@
 //! Ticket worktrees exist while their ticket is open and its team is active. Archiving a team,
 //! closing or accepting a ticket removes the worktree; its branch and history always stay.
-//! Restoring a team re-creates its open tickets' worktrees from their branches. Closed and
-//! accepted tickets take no further work, so their worktrees are never re-created.
+//! While an agent on the ticket is still in its turn, removal is marked pending and happens when
+//! the turn ends. Restoring a team re-creates its open tickets' worktrees from their branches and
+//! cancels their pending removals. Closed and accepted tickets take no further work, so their
+//! worktrees are never re-created.
 use crate::*;
 
 impl Host {
@@ -67,11 +69,11 @@ impl Host {
         Ok(())
     }
     /// Removes the tickets' worktrees, keeping their branches, then applies `change`. Refuses
-    /// without removing anything while an agent on one of them is working or in its turn, a
-    /// worktree is locked or holds uncommitted or untracked work. Ignored files such as build
-    /// output do not count, and missing worktrees are already done. `change` runs in one
-    /// savepoint; if a removal or `change` fails, its writes roll back and the removed worktrees,
-    /// proven clean, are re-created from their branches.
+    /// without removing anything while a worktree is locked or holds uncommitted or untracked
+    /// work. Ignored files such as build output do not count, and missing worktrees are already
+    /// done. A worktree whose agent is still in its turn is marked for removal when the turn
+    /// ends instead. `change` and the marks run in one savepoint; if a removal or `change` fails,
+    /// its writes roll back and the removed worktrees, proven clean, are re-created.
     pub(crate) fn with_worktrees_removed<T>(
         &mut self,
         tickets: &[Ticket],
@@ -79,8 +81,20 @@ impl Host {
     ) -> Result<T> {
         self.check_removable(tickets)?;
         let mut removed = vec![];
+        let mut deferred = vec![];
         let mut result = Ok(());
         for ticket in tickets {
+            match self.agent_in_turn(ticket) {
+                Ok(true) => {
+                    deferred.push(ticket);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            }
             match self.remove_worktree(ticket) {
                 Ok(true) => removed.push(ticket),
                 Ok(false) => {}
@@ -92,11 +106,21 @@ impl Host {
         }
         let result = result.and_then(|()| {
             self.db.execute_batch("SAVEPOINT worktrees")?;
-            let changed = change(self).and_then(|value| {
-                // Releasing the outermost savepoint commits, which can still fail.
-                self.db.execute_batch("RELEASE worktrees")?;
-                Ok(value)
-            });
+            let changed = deferred
+                .iter()
+                .try_for_each(|ticket| {
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO pending_worktree_removals VALUES (?1,?2)",
+                        params![ticket.id, now()],
+                    )?;
+                    Ok(())
+                })
+                .and_then(|()| change(self))
+                .and_then(|value| {
+                    // Releasing the outermost savepoint commits, which can still fail.
+                    self.db.execute_batch("RELEASE worktrees")?;
+                    Ok(value)
+                });
             changed.map_err(|error| match self.roll_back_change() {
                 Ok(()) => error,
                 Err(rollback) => error.context(format!("Could not roll back: {rollback:#}")),
@@ -139,21 +163,8 @@ impl Host {
         Ok(undone?)
     }
     fn check_removable(&self, tickets: &[Ticket]) -> Result<()> {
-        let runtimes = self.runtimes()?;
         let mut blockers = vec![];
         for ticket in tickets {
-            for runtime in runtimes
-                .iter()
-                .filter(|r| r.ticket_id.as_deref() == Some(&ticket.id))
-            {
-                let agent = self.session(&runtime.session_id)?;
-                if agent.status == Status::Working || self.in_turn(&agent.id)? {
-                    blockers.push(format!(
-                        "{} is still working on \"{}\" ({})",
-                        agent.name, ticket.title, ticket.id
-                    ));
-                }
-            }
             let path = Path::new(&ticket.worktree);
             if !path.exists() {
                 continue;
@@ -198,14 +209,106 @@ impl Host {
             .with_context(|| format!("Remove \"{}\" ({})", ticket.title, ticket.id))?;
         Ok(true)
     }
-    /// A provider run is open from turn start until it finishes; service startup settles runs a
-    /// stopped host left open.
-    fn in_turn(&self, session_id: &str) -> Result<bool> {
+    /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
+    /// until it finishes, and service startup settles runs a stopped host left open. An agent
+    /// that has reported is Done but still in its turn.
+    fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
         Ok(self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM provider_runs WHERE session_id=?1 AND finished_at IS NULL)",
-            [session_id],
+            "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
+             WHERE r.finished_at IS NULL AND json_extract(t.data,'$.ticket_id')=?1)",
+            [&ticket.id],
             |r| r.get(0),
         )?)
+    }
+    pub(crate) fn cancel_pending_removals(&self, tickets: &[Ticket]) -> Result<()> {
+        for ticket in tickets {
+            self.db.execute(
+                "DELETE FROM pending_worktree_removals WHERE ticket_id=?1",
+                [&ticket.id],
+            )?;
+        }
+        Ok(())
+    }
+    /// Tickets whose worktree removal waits for an agent's turn to end.
+    pub fn pending_worktree_removals(&self) -> Result<Vec<String>> {
+        Ok(self
+            .db
+            .prepare("SELECT ticket_id FROM pending_worktree_removals ORDER BY rowid")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    /// Performs pending removals whose tickets no longer have an agent in its turn. The service
+    /// calls this when a turn ends and at startup. A worktree that gained unsaved work, or that
+    /// Git cannot remove, is kept and its coordinator told; the mark is cleared either way.
+    pub fn settle_pending_worktrees(&mut self) -> Result<()> {
+        let pending: Vec<(String, i64)> = self
+            .db
+            .prepare("SELECT ticket_id,marked_at FROM pending_worktree_removals ORDER BY rowid")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, marked_at) in pending {
+            let ticket = self.ticket(&id)?;
+            if self.agent_in_turn(&ticket)? {
+                continue;
+            }
+            let removed = self
+                .check_removable(std::slice::from_ref(&ticket))
+                .and_then(|()| self.remove_worktree(&ticket));
+            let coordinator = self.session(&ticket.coordinator_id)?;
+            match removed {
+                Ok(_) => Self::event(
+                    &self.db,
+                    &coordinator.project_id,
+                    Some(&coordinator.id),
+                    "worktree_removed",
+                    &ticket.id,
+                )?,
+                Err(reason) => self.report_kept_worktree(&ticket, marked_at, &reason)?,
+            }
+            self.cancel_pending_removals(&[ticket])?;
+        }
+        Ok(())
+    }
+    /// Tells the nearest unarchived owner of the ticket, from its coordinator up, once per mark.
+    /// When the whole tree is archived, the notice waits in the human's attention inbox instead.
+    fn report_kept_worktree(
+        &mut self,
+        ticket: &Ticket,
+        marked_at: i64,
+        reason: &anyhow::Error,
+    ) -> Result<()> {
+        let notice = format!(
+            "Wiffletree kept the worktree of ticket \"{}\" ({}) at {} instead of removing it: {reason:#}. Its branch {} is kept. Commit or discard that work, then remove the worktree yourself.",
+            ticket.title, ticket.id, ticket.worktree, ticket.branch
+        );
+        let notice: String = notice.chars().take(4000).collect();
+        let id = format!("worktree-kept:{}:{marked_at}", ticket.id);
+        let mut owner = Some(self.session(&ticket.coordinator_id)?);
+        while let Some(session) = owner.take_if(|s| s.archived) {
+            owner = session
+                .parent_id
+                .as_deref()
+                .map(|parent| self.session(parent))
+                .transpose()?;
+        }
+        match owner {
+            Some(owner) => {
+                if self.message(&id).is_err() {
+                    self.send(&id, None, &owner.id, &notice)?;
+                }
+            }
+            None => {
+                self.request_attention(&ticket.coordinator_id, "local", &id, &notice, &[])?;
+            }
+        }
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        Self::event(
+            &self.db,
+            &coordinator.project_id,
+            Some(&coordinator.id),
+            "worktree_kept",
+            &ticket.id,
+        )
     }
 }
 

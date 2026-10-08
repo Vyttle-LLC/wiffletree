@@ -220,6 +220,20 @@ impl Host {
         if ticket.state == "closed" {
             return Ok(ticket);
         }
+        if let Some(busy) = self
+            .runtimes()?
+            .into_iter()
+            .filter(|r| r.ticket_id.as_deref() == Some(ticket_id))
+            .map(|r| self.session(&r.session_id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|s| s.status == Status::Working)
+        {
+            bail!(
+                "{} is still working; close the ticket after it reports",
+                busy.name
+            );
+        }
         self.with_worktrees_removed(&[ticket.clone()], |host| {
             let agents: Vec<Session> = host
                 .runtimes()?

@@ -450,6 +450,7 @@ impl Host {
             self.with_worktrees_removed(&tickets, save)
         } else {
             self.restore_worktrees(&tickets)?;
+            self.cancel_pending_removals(&tickets)?;
             save(self)
         }
     }

@@ -56,13 +56,13 @@ pub fn tools() -> Value {
         ),
         tool(
             "accept_ticket",
-            "Repository coordinator: accept a ticket only after independent verification passed. Does not merge or publish. Removes the ticket's worktree and keeps its branch; refuses while the worktree has uncommitted or untracked files or an agent on it is working.",
+            "Repository coordinator: accept a ticket only after independent verification passed. Does not merge or publish. Removes the ticket's worktree and keeps its branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
             json!({"ticket_id":string}),
             vec!["ticket_id"]
         ),
         tool(
             "close_ticket",
-            "Repository coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent on it is working.",
+            "Repository coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent has not reported; an agent that reported and is still finishing its turn delays only the removal.",
             json!({"ticket_id":string}),
             vec!["ticket_id"]
         ),
