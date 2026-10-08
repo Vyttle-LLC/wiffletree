@@ -834,6 +834,7 @@ impl Workspace {
         let sending = self.sending.contains(&session.id);
         let attached = self.attached.get(&session.id).cloned().unwrap_or_default();
         let empty = self.input.read(cx).value().trim().is_empty() && attached.is_empty();
+        let unsendable = empty || sending || session.archived;
         div()
             .key_context("ChatComposer")
             .on_action(cx.listener(|v, _: &SendMessage, w, c| {
@@ -906,7 +907,9 @@ impl Workspace {
                                             .primary()
                                             .icon(icon("arrow-up"))
                                             .loading(sending)
-                                            .disabled(empty || sending || session.archived)
+                                            .disabled(unsendable)
+                                            // The stock disabled arrow is too faint on its tint.
+                                            .when(unsendable, |b| b.text_color(p.subtle))
                                             .tooltip("Send")
                                             .on_click(cx.listener(|v, _, w, c| v.send(w, c))),
                                     ),

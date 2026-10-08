@@ -1492,6 +1492,16 @@ fn main() -> anyhow::Result<()> {
             gpui_component::init(cx);
             cx.set_global(preferences);
             apply_theme(cx);
+            // Under the System appearance, macOS can switch modes while the app runs. The component
+            // theme only changes when told, so every window re-applies it or keeps stale colours.
+            cx.observe_new(|_: &mut Root, window, _| {
+                if let Some(window) = window {
+                    window
+                        .observe_window_appearance(|_, cx| apply_theme(cx))
+                        .detach();
+                }
+            })
+            .detach();
             cx.bind_keys([
                 KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
                 KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
