@@ -397,3 +397,69 @@ fn an_empty_folder_left_on_a_stale_worktree_is_replaced_and_any_other_folder_ref
     assert!(refused.contains(&ticket.id), "{refused}");
     assert!(worktree.join("stray.txt").exists());
 }
+
+/// Makes recording the activity `kind` fail until the returned connection drops the trigger.
+fn fail_activity(directory: &Path, kind: &str) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(directory.join("home/workspace.sqlite3")).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TRIGGER fail_activity BEFORE INSERT ON activity WHEN NEW.kind='{kind}'
+         BEGIN SELECT RAISE(ABORT,'injected'); END;"
+    ))
+    .unwrap();
+    db
+}
+
+#[test]
+fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Review");
+    let reviewer = host
+        .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Review", None)
+        .unwrap();
+    let db = fail_activity(directory.path(), "ticket_closed");
+
+    assert!(host.close_ticket(&ticket.id).is_err());
+
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "assigned");
+    assert!(!host.session(&reviewer.id).unwrap().archived);
+    assert!(Path::new(&ticket.worktree).join("style.css").exists());
+
+    db.execute_batch("DROP TRIGGER fail_activity").unwrap();
+    host.close_ticket(&ticket.id).unwrap();
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert!(host.session(&reviewer.id).unwrap().archived);
+    assert!(!Path::new(&ticket.worktree).exists());
+}
+
+#[test]
+fn a_failed_team_archive_keeps_accepted_tickets_open_to_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    passed(&mut host, &ticket);
+    host.agent_tool(
+        &coordinator.id,
+        "accept_ticket",
+        json!({"ticket_id":ticket.id}),
+    )
+    .unwrap();
+    let archive = json!({"session_id":coordinator.id});
+    let db = fail_activity(directory.path(), "team_archived");
+
+    assert!(
+        host.agent_tool(&root.id, "archive_team", archive.clone())
+            .is_err()
+    );
+
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "accepted");
+    assert!(!host.session(&coordinator.id).unwrap().archived);
+    assert!(!Path::new(&ticket.worktree).exists());
+
+    db.execute_batch("DROP TRIGGER fail_activity").unwrap();
+    host.agent_tool(&root.id, "archive_team", archive).unwrap();
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert!(host.session(&coordinator.id).unwrap().archived);
+}

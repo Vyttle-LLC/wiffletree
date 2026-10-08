@@ -69,8 +69,9 @@ impl Host {
     /// Removes the tickets' worktrees, keeping their branches, then applies `change`. Refuses
     /// without removing anything while an agent on one of them is working or in its turn, a
     /// worktree is locked or holds uncommitted or untracked work. Ignored files such as build
-    /// output do not count, and missing worktrees are already done. If a removal or `change`
-    /// fails, the removed worktrees, proven clean, are re-created from their branches.
+    /// output do not count, and missing worktrees are already done. `change` runs in one
+    /// savepoint; if a removal or `change` fails, its writes roll back and the removed worktrees,
+    /// proven clean, are re-created from their branches.
     pub(crate) fn with_worktrees_removed<T>(
         &mut self,
         tickets: &[Ticket],
@@ -89,7 +90,16 @@ impl Host {
                 }
             }
         }
-        let result = result.and_then(|()| change(self));
+        let result = result.and_then(|()| {
+            self.db.execute_batch("SAVEPOINT worktrees")?;
+            let changed = change(self);
+            let _ = self.db.execute_batch(if changed.is_ok() {
+                "RELEASE worktrees"
+            } else {
+                "ROLLBACK TO worktrees; RELEASE worktrees"
+            });
+            changed
+        });
         let Err(error) = result else {
             return result;
         };

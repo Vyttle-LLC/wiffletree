@@ -231,16 +231,16 @@ impl Host {
                 host.set_archived(&agent.id, true)?;
             }
             ticket.state = "closed".into();
-            host.save_ticket(&ticket)
+            host.save_ticket(&ticket)?;
+            let coordinator = host.session(&ticket.coordinator_id)?;
+            Self::event(
+                &host.db,
+                &coordinator.project_id,
+                Some(&coordinator.id),
+                "ticket_closed",
+                &ticket.id,
+            )
         })?;
-        let coordinator = self.session(&ticket.coordinator_id)?;
-        Self::event(
-            &self.db,
-            &coordinator.project_id,
-            Some(&coordinator.id),
-            "ticket_closed",
-            &ticket.id,
-        )?;
         Ok(ticket)
     }
     /// Archives a main coordinator's finished repository team: its ticket worktrees are removed,

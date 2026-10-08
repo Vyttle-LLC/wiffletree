@@ -492,13 +492,7 @@ impl Actor {
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
             ProviderEvent::Finished { error, usage } => {
                 let mut active = self.active.remove(id).unwrap();
-                self.settle_steps(id, &mut active, error.is_some())?;
-                if error.is_none() {
-                    self.host.append_output(&session, run, &active.output)?;
-                }
-                runtime.last_finished_at = Some(now());
-                runtime.last_error = error.clone();
-                self.host.save_runtime(&runtime)?;
+                // Settle the run first so a later failure cannot leave it open.
                 self.host.db.execute(
                     "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5) WHERE id=?1",
                     params![
@@ -513,6 +507,13 @@ impl Actor {
                         active.omitted_steps as i64
                     ],
                 )?;
+                self.settle_steps(id, &mut active, error.is_some())?;
+                if error.is_none() {
+                    self.host.append_output(&session, run, &active.output)?;
+                }
+                runtime.last_finished_at = Some(now());
+                runtime.last_error = error.clone();
+                self.host.save_runtime(&runtime)?;
                 for message in &active.messages {
                     self.host.db.execute(
                         "UPDATE messages SET receipt=?2 WHERE id=?1",
@@ -743,17 +744,32 @@ impl Actor {
                 continue;
             }
             if let Err(error) = self.start_turn(session.clone(), message.clone()) {
-                let mut runtime = self.host.session_runtime(&session.id)?;
-                runtime.last_error = Some(format!("{error:#}"));
-                self.host.save_runtime(&runtime)?;
-                self.host.set_status(&session.id, Status::Disconnected)?;
-                self.host.append_output(
-                    &session,
-                    &format!("start-error:{}", message.id),
-                    &format!("Could not start: {error:#}"),
-                )?;
+                self.start_failed(&session, &message, &error)?;
             }
         }
+        Ok(())
+    }
+    /// Records why a turn could not start and settles any run it opened.
+    fn start_failed(
+        &mut self,
+        session: &Session,
+        message: &Message,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        // A turn that never launched must not look active to the worktree guard.
+        self.host.db.execute(
+            "UPDATE provider_runs SET finished_at=?2,outcome='failed',detail=json_set(detail,'$.result',json(?3)) WHERE session_id=?1 AND finished_at IS NULL",
+            params![session.id, now(), json!({"error":format!("{error:#}")}).to_string()],
+        )?;
+        let mut runtime = self.host.session_runtime(&session.id)?;
+        runtime.last_error = Some(format!("{error:#}"));
+        self.host.save_runtime(&runtime)?;
+        self.host.set_status(&session.id, Status::Disconnected)?;
+        self.host.append_output(
+            session,
+            &format!("start-error:{}", message.id),
+            &format!("Could not start: {error:#}"),
+        )?;
         Ok(())
     }
     fn start_turn(&mut self, session: Session, message: Message) -> Result<()> {
@@ -904,22 +920,7 @@ mod tests {
                 params![run, session, now()],
             )
             .unwrap();
-        let (sender, _) = async_channel::bounded(1);
-        let (changed, changes) = async_channel::bounded(1);
-        let (steps_changed, step_changes) = async_channel::bounded(1);
-        let mut actor = Actor {
-            host,
-            sender,
-            changed,
-            steps_changed,
-            steps_dirty: false,
-            revisions: HashMap::new(),
-            active: HashMap::new(),
-            permissions: HashMap::new(),
-            socket: PathBuf::new(),
-            helper: PathBuf::new(),
-            turns: HashMap::new(),
-        };
+        let (mut actor, changes, step_changes) = idle_actor(host);
         actor.active.insert(
             session.clone(),
             Active {
@@ -934,6 +935,101 @@ mod tests {
             },
         );
         (home, actor, session, run, changes, step_changes)
+    }
+
+    /// An actor with no turns, its change and step-change receivers.
+    fn idle_actor(host: Host) -> (Actor, Receiver<()>, Receiver<()>) {
+        let (sender, _) = async_channel::bounded(1);
+        let (changed, changes) = async_channel::bounded(1);
+        let (steps_changed, step_changes) = async_channel::bounded(1);
+        let actor = Actor {
+            host,
+            sender,
+            changed,
+            steps_changed,
+            steps_dirty: false,
+            revisions: HashMap::new(),
+            active: HashMap::new(),
+            permissions: HashMap::new(),
+            socket: PathBuf::new(),
+            helper: PathBuf::new(),
+            turns: HashMap::new(),
+        };
+        (actor, changes, step_changes)
+    }
+
+    #[test]
+    fn a_turn_that_failed_to_start_does_not_block_its_ticket_worktree() {
+        let home = tempfile::tempdir().unwrap();
+        let repository = home.path().join("web");
+        fs::create_dir_all(&repository).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=F",
+                "-c",
+                "user.email=f@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "F",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(&repository)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let mut host = Host::open(home.path().join("home")).unwrap();
+        host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
+            .unwrap();
+        let project = host.create_project("Start").unwrap();
+        let root = host.sessions().unwrap().remove(0);
+        let attached = host
+            .attach_repository(&project.id, repository.to_str().unwrap(), "HEAD")
+            .unwrap();
+        let coordinator = host
+            .create_session(
+                &project.id,
+                &root.id,
+                Some(&attached.id),
+                "Web",
+                Role::TaskOrchestrator,
+                Provider::Codex,
+            )
+            .unwrap();
+        let ticket = host
+            .create_ticket(&coordinator.id, "Toolbar", "Do")
+            .unwrap();
+        let tester = host
+            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+            .unwrap();
+        let assignment = host.messages(&tester.id, None, 10).unwrap().remove(0);
+        // The run start_turn opens before a later step, such as recording turn_scheduled, fails.
+        host.db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
+                [&tester.id],
+            )
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+
+        actor
+            .start_failed(&tester, &assignment, &anyhow::anyhow!("injected"))
+            .unwrap();
+
+        actor.host.close_ticket(&ticket.id).unwrap();
+        assert!(!Path::new(&ticket.worktree).exists());
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Disconnected
+        );
     }
 
     fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {

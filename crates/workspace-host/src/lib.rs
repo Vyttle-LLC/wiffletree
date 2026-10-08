@@ -412,7 +412,8 @@ impl Host {
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
-            let tx = host.db.transaction()?;
+            // A savepoint, so a ticket close or team archive can include this in its own change.
+            let tx = host.db.savepoint()?;
             for session in &mut affected {
                 if session.archived == archived {
                     continue;
