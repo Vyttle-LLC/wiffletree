@@ -25,6 +25,7 @@
 - [x] 4.3 In `service.rs::schedule`, treat a running cycle's testers and reviewers as readers, admit a round all-or-none, and hold new worker turns host-wide while a round waits so it cannot be starved; verify with the fake provider that three verifiers' `provider_runs` satisfy `MAX(started_at) < MIN(finished_at)`
 - [x] 4.4 Route reports during a cycle: bypass the per-report `ticket.state = kind` update so state changes only at round start (`verifying`) and round end, read-only check on verdicts, batch them to the coordinator, end the round, send one failure message to the implementer, re-run only failed verifiers on the implementer's next clean `ready_for_testing`, block at the cap with one waking message, end the cycle as `blocked` with an immediate wake on any other non-progress implementer report, and record a verdict that arrives after its cycle ended without changing the ticket's state; verify every scenario in `specs/ticket-verification`, including that `accept_ticket` refuses after one of three verifiers passed
 - [x] 4.5 Add an end-to-end SH-1171-sized test (one repository, one ticket, three verifiers, one failure fixed in round 2) asserting: no `task_orchestrator` session, every implementer or verifier input sent by the project coordinator, overlapping round-1 intervals, and exactly one worktree registered for the ticket
+- [x] 4.6 Reconcile with parent check-ins and `stop_turn`: ticket agents check in with and are stopped by the project coordinator, a check-in during a running cycle is quiet and changes neither the ticket nor the cycle, and the migration cancels unread check-ins to a retired coordinator without re-sending them; verify with host and migration tests
 
 ## 5. Role contracts
 
@@ -51,4 +52,4 @@ These edits ship in the same phase and pull request as the role removal (groups 
 - [x] 8.2 Change `AGENTS.md` "Keep project → task orchestrator → agents semantics" to "Keep project → ticket → agents semantics", keeping the rest of the line
 - [x] 8.3 Update `docs/PRD.md` (principles, hierarchy table and example tree, interface, reviewers paragraph, agent communication, usage scopes and delivery stages), `README.md`, `design/README.md` and `docs/DEVELOPMENT.md`, leaving the historical mockups untouched
 - [x] 8.4 Reword the "Enforced hierarchy" requirement in `native-workspace-foundation` to tickets before that change is archived
-- [x] 8.5 Run `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` and `scripts/test_communications.py`
+- [x] 8.5 Run the CI checks: `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace` and `scripts/test_communications.py`

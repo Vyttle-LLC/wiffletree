@@ -118,6 +118,10 @@ fn retire(db: &Connection, sessions: &[Session], retired: &Session) -> Result<()
     let mut resent = vec![];
     let mut listed = vec![];
     for message in &inbound {
+        // A check-in describes a turn the host stop ended; there is nothing left to stop.
+        if message.id.starts_with(CHECK_IN) {
+            continue;
+        }
         let from_child = children
             .iter()
             .any(|c| message.sender.as_ref() == Some(&c.id));

@@ -165,6 +165,15 @@ fn fixture() -> Fixture {
     );
     message(
         &db,
+        &format!("check-in:{}-run:30", implementer.id),
+        project_id,
+        &implementer.id,
+        team,
+        "[check-in] Implementer has been in one turn for 30 minutes",
+        "queued",
+    );
+    message(
+        &db,
         "agent:brief-2",
         project_id,
         &main.id,
@@ -324,6 +333,10 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
     assert_eq!(resent.sender.as_ref(), Some(&f.implementer.id));
     assert_eq!(resent.receipt, Receipt::Queued);
     assert!(resent.body.contains(&report_id) && resent.body.contains("Committed"));
+    // A check-in about a turn the host stop ended is cancelled, not re-sent.
+    let check_in = format!("check-in:{}-run:30", f.implementer.id);
+    assert_eq!(host.message(&check_in).unwrap().receipt, Receipt::Cancelled);
+    assert!(host.message(&format!("migrated:{check_in}")).is_err());
     let copies: i64 = raw(&f.home)
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE body LIKE '%Also add logging%' AND id<>'agent:brief-2' AND recipient<>?1",

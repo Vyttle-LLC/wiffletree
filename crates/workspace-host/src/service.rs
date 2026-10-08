@@ -1119,9 +1119,13 @@ impl Actor {
         let run = active.run.clone();
         let minutes = (now - active.started_at) / 60_000;
         let ticket = match self.host.session_runtime(id)?.ticket_id {
-            Some(ticket) => format!(" on ticket \"{}\"", self.host.ticket(&ticket)?.title),
-            None => String::new(),
+            Some(ticket) => Some(self.host.ticket(&ticket)?),
+            None => None,
         };
+        // A running verification cycle wakes the coordinator only with its outcome, so a
+        // check-in from one of its agents rides along with the coordinator's next turn instead.
+        let quiet = ticket.as_ref().is_some_and(|t| t.running_cycle().is_some());
+        let ticket = ticket.map_or_else(String::new, |t| format!(" on ticket \"{}\"", t.title));
         let latest = active.steps.last().map_or_else(
             || "no steps yet".to_owned(),
             |step| {
@@ -1142,14 +1146,16 @@ impl Actor {
                 if self.host.session(parent)?.archived {
                     return Ok(());
                 }
-                self.host.send(
-                    &format!("{CHECK_IN}{run}:{minutes}"),
-                    Some(id),
-                    parent,
-                    &format!(
-                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_turn with session_id {id} and a reason."
-                    ),
-                )?;
+                let id_of_check_in = format!("{CHECK_IN}{run}:{minutes}");
+                let body = format!(
+                    "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_turn with session_id {id} and a reason."
+                );
+                if quiet {
+                    self.host
+                        .send_quietly(&id_of_check_in, Some(id), parent, &body)?;
+                } else {
+                    self.host.send(&id_of_check_in, Some(id), parent, &body)?;
+                }
             }
             None => {
                 self.settle_check_ins(&session)?;
@@ -1748,7 +1754,7 @@ mod tests {
         let second = actor.host.session(&verifiers[1]).unwrap();
         actor
             .active
-            .insert(verifiers[0].clone(), active_turn("first", vec![], None));
+            .insert(verifiers[0].clone(), active_turn("first", vec![]));
         assert!(!actor.worktree_busy(&ticket.id, &second).unwrap());
 
         let implementer = actor
@@ -1760,7 +1766,7 @@ mod tests {
             .unwrap();
         actor
             .active
-            .insert(implementer.id.clone(), active_turn("write", vec![], None));
+            .insert(implementer.id.clone(), active_turn("write", vec![]));
         assert!(actor.worktree_busy(&ticket.id, &second).unwrap());
         actor.active.remove(&implementer.id);
 
@@ -1794,7 +1800,7 @@ mod tests {
             .unwrap();
         actor
             .active
-            .insert(busy.id.clone(), active_turn("busy", vec![], None));
+            .insert(busy.id.clone(), active_turn("busy", vec![]));
 
         let (members, waiting) = actor.admit_rounds().unwrap();
 
@@ -1820,7 +1826,7 @@ mod tests {
             .collect();
         assert_eq!(elsewhere.len(), 4);
         for id in elsewhere {
-            actor.active.insert(id, active_turn("busy", vec![], None));
+            actor.active.insert(id, active_turn("busy", vec![]));
         }
 
         let (_, waiting) = actor.admit_rounds().unwrap();
@@ -2342,6 +2348,45 @@ mod tests {
     }
 
     #[test]
+    fn a_check_in_during_a_verification_round_is_quiet_and_leaves_the_cycle_alone() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(1);
+        let started = now();
+        actor.active.insert(
+            verifiers[0].clone(),
+            Active::new(
+                "verifying".into(),
+                String::new(),
+                Arc::new(AtomicBool::new(false)),
+                vec![],
+                started,
+            ),
+        );
+        let waking = |actor: &Actor| -> i64 {
+            actor
+                .host
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0",
+                    [&ticket.coordinator_id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = waking(&actor);
+
+        actor.check_in_long_turns(started + CHECK_IN_MS);
+
+        let coordinator = actor.host.session(&ticket.coordinator_id).unwrap();
+        let check_in = check_ins(&actor, &coordinator);
+        assert_eq!(check_in.len(), 1, "the project coordinator receives it");
+        assert_eq!(check_in[0].sender.as_deref(), Some(verifiers[0].as_str()));
+        assert_eq!(waking(&actor), before, "it starts no coordinator turn");
+        let after = actor.host.ticket(&ticket.id).unwrap();
+        assert_eq!(after.state, ticket.state);
+        assert_eq!(after.verification, ticket.verification);
+    }
+
+    #[test]
     fn a_long_turn_without_a_parent_asks_the_human_once_at_a_time() {
         let (_home, mut actor, session, _) = actor_with_turn();
         let root = actor.host.session(&session).unwrap();
@@ -2488,9 +2533,11 @@ mod tests {
                 Provider::Codex,
             )
             .unwrap();
-        let grandparent = coordinator.parent_id.clone().unwrap();
+        // A ticket agent's parent is the project coordinator itself.
+        assert_eq!(coordinator.role, Role::ProjectOrchestrator);
+        assert_eq!(tester.parent_id.as_deref(), Some(coordinator.id.as_str()));
         let args = json!({"session_id":tester.id,"reason":"Wrong approach"});
-        for caller in [grandparent.as_str(), &sibling.id, &tester.id] {
+        for caller in [&sibling.id, &tester.id] {
             let error = actor.stop_turn(caller, &args).unwrap_err().to_string();
             assert_eq!(
                 error,
