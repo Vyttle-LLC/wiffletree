@@ -4,7 +4,7 @@ use crate::stream::StepUpdate;
 use crate::*;
 use async_channel::{Receiver, Sender};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufReader, Write},
     os::unix::{fs::PermissionsExt, net::UnixListener},
     sync::{
@@ -16,6 +16,57 @@ use std::{
 type Reply = Sender<std::result::Result<Value, String>>;
 /// Operation prefix for the notice raised when a project pauses at its turn budget.
 const TURN_BUDGET: &str = "turn-budget";
+/// How long an idle parent waits after a child's first progress report, so a burst of
+/// them arrives in one turn.
+const PROGRESS_BATCH_MS: i64 = 20_000;
+/// Bounds one turn's prompt; any further queued messages go to the next turn.
+const MAX_TURN_MESSAGES: usize = 20;
+
+/// Longest a wake-up sleeps before the actor looks again; macOS suspends sleeping threads
+/// while the Mac sleeps, so a long sleep could miss a timer by hours.
+const MAX_WAKE_SLEEP_MS: i64 = 60_000;
+/// SQL condition for turn input, on columns of the messages `table` alias. A session's other
+/// messages to itself are its own output; timer fires are the exception.
+fn is_turn_input(table: &str) -> String {
+    let t = table;
+    format!("({t}.sender IS NULL OR {t}.sender<>{t}.recipient OR substr({t}.id,1,6)='timer:')")
+}
+
+/// SQL condition for a message that is a child's progress report: live.rs "report" writes
+/// the id `report:{sender}:…`, so a human message cannot pass for one.
+const IS_PROGRESS_REPORT: &str = "sender IS NOT NULL AND substr(id,1,length(sender)+8)='report:'||sender||':' AND substr(body,1,11)='[progress] '";
+/// `input` pairs each message with a status line rendered under its id, such as a timer
+/// fire's lateness; most messages have none.
+fn turn_prompt(
+    session: &Session,
+    preamble: &str,
+    input: &[(&Message, Option<String>)],
+    reminder: &str,
+) -> String {
+    let messages = input
+        .iter()
+        .map(|(m, status)| {
+            let status = status.as_ref().map_or(String::new(), |s| format!("\n{s}"));
+            format!(
+                "Sender: {}\nMessage ID: {}{status}\n\n{}{}",
+                if m.id.starts_with(schedules::FIRE_PREFIX) {
+                    "your timer"
+                } else {
+                    m.sender.as_deref().unwrap_or("human")
+                },
+                m.id,
+                m.body,
+                provider::attachment_list(&m.attachments)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    format!(
+        "Managed session {} ({}){preamble}\n{messages}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The main coordinator responds to the human directly. Never wait or poll for a reply.{reminder}",
+        session.name,
+        session.role.label(),
+    )
+}
 
 /// Lists the coordinator's unsettled inbox questions so each turn can close the ones it resolved.
 fn open_questions_reminder(questions: &[Attention]) -> String {
@@ -29,6 +80,125 @@ fn open_questions_reminder(questions: &[Attention]) -> String {
         .join("\n");
     format!(
         "\n\nYour open inbox questions (request_id: question):\n{list}\nIf this message or the current state already settles one, call close_question for it before ending your turn."
+    )
+}
+/// A clean exit stops turns this way; only an unexpected stop leaves runs unfinished for the next start.
+const QUIT_DURING_TURN: &str =
+    "Wiffletree quit during a turn (app quit or restart to update); inspect work before retrying";
+const STOPPED_UNEXPECTEDLY: &str =
+    "Host stopped unexpectedly during a turn; inspect the worktree before retrying held input";
+/// Marks turns the last host left unfinished as interrupted. Projects keep their live state, so
+/// queued work and timer fires run on their own after a restart; only the interrupted sessions
+/// wait, Disconnected with their input held, until the human retries or skips it.
+fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
+    let interrupted = host
+        .db
+        .prepare("SELECT session_id FROM provider_runs WHERE finished_at IS NULL")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in interrupted {
+        let mut runtime = host.session_runtime(&id)?;
+        runtime.last_error = Some(STOPPED_UNEXPECTEDLY.into());
+        host.save_runtime(&runtime)?;
+        host.set_status(&id, Status::Disconnected)?;
+    }
+    // A restart never silently repeats a turn that may have had side effects: those
+    // sessions stay held for reconciliation, while the rest of a live project carries on.
+    host.db.execute(
+        "UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?2)) WHERE finished_at IS NULL",
+        params![now(), STOPPED_UNEXPECTEDLY],
+    )?;
+    Ok(())
+}
+/// Names the turn that took this message and stopped before finishing, so a retry can find its partial work.
+fn interrupted_turn_note(host: &Host, message_id: &str) -> Result<String> {
+    let run = host
+        .db
+        .query_row(
+            "SELECT id,started_at FROM provider_runs WHERE outcome IN ('failed','interrupted') AND EXISTS (SELECT 1 FROM json_each(messages) WHERE value=?1) ORDER BY started_at DESC LIMIT 1",
+            [message_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    Ok(run.map_or_else(String::new, |(id, started_at)| {
+        let started = schedules::rfc3339(started_at);
+        format!(
+            "\nRetry of interrupted turn {id} (started {started}). Check the worktree for its partial work before repeating it."
+        )
+    }))
+}
+/// What a session's first turn after a host start needs to pick up again: the turn the stop
+/// cut off, its timers and the fires it missed. Empty when there is nothing to say.
+fn resume_note(
+    host: &Host,
+    session: &str,
+    started_at: i64,
+    delivered_at: i64,
+    notes: &[String],
+) -> Result<String> {
+    let mut lines = Vec::new();
+    let interrupted = host.db.query_row(
+        "SELECT id,started_at FROM provider_runs WHERE session_id=?1 AND started_at<?2 AND (outcome='interrupted' OR json_extract(detail,'$.result.error') IN (?3,?4)) AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1 AND started_at<?2)",
+        params![session, started_at, QUIT_DURING_TURN, STOPPED_UNEXPECTEDLY],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+    ).optional()?;
+    if let Some((run, started)) = interrupted
+        && !notes.iter().any(|note| note.contains(&run))
+    {
+        lines.push(format!(
+            "- Interrupted turn {run} (started {}); check for its partial work.",
+            schedules::rfc3339(started)
+        ));
+    }
+    for timer in host.active_schedules(Some(session))? {
+        lines.push(format!(
+            "- Timer {} \"{}\", {}, next fire {}.",
+            timer.id,
+            timer.label,
+            schedules::cadence(&timer),
+            timer
+                .next_fire_at
+                .map(schedules::rfc3339)
+                .unwrap_or_default()
+        ));
+    }
+    for (timer, label, due, missed) in host.late_fires(session, started_at, delivered_at)? {
+        let more = if missed > 0 {
+            format!(" and {missed} later slot(s)")
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "- Missed: timer {timer} \"{label}\" due {}{more}; it fires once, marked late.",
+            schedules::rfc3339(due)
+        ));
+    }
+    Ok(if lines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThe workspace host restarted since your last turn.\n{}",
+            lines.join("\n")
+        )
+    })
+}
+/// Tells a session that its last turn ran out of time, so it checks what that turn finished.
+fn over_budget_note(host: &Host, session: &str) -> Result<String> {
+    let run = host.db.query_row(
+        "SELECT id,started_at,json_extract(detail,'$.turn_budget_minutes') FROM provider_runs WHERE session_id=?1 AND outcome='over_budget' AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1)",
+        [session],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, u32>(2)?)),
+    ).optional()?;
+    Ok(run.map_or_else(String::new, |(id, started_at, minutes)| {
+        format!(
+            "\nYour previous turn {id} (started {}) was stopped at its {minutes}-minute turn budget, and its input was not retried. Check what it finished; delegate work that needs longer.",
+            schedules::rfc3339(started_at)
+        )
+    }))
+}
+fn over_budget_notice(minutes: u32) -> String {
+    format!(
+        "Stopped at its {minutes}-minute turn budget. Its input will not be retried; the next message or timer runs normally. Partial work may remain."
     )
 }
 /// Provider output is not Markdown, so it is fenced to show verbatim.
@@ -62,6 +232,8 @@ enum Event {
         run: String,
         event: ProviderEvent,
     },
+    /// A wake-up armed for this time arrived; scheduling runs after every event.
+    Wake(i64),
     Shutdown,
 }
 struct Handle {
@@ -85,9 +257,17 @@ struct Active {
     messages: Vec<String>,
     output: String,
     reported: bool,
+    /// The role's turn budget, and whether this turn was stopped for exceeding it.
+    budget: Option<Budget>,
+    over_budget: bool,
     /// This turn's steps; the store has each one as of its last start or state change.
     steps: Vec<Step>,
     omitted_steps: usize,
+}
+#[derive(Clone, Copy)]
+struct Budget {
+    minutes: u32,
+    deadline: i64,
 }
 struct Permission {
     session: String,
@@ -109,6 +289,11 @@ struct Actor {
     socket: PathBuf,
     helper: PathBuf,
     turns: HashMap<String, usize>,
+    /// The earliest armed wake-up, for progress batches and timers alike.
+    wake_at: Option<i64>,
+    /// When this host started, and the sessions that have had a turn since.
+    started_at: i64,
+    resumed: HashSet<String>,
     /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
     stopping: bool,
 }
@@ -123,64 +308,113 @@ impl Service {
         let (steps_changed, step_changes) = async_channel::bounded(1);
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let worker = sender.clone();
-        std::thread::Builder::new().name("workspace-host".into()).spawn(move || {
-            let setup=(||->Result<_>{
-                let mut host=Host::open(home)?;
-                let interrupted=host.db.prepare("SELECT session_id FROM provider_runs WHERE finished_at IS NULL")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                for id in interrupted {
-                    let mut runtime=host.session_runtime(&id)?;
-                    runtime.last_error=Some("Host stopped during a turn. Inspect the worktree before retrying held input.".into());
-                    host.save_runtime(&runtime)?;
-                    host.set_status(&id,Status::Disconnected)?;
+        std::thread::Builder::new()
+            .name("workspace-host".into())
+            .spawn(move || {
+                let setup = (|| -> Result<_> {
+                    let mut host = Host::open(home)?;
+                    recover_unfinished_turns(&mut host)?;
+                    host.settle_pending_worktrees();
+                    let directory = tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
+                    let socket = directory.path().join("ipc");
+                    let listener = UnixListener::bind(&socket)?;
+                    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+                    Ok((host, directory, socket, listener))
+                })();
+                let (host, directory, socket, listener) = match setup {
+                    Ok(v) => {
+                        let _ = ready.send(Ok(()));
+                        v
+                    }
+                    Err(e) => {
+                        let _ = ready.send(Err(format!("{e:#}")));
+                        return;
+                    }
+                };
+                let connections = Arc::new(AtomicUsize::new(0));
+                let socket_sender = worker.clone();
+                let stop_listener = Arc::new(AtomicBool::new(false));
+                let stopping = stop_listener.clone();
+                std::thread::spawn(move || {
+                    for connection in listener.incoming() {
+                        if stopping.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let Ok(mut stream) = connection else { break };
+                        if connections.fetch_add(1, Ordering::Relaxed) >= 32 {
+                            connections.fetch_sub(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        let count = connections.clone();
+                        let sender = socket_sender.clone();
+                        std::thread::spawn(move || {
+                            let response = (|| -> Result<Value> {
+                                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                                let request =
+                                    mcp::read_json(&mut BufReader::new(stream.try_clone()?))?
+                                        .context("Empty request")?;
+                                let (reply, receive) = async_channel::bounded(1);
+                                sender.send_blocking(Event::Tool {
+                                    token: request["token"]
+                                        .as_str()
+                                        .context("Missing credential")?
+                                        .into(),
+                                    name: request["name"].as_str().context("Missing tool")?.into(),
+                                    args: request["arguments"].clone(),
+                                    reply,
+                                })?;
+                                receive.recv_blocking()?.map_err(anyhow::Error::msg)
+                            })();
+                            let value = match response {
+                                Ok(value) => json!({"result":value}),
+                                Err(error) => json!({"error":format!("{error:#}")}),
+                            };
+                            let _ =
+                                stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+                            let _ = writeln!(stream, "{value}");
+                            count.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    }
+                });
+                let mut actor = Actor {
+                    host,
+                    sender: worker,
+                    changed,
+                    steps_changed,
+                    steps_dirty: false,
+                    revisions: HashMap::new(),
+                    active: HashMap::new(),
+                    permissions: HashMap::new(),
+                    socket: socket.clone(),
+                    helper,
+                    turns: HashMap::new(),
+                    wake_at: None,
+                    started_at: now(),
+                    resumed: HashSet::new(),
+                    stopping: false,
+                };
+                // Timers that came due while the host was stopped fire now.
+                if let Err(e) = actor.schedule() {
+                    eprintln!("Workspace scheduler: {e:#}");
                 }
-                // A host restart never silently resumes uncertain provider side effects.
-                host.db.execute("UPDATE live_projects SET enabled=0",[])?;
-                host.db.execute("UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail='Host restarted; reconcile before retry' WHERE finished_at IS NULL",[now()])?;
-                host.settle_pending_worktrees();
-                let directory=tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
-                let socket=directory.path().join("ipc");
-                let listener=UnixListener::bind(&socket)?;
-                fs::set_permissions(&socket,fs::Permissions::from_mode(0o600))?;
-                Ok((host,directory,socket,listener))
-            })();
-            let (host,directory,socket,listener)=match setup {Ok(v)=>{let _=ready.send(Ok(()));v},Err(e)=>{let _=ready.send(Err(format!("{e:#}")));return}};
-            let connections=Arc::new(AtomicUsize::new(0));
-            let socket_sender=worker.clone();
-            let stop_listener=Arc::new(AtomicBool::new(false));let stopping=stop_listener.clone();
-            std::thread::spawn(move || {
-                for connection in listener.incoming() {
-                    if stopping.load(Ordering::Relaxed){break}
-                    let Ok(mut stream)=connection else {break};
-                    if connections.fetch_add(1,Ordering::Relaxed)>=32 {connections.fetch_sub(1,Ordering::Relaxed);continue}
-                    let count=connections.clone();let sender=socket_sender.clone();
-                    std::thread::spawn(move || {
-                        let response=(||->Result<Value>{
-                            stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-                            let request=mcp::read_json(&mut BufReader::new(stream.try_clone()?))?.context("Empty request")?;
-                            let (reply,receive)=async_channel::bounded(1);
-                            sender.send_blocking(Event::Tool {token:request["token"].as_str().context("Missing credential")?.into(),name:request["name"].as_str().context("Missing tool")?.into(),args:request["arguments"].clone(),reply})?;
-                            receive.recv_blocking()?.map_err(anyhow::Error::msg)
-                        })();
-                        let value=match response {Ok(value)=>json!({"result":value}),Err(error)=>json!({"error":format!("{error:#}")})};
-                        let _=stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-                        let _=writeln!(stream,"{value}");
-                        count.fetch_sub(1,Ordering::Relaxed);
-                    });
+                while let Ok(event) = receiver.recv_blocking() {
+                    if matches!(event, Event::Shutdown) {
+                        break;
+                    }
+                    let dirty = actor.handle(event);
+                    if let Err(e) = actor.schedule() {
+                        eprintln!("Workspace scheduler: {e:#}");
+                    }
+                    actor.signal(dirty);
                 }
-            });
-            let mut actor=Actor {host,sender:worker,changed,steps_changed,steps_dirty:false,revisions:HashMap::new(),active:HashMap::new(),permissions:HashMap::new(),socket:socket.clone(),helper,turns:HashMap::new(),stopping:false};
-            while let Ok(event)=receiver.recv_blocking(){
-                if matches!(event,Event::Shutdown){break}
-                let dirty=actor.handle(event);
-                if let Err(e)=actor.schedule(){eprintln!("Workspace scheduler: {e:#}");}
-                actor.signal(dirty);
-            }
-            actor.stop();
-            for (_,permission) in actor.permissions.drain(){let _=permission.reply.try_send(Err("Workspace stopped".into()));}
-            stop_listener.store(true,Ordering::Relaxed);
-            let _=std::os::unix::net::UnixStream::connect(&socket);
-            drop(directory);
-        })?;
+                actor.stop();
+                for (_, permission) in actor.permissions.drain() {
+                    let _ = permission.reply.try_send(Err("Workspace stopped".into()));
+                }
+                stop_listener.store(true, Ordering::Relaxed);
+                let _ = std::os::unix::net::UnixStream::connect(&socket);
+                drop(directory);
+            })?;
         readiness.recv()?.map_err(anyhow::Error::msg)?;
         Ok(Self {
             handle: Arc::new(Handle { sender }),
@@ -459,6 +693,12 @@ impl Actor {
                 }
                 changes_state
             }
+            Event::Wake(at) => {
+                if self.wake_at == Some(at) {
+                    self.wake_at = None;
+                }
+                false
+            }
             Event::Shutdown => false,
         }
     }
@@ -498,8 +738,21 @@ impl Actor {
                 )?;
             }
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
-            ProviderEvent::Finished { error, usage } => {
+            ProviderEvent::Finished {
+                error,
+                usage,
+                cancelled,
+            } => {
                 let mut active = self.active.remove(id).unwrap();
+                let failed = error.is_some();
+                // A turn stopped at its budget is finished rather than held, so a coordinator
+                // never stalls its project; its next turn is told about the cut-off instead.
+                // Only our own cancellation counts; a real failure keeps its error and held input.
+                let budget = active
+                    .budget
+                    .filter(|_| active.over_budget && cancelled)
+                    .map(|b| b.minutes);
+                let error = error.filter(|_| budget.is_none());
                 // Settle the run first so a later failure cannot leave it open. If this update
                 // fails, the run stays open and blocks worktree removal until restart: safe.
                 self.host.db.execute(
@@ -507,17 +760,17 @@ impl Actor {
                     params![
                         run,
                         now(),
-                        if error.is_some() {
-                            "failed"
-                        } else {
-                            "completed"
+                        match (budget, &error) {
+                            (Some(_), _) => "over_budget",
+                            (None, Some(_)) => "failed",
+                            (None, None) => "completed",
                         },
                         json!({"error":error,"usage":usage}).to_string(),
                         active.omitted_steps as i64
                     ],
                 )?;
-                self.settle_steps(id, &mut active, error.is_some())?;
-                if error.is_none() {
+                self.settle_steps(id, &mut active, failed)?;
+                if !failed {
                     self.host.append_output(&session, run, &active.output)?;
                 }
                 runtime.last_finished_at = Some(now());
@@ -527,6 +780,20 @@ impl Actor {
                     self.host.db.execute(
                         "UPDATE messages SET receipt=?2 WHERE id=?1",
                         params![message, if error.is_some() { "held" } else { "completed" }],
+                    )?;
+                }
+                if let Some(minutes) = budget {
+                    self.host.append_output(
+                        &session,
+                        &format!("budget:{run}"),
+                        &over_budget_notice(minutes),
+                    )?;
+                    Host::event(
+                        &self.host.db,
+                        &session.project_id,
+                        Some(id),
+                        "turn_over_budget",
+                        &format!("{run}; budget_minutes={minutes}"),
                     )?;
                 }
                 if let Some(error) = &error {
@@ -553,9 +820,16 @@ impl Actor {
                 // A deliberately archived parent has no one to wake.
                 if let Some(parent) = &session.parent_id
                     && !self.host.session(parent)?.archived
-                    && (error.is_some() || (session.role.is_worker() && !active.reported))
+                    && (error.is_some()
+                        || budget.is_some()
+                        || (session.role.is_worker() && !active.reported))
                 {
-                    let body = if let Some(error) = &error {
+                    let body = if let Some(minutes) = budget {
+                        format!(
+                            "{} stopped at its {minutes}-minute turn budget; its input was not retried.",
+                            session.name
+                        )
+                    } else if let Some(error) = &error {
                         format!(
                             "{} stopped with an error: {error}. Inspect its runtime/worktree before resuming.",
                             session.name
@@ -598,6 +872,7 @@ impl Actor {
         }
         Ok(())
     }
+    /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
     /// Cancels every active turn and records it finished without waiting for its process.
     fn stop(&mut self) {
         self.stopping = true;
@@ -614,13 +889,13 @@ impl Actor {
                 &id,
                 &run,
                 ProviderEvent::Finished {
-                    error: Some("Host stopped during a turn; inspect work before retrying".into()),
+                    error: Some(QUIT_DURING_TURN.into()),
                     usage: Value::Null,
+                    cancelled: false,
                 },
             );
         }
     }
-    /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
     fn signal(&mut self, state_changed: bool) {
         if state_changed {
             let _ = self.changed.try_send(());
@@ -728,14 +1003,56 @@ impl Actor {
         page.omitted_steps = active.omitted_steps;
         Ok(page)
     }
+    /// Stops turns that ran past their role's turn budget through the same cancel flag a
+    /// human stop uses; the provider thread then finishes the turn. Keeps a wake-up armed for
+    /// the next deadline.
+    fn enforce_budgets(&mut self) {
+        let now = now();
+        let mut next = None;
+        for active in self.active.values_mut() {
+            let Some(budget) = active.budget else {
+                continue;
+            };
+            if active.over_budget || active.cancel.load(Ordering::Relaxed) {
+                continue;
+            }
+            if now >= budget.deadline {
+                active.over_budget = true;
+                active.cancel.store(true, Ordering::Relaxed);
+            } else {
+                next = Some(next.map_or(budget.deadline, |at: i64| at.min(budget.deadline)));
+            }
+        }
+        if let Some(at) = next {
+            self.wake(at);
+        }
+    }
     fn schedule(&mut self) -> Result<()> {
+        self.enforce_budgets();
+        // Timers fire into the queue whether or not the project is live.
+        match self.host.fire_due_schedules(now()) {
+            Ok(pass) => {
+                if let Some(next) = pass.next {
+                    self.wake(next);
+                }
+                // Fires and next-fire times show in the client even when no turn starts.
+                if pass.changed {
+                    let _ = self.changed.try_send(());
+                }
+            }
+            Err(e) => eprintln!("Workspace timers: {e:#}"),
+        }
         if self.active.len() >= 8 {
             return Ok(());
         }
-        let messages=self.host.db.prepare("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND (m.sender IS NULL OR m.sender<>m.recipient) AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100")?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut considered = HashSet::new();
         for message in messages {
             if self.active.len() >= 8 {
                 break;
+            }
+            if !considered.insert(message.recipient.clone()) {
+                continue;
             }
             let session = self.host.session(&message.recipient)?;
             if self.active.contains_key(&session.id)
@@ -743,6 +1060,9 @@ impl Actor {
             {
                 continue;
             }
+            let Some(input) = self.due_input(&session.id)? else {
+                continue;
+            };
             let project = self.host.project(&session.project_id)?;
             let project_active = self
                 .active
@@ -780,7 +1100,7 @@ impl Actor {
             {
                 continue;
             }
-            if let Err(error) = self.start_turn(session.clone(), message.clone()) {
+            if let Err(error) = self.start_turn(session.clone(), input) {
                 self.start_failed(&session, &message, &error)?;
             }
         }
@@ -810,7 +1130,101 @@ impl Actor {
         self.host.settle_pending_worktrees();
         Ok(())
     }
-    fn start_turn(&mut self, session: Session, message: Message) -> Result<()> {
+    /// The recipient's next turn input: every queued message, in order, up to
+    /// MAX_TURN_MESSAGES. It is `None` while only progress reports wait inside
+    /// their batch window; one wake-up is then armed for when the window closes.
+    fn due_input(&mut self, recipient: &str) -> Result<Option<Vec<Message>>> {
+        let input = self.host.db.prepare(&format!("SELECT * FROM messages WHERE recipient=?1 AND receipt='queued' AND {} ORDER BY sequence LIMIT ?2", is_turn_input("messages")))?.query_map(params![recipient, MAX_TURN_MESSAGES],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Urgency covers the whole queue, not just the bounded input.
+        let urgent: bool = self.host.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='queued' AND {} AND NOT ({IS_PROGRESS_REPORT}))", is_turn_input("messages")), [recipient], |r| r.get(0))?;
+        let due = input
+            .first()
+            .map_or(0, |m| m.created_at + PROGRESS_BATCH_MS);
+        if urgent || now() >= due {
+            return Ok(Some(input));
+        }
+        self.wake(due);
+        Ok(None)
+    }
+    /// Arms one wake-up for `at` unless an earlier one is already armed.
+    fn wake(&mut self, at: i64) {
+        if self.wake_at.is_some_and(|armed| armed <= at) {
+            return;
+        }
+        self.wake_at = Some(at);
+        let sender = self.sender.clone();
+        let wait = (at - now()).clamp(0, MAX_WAKE_SLEEP_MS) as u64;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            let _ = sender.send_blocking(Event::Wake(at));
+        });
+    }
+    /// Records the run and delivers its whole input together, so a failure leaves every
+    /// message queued for the next attempt.
+    fn record_turn_start(
+        &mut self,
+        run: &str,
+        session: &Session,
+        input: &[Message],
+        detail: &Value,
+        runtime: &SessionRuntime,
+    ) -> Result<()> {
+        let ids = input.iter().map(|m| &m.id).collect::<Vec<_>>();
+        let queued_at = input.first().context("Nothing to deliver")?.created_at;
+        self.host.atomically(|host| {
+            host.db.execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,?3,?4,?5)",
+                params![run, session.id, json!(ids).to_string(), now(), detail.to_string()],
+            )?;
+            for id in ids {
+                host.advance_receipt(id, Receipt::Delivered)?;
+            }
+            host.set_status(&session.id, Status::Working)?;
+            host.save_runtime(runtime)?;
+            Host::event(
+                &host.db,
+                &session.project_id,
+                Some(&session.id),
+                "turn_scheduled",
+                &format!("{run}; queue_ms={}", now() - queued_at),
+            )
+        })
+    }
+    /// The turn's whole prompt. A session's first turn since the host started also says what
+    /// the restart interrupted and which of its timers fired late.
+    fn prompt(&self, session: &Session, input: &[Message]) -> Result<String> {
+        let mut notes = Vec::new();
+        for message in input {
+            let note = interrupted_turn_note(&self.host, &message.id)?;
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+        notes.push(over_budget_note(&self.host, &session.id)?);
+        let delivered_at = now();
+        let resume = if self.resumed.contains(&session.id) {
+            String::new()
+        } else {
+            resume_note(
+                &self.host,
+                &session.id,
+                self.started_at,
+                delivered_at,
+                &notes,
+            )?
+        };
+        let input = input
+            .iter()
+            .map(|m| Ok((m, self.host.fire_status(&m.id, delivered_at)?)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(turn_prompt(
+            session,
+            &(resume + &notes.concat()),
+            &input,
+            &open_questions_reminder(&self.host.open_questions(session)?),
+        ))
+    }
+    fn start_turn(&mut self, session: Session, input: Vec<Message>) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
         let profile = if let Some(profile) = &runtime.profile {
             profile.clone()
@@ -850,33 +1264,20 @@ impl Actor {
         let run = new_id();
         let cancel = Arc::new(AtomicBool::new(false));
         let token = format!("{}{}", new_id(), new_id());
-        let prompt = format!(
-            "Managed session {} ({})\nSender: {}\nMessage ID: {}\n\n{}{}\n\nUse workspace_context to obtain current team IDs and tickets. If you have a parent, report through workspace tools before ending the turn. The main coordinator responds to the human directly. Never wait or poll for a reply.{}",
-            session.name,
-            session.role.label(),
-            message.sender.as_deref().unwrap_or("human"),
-            message.id,
-            message.body,
-            provider::attachment_list(&message.attachments),
-            open_questions_reminder(&self.host.open_questions(&session)?)
-        );
-        self.host.db.execute(
-            "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,?3,?4,?5)",
-            params![run, session.id, json!([message.id]).to_string(), now(),json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"policy":self.host.policy(session.role)?}).to_string()],
-        )?;
-        self.host.advance_receipt(&message.id, Receipt::Delivered)?;
-        self.host.set_status(&session.id, Status::Working)?;
+        let prompt = self.prompt(&session, &input)?;
+        let policy = self.host.policy(session.role)?;
+        let started_at = now();
+        let budget = policy.turn_budget().map(|minutes| Budget {
+            minutes,
+            deadline: started_at + i64::from(minutes) * 60_000,
+        });
+        let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"policy":policy,"turn_budget_minutes":budget.map(|b| b.minutes)});
         runtime.last_error = None;
-        runtime.last_started_at = Some(now());
+        runtime.last_started_at = Some(started_at);
         runtime.directory = Some(cwd.to_string_lossy().into_owned());
-        self.host.save_runtime(&runtime)?;
-        Host::event(
-            &self.host.db,
-            &session.project_id,
-            Some(&session.id),
-            "turn_scheduled",
-            &format!("{}; queue_ms={}", run, now() - message.created_at),
-        )?;
+        self.record_turn_start(&run, &session, &input, &detail, &runtime)?;
+        self.resumed.insert(session.id.clone());
+        // Nothing fallible may follow: the input is delivered and only Active can settle it.
         let turn = Turn {
             run_id: run.clone(),
             session: session.clone(),
@@ -884,7 +1285,7 @@ impl Actor {
             provider_session: runtime.provider_session_id,
             cwd,
             prompt,
-            attachments: message.attachments.clone(),
+            attachments: input.iter().flat_map(|m| m.attachments.clone()).collect(),
             socket: self.socket.clone(),
             token: token.clone(),
             helper: self.helper.clone(),
@@ -895,13 +1296,18 @@ impl Actor {
                 run: run.clone(),
                 token,
                 cancel: cancel.clone(),
-                messages: vec![message.id],
+                messages: input.into_iter().map(|m| m.id).collect(),
                 output: String::new(),
                 reported: false,
+                budget,
+                over_budget: false,
                 steps: vec![],
                 omitted_steps: 0,
             },
         );
+        if let Some(budget) = budget {
+            self.wake(budget.deadline);
+        }
         let _ = self.changed.try_send(());
         *self.turns.entry(session.project_id).or_default() += 1;
         let sender = self.sender.clone();
@@ -921,6 +1327,7 @@ impl Actor {
                     event: ProviderEvent::Finished {
                         error: Some(format!("{error:#}")),
                         usage: Value::Null,
+                        cancelled: error.is::<provider::Cancelled>(),
                     },
                 });
             }
@@ -959,23 +1366,27 @@ mod tests {
             )
             .unwrap();
         let (mut actor, changes, step_changes) = idle_actor(host);
-        actor.active.insert(
-            session.clone(),
-            Active {
-                run: run.clone(),
-                token: String::new(),
-                cancel: Arc::new(AtomicBool::new(false)),
-                messages: vec![],
-                output: String::new(),
-                reported: false,
-                steps: vec![],
-                omitted_steps: 0,
-            },
-        );
+        actor
+            .active
+            .insert(session.clone(), active_turn(&run, vec![], None));
         (home, actor, session, run, changes, step_changes)
     }
 
-    /// An actor with no turns, its change and step-change receivers.
+    fn active_turn(run: &str, messages: Vec<String>, budget: Option<Budget>) -> Active {
+        Active {
+            run: run.into(),
+            token: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            messages,
+            output: String::new(),
+            reported: false,
+            budget,
+            over_budget: false,
+            steps: vec![],
+            omitted_steps: 0,
+        }
+    }
+
     fn idle_actor(host: Host) -> (Actor, Receiver<()>, Receiver<()>) {
         let (sender, _) = async_channel::bounded(1);
         let (changed, changes) = async_channel::bounded(1);
@@ -992,6 +1403,9 @@ mod tests {
             socket: PathBuf::new(),
             helper: PathBuf::new(),
             turns: HashMap::new(),
+            wake_at: None,
+            started_at: now(),
+            resumed: HashSet::new(),
             stopping: false,
         };
         (actor, changes, step_changes)
@@ -1068,19 +1482,9 @@ mod tests {
     }
 
     fn finish(actor: &mut Actor, session: &Session, reported: bool, error: Option<&str>) {
-        actor.active.insert(
-            session.id.clone(),
-            Active {
-                run: "run".into(),
-                token: String::new(),
-                cancel: Arc::new(AtomicBool::new(false)),
-                messages: vec![],
-                output: String::new(),
-                reported,
-                steps: vec![],
-                omitted_steps: 0,
-            },
-        );
+        let mut active = active_turn("run", vec![], None);
+        active.reported = reported;
+        actor.active.insert(session.id.clone(), active);
         actor
             .provider_event(
                 &session.id,
@@ -1088,6 +1492,7 @@ mod tests {
                 ProviderEvent::Finished {
                     error: error.map(Into::into),
                     usage: Value::Null,
+                    cancelled: false,
                 },
             )
             .unwrap();
@@ -1131,19 +1536,9 @@ mod tests {
     #[test]
     fn shutdown_leaves_a_pending_removal_for_startup() {
         let (_home, mut actor, ticket, tester) = ticket_pending_removal();
-        actor.active.insert(
-            tester.id.clone(),
-            Active {
-                run: "run".into(),
-                token: String::new(),
-                cancel: Arc::new(AtomicBool::new(false)),
-                messages: vec![],
-                output: String::new(),
-                reported: true,
-                steps: vec![],
-                omitted_steps: 0,
-            },
-        );
+        let mut active = active_turn("run", vec![], None);
+        active.reported = true;
+        actor.active.insert(tester.id.clone(), active);
 
         actor.stop();
 
@@ -1162,6 +1557,493 @@ mod tests {
 
         assert!(!Path::new(&ticket.worktree).exists());
         assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
+    }
+
+    /// An idle main coordinator with one child that reports to it.
+    fn actor_with_child() -> (tempfile::TempDir, Actor, String, String) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        let project = host.create_project("Reports").unwrap();
+        let parent = host.sessions().unwrap().remove(0).id;
+        let repo = home.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        };
+        git(&["init"]);
+        git(&[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ]);
+        let repo = host
+            .attach_repository(&project.id, repo.to_str().unwrap(), "HEAD")
+            .unwrap();
+        let child = host
+            .create_session(
+                &project.id,
+                &parent,
+                Some(&repo.id),
+                "Child",
+                Role::TaskOrchestrator,
+                Provider::Codex,
+            )
+            .unwrap()
+            .id;
+        (home, idle_actor(host).0, parent, child)
+    }
+
+    fn report(actor: &mut Actor, child: &str, kind: &str, body: &str) {
+        actor
+            .host
+            .agent_tool(
+                child,
+                "report",
+                json!({"message_id":body,"kind":kind,"body":body}),
+            )
+            .unwrap();
+    }
+
+    fn bodies(input: &[Message]) -> Vec<&str> {
+        input
+            .iter()
+            .map(|m| m.body.lines().last().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_burst_of_progress_waits_for_one_wake_then_arrives_in_one_turn() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        for body in ["one", "two", "three"] {
+            report(&mut actor, &child, "progress", body);
+            assert!(actor.due_input(&parent).unwrap().is_none());
+        }
+        assert!(actor.wake_at.is_some());
+        actor
+            .host
+            .db
+            .execute(
+                "UPDATE messages SET created_at=created_at-?1",
+                [PROGRESS_BATCH_MS],
+            )
+            .unwrap();
+        let input = actor.due_input(&parent).unwrap().unwrap();
+        assert_eq!(bodies(&input), ["one", "two", "three"]);
+        let session = actor.host.session(&parent).unwrap();
+        let paired = input.iter().map(|m| (m, None)).collect::<Vec<_>>();
+        let prompt = turn_prompt(&session, "", &paired, "");
+        assert!(input.iter().all(|m| prompt.contains(&m.body)), "{prompt}");
+    }
+
+    #[test]
+    fn a_timer_fire_wakes_at_once_and_is_the_only_self_message_taken_as_input() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        report(&mut actor, &child, "progress", "started");
+        actor
+            .host
+            .db
+            .execute(
+                "INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) SELECT 'output:run',project_id,?1,?1,'MY OWN REPLY','queued',?2 FROM sessions WHERE id=?1",
+                params![parent, now()],
+            )
+            .unwrap();
+        assert!(
+            actor.due_input(&parent).unwrap().is_none(),
+            "progress alone waits for its batch"
+        );
+        let session = actor.host.session(&parent).unwrap();
+        let args = json!({"label":"check","prompt":"Check","every":"30m"});
+        actor
+            .host
+            .schedule_tool(&session, "schedule", &args, now())
+            .unwrap();
+        actor.host.fire_due_schedules(now() + 31 * 60_000).unwrap();
+        let input = actor.due_input(&parent).unwrap().unwrap();
+        assert_eq!(input.len(), 2, "{:?}", bodies(&input));
+        assert_eq!(bodies(&input)[0], "started");
+        assert!(input[1].id.starts_with("timer:"));
+    }
+
+    #[test]
+    fn a_timer_that_cannot_fire_arms_its_retry_not_a_wake_in_the_past() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        host.create_project("Full").unwrap();
+        let session = host.sessions().unwrap().remove(0);
+        let args = json!({"label":"check","prompt":"Check","every":"30m"});
+        host.schedule_tool(&session, "schedule", &args, now())
+            .unwrap();
+        host.db
+            .execute("UPDATE schedules SET next_fire_at=?1", [now() - 1_000])
+            .unwrap();
+        for n in 0..1024 {
+            host.send(&format!("busy-{n}"), None, &session.id, "Busy")
+                .unwrap();
+        }
+        let (mut actor, _, _) = idle_actor(host);
+        actor.schedule().unwrap();
+        let armed = actor.wake_at.unwrap();
+        assert!(armed > now() + 50_000, "armed {} ms ahead", armed - now());
+    }
+
+    #[test]
+    fn a_fire_queued_before_a_stop_that_turns_late_at_start_is_listed_as_missed() {
+        let home = tempfile::tempdir().unwrap();
+        let session = {
+            let mut host = Host::open(home.path()).unwrap();
+            host.create_project("Monitor").unwrap();
+            let session = host.sessions().unwrap().remove(0);
+            let args = json!({"label":"check","prompt":"Check","every":"30m"});
+            host.schedule_tool(&session, "schedule", &args, now())
+                .unwrap();
+            // The first slot fires on time an hour ago and is still queued when the host stops.
+            host.db
+                .execute(
+                    "UPDATE schedules SET first_at=first_at-?1,next_fire_at=next_fire_at-?1",
+                    [90 * 60_000],
+                )
+                .unwrap();
+            host.fire_due_schedules(now() - 59 * 60_000).unwrap();
+            host.db
+                .execute("UPDATE messages SET created_at=created_at-?1", [3_600_000])
+                .unwrap();
+            session
+        };
+        let host = Host::open(home.path()).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor.schedule().unwrap();
+        let input = actor.due_input(&session.id).unwrap().unwrap();
+        assert_eq!(
+            input.len(),
+            1,
+            "the missed slots fold into the waiting fire"
+        );
+        let prompt = actor.prompt(&session, &input).unwrap();
+        assert!(prompt.contains("Missed: timer"), "{prompt}");
+        assert!(
+            prompt.contains("Timer status: late; 2 later slot(s)"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_one_shot_fire_queued_on_time_before_a_stop_is_late_and_missed_after_it() {
+        let home = tempfile::tempdir().unwrap();
+        let session = {
+            let mut host = Host::open(home.path()).unwrap();
+            host.create_project("Once").unwrap();
+            let session = host.sessions().unwrap().remove(0);
+            let args = json!({"label":"once","prompt":"Check once","at":"+10m"});
+            host.schedule_tool(&session, "schedule", &args, now())
+                .unwrap();
+            // It fires on time an hour ago, then the host stops with it still queued.
+            host.db
+                .execute(
+                    "UPDATE schedules SET first_at=first_at-?1,next_fire_at=next_fire_at-?1",
+                    [70 * 60_000],
+                )
+                .unwrap();
+            assert_eq!(
+                host.fire_due_schedules(now() - 60 * 60_000).unwrap().next,
+                None
+            );
+            host.db
+                .execute("UPDATE messages SET created_at=created_at-?1", [3_600_000])
+                .unwrap();
+            session
+        };
+        let host = Host::open(home.path()).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor.schedule().unwrap();
+        let input = actor.due_input(&session.id).unwrap().unwrap();
+        let prompt = actor.prompt(&session, &input).unwrap();
+        for expected in [
+            "The workspace host restarted",
+            "Missed: timer",
+            "\"once\"",
+            "Timer status: late",
+        ] {
+            assert!(prompt.contains(expected), "{expected}\n{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_report_that_needs_an_answer_wakes_at_once_with_the_whole_queue() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        report(&mut actor, &child, "progress", "started");
+        report(&mut actor, &child, "blocked", "which schema?");
+        report(&mut actor, &child, "failed", "tests fail");
+        report(&mut actor, &child, "progress", "meanwhile");
+        let input = actor.due_input(&parent).unwrap().unwrap();
+        assert_eq!(
+            bodies(&input),
+            ["started", "which schema?", "tests fail", "meanwhile"]
+        );
+        assert!(actor.wake_at.is_none());
+    }
+
+    #[test]
+    fn a_failed_turn_start_leaves_the_whole_batch_queued_for_retry() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        report(&mut actor, &child, "blocked", "one");
+        report(&mut actor, &child, "progress", "two");
+        let session = actor.host.session(&parent).unwrap();
+        let runtime = actor.host.session_runtime(&parent).unwrap();
+        let batch = actor.due_input(&parent).unwrap().unwrap();
+        let receipts = |actor: &Actor| {
+            batch
+                .iter()
+                .map(|m| actor.host.message(&m.id).unwrap().receipt)
+                .collect::<Vec<_>>()
+        };
+        let faults = [
+            format!(
+                "BEFORE UPDATE OF receipt ON messages WHEN NEW.id='{}'",
+                batch[1].id
+            ),
+            "BEFORE INSERT ON activity WHEN NEW.kind='turn_scheduled'".into(),
+        ];
+        for fault in faults {
+            actor
+                .host
+                .db
+                .execute(
+                    &format!(
+                        "CREATE TRIGGER fault {fault} BEGIN SELECT RAISE(ABORT,'injected'); END"
+                    ),
+                    [],
+                )
+                .unwrap();
+            assert!(
+                actor
+                    .record_turn_start(&new_id(), &session, &batch, &json!({}), &runtime)
+                    .is_err()
+            );
+            assert_eq!(
+                receipts(&actor),
+                [Receipt::Queued, Receipt::Queued],
+                "{fault}"
+            );
+            assert_eq!(actor.host.session(&parent).unwrap().status, session.status);
+            let runs: i64 = actor
+                .host
+                .db
+                .query_row("SELECT COUNT(*) FROM provider_runs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(runs, 0);
+            actor.host.db.execute("DROP TRIGGER fault", []).unwrap();
+        }
+        let retry = actor.due_input(&parent).unwrap().unwrap();
+        assert_eq!(retry, batch);
+        actor
+            .record_turn_start(&new_id(), &session, &retry, &json!({}), &runtime)
+            .unwrap();
+        assert_eq!(receipts(&actor), [Receipt::Delivered, Receipt::Delivered]);
+    }
+
+    #[test]
+    fn a_human_message_shaped_like_progress_still_wakes_at_once() {
+        let (_home, mut actor, parent, _child) = actor_with_child();
+        actor
+            .host
+            .send("report:x", None, &parent, "[progress] imitation")
+            .unwrap();
+        assert_eq!(actor.due_input(&parent).unwrap().unwrap().len(), 1);
+        assert!(actor.wake_at.is_none());
+    }
+
+    #[test]
+    fn an_urgent_report_beyond_the_turn_limit_still_wakes_at_once() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        for n in 0..MAX_TURN_MESSAGES {
+            report(&mut actor, &child, "progress", &format!("step {n}"));
+        }
+        report(&mut actor, &child, "blocked", "which schema?");
+        let session = actor.host.session(&parent).unwrap();
+        let runtime = actor.host.session_runtime(&parent).unwrap();
+        let first = actor.due_input(&parent).unwrap().unwrap();
+        assert_eq!(first.len(), MAX_TURN_MESSAGES);
+        assert!(bodies(&first).iter().all(|b| b.starts_with("step ")));
+        actor
+            .record_turn_start(&new_id(), &session, &first, &json!({}), &runtime)
+            .unwrap();
+        let second = actor.due_input(&parent).unwrap().unwrap();
+        assert_eq!(bodies(&second), ["which schema?"]);
+        assert!(actor.wake_at.is_none());
+    }
+
+    #[test]
+    fn a_coordinator_turn_over_its_budget_stops_without_holding_its_project() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        let coordinator = actor.host.session(&parent).unwrap();
+        actor.host.set_live(&coordinator.project_id, true).unwrap();
+        let worker = actor
+            .host
+            .create_session(
+                &coordinator.project_id,
+                &child,
+                None,
+                "Worker",
+                Role::Implementer,
+                Provider::Codex,
+            )
+            .unwrap();
+        assert_eq!(
+            actor.host.policy(Role::Implementer).unwrap().turn_budget(),
+            None,
+            "workers have no budget by default"
+        );
+        actor
+            .active
+            .insert(worker.id.clone(), active_turn("work", vec![], None));
+        let check = actor.host.send("check", None, &parent, "Check").unwrap();
+        let input = actor.due_input(&parent).unwrap().unwrap();
+        let policy = actor.host.policy(coordinator.role).unwrap();
+        assert_eq!(policy.turn_budget(), Some(10));
+        let runtime = actor.host.session_runtime(&parent).unwrap();
+        actor
+            .record_turn_start(
+                "slow",
+                &coordinator,
+                &input,
+                &json!({"turn_budget_minutes":10}),
+                &runtime,
+            )
+            .unwrap();
+        // Ten minutes have passed since the turn started.
+        let budget = Budget {
+            minutes: 10,
+            deadline: now() - 1,
+        };
+        actor.active.insert(
+            parent.clone(),
+            active_turn("slow", vec![check.id.clone()], Some(budget)),
+        );
+
+        actor.enforce_budgets();
+        assert!(actor.active[&parent].cancel.load(Ordering::Relaxed));
+        assert!(!actor.active[&worker.id].cancel.load(Ordering::Relaxed));
+        let error = Some(provider::Cancelled.to_string());
+        actor
+            .provider_event(
+                &parent,
+                "slow",
+                ProviderEvent::Finished {
+                    error,
+                    usage: Value::Null,
+                    cancelled: true,
+                },
+            )
+            .unwrap();
+
+        let chat = actor.host.messages(&parent, None, 100).unwrap();
+        assert_eq!(
+            chat.iter().find(|m| m.id == "check").unwrap().receipt,
+            Receipt::Completed
+        );
+        let notice = chat.iter().find(|m| m.id == "output:budget:slow").unwrap();
+        assert!(
+            notice
+                .body
+                .starts_with("Stopped at its 10-minute turn budget"),
+            "{}",
+            notice.body
+        );
+        let activity = actor
+            .host
+            .activity(&coordinator.project_id, None, 100)
+            .unwrap();
+        assert!(
+            activity
+                .iter()
+                .any(|a| a.kind == "turn_over_budget" && a.detail.starts_with("slow;"))
+        );
+        assert_eq!(actor.host.session(&parent).unwrap().status, Status::Ready);
+        assert_eq!(
+            actor.host.session_runtime(&parent).unwrap().last_error,
+            None
+        );
+
+        actor.host.send("next", None, &parent, "Next").unwrap();
+        let next = actor
+            .due_input(&parent)
+            .unwrap()
+            .expect("the next message runs");
+        assert_eq!(next[0].id, "next");
+        let prompt = actor.prompt(&coordinator, &next).unwrap();
+        assert!(
+            prompt.contains("previous turn slow") && prompt.contains("10-minute turn budget"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_real_failure_racing_the_budget_keeps_its_error_and_held_input() {
+        // A crash, and a provider failure whose text happens to match our own cancellation.
+        let crash = "Provider exited without a successful terminal result (exit status: 1)";
+        for error in [crash.to_owned(), provider::Cancelled.to_string()] {
+            let (_home, mut actor, parent, _child) = actor_with_child();
+            let coordinator = actor.host.session(&parent).unwrap();
+            let check = actor.host.send("check", None, &parent, "Check").unwrap();
+            let input = actor.due_input(&parent).unwrap().unwrap();
+            let runtime = actor.host.session_runtime(&parent).unwrap();
+            actor
+                .record_turn_start("racing", &coordinator, &input, &json!({}), &runtime)
+                .unwrap();
+            let budget = Budget {
+                minutes: 10,
+                deadline: now() - 1,
+            };
+            actor.active.insert(
+                parent.clone(),
+                active_turn("racing", vec![check.id.clone()], Some(budget)),
+            );
+            actor.enforce_budgets();
+            // The provider failed on its own before it saw the cancel flag.
+            actor
+                .provider_event(
+                    &parent,
+                    "racing",
+                    ProviderEvent::Finished {
+                        error: Some(error.clone()),
+                        usage: Value::Null,
+                        cancelled: false,
+                    },
+                )
+                .unwrap();
+            let chat = actor.host.messages(&parent, None, 100).unwrap();
+            assert_eq!(
+                chat.iter().find(|m| m.id == "check").unwrap().receipt,
+                Receipt::Held
+            );
+            assert!(!chat.iter().any(|m| m.id == "output:budget:racing"));
+            let runtime = actor.host.session_runtime(&parent).unwrap();
+            assert_eq!(runtime.last_error.as_deref(), Some(error.as_str()));
+            assert_eq!(
+                actor.host.session(&parent).unwrap().status,
+                Status::Disconnected
+            );
+            let outcome: String = actor
+                .host
+                .db
+                .query_row(
+                    "SELECT outcome FROM provider_runs WHERE id='racing'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(outcome, "failed");
+        }
     }
 
     fn update(id: &str, kind: StepKind, state: StepState, title: &str) -> StepUpdate {
@@ -1208,6 +2090,113 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_left_unfinished_is_reported_as_an_unexpected_stop() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        let runtime = actor.host.session_runtime(&session).unwrap();
+        assert_eq!(runtime.last_error.as_deref(), Some(STOPPED_UNEXPECTEDLY));
+        assert_eq!(
+            actor.host.session(&session).unwrap().status,
+            Status::Disconnected
+        );
+        let (outcome, error): (String, String) = actor
+            .host
+            .db
+            .query_row(
+                "SELECT outcome,json_extract(detail,'$.result.error') FROM provider_runs WHERE id=?1",
+                [&run],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (outcome.as_str(), error.as_str()),
+            ("interrupted", STOPPED_UNEXPECTEDLY)
+        );
+    }
+
+    #[test]
+    fn a_retried_message_names_the_turn_that_was_cut_off() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        actor
+            .host
+            .db
+            .execute(
+                "UPDATE provider_runs SET messages='[\"m1\"]',started_at=1791400582000 WHERE id=?1",
+                [&run],
+            )
+            .unwrap();
+        let stopped = ProviderEvent::Finished {
+            error: Some(QUIT_DURING_TURN.into()),
+            usage: Value::Null,
+            cancelled: false,
+        };
+        actor.provider_event(&session, &run, stopped).unwrap();
+        let note = interrupted_turn_note(&actor.host, "m1").unwrap();
+        assert!(note.contains(&run), "{note}");
+        assert!(note.contains("2026-10-07T19:16:22Z"), "{note}");
+        assert!(interrupted_turn_note(&actor.host, "m2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_first_turn_after_a_restart_names_the_cut_off_turn_its_timers_and_missed_fires() {
+        let home = tempfile::tempdir().unwrap();
+        let (session, run, timer) = {
+            let mut host = Host::open(home.path()).unwrap();
+            host.create_project("Monitor").unwrap();
+            let session = host.sessions().unwrap().remove(0);
+            let args =
+                json!({"label":"check","prompt":"Check the service","every":"30m","until":"+3h"});
+            let timer = host
+                .schedule_tool(&session, "schedule", &args, now())
+                .unwrap();
+            let run = new_id();
+            host.db
+                .execute(
+                    "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,'{}')",
+                    params![run, session.id, now()],
+                )
+                .unwrap();
+            // The host dies mid-turn and stays down past the first two slots.
+            host.db
+                .execute(
+                    "UPDATE schedules SET first_at=first_at-?1,next_fire_at=next_fire_at-?1,until=until-?1",
+                    [65 * 60_000],
+                )
+                .unwrap();
+            (session, run, timer["id"].as_str().unwrap().to_owned())
+        };
+        let mut host = Host::open(home.path()).unwrap();
+        recover_unfinished_turns(&mut host).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor.schedule().unwrap();
+        let input = actor.due_input(&session.id).unwrap().unwrap();
+        assert_eq!(input.len(), 1, "one fire for both missed slots");
+        assert!(
+            !input[0].body.contains("late"),
+            "the stored body never changes"
+        );
+        let prompt = actor.prompt(&session, &input).unwrap();
+        for expected in [
+            format!("Interrupted turn {run}"),
+            format!("Timer {timer} \"check\", every 30m until"),
+            format!("Missed: timer {timer} \"check\""),
+            "Sender: your timer".into(),
+            "Timer status: late; 1 later slot(s)".into(),
+            "Check the service".into(),
+        ] {
+            assert!(prompt.contains(&expected), "{expected}\n{prompt}");
+        }
+        assert!(!prompt.contains("Sender: human"), "{prompt}");
+        actor.resumed.insert(session.id.clone());
+        assert!(
+            !actor
+                .prompt(&session, &input)
+                .unwrap()
+                .contains("restarted")
+        );
+    }
+
+    #[test]
     fn a_failed_turn_interrupts_its_running_steps_and_keeps_narration_out_of_chat() {
         let (_home, mut actor, session, run) = actor_with_turn();
         for step in [
@@ -1226,6 +2215,7 @@ mod tests {
         let failure = ProviderEvent::Finished {
             error: Some("Turn interrupted".into()),
             usage: Value::Null,
+            cancelled: false,
         };
         actor.provider_event(&session, &run, failure).unwrap();
         let page = actor.host.steps(&session, Some(&run), 0).unwrap();

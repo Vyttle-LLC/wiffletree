@@ -8,6 +8,8 @@ mod policies;
 pub mod provider;
 mod repositories;
 pub mod runtime;
+pub(crate) mod schedules;
+pub use schedules::TimerPass;
 pub mod service;
 mod settings;
 mod steps;
@@ -30,6 +32,8 @@ pub struct Host {
     pub(crate) db: Connection,
     _lock: StoreLock,
     pub home: PathBuf,
+    /// When each timer whose last fire failed may try again; see `fire_due_schedules`.
+    fire_retries: std::collections::HashMap<String, i64>,
 }
 struct StoreLock(File);
 impl Drop for StoreLock {
@@ -105,6 +109,7 @@ impl Host {
         db.execute_batch(include_str!("live.sql"))?;
         db.execute_batch(include_str!("usage.sql"))?;
         db.execute_batch(include_str!("steps.sql"))?;
+        db.execute_batch(include_str!("schedules.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
@@ -112,6 +117,7 @@ impl Host {
             db,
             _lock: lock,
             home: home.to_path_buf(),
+            fire_retries: Default::default(),
         };
         host.recover()?;
         for policy in default_policies() {
@@ -205,7 +211,7 @@ impl Host {
         self.list_data("SELECT data FROM policies ORDER BY role", [])
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, policies: self.policies()?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, policies: self.policies()?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)? })
     }
     pub fn create_project(&mut self, name: &str) -> Result<Project> {
         text(name, 128)?;
@@ -442,6 +448,10 @@ impl Host {
                     Self::event(&tx, &project, Some(id), kind, &session.name)?;
                 }
             }
+            if archived {
+                let sessions = affected.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+                Self::stop_schedules_in(&tx, &sessions, None, "archived")?;
+            }
             if stops_project {
                 tx.execute(
                     "UPDATE live_projects SET enabled=0 WHERE project_id=?1",
@@ -465,10 +475,26 @@ impl Host {
             save(self)
         }
     }
+    /// Runs `work` as one unit: if it fails, none of its writes remain. Helpers called inside
+    /// must use savepoints rather than transactions.
+    pub(crate) fn atomically<T>(&mut self, work: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.db.execute_batch("SAVEPOINT atomically")?;
+        match work(self) {
+            Ok(value) => {
+                self.db.execute_batch("RELEASE atomically")?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.db
+                    .execute_batch("ROLLBACK TO atomically; RELEASE atomically")?;
+                Err(error)
+            }
+        }
+    }
     pub fn set_status(&mut self, id: &str, status: Status) -> Result<()> {
         let mut session = self.session(id)?;
         session.status = status;
-        let tx = self.db.transaction()?;
+        let tx = self.db.savepoint()?;
         tx.execute(
             "UPDATE sessions SET data=?2 WHERE id=?1",
             params![id, encode(&session)?],
@@ -595,7 +621,7 @@ impl Host {
         attachments: &[Attachment],
     ) -> Result<()> {
         let recipient = target.id.as_str();
-        let tx = self.db.transaction()?;
+        let tx = self.db.savepoint()?;
         tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7)", params![id, target.project_id, sender, recipient, body, now(), encode(&attachments)?])?;
         Self::event(
             &tx,
@@ -650,7 +676,7 @@ impl Host {
                 "Delivery must preserve recipient order"
             );
         }
-        let tx = self.db.transaction()?;
+        let tx = self.db.savepoint()?;
         tx.execute(
             "UPDATE messages SET receipt=?2 WHERE id=?1",
             params![id, tag(&next)?],

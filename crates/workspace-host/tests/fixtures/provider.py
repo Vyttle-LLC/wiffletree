@@ -6,7 +6,6 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-import tomllib
 import uuid
 
 args=sys.argv[1:]
@@ -45,6 +44,7 @@ if claude:
     config=json.loads(args[args.index('--mcp-config')+1])['mcpServers']['agent_workspace']
     resumed=args[args.index('--resume')+1] if '--resume' in args else None
 else:
+    import tomllib
     assert '--dangerously-bypass-approvals-and-sandbox' in args, args
     assert not any('sandbox_mode=' in a for a in args), args
     config=next(tomllib.loads(args[i+1])['mcp_servers']['agent_workspace'] for i,a in enumerate(args[:-1]) if a=='-c' and args[i+1].startswith('mcp_servers.'))
@@ -73,6 +73,9 @@ try:
         emit({'type':'rate_limit_event','rate_limit_info':{'rateLimitType':'five_hour','status':'allowed','utilization':0.25,'resetsAt':int(time.time())+300}})
     prompt=sys.stdin.read()
     ctx=tool('workspace_context');me=ctx['self'];role=me['role']
+    prompts=os.environ.get('WORKSPACE_TEST_PROMPT_DIR')
+    if prompts:
+        with open(Path(prompts)/f"{me['id']}.txt",'a') as log:log.write(prompt+'\n=====\n')
     # Every turn narrates and runs one command, so work steps stay out of the transcript.
     if claude:
         emit({'type':'stream_event','event':{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}}})
@@ -86,7 +89,9 @@ try:
     if 'HANG_UNTIL_CANCELLED' in prompt:time.sleep(30)
     if claude: emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'fixture-ls','content':'result.txt'}]}})
     else: emit({'type':'item.completed','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'result.txt\n','exit_code':0,'status':'completed'}})
-    if 'REQUEST_PERMISSION' in prompt:
+    if 'JUST_REPLY' in prompt:
+        result='NOTED'
+    elif 'REQUEST_PERMISSION' in prompt:
         permission=tool('request_permission',tool_name='Bash',input={'command':'python3 -m unittest'},tool_use_id='test-permission')
         result='PERMISSION_'+permission['behavior']
     elif role=='project_orchestrator':
@@ -100,20 +105,34 @@ try:
         if 'START_HANDOFF' in prompt:
             team=tool('create_repo_coordinator',repository_id=ctx['repositories'][0]['id'],provider='codex')
             tool('send_message',recipient=team['id'],message_id='start',body='Run the fixture ticket.')
-        result='MAIN_READY'
+        if 'SCHEDULE_TIMER' in prompt:
+            tool('schedule',label='Fixture check',prompt='TIMER_CHECK',at='+2s')
+        if 'SCHEDULE_MONITOR' in prompt:
+            tool('schedule',label='Service check',prompt='CHECK_SERVICE',every='30m',until='+3h')
+        timer_fire='Sender: your timer' in prompt and '[timer] Fixture check' in prompt and 'TIMER_CHECK' in prompt
+        # A coordinator's own read-only check: its final message is the result in the human's chat.
+        check='Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt
+        result='TIMER_FIRED' if timer_fire else 'SERVICE_HEALTHY' if check else 'MAIN_READY'
+    elif role=='task_orchestrator' and 'Sender: your timer' in prompt and 'CHECK_SERVICE' in prompt:
+        # A repository coordinator reports its check to its parent.
+        tool('report',message_id=str(uuid.uuid4()),kind='progress',body='Service healthy')
+        result='CHECK_REPORTED'
     elif role=='task_orchestrator':
         tickets=ctx['tickets']
         if not tickets:
             ticket=tool('create_ticket',title='Fixture ticket',brief='Create result.txt containing verified')
             tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture')
         elif tickets[0]['state']=='ready_for_testing':
+            assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
             tool('assign_ticket',ticket_id=tickets[0]['id'],role='tester',instruction='Verify fixture')
         elif tickets[0]['state']=='passed':
             tool('accept_ticket',ticket_id=tickets[0]['id'])
             tool('report',message_id='accepted',kind='completed',body='Independent verification passed')
         result='COORDINATED'
     elif role=='implementer':
+        tool('report',message_id='planned',kind='progress',body='Fixture planned')
         Path('result.txt').write_text('verified')
+        tool('report',message_id='written',kind='progress',body='Fixture written')
         # Acceptance removes the worktree and refuses uncommitted work, so the double commits like a real implementer.
         for git in [['add','result.txt'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-q','-m','Write result']]:
             subprocess.run(['git',*git],check=True,capture_output=True)

@@ -1,6 +1,11 @@
 //! Durable project teams, ticket workspaces and scoped agent operations.
 use crate::*;
 
+/// Reports per child that `workspace_context` lists, newest first.
+const CONTEXT_REPORTS_PER_CHILD: usize = 5;
+/// Characters of a report body shown in `workspace_context`.
+const CONTEXT_REPORT_SUMMARY_CHARS: usize = 200;
+
 impl Host {
     pub fn tickets(&self) -> Result<Vec<Ticket>> {
         self.list_data("SELECT data FROM tickets ORDER BY rowid", [])
@@ -39,7 +44,7 @@ impl Host {
                 ..Default::default()
             }))
     }
-    pub(crate) fn save_runtime(&self, runtime: &SessionRuntime) -> Result<()> {
+    pub fn save_runtime(&self, runtime: &SessionRuntime) -> Result<()> {
         self.db.execute("INSERT INTO runtimes VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET data=excluded.data", params![runtime.session_id,encode(runtime)?])?;
         Ok(())
     }
@@ -314,6 +319,10 @@ impl Host {
         if session.role == Role::ProjectOrchestrator {
             context["teams"] = json!(self.teams(id)?);
         }
+        let child_reports = self.child_reports(id)?;
+        if !child_reports.is_empty() {
+            context["child_reports"] = Value::Array(child_reports);
+        }
         Ok(context)
     }
     /// The main coordinator's view of each repository team and the state of its tickets.
@@ -329,6 +338,36 @@ impl Host {
                     .map(|t|json!({"id":t.id,"title":t.title,"state":t.state})).collect::<Vec<_>>()})
             })
             .collect())
+    }
+    /// Recent reports each direct child sent this session, newest first. Children
+    /// that never reported are omitted, so a session without children gets nothing.
+    fn child_reports(&self, id: &str) -> Result<Vec<Value>> {
+        let mut children = Vec::new();
+        for child in self
+            .sessions()?
+            .into_iter()
+            .filter(|s| s.parent_id.as_deref() == Some(id))
+        {
+            let reports = self
+                .db
+                .prepare("SELECT * FROM messages WHERE recipient=?1 AND sender=?2 AND id LIKE 'report:%' ORDER BY sequence DESC LIMIT ?3")?
+                .query_map(params![id, child.id, CONTEXT_REPORTS_PER_CHILD], Self::message_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if reports.is_empty() {
+                continue;
+            }
+            let reports = reports.iter().map(|m| {
+                // Body format is "[kind] name\nbody"; see the `report` tool.
+                let (head, body) = m.body.split_once('\n').unwrap_or((&m.body, ""));
+                let kind = head.strip_prefix('[').and_then(|h| h.split_once(']')).map_or("", |(k, _)| k);
+                let summary: String = body.chars().take(CONTEXT_REPORT_SUMMARY_CHARS).collect();
+                let ellipsis = if body.chars().count() > CONTEXT_REPORT_SUMMARY_CHARS { "…" } else { "" };
+                json!({"at":m.created_at,"kind":kind,"summary":format!("{summary}{ellipsis}"),
+                    "read":matches!(m.receipt, Receipt::Delivered | Receipt::Acknowledged | Receipt::Completed)})
+            }).collect::<Vec<_>>();
+            children.push(json!({"child_id":child.id,"child":child.name,"reports":reports}));
+        }
+        Ok(children)
     }
     /// Questions this session placed in the inbox that the human has not yet settled.
     pub fn open_questions(&self, session: &Session) -> Result<Vec<Attention>> {
@@ -370,6 +409,9 @@ impl Host {
         };
         match name {
             "workspace_context" => self.agent_context(id),
+            "schedule" | "unschedule" | "list_schedules" => {
+                self.schedule_tool(&session, name, &args, now())
+            }
             "send_message" => {
                 let recipient = self.session(string("recipient")?)?;
                 ensure!(
@@ -377,12 +419,21 @@ impl Host {
                         || recipient.parent_id.as_deref() == Some(id),
                     "Messages must follow coordinator ownership"
                 );
-                Ok(serde_json::to_value(self.send(
+                let message = self.send(
                     &format!("agent:{id}:{}", string("message_id")?),
                     Some(id),
                     &recipient.id,
                     string("body")?,
-                )?)?)
+                )?;
+                let mut receipt = serde_json::to_value(&message)?;
+                // Tool result only: the stored receipt stays `queued` until the next turn starts.
+                let recipient = self.session(&recipient.id)?;
+                if message.receipt == Receipt::Queued && recipient.status == Status::Working {
+                    receipt["receipt"] = json!("queued_behind_turn");
+                    receipt["recipient_turn_started_at"] =
+                        json!(self.session_runtime(&recipient.id)?.last_started_at);
+                }
+                Ok(receipt)
             }
             "create_repo_coordinator" => {
                 ensure!(
@@ -475,20 +526,9 @@ impl Host {
                     "Only verification agents report passed"
                 );
                 let body = string("body")?;
-                if kind == "progress" {
-                    Self::event(
-                        &self.db,
-                        &session.project_id,
-                        Some(id),
-                        "agent_progress",
-                        body,
-                    )?;
-                    return Ok(json!({"recorded":true,"woke_coordinator":false}));
-                }
-                let parent = session
-                    .parent_id
-                    .as_deref()
-                    .context("Main coordinator communicates with the human directly")?;
+                let parent = session.parent_id.as_deref().context(
+                    "You have no parent to report to; answer the human in this chat instead",
+                )?;
                 let report_id = format!("report:{id}:{}", string("message_id")?);
                 if let Ok(existing) = self.message(&report_id) {
                     ensure!(
@@ -503,9 +543,21 @@ impl Host {
                     parent,
                     &format!("[{kind}] {}\n{body}", session.name),
                 )?;
+                // Progress is delivered in batches (see the scheduler) and never moves the ticket
+                // or the reporter's status.
+                if kind == "progress" {
+                    Self::event(
+                        &self.db,
+                        &session.project_id,
+                        Some(id),
+                        "agent_progress",
+                        body,
+                    )?;
+                    return Ok(serde_json::to_value(message)?);
+                }
                 if let Some(ticket_id) = self.session_runtime(id)?.ticket_id {
                     let mut ticket = self.ticket(&ticket_id)?;
-                    if kind != "progress" && ticket.is_open() {
+                    if ticket.is_open() {
                         ticket.state = kind.into();
                         self.save_ticket(&ticket)?;
                     }
@@ -514,7 +566,6 @@ impl Host {
                     id,
                     match kind {
                         "blocked" | "failed" => Status::Blocked,
-                        "progress" => Status::Working,
                         _ => Status::Done,
                     },
                 )?;

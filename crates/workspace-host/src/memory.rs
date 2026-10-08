@@ -42,6 +42,17 @@ fn insert_entries(content: &str, additions: &str, repository: &str) -> String {
     }
     format!("{}{additions}{}", &content[..offset], &content[offset..])
 }
+/// Releases the brain lock explicitly. Closing the file is not enough: a child
+/// process forked by another thread before it execs shares the open file
+/// description and would keep the flock held after this writer is done.
+struct BrainLock(File);
+
+impl Drop for BrainLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 pub fn render_log(log: &WorkLog) -> String {
     let date = DateTime::<Utc>::from_timestamp_millis(log.created_at)
         .unwrap_or_default()
@@ -197,6 +208,7 @@ impl Host {
             .truncate(false)
             .open(root.join(".workspace-brain.lock"))?;
         lock.try_lock().context("Another writer owns this brain")?;
+        let _lock = BrainLock(lock);
         let logs: Vec<WorkLog> = self.list_data("SELECT data FROM work_logs l WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM log_exports e WHERE e.log_id=l.id AND e.brain=?2) ORDER BY sequence ASC LIMIT 100", params![project.id, brain])?;
         if logs.is_empty() {
             return Ok(0);

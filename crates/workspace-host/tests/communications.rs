@@ -261,6 +261,123 @@ fn ticket_agents_are_scoped_and_reports_are_immediate_and_idempotent() {
 }
 
 #[test]
+fn progress_reaches_the_parent_without_moving_the_ticket_or_the_reporter() {
+    let (_home, _repo, mut host, root, coordinator) = fixture();
+    let ticket = host
+        .create_ticket(&coordinator.id, "Progress", "Report as you go")
+        .unwrap();
+    let implementer = host
+        .assign_ticket(
+            &ticket.id,
+            Role::Implementer,
+            Provider::Codex,
+            "Implement",
+            None,
+        )
+        .unwrap();
+    let progress = json!({"message_id":"halfway","kind":"progress","body":"Parser done"});
+    let report: Message = serde_json::from_value(
+        host.agent_tool(&implementer.id, "report", progress.clone())
+            .unwrap(),
+    )
+    .unwrap();
+    host.agent_tool(&implementer.id, "report", progress)
+        .unwrap();
+    assert_eq!(report.id, format!("report:{}:halfway", implementer.id));
+    assert_eq!(
+        report.body,
+        format!("[progress] {}\nParser done", implementer.name)
+    );
+    assert_eq!(
+        host.messages(&coordinator.id, None, 100).unwrap(),
+        vec![report]
+    );
+    let progress_rows = host
+        .activity(&root.project_id, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.kind == "agent_progress")
+        .count();
+    assert_eq!(progress_rows, 1, "Every progress row has its message");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "assigned");
+    assert_eq!(
+        host.session(&implementer.id).unwrap().status,
+        implementer.status
+    );
+    let error = host
+        .agent_tool(
+            &root.id,
+            "report",
+            json!({"message_id":"orphan","kind":"progress","body":"No parent"}),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("human in this chat"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn workspace_context_lists_each_childs_recent_reports_newest_first() {
+    let (_home, _repo, mut host, _root, coordinator) = fixture();
+    let ticket = host
+        .create_ticket(&coordinator.id, "One ticket", "Report twice and be listed")
+        .unwrap();
+    let implementer = host
+        .assign_ticket(
+            &ticket.id,
+            Role::Implementer,
+            Provider::Codex,
+            "Implement",
+            None,
+        )
+        .unwrap();
+    assert!(
+        host.agent_tool(&coordinator.id, "workspace_context", json!({}))
+            .unwrap()
+            .get("child_reports")
+            .is_none(),
+        "A child that never reported adds nothing"
+    );
+    for (id, kind, body) in [
+        ("first", "blocked", "Need a decision"),
+        ("second", "failed", "Tests fail"),
+    ] {
+        host.agent_tool(
+            &implementer.id,
+            "report",
+            json!({"message_id":id,"kind":kind,"body":body}),
+        )
+        .unwrap();
+    }
+    let first = host
+        .message(&format!("report:{}:first", implementer.id))
+        .unwrap();
+    host.advance_receipt(&first.id, Receipt::Delivered).unwrap();
+    let context = host
+        .agent_tool(&coordinator.id, "workspace_context", json!({}))
+        .unwrap();
+    let listed = &context["child_reports"][0];
+    assert_eq!(listed["child_id"], implementer.id);
+    let reports = listed["reports"].as_array().unwrap();
+    let kinds: Vec<_> = reports
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["failed", "blocked"]);
+    assert_eq!(reports[0]["summary"], "Tests fail");
+    assert_eq!(reports[0]["read"], false);
+    assert_eq!(reports[1]["read"], true);
+    assert!(
+        host.agent_tool(&implementer.id, "workspace_context", json!({}))
+            .unwrap()
+            .get("child_reports")
+            .is_none(),
+        "Workers without children see nothing new"
+    );
+}
+
+#[test]
 fn coordinator_closes_questions_the_human_already_settled() {
     let (_home, _repo, mut host, root, coordinator) = fixture();
     let ask = |host: &mut Host, request: &str| {
@@ -560,6 +677,8 @@ fn archiving_a_team_names_every_blocker_then_closes_accepted_work() {
 
     host.set_status(&worker.id, Status::Done).unwrap();
     host.close_ticket(&open.id).unwrap();
+    let timer = json!({"label":"Check","prompt":"Check the build","every":"30m"});
+    host.agent_tool(&coordinator.id, "schedule", timer).unwrap();
     let team: Vec<Session> = serde_json::from_value(
         host.agent_tool(&root.id, "archive_team", archive.clone())
             .unwrap(),
@@ -573,6 +692,10 @@ fn archiving_a_team_names_every_blocker_then_closes_accepted_work() {
     }
     assert!(!host.session(&root.id).unwrap().archived);
     assert_eq!(host.ticket(&accepted.id).unwrap().state, "closed");
+    assert!(
+        host.snapshot().unwrap().schedules.is_empty(),
+        "Archiving a team stops its timers"
+    );
     let archived_events = |host: &Host| {
         host.activity(&root.project_id, None, 100)
             .unwrap()
@@ -636,5 +759,35 @@ fn a_failed_team_archive_leaves_the_team_active_and_a_retry_records_it() {
     assert_eq!(
         events.iter().filter(|a| a.kind == "team_archived").count(),
         1
+    );
+}
+
+#[test]
+fn send_message_tells_the_sender_when_the_recipient_is_mid_turn() {
+    let (_home, _repo, mut host, root, coordinator) = fixture();
+    let send = |host: &mut Host, id: &str| {
+        host.agent_tool(
+            &root.id,
+            "send_message",
+            json!({"recipient":coordinator.id,"message_id":id,"body":"Next step"}),
+        )
+        .unwrap()
+    };
+    let idle = send(&mut host, "idle");
+    assert_eq!(idle["receipt"], "queued");
+    assert!(idle.get("recipient_turn_started_at").is_none());
+
+    host.set_status(&coordinator.id, Status::Working).unwrap();
+    let mut runtime = host.session_runtime(&coordinator.id).unwrap();
+    runtime.last_started_at = Some(1_791_403_377_633);
+    host.save_runtime(&runtime).unwrap();
+    let busy = send(&mut host, "busy");
+    assert_eq!(busy["receipt"], "queued_behind_turn");
+    assert_eq!(busy["recipient_turn_started_at"], 1_791_403_377_633_i64);
+    assert_eq!(
+        host.message(&format!("agent:{}:busy", root.id))
+            .unwrap()
+            .receipt,
+        Receipt::Queued
     );
 }

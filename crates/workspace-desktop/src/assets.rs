@@ -63,6 +63,10 @@ const DRAWINGS: &[(&str, &str)] = &[
     ),
     ("activity", r#"<path d="M3 12h4l3-7 4 14 3-7h4"/>"#),
     (
+        "clock",
+        r#"<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>"#,
+    ),
+    (
         "git",
         r#"<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10m12-10a9 9 0 0 1-9 9H6"/>"#,
     ),
