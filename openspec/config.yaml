@@ -4,6 +4,6 @@ context: |
   Product: Wiffletree, a provider-agnostic agent orchestration workspace.
   Read docs/PRD.md for current requirements and proposed performance budgets.
   Stack: Rust orchestration host, GPUI macOS client; headless Linux support.
-  Hierarchy: project orchestrator -> task orchestrators -> multiple agents.
+  Hierarchy: project coordinator -> tickets (one repository worktree each) -> agents.
   Project storage is independent of code repositories.
   design/mockups/current is a simulated HTML design study, not the application.
