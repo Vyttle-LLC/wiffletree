@@ -175,7 +175,7 @@ fn every_way_a_turn_ends_stops_its_whole_process_group_promptly() {
     let replies = replies(&service, &main.id);
     assert_eq!(replies, 4, "every finished turn posts its reply");
 
-    // Stop, which uses the same cancel flag as a parent's stop_turn.
+    // Stop, which uses the same cancel flag as a parent's stop_agents.
     linger("stop");
     let stopped = Instant::now();
     request(

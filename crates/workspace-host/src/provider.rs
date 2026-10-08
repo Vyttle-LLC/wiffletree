@@ -269,10 +269,8 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     } else {
         None
     };
-    ensure!(
-        !cancel.load(Ordering::Relaxed),
-        "Turn interrupted before provider launch"
-    );
+    // A stop that lands before launch is a cancellation like any other.
+    check_running(&cancel)?;
     let input = input(&turn)?;
     let mut process = Process {
         child: command(&turn)?

@@ -56,10 +56,16 @@ pub fn tools() -> Value {
             vec!["message_id", "kind", "body"]
         ),
         tool(
-            "stop_turn",
-            "Stop your direct child's running turn, for example after a check-in shows it stuck or on the wrong path. Give the reason; its next turn is told why. Its input is not retried, so send it what to do next. To let a turn continue, do nothing.",
-            json!({"session_id":string,"reason":string}),
-            vec!["session_id", "reason"]
+            "stop_agents",
+            "Stop your direct children named in session_ids, or all of them when omitted, for example after a check-in shows one stuck or on the wrong path. Running turns stop and their input is not retried; idle children are paused. Each stays paused, so messages and timer fires wait until you call resume_agent. Give the reason; the next turn is told why. Returns stopped, paused_idle or already_paused per agent. Other arguments are refused, so a mistyped session_ids never stops every child.",
+            json!({"session_ids":{"type":"array","items":string},"reason":string}),
+            vec!["reason"]
+        ),
+        tool(
+            "resume_agent",
+            "Resume a direct child that is paused or interrupted: stopped by you, by the human or by a host restart or failure. Resume a child the human stopped only when the human says so. If it has held input from an interrupted turn, inspect its worktree first, then pass held: retry to redeliver it with a note that the turn was interrupted, or skip to drop it. message is delivered as new input. A turn starts when it has input; the result says who stopped the child. Refused while the child is working, not stopped or archived, and then nothing changes.",
+            json!({"session_id":string,"held":{"type":"string","enum":["retry","skip"]},"message":string}),
+            vec!["session_id"]
         ),
         tool(
             "schedule",

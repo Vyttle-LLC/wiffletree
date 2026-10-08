@@ -416,10 +416,34 @@ impl Workspace {
 
     fn status_detail(&self, session: &Session) -> String {
         let label = status_label(session.status);
-        if self.shown_status(session) == session.status {
+        let mut detail = if self.shown_status(session) == session.status {
             label.to_owned()
         } else {
             format!("{label} · Team working")
+        };
+        if let Some(waiting) = self.waiting_input(session) {
+            detail = format!("{detail} · {waiting}");
+        }
+        detail
+    }
+
+    /// Names input a session is not running: held while it is stopped or after an interrupted
+    /// turn, or queued while it is idle.
+    fn waiting_input(&self, session: &Session) -> Option<&'static str> {
+        let input = self
+            .snapshot
+            .as_ref()?
+            .undelivered
+            .iter()
+            .find(|u| u.session_id == session.id)?;
+        let stopped = matches!(session.status, Status::Paused | Status::Disconnected);
+        let idle = matches!(session.status, Status::Ready | Status::Done);
+        if input.held > 0 || (stopped && input.queued > 0) {
+            Some("held")
+        } else if idle && input.queued > 0 {
+            Some("queued input")
+        } else {
+            None
         }
     }
 
@@ -659,6 +683,15 @@ impl Workspace {
                     .when(depth == 1, |d| d.font_weight(FontWeight::MEDIUM))
                     .child(label),
             )
+            .when_some(self.waiting_input(session), |d, waiting| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(p.subtle)
+                        .child(waiting),
+                )
+            })
             .child(div().flex_none().child(status_glyph(status, 12., p)))
     }
 
