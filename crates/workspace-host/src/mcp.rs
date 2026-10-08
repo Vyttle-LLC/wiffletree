@@ -55,6 +55,12 @@ pub fn tools() -> Value {
             vec!["message_id", "kind", "body"]
         ),
         tool(
+            "stop_turn",
+            "Stop your direct child's running turn, for example after a check-in shows it stuck or on the wrong path. Give the reason; its next turn is told why. Its input is not retried, so send it what to do next. To let a turn continue, do nothing.",
+            json!({"session_id":string,"reason":string}),
+            vec!["session_id", "reason"]
+        ),
+        tool(
             "schedule",
             "Coordinator: set a durable timer that sends you prompt at its time, as your own message, even between turns and across host restarts. Give at (RFC 3339 or an offset like +90m), every (e.g. 30m, 2h; at least 5m) or both, and optionally until. Fires that pile up while you are busy or the host is stopped arrive once, marked late. Provider-native schedulers do not fire between managed turns; use this instead. Returns the timer id and next fire time.",
             json!({"label":string,"prompt":string,"at":string,"every":string,"until":string}),

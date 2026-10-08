@@ -254,16 +254,11 @@ impl std::fmt::Display for Cancelled {
     }
 }
 impl std::error::Error for Cancelled {}
-const TURN_LIMIT: Duration = Duration::from_secs(60 * 30);
-/// Stops a turn that was cancelled or ran past the provider limit, in any phase that waits.
-fn check_running(cancel: &AtomicBool, start: Instant) -> Result<()> {
+/// Stops a cancelled turn, in any phase that waits.
+fn check_running(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Relaxed) {
         return Err(Cancelled.into());
     }
-    ensure!(
-        start.elapsed() < TURN_LIMIT,
-        "Provider turn exceeded 30-minute limit; inspect work before retrying"
-    );
     Ok(())
 }
 pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEvent)) -> Result<()> {
@@ -311,7 +306,6 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let stdout = process.child.stdout.take().context("No provider stdout")?;
     let output = Output::spawn(stdout)?;
     let _stop_reading = StopReading(output.clone());
-    let start = Instant::now();
     let mut terminal = false;
     let mut failure = None;
     let mut usage = Value::Null;
@@ -322,7 +316,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     // it. Every event the reader accepted is handled; the reader decides when to stop.
     let mut exited = false;
     loop {
-        check_running(&cancel, start)?;
+        check_running(&cancel)?;
         if !exited && process.exited()? {
             // First, so the reader never waits for room while the group is being stopped.
             output.provider_exited();
@@ -433,7 +427,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     // A provider can close stdout and keep running; returning early drops `process`, which
     // stops its whole process group.
     while !process.exited()? {
-        check_running(&cancel, start)?;
+        check_running(&cancel)?;
         std::thread::sleep(Duration::from_millis(50));
     }
     // Stops tool subprocesses that outlived the provider.

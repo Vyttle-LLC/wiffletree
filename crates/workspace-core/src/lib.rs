@@ -277,8 +277,6 @@ pub enum Complexity {
     Standard,
     Complex,
 }
-/// The longest turn budget a policy may set; the provider runner stops every turn at 30 minutes.
-pub const MAX_TURN_BUDGET_MINUTES: u32 = 30;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RolePolicy {
     pub role: Role,
@@ -290,9 +288,6 @@ pub struct RolePolicy {
     pub complex: ModelProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_profiles: Vec<ProviderProfiles>,
-    /// Overrides the role's default turn budget; see `turn_budget`.
-    #[serde(default)]
-    pub turn_budget_minutes: Option<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProfiles {
@@ -319,15 +314,6 @@ pub struct Route {
     pub catalog_verified: bool,
 }
 impl RolePolicy {
-    /// How long the host lets one coordinator turn run: the policy's own budget, else
-    /// 10 minutes so coordinators stay available. Workers have none, because a cut-off turn's
-    /// input is not retried and their uncertain write work must be held instead.
-    pub fn turn_budget(&self) -> Option<u32> {
-        if self.role.is_worker() {
-            return None;
-        }
-        Some(self.turn_budget_minutes.unwrap_or(10))
-    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             !self.allowed.is_empty() && self.allowed.len() <= 32,
@@ -354,15 +340,6 @@ impl RolePolicy {
                 "Invalid effort"
             );
         }
-        ensure!(
-            self.turn_budget_minutes.is_none() || !self.role.is_worker(),
-            "Only coordinator roles have a turn budget"
-        );
-        ensure!(
-            self.turn_budget_minutes
-                .is_none_or(|minutes| (1..=MAX_TURN_BUDGET_MINUTES).contains(&minutes)),
-            "Turn budget must be 1–{MAX_TURN_BUDGET_MINUTES} minutes"
-        );
         if !self.provider_profiles.is_empty() {
             ensure!(
                 self.provider_profiles.len() == 2,
@@ -488,7 +465,6 @@ pub fn default_policies() -> Vec<RolePolicy> {
                 standard: sol.clone(),
                 complex: astra.clone(),
                 provider_profiles: Vec::new(),
-                turn_budget_minutes: None,
             };
             if matches!(
                 role,

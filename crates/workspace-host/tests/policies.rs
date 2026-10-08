@@ -26,41 +26,40 @@ fn legacy(role: Role) -> RolePolicy {
         standard: default,
         complex,
         provider_profiles: Vec::new(),
-        turn_budget_minutes: None,
     }
 }
 
 #[test]
-fn stored_policies_without_a_turn_budget_load_with_their_role_default() {
+fn stored_policies_with_a_former_turn_budget_still_load() {
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open(home.path()).unwrap();
     let mut custom = legacy(Role::TaskOrchestrator);
-    custom.turn_budget_minutes = Some(25);
+    custom.mode = RoutingMode::Automatic;
     host.set_policy(&custom).unwrap();
     drop(host);
-    // Strip the field the way a store written before turn budgets has it.
+    // Stores written while turns had time budgets keep the field.
     let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
     db.execute(
-        "UPDATE policies SET data=json_remove(data,'$.turn_budget_minutes') WHERE role IN ('project_orchestrator','implementer')",
+        "UPDATE policies SET data=json_set(data,'$.turn_budget_minutes',25)",
         [],
     )
     .unwrap();
     drop(db);
-    let host = Host::open(home.path()).unwrap();
-    let budget = |role| host.policy(role).unwrap().turn_budget();
-    assert_eq!(budget(Role::ProjectOrchestrator), Some(10));
-    assert_eq!(budget(Role::Implementer), None);
-    assert_eq!(budget(Role::TaskOrchestrator), Some(25));
-    let mut over = legacy(Role::ProjectOrchestrator);
-    for minutes in [0, MAX_TURN_BUDGET_MINUTES + 1] {
-        over.turn_budget_minutes = Some(minutes);
-        assert!(over.validate().is_err(), "{minutes}");
-    }
-    // A worker's cut-off turn would complete uncertain write work instead of holding it.
-    let mut worker = legacy(Role::Implementer);
-    worker.turn_budget_minutes = Some(5);
-    assert!(worker.validate().is_err());
-    assert_eq!(worker.turn_budget(), None, "even if one was stored");
+    let mut host = Host::open(home.path()).unwrap();
+    assert_eq!(host.policies().unwrap().len(), Role::ALL.len());
+    assert_eq!(host.policy(Role::TaskOrchestrator).unwrap(), custom);
+    // Saving drops it.
+    host.set_policy(&custom).unwrap();
+    drop(host);
+    let stored: String = Connection::open(home.path().join("workspace.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT data FROM policies WHERE role='task_orchestrator'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("turn_budget"), "{stored}");
 }
 
 #[test]
@@ -217,9 +216,6 @@ fn four_role_defaults_save_atomically_and_keep_existing_agents() {
                 .collect(),
         })
         .collect();
-    let mut custom = host.policy(Role::TaskOrchestrator).unwrap();
-    custom.turn_budget_minutes = Some(3);
-    host.set_policy(&custom).unwrap();
     let previous = host.policies().unwrap();
     let mut invalid = defaults.clone();
     invalid[3].profiles[1].small.effort.clear();
@@ -256,14 +252,6 @@ fn four_role_defaults_save_atomically_and_keep_existing_agents() {
         host.policy(new_root.role).unwrap().default,
         defaults[0].profiles[0].big
     );
-    let budget = |role| host.policy(role).unwrap().turn_budget();
-    assert_eq!(
-        budget(Role::TaskOrchestrator),
-        Some(3),
-        "defaults keep budgets"
-    );
-    assert_eq!(budget(Role::ProjectOrchestrator), Some(10));
-    assert_eq!(budget(Role::Tester), None);
     drop(host);
     let host = Host::open(home.path()).unwrap();
     for entry in defaults {
