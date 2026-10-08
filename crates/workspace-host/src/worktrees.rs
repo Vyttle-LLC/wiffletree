@@ -281,7 +281,12 @@ impl Host {
             "Wiffletree kept the worktree of ticket \"{}\" ({}) at {} instead of removing it: {reason:#}. Its branch {} is kept. Commit or discard that work, then remove the worktree yourself.",
             ticket.title, ticket.id, ticket.worktree, ticket.branch
         );
-        let notice: String = notice.chars().take(4000).collect();
+        // Attention prompts allow 4096 bytes; cut on a character boundary within that.
+        let mut end = notice.len().min(4096);
+        while !notice.is_char_boundary(end) {
+            end -= 1;
+        }
+        let notice = &notice[..end];
         let id = format!("worktree-kept:{}:{marked_at}", ticket.id);
         let mut owner = Some(self.session(&ticket.coordinator_id)?);
         while let Some(session) = owner.take_if(|s| s.archived) {
@@ -294,11 +299,11 @@ impl Host {
         match owner {
             Some(owner) => {
                 if self.message(&id).is_err() {
-                    self.send(&id, None, &owner.id, &notice)?;
+                    self.send(&id, None, &owner.id, notice)?;
                 }
             }
             None => {
-                self.request_attention(&ticket.coordinator_id, "local", &id, &notice, &[])?;
+                self.request_attention(&ticket.coordinator_id, "local", &id, notice, &[])?;
             }
         }
         let coordinator = self.session(&ticket.coordinator_id)?;

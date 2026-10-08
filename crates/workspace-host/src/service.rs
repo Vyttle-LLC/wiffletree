@@ -539,7 +539,10 @@ impl Actor {
                 } else if session.status == Status::Working {
                     self.host.set_status(id, Status::Ready)?;
                 }
+                self.host.settle_pending_worktrees()?;
+                // A deliberately archived parent has no one to wake.
                 if let Some(parent) = &session.parent_id
+                    && !self.host.session(parent)?.archived
                     && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
                     let body = if let Some(error) = &error {
@@ -581,7 +584,6 @@ impl Actor {
                     "turn_finished",
                     run,
                 )?;
-                self.host.settle_pending_worktrees()?;
             }
         }
         Ok(())
@@ -961,8 +963,8 @@ mod tests {
         (actor, changes, step_changes)
     }
 
-    /// A closed ticket whose tester is still in its turn, run `run`, so removal is pending.
-    fn ticket_pending_removal() -> (tempfile::TempDir, Actor, Ticket, Session) {
+    /// A ticket whose tester is in its turn, run `run`, under its repository coordinator.
+    fn ticket_in_turn() -> (tempfile::TempDir, Actor, Ticket, Session, Session) {
         let home = tempfile::tempdir().unwrap();
         let repository = home.path().join("web");
         fs::create_dir_all(&repository).unwrap();
@@ -1019,10 +1021,61 @@ mod tests {
                 [&tester.id],
             )
             .unwrap();
-        host.close_ticket(&ticket.id).unwrap();
-        assert!(Path::new(&ticket.worktree).exists());
         let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, tester, coordinator)
+    }
+
+    /// The same ticket closed, so its worktree removal waits for the tester's turn.
+    fn ticket_pending_removal() -> (tempfile::TempDir, Actor, Ticket, Session) {
+        let (home, mut actor, ticket, tester, _) = ticket_in_turn();
+        actor.host.close_ticket(&ticket.id).unwrap();
+        assert!(Path::new(&ticket.worktree).exists());
         (home, actor, ticket, tester)
+    }
+
+    fn finish(actor: &mut Actor, session: &Session, reported: bool, error: Option<&str>) {
+        actor.active.insert(
+            session.id.clone(),
+            Active {
+                run: "run".into(),
+                token: String::new(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                messages: vec![],
+                output: String::new(),
+                reported,
+                steps: vec![],
+                omitted_steps: 0,
+            },
+        );
+        actor
+            .provider_event(
+                &session.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: error.map(Into::into),
+                    usage: Value::Null,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_turn_under_an_archived_team_performs_its_pending_removal() {
+        for archive_root in [true, false] {
+            let (_home, mut actor, ticket, tester, coordinator) = ticket_in_turn();
+            let archived = if archive_root {
+                coordinator.parent_id.clone().unwrap()
+            } else {
+                coordinator.id.clone()
+            };
+            actor.host.set_archived(&archived, true).unwrap();
+            assert!(Path::new(&ticket.worktree).exists());
+
+            finish(&mut actor, &tester, false, Some("Turn interrupted"));
+
+            assert!(!Path::new(&ticket.worktree).exists());
+            assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -1044,30 +1097,8 @@ mod tests {
     #[test]
     fn a_finished_turn_performs_its_ticket_pending_removal() {
         let (_home, mut actor, ticket, tester) = ticket_pending_removal();
-        actor.active.insert(
-            tester.id.clone(),
-            Active {
-                run: "run".into(),
-                token: String::new(),
-                cancel: Arc::new(AtomicBool::new(false)),
-                messages: vec![],
-                output: String::new(),
-                reported: true,
-                steps: vec![],
-                omitted_steps: 0,
-            },
-        );
 
-        actor
-            .provider_event(
-                &tester.id,
-                "run",
-                ProviderEvent::Finished {
-                    error: None,
-                    usage: Value::Null,
-                },
-            )
-            .unwrap();
+        finish(&mut actor, &tester, true, None);
 
         assert!(!Path::new(&ticket.worktree).exists());
         assert!(actor.host.pending_worktree_removals().unwrap().is_empty());
