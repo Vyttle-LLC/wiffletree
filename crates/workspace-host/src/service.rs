@@ -1191,18 +1191,7 @@ impl Actor {
         if self.active.len() >= HOST_TURNS {
             return Ok(());
         }
-        // A round's verifiers start together or not at all. While a round waits for capacity,
-        // no other worker turn starts anywhere, so freed slots accumulate until it fits.
-        let mut in_rounds = HashSet::new();
-        let mut hold_workers = false;
-        for (ticket, members) in self.waiting_rounds()? {
-            match self.admit_round(&ticket, &members)? {
-                Admission::Started => {}
-                Admission::Waiting => hold_workers = true,
-                Admission::Stuck => {}
-            }
-            in_rounds.extend(members.into_iter().map(|s| s.id));
-        }
+        let (in_rounds, hold_workers) = self.admit_rounds()?;
         // Quiet messages ride along with the next turn but never start one.
         let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY CASE WHEN s.role IN ('project_orchestrator','task_orchestrator') THEN 0 ELSE 1 END,m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut considered = HashSet::new();
@@ -1286,6 +1275,19 @@ impl Actor {
             }
         }
         Ok(false)
+    }
+    /// Starts each verification round that fits. A round's verifiers start together or not at
+    /// all, so they are never scheduled one by one. Returns them, and whether a round is waiting
+    /// for capacity: then no other worker turn starts anywhere, so freed slots accumulate until
+    /// it fits.
+    fn admit_rounds(&mut self) -> Result<(HashSet<String>, bool)> {
+        let mut members_of_rounds = HashSet::new();
+        let mut waiting = false;
+        for (ticket, members) in self.waiting_rounds()? {
+            waiting |= matches!(self.admit_round(&ticket, &members)?, Admission::Waiting);
+            members_of_rounds.extend(members.into_iter().map(|s| s.id));
+        }
+        Ok((members_of_rounds, waiting))
     }
     /// Each running cycle's current round whose verifiers still have their round message queued.
     fn waiting_rounds(&self) -> Result<Vec<(Ticket, Vec<Session>)>> {
@@ -1638,6 +1640,22 @@ mod tests {
 
     /// A ticket whose tester is in its turn, run `run`, under its project coordinator.
     fn ticket_in_turn() -> (tempfile::TempDir, Actor, Ticket, Session, Session) {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        let tester = host
+            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+            .unwrap();
+        host.db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
+                [&tester.id],
+            )
+            .unwrap();
+        let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, tester, coordinator)
+    }
+
+    /// A ticket "Toolbar" in a fresh repository, owned by its project's coordinator.
+    fn ticket_fixture() -> (tempfile::TempDir, Host, Ticket, Session) {
         let home = tempfile::tempdir().unwrap();
         let repository = home.path().join("web");
         fs::create_dir_all(&repository).unwrap();
@@ -1676,17 +1694,169 @@ mod tests {
         let ticket = host
             .create_ticket(&coordinator.id, &attached.id, "Toolbar", "Do")
             .unwrap();
-        let tester = host
-            .assign_ticket(&ticket.id, Role::Tester, Provider::Claude, "Test", None)
+        (home, host, ticket, coordinator)
+    }
+
+    /// A live project whose ticket has a verification round of `count` testers queued and not
+    /// yet started.
+    fn waiting_round(count: usize) -> (tempfile::TempDir, Actor, Ticket, Vec<String>) {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        host.set_verification(VerificationSettings {
+            verifiers: (0..count)
+                .map(|i| VerifierConfig {
+                    role: Role::Tester,
+                    focus: format!("Tester {i}"),
+                    instruction: None,
+                    provider: None,
+                    size: None,
+                })
+                .collect(),
+            max_rounds: 2,
+        })
+        .unwrap();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Do", None)
             .unwrap();
-        host.db
-            .execute(
-                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
-                [&tester.id],
+        host.agent_tool(
+            &implementer.id,
+            "report",
+            json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"}),
+        )
+        .unwrap();
+        let ticket = host.verify_ticket(&ticket.id).unwrap();
+        host.set_live(&coordinator.project_id, true).unwrap();
+        let verifiers = ticket.verification.as_ref().unwrap().rounds[0]
+            .verifiers
+            .iter()
+            .map(|v| v.session_id.clone())
+            .collect();
+        let (actor, _, _) = idle_actor(host);
+        (home, actor, ticket, verifiers)
+    }
+
+    fn queued(actor: &Actor, ticket: &Ticket) -> usize {
+        ticket.verification.as_ref().unwrap().rounds[0]
+            .verifiers
+            .iter()
+            .filter(|v| actor.host.message(&v.message_id).unwrap().receipt == Receipt::Queued)
+            .count()
+    }
+
+    #[test]
+    fn testers_verifying_a_ticket_share_its_worktree_but_writers_do_not() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        let second = actor.host.session(&verifiers[1]).unwrap();
+        actor
+            .active
+            .insert(verifiers[0].clone(), active_turn("first", vec![], None));
+        assert!(!actor.worktree_busy(&ticket.id, &second).unwrap());
+
+        let implementer = actor
+            .host
+            .ticket_agents(&ticket.id)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.role == Role::Implementer)
+            .unwrap();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("write", vec![], None));
+        assert!(actor.worktree_busy(&ticket.id, &second).unwrap());
+        actor.active.remove(&implementer.id);
+
+        let ad_hoc = actor
+            .host
+            .assign_ticket(
+                &ticket.id,
+                Role::Tester,
+                Provider::Codex,
+                "Test",
+                Some("Extra"),
             )
             .unwrap();
-        let (actor, _, _) = idle_actor(host);
-        (home, actor, ticket, tester, coordinator)
+        assert!(
+            actor.worktree_busy(&ticket.id, &ad_hoc).unwrap(),
+            "a tester outside the cycle still writes"
+        );
+    }
+
+    #[test]
+    fn a_round_that_does_not_fit_the_project_waits_whole_and_holds_other_workers() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(3);
+        // Another ticket's worker takes one of the project's three worker turns.
+        let other = actor
+            .host
+            .create_ticket(&ticket.coordinator_id, &ticket.repository_id, "Other", "Do")
+            .unwrap();
+        let busy = actor
+            .host
+            .assign_ticket(&other.id, Role::Implementer, Provider::Codex, "Do", None)
+            .unwrap();
+        actor
+            .active
+            .insert(busy.id.clone(), active_turn("busy", vec![], None));
+
+        let (members, waiting) = actor.admit_rounds().unwrap();
+
+        assert!(waiting, "other workers are held");
+        assert_eq!(members, verifiers.iter().cloned().collect::<HashSet<_>>());
+        assert_eq!(actor.active.len(), 1, "no verifier started alone");
+        assert_eq!(queued(&actor, &ticket), 3);
+    }
+
+    #[test]
+    fn a_round_that_does_not_fit_the_host_waits_and_holds_workers_in_every_project() {
+        let (_home, mut actor, ticket, _verifiers) = waiting_round(3);
+        for i in 0..4 {
+            actor.host.create_project(&format!("Busy {i}")).unwrap();
+        }
+        let elsewhere: Vec<String> = actor
+            .host
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.project_id != ticket_project(&actor, &ticket))
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(elsewhere.len(), 4);
+        for id in elsewhere {
+            actor.active.insert(id, active_turn("busy", vec![], None));
+        }
+
+        let (_, waiting) = actor.admit_rounds().unwrap();
+
+        assert!(
+            waiting,
+            "4 active turns leave 2 of the host's 6 worker turns"
+        );
+        assert_eq!(actor.active.len(), 4);
+        assert_eq!(queued(&actor, &ticket), 3);
+    }
+
+    #[test]
+    fn a_round_with_a_paused_verifier_waits_without_holding_other_workers() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        actor
+            .host
+            .set_status(&verifiers[1], Status::Paused)
+            .unwrap();
+
+        let (members, waiting) = actor.admit_rounds().unwrap();
+
+        assert!(
+            !waiting,
+            "a round that cannot start does not stall the host"
+        );
+        assert_eq!(members.len(), 2, "its verifiers still start only together");
+        assert_eq!(queued(&actor, &ticket), 2);
+    }
+
+    fn ticket_project(actor: &Actor, ticket: &Ticket) -> String {
+        actor
+            .host
+            .session(&ticket.coordinator_id)
+            .unwrap()
+            .project_id
     }
 
     /// The same ticket closed, so its worktree removal waits for the tester's turn.
