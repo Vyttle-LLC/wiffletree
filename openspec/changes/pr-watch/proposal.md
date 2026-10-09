@@ -1,6 +1,6 @@
 ## Why
 
-Once a ticket's PR opens, Wiffletree knows nothing about it. Nobody sees checks, review threads or conflicts in the tree. The ticket is accepted only when someone notices the merge and tells the coordinator. Coordinator timers can't fill the gap: each fire is a turn on the coordinator's model, and polling every 5 minutes would hit the 100-turn brake in about 8 hours. The PRD already calls for a watcher that is "ordinary background software" polling GitHub without a model (`docs/PRD.md:46`, `:384-404`). This change builds its first slice.
+Once a ticket's PR opens, Wiffletree knows nothing about it. Nobody sees checks, review threads or conflicts in the tree. The ticket is accepted only when someone notices the merge and tells the coordinator. Coordinator timers can't fill the gap: each fire is a turn on the coordinator's model. Polling every 5 minutes would cost 288 coordinator turns a day and raise a turn-count check-in with the human about every 8 hours. The PRD already calls for a watcher that is "ordinary background software" polling GitHub without a model (`docs/PRD.md:46`, `:384-404`). This change builds its first slice.
 
 ## What Changes
 

@@ -1,12 +1,12 @@
 ## Context
 
-See proposal.md for why. The code this builds on, at origin/main be5f484:
+See proposal.md for why. The code this builds on, at origin/main 6b1e7c9:
 
-- `workspace-host/src/service.rs`: `Actor::process` (`:574`) handles one event, then runs `schedule`, then `refresh_overlaps`, then `signal`. `refresh_overlaps` (`:587`) checks each repository with open tickets at most every 5 minutes. It runs Git on its own thread through `spawn_overlap_check` (`:255`), which catches panics and always sends `Event::Overlaps` back (`:287`, handled at `:857`). It arms no wake-up, so it runs only when some event arrives. `Actor::wake` (`:1752`) keeps the single earliest wake-up and sleeps at most `MAX_WAKE_SLEEP_MS` (`:34`). `schedule` (`:1473`) fires timers and starts turns only for live projects. `turn_prompt` (`:55`) labels a message by its sender and calls `timer:` fires "your timer".
+- `workspace-host/src/service.rs`: `Actor::process` (`:558`) handles one event, then runs `schedule`, then `refresh_overlaps`, then `signal`. `refresh_overlaps` (`:571`) checks each repository with open tickets at most every 5 minutes. It runs Git on its own thread through `spawn_overlap_check` (`:241`), which catches panics and always sends `Event::Overlaps` back (`:275`, handled at `:835`). It arms no wake-up, so it runs only when some event arrives. `Actor::wake` (`:1763`) keeps the single earliest wake-up and sleeps at most `MAX_WAKE_SLEEP_MS` (`:27`). `schedule` (`:1528`) fires timers and starts turns only for live projects. Since #32 there are no turn caps. Instead, `check_in_by_turns` (`:1449`) raises a human inbox item once the coordinator has run `checkin_human_turns` turns (default 100) since the human last stepped in. Stepping in is detected only from client commands, such as `Command::Send` with sender `None` (`:707-723`), so a message the host sends internally never counts as the human. `turn_prompt` (`:41`) labels a message by its sender and calls `timer:` fires "your timer".
 - `workspace-host/src/overlaps.rs`: `Host::overlap_checks` gathers each repository's open tickets on the host thread. The results are cached in memory on `Host` (`lib.rs:41-43`, `branch_warnings` and `base_fetched_at`), and reach the client through `Snapshot.branch_warnings`.
 - `workspace-host/src/runtime.rs`: `git_query` (`:58`) runs `git` through `bounded_output` (`:87`), which applies one deadline and an output bound. Nothing runs `gh` today.
 - `workspace-host/src/live.rs`: `Host::ticket` (`:209`) and `save_ticket` (`:216`). `ticket_overview` (`:531`) serializes each `Ticket` into `workspace_context`, so a new ticket field reaches the coordinator with no extra code. `accept_ticket` (`:392`) gates on the latest cycle and calls `check_verified_head` (`:445`).
-- `workspace-host/src/lib.rs`: `Host::send` (`:551`) queues a turn-starting message. A message id is unique. Re-sending the same id with the same payload returns the existing message, and a different payload is refused. A message to an archived session is refused. Host-authored messages use sender `None`, as verification's outcome does (`verification.rs:908-919`, id `verification:{ticket}:{cycle}:outcome`). `Host::event` (`:184`) appends to the `activity` table.
+- `workspace-host/src/lib.rs`: `Host::send` (`:561`) queues a turn-starting message. A message id is unique. Re-sending the same id with the same payload returns the existing message, and a different payload is refused. A message to an archived session is refused. Host-authored messages use sender `None`, as verification's outcome does (`verification.rs:895-906`, id `verification:{ticket}:{cycle}:outcome`). `Host::event` (`:195`) appends to the `activity` table.
 - `workspace-desktop`: `sidebar.rs::ticket_row` (`:698`) draws one 30 px row with a label and a state dot. `tree.rs` holds the row text helpers (`ticket_label`, `verification_lines`). `team_view.rs::tickets` (`:99`) draws ticket cards, with `warning_badge` (`:320`) for overlap warnings. `repositories_view.rs::repositories_page` (`:7`) shows "N projects · M open tickets" for each repository. `conversation.rs` (`:626`) draws every sender-`None` message as a human bubble, and `waiting_messages` (`:195`) counts them as the human's.
 - `gh` 2.94.0 here. Its GraphQL API answered the query in decision 2 for this repository's PR #31 at a cost of 1 point (see settled decision 3).
 
@@ -33,7 +33,7 @@ See proposal.md for why. The code this builds on, at origin/main be5f484:
 
 Unlike the overlap check, it arms a wake-up, because a quiet host may see no other event for hours. `wake` already keeps only the earliest time, and `process` re-arms after every event, so timers and the watcher share one mechanism.
 
-*Alternatives:* a coordinator timer, rejected because every fire is a model turn and counts toward the 100-turn brake. A dedicated polling thread, rejected because it would be a second scheduler beside the actor's. Folding the watcher into `refresh_overlaps`, rejected because the two have different intervals and only one of them arms a wake-up.
+*Alternatives:* a coordinator timer, rejected because every fire is a model turn. A 5-minute poll would be 288 coordinator turns a day, and would raise a turn-count check-in with the human about every 8 hours. A dedicated polling thread, rejected because it would be a second scheduler beside the actor's. Folding the watcher into `refresh_overlaps`, rejected because the two have different intervals and only one of them arms a wake-up.
 
 ### 2. One read-only GraphQL call per repository per pass
 `pr_watch::fetch` runs:
@@ -100,6 +100,8 @@ Every watcher message goes to `ticket.coordinator_id` with sender `None`, as a t
 - **Conflict** (`pr:{ticket}:conflict:{number}:{head}`, when an open PR's snapshot changes and its merge state is `Dirty`). "PR #139 for ticket "X" (<id>) conflicts with <base> at head <sha>. Resolving it needs a rebase or merge in the worktree and a new verification cycle before it is pushed. Automatic wake 2 of 3 for this PR."
 - **Budget.** Checks and conflict wakes share a budget of 3 per PR number, counted from the existing `pr:{ticket}:checks:{number}:` and `pr:{ticket}:conflict:{number}:` messages. One more wake is due once 3 have been sent. Instead of sending it, the host sends `pr:{ticket}:budget:{number}` once: "PR #N for ticket "X" (<id>) has used its 3 automatic wakes. Further failed checks and conflicts show only on the ticket row and in workspace_context." After that the PR wakes nobody, apart from its merged or closed message.
 
+Each wake is one coordinator turn. It counts toward the coordinator's turn-count check-in with the human, but never resets it, because the host's own messages are not the human stepping in. The budget keeps that cost to at most four turns per PR, plus the merged or closed message.
+
 The wakes go to the coordinator, never to the implementer. A fix after the PR opens needs a new verification cycle and a push, and the coordinator owns both. The ticket stays open after a merge, and `accept_ticket` keeps its own gates.
 
 *Alternatives:* the host accepts the ticket on merge. Rejected because acceptance is the coordinator's decision, and `accept_ticket` may legitimately refuse, for example over untriaged findings. Naming the failing checks in the message: check names come from workflow files the PR itself can change, so they count as PR text. `gh pr checks` gives them to whoever acts on the wake.
@@ -151,7 +153,7 @@ The mockup is `design/mockups/current/pr-watch.html`.
   - a closed ticket is skipped
   - an archived coordinator still gets the snapshot saved
   - the message text never includes PR text
-- An actor test in `service.rs` beside the overlap tests (`:2070`): `Event::PullRequests` clears the running mark, arms the next wake and signals only on change.
+- An actor test in `service.rs` beside the overlap tests (`:2083`): `Event::PullRequests` clears the running mark, arms the next wake and signals only on change.
 - `tree.rs` tests for `pr_line` in each mockup state. A `conversation`/`turn_prompt` test for the `pr:` label.
 
 ## Risks / Trade-offs
