@@ -1623,13 +1623,11 @@ impl Actor {
             Err(e) => eprintln!("Workspace timers: {e:#}"),
         }
         let in_rounds = self.admit_rounds()?;
-        // Quiet messages ride along with the next turn but never start one.
-        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY s.role<>'project_orchestrator',m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut considered = HashSet::new();
+        // Quiet messages ride along with the next turn but never start one. Each recipient's
+        // oldest due message stands for it, so a long queue cannot hide other sessions.
+        let messages=self.host.db.prepare(&format!("SELECT m.*,MIN(m.sequence) AS first FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') GROUP BY m.recipient ORDER BY s.role<>'project_orchestrator',first", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         for message in messages {
-            if !considered.insert(message.recipient.clone())
-                || in_rounds.contains(&message.recipient)
-            {
+            if in_rounds.contains(&message.recipient) {
                 continue;
             }
             let session = self.host.session(&message.recipient)?;
@@ -2420,6 +2418,21 @@ mod tests {
             shown(&actor),
             (Status::Blocked, json!("blocked"), json!("blocked"))
         );
+    }
+
+    #[test]
+    fn a_paused_coordinators_long_queue_does_not_hide_a_runnable_worker() {
+        let (_home, mut actor, reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
+        for n in 0..101 {
+            actor
+                .host
+                .send(&format!("busy-{n}"), None, &coordinator.id, "Busy")
+                .unwrap();
+        }
+        actor.schedule().unwrap();
+        // A unit test cannot launch a provider, so the reviewer's provider is disabled: the
+        // scheduler reaching it holds its turn where it would otherwise start it.
+        assert!(actor.host.session_runtime(&reviewer.id).unwrap().held);
     }
 
     #[test]
