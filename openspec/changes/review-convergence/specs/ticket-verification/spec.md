@@ -52,7 +52,7 @@ While a verification cycle is running, the ticket's state SHALL change only when
 - **THEN** the ticket's state becomes `verifying` when round 2 starts, never `ready_for_testing`
 
 ### Requirement: Failures go back to the implementer
-A round SHALL end when every verifier in it has reported. If any verifier's result is failed and the round is below the cap, the host SHALL send the ticket's implementer session one message, from Wiffletree and not in the project coordinator's name, listing every `open` ledger entry the round reported: each entry's id, location, summary, trigger and evidence. The message SHALL NOT include the verifiers' full reports or any other finding. The host SHALL set the ticket's state to `failed` and leave the project coordinator asleep. When that implementer next reports `ready_for_testing`, the host SHALL refuse the report while the worktree holds uncommitted or untracked files; otherwise it SHALL start the next round with only the verifiers whose result failed, pinned to the new HEAD. Verifiers that passed SHALL keep their earlier result.
+A round SHALL end when every verifier in it has reported. If any verifier's result is failed and the round is below the cap, the host SHALL send the ticket's implementer session one message, from Wiffletree and not in the project coordinator's name, listing every `open` ledger entry the round reported, with each entry's id, location, summary, trigger and evidence, and naming each verifier whose result the host recorded as failed because the worktree changed, with that reason. The message SHALL NOT include the verifiers' full reports or any other finding. The host SHALL set the ticket's state to `failed` and leave the project coordinator asleep. When that implementer next reports `ready_for_testing`, the host SHALL refuse the report while the worktree holds uncommitted or untracked files; otherwise it SHALL start the next round with only the verifiers whose result failed, pinned to the new HEAD. Verifiers that passed SHALL keep their earlier result.
 
 #### Scenario: One verifier fails
 - **WHEN** in round 1 the Regressions reviewer reports one evidenced blocking finding and one non-blocking finding, and the other two verifiers pass
@@ -63,6 +63,10 @@ A round SHALL end when every verifier in it has reported. If any verifier's resu
 - **WHEN** the implementer commits a fix and reports `ready_for_testing` after a round 1 failure by the Regressions reviewer
 - **THEN** round 2 starts with only the Regressions reviewer, pinned to the implementer's new commit
 - **AND** the tester and the Correctness reviewer receive no new message
+
+#### Scenario: Worktree changed by a verifier
+- **WHEN** in round 1 the Correctness reviewer edits the worktree and reports `passed`, and no verifier reports a blocking finding
+- **THEN** the implementer's message names the Correctness reviewer with the reason "worktree changed during verification", so the failed round is never sent with an empty list
 
 #### Scenario: Ready with unsaved work
 - **WHEN** the implementer reports `ready_for_testing` during a cycle while its worktree has uncommitted changes
@@ -100,7 +104,7 @@ Verifier verdicts and the implementer's `ready_for_testing` reports during a run
 ## ADDED Requirements
 
 ### Requirement: Verifiers report structured findings
-A verifier's `passed` or `failed` report SHALL accept a list of findings. Each finding SHALL have a severity of `blocking`, `non_blocking` or `pre_existing`; a location in `path:line` form; a one-line summary; a trigger; and evidence. It MAY name the id of an existing ledger entry of the verifier's own focus to report that entry again. The host SHALL refuse the whole report, recording nothing, when a finding is malformed or exceeds the text bounds, or names an id that is not an entry of the reporting verifier's focus. Findings SHALL be recorded only from a report that is a verdict for the verifier's current round; in any other report they SHALL be ignored.
+A verifier's `passed` or `failed` report SHALL accept a list of findings. Each finding SHALL have a severity of `blocking`, `non_blocking` or `pre_existing`; a location in `path:line` form; a one-line summary; a trigger; and evidence. It MAY name the id of a ledger entry of the verifier's own focus whose status is `open`, `wont_fix` or `follow_up`, to report that entry again. The host SHALL refuse the whole report, recording nothing, when a finding is malformed or exceeds the text bounds, or names any other id. Findings SHALL be recorded only from a report that is a verdict for the verifier's current round; in any other report they SHALL be ignored.
 
 #### Scenario: Malformed finding
 - **WHEN** a verifier reports `failed` with a finding whose severity is "critical"
@@ -111,7 +115,7 @@ A verifier's `passed` or `failed` report SHALL accept a list of findings. Each f
 - **THEN** the report is stored quietly as today and the ledger gains no entry
 
 ### Requirement: The host decides each verifier's result
-For a verifier's `passed` or `failed` report at an unchanged worktree, the host SHALL record the result as failed if and only if the report contains an evidenced blocking finding, whatever kind was reported. An evidenced blocking finding has severity `blocking`, a location ending in `:` and a line number, and a non-empty trigger and evidence, and is not a re-report of an entry the coordinator has already decided. When the recorded result differs from the reported kind, the host SHALL record the reason on the verifier's run. A `blocked` report and the worktree-changed rule SHALL behave as before.
+For a verifier's `passed` or `failed` report at an unchanged worktree, the host SHALL record the result as failed if and only if the report contains an evidenced blocking finding, whatever kind was reported. An evidenced blocking finding has severity `blocking`, a location ending in `:` and a line number, and a non-empty trigger and evidence, and is not a re-report of a `wont_fix` or `follow_up` entry. When the recorded result differs from the reported kind, the host SHALL record the reason on the verifier's run. A `blocked` report and the worktree-changed rule SHALL behave as before.
 
 #### Scenario: Failure without evidence
 - **WHEN** a verifier reports `failed` with one blocking finding that has no evidence
@@ -127,7 +131,7 @@ For a verifier's `passed` or `failed` report at an unchanged worktree, the host 
 - **THEN** its result is recorded as passed and the three findings enter the ledger as `untriaged`
 
 ### Requirement: Decision ledger
-Each ticket SHALL keep a ledger of every recorded finding, across all its cycles. Each entry SHALL have an id unique in the ticket (`F1`, `F2`, …), the finding's severity, location, summary, trigger and evidence, its source (verifier focus, cycle and round), a status, and a reason once the coordinator decides it. The status SHALL be one of `open`, `fixed`, `untriaged`, `fix_now`, `follow_up` or `wont_fix`. An evidenced blocking finding SHALL enter as `open`, and every other finding as `untriaged`. When a verifier reports a verdict, each `open` entry of its focus that it did not report again SHALL become `fixed`; an entry it reports again SHALL stay `open` with its round and evidence updated. When a cycle ends, an `open` entry whose focus had no verifier in that cycle SHALL become `untriaged`. Entries SHALL never be deleted.
+Each ticket SHALL keep a ledger of every recorded finding, across all its cycles. Each entry SHALL have an id unique in the ticket (`F1`, `F2`, …), the finding's severity, location, summary, trigger and evidence, its source (verifier focus, cycle and round), a status, and a reason once the coordinator decides it. The status SHALL be one of `open`, `fixed`, `untriaged`, `fix_now`, `follow_up` or `wont_fix`. Only a completed check SHALL add or change entries: a `passed` or `failed` report whose worktree check passed. A `blocked` report, or a result the host recorded as failed because the worktree changed, SHALL leave the ledger unchanged, so an `open` entry stays `open` until a completed check clears it. An evidenced blocking finding SHALL enter as `open`, and every other finding as `untriaged`. After a completed check, each `open` entry of the verifier's focus that the report did not name again SHALL become `fixed`; an entry it names again SHALL stay `open`, with its round and evidence updated. A `wont_fix` or `follow_up` entry named again SHALL stay unchanged. When a cycle ends, an `open` entry whose focus had no verifier in that cycle SHALL become `untriaged`. Entries SHALL never be deleted.
 
 #### Scenario: Blocking finding fixed
 - **WHEN** the Regressions reviewer's finding F3 is open after round 1, and in round 2 it reports `passed` without naming F3
@@ -137,12 +141,20 @@ Each ticket SHALL keep a ledger of every recorded finding, across all its cycles
 - **WHEN** in round 2 the Regressions reviewer reports F3 again by its id with new evidence
 - **THEN** F3 stays `open` with round 2 and the new evidence, and no new entry is added
 
+#### Scenario: Re-check cannot run
+- **WHEN** F3 is open after round 1 and in round 2 the Regressions reviewer reports `blocked` because it cannot run its check
+- **THEN** F3 stays `open`, and the next cycle's message to the Regressions reviewer still lists F3
+
+#### Scenario: Re-check from a changed worktree
+- **WHEN** F3 is open and in round 2 the Regressions reviewer edits the worktree and reports `passed` without naming F3
+- **THEN** its result is failed with the reason "worktree changed during verification" and F3 stays `open`
+
 #### Scenario: Verifier removed from settings
 - **WHEN** an entry from a "Claude" reviewer is open and the next cycle has no verifier with that focus
 - **THEN** the entry becomes `untriaged` when that cycle ends
 
 ### Requirement: The coordinator triages findings
-The project coordinator SHALL have a `triage_findings` tool for tickets it owns, taking a ticket id and a list of decisions, each with an entry id, a decision of `fix_now`, `follow_up` or `wont_fix`, and a one-line reason. Each named entry SHALL be `untriaged` or `open`. The host SHALL apply every decision or none, refusing the call when an entry is unknown, already decided, named twice, or given a reason that is not one line. Deciding an `open` entry SHALL overrule it: later rounds SHALL list it as already decided, and reporting its id again SHALL fail nothing. A decision SHALL never change once recorded. The tool SHALL record a `findings_triaged` event and SHALL NOT wake or message any agent.
+The project coordinator SHALL have a `triage_findings` tool for tickets it owns, taking a ticket id and a list of decisions, each with an entry id, a decision of `fix_now`, `follow_up` or `wont_fix`, and a one-line reason. Each named entry SHALL be `untriaged`, or `open` with a decision of `follow_up` or `wont_fix`. An `open` entry is already routed for a fix, so `fix_now` on it SHALL be refused. The host SHALL apply every decision or none, refusing the call when an entry is unknown, already decided, named twice, given a decision its status does not allow, or given a reason that is not one line. Marking an `open` entry `follow_up` or `wont_fix` SHALL overrule it: later rounds SHALL list it as already decided, and reporting its id again SHALL fail nothing. A decision SHALL never change once recorded. The tool SHALL record a `findings_triaged` event and SHALL NOT wake or message any agent.
 
 #### Scenario: Triage once
 - **WHEN** the coordinator marks F2 `wont_fix` with the reason "Matches the existing naming" and later tries to mark F2 `follow_up`
@@ -151,6 +163,10 @@ The project coordinator SHALL have a `triage_findings` tool for tickets it owns,
 #### Scenario: Overruling a routed finding mid-cycle
 - **WHEN** the implementer objects to the open entry F3, the coordinator marks it `wont_fix`, and the Regressions reviewer reports F3 again in the next round with no other blocking finding
 - **THEN** the reviewer's result is recorded as passed and F3 stays `wont_fix`
+
+#### Scenario: Fix now does not overrule
+- **WHEN** the coordinator marks the open entry F3 `fix_now`
+- **THEN** the call is refused, F3 stays `open`, and a later re-report of F3 with evidence still fails its round
 
 #### Scenario: All or nothing
 - **WHEN** a call decides F2 and an unknown id F99
