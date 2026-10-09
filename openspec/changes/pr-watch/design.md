@@ -39,16 +39,16 @@ Unlike the overlap check, it arms a wake-up, because a quiet host may see no oth
 `pr_watch::fetch` runs:
 
 ```
-gh api graphql -f query=<QUERY> -F owner=<o> -F name=<n> -f h0=<branch> -f h1=<branch> …
+gh api graphql -f query=<QUERY> -f owner=<o> -f name=<n> -f h0=<branch> -f h1=<branch> …
 ```
 
-Its working directory is the repository. `QUERY` declares `$h0…$hN` and one aliased connection per branch: `tN: pullRequests(headRefName: $hN, first: 2, orderBy: {field: CREATED_AT, direction: DESC})`. Each node has `number url state isDraft isCrossRepository headRefOid baseRefName mergeStateStatus mergedAt mergeCommit{oid} commits(last:1){nodes{commit{statusCheckRollup{state}}}} reviewThreads(first:50){nodes{isResolved comments(last:1){nodes{databaseId}}}} comments(last:1){nodes{databaseId}} reviews(last:1){nodes{databaseId}}`. The query also reads `rateLimit { remaining resetAt }`. Branch names are passed only as variables, never pasted into the query. Each thread's last comment is read because a reply inside a review thread changes neither the issue comments nor, necessarily, the PR's last review. Nested connections multiply GraphQL's cost, so the query asks for 2 PRs per branch and 50 threads per PR. That costs about 1 point per branch, measured with the query on this repository (2 points for 2 branches; 10 with 5 PRs and 100 threads). A repository with more than 50 open tickets is split into several calls.
+Its working directory is the repository. `QUERY` declares `$h0…$hN` and one aliased connection per branch: `tN: pullRequests(headRefName: $hN, first: 2, orderBy: {field: CREATED_AT, direction: DESC})`. Each node has `number url state isDraft isCrossRepository headRefOid baseRefName mergeStateStatus mergedAt mergeCommit{oid} commits(last:1){nodes{commit{statusCheckRollup{state}}}} reviewThreads(first:50){nodes{isResolved comments(last:1){nodes{databaseId createdAt}}}} comments(last:1){nodes{databaseId}} reviews(last:1){nodes{databaseId}}`. The query also reads `rateLimit { remaining resetAt }`. Owner, name and branch names are passed only as raw-string variables (`-f`), never pasted into the query. `-F` would let `gh` coerce or expand them. Each thread's last comment is read because a reply inside a review thread changes neither the issue comments nor, necessarily, the PR's last review. Nested connections multiply GraphQL's cost, so the query asks for 2 PRs per branch and 50 threads per PR. That costs about 1 point per branch, measured with the query on this repository (2 points for 2 branches; 10 with 5 PRs and 100 threads). A repository with more than 50 open tickets is split into several calls.
 
 - **Owner and name** come from the base's remote. For `origin/main` that is `git remote get-url origin`, parsed for `github.com` in its HTTPS and SSH forms. A base with no remote, or a remote that isn't on `github.com`, makes no `gh` call. Its status reads "not on GitHub; PRs not watched". This is deterministic, so `gh`'s own choice among several remotes never matters.
 - **Running `gh`.** `runtime.rs` gains `gh_output(path, args)`, which reuses `bounded_output` with a 30 s deadline and sets `GH_PROMPT_DISABLED=1` and `NO_COLOR=1`. A non-zero exit becomes the repository's error, using `gh`'s last error line.
 - **Merged heads.** For each PR in state `MERGED`, the same thread reads the ticket worktree's HEAD with `git rev-parse HEAD`, for decision 6.
 
-*Conditional requests:* not used, because `gh` cannot make them here. GraphQL has no ETag or `304`. `gh pr view` and `gh pr list` are GraphQL underneath. REST would need several calls per PR, and review threads aren't in REST at all. A query costs about 1 point per ticket branch, out of 5,000 an hour. Twenty open tickets with active PRs, polled every 60 s, use about 1,200 points an hour. Rate limits are handled in decision 7.
+*Conditional requests:* not used, because `gh` cannot make them here. GraphQL has no ETag or `304`. `gh pr view` and `gh pr list` are GraphQL underneath. REST would need several calls per PR, and review threads aren't in REST at all. The cost grows with the number of watched branches, at about 1 point per branch per pass, out of 5,000 an hour. Twenty open tickets with active PRs, polled every 60 s, use about 1,200 points an hour. Rate limits are handled in decision 7.
 
 ### 3. Picking a ticket's PR
 Nodes with `isCrossRepository: true` are skipped, so a fork's branch with the same name never matches. Of the rest, which are at most the branch's 2 newest PRs, an `OPEN` PR wins. Otherwise the newest wins. No PR leaves `pull_request` at `None`. Ticket branches are unique (`wiffletree/<slug>`), so in practice there is one match.
@@ -67,14 +67,19 @@ pub struct PullRequest {
     pub merge_state: MergeState,     // GitHub's MergeStateStatus
     pub checks: CheckState,          // None | Pending | Success | Failure
     pub unresolved_threads: u32,
-    pub last_comment_id: Option<u64>,
+    pub comments: CommentCursors,   // newest comment id of each kind
     pub merge_commit: Option<String>,
 }
 ```
 
 - `MergeState` mirrors GitHub's enum: `Clean`, `Behind`, `Blocked`, `Dirty`, `Unstable`, `HasHooks` and `Unknown`. It is serialized in snake_case, and `#[serde(other)]` maps anything new to `Unknown`.
 - `CheckState` maps the rollup's `StatusState`. `SUCCESS` is `Success`. `FAILURE` and `ERROR` are `Failure`. `PENDING` and `EXPECTED` are `Pending`. A null rollup is `None`.
-- `last_comment_id` is the largest `databaseId` among the last issue comment, the last review and each review thread's last comment. A reply inside a review thread therefore changes it.
+- `CommentCursors { issue, review, inline: Option<u64> }` records three ids:
+  - `issue`: the last issue comment's `databaseId`
+  - `review`: the last review's `databaseId`
+  - `inline`: the `databaseId` of the newest review-thread comment by `createdAt`, across every thread's last comment
+
+  Any new comment changes its own kind's cursor. The three id spaces aren't ordered against each other, so a single max can miss a new inline reply whose id is smaller than an existing issue comment's. Cursors per kind, not a digest, because they stay readable in `workspace_context` and say which kind changed.
 - `Ticket.pull_request: Option<PullRequest>` uses `#[serde(default, skip_serializing_if = "Option::is_none")]`, as `waiver` does.
 
 The check time is **not** stored on the ticket. Storing it would rewrite every ticket on every pass. It lives in decision 8.
@@ -98,7 +103,7 @@ Every watcher message goes to `ticket.coordinator_id` with sender `None`, as a t
 - **Closed without merging** (`pr:{ticket}:closed:{number}`, on a change to `Closed`). "PR #N for ticket "X" (<id>) was closed without merging. Reopen it, close the ticket with close_ticket, or ask the human." The same PR closing again after a reopen sends nothing new.
 - **Checks failed** (`pr:{ticket}:checks:{number}:{head}`, when an open PR's snapshot changes and its checks are `Failure`). "PR #143 for ticket "X" (<id>): checks failed at head <sha>. Run gh pr checks 143 in the ticket worktree for details. A fix needs a new verification cycle before it is pushed. Automatic wake 1 of 3 for this PR."
 - **Conflict** (`pr:{ticket}:conflict:{number}:{head}`, when an open PR's snapshot changes and its merge state is `Dirty`). "PR #139 for ticket "X" (<id>) conflicts with <base> at head <sha>. Resolving it needs a rebase or merge in the worktree and a new verification cycle before it is pushed. Automatic wake 2 of 3 for this PR."
-- **Budget.** Checks and conflict wakes share a budget of 3 per PR number, counted from the existing `pr:{ticket}:checks:{number}:` and `pr:{ticket}:conflict:{number}:` messages. One more wake is due once 3 have been sent. Instead of sending it, the host sends `pr:{ticket}:budget:{number}` once: "PR #N for ticket "X" (<id>) has used its 3 automatic wakes. Further failed checks and conflicts show only on the ticket row and in workspace_context." After that the PR wakes nobody, apart from its merged or closed message.
+- **Budget.** The order is fixed. The host first checks whether the wake's message id already exists. An existing id is skipped, spends no budget and never triggers the budget message. Only a new id is checked against the budget. Checks and conflict wakes share a budget of 3 per PR number, counted from the existing `pr:{ticket}:checks:{number}:` and `pr:{ticket}:conflict:{number}:` messages. One more wake is due once 3 have been sent. Instead of sending it, the host sends `pr:{ticket}:budget:{number}` once: "PR #N for ticket "X" (<id>) has used its 3 automatic wakes. Further failed checks and conflicts show only on the ticket row and in workspace_context." After that the PR wakes nobody, apart from its merged or closed message.
 
 Each wake is one coordinator turn. It counts toward the coordinator's turn-count check-in with the human, but never resets it, because the host's own messages are not the human stepping in. The budget keeps that cost to at most four turns per PR, plus the merged or closed message.
 

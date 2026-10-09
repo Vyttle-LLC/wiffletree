@@ -50,7 +50,7 @@ A ticket's PR SHALL be a PR in the ticket's repository whose head branch is the 
 - **THEN** the ticket shows PR #15
 
 ### Requirement: PR snapshot on the ticket
-Each ticket SHALL record its PR's number, URL, state (`open`, `closed` or `merged`), draft flag, base branch, head SHA, merge state, check rollup (`none`, `pending`, `success` or `failure`), number of unresolved review threads, last comment id and merge commit. The last comment id SHALL change when anyone adds an issue comment, submits a review or replies inside a review thread. The coordinator SHALL see this record in `workspace_context`. The host SHALL store the record and log a `pull_request` activity event only when it changes. A pass in which GitHub reports the merge state as unknown SHALL keep the previously recorded merge state. A failed pass SHALL keep every recorded snapshot. Tickets stored before this change SHALL load with no PR.
+Each ticket SHALL record its PR's number, URL, state (`open`, `closed` or `merged`), draft flag, base branch, head SHA, merge state, check rollup (`none`, `pending`, `success` or `failure`), number of unresolved review threads, newest comment id of each kind (issue comments, reviews and replies inside review threads) and merge commit. The id of a kind SHALL change whenever a comment of that kind is added, whatever its numeric value relative to the other kinds. The coordinator SHALL see this record in `workspace_context`. The host SHALL store the record and log a `pull_request` activity event only when it changes. A pass in which GitHub reports the merge state as unknown SHALL keep the previously recorded merge state. A failed pass SHALL keep every recorded snapshot. Tickets stored before this change SHALL load with no PR.
 
 #### Scenario: Change recorded once
 - **WHEN** a pass records a change to a ticket's PR and the next pass returns the same state
@@ -112,7 +112,7 @@ When an open PR's recorded checks become `failure`, the host SHALL send the tick
 
 #### Scenario: New comment
 - **WHEN** a reviewer comments on a ticket's PR, or replies inside an existing unresolved review thread
-- **THEN** the recorded last comment id changes and no agent is woken
+- **THEN** the recorded comment id of that kind changes and no agent is woken
 
 ### Requirement: Watcher messages carry no PR text and come from Wiffletree
 Messages from the PR watcher SHALL contain only the ticket's title and id, PR numbers, base branch names, Git SHAs and fixed wording. They SHALL NOT include PR titles, descriptions, comments, review text, check names or author names. The coordinator's turn input SHALL name their sender as the Wiffletree PR watcher, and the conversation view SHALL show them as Wiffletree notices, not as messages from the human.

@@ -220,7 +220,8 @@ pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--
     "url": "https://github.com/…/pull/139",
     "base": "main", "head": "3daf610…",
     "merge_state": "dirty", "checks": "success",
-    "unresolved_threads": 0, "last_comment_id": 2391
+    "unresolved_threads": 0,
+    "comments": { "issue": 2391, "review": 1877, "inline": 4190331 }
   }
 }</pre>
         </div>
@@ -232,7 +233,7 @@ pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--
 
 <ul class="notes">
   <li>The host makes one read-only <span class="mono">gh api graphql</span> call per repository per pass: about every 60 s while the repository has an open PR, every 5 min otherwise, and backing off after failures. It never comments, labels, pushes, rebases or merges.</li>
-  <li>Not in this study, pending the human’s decisions in <span class="mono">design.md</span>: waking an agent on failed checks, conflicts or new comments.</li>
+  <li>Settled after this study (see <span class="mono">design.md</span>, “Settled by the human”). Failed checks and conflicts wake only the coordinator, without PR text, at most once per head and 3 times per PR, then one “budget used” message. A PR closed without merging sends one message. New comments wake nobody; that is deferred to a later change. These messages are not drawn here.</li>
   <li>This is a static design study, not the GPUI implementation.</li>
 </ul>
 </body>
