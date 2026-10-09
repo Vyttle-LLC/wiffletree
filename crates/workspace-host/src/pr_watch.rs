@@ -433,9 +433,12 @@ impl Host {
         }
         let old = ticket.pull_request.clone();
         let mut new = found.pull_request.clone();
-        // GitHub computes the merge state lazily, and merged PRs report it unknown.
+        // GitHub computes the merge state lazily, and merged PRs report it unknown. A new head
+        // needs its own reading.
         if new.merge_state == MergeState::Unknown
-            && let Some(old) = old.as_ref().filter(|old| old.number == new.number)
+            && let Some(old) = old
+                .as_ref()
+                .filter(|old| old.number == new.number && old.head == new.head)
         {
             new.merge_state = old.merge_state;
         }
@@ -449,6 +452,11 @@ impl Host {
         {
             if let Err(e) = self.send(&id, None, &ticket.coordinator_id, &body) {
                 eprintln!("Workspace PR watch: {id}: {e:#}");
+                // An archived coordinator takes no messages. Any other failure, such as a full
+                // queue, leaves the snapshot unsaved so the next pass sends it again.
+                if !self.session(&ticket.coordinator_id)?.archived {
+                    return Ok(false);
+                }
             }
         }
         let detail = format!(
@@ -1328,6 +1336,34 @@ mod tests {
     }
 
     #[test]
+    fn a_full_queue_leaves_the_change_for_the_next_pass() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        for i in 0..1024 {
+            host.send(&format!("m{i}"), None, &ticket.coordinator_id, "Queued")
+                .unwrap();
+        }
+        let pass = merged_at(&ticket, merged(141), Some(HEAD));
+        host.record_pull_requests(&ticket.repository_id, &pass, 0, 0)
+            .unwrap();
+        assert!(notices(&host).is_empty());
+        assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, None);
+        host.db
+            .execute("UPDATE messages SET receipt='completed' WHERE id='m0'", [])
+            .unwrap();
+        host.record_pull_requests(&ticket.repository_id, &pass, 1, 1)
+            .unwrap();
+        assert_eq!(notices(&host).len(), 1);
+        assert_eq!(
+            host.ticket(&ticket.id)
+                .unwrap()
+                .pull_request
+                .unwrap()
+                .number,
+            141
+        );
+    }
+
+    #[test]
     fn a_pr_closed_without_merging_is_reported_once() {
         let (_home, mut host, ticket) = host_with_ticket();
         let mut closed = open_pr(MergeState::Clean);
@@ -1396,6 +1432,19 @@ mod tests {
                 ticket.id
             )]
         );
+    }
+
+    #[test]
+    fn a_conflict_is_not_carried_over_to_a_new_head() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        assert_eq!(record(&mut host, &ticket, conflicting("a1")).len(), 1);
+        let mut pushed = conflicting("b2");
+        pushed.merge_state = MergeState::Unknown;
+        assert!(record(&mut host, &ticket, pushed).is_empty());
+        let recorded = host.ticket(&ticket.id).unwrap().pull_request.unwrap();
+        assert_eq!(recorded.merge_state, MergeState::Unknown);
+        // When GitHub then reports the conflict at the new head, its wake is sent.
+        assert_eq!(record(&mut host, &ticket, conflicting("b2")).len(), 1);
     }
 
     #[test]
