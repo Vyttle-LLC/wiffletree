@@ -19,6 +19,10 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers 
 - **THEN** three verifier sessions each receive a message naming the same commit, each pinned to its chosen profile with its reason
 - **AND** the ticket's state is `verifying`
 
+#### Scenario: Unready ticket
+- **WHEN** `verify_ticket` is called on a ticket whose implementer has not reported `ready_for_testing`
+- **THEN** the host refuses and starts no verifier
+
 #### Scenario: Wrong provider for a verifier
 - **WHEN** a Codex tester verifier is given a Claude profile
 - **THEN** the call fails with "Claude is not configured for Tester · Codex. Tester · Codex uses: Codex.", no verifier session is created and a `model_rejected` event is recorded
@@ -26,6 +30,10 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers 
 #### Scenario: Turn limit too small
 - **WHEN** three verifiers are configured and the project's turn limit is 3
 - **THEN** `verify_ticket` refuses, naming the verifier count and the turn limit
+
+#### Scenario: More verifiers than the host can run
+- **WHEN** the project's turn limit is 20 and more verifiers are configured than the host-wide worker turn limit
+- **THEN** `verify_ticket` refuses, naming the verifier count and the host-wide limit
 
 #### Scenario: Verifier provider changed between cycles
 - **WHEN** a verifier ran cycle 1 on a Claude model, its provider is changed to Codex, and the next `verify_ticket` gives it a Codex profile
