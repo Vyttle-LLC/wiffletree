@@ -104,16 +104,24 @@ impl Host {
         fs::read(self.home.join(FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(|| HostSettings {
-                workspaces_dir: default_workspaces_dir(),
-                verification: VerificationSettings::default(),
-            })
+            .unwrap_or_else(|| HostSettings::new(default_workspaces_dir()))
     }
     /// Saves who verifies tickets. An invalid setting is refused and the saved one stays.
     pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
         verification.validate()?;
         let settings = HostSettings {
             verification,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        Ok(settings)
+    }
+    /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.
+    pub fn set_check_ins(&mut self, child_turns: u32, human_turns: u32) -> Result<HostSettings> {
+        HostSettings::validate_check_ins(child_turns, human_turns)?;
+        let settings = HostSettings {
+            checkin_child_turns: child_turns,
+            checkin_human_turns: human_turns,
             ..self.settings()
         };
         self.save_settings(&settings)?;

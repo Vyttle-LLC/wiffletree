@@ -14,8 +14,6 @@ use std::{
 };
 
 type Reply = Sender<std::result::Result<Value, String>>;
-/// Operation prefix for the notice raised when a project pauses at its turn budget.
-const TURN_BUDGET: &str = "turn-budget";
 /// How long a turn runs before it checks in with its parent, and how often after that.
 const CHECK_IN_MS: i64 = 30 * 60_000;
 /// How long an idle parent waits after a child's first progress report, so a burst of
@@ -23,11 +21,6 @@ const CHECK_IN_MS: i64 = 30 * 60_000;
 const PROGRESS_BATCH_MS: i64 = 20_000;
 /// Bounds one turn's prompt; any further queued messages go to the next turn.
 const MAX_TURN_MESSAGES: usize = 20;
-/// The host-wide cap on active turns.
-const HOST_TURNS: usize = 8;
-/// The host-wide cap on active turns that a worker may join; `verify_ticket` refuses rounds
-/// larger than this, so a waiting round always fits eventually.
-pub(crate) const HOST_WORKER_TURNS: usize = 6;
 
 /// Longest a wake-up sleeps before the actor looks again; macOS suspends sleeping threads
 /// while the Mac sleeps, so a long sleep could miss a timer by hours.
@@ -43,13 +36,6 @@ fn is_turn_input(table: &str) -> String {
 /// the id `report:{sender}:…`, so a human message cannot pass for one.
 const IS_PROGRESS_REPORT: &str = "sender IS NOT NULL AND substr(id,1,length(sender)+8)='report:'||sender||':' AND substr(body,1,11)='[progress] '";
 
-/// Whether a queued verification round could start now, must wait for capacity, or cannot start
-/// until someone intervenes (a verifier is paused, disconnected or holding input).
-enum Admission {
-    Started,
-    Waiting,
-    Stuck,
-}
 /// `input` pairs each message with a status line rendered under its id, such as a timer
 /// fire's lateness; most messages have none.
 fn turn_prompt(
@@ -375,7 +361,9 @@ struct Actor {
     permissions: HashMap<String, Permission>,
     socket: PathBuf,
     helper: PathBuf,
-    turns: HashMap<String, usize>,
+    /// Each project coordinator's turns since the human last stepped in, by project. Kept in
+    /// memory, so a host restart starts the count again.
+    human_turns: HashMap<String, usize>,
     /// The earliest armed wake-up, for progress batches and timers alike.
     wake_at: Option<i64>,
     /// When this host started, and the sessions that have had a turn since.
@@ -480,7 +468,7 @@ impl Service {
                     permissions: HashMap::new(),
                     socket: socket.clone(),
                     helper,
-                    turns: HashMap::new(),
+                    human_turns: HashMap::new(),
                     wake_at: None,
                     started_at: now(),
                     resumed: HashSet::new(),
@@ -533,10 +521,6 @@ impl Service {
     pub fn step_changes(&self) -> Receiver<()> {
         self.step_changes.clone()
     }
-}
-/// The project's turns a worker may take; one is kept for its coordinator.
-pub(crate) fn worker_turns(project: &Project) -> usize {
-    project.turn_limit.saturating_sub(1).max(1)
 }
 impl Actor {
     /// Repository scans run Git once per new repository, so they leave the host thread free
@@ -685,12 +669,6 @@ impl Actor {
                             !self.active.contains_key(session_id),
                             "Wait for the active turn to stop"
                         ),
-                        Command::SetLive {
-                            project_id,
-                            enabled: true,
-                        } => {
-                            self.turns.insert(project_id.clone(), 0);
-                        }
                         _ => {}
                     }
                     let response = match &command {
@@ -742,12 +720,12 @@ impl Actor {
                         _ => None,
                     };
                     if let Some(project) = started {
-                        self.turns.insert(project.clone(), 0);
-                        // Stepping in is the answer to a turn-budget pause.
-                        for pause in self.host.open_attention(&project)? {
-                            if pause.operation_id.starts_with(TURN_BUDGET) {
+                        self.human_turns.insert(project.clone(), 0);
+                        // Stepping in answers the coordinator's turn-count check-in.
+                        for item in self.host.open_attention(&project)? {
+                            if item.operation_id.starts_with(TURN_COUNT) {
                                 self.host
-                                    .resolve_attention(&pause.id, "Resumed by the human")?;
+                                    .resolve_attention(&item.id, "The human stepped in")?;
                             }
                         }
                         if !self.host.live_projects()?.contains(&project) {
@@ -1415,10 +1393,7 @@ impl Actor {
         let active = &self.active[id];
         let run = active.run.clone();
         let minutes = (now - active.started_at) / 60_000;
-        let ticket = match self.host.session_runtime(id)?.ticket_id {
-            Some(ticket) => format!(" on ticket \"{}\"", self.host.ticket(&ticket)?.title),
-            None => String::new(),
-        };
+        let ticket = self.ticket_label(id)?;
         let latest = active.steps.last().map_or_else(
             || "no steps yet".to_owned(),
             |step| {
@@ -1461,6 +1436,86 @@ impl Actor {
         }
         Ok(())
     }
+    /// ` on ticket "…"` for a ticket agent, or nothing.
+    fn ticket_label(&self, id: &str) -> Result<String> {
+        Ok(match self.host.session_runtime(id)?.ticket_id {
+            Some(ticket) => format!(" on ticket \"{}\"", self.host.ticket(&ticket)?.title),
+            None => String::new(),
+        })
+    }
+    /// Counts the turns a session starts without its overseer, and checks in at every multiple
+    /// of the threshold in the settings: with the parent, counted in the store from the parent's
+    /// last message, or for the project coordinator with the human. Nothing is paused.
+    fn check_in_by_turns(&mut self, session: &Session, run: &str) -> Result<()> {
+        let settings = self.host.settings();
+        let Some(parent) = &session.parent_id else {
+            let turns = self
+                .human_turns
+                .entry(session.project_id.clone())
+                .or_default();
+            *turns += 1;
+            let turns = *turns;
+            if turns % settings.checkin_human_turns as usize != 0 {
+                return Ok(());
+            }
+            for item in self.host.open_attention(&session.project_id)? {
+                if item.session_id == session.id && item.operation_id.starts_with(TURN_COUNT) {
+                    self.host.resolve_attention(&item.id, "Superseded")?;
+                }
+            }
+            self.host.request_attention(
+                &session.id,
+                "local",
+                &format!("{TURN_COUNT}{run}"),
+                &format!(
+                    "{} has run {turns} turns since you last stepped in. It keeps running; message it, or use Pause or Stop if it is stuck.",
+                    session.name
+                ),
+                &[],
+            )?;
+            return Ok(());
+        };
+        let (turns, since): (u32, Option<i64>) = self.host.db.query_row(
+            "WITH last AS (SELECT MAX(created_at) AS at FROM messages WHERE recipient=?1 AND sender=?2) SELECT (SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND started_at>COALESCE(last.at,0)), last.at FROM last",
+            params![session.id, parent],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if turns == 0
+            || turns % settings.checkin_child_turns != 0
+            || self.host.session(parent)?.archived
+        {
+            return Ok(());
+        }
+        let since = since.map_or_else(
+            || "without a message from you".to_owned(),
+            |at| format!("since you last messaged it at {}", schedules::rfc3339(at)),
+        );
+        let reply = self
+            .host
+            .db
+            .query_row(
+                "SELECT body FROM messages WHERE sender=?1 AND recipient=?1 AND substr(id,1,7)='output:' ORDER BY sequence DESC LIMIT 1",
+                [&session.id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map_or_else(
+                || "No reply yet.".to_owned(),
+                |body| format!("Last reply: {}", body.chars().take(300).collect::<String>()),
+            );
+        self.host.send(
+            &format!("{CHECK_IN}{run}:turns"),
+            Some(&session.id),
+            parent,
+            &format!(
+                "[check-in] {}{} has run {turns} turns {since}. {reply}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{}] and a reason.",
+                session.name,
+                self.ticket_label(&session.id)?,
+                session.id
+            ),
+        )?;
+        Ok(())
+    }
     /// Clears a session's check-in inbox items once a newer one or the turn's end replaces them.
     fn settle_check_ins(&mut self, session: &Session) -> Result<()> {
         for item in self.host.open_attention(&session.project_id)? {
@@ -1485,17 +1540,11 @@ impl Actor {
             }
             Err(e) => eprintln!("Workspace timers: {e:#}"),
         }
-        if self.active.len() >= HOST_TURNS {
-            return Ok(());
-        }
-        let (in_rounds, hold_workers) = self.admit_rounds()?;
+        let in_rounds = self.admit_rounds()?;
         // Quiet messages ride along with the next turn but never start one.
         let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY s.role<>'project_orchestrator',m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut considered = HashSet::new();
         for message in messages {
-            if self.active.len() >= HOST_TURNS {
-                break;
-            }
             if !considered.insert(message.recipient.clone())
                 || in_rounds.contains(&message.recipient)
             {
@@ -1504,28 +1553,12 @@ impl Actor {
             let session = self.host.session(&message.recipient)?;
             if self.active.contains_key(&session.id)
                 || matches!(session.status, Status::Paused | Status::Disconnected)
-                || (hold_workers && session.role.is_worker())
             {
                 continue;
             }
             let Some(input) = self.due_input(&session.id)? else {
                 continue;
             };
-            let project = self.host.project(&session.project_id)?;
-            let project_active = self.project_active(&project.id);
-            // Reserve capacity for coordinators so a full worker pool cannot starve handoffs.
-            if project_active >= project.turn_limit
-                || (session.role.is_worker()
-                    && (project_active >= worker_turns(&project)
-                        || self.active.len() >= HOST_WORKER_TURNS))
-            {
-                continue;
-            }
-            if self.turns.get(&project.id).copied().unwrap_or_default() >= 100 {
-                self.host.set_live(&project.id, false)?;
-                self.host.request_attention(&session.id,"local",&format!("{TURN_BUDGET}:{}", new_id()),"This project ran 100 turns since you last stepped in. Review the work, then message it or resume to continue.",&[])?;
-                continue;
-            }
             let runtime = self.host.session_runtime(&session.id)?;
             if let Some(ticket) = &runtime.ticket_id
                 && self.worktree_busy(ticket, &session)?
@@ -1544,12 +1577,6 @@ impl Actor {
             }
         }
         Ok(())
-    }
-    fn project_active(&self, project: &str) -> usize {
-        self.active
-            .keys()
-            .filter(|id| self.host.session(id).is_ok_and(|s| s.project_id == project))
-            .count()
     }
     /// A ticket's worktree has one writer at a time. Readers run together: reviewers, and the
     /// testers verifying the ticket in its running cycle.
@@ -1580,18 +1607,15 @@ impl Actor {
         }
         Ok(false)
     }
-    /// Starts each verification round that fits. A round's verifiers start together or not at
-    /// all, so they are never scheduled one by one. Returns them, and whether a round is waiting
-    /// for capacity: then no other worker turn starts anywhere, so freed slots accumulate until
-    /// it fits.
-    fn admit_rounds(&mut self) -> Result<(HashSet<String>, bool)> {
+    /// Starts each verification round that can start. A round's verifiers start together or
+    /// not at all, so they are never scheduled one by one; returns them all.
+    fn admit_rounds(&mut self) -> Result<HashSet<String>> {
         let mut members_of_rounds = HashSet::new();
-        let mut waiting = false;
         for (ticket, members) in self.waiting_rounds()? {
-            waiting |= matches!(self.admit_round(&ticket, &members)?, Admission::Waiting);
+            self.admit_round(&ticket, &members)?;
             members_of_rounds.extend(members.into_iter().map(|s| s.id));
         }
-        Ok((members_of_rounds, waiting))
+        Ok(members_of_rounds)
     }
     /// Each running cycle's current round whose verifiers still have their round message queued.
     fn waiting_rounds(&self) -> Result<Vec<(Ticket, Vec<Session>)>> {
@@ -1617,8 +1641,7 @@ impl Actor {
         Ok(rounds)
     }
     /// Starts every member of a round, or none of them.
-    fn admit_round(&mut self, ticket: &Ticket, members: &[Session]) -> Result<Admission> {
-        let project = self.host.project(&members[0].project_id)?;
+    fn admit_round(&mut self, ticket: &Ticket, members: &[Session]) -> Result<()> {
         let held = |id: &str| -> Result<bool> {
             Ok(self.host.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='held')",
@@ -1626,36 +1649,24 @@ impl Actor {
                 |r| r.get(0),
             )?)
         };
-        if !self.host.live_projects()?.contains(&project.id)
-            || self.turns.get(&project.id).copied().unwrap_or_default() >= 100
-        {
-            return Ok(Admission::Stuck);
+        if !self.host.live_projects()?.contains(&members[0].project_id) {
+            return Ok(());
         }
         for member in members {
             if member.archived
                 || matches!(member.status, Status::Paused | Status::Disconnected)
                 || held(&member.id)?
+                || self.active.contains_key(&member.id)
+                || self.worktree_busy(&ticket.id, member)?
             {
-                return Ok(Admission::Stuck);
-            }
-        }
-        let count = members.len();
-        if members.iter().any(|m| self.active.contains_key(&m.id))
-            || self.active.len() + count > HOST_WORKER_TURNS
-            || self.project_active(&project.id) + count > worker_turns(&project)
-        {
-            return Ok(Admission::Waiting);
-        }
-        for member in members {
-            if self.worktree_busy(&ticket.id, member)? {
-                return Ok(Admission::Waiting);
+                return Ok(());
             }
         }
         let mut inputs = vec![];
         for member in members {
             match self.due_input(&member.id)? {
                 Some(input) => inputs.push((member.clone(), input)),
-                None => return Ok(Admission::Waiting),
+                None => return Ok(()),
             }
         }
         for (member, input) in inputs {
@@ -1672,7 +1683,7 @@ impl Actor {
                 self.start_failed(&member, &first, &error)?;
             }
         }
-        Ok(Admission::Started)
+        Ok(())
     }
     /// Keeps the input queued, blocks the session and tells its parent once per held input,
     /// through the agent's own `report` path so the parent wakes.
@@ -1888,7 +1899,9 @@ impl Actor {
         self.wake(active.next_check_in);
         self.active.insert(session.id.clone(), active);
         let _ = self.changed.try_send(());
-        *self.turns.entry(session.project_id).or_default() += 1;
+        if let Err(e) = self.check_in_by_turns(&session, &run) {
+            eprintln!("Workspace check-in: {e:#}");
+        }
         let sender = self.sender.clone();
         let id = session.id;
         std::thread::spawn(move || {
@@ -1976,7 +1989,7 @@ mod tests {
             permissions: HashMap::new(),
             socket: PathBuf::new(),
             helper: PathBuf::new(),
-            turns: HashMap::new(),
+            human_turns: HashMap::new(),
             wake_at: None,
             started_at: now(),
             resumed: HashSet::new(),
@@ -2270,82 +2283,39 @@ mod tests {
     }
 
     #[test]
-    fn a_round_that_does_not_fit_the_project_waits_whole_and_holds_other_workers() {
+    fn a_round_waits_whole_while_the_implementer_writes_in_its_worktree() {
         let (_home, mut actor, ticket, verifiers) = waiting_round(3);
-        // Another ticket's worker takes one of the project's three worker turns.
-        let other = actor
+        let implementer = actor
             .host
-            .create_ticket(&ticket.coordinator_id, &ticket.repository_id, "Other", "Do")
-            .unwrap();
-        let busy = actor
-            .host
-            .assign_ticket(&other.id, Role::Implementer, Provider::Codex, "Do", None)
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.role == Role::Implementer)
             .unwrap();
         actor
             .active
-            .insert(busy.id.clone(), active_turn("busy", vec![]));
+            .insert(implementer.id.clone(), active_turn("writing", vec![]));
 
-        let (members, waiting) = actor.admit_rounds().unwrap();
+        let members = actor.admit_rounds().unwrap();
 
-        assert!(waiting, "other workers are held");
         assert_eq!(members, verifiers.iter().cloned().collect::<HashSet<_>>());
         assert_eq!(actor.active.len(), 1, "no verifier started alone");
         assert_eq!(queued(&actor, &ticket), 3);
     }
 
     #[test]
-    fn a_round_that_does_not_fit_the_host_waits_and_holds_workers_in_every_project() {
-        let (_home, mut actor, ticket, _verifiers) = waiting_round(3);
-        for i in 0..4 {
-            actor.host.create_project(&format!("Busy {i}")).unwrap();
-        }
-        let elsewhere: Vec<String> = actor
-            .host
-            .sessions()
-            .unwrap()
-            .into_iter()
-            .filter(|s| s.project_id != ticket_project(&actor, &ticket))
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(elsewhere.len(), 4);
-        for id in elsewhere {
-            actor.active.insert(id, active_turn("busy", vec![]));
-        }
-
-        let (_, waiting) = actor.admit_rounds().unwrap();
-
-        assert!(
-            waiting,
-            "4 active turns leave 2 of the host's 6 worker turns"
-        );
-        assert_eq!(actor.active.len(), 4);
-        assert_eq!(queued(&actor, &ticket), 3);
-    }
-
-    #[test]
-    fn a_round_with_a_paused_verifier_waits_without_holding_other_workers() {
+    fn a_round_with_a_paused_verifier_waits_whole() {
         let (_home, mut actor, ticket, verifiers) = waiting_round(2);
         actor
             .host
             .set_status(&verifiers[1], Status::Paused)
             .unwrap();
 
-        let (members, waiting) = actor.admit_rounds().unwrap();
+        let members = actor.admit_rounds().unwrap();
 
-        assert!(
-            !waiting,
-            "a round that cannot start does not stall the host"
-        );
         assert_eq!(members.len(), 2, "its verifiers still start only together");
+        assert!(actor.active.is_empty());
         assert_eq!(queued(&actor, &ticket), 2);
-    }
-
-    fn ticket_project(actor: &Actor, ticket: &Ticket) -> String {
-        actor
-            .host
-            .session(&ticket.coordinator_id)
-            .unwrap()
-            .project_id
     }
 
     #[test]
@@ -3216,6 +3186,202 @@ mod tests {
         let check_in = check_ins(&actor, &coordinator);
         assert_eq!(check_in.len(), 1, "the project coordinator receives it");
         assert_eq!(check_in[0].sender.as_deref(), Some(verifiers[0].as_str()));
+        assert_eq!(waking(&actor), before + 1, "it wakes the coordinator");
+        let after = actor.host.ticket(&ticket.id).unwrap();
+        assert_eq!(after.state, ticket.state);
+        assert_eq!(after.verification, ticket.verification);
+    }
+
+    /// Starts `count` turns of `session` one millisecond apart from `from`, as the scheduler
+    /// records them.
+    fn run_turns(actor: &mut Actor, session: &str, from: i64, count: i64) {
+        let session = actor.host.session(session).unwrap();
+        for n in 0..count {
+            let run = new_id();
+            actor
+                .host
+                .db
+                .execute(
+                    "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,'{}')",
+                    params![run, session.id, from + n],
+                )
+                .unwrap();
+            actor.check_in_by_turns(&session, &run).unwrap();
+        }
+    }
+
+    fn turn_check_ins(actor: &Actor, parent: &str) -> Vec<Message> {
+        actor
+            .host
+            .messages(parent, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.id.starts_with(CHECK_IN) && m.id.ends_with(":turns"))
+            .collect()
+    }
+
+    #[test]
+    fn a_child_checks_in_with_its_parent_at_every_multiple_of_its_turns_without_it() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        let base = now() + 10_000;
+
+        run_turns(&mut actor, &child, base, 24);
+        assert!(turn_check_ins(&actor, &parent).is_empty());
+        run_turns(&mut actor, &child, base + 24, 1);
+        let first = turn_check_ins(&actor, &parent);
+        assert_eq!(first.len(), 1);
+        for expected in [
+            "[check-in] Child has run 25 turns without a message from you.",
+            "No reply yet.",
+            &format!("stop_agents with session_ids [{child}]"),
+        ] {
+            assert!(
+                first[0].body.contains(expected),
+                "{expected}\n{}",
+                first[0].body
+            );
+        }
+        assert_eq!(first[0].sender.as_deref(), Some(child.as_str()));
+        assert_eq!(first[0].receipt, Receipt::Queued);
+
+        run_turns(&mut actor, &child, base + 25, 1);
+        assert_eq!(turn_check_ins(&actor, &parent).len(), 1, "none at 26");
+        run_turns(&mut actor, &child, base + 26, 24);
+        assert_eq!(turn_check_ins(&actor, &parent).len(), 2, "another at 50");
+        assert!(
+            actor
+                .host
+                .open_attention(&actor.host.session(&child).unwrap().project_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_parent_message_restarts_the_count_and_a_new_threshold_applies_at_once() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        let base = now() + 10_000;
+        run_turns(&mut actor, &child, base, 24);
+        actor
+            .host
+            .send("carry-on", Some(&parent), &child, "Carry on")
+            .unwrap();
+        actor
+            .host
+            .db
+            .execute(
+                "UPDATE messages SET created_at=?1 WHERE id='carry-on'",
+                [base + 100],
+            )
+            .unwrap();
+        let session = actor.host.session(&child).unwrap();
+        actor
+            .host
+            .append_output(&session, "earlier", "Wrote the parser")
+            .unwrap();
+
+        run_turns(&mut actor, &child, base + 200, 24);
+        assert!(
+            turn_check_ins(&actor, &parent).is_empty(),
+            "the count restarted"
+        );
+
+        actor.host.set_check_ins(10, 100).unwrap();
+        run_turns(&mut actor, &child, base + 300, 6);
+        let check_ins = turn_check_ins(&actor, &parent);
+        assert_eq!(check_ins.len(), 1, "at 30, the next multiple of 10");
+        for expected in [
+            "has run 30 turns since you last messaged it at ",
+            "Last reply: Wrote the parser",
+        ] {
+            assert!(
+                check_ins[0].body.contains(expected),
+                "{expected}\n{}",
+                check_ins[0].body
+            );
+        }
+    }
+
+    #[test]
+    fn the_coordinator_checks_in_with_the_human_until_the_human_steps_in() {
+        let (_home, mut actor, root, child) = actor_with_child();
+        let project = actor.host.session(&root).unwrap().project_id;
+        actor.host.set_live(&project, true).unwrap();
+        let items = |actor: &Actor| {
+            actor
+                .host
+                .open_attention(&project)
+                .unwrap()
+                .into_iter()
+                .filter(|a| a.operation_id.starts_with(TURN_COUNT))
+                .collect::<Vec<_>>()
+        };
+        let base = now() + 10_000;
+
+        run_turns(&mut actor, &child, base, 100);
+        assert!(items(&actor).is_empty(), "a child's turns do not count");
+        run_turns(&mut actor, &root, base, 99);
+        assert!(items(&actor).is_empty());
+        run_turns(&mut actor, &root, base + 99, 1);
+        let first = items(&actor);
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0]
+                .prompt
+                .contains("has run 100 turns since you last stepped in"),
+            "{}",
+            first[0].prompt
+        );
+        let root_session = actor.host.session(&root).unwrap();
+        actor.settle_check_ins(&root_session).unwrap();
+        assert_eq!(items(&actor).len(), 1, "it outlives the turn");
+        run_turns(&mut actor, &root, base + 100, 100);
+        let second = items(&actor);
+        assert_eq!(second.len(), 1, "a newer one supersedes it");
+        assert_ne!(second[0].id, first[0].id);
+        assert!(actor.host.live_projects().unwrap().contains(&project));
+
+        command(
+            &mut actor,
+            Command::Send {
+                id: "human".into(),
+                sender: None,
+                recipient: root.clone(),
+                body: "Keep going".into(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+        assert!(items(&actor).is_empty(), "stepping in clears it");
+        run_turns(&mut actor, &root, base + 200, 99);
+        assert!(items(&actor).is_empty(), "and restarts the count");
+    }
+
+    #[test]
+    fn a_turn_count_check_in_during_a_round_wakes_the_coordinator_and_leaves_the_cycle_alone() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(1);
+        let waking = |actor: &Actor| -> i64 {
+            actor
+                .host
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0",
+                    [&ticket.coordinator_id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = waking(&actor);
+
+        run_turns(&mut actor, &verifiers[0], now() + 10_000, 25);
+
+        let check_ins = turn_check_ins(&actor, &ticket.coordinator_id);
+        assert_eq!(check_ins.len(), 1);
+        assert!(
+            check_ins[0].body.contains(" on ticket \"Toolbar\""),
+            "{}",
+            check_ins[0].body
+        );
         assert_eq!(waking(&actor), before + 1, "it wakes the coordinator");
         let after = actor.host.ticket(&ticket.id).unwrap();
         assert_eq!(after.state, ticket.state);

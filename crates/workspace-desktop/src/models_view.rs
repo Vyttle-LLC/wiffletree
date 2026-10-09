@@ -263,13 +263,7 @@ impl Workspace {
             .child(rows)
     }
 
-    fn review_card(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let projects = self.snapshot.as_ref().map_or(&[][..], |s| &s.projects);
-        let note = self
-            .verifiers
-            .read(cx)
-            .verifier_count()
-            .and_then(|count| models::turn_limit_note(count, projects));
+    fn review_card(&self, p: Palette) -> Div {
         card(p)
             .gap_3()
             .child(Self::card_title(
@@ -278,7 +272,6 @@ impl Workspace {
                 p,
             ))
             .child(self.verifiers.clone())
-            .children(note.map(|note| hint(note, p).text_color(p.yellow)))
     }
 
     fn guide_card(&self, p: Palette) -> Div {
@@ -333,7 +326,7 @@ impl Workspace {
         ));
         body.child(providers)
             .child(self.roles_card(p, cx))
-            .child(self.review_card(p, cx))
+            .child(self.review_card(p))
             .child(self.guide_card(p))
     }
 

@@ -295,6 +295,47 @@ fn settings_round_trip_keep_unknown_fields_and_fall_back_when_missing_or_corrupt
 }
 
 #[test]
+fn check_in_thresholds_default_for_old_settings_and_refuse_out_of_range_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("settings.json");
+    let mut host = Host::open(directory.path()).unwrap();
+    std::fs::write(
+        &file,
+        r#"{"workspaces_dir":"/tmp/w","verification":{"verifiers":[{"role":"tester","focus":"Tests"}],"max_rounds":2},"future_option":true}"#,
+    )
+    .unwrap();
+    let old = host.settings();
+    assert_eq!(
+        (old.checkin_child_turns, old.checkin_human_turns),
+        (25, 100)
+    );
+    assert_eq!(old.verification.max_rounds, 2);
+
+    let saved: HostSettings = serde_json::from_value(
+        host.execute(Command::SetCheckIns {
+            child_turns: 10,
+            human_turns: 250,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (saved.checkin_child_turns, saved.checkin_human_turns),
+        (10, 250)
+    );
+    assert_eq!(saved.verification, old.verification);
+    for (child, human) in [(4, 100), (501, 100), (25, 9), (25, 1001)] {
+        assert!(
+            host.set_check_ins(child, human).is_err(),
+            "{child}, {human}"
+        );
+    }
+    assert_eq!(host.settings(), saved);
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(raw["future_option"], true);
+}
+
+#[test]
 fn unusable_workspace_folders_are_refused_and_keep_the_saved_setting() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open(directory.path().join("home")).unwrap();

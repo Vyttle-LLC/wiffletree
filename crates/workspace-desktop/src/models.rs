@@ -1,7 +1,7 @@
 //! Pure helpers behind the Models page and the model pickers.
 use workspace_core::{
-    AllowedModel, Chooser, ModelProfile, ModelSelection, PROVIDERS, Project, Provider, Role,
-    Selection, Session,
+    AllowedModel, Chooser, ModelProfile, ModelSelection, PROVIDERS, Provider, Role, Selection,
+    Session,
 };
 use workspace_host::runtime::ModelOption;
 
@@ -195,22 +195,6 @@ pub fn toggle_role_provider(selection: &mut ModelSelection, role: Role, provider
     }
 }
 
-/// Why `verify_ticket` would refuse in some projects: a round's verifiers all run at once, and
-/// each project keeps one of its turns for its coordinator.
-pub fn turn_limit_note(verifiers: usize, projects: &[Project]) -> Option<String> {
-    let needed = verifiers + 1;
-    let short: Vec<_> = projects
-        .iter()
-        .filter(|p| p.turn_limit < needed)
-        .map(|p| format!("{} ({})", p.name, p.turn_limit))
-        .collect();
-    (!short.is_empty()).then(|| {
-        format!(
-            "{verifiers} verifiers need a project turn limit of at least {needed}. Lower now: {}.",
-            short.join(", ")
-        )
-    })
-}
 /// A group of the human's model picker.
 pub struct PickerGroup {
     pub heading: String,
@@ -453,23 +437,5 @@ mod tests {
                 "{model} · {effort}"
             );
         }
-    }
-    #[test]
-    fn the_review_card_names_projects_whose_turn_limit_is_too_low() {
-        let project = |name: &str, turn_limit| Project {
-            id: name.into(),
-            name: name.into(),
-            brain: None,
-            turn_limit,
-            repositories: None,
-            home: None,
-            slug: None,
-        };
-        let projects = [project("Small", 4), project("Large", 5)];
-        assert_eq!(turn_limit_note(3, &projects), None);
-        assert_eq!(
-            turn_limit_note(4, &projects).unwrap(),
-            "4 verifiers need a project turn limit of at least 5. Lower now: Small (4)."
-        );
     }
 }

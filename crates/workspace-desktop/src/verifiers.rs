@@ -25,9 +25,6 @@ fn provider_note(verifier: &VerifierConfig) -> String {
 }
 
 impl VerifierEditor {
-    pub(super) fn verifier_count(&self) -> Option<usize> {
-        self.verification.as_ref().map(|v| v.verifiers.len())
-    }
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut editor = Self {
             bridge,

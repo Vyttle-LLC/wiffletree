@@ -73,11 +73,16 @@ fn tag<T: Serialize>(value: &T) -> Result<String> {
 }
 /// Prefix of the inbox items the host raises for a long turn; agents and clients cannot use it.
 pub(crate) const CHECK_IN: &str = "check-in:";
+/// Prefix of the inbox item raised when the project coordinator has run many turns without the
+/// human; reserved like `CHECK_IN`.
+pub(crate) const TURN_COUNT: &str = "turn-count:";
 fn ensure_unreserved(operation: &str) -> Result<()> {
-    ensure!(
-        !operation.starts_with(CHECK_IN),
-        "IDs starting with \"{CHECK_IN}\" are reserved for workspace check-ins"
-    );
+    for prefix in [CHECK_IN, TURN_COUNT] {
+        ensure!(
+            !operation.starts_with(prefix),
+            "IDs starting with \"{prefix}\" are reserved for workspace check-ins"
+        );
+    }
     Ok(())
 }
 /// How a queued message reaches its recipient.
@@ -244,7 +249,6 @@ impl Host {
             id: new_id(),
             name: name.trim().into(),
             brain: None,
-            turn_limit: 4,
             repositories: None,
             home: Some(self.new_project_home(name)?),
             slug: None,
@@ -1168,6 +1172,10 @@ impl Host {
             Command::SetVerification { verification } => {
                 serde_json::to_value(self.set_verification(verification)?)?
             }
+            Command::SetCheckIns {
+                child_turns,
+                human_turns,
+            } => serde_json::to_value(self.set_check_ins(child_turns, human_turns)?)?,
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?
