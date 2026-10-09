@@ -34,6 +34,10 @@ const DRAWINGS: &[(&str, &str)] = &[
         r#"<circle cx="12" cy="12" r="8" stroke-dasharray="2 4"/>"#,
     ),
     (
+        "waived",
+        r#"<circle cx="12" cy="12" r="10" stroke-width="2.5" stroke-dasharray="3.5 3"/><path d="m8 12 3 3 5-6" stroke-width="2.5"/>"#,
+    ),
+    (
         "attention",
         r#"<circle cx="12" cy="12" r="8"/><path d="M10 9a2 2 0 1 1 3 2c-1 1-1 1-1 2m0 3v.1"/>"#,
     ),

@@ -703,8 +703,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let coordinator = ticket.coordinator_id.clone();
-        let state = humanize(&ticket.state);
+        let waiver = tree::waiver_note(ticket);
+        let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
         let detail = format!("{label} · {state}");
+        // A waived acceptance is never drawn as passed.
+        let mark = match waiver {
+            Some(_) => icon("waived")
+                .size(px(12.))
+                .text_color(p.yellow)
+                .into_any_element(),
+            None => div()
+                .size(px(6.))
+                .mr(px(3.))
+                .rounded_full()
+                .bg(ticket_state_color(&ticket.state, p))
+                .into_any_element(),
+        };
         self.row(
             SharedString::from(format!("ticket-{}", ticket.id)),
             1,
@@ -725,14 +739,7 @@ impl Workspace {
                 .text_color(p.text)
                 .child(label),
         )
-        .child(
-            div()
-                .flex_none()
-                .size(px(6.))
-                .mr(px(3.))
-                .rounded_full()
-                .bg(ticket_state_color(&ticket.state, p)),
-        )
+        .child(div().flex_none().child(mark))
     }
 }
 

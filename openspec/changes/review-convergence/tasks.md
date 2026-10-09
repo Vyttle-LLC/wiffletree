@@ -38,9 +38,9 @@
 
 ## 7. Desktop
 
-- [ ] 7.1 Add the `waived` drawing (a dashed ring with a check) to `assets.rs::DRAWINGS`. Use it in `sidebar.rs::ticket_row` in yellow for an accepted ticket with a waiver, with the tooltip "Accepted with waiver · N open findings". Verify with a unit test of the glyph choice and a visual check against `design/mockups/current/review-convergence.html`.
-- [ ] 7.2 In `tree.rs`, add earlier-cycle lines to `verification_lines` and a ledger row model. In `team_view.rs::tickets`, show the waiver block and the "Decision ledger" section. Verify with `tree.rs` unit tests and a visual check against the mockup.
-- [ ] 7.3 Add the cycle-cap selector beside the round cap in `verifiers.rs`. Verify that it saves at once and survives restart.
+- [x] 7.1 Add the `waived` drawing (a dashed ring with a check) to `assets.rs::DRAWINGS`. Use it in `sidebar.rs::ticket_row` in yellow for an accepted ticket with a waiver, with the tooltip "Accepted with waiver · N open findings". Verify with a unit test of the glyph choice and a visual check against `design/mockups/current/review-convergence.html`.
+- [x] 7.2 In `tree.rs`, add earlier-cycle lines to `verification_lines` and a ledger row model. In `team_view.rs::tickets`, show the waiver block and the "Decision ledger" section. Verify with `tree.rs` unit tests and a visual check against the mockup.
+- [x] 7.3 Add the cycle-cap selector beside the round cap in `verifiers.rs`. Verify that it saves at once and survives restart.
 
 ## 8. Docs and checks
 

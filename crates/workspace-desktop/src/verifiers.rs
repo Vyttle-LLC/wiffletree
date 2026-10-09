@@ -1,5 +1,6 @@
-//! The Models page's Review card: who verifies tickets and the round cap. Each change saves at
-//! once, apart from the page's Save, because the host keeps it in its settings file.
+//! The Models page's Review card: who verifies tickets, the round cap and the cycle cap. Each
+//! change saves at once, apart from the page's Save, because the host keeps it in its settings
+//! file.
 use super::*;
 use gpui_component::{ActiveTheme, Sizable, button::ButtonVariants, input::Input};
 use ui::{hint, icon, segment};
@@ -103,24 +104,48 @@ impl VerifierEditor {
     }
 }
 
+/// One button per allowed cap; choosing one saves at once.
+fn cap_selector(
+    name: &str,
+    current: u32,
+    maximum: u32,
+    set: fn(&mut VerificationSettings, u32),
+    cx: &mut Context<VerifierEditor>,
+) -> Div {
+    let mut segments = div().flex().gap_1();
+    for n in 1..=maximum {
+        segments = segments.child(
+            segment(
+                SharedString::from(format!("{name}-{n}")),
+                n.to_string(),
+                n == current,
+            )
+            .on_click(cx.listener(move |view, _, _, cx| view.save(|v| set(v, n), cx))),
+        );
+    }
+    segments
+}
+
 impl Render for VerifierEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().is_dark());
         let Some(verification) = &self.verification else {
             return div().children(self.error.clone().map(|e| hint(e, p).text_color(p.red)));
         };
-        let cap = verification.max_rounds;
-        let mut rounds = div().flex().gap_1();
-        for n in 1..=MAX_VERIFICATION_ROUNDS {
-            rounds = rounds.child(
-                segment(
-                    SharedString::from(format!("rounds-{n}")),
-                    n.to_string(),
-                    n == cap,
-                )
-                .on_click(cx.listener(move |view, _, _, cx| view.save(|v| v.max_rounds = n, cx))),
-            );
-        }
+        let rounds = cap_selector(
+            "rounds",
+            verification.max_rounds,
+            MAX_VERIFICATION_ROUNDS,
+            |v, n| v.max_rounds = n,
+            cx,
+        );
+        let cycles = cap_selector(
+            "cycles",
+            verification.max_cycles,
+            MAX_VERIFICATION_CYCLES,
+            |v, n| v.max_cycles = n,
+            cx,
+        );
         let mut list = div().flex().flex_col().gap_1();
         for (index, verifier) in verification.verifiers.iter().enumerate() {
             list = list.child(
@@ -221,10 +246,13 @@ impl Render for VerifierEditor {
                     .items_center()
                     .gap_2()
                     .child("Round cap")
-                    .child(rounds),
+                    .child(rounds)
+                    .child(div().w(px(12.)))
+                    .child("Cycle cap")
+                    .child(cycles),
             )
             .child(hint(
-                "verify_ticket starts every verifier at once on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. Only failed verifiers re-run, up to the round cap. Changes here save at once.",
+                "verify_ticket starts every verifier at once on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. Only failed verifiers re-run, up to the round cap, and a ticket may start up to the cycle cap of cycles. Changes here save at once.",
                 p,
             ))
             .children(self.error.clone().map(|error| hint(error, p).text_color(p.red)))

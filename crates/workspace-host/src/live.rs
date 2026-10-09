@@ -513,9 +513,11 @@ impl Host {
                 .filter(|&p| selection.is_enabled(p))
                 .map(|p| json!({"provider": p, "models": selection.allowed(p)}))
                 .collect();
+            let verification = self.settings().verification;
             context["model_selection"] = json!({"revision": selection.revision,
                 "providers": providers, "role_providers": selection.role_providers,
-                "verifiers": self.settings().verification.verifiers, "guide": selection.guide});
+                "verifiers": verification.verifiers, "max_rounds": verification.max_rounds,
+                "max_cycles": verification.max_cycles, "guide": selection.guide});
         }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {

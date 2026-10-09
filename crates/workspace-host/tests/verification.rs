@@ -2116,3 +2116,24 @@ fn a_waiver_is_refused_without_a_fully_checked_blocked_cycle() {
         assert!(f.worktree().exists());
     }
 }
+
+#[test]
+fn a_saved_cycle_cap_survives_restart_and_reaches_the_coordinator() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path()).unwrap();
+    let mut settings = host.settings().verification;
+    settings.max_cycles = 3;
+    host.set_verification(settings).unwrap();
+    drop(host);
+
+    let mut host = Host::open(directory.path()).unwrap();
+    host.create_project("Calls").unwrap();
+    let coordinator = host.sessions().unwrap().remove(0);
+    let context = host
+        .agent_tool(&coordinator.id, "workspace_context", json!({}))
+        .unwrap();
+
+    assert_eq!(host.settings().verification.max_cycles, 3);
+    assert_eq!(context["model_selection"]["max_cycles"], 3);
+    assert_eq!(context["model_selection"]["max_rounds"], 3);
+}

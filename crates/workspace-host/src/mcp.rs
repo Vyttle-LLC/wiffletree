@@ -21,7 +21,7 @@ pub fn tools() -> Value {
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and the guide.",
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers with their round and cycle caps, and the guide.",
             json!({}),
             vec![]
         ),
