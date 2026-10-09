@@ -7,9 +7,12 @@
 
 ## 2. Turn-count check-ins
 
-- [ ] 2.1 Child check-in: in `start_turn`, count the session's runs since its parent's latest message and send `check-in:{run}:turns` at each multiple of 25. Test the 25th and 50th turns, no check-in at 26, a reset after a parent message, and an archived parent getting none.
-- [ ] 2.2 Human check-in: narrow `Actor.turns` to sessions without a parent and raise `turn-count:{run}` at each multiple of 100, superseding the previous one. Make the step-in branch clear `turn-count` items without touching live state, and reserve the prefix in `ensure_unreserved`. Test that the item survives the turn's end, the human's message clears it, the project stays live, and worker turns do not count.
+- [ ] 2.0 Add `checkin_child_turns` (default 25) and `checkin_human_turns` (default 100) to `HostSettings` with serde defaults and range validation (5–500, 10–1000), plus `Host::set_check_ins` and `Command::SetCheckIns`. Test that old settings load with the defaults and verification unchanged, that out-of-range values are refused and the saved ones kept, and that unknown fields survive a save.
+- [ ] 2.1 Child check-in: in `start_turn`, count the session's runs since its parent's latest message and send `check-in:{run}:turns` at each multiple of `checkin_child_turns`. Test the 25th and 50th turns, no check-in at 26, a lowered threshold of 10 applying from the next turn, a reset after a parent message, and an archived parent getting none.
+- [ ] 2.2 Human check-in: narrow `Actor.turns` to sessions without a parent and raise `turn-count:{run}` at each multiple of `checkin_human_turns`, superseding the previous one. Make the step-in branch clear `turn-count` items without touching live state, and reserve the prefix in `ensure_unreserved`. Test that the item survives the turn's end, the human's message clears it, the project stays live, and worker turns do not count.
 - [ ] 2.3 Test that a turn-count check-in from a verifier during a running round wakes the coordinator and leaves the cycle unchanged, alongside `a_check_in_during_a_verification_round_…`.
+
+- [ ] 2.4 Desktop selectors (held until the mockup is approved): two preset rows built like `verifiers::cap_selector` (agent 10/25/50/100/250, coordinator 50/100/250/500/1000) in the approved place, each saving at once with `SetCheckIns` and showing the host's error. Update the native-workspace delta with the approved placement. Verify with `cargo build -p workspace-desktop` and a check of the rendered window.
 
 ## 3. Prose and docs
 
