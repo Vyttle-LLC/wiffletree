@@ -402,6 +402,10 @@ struct Actor {
     /// No repository's check can be due before this.
     overlaps_due_at: i64,
     pr_watch: pr_watch::Watch,
+    /// Something changed since the PR watcher last read its tickets; see `refresh_pull_requests`.
+    pr_tickets_stale: bool,
+    /// A change cannot make the PR watcher read its tickets before this.
+    pr_tickets_due_at: i64,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -502,6 +506,8 @@ impl Service {
                     overlaps_running: HashSet::new(),
                     overlaps_due_at: 0,
                     pr_watch: pr_watch::Watch::default(),
+                    pr_tickets_stale: true,
+                    pr_tickets_due_at: 0,
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -594,11 +600,16 @@ impl Actor {
 
     /// Starts a PR pass for each due repository, one per repository at a time, and arms a
     /// wake-up for the next, since a quiet host may see no other event for hours. The store is
-    /// read only when a pass is due or the event may have changed the open tickets.
-    fn refresh_pull_requests(&mut self, at: i64, tickets_changed: bool) {
-        if tickets_changed || self.pr_watch.next_due().is_some_and(|due| due <= at) {
+    /// read only when a pass is due, or at most once a minute after a change, so most events
+    /// cost no store read.
+    fn refresh_pull_requests(&mut self, at: i64, changed: bool) {
+        self.pr_tickets_stale |= changed;
+        let relist = self.pr_tickets_stale && at >= self.pr_tickets_due_at;
+        if relist || self.pr_watch.next_due().is_some_and(|due| due <= at) {
             match self.host.pull_request_queries() {
                 Ok(queries) => {
+                    self.pr_tickets_stale = false;
+                    self.pr_tickets_due_at = at.saturating_add(pr_watch::ACTIVE_MS);
                     self.pr_watch
                         .keep(queries.iter().map(|(id, _)| id.as_str()));
                     let due = self.pr_watch.start_due(at);
@@ -613,7 +624,8 @@ impl Actor {
                 Err(e) => eprintln!("Workspace PR watch: {e:#}"),
             }
         }
-        if let Some(due) = self.pr_watch.next_due() {
+        let relist_at = self.pr_tickets_stale.then_some(self.pr_tickets_due_at);
+        if let Some(due) = self.pr_watch.next_due().into_iter().chain(relist_at).min() {
             self.wake(due);
         }
     }
@@ -2067,6 +2079,8 @@ mod tests {
             overlaps_running: HashSet::new(),
             overlaps_due_at: 0,
             pr_watch: pr_watch::Watch::default(),
+            pr_tickets_stale: true,
+            pr_tickets_due_at: 0,
         };
         (actor, changes, step_changes)
     }
@@ -2242,6 +2256,28 @@ mod tests {
         let due = actor.pr_watch.next_due().unwrap();
         assert!(due >= 1_000 + pr_watch::IDLE_MS);
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_change_reads_the_pr_tickets_at_most_once_a_minute() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, _events) = async_channel::bounded(4);
+        actor.sender = sender;
+        let repository = ticket.repository_id.clone();
+        let not_watched = |actor: &mut Actor, at| {
+            let outcome = pr_watch::Outcome::NotOnGitHub;
+            actor.pr_watch.finish(&repository, at, &outcome).is_none()
+        };
+        actor.refresh_pull_requests(1_000, true);
+        actor.host.close_ticket(&ticket.id).unwrap();
+        // The close is a change, but the tickets were read less than a minute ago.
+        actor.refresh_pull_requests(2_000, true);
+        assert!(!not_watched(&mut actor, 2_000));
+        let relist_at = 1_000 + pr_watch::ACTIVE_MS;
+        assert_eq!(actor.wake_at, Some(relist_at));
+        actor.refresh_pull_requests(relist_at, false);
+        assert!(not_watched(&mut actor, relist_at));
     }
 
     #[test]
