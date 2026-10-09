@@ -8,7 +8,7 @@ See proposal.md for why. The code this builds on, at origin/main be5f484:
 - `workspace-host/src/live.rs`: `Host::ticket` (`:209`) and `save_ticket` (`:216`). `ticket_overview` (`:531`) serializes each `Ticket` into `workspace_context`, so a new ticket field reaches the coordinator with no extra code. `accept_ticket` (`:392`) gates on the latest cycle and calls `check_verified_head` (`:445`).
 - `workspace-host/src/lib.rs`: `Host::send` (`:551`) queues a turn-starting message. A message id is unique. Re-sending the same id with the same payload returns the existing message, and a different payload is refused. A message to an archived session is refused. Host-authored messages use sender `None`, as verification's outcome does (`verification.rs:908-919`, id `verification:{ticket}:{cycle}:outcome`). `Host::event` (`:184`) appends to the `activity` table.
 - `workspace-desktop`: `sidebar.rs::ticket_row` (`:698`) draws one 30 px row with a label and a state dot. `tree.rs` holds the row text helpers (`ticket_label`, `verification_lines`). `team_view.rs::tickets` (`:99`) draws ticket cards, with `warning_badge` (`:320`) for overlap warnings. `repositories_view.rs::repositories_page` (`:7`) shows "N projects · M open tickets" for each repository. `conversation.rs` (`:626`) draws every sender-`None` message as a human bubble, and `waiting_messages` (`:195`) counts them as the human's.
-- `gh` 2.94.0 here. Its GraphQL API answered the query in decision 2 for this repository's PR #31 at a cost of 1 point (see open decision (c)).
+- `gh` 2.94.0 here. Its GraphQL API answered the query in decision 2 for this repository's PR #31 at a cost of 1 point (see settled decision 3).
 
 ## Goals / Non-Goals
 
@@ -87,18 +87,22 @@ The check time is **not** stored on the ticket. Storing it would rewrite every t
 1. It reloads the ticket and skips it if the ticket is no longer open.
 2. When GitHub reports `merge_state: Unknown`, it keeps the stored merge state. GitHub computes the merge state lazily, and merged PRs report `UNKNOWN`, so a passing `Unknown` reading must not flicker the row or count as a change.
 3. If the snapshot differs from the stored one, it calls `save_ticket` and `Host::event(project, None, "pull_request", "<ticket id> #142: checks failed")`. A small `PullRequest::changes(&old, &new)` names what changed.
-4. On a transition to `Merged`, it sends the merged message (decision 6).
+4. Before saving, it sends any message the new snapshot calls for (decision 6). Sending first means a crash between the two steps resends nothing twice: the next pass sees the same change again, and each message is skipped when its id already exists.
 
 It returns whether anything changed, so `process` signals the client. The 60 s cadence is the coalescing window. A burst of pushes or check updates between passes becomes one change.
 
-### 6. The merged message
-- **Id and recipient.** The id is `pr:{ticket}:merged:{number}`. It goes to `ticket.coordinator_id` with sender `None`, as a turn-starting message, like verification's outcome.
-- **Text.** "PR #141 for ticket "Overlap warnings" (<id>) merged into <base> as <merge commit>. Its head <sha> is the ticket worktree's HEAD. Accept the ticket with accept_ticket." When the merged head differs from the worktree's HEAD, the second sentence becomes "Its head <sha> differs from the ticket worktree's HEAD <sha>, so the merge may hold commits verification never saw. Check what changed before you call accept_ticket." When HEAD can't be read, it says so. The text uses only the ticket's own title and Git identifiers. PR titles, bodies and comments are never copied in.
-- **Once only.** The message is sent before the merged snapshot is saved. It is skipped when a message with that id already exists, so a crash between the two steps cannot send it twice or trip the reused-id check.
-- **Archived coordinator.** If the coordinator is archived, the send fails. The failure is logged and the snapshot is still saved.
-- **No auto-accept.** The ticket stays open. `accept_ticket` keeps its own gates.
+### 6. Messages to the coordinator
+Every watcher message goes to `ticket.coordinator_id` with sender `None`, as a turn-starting message like verification's outcome. Its id starts with `pr:`, and it is sent only if no message with that id exists. That rule, not the snapshot alone, keeps each message to one send, and it never trips the reused-id check. The text uses only the ticket's own title, its id, the PR number, the base name and Git SHAs. PR titles, bodies, comments, check names and author names are never copied in. A send to an archived coordinator fails, the failure is logged, and the snapshot is still saved.
 
-*Alternative:* the host accepts the ticket on merge. Rejected because acceptance is the coordinator's decision, and `accept_ticket` may legitimately refuse, for example over untriaged findings.
+- **Merged** (`pr:{ticket}:merged:{number}`, on a change to `Merged`). "PR #141 for ticket "Overlap warnings" (<id>) merged into <base> as <merge commit>. Its head <sha> is the ticket worktree's HEAD. Accept the ticket with accept_ticket." When the merged head differs from the worktree's HEAD, the second sentence becomes "Its head <sha> differs from the ticket worktree's HEAD <sha>, so the merge may hold commits verification never saw. Check what changed before you call accept_ticket." When HEAD can't be read, it says so.
+- **Closed without merging** (`pr:{ticket}:closed:{number}`, on a change to `Closed`). "PR #N for ticket "X" (<id>) was closed without merging. Reopen it, close the ticket with close_ticket, or ask the human." The same PR closing again after a reopen sends nothing new.
+- **Checks failed** (`pr:{ticket}:checks:{number}:{head}`, when an open PR's snapshot changes and its checks are `Failure`). "PR #143 for ticket "X" (<id>): checks failed at head <sha>. Run gh pr checks 143 in the ticket worktree for details. A fix needs a new verification cycle before it is pushed. Automatic wake 1 of 3 for this PR."
+- **Conflict** (`pr:{ticket}:conflict:{number}:{head}`, when an open PR's snapshot changes and its merge state is `Dirty`). "PR #139 for ticket "X" (<id>) conflicts with <base> at head <sha>. Resolving it needs a rebase or merge in the worktree and a new verification cycle before it is pushed. Automatic wake 2 of 3 for this PR."
+- **Budget.** Checks and conflict wakes share a budget of 3 per PR number, counted from the existing `pr:{ticket}:checks:{number}:` and `pr:{ticket}:conflict:{number}:` messages. One more wake is due once 3 have been sent. Instead of sending it, the host sends `pr:{ticket}:budget:{number}` once: "PR #N for ticket "X" (<id>) has used its 3 automatic wakes. Further failed checks and conflicts show only on the ticket row and in workspace_context." After that the PR wakes nobody, apart from its merged or closed message.
+
+The wakes go to the coordinator, never to the implementer. A fix after the PR opens needs a new verification cycle and a push, and the coordinator owns both. The ticket stays open after a merge, and `accept_ticket` keeps its own gates.
+
+*Alternatives:* the host accepts the ticket on merge. Rejected because acceptance is the coordinator's decision, and `accept_ticket` may legitimately refuse, for example over untriaged findings. Naming the failing checks in the message: check names come from workflow files the PR itself can change, so they count as PR text. `gh pr checks` gives them to whoever acts on the wake.
 
 ### 7. Cadence, backoff and rate limits
 `pr_watch::Watch` holds the constants `ACTIVE_MS = 60_000`, `IDLE_MS = 300_000` and `MAX_BACKOFF_MS = 1_800_000`.
@@ -142,6 +146,8 @@ The mockup is `design/mockups/current/pr-watch.html`.
   - an unchanged snapshot writes nothing
   - an `Unknown` merge state keeps the stored one
   - a merge sends exactly one message, including after a simulated crash between send and save
+  - a close without merging sends one message
+  - failed checks and a conflict each wake the coordinator once per head, the fourth wake becomes the single budget message, and nothing follows it
   - a closed ticket is skipped
   - an archived coordinator still gets the snapshot saved
   - the message text never includes PR text
@@ -162,43 +168,27 @@ The mockup is `design/mockups/current/pr-watch.html`.
 
 `Ticket.pull_request` defaults to `None`, so stored tickets load unchanged. Older builds ignore the unknown field. There is no SQL migration. Rollback means reverting the build. Stored snapshots are then ignored.
 
-## Open decisions for the human
+## Settled by the human (October 9, 2026)
 
-**(a) Wake the implementer on failed checks, a conflict or a trusted comment?**
+The human approved the mockup and proposal with these answers:
 
-*Recommendation: not the implementer. In v1, wake the coordinator, without PR text, on failed checks and on a conflict. Defer comments to their own change.*
+1. **Wakes on failed checks and conflicts: the coordinator only.** No PR text, at most once per head SHA and 3 times per PR, then one "budget used" message (decision 6). Comments are deferred to a later change. That change needs the report's safety rules:
+   - act only on authors whose `authorAssociation` is OWNER, MEMBER or COLLABORATOR
+   - ignore bots and the account `gh` runs as
+   - pass comment text only as quoted, untrusted data
+   - allow about three code-change rounds per head
+   - trip a circuit breaker after two agent replies in one thread with no human in between
+   - never approve, merge or dismiss reviews
+   - allow no replies on repositories where a comment can trigger a deploy
+2. **The PR skill and the README fix are a separate change.** The watcher is read-only, so `README.md:51` ("Wiffletree itself never pushes or merges") stays true. `README.md:81` and an `open-pr` skill bundled under `crates/workspace-host/skills/` go into their own change.
+3. **`gh` field names are as verified.** These were checked with `gh pr view --help`, `gh pr view 31 --json …` and GraphQL introspection on `github.com`, all read-only:
 
-- **Why not the implementer.** A fix after the PR opens needs a new verification cycle and someone to push, and the coordinator owns both. Waking the implementer directly would change code behind the coordinator's back, which undercuts the decision authority review convergence just gave it.
-- **The checks and conflict wakes.** They would reuse decision 6's mechanism with ids `pr:{ticket}:checks:{head}` and `pr:{ticket}:conflict:{head}`. Each fires at most once per head SHA, and at most three per PR in total. A fourth gets one final "PR wake budget used; see the ticket row" message, which is the circuit breaker. They carry only the PR number, the head, and the names of failing checks, which come from the repository's own workflow files, not from PR text. That adds about 40 lines and one spec requirement.
-- **Comments are the injection risk.** They need their own change with the report's safety rules:
-  - act only on authors whose `authorAssociation` is OWNER, MEMBER or COLLABORATOR
-  - ignore bots and the account `gh` runs as (`viewer.login`)
-  - pass comment text only as quoted, untrusted data, never as instructions
-  - allow about three code-change rounds per head
-  - trip a circuit breaker after two agent replies in one thread with no human in between
-  - never approve, merge or dismiss reviews
-  - allow no replies on repositories where a comment can trigger a deploy, such as Atlantis
+   | Field | Values |
+   | --- | --- |
+   | `mergeStateStatus` | `BEHIND`, `BLOCKED`, `CLEAN`, `DIRTY`, `HAS_HOOKS`, `UNKNOWN`, `UNSTABLE` (no `DRAFT`; drafts come from `isDraft`) |
+   | `mergeable` | `MERGEABLE`, `CONFLICTING`, `UNKNOWN` (not used; `DIRTY` covers conflicts) |
+   | Rollup `state` (`StatusState`) | `SUCCESS`, `FAILURE`, `ERROR`, `PENDING`, `EXPECTED` |
+   | PR `state` | `OPEN`, `CLOSED`, `MERGED` |
 
-**(b) Bundle a PR skill and fix the README in this change?**
-
-*Recommendation: a separate small change, before or alongside this one.*
-
-The watcher is read-only, so "Wiffletree itself never pushes or merges" (`README.md:51`) stays true. Fixing `README.md:81` ("does not push, open pull requests…") and bundling an `open-pr` skill under `crates/workspace-host/skills/` (which `communication.md:10` already names) changes role contracts and agents' authority. That deserves its own review. Bundling it here would also pull `ticket-workspaces`' role-instruction requirement into this change.
-
-**(c) `gh` field names: verified, no decision needed.**
-
-These were checked with `gh pr view --help`, `gh pr view 31 --json …` and GraphQL introspection on `github.com`, all read-only:
-
-| Field | Values |
-| --- | --- |
-| `mergeStateStatus` | `BEHIND`, `BLOCKED`, `CLEAN`, `DIRTY`, `HAS_HOOKS`, `UNKNOWN`, `UNSTABLE` (no `DRAFT`; drafts come from `isDraft`) |
-| `mergeable` | `MERGEABLE`, `CONFLICTING`, `UNKNOWN` (not used; `DIRTY` covers conflicts) |
-| Rollup `state` (`StatusState`) | `SUCCESS`, `FAILURE`, `ERROR`, `PENDING`, `EXPECTED` |
-| PR `state` | `OPEN`, `CLOSED`, `MERGED` |
-| `authorAssociation` | `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `MANNEQUIN`, `NONE` |
-
-`gh pr view --json` has no review-thread field, which is why the watcher uses `gh api graphql`. A merged PR (#31) reports `mergeStateStatus: UNKNOWN`, which decision 5 handles.
-
-**(d) Tell the coordinator when a PR closes without merging?**
-
-*Recommendation: yes.* Use one message, `pr:{ticket}:closed:{number}`: "PR #N was closed without merging; reopen it, close the ticket or ask the human." Otherwise the ticket waits silently for a merge that will never come. It reuses decision 6, adding about 10 lines and one scenario. Without it, the row shows "closed" and nothing else happens.
+   `gh pr view --json` has no review-thread field, hence `gh api graphql`. A merged PR (#31) reports `mergeStateStatus: UNKNOWN`, which decision 5 handles.
+4. **A PR closed without merging sends one `pr:{ticket}:closed:{number}` message** (decision 6).
