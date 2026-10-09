@@ -8,7 +8,7 @@ See proposal.md for why. The code this builds on, at origin/main 6b1e7c9:
 - `workspace-host/src/live.rs`: `Host::ticket` (`:209`) and `save_ticket` (`:216`). `ticket_overview` (`:531`) serializes each `Ticket` into `workspace_context`, so a new ticket field reaches the coordinator with no extra code. `accept_ticket` (`:392`) gates on the latest cycle and calls `check_verified_head` (`:445`).
 - `workspace-host/src/lib.rs`: `Host::send` (`:561`) queues a turn-starting message. A message id is unique. Re-sending the same id with the same payload returns the existing message, and a different payload is refused. A message to an archived session is refused. Host-authored messages use sender `None`, as verification's outcome does (`verification.rs:895-906`, id `verification:{ticket}:{cycle}:outcome`). `Host::event` (`:195`) appends to the `activity` table.
 - `workspace-desktop`: `sidebar.rs::ticket_row` (`:698`) draws one 30 px row with a label and a state dot. `tree.rs` holds the row text helpers (`ticket_label`, `verification_lines`). `team_view.rs::tickets` (`:99`) draws ticket cards, with `warning_badge` (`:320`) for overlap warnings. `repositories_view.rs::repositories_page` (`:7`) shows "N projects · M open tickets" for each repository. `conversation.rs` (`:626`) draws every sender-`None` message as a human bubble, and `waiting_messages` (`:195`) counts them as the human's.
-- `gh` 2.94.0 here. Its GraphQL API answered the query in decision 2 for this repository's PR #31 at a cost of 1 point (see settled decision 3).
+- `gh` 2.94.0 here. Its GraphQL API answered the query in decision 2 for this repository's PR #31 (see settled decision 3). With the review-thread comments included, it costs about 1 point per ticket branch.
 
 ## Goals / Non-Goals
 
@@ -42,16 +42,16 @@ Unlike the overlap check, it arms a wake-up, because a quiet host may see no oth
 gh api graphql -f query=<QUERY> -F owner=<o> -F name=<n> -f h0=<branch> -f h1=<branch> …
 ```
 
-Its working directory is the repository. `QUERY` declares `$h0…$hN` and one aliased connection per branch: `tN: pullRequests(headRefName: $hN, first: 5, orderBy: {field: CREATED_AT, direction: DESC})`. Each node has `number url state isDraft isCrossRepository headRefOid baseRefName mergeStateStatus mergedAt mergeCommit{oid} commits(last:1){nodes{commit{statusCheckRollup{state}}}} reviewThreads(first:100){nodes{isResolved}} comments(last:1){nodes{databaseId}} reviews(last:1){nodes{databaseId}}`. The query also reads `rateLimit { remaining resetAt }`. Branch names are passed only as variables, never pasted into the query. A repository with more than 50 open tickets is split into several calls.
+Its working directory is the repository. `QUERY` declares `$h0…$hN` and one aliased connection per branch: `tN: pullRequests(headRefName: $hN, first: 2, orderBy: {field: CREATED_AT, direction: DESC})`. Each node has `number url state isDraft isCrossRepository headRefOid baseRefName mergeStateStatus mergedAt mergeCommit{oid} commits(last:1){nodes{commit{statusCheckRollup{state}}}} reviewThreads(first:50){nodes{isResolved comments(last:1){nodes{databaseId}}}} comments(last:1){nodes{databaseId}} reviews(last:1){nodes{databaseId}}`. The query also reads `rateLimit { remaining resetAt }`. Branch names are passed only as variables, never pasted into the query. Each thread's last comment is read because a reply inside a review thread changes neither the issue comments nor, necessarily, the PR's last review. Nested connections multiply GraphQL's cost, so the query asks for 2 PRs per branch and 50 threads per PR. That costs about 1 point per branch, measured with the query on this repository (2 points for 2 branches; 10 with 5 PRs and 100 threads). A repository with more than 50 open tickets is split into several calls.
 
 - **Owner and name** come from the base's remote. For `origin/main` that is `git remote get-url origin`, parsed for `github.com` in its HTTPS and SSH forms. A base with no remote, or a remote that isn't on `github.com`, makes no `gh` call. Its status reads "not on GitHub; PRs not watched". This is deterministic, so `gh`'s own choice among several remotes never matters.
 - **Running `gh`.** `runtime.rs` gains `gh_output(path, args)`, which reuses `bounded_output` with a 30 s deadline and sets `GH_PROMPT_DISABLED=1` and `NO_COLOR=1`. A non-zero exit becomes the repository's error, using `gh`'s last error line.
 - **Merged heads.** For each PR in state `MERGED`, the same thread reads the ticket worktree's HEAD with `git rev-parse HEAD`, for decision 6.
 
-*Conditional requests:* not used, because `gh` cannot make them here. GraphQL has no ETag or `304`. `gh pr view` and `gh pr list` are GraphQL underneath. REST would need several calls per PR, and review threads aren't in REST at all. One query costs 1 point of the 5,000 per hour. Twenty repositories with active PRs, polled every 60 s, use 1,200 points an hour. Rate limits are handled in decision 7.
+*Conditional requests:* not used, because `gh` cannot make them here. GraphQL has no ETag or `304`. `gh pr view` and `gh pr list` are GraphQL underneath. REST would need several calls per PR, and review threads aren't in REST at all. A query costs about 1 point per ticket branch, out of 5,000 an hour. Twenty open tickets with active PRs, polled every 60 s, use about 1,200 points an hour. Rate limits are handled in decision 7.
 
 ### 3. Picking a ticket's PR
-Nodes with `isCrossRepository: true` are skipped, so a fork's branch with the same name never matches. Of the rest, an `OPEN` PR wins. Otherwise the newest wins. No PR leaves `pull_request` at `None`. Ticket branches are unique (`wiffletree/<slug>`), so in practice there is one match.
+Nodes with `isCrossRepository: true` are skipped, so a fork's branch with the same name never matches. Of the rest, which are at most the branch's 2 newest PRs, an `OPEN` PR wins. Otherwise the newest wins. No PR leaves `pull_request` at `None`. Ticket branches are unique (`wiffletree/<slug>`), so in practice there is one match.
 
 ### 4. The snapshot type, on the ticket
 In `workspace-core/src/lib.rs`:
@@ -74,7 +74,7 @@ pub struct PullRequest {
 
 - `MergeState` mirrors GitHub's enum: `Clean`, `Behind`, `Blocked`, `Dirty`, `Unstable`, `HasHooks` and `Unknown`. It is serialized in snake_case, and `#[serde(other)]` maps anything new to `Unknown`.
 - `CheckState` maps the rollup's `StatusState`. `SUCCESS` is `Success`. `FAILURE` and `ERROR` are `Failure`. `PENDING` and `EXPECTED` are `Pending`. A null rollup is `None`.
-- `last_comment_id` is the larger of the last issue comment's and the last review's `databaseId`.
+- `last_comment_id` is the largest `databaseId` among the last issue comment, the last review and each review thread's last comment. A reply inside a review thread therefore changes it.
 - `Ticket.pull_request: Option<PullRequest>` uses `#[serde(default, skip_serializing_if = "Option::is_none")]`, as `waiver` does.
 
 The check time is **not** stored on the ticket. Storing it would rewrite every ticket on every pass. It lives in decision 8.
@@ -160,7 +160,7 @@ The mockup is `design/mockups/current/pr-watch.html`.
 
 - [`gh` missing or not logged in] → The repository row shows the error, passes back off, and agents are unaffected. Login-shell PATH adoption (`login_env.rs`) already makes `gh` visible to the host.
 - [A wrong PR match] → Cross-repository PRs are skipped and ticket branch names are unique. The PR number is visible on the row, so a mismatch is obvious.
-- [The thread count is capped at the first 100 review threads] → This is acceptable for ticket-sized PRs. Paging is out of scope.
+- [The thread count and the reply check cover the first 50 review threads, and only the 2 newest PRs per branch are read] → Both are acceptable for ticket-sized PRs with unique branches. Paging is out of scope, and the caps keep the query at about 1 point per branch.
 - [Shared rate limit with the human's own `gh` use] → The 200-point floor and the wait for `resetAt`.
 - [Merged head differs from the worktree] → The message says so, and `accept_ticket`'s verified-head check still applies to the local HEAD.
 - [Verification's host messages still look like the human's] → This is pre-existing. The `host_notice` helper makes extending it to `verification:` a one-line follow-up.

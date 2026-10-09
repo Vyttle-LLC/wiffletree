@@ -39,7 +39,7 @@ A repository SHALL be checked as soon as the host starts or first has an open ti
 - **THEN** the repository is still checked about every 60 seconds
 
 ### Requirement: A ticket's PR is found by its branch
-A ticket's PR SHALL be a PR in the ticket's repository whose head branch is the ticket's branch. PRs from other repositories, such as forks, SHALL be ignored. When several match, an open PR SHALL be chosen, and otherwise the most recently created one.
+A ticket's PR SHALL be a PR in the ticket's repository whose head branch is the ticket's branch. PRs from other repositories, such as forks, SHALL be ignored. When several match, an open PR among the two most recently created SHALL be chosen, and otherwise the most recently created one.
 
 #### Scenario: Fork with the same branch name
 - **WHEN** a fork opens a PR from a branch with the same name as a ticket's branch and the ticket has no PR of its own
@@ -50,7 +50,7 @@ A ticket's PR SHALL be a PR in the ticket's repository whose head branch is the 
 - **THEN** the ticket shows PR #15
 
 ### Requirement: PR snapshot on the ticket
-Each ticket SHALL record its PR's number, URL, state (`open`, `closed` or `merged`), draft flag, base branch, head SHA, merge state, check rollup (`none`, `pending`, `success` or `failure`), number of unresolved review threads, last comment id and merge commit. The coordinator SHALL see this record in `workspace_context`. The host SHALL store the record and log a `pull_request` activity event only when it changes. A pass in which GitHub reports the merge state as unknown SHALL keep the previously recorded merge state. A failed pass SHALL keep every recorded snapshot. Tickets stored before this change SHALL load with no PR.
+Each ticket SHALL record its PR's number, URL, state (`open`, `closed` or `merged`), draft flag, base branch, head SHA, merge state, check rollup (`none`, `pending`, `success` or `failure`), number of unresolved review threads, last comment id and merge commit. The last comment id SHALL change when anyone adds an issue comment, submits a review or replies inside a review thread. The coordinator SHALL see this record in `workspace_context`. The host SHALL store the record and log a `pull_request` activity event only when it changes. A pass in which GitHub reports the merge state as unknown SHALL keep the previously recorded merge state. A failed pass SHALL keep every recorded snapshot. Tickets stored before this change SHALL load with no PR.
 
 #### Scenario: Change recorded once
 - **WHEN** a pass records a change to a ticket's PR and the next pass returns the same state
@@ -111,7 +111,7 @@ When an open PR's recorded checks become `failure`, the host SHALL send the tick
 - **THEN** the coordinator receives one message saying the PR has used its automatic wakes, and later failures or conflicts on that PR send nothing
 
 #### Scenario: New comment
-- **WHEN** a reviewer comments on a ticket's PR
+- **WHEN** a reviewer comments on a ticket's PR, or replies inside an existing unresolved review thread
 - **THEN** the recorded last comment id changes and no agent is woken
 
 ### Requirement: Watcher messages carry no PR text and come from Wiffletree
