@@ -21,7 +21,7 @@ pub fn tools() -> Value {
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and the guide.",
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers with their round and cycle caps, and the guide.",
             json!({}),
             vec![]
         ),
@@ -39,7 +39,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "verify_ticket",
-            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. For each verifier in model_selection.verifiers, give its focus, an exact profile within its provider (or, without one, its role's providers) and the models allowed on this machine, guided by the guide, and a one-line reason. Any refused choice starts no verifier, and nothing is substituted. A verifier session that already exists under that focus is reused only if your profile matches its pinned one; otherwise it is archived and a fresh verifier starts on your choice. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked.",
+            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. For each verifier in model_selection.verifiers, give its focus, an exact profile within its provider (or, without one, its role's providers) and the models allowed on this machine, guided by the guide, and a one-line reason. Any refused choice starts no verifier, and nothing is substituted. A verifier session that already exists under that focus is reused only if your profile matches its pinned one; otherwise it is archived and a fresh verifier starts on your choice. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked. A ticket may start only as many cycles as the cycle cap allows.",
             json!({"ticket_id":string,"verifiers":{"type":"array","items":{"type":"object","properties":{"focus":string,"profile":profile,"reason":string},"required":["focus","profile","reason"],"additionalProperties":false}}}),
             vec!["ticket_id", "verifiers"]
         ),
@@ -51,8 +51,9 @@ pub fn tools() -> Value {
         ),
         tool(
             "report",
-            "Report progress, a blocker or a result to your parent. Progress is batched into its next turn; other kinds wake it immediately. Ask for a decision with kind blocked and the exact question. Give concrete evidence. Never wait for discovery.",
-            json!({"message_id":string,"kind":{"type":"string","enum":["progress","blocked","ready_for_testing","passed","failed","completed"]},"body":string}),
+            "Report progress, a blocker or a result to your parent. Progress is batched into its next turn; other kinds wake it immediately. Ask for a decision with kind blocked and the exact question. Give concrete evidence. Never wait for discovery. Verifiers attach every finding to passed or failed: the host fails your check only for a blocking finding with a path:line location, a trigger and evidence. Give id only to report your own open, follow-up or won't-fix entry again.",
+            json!({"message_id":string,"kind":{"type":"string","enum":["progress","blocked","ready_for_testing","passed","failed","completed"]},"body":string,
+                "findings":{"type":"array","items":{"type":"object","properties":{"id":string,"severity":{"type":"string","enum":["blocking","non_blocking","pre_existing"]},"location":string,"summary":string,"trigger":string,"evidence":string},"required":["severity","location","summary","trigger","evidence"],"additionalProperties":false}}}),
             vec!["message_id", "kind", "body"]
         ),
         tool(
@@ -86,9 +87,15 @@ pub fn tools() -> Value {
             vec![]
         ),
         tool(
+            "triage_findings",
+            "Coordinator: decide each untriaged finding in a ticket's ledger once: fix_now, follow_up or wont_fix, each with a one-line reason. An open finding is already routed to the implementer; overrule it only with follow_up or wont_fix, for example after the implementer's objection. Decisions never change, and the call applies all of them or none. It messages no one: send fix_now work to the implementer with send_message, then verify again.",
+            json!({"ticket_id":string,"decisions":{"type":"array","items":{"type":"object","properties":{"id":string,"decision":{"type":"string","enum":["fix_now","follow_up","wont_fix"]},"reason":string},"required":["id","decision","reason"],"additionalProperties":false}}}),
+            vec!["ticket_id", "decisions"]
+        ),
+        tool(
             "accept_ticket",
-            "Coordinator: accept a ticket whose verification passed at the commit still checked out. Does not merge or publish. Archives its agents and removes its worktree, keeping conversations and branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
-            json!({"ticket_id":string}),
+            "Coordinator: accept a ticket whose latest verification cycle passed at the commit still checked out or a patch-equivalent one, such as a squash. Triage every untriaged finding first. After a blocked cycle in which every verifier checked, give waived: a one-line reason for accepting the open findings it names; the cycle stays blocked and the waiver is recorded. Does not merge or publish. Archives its agents and removes its worktree, keeping conversations and branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
+            json!({"ticket_id":string,"waived":string}),
             vec!["ticket_id"]
         ),
         tool(

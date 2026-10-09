@@ -1,9 +1,9 @@
-//! A project's tickets with their repository, agents and verification rounds.
+//! A project's tickets with their repository, agents, verification cycles and decision ledger.
 use super::*;
 use gpui_component::button::ButtonVariants;
 use inspector::copyable;
 use ui::{
-    card, empty_state, hint, humanize, icon, pill, section, session_icon, ticket_state_color,
+    card, empty_state, hint, humanize, icon, mono, pill, section, session_icon, ticket_state_color,
 };
 
 impl Workspace {
@@ -137,6 +137,13 @@ impl Workspace {
         };
         for ticket in tickets {
             let ticket_id = ticket.id.clone();
+            let (state, state_color) = match tree::waiver_note(ticket) {
+                Some(_) => ("Accepted with waiver".to_owned(), p.yellow),
+                None => (
+                    humanize(&ticket.state),
+                    ticket_state_color(&ticket.state, p),
+                ),
+            };
             let mut entry = card(p)
                 .child(
                     div()
@@ -151,13 +158,16 @@ impl Workspace {
                                 .child(tree::ticket_label(snapshot, ticket)),
                         )
                         .children(warning_badge(snapshot, ticket, p))
-                        .child(pill(
-                            humanize(&ticket.state),
-                            ticket_state_color(&ticket.state, p),
-                        )),
+                        .child(pill(state, state_color)),
                 )
                 .child(hint(ticket.brief.clone(), p).line_clamp(4))
-                .child(copyable("Branch", &ticket.branch, p));
+                .child(copyable("Branch", &ticket.branch, p))
+                .children(
+                    ticket
+                        .waiver
+                        .as_ref()
+                        .map(|reason| waiver_block(ticket, reason, p)),
+                );
             let rounds = tree::verification_lines(ticket);
             if !rounds.is_empty() {
                 let mut list = div().flex().flex_col().gap_1();
@@ -165,6 +175,19 @@ impl Workspace {
                     list = list.child(hint(line, p));
                 }
                 entry = entry.child(list);
+            }
+            let ledger = tree::ledger_rows(ticket);
+            if !ledger.is_empty() {
+                let untriaged = ledger
+                    .iter()
+                    .filter(|row| row.status == EntryStatus::Untriaged)
+                    .count();
+                entry = entry
+                    .child(
+                        section(format!("DECISION LEDGER · {}", ledger.len()), p)
+                            .child(hint(format!("{untriaged} untriaged"), p).text_size(px(11.))),
+                    )
+                    .child(ledger_list(ledger, p));
             }
             let agents = agents_of(ticket);
             if !agents.is_empty() {
@@ -210,6 +233,86 @@ impl Workspace {
         }
         body
     }
+}
+
+/// Why the coordinator accepted the ticket despite a blocked cycle, and what it left open.
+fn waiver_block(ticket: &Ticket, reason: &str, p: Palette) -> Div {
+    let open: Vec<&str> = ticket
+        .ledger
+        .iter()
+        .filter(|e| e.status == EntryStatus::Open)
+        .map(|e| e.id.as_str())
+        .collect();
+    let left = if open.is_empty() {
+        "Verdict stays blocked".to_owned()
+    } else {
+        format!(
+            "Open at acceptance: {} · verdict stays blocked",
+            open.join(", ")
+        )
+    };
+    div()
+        .border_l_2()
+        .border_color(p.yellow)
+        .rounded_r(px(6.))
+        .bg(p.yellow.opacity(0.06))
+        .px(px(10.))
+        .py(px(6.))
+        .text_size(px(12.))
+        .child(
+            div()
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Waived by the coordinator."),
+                )
+                .child(reason.to_owned()),
+        )
+        .child(hint(left, p).text_size(px(11.)))
+}
+
+/// Each entry's id, summary, place and decision, with its status as a pill.
+fn ledger_list(rows: Vec<tree::LedgerRow>, p: Palette) -> Div {
+    let line = p.edge.opacity(0.5);
+    let mut list = div().flex().flex_col().border_t_1().border_color(line);
+    for row in rows {
+        let color = match row.status {
+            EntryStatus::Open => p.red,
+            EntryStatus::Fixed => p.green,
+            EntryStatus::Untriaged => p.focus,
+            EntryStatus::FixNow => p.yellow,
+            EntryStatus::FollowUp => p.blue,
+            EntryStatus::WontFix => p.subtle,
+        };
+        list = list.child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .py(px(9.))
+                .border_b_1()
+                .border_color(line)
+                .child(mono(row.id, p).w(px(28.)).flex_none())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(12.)).child(row.summary))
+                        .child(
+                            div()
+                                .font_family(".SystemMonoFont")
+                                .text_size(px(10.5))
+                                .text_color(p.subtle)
+                                .child(row.place),
+                        )
+                        .child(hint(row.note, p).text_size(px(11.))),
+                )
+                .child(pill(humanize(row.status.label()), color)),
+        );
+    }
+    list
 }
 
 /// Flags an open ticket whose branch has fallen behind its base or overlaps another open

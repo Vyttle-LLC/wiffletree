@@ -94,6 +94,12 @@ fn take_input(host: &mut Host, session: &str) {
     }
 }
 
+/// An evidenced blocking finding summarized as `summary`.
+fn blocking(summary: &str) -> Value {
+    json!({"severity":"blocking","location":"src/calls.rs:42","summary":summary,
+        "trigger":"A call arrives while the line is busy","evidence":"calls::busy_line fails"})
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     host: Host,
@@ -119,12 +125,13 @@ impl Fixture {
         host.set_verification(VerificationSettings {
             verifiers,
             max_rounds: cap,
+            max_cycles: 2,
         })
         .unwrap();
         let project = host.create_project("Calls").unwrap();
         let coordinator = host.sessions().unwrap().remove(0);
         let repository = host
-            .attach_repository(&project.id, repository.to_str().unwrap(), "HEAD")
+            .attach_repository(&project.id, repository.to_str().unwrap(), "main")
             .unwrap();
         let ticket = host
             .create_ticket(
@@ -169,6 +176,25 @@ impl Fixture {
             "report",
             json!({"message_id":id,"kind":kind,"body":format!("{kind} evidence from {session}")}),
         )
+    }
+    /// Reports `kind` with `findings` from within `session`'s turn.
+    fn report_findings(
+        &mut self,
+        session: &str,
+        id: &str,
+        kind: &str,
+        findings: Value,
+    ) -> anyhow::Result<Value> {
+        take_input(&mut self.host, session);
+        self.host.agent_tool(
+            session,
+            "report",
+            json!({"message_id":id,"kind":kind,"body":format!("{kind} evidence from {session}"),"findings":findings}),
+        )
+    }
+    /// Fails with one evidenced blocking finding, summarized as `id`.
+    fn fail(&mut self, session: &str, id: &str) -> anyhow::Result<Value> {
+        self.report_findings(session, id, "failed", json!([blocking(id)]))
     }
     fn verify(&mut self) -> anyhow::Result<Ticket> {
         let id = self.ticket.id.clone();
@@ -317,6 +343,7 @@ fn verify_ticket_refuses_unready_dirty_running_and_oversized_cycles() {
         .set_verification(VerificationSettings {
             verifiers: many,
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     let host_wide = f.verify().unwrap_err().to_string();
@@ -336,6 +363,7 @@ fn verify_ticket_refuses_unready_dirty_running_and_oversized_cycles() {
         .set_verification(VerificationSettings {
             verifiers: three_verifiers(),
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     f.verify().unwrap();
@@ -380,7 +408,7 @@ fn a_first_pass_neither_passes_the_ticket_nor_allows_acceptance() {
         )
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("verifying"), "{refused}");
+    assert!(refused.contains("cycle 1 is still running"), "{refused}");
     assert_eq!(f.current().state, "verifying");
     assert_eq!(f.host.sessions().unwrap(), agents);
     assert!(f.worktree().exists());
@@ -443,7 +471,7 @@ fn a_failure_goes_to_the_implementer_and_only_failed_verifiers_re_run() {
     let before = |f: &Fixture, session: &str| f.host.messages(session, None, 100).unwrap().len();
     let (claude_before, style_before) = (before(&f, &claude), before(&f, &style));
     f.report(&claude, "pass", "passed").unwrap();
-    f.report(&codex, "fail", "failed").unwrap();
+    f.fail(&codex, "fail").unwrap();
     f.report(&style, "pass", "passed").unwrap();
 
     assert_eq!(f.current().state, "failed");
@@ -454,17 +482,13 @@ fn a_failure_goes_to_the_implementer_and_only_failed_verifiers_re_run() {
     let sent = f.waking(&f.implementer.id);
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].id, format!("verification:{}:1:1", f.ticket.id));
-    assert_eq!(sent[0].sender.as_ref(), Some(&f.coordinator.id));
+    assert_eq!(sent[0].sender, None, "sent as Wiffletree");
     assert!(
-        sent[0]
-            .body
-            .contains(&format!("failed evidence from {codex}"))
+        sent[0].body.contains("F1 · src/calls.rs:42 · fail"),
+        "{}",
+        sent[0].body
     );
-    assert!(
-        !sent[0]
-            .body
-            .contains(&format!("passed evidence from {claude}"))
-    );
+    assert!(!sent[0].body.contains("evidence from"), "{}", sent[0].body);
 
     // Ready with unsaved work is refused and starts nothing.
     std::fs::write(f.worktree().join("fix.txt"), "two").unwrap();
@@ -515,13 +539,13 @@ fn the_round_cap_blocks_the_ticket_and_wakes_the_coordinator_once() {
     );
     f.report(&claude, "pass", "passed").unwrap();
     f.report(&style, "pass", "passed").unwrap();
-    f.report(&codex, "fail-1", "failed").unwrap();
+    f.fail(&codex, "fail-1").unwrap();
     f.commit("fix.txt", "two");
     f.report(&f.implementer.id.clone(), "fixed", "ready_for_testing")
         .unwrap();
     let implementer_messages = f.host.messages(&f.implementer.id, None, 100).unwrap().len();
 
-    f.report(&codex, "fail-2", "failed").unwrap();
+    f.fail(&codex, "fail-2").unwrap();
 
     let ticket = f.current();
     assert_eq!(ticket.state, "blocked");
@@ -536,7 +560,11 @@ fn the_round_cap_blocks_the_ticket_and_wakes_the_coordinator_once() {
     );
     let waking = f.waking(&f.coordinator.id);
     assert_eq!(waking.len(), 1, "{waking:?}");
-    for expected in ["2 of 2 rounds", "round cap of 2", "Tester · Codex"] {
+    for expected in [
+        "cycle 1 of 2, 2 of 2 rounds",
+        "round cap of 2",
+        "Open findings:\n- F2 · src/calls.rs:42 · fail-2",
+    ] {
         assert!(
             waking[0].body.contains(expected),
             "{expected}\n{}",
@@ -562,8 +590,7 @@ fn a_cap_of_three_allows_a_third_round() {
     f.verify().unwrap();
     let codex = f.verifier("Codex");
     for round in 1..=2 {
-        f.report(&codex, &format!("fail-{round}"), "failed")
-            .unwrap();
+        f.fail(&codex, &format!("fail-{round}")).unwrap();
         f.commit("fix.txt", &format!("fix {round}"));
         f.report(
             &f.implementer.id.clone(),
@@ -582,7 +609,7 @@ fn a_blocked_verifier_blocks_the_ticket_after_its_round_without_another_round() 
     f.coordinator_reads();
     f.verify().unwrap();
     f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
-    f.report(&f.verifier("Codex"), "fail", "failed").unwrap();
+    f.fail(&f.verifier("Codex"), "fail").unwrap();
     f.report(&f.verifier("Style"), "blocked", "blocked")
         .unwrap();
 
@@ -628,7 +655,7 @@ fn an_implementer_blocked_between_rounds_ends_the_cycle_and_wakes_the_coordinato
     f.coordinator_reads();
     f.verify().unwrap();
     f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
-    f.report(&f.verifier("Codex"), "fail", "failed").unwrap();
+    f.fail(&f.verifier("Codex"), "fail").unwrap();
     f.report(&f.verifier("Style"), "pass", "passed").unwrap();
 
     f.report(&f.implementer.id.clone(), "stuck", "blocked")
@@ -660,7 +687,7 @@ fn a_verdict_after_its_cycle_ended_is_recorded_without_moving_the_ticket() {
     f.coordinator_reads();
 
     let codex = f.verifier("Codex");
-    f.report(&codex, "late", "failed").unwrap();
+    f.fail(&codex, "late").unwrap();
 
     let ticket = f.current();
     assert_eq!(ticket.state, "blocked");
@@ -842,10 +869,12 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
         VerificationSettings {
             verifiers: duplicate,
             max_rounds: 2,
+            max_cycles: 2,
         },
         VerificationSettings {
             verifiers: three_verifiers(),
             max_rounds: 0,
+            max_cycles: 2,
         },
     ] {
         assert!(f.host.set_verification(invalid).is_err());
@@ -854,13 +883,18 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
 }
 
 #[test]
-fn without_a_saved_setting_a_tester_and_two_reviewers_verify_with_a_cap_of_two() {
+fn without_a_saved_setting_a_tester_and_two_lens_reviewers_verify_with_caps_of_three_and_two() {
     let directory = tempfile::tempdir().unwrap();
     let host = Host::open(directory.path()).unwrap();
     let settings = host.settings().verification;
-    assert_eq!(settings.max_rounds, 2);
+    assert_eq!((settings.max_rounds, settings.max_cycles), (3, 2));
     assert_eq!(settings, VerificationSettings::default());
-    assert_eq!(settings.verifiers.len(), 3);
+    let focuses: Vec<_> = settings
+        .verifiers
+        .iter()
+        .map(|v| v.focus.as_str())
+        .collect();
+    assert_eq!(focuses, ["Tests", "Correctness", "Regressions"]);
 }
 
 #[test]
@@ -952,6 +986,7 @@ fn a_verifier_dropped_from_the_settings_stays_quiet_when_it_reports_late() {
         .set_verification(VerificationSettings {
             verifiers: vec![verifier(Role::Tester, "New", None)],
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
@@ -1025,6 +1060,7 @@ fn a_verifier_whose_provider_changed_starts_a_fresh_session_and_retires_the_old_
         .set_verification(VerificationSettings {
             verifiers: vec![verifier(Role::Reviewer, "Review", Some(Provider::Codex))],
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     let sol = profile(Provider::Codex, "gpt-6.1-sol", "high");
@@ -1074,7 +1110,7 @@ fn passed_verifiers_retire_after_their_round_and_the_rest_when_the_cycle_ends() 
     );
     f.report(&claude, "pass", "passed").unwrap();
     assert!(!f.archived(&claude), "a pass mid-round retires nothing");
-    f.report(&codex, "fail", "failed").unwrap();
+    f.fail(&codex, "fail").unwrap();
     f.report(&style, "pass", "passed").unwrap();
 
     assert!(f.archived(&claude) && f.archived(&style));
@@ -1106,7 +1142,7 @@ fn a_cycle_blocked_by_its_implementer_retires_even_pending_verifiers() {
 
     // The archived verifier's turn still reports; it is recorded and wakes no one.
     f.coordinator_reads();
-    f.report(&codex, "late", "failed").unwrap();
+    f.fail(&codex, "late").unwrap();
     let ticket = f.current();
     assert_eq!(ticket.state, "blocked");
     let verification = ticket.verification.unwrap();
@@ -1176,7 +1212,7 @@ fn archive_agent_refuses_each_agent_still_needed() {
     assert!(error.contains("owes verification cycle 1"), "{error}");
     f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
     f.report(&f.verifier("Style"), "pass", "passed").unwrap();
-    f.report(&codex, "fail", "failed").unwrap();
+    f.fail(&codex, "fail").unwrap();
     let error = refused(&mut f, &coordinator, &codex);
     assert!(
         error.contains("owes verification cycle 1"),
@@ -1210,4 +1246,943 @@ fn archive_agent_refuses_each_agent_still_needed() {
         error.contains("not an agent of a ticket you own"),
         "{error}"
     );
+}
+
+fn finding(severity: &str, summary: &str) -> Value {
+    json!({"severity":severity,"location":"src/calls.rs:7","summary":summary,"trigger":"","evidence":""})
+}
+
+impl Fixture {
+    fn ledger(&self) -> Vec<LedgerEntry> {
+        self.current().ledger
+    }
+    fn entry(&self, id: &str) -> LedgerEntry {
+        self.ledger().into_iter().find(|e| e.id == id).unwrap()
+    }
+    fn run(&self, focus: &str) -> VerifierRun {
+        self.round()
+            .verifiers
+            .into_iter()
+            .find(|v| v.focus == focus)
+            .unwrap()
+    }
+    /// Commits a fix and reports ready, starting the next round.
+    fn fix(&mut self, content: &str) {
+        self.commit("fix.txt", content);
+        let implementer = self.implementer.id.clone();
+        self.report(&implementer, content, "ready_for_testing")
+            .unwrap();
+    }
+}
+
+fn one_tester(cap: u32) -> Fixture {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], cap);
+    f.verify().unwrap();
+    f
+}
+
+#[test]
+fn a_malformed_finding_or_a_foreign_id_refuses_the_whole_report() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+    let refused = [
+        json!([{"severity":"critical","location":"a.rs:1","summary":"Bad","trigger":"t","evidence":"e"}]),
+        json!([{"severity":"blocking","location":"a.rs:1","summary":"Two\nlines","trigger":"t","evidence":"e"}]),
+        json!([{"severity":"blocking","location":"a.rs:1","summary":"Long","trigger":"t","evidence":"e".repeat(4096)}]),
+        json!([{"severity":"blocking","location":" ","summary":"Nowhere","trigger":"t","evidence":"e"}]),
+        json!([blocking("Real"), {"id":"F9","severity":"blocking","location":"a.rs:1","summary":"Unknown","trigger":"t","evidence":"e"}]),
+    ];
+    for (n, findings) in refused.into_iter().enumerate() {
+        let id = format!("bad-{n}");
+        assert!(
+            f.report_findings(&codex, &id, "failed", findings).is_err(),
+            "{id}"
+        );
+        assert!(f.host.message(&format!("report:{codex}:{id}")).is_err());
+    }
+    assert_eq!(f.run("Codex").result, VerifierResult::Pending);
+    assert!(f.ledger().is_empty());
+}
+
+#[test]
+fn an_id_must_name_an_open_or_settled_entry_of_the_verifiers_own_focus() {
+    let mut f = Fixture::ready(
+        vec![
+            verifier(Role::Tester, "Codex", None),
+            verifier(Role::Reviewer, "Style", None),
+        ],
+        3,
+    );
+    f.verify().unwrap();
+    let (codex, style) = (f.verifier("Codex"), f.verifier("Style"));
+    let codex_findings = json!([blocking("Busy line"), finding("non_blocking", "Naming")]);
+    f.report_findings(&codex, "fail", "failed", codex_findings)
+        .unwrap();
+    f.fail(&style, "Style break").unwrap();
+    f.fix("two");
+    let again = |id: &str| {
+        let mut finding = blocking("Again");
+        finding["id"] = json!(id);
+        json!([finding])
+    };
+
+    let foreign = f.report_findings(&style, "foreign", "failed", again("F1"));
+    let untriaged = f.report_findings(&codex, "untriaged", "failed", again("F2"));
+
+    assert!(foreign.unwrap_err().to_string().contains("not an open"));
+    assert!(untriaged.is_err());
+    assert!(
+        f.round()
+            .verifiers
+            .iter()
+            .all(|v| v.result == VerifierResult::Pending)
+    );
+    f.report_findings(&codex, "own", "failed", again("F1"))
+        .unwrap();
+    assert_eq!(f.entry("F1").finding.summary, "Again");
+}
+
+#[test]
+fn findings_in_a_late_verdict_are_ignored() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+    f.report(&codex, "pass", "passed").unwrap();
+
+    f.report_findings(
+        &codex,
+        "second-thoughts",
+        "failed",
+        json!([blocking("Late")]),
+    )
+    .unwrap();
+
+    assert!(f.ledger().is_empty());
+    assert_eq!(f.current().state, "passed");
+}
+
+#[test]
+fn a_failure_without_evidence_passes_and_its_finding_awaits_triage() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+
+    f.report_findings(
+        &codex,
+        "fail",
+        "failed",
+        json!([finding("blocking", "No proof")]),
+    )
+    .unwrap();
+
+    let run = f.run("Codex");
+    assert_eq!(run.result, VerifierResult::Passed);
+    assert_eq!(
+        run.reason.as_deref(),
+        Some("reported failed without an evidenced blocking finding")
+    );
+    let entry = f.entry("F1");
+    assert_eq!(entry.status, EntryStatus::Untriaged);
+    assert_eq!(
+        (entry.focus.as_str(), entry.cycle, entry.round),
+        ("Codex", 1, 1)
+    );
+}
+
+#[test]
+fn a_pass_with_an_evidenced_blocking_finding_fails() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+
+    f.report_findings(&codex, "pass", "passed", json!([blocking("Busy line")]))
+        .unwrap();
+
+    let run = f.run("Codex");
+    assert_eq!(run.result, VerifierResult::Failed);
+    assert_eq!(
+        run.reason.as_deref(),
+        Some("reported passed with an evidenced blocking finding")
+    );
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+}
+
+#[test]
+fn only_non_blocking_findings_pass_and_await_triage() {
+    let mut f = one_tester(2);
+    let codex = f.verifier("Codex");
+    let findings = json!([
+        finding("non_blocking", "Naming"),
+        finding("non_blocking", "Comment"),
+        finding("pre_existing", "Old bug"),
+    ]);
+
+    f.report_findings(&codex, "fail", "failed", findings)
+        .unwrap();
+
+    assert_eq!(f.run("Codex").result, VerifierResult::Passed);
+    let statuses: Vec<_> = f
+        .ledger()
+        .iter()
+        .map(|e| (e.id.clone(), e.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("F1".into(), EntryStatus::Untriaged),
+            ("F2".into(), EntryStatus::Untriaged),
+            ("F3".into(), EntryStatus::Untriaged),
+        ]
+    );
+}
+
+#[test]
+fn the_implementer_gets_only_the_rounds_open_entries_from_wiffletree() {
+    let mut f = Fixture::ready(three_verifiers(), 3);
+    f.coordinator_reads();
+    f.verify().unwrap();
+    f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
+    f.report(&f.verifier("Style"), "pass", "passed").unwrap();
+    let findings = json!([blocking("Busy line"), finding("non_blocking", "Naming nit")]);
+
+    f.report_findings(&f.verifier("Codex"), "fail", "failed", findings)
+        .unwrap();
+
+    let sent = f.waking(&f.implementer.id);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].sender, None);
+    let body = &sent[0].body;
+    for expected in [
+        "F1 · src/calls.rs:42 · Busy line",
+        "Trigger: A call arrives while the line is busy",
+        "Evidence: calls::busy_line fails",
+        "tell the coordinator in one sentence with evidence",
+    ] {
+        assert!(body.contains(expected), "{expected}\n{body}");
+    }
+    assert!(
+        !body.contains("Naming nit") && !body.contains("F2"),
+        "{body}"
+    );
+    assert!(f.waking(&f.coordinator.id).is_empty());
+}
+
+#[test]
+fn a_verifier_that_changed_the_worktree_is_named_to_the_implementer() {
+    let mut f = Fixture::ready(three_verifiers(), 3);
+    f.verify().unwrap();
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    f.report(&f.verifier("Style"), "pass", "passed").unwrap();
+    f.commit("verifier.txt", "sneaky");
+
+    f.report(&f.verifier("Claude"), "pass", "passed").unwrap();
+
+    let sent = f.waking(&f.implementer.id);
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0]
+            .body
+            .contains("Tester · Claude: worktree changed during verification"),
+        "{}",
+        sent[0].body
+    );
+}
+
+#[test]
+fn a_blocking_finding_not_reported_again_is_fixed() {
+    let mut f = one_tester(3);
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "Busy line").unwrap();
+    f.fix("two");
+
+    f.report(&codex, "pass-2", "passed").unwrap();
+
+    assert_eq!(f.entry("F1").status, EntryStatus::Fixed);
+    assert_eq!(f.current().state, "passed");
+}
+
+#[test]
+fn a_blocking_finding_reported_again_stays_open_with_the_new_round_and_evidence() {
+    let mut f = one_tester(3);
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "Busy line").unwrap();
+    f.fix("two");
+    let mut again = blocking("Busy line");
+    again["id"] = json!("F1");
+    again["evidence"] = json!("calls::busy_line still fails");
+
+    f.report_findings(&codex, "fail-2", "failed", json!([again]))
+        .unwrap();
+
+    let entry = f.entry("F1");
+    assert_eq!(entry.status, EntryStatus::Open);
+    assert_eq!(entry.round, 2);
+    assert_eq!(entry.finding.evidence, "calls::busy_line still fails");
+    assert_eq!(f.ledger().len(), 1);
+    assert_eq!(f.run("Codex").result, VerifierResult::Failed);
+}
+
+#[test]
+fn a_re_check_that_cannot_run_leaves_the_entry_open() {
+    let mut f = one_tester(3);
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "Busy line").unwrap();
+    f.fix("two");
+
+    f.report(&codex, "cannot", "blocked").unwrap();
+
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    assert_eq!(f.current().state, "blocked");
+}
+
+#[test]
+fn a_re_check_from_a_changed_worktree_fails_and_leaves_the_entry_open() {
+    let mut f = one_tester(3);
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "Busy line").unwrap();
+    f.fix("two");
+    f.commit("verifier.txt", "sneaky");
+
+    f.report(&codex, "pass-2", "passed").unwrap();
+
+    let run = f.run("Codex");
+    assert_eq!(run.result, VerifierResult::Failed);
+    assert_eq!(
+        run.reason.as_deref(),
+        Some("worktree changed during verification")
+    );
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+}
+
+#[test]
+fn an_open_entry_whose_verifier_left_the_settings_awaits_triage_when_the_next_cycle_ends() {
+    let mut f = Fixture::ready(vec![verifier(Role::Reviewer, "Claude", None)], 2);
+    f.verify().unwrap();
+    f.fail(&f.verifier("Claude"), "Busy line").unwrap();
+    f.report(&f.implementer.id.clone(), "stuck", "blocked")
+        .unwrap();
+    assert_eq!(
+        f.entry("F1").status,
+        EntryStatus::Open,
+        "its verifier was in the cycle that ended"
+    );
+    f.host
+        .set_verification(VerificationSettings {
+            verifiers: vec![verifier(Role::Tester, "New", None)],
+            max_rounds: 2,
+            max_cycles: 2,
+        })
+        .unwrap();
+    f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
+        .unwrap();
+    f.verify().unwrap();
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    f.coordinator_reads();
+
+    f.report(&f.verifier("New"), "pass", "passed").unwrap();
+
+    assert_eq!(f.entry("F1").status, EntryStatus::Untriaged);
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    assert!(
+        body.contains("Untriaged findings:\n- F1 · src/calls.rs:42 · Busy line"),
+        "{body}"
+    );
+    assert!(!body.contains("Open findings"), "{body}");
+    assert!(
+        body.contains("Triage the untriaged findings with triage_findings"),
+        "{body}"
+    );
+}
+
+impl Fixture {
+    fn triage(&mut self, decisions: Value) -> anyhow::Result<Value> {
+        let coordinator = self.coordinator.id.clone();
+        let ticket = self.ticket.id.clone();
+        self.host.agent_tool(
+            &coordinator,
+            "triage_findings",
+            json!({"ticket_id":ticket,"decisions":decisions}),
+        )
+    }
+    /// The latest `verify:` message `session` received.
+    fn round_input(&self, session: &str) -> String {
+        self.host
+            .messages(session, None, 100)
+            .unwrap()
+            .into_iter()
+            .rfind(|m| m.id.starts_with("verify:"))
+            .unwrap()
+            .body
+    }
+}
+
+fn decision(id: &str, decision: &str, reason: &str) -> Value {
+    json!({"id":id,"decision":decision,"reason":reason})
+}
+
+/// One tester that reported a blocking finding (F1) and two non-blocking ones (F2, F3) in round 1.
+fn three_findings() -> Fixture {
+    let mut f = one_tester(3);
+    let findings = json!([
+        blocking("Busy line"),
+        finding("non_blocking", "Naming"),
+        finding("non_blocking", "Comment")
+    ]);
+    f.report_findings(&f.verifier("Codex"), "fail", "failed", findings)
+        .unwrap();
+    f
+}
+
+#[test]
+fn a_finding_is_triaged_once_and_wakes_no_one() {
+    let mut f = three_findings();
+    f.coordinator_reads();
+    let implementer_inputs = f.waking(&f.implementer.id).len();
+
+    f.triage(json!([decision(
+        "F2",
+        "wont_fix",
+        "Matches the existing naming"
+    )]))
+    .unwrap();
+    let again = f.triage(json!([decision("F2", "follow_up", "Later")]));
+
+    assert!(again.unwrap_err().to_string().contains("already won't fix"));
+    let entry = f.entry("F2");
+    assert_eq!(entry.status, EntryStatus::WontFix);
+    assert_eq!(entry.reason.as_deref(), Some("Matches the existing naming"));
+    assert!(f.waking(&f.coordinator.id).is_empty());
+    assert_eq!(f.waking(&f.implementer.id).len(), implementer_inputs);
+    let events = f
+        .host
+        .activity(&f.coordinator.project_id, None, 50)
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "findings_triaged" && e.detail.ends_with("F2 won't fix")),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_triage_call_applies_every_decision_or_none() {
+    let mut f = three_findings();
+    for refused in [
+        json!([
+            decision("F2", "follow_up", "Later"),
+            decision("F99", "wont_fix", "Gone")
+        ]),
+        json!([
+            decision("F2", "follow_up", "Later"),
+            decision("F2", "wont_fix", "Twice")
+        ]),
+        json!([decision("F2", "follow_up", "Two\nlines")]),
+        json!([decision("F2", "fixed", "Not a decision")]),
+    ] {
+        assert!(f.triage(refused.clone()).is_err(), "{refused}");
+        assert_eq!(f.entry("F2").status, EntryStatus::Untriaged, "{refused}");
+    }
+    let implementer = f.implementer.id.clone();
+    let worker = f.host.agent_tool(
+        &implementer,
+        "triage_findings",
+        json!({"ticket_id":f.ticket.id,"decisions":[decision("F2","wont_fix","Mine")]}),
+    );
+    assert!(
+        worker
+            .unwrap_err()
+            .to_string()
+            .contains("project coordinator")
+    );
+    assert_eq!(f.entry("F2").status, EntryStatus::Untriaged);
+}
+
+#[test]
+fn overruling_a_routed_finding_mid_cycle_lets_its_re_report_pass() {
+    let mut f = three_findings();
+    f.triage(json!([decision(
+        "F1",
+        "wont_fix",
+        "The implementer showed the line is never busy"
+    )]))
+    .unwrap();
+    f.fix("two");
+    let mut again = blocking("Busy line");
+    again["id"] = json!("F1");
+
+    f.report_findings(&f.verifier("Codex"), "again", "failed", json!([again]))
+        .unwrap();
+
+    assert_eq!(f.run("Codex").result, VerifierResult::Passed);
+    assert_eq!(f.entry("F1").status, EntryStatus::WontFix);
+    assert_eq!(f.current().state, "passed");
+}
+
+#[test]
+fn fix_now_does_not_overrule_an_open_finding() {
+    let mut f = three_findings();
+
+    let refused = f.triage(json!([decision("F1", "fix_now", "Fix it")]));
+
+    assert!(refused.unwrap_err().to_string().contains("already routed"));
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    f.fix("two");
+    let mut again = blocking("Busy line");
+    again["id"] = json!("F1");
+    f.report_findings(&f.verifier("Codex"), "again", "failed", json!([again]))
+        .unwrap();
+    assert_eq!(f.run("Codex").result, VerifierResult::Failed);
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+}
+
+/// Ends the current cycle with the implementer blocked, then reports it ready again.
+fn end_cycle(f: &mut Fixture) {
+    let implementer = f.implementer.id.clone();
+    let cycle = f.current().verification.unwrap().cycle;
+    f.report(&implementer, &format!("stuck-{cycle}"), "blocked")
+        .unwrap();
+    f.report(&implementer, &format!("again-{cycle}"), "ready_for_testing")
+        .unwrap();
+    f.coordinator_reads();
+}
+
+#[test]
+fn the_cycle_cap_refuses_a_third_cycle_until_the_human_raises_it() {
+    let mut f = one_tester(2);
+    end_cycle(&mut f);
+    f.verify().unwrap();
+    end_cycle(&mut f);
+    let sessions = f.host.sessions().unwrap().len();
+
+    let refused = f.verify().unwrap_err().to_string();
+
+    for expected in ["2 verification cycles", "waiver", "close", "ask the human"] {
+        assert!(refused.contains(expected), "{expected}: {refused}");
+    }
+    assert_eq!(
+        f.host.sessions().unwrap().len(),
+        sessions,
+        "no verifier started"
+    );
+    assert_eq!(f.current().verification.unwrap().cycle, 2);
+
+    let mut raised = f.host.settings().verification;
+    raised.max_cycles = 3;
+    f.host.set_verification(raised).unwrap();
+    assert_eq!(f.verify().unwrap().verification.unwrap().cycle, 3);
+}
+
+#[test]
+fn a_new_cycle_keeps_the_earlier_one() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let first = f.current().verification.unwrap();
+    let implementer = f.implementer.id.clone();
+    f.report(&implementer, "again", "ready_for_testing")
+        .unwrap();
+
+    f.verify().unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.previous_cycles, [first]);
+    assert_eq!(
+        ticket.previous_cycles[0].outcome,
+        VerificationOutcome::Passed
+    );
+    assert_eq!(ticket.verification.unwrap().cycle, 2);
+}
+
+#[test]
+fn every_round_names_the_diff_and_the_decided_entries() {
+    let mut f = three_findings();
+    f.triage(json!([
+        decision("F2", "wont_fix", "Matches the naming"),
+        decision("F3", "follow_up", "Ticket for later")
+    ]))
+    .unwrap();
+    end_cycle(&mut f);
+    let base = git(f.worktree(), &["rev-parse", "main"]);
+    let head = git(f.worktree(), &["rev-parse", "HEAD"]);
+
+    f.verify().unwrap();
+
+    let input = f.round_input(&f.verifier("Codex"));
+    for expected in [
+        format!("Base: {base} (main)"),
+        format!("Diff: {base}..{head}, 1 file changed, 1 insertion(+)"),
+        "Already decided; do not re-raise unless the cited code changed:".into(),
+        "- F2 · src/calls.rs:7 · Naming (won't fix)".into(),
+        "- F3 · src/calls.rs:7 · Comment (follow-up)".into(),
+        "- F1 · src/calls.rs:42 · Busy line".into(),
+        "Instruction: Check Codex".into(),
+    ] {
+        assert!(input.contains(&expected), "{expected}\n{input}");
+    }
+    assert!(!input.contains("New since"), "{input}");
+}
+
+#[test]
+fn round_two_re_checks_only_the_open_findings_and_the_new_diff() {
+    let mut f = one_tester(3);
+    let first = f.round().commit;
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+
+    f.fix("two");
+
+    let fixed = f.round().commit;
+    let input = f.round_input(&f.verifier("Codex"));
+    for expected in [
+        "Check only whether your open blocking findings are fixed".to_owned(),
+        format!("New since round 1: {first}..{fixed}, 1 file changed"),
+        "report one again by its id only if it is still present:\n- F1 · src/calls.rs:42 · Busy line".into(),
+        "Instruction: Check Codex".into(),
+    ] {
+        assert!(input.contains(&expected), "{expected}\n{input}");
+    }
+}
+
+#[test]
+fn a_re_check_that_could_not_run_is_listed_in_the_next_cycle() {
+    let mut f = one_tester(3);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    f.fix("two");
+    f.report(&f.verifier("Codex"), "cannot", "blocked").unwrap();
+    let implementer = f.implementer.id.clone();
+    f.report(&implementer, "again", "ready_for_testing")
+        .unwrap();
+
+    f.verify().unwrap();
+
+    let input = f.round_input(&f.verifier("Codex"));
+    assert!(
+        input.contains("- F1 · src/calls.rs:42 · Busy line"),
+        "{input}"
+    );
+}
+
+#[test]
+fn a_round_starts_when_the_base_is_unavailable() {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 2);
+    let db = rusqlite::Connection::open(f.host.home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE repositories SET data=json_set(data,'$.base','origin/gone')",
+        [],
+    )
+    .unwrap();
+
+    f.verify().unwrap();
+
+    let input = f.round_input(&f.verifier("Codex"));
+    assert!(
+        input.contains("Base unavailable: No merge-base with origin/gone"),
+        "{input}"
+    );
+}
+
+#[test]
+fn a_pass_with_an_untriaged_finding_asks_for_triage_then_acceptance() {
+    let mut f = one_tester(2);
+    f.coordinator_reads();
+    let commit = f.round().commit;
+
+    f.report_findings(
+        &f.verifier("Codex"),
+        "pass",
+        "passed",
+        json!([finding("non_blocking", "Naming")]),
+    )
+    .unwrap();
+
+    let waking = f.waking(&f.coordinator.id);
+    assert_eq!(waking.len(), 1);
+    let body = &waking[0].body;
+    for expected in [
+        "passed in cycle 1 of 2, 1 of 2 rounds".to_owned(),
+        format!("Tester · Codex: passed at {commit}"),
+        "Untriaged findings:\n- F1 · src/calls.rs:7 · Naming".into(),
+        "Triage the untriaged findings with triage_findings, then accept the ticket.".into(),
+    ] {
+        assert!(body.contains(&expected), "{expected}\n{body}");
+    }
+    assert!(!body.contains("fresh cycle"), "{body}");
+}
+
+#[test]
+fn the_last_cycle_blocked_offers_no_further_verification() {
+    let mut f = one_tester(1);
+    end_cycle(&mut f);
+    f.verify().unwrap();
+
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    assert!(body.contains("cycle 2 of 2, 1 of 1 rounds"), "{body}");
+    assert!(
+        body.contains("waived")
+            && body.contains("close the ticket")
+            && body.contains("ask the human")
+    );
+    assert!(!body.contains("verify_ticket"), "{body}");
+}
+
+#[test]
+fn a_verifier_that_cannot_verify_is_reported_without_offering_a_waiver() {
+    let mut f = one_tester(2);
+    f.coordinator_reads();
+
+    f.report(&f.verifier("Codex"), "cannot", "blocked").unwrap();
+
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    assert!(body.contains("a verifier could not verify"), "{body}");
+    assert!(body.contains("blocked evidence from"), "{body}");
+    assert!(!body.contains("waived"), "{body}");
+    assert!(body.contains("call verify_ticket again"), "{body}");
+}
+
+#[test]
+fn workspace_context_lists_each_tickets_ledger_and_earlier_cycles() {
+    let mut f = three_findings();
+    end_cycle(&mut f);
+    f.verify().unwrap();
+    let coordinator = f.coordinator.id.clone();
+
+    let context = f
+        .host
+        .agent_tool(&coordinator, "workspace_context", json!({}))
+        .unwrap();
+
+    let ticket = &context["tickets"][0];
+    let ledger: Vec<(&str, &str, &str)> = ticket["ledger"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["id"].as_str().unwrap(),
+                e["status"].as_str().unwrap(),
+                e["focus"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ledger,
+        [
+            ("F1", "open", "Codex"),
+            ("F2", "untriaged", "Codex"),
+            ("F3", "untriaged", "Codex")
+        ]
+    );
+    assert_eq!(ticket["previous_cycles"][0]["cycle"], 1);
+    assert_eq!(ticket["verification"]["cycle"], 2);
+}
+
+impl Fixture {
+    fn accept(&mut self, waived: Option<&str>) -> anyhow::Result<Value> {
+        let coordinator = self.coordinator.id.clone();
+        let mut args = json!({"ticket_id":self.ticket.id});
+        if let Some(waived) = waived {
+            args["waived"] = json!(waived);
+        }
+        self.host.agent_tool(&coordinator, "accept_ticket", args)
+    }
+}
+
+#[test]
+fn a_report_after_a_passed_cycle_does_not_block_acceptance() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let implementer = f.implementer.id.clone();
+    f.report(&implementer, "pr-opened", "completed").unwrap();
+    assert_eq!(f.current().state, "completed");
+
+    f.accept(None).unwrap();
+
+    assert_eq!(f.current().state, "accepted");
+}
+
+#[test]
+fn a_squash_after_verification_is_accepted_without_a_new_cycle() {
+    let mut f = one_tester(3);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    f.fix("two");
+    f.report(&f.verifier("Codex"), "pass-2", "passed").unwrap();
+    let verified = f.round().commit;
+    git(f.worktree(), &["reset", "-q", "--soft", "main"]);
+    git(f.worktree(), &["commit", "-q", "-m", "Squashed"]);
+    assert_ne!(git(f.worktree(), &["rev-parse", "HEAD"]), verified);
+
+    f.accept(None).unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "accepted");
+    assert_eq!(ticket.verification.unwrap().cycle, 1);
+}
+
+#[test]
+fn a_moved_head_without_a_comparable_patch_is_refused_with_the_reason() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    git(f.worktree(), &["commit", "-q", "--amend", "-m", "Reworded"]);
+    let db = rusqlite::Connection::open(f.host.home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE repositories SET data=json_set(data,'$.base','origin/gone')",
+        [],
+    )
+    .unwrap();
+
+    let refused = f.accept(None).unwrap_err().to_string();
+
+    assert!(
+        refused.contains("could not be compared") && refused.contains("origin/gone"),
+        "{refused}"
+    );
+    assert_eq!(f.current().state, "passed");
+}
+
+#[test]
+fn untriaged_findings_block_acceptance_until_triaged() {
+    let mut f = one_tester(2);
+    let findings = json!([finding("non_blocking", "Naming")]);
+    f.report_findings(&f.verifier("Codex"), "pass", "passed", findings)
+        .unwrap();
+
+    let refused = f.accept(None).unwrap_err().to_string();
+
+    assert!(refused.contains("Triage F1"), "{refused}");
+    assert!(f.worktree().exists());
+    f.triage(json!([decision(
+        "F1",
+        "follow_up",
+        "Rename in the cleanup ticket"
+    )]))
+    .unwrap();
+    f.accept(None).unwrap();
+    assert_eq!(f.current().state, "accepted");
+}
+
+/// A cycle blocked at a round cap of 1 with F1 open.
+fn blocked_at_the_cap() -> Fixture {
+    let mut f = one_tester(1);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    assert_eq!(f.current().state, "blocked");
+    f
+}
+
+#[test]
+fn a_waiver_accepts_a_blocked_cycle_and_records_the_open_findings() {
+    let mut f = blocked_at_the_cap();
+    let waiver = "F1 needs a base ref the host always fetches";
+
+    f.accept(Some(waiver)).unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "accepted");
+    assert_eq!(ticket.waiver.as_deref(), Some(waiver));
+    assert_eq!(
+        ticket.verification.unwrap().outcome,
+        VerificationOutcome::Blocked
+    );
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    let events = f
+        .host
+        .activity(&f.coordinator.project_id, None, 50)
+        .unwrap();
+    let accepted = events.iter().find(|e| e.kind == "ticket_accepted").unwrap();
+    assert_eq!(
+        accepted.detail,
+        format!("{}; waived: {waiver}; open: F1", f.ticket.id)
+    );
+}
+
+#[test]
+fn a_waiver_is_refused_without_a_fully_checked_blocked_cycle() {
+    let mut blocked = blocked_at_the_cap();
+    let refused = blocked.accept(None).unwrap_err().to_string();
+    assert!(refused.contains("waived"), "{refused}");
+    let refused = blocked.accept(Some("Two\nlines"));
+    assert!(refused.is_err());
+
+    let mut cannot = one_tester(2);
+    cannot
+        .report(&cannot.verifier("Codex"), "cannot", "blocked")
+        .unwrap();
+    let refused = cannot
+        .accept(Some("Accept anyway"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("could not verify"), "{refused}");
+
+    let mut passed = one_tester(2);
+    passed
+        .report(&passed.verifier("Codex"), "pass", "passed")
+        .unwrap();
+    let refused = passed
+        .accept(Some("Accept anyway"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("nothing to waive"), "{refused}");
+
+    for f in [&blocked, &cannot, &passed] {
+        let ticket = f.current();
+        assert_ne!(ticket.state, "accepted");
+        assert_eq!(ticket.waiver, None);
+        assert!(f.worktree().exists());
+    }
+}
+
+#[test]
+fn a_saved_cycle_cap_survives_restart_and_reaches_the_coordinator() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open(directory.path()).unwrap();
+    let mut settings = host.settings().verification;
+    settings.max_cycles = 3;
+    host.set_verification(settings).unwrap();
+    drop(host);
+
+    let mut host = Host::open(directory.path()).unwrap();
+    host.create_project("Calls").unwrap();
+    let coordinator = host.sessions().unwrap().remove(0);
+    let context = host
+        .agent_tool(&coordinator.id, "workspace_context", json!({}))
+        .unwrap();
+
+    assert_eq!(host.settings().verification.max_cycles, 3);
+    assert_eq!(context["model_selection"]["max_cycles"], 3);
+    assert_eq!(context["model_selection"]["max_rounds"], 3);
+}
+
+#[test]
+fn an_open_finding_reported_again_without_evidence_stays_open() {
+    let mut f = one_tester(3);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    f.fix("two");
+    let mut again = blocking("Busy line");
+    again["id"] = json!("F1");
+    again["evidence"] = json!("");
+
+    f.report_findings(&f.verifier("Codex"), "again", "failed", json!([again]))
+        .unwrap();
+
+    let entry = f.entry("F1");
+    assert_eq!(entry.status, EntryStatus::Open);
+    assert_eq!((entry.round, entry.finding.evidence.as_str()), (2, ""));
+    assert_eq!(f.ledger().len(), 1);
+    assert_eq!(f.run("Codex").result, VerifierResult::Passed);
+}
+
+#[test]
+fn a_closed_ticket_cannot_be_accepted() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let coordinator = f.coordinator.id.clone();
+    f.host
+        .agent_tool(
+            &coordinator,
+            "close_ticket",
+            json!({"ticket_id":f.ticket.id}),
+        )
+        .unwrap();
+
+    let refused = f.accept(None).unwrap_err().to_string();
+
+    assert!(refused.contains("already closed"), "{refused}");
+    assert_eq!(f.current().state, "closed");
 }

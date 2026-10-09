@@ -308,15 +308,23 @@ pub enum Chooser {
     Default,
 }
 impl Selection {
-    /// A coordinator's reason: one non-empty line of at most 200 characters, with no control
-    /// characters such as a carriage return.
+    /// A coordinator's reason for a model: see `one_line_reason`.
     pub fn check_reason(reason: &str) -> Result<&str> {
-        let reason = reason.trim();
-        ensure!(!reason.is_empty(), "Give a one-line reason for this model");
         ensure!(
-            !reason.chars().any(char::is_control) && reason.chars().count() <= MAX_REASON_CHARS,
-            "The reason must be one line of at most {MAX_REASON_CHARS} characters"
+            !reason.trim().is_empty(),
+            "Give a one-line reason for this model"
         );
-        Ok(reason)
+        one_line_reason(reason)
     }
+}
+/// A coordinator's reason for a decision: one non-empty line of at most 200 characters, with no
+/// control characters such as a carriage return.
+pub fn one_line_reason(reason: &str) -> Result<&str> {
+    let reason = reason.trim();
+    ensure!(!reason.is_empty(), "Give a one-line reason");
+    ensure!(
+        !reason.chars().any(char::is_control) && reason.chars().count() <= MAX_REASON_CHARS,
+        "The reason must be one line of at most {MAX_REASON_CHARS} characters"
+    );
+    Ok(reason)
 }

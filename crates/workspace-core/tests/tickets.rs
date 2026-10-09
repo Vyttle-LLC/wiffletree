@@ -11,6 +11,100 @@ fn a_ticket_stored_before_repositories_and_verification_still_decodes() {
     assert_eq!(ticket.repository_id, "");
     assert!(ticket.verification.is_none());
     assert!(ticket.running_cycle().is_none());
+    assert!(ticket.previous_cycles.is_empty() && ticket.ledger.is_empty());
+    assert_eq!(ticket.waiver, None);
+}
+
+fn finding(severity: Severity, location: &str, trigger: &str, evidence: &str) -> Finding {
+    Finding {
+        severity,
+        location: location.into(),
+        summary: "Drops the call".into(),
+        trigger: trigger.into(),
+        evidence: evidence.into(),
+    }
+}
+
+#[test]
+fn only_a_located_blocking_finding_with_trigger_and_evidence_is_evidenced() {
+    let evidenced = finding(
+        Severity::Blocking,
+        "src/calls.rs:42",
+        "A busy line",
+        "Test fails",
+    );
+    assert!(evidenced.is_evidenced_blocking());
+    for rejected in [
+        finding(
+            Severity::NonBlocking,
+            "src/calls.rs:42",
+            "A busy line",
+            "Test fails",
+        ),
+        finding(
+            Severity::PreExisting,
+            "src/calls.rs:42",
+            "A busy line",
+            "Test fails",
+        ),
+        finding(
+            Severity::Blocking,
+            "src/calls.rs",
+            "A busy line",
+            "Test fails",
+        ),
+        finding(
+            Severity::Blocking,
+            "src/calls.rs:",
+            "A busy line",
+            "Test fails",
+        ),
+        finding(
+            Severity::Blocking,
+            "src/calls.rs:4x",
+            "A busy line",
+            "Test fails",
+        ),
+        finding(Severity::Blocking, ":42", "A busy line", "Test fails"),
+        finding(Severity::Blocking, "src/calls.rs:42", " ", "Test fails"),
+        finding(Severity::Blocking, "src/calls.rs:42", "A busy line", ""),
+    ] {
+        assert!(!rejected.is_evidenced_blocking(), "{rejected:?}");
+    }
+}
+
+#[test]
+fn findings_and_ledger_entries_round_trip_in_snake_case() {
+    let reported: ReportedFinding = serde_json::from_value(json!({
+        "id":"F3","severity":"non_blocking","location":"a.rs:1","summary":"Naming"
+    }))
+    .unwrap();
+    assert_eq!(reported.id.as_deref(), Some("F3"));
+    assert_eq!(reported.finding.severity, Severity::NonBlocking);
+    assert_eq!(reported.finding.evidence, "");
+    assert!(
+        serde_json::from_value::<ReportedFinding>(
+            json!({"severity":"critical","location":"a.rs:1","summary":"Naming"})
+        )
+        .is_err()
+    );
+    let entry = LedgerEntry {
+        id: "F1".into(),
+        finding: finding(Severity::PreExisting, "a.rs:1", "t", "e"),
+        focus: "Regressions".into(),
+        cycle: 1,
+        round: 2,
+        status: EntryStatus::WontFix,
+        reason: Some("Out of scope".into()),
+    };
+    let value = serde_json::to_value(&entry).unwrap();
+    assert_eq!(value["severity"], "pre_existing");
+    assert_eq!(value["status"], "wont_fix");
+    assert_eq!(serde_json::from_value::<LedgerEntry>(value).unwrap(), entry);
+    assert_eq!(
+        serde_json::to_value(EntryStatus::FixNow).unwrap(),
+        json!("fix_now")
+    );
 }
 
 #[test]
@@ -45,9 +139,10 @@ fn ticket_commands_round_trip() {
 }
 
 #[test]
-fn settings_saved_before_verification_use_the_default_verifiers_and_two_rounds() {
+fn settings_saved_before_verification_use_the_default_lenses_and_caps() {
     let settings: HostSettings = serde_json::from_value(json!({"workspaces_dir":"/w"})).unwrap();
-    assert_eq!(settings.verification.max_rounds, 2);
+    assert_eq!(settings.verification.max_rounds, 3);
+    assert_eq!(settings.verification.max_cycles, 2);
     let verifiers: Vec<_> = settings
         .verification
         .verifiers
@@ -58,11 +153,44 @@ fn settings_saved_before_verification_use_the_default_verifiers_and_two_rounds()
         verifiers,
         [
             ("Tester · Tests".to_owned(), None),
-            ("Reviewer · Claude".to_owned(), Some(Provider::Claude)),
-            ("Reviewer · Codex".to_owned(), Some(Provider::Codex)),
+            ("Reviewer · Correctness".to_owned(), Some(Provider::Claude)),
+            ("Reviewer · Regressions".to_owned(), Some(Provider::Codex)),
+        ]
+    );
+    let instructions: Vec<_> = settings
+        .verification
+        .verifiers
+        .iter()
+        .map(|v| v.instruction.as_deref())
+        .collect();
+    assert_eq!(
+        instructions,
+        [
+            None,
+            Some("Correctness against the ticket's acceptance criteria."),
+            Some("Regressions and test coverage."),
         ]
     );
     settings.verification.validate().unwrap();
+}
+
+#[test]
+fn a_saved_setting_without_a_cycle_cap_keeps_its_verifiers_and_uses_two_cycles() {
+    let settings: VerificationSettings = serde_json::from_value(json!({
+        "verifiers":[
+            {"role":"reviewer","focus":"Claude","provider":"claude"},
+            {"role":"reviewer","focus":"Codex","provider":"codex"}
+        ],
+        "max_rounds":2
+    }))
+    .unwrap();
+    assert_eq!((settings.max_rounds, settings.max_cycles), (2, 2));
+    let focuses: Vec<_> = settings
+        .verifiers
+        .iter()
+        .map(|v| v.focus.as_str())
+        .collect();
+    assert_eq!(focuses, ["Claude", "Codex"]);
 }
 
 #[test]
@@ -89,6 +217,7 @@ fn verification_settings_reject_duplicate_focus_and_out_of_range_caps() {
             verifier(Role::Reviewer, "Style"),
         ],
         max_rounds: 5,
+        max_cycles: 5,
     };
     settings.validate().unwrap();
     settings.max_rounds = 0;
@@ -96,6 +225,11 @@ fn verification_settings_reject_duplicate_focus_and_out_of_range_caps() {
     settings.max_rounds = 6;
     assert!(settings.validate().is_err());
     settings.max_rounds = 2;
+    for cycles in [0, 6] {
+        settings.max_cycles = cycles;
+        assert!(settings.validate().is_err(), "{cycles}");
+    }
+    settings.max_cycles = 2;
     settings.verifiers.push(verifier(Role::Reviewer, "style"));
     assert!(settings.validate().is_err());
     settings.verifiers.pop();

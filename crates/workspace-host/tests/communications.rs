@@ -1003,6 +1003,10 @@ fn only_the_project_coordinator_manages_tickets() {
                 json!({"ticket_id":ticket.id,"role":"tester","instruction":"Test"}),
             ),
             ("verify_ticket", common::verify_args(&host, &ticket.id)),
+            (
+                "triage_findings",
+                json!({"ticket_id":ticket.id,"decisions":[]}),
+            ),
             ("accept_ticket", json!({"ticket_id":ticket.id})),
             ("close_ticket", json!({"ticket_id":ticket.id})),
         ] {

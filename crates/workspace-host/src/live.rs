@@ -189,6 +189,9 @@ impl Host {
             branch,
             state: "planned".into(),
             verification: None,
+            previous_cycles: vec![],
+            ledger: vec![],
+            waiver: None,
         };
         self.db.execute(
             "INSERT INTO tickets VALUES (?1,?2,?3)",
@@ -381,33 +384,84 @@ impl Host {
         }
         self.finish_ticket(ticket, "closed", "ticket_closed")
     }
-    /// Accepts a ticket whose last verification cycle passed at the commit still checked out.
-    /// Like closing, it archives the agents and removes the worktree, keeping the branch.
-    pub fn accept_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
-        let ticket = self.ticket(ticket_id)?;
+    /// Accepts a ticket on its latest verification cycle: one that passed, or, with a waiver
+    /// reason, one blocked only by findings it checked. No cycle may be running or finding
+    /// untriaged, and HEAD must be the verified commit or patch-equivalent to it. The ticket's
+    /// state is not the gate, so a report after the cycle does not undo it. Like closing, it
+    /// archives the agents and removes the worktree, keeping the branch.
+    pub fn accept_ticket(&mut self, ticket_id: &str, waived: Option<&str>) -> Result<Ticket> {
+        let mut ticket = self.ticket(ticket_id)?;
         if ticket.state == "accepted" {
             return Ok(ticket);
         }
+        ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
+        if let Some(cycle) = ticket.running_cycle() {
+            bail!(
+                "Verification cycle {} is still running; accept the ticket once it ends",
+                cycle.cycle
+            );
+        }
+        let verification = ticket.verification.as_ref().context(
+            "Start verification with verify_ticket; acceptance needs the commit it verified",
+        )?;
+        let waived = waived.map(one_line_reason).transpose()?;
+        match (verification.outcome, waived) {
+            (VerificationOutcome::Passed, None) => {}
+            (VerificationOutcome::Passed, Some(_)) => bail!(
+                "Verification cycle {} passed; there is nothing to waive",
+                verification.cycle
+            ),
+            (VerificationOutcome::Blocked, Some(_)) => ensure!(
+                verification.latest_results().iter().all(|run| !matches!(
+                    run.result,
+                    VerifierResult::Blocked | VerifierResult::Pending
+                )),
+                "A verifier of cycle {} could not verify or never reported; a waiver covers only checked findings",
+                verification.cycle
+            ),
+            _ => bail!(
+                "Verification cycle {} is blocked; fix and verify again, or accept with a waived reason",
+                verification.cycle
+            ),
+        }
+        let untriaged: Vec<&str> = ticket
+            .ledger
+            .iter()
+            .filter(|e| e.status == EntryStatus::Untriaged)
+            .map(|e| e.id.as_str())
+            .collect();
         ensure!(
-            ticket.state == "passed",
-            "Ticket is {}; independent verification must pass before acceptance",
-            ticket.state
+            untriaged.is_empty(),
+            "Triage {} with triage_findings before accepting",
+            untriaged.join(", ")
         );
-        let verified = ticket
-            .verification
-            .as_ref()
-            .filter(|v| v.outcome == VerificationOutcome::Passed)
-            .and_then(|v| v.verified_commit())
-            .context(
-                "Start verification with verify_ticket; acceptance needs the commit it verified",
-            )?
-            .to_owned();
-        let head = verification::head(&ticket)?;
-        ensure!(
-            head == verified,
-            "The worktree moved past the verified commit: verified {verified}, current {head}; verify again"
-        );
+        let verified = verification.verified_commit().context("No round")?;
+        self.check_verified_head(&ticket, verified)?;
+        ticket.waiver = waived.map(Into::into);
         self.finish_ticket(ticket, "accepted", "ticket_accepted")
+    }
+    /// HEAD is the verified commit, or has the same patch id against the repository's base, as
+    /// after a squash or a clean rebase.
+    fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
+        let head = verification::head(ticket)?;
+        if head == verified {
+            return Ok(());
+        }
+        let worktree = Path::new(&ticket.worktree);
+        let same_patch = || -> Result<bool> {
+            let base = self.ticket_repository(ticket)?.base;
+            Ok(worktrees::patch_id(worktree, &base, verified)?
+                == worktrees::patch_id(worktree, &base, &head)?)
+        };
+        match same_patch() {
+            Ok(true) => Ok(()),
+            Ok(false) => bail!(
+                "The worktree's changes differ from the verified commit: verified {verified}, current {head}; verify again"
+            ),
+            Err(error) => bail!(
+                "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#}); verify again"
+            ),
+        }
     }
     fn finish_ticket(
         &mut self,
@@ -422,12 +476,24 @@ impl Host {
             ticket.state = state.into();
             host.save_ticket(&ticket)?;
             let coordinator = host.session(&ticket.coordinator_id)?;
+            let body = match &ticket.waiver {
+                Some(waiver) => {
+                    let open: Vec<&str> = ticket
+                        .ledger
+                        .iter()
+                        .filter(|e| e.status == EntryStatus::Open)
+                        .map(|e| e.id.as_str())
+                        .collect();
+                    format!("{}; waived: {waiver}; open: {}", ticket.id, open.join(", "))
+                }
+                None => ticket.id.clone(),
+            };
             Self::event(
                 &host.db,
                 &coordinator.project_id,
                 Some(&coordinator.id),
                 milestone,
-                &ticket.id,
+                &body,
             )
         })?;
         Ok(ticket)
@@ -448,9 +514,11 @@ impl Host {
                 .filter(|&p| selection.is_enabled(p))
                 .map(|p| json!({"provider": p, "models": selection.allowed(p)}))
                 .collect();
+            let verification = self.settings().verification;
             context["model_selection"] = json!({"revision": selection.revision,
                 "providers": providers, "role_providers": selection.role_providers,
-                "verifiers": self.settings().verification.verifiers, "guide": selection.guide});
+                "verifiers": verification.verifiers, "max_rounds": verification.max_rounds,
+                "max_cycles": verification.max_cycles, "guide": selection.guide});
         }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {
@@ -687,12 +755,20 @@ impl Host {
                 })?;
                 self.assignment_result(&worker)
             }
-            "report" => self.report(
-                &session,
-                string("kind")?,
-                string("body")?,
-                string("message_id")?,
-            ),
+            "report" => {
+                let findings: Vec<ReportedFinding> = match args.get("findings") {
+                    Some(findings) => serde_json::from_value(findings.clone())
+                        .context("Each finding needs a severity of blocking, non_blocking or pre_existing, a location and a summary")?,
+                    None => vec![],
+                };
+                self.report(
+                    &session,
+                    string("kind")?,
+                    string("body")?,
+                    string("message_id")?,
+                    &findings,
+                )
+            }
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 let choices: Vec<VerifierChoice> =
@@ -703,9 +779,21 @@ impl Host {
                     self.verify_ticket(&ticket.id, &choices)?,
                 )?)
             }
+            "triage_findings" => {
+                let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                let decisions: Vec<verification::Triage> =
+                    serde_json::from_value(args.get("decisions").cloned().context(
+                        "Missing decisions: give each finding's id, decision and reason",
+                    )?)?;
+                Ok(serde_json::to_value(
+                    self.triage_findings(&ticket.id, &decisions)?,
+                )?)
+            }
             "accept_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
-                Ok(serde_json::to_value(self.accept_ticket(&ticket.id)?)?)
+                Ok(serde_json::to_value(
+                    self.accept_ticket(&ticket.id, args["waived"].as_str())?,
+                )?)
             }
             "close_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;

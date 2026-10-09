@@ -27,22 +27,27 @@ pub fn ticket_label(snapshot: &Snapshot, ticket: &Ticket) -> String {
     }
 }
 
-/// One line for the cycle and one per round: its commit and each verifier's result.
-pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
-    let Some(verification) = &ticket.verification else {
-        return vec![];
-    };
+fn cycle_line(verification: &Verification) -> String {
     let outcome = match verification.outcome {
         VerificationOutcome::Running => "running",
         VerificationOutcome::Passed => "passed",
         VerificationOutcome::Blocked => "blocked",
     };
-    let mut lines = vec![format!(
+    format!(
         "Verification cycle {}: {outcome}, {} of {} rounds",
         verification.cycle,
         verification.rounds.len(),
         verification.max_rounds
-    )];
+    )
+}
+
+/// One line for the latest cycle and one per round, with its commit and each verifier's result,
+/// then one line per earlier cycle, newest first.
+pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
+    let Some(verification) = &ticket.verification else {
+        return vec![];
+    };
+    let mut lines = vec![cycle_line(verification)];
     for round in &verification.rounds {
         let results = round
             .verifiers
@@ -59,7 +64,64 @@ pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
         let commit: String = round.commit.chars().take(7).collect();
         lines.push(format!("Round {} at {commit}: {results}", round.round));
     }
+    lines.extend(ticket.previous_cycles.iter().rev().map(cycle_line));
     lines
+}
+
+/// A ticket accepted with a waiver: its row's waived ring says this beside the label.
+pub fn waiver_note(ticket: &Ticket) -> Option<String> {
+    ticket
+        .waiver
+        .as_ref()
+        .filter(|_| ticket.state == "accepted")?;
+    let open = ticket
+        .ledger
+        .iter()
+        .filter(|e| e.status == EntryStatus::Open)
+        .count();
+    let plural = if open == 1 { "" } else { "s" };
+    Some(format!(
+        "Accepted with waiver · {open} open finding{plural}"
+    ))
+}
+
+/// One decision-ledger entry as the Tickets panel lists it.
+#[derive(Debug, PartialEq)]
+pub struct LedgerRow {
+    pub id: String,
+    pub summary: String,
+    /// Its location and source: "src/calls.rs:42 · Regressions · cycle 2, round 1".
+    pub place: String,
+    pub status: EntryStatus,
+    /// Its severity, then the coordinator's reason once decided.
+    pub note: String,
+}
+
+pub fn ledger_rows(ticket: &Ticket) -> Vec<LedgerRow> {
+    ticket
+        .ledger
+        .iter()
+        .map(|entry| {
+            let severity = match entry.finding.severity {
+                Severity::Blocking => "Blocking",
+                Severity::NonBlocking => "Non-blocking",
+                Severity::PreExisting => "Pre-existing",
+            };
+            LedgerRow {
+                id: entry.id.clone(),
+                summary: entry.finding.summary.clone(),
+                place: format!(
+                    "{} · {} · cycle {}, round {}",
+                    entry.finding.location, entry.focus, entry.cycle, entry.round
+                ),
+                status: entry.status,
+                note: match &entry.reason {
+                    Some(reason) => format!("{severity} · {reason}"),
+                    None => severity.into(),
+                },
+            }
+        })
+        .collect()
 }
 
 /// Newest project first. Archived sessions appear only when `show_archived`; a ticket whose
@@ -264,6 +326,7 @@ mod tests {
                 })
                 .to_vec(),
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
         let implementer = host
@@ -308,6 +371,105 @@ mod tests {
                 format!("Round 1 at {commit}: Tester · Claude passed, Tester · Codex pending"),
             ]
         );
+    }
+
+    fn entry(
+        id: &str,
+        severity: Severity,
+        status: EntryStatus,
+        reason: Option<&str>,
+    ) -> LedgerEntry {
+        LedgerEntry {
+            id: id.into(),
+            finding: Finding {
+                severity,
+                location: "live.rs:398".into(),
+                summary: format!("Summary {id}"),
+                trigger: "No base ref".into(),
+                evidence: "Test fails".into(),
+            },
+            focus: "Regressions".into(),
+            cycle: 2,
+            round: 1,
+            status,
+            reason: reason.map(Into::into),
+        }
+    }
+
+    fn verification(cycle: u32, outcome: VerificationOutcome, rounds: u32) -> Verification {
+        Verification {
+            cycle,
+            max_rounds: 3,
+            outcome,
+            rounds: (1..=rounds)
+                .map(|round| VerificationRound {
+                    round,
+                    commit: format!("{round}abcdef0123"),
+                    verifiers: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_tickets_view_shows_every_cycle_and_the_ledger_with_its_decisions() {
+        let (_directory, _host, _root, mut ticket) = store();
+        ticket.verification = Some(verification(2, VerificationOutcome::Blocked, 3));
+        ticket.previous_cycles = vec![verification(1, VerificationOutcome::Passed, 2)];
+        ticket.ledger = vec![
+            entry("F1", Severity::Blocking, EntryStatus::Fixed, None),
+            entry(
+                "F2",
+                Severity::NonBlocking,
+                EntryStatus::WontFix,
+                Some("Matches the naming"),
+            ),
+            entry("F3", Severity::Blocking, EntryStatus::Open, None),
+            entry(
+                "F4",
+                Severity::PreExisting,
+                EntryStatus::FollowUp,
+                Some("Ticket later"),
+            ),
+            entry("F5", Severity::NonBlocking, EntryStatus::Untriaged, None),
+        ];
+
+        let lines = verification_lines(&ticket);
+        let rows = ledger_rows(&ticket);
+
+        assert_eq!(lines[0], "Verification cycle 2: blocked, 3 of 3 rounds");
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[4], "Verification cycle 1: passed, 2 of 3 rounds");
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows[1],
+            LedgerRow {
+                id: "F2".into(),
+                summary: "Summary F2".into(),
+                place: "live.rs:398 · Regressions · cycle 2, round 1".into(),
+                status: EntryStatus::WontFix,
+                note: "Non-blocking · Matches the naming".into(),
+            }
+        );
+        assert_eq!(rows[2].note, "Blocking");
+        assert_eq!(rows[3].note, "Pre-existing · Ticket later");
+    }
+
+    #[test]
+    fn only_an_accepted_ticket_with_a_waiver_gets_the_waived_ring() {
+        let (_directory, _host, _root, mut ticket) = store();
+        ticket.ledger = vec![entry("F3", Severity::Blocking, EntryStatus::Open, None)];
+        for state in ["passed", "blocked", "accepted"] {
+            ticket.state = state.into();
+            assert_eq!(waiver_note(&ticket), None, "{state}");
+        }
+        ticket.waiver = Some("F3 needs a fetched base".into());
+        assert_eq!(
+            waiver_note(&ticket).as_deref(),
+            Some("Accepted with waiver · 1 open finding")
+        );
+        ticket.state = "blocked".into();
+        assert_eq!(waiver_note(&ticket), None);
     }
 
     #[test]

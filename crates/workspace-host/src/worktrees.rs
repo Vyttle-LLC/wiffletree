@@ -519,6 +519,46 @@ pub(crate) fn is_clean(worktree: &Path) -> Result<bool> {
     Ok(runtime::git_output(worktree, &["status", "--porcelain"])?.is_empty())
 }
 
+/// Where `commit`'s history meets `base`, the repository's base such as `origin/main`.
+pub(crate) fn merge_base(worktree: &Path, base: &str, commit: &str) -> Result<String> {
+    Ok(runtime::git_output(worktree, &["merge-base", base, commit])
+        .with_context(|| format!("No merge-base with {base}"))?
+        .trim()
+        .to_owned())
+}
+
+/// The changed-file and line counts between two commits, such as "2 files changed, 9
+/// insertions(+)".
+pub(crate) fn shortstat(worktree: &Path, from: &str, to: &str) -> Result<String> {
+    let stat = runtime::git_output(worktree, &["diff", "--shortstat", from, to])?;
+    Ok(match stat.trim() {
+        "" => "no changes".into(),
+        stat => stat.into(),
+    })
+}
+
+/// The stable patch id of `commit`'s diff from its merge-base with `base`. Commits with the same
+/// change share it, however their history was squashed or rebased.
+pub(crate) fn patch_id(worktree: &Path, base: &str, commit: &str) -> Result<String> {
+    let diff = runtime::git_output(
+        worktree,
+        &["diff", &merge_base(worktree, base, commit)?, commit],
+    )?;
+    let answer = runtime::git_answer_with_input(worktree, &["patch-id", "--stable"], &diff)?;
+    ensure!(
+        answer.status.success(),
+        "git patch-id failed{}",
+        answer.reason()
+    );
+    // An empty diff has no patch id; it matches only another empty diff.
+    Ok(answer
+        .output
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned())
+}
+
 /// Probes with signal 0, which delivers nothing. EPERM still means the group exists.
 fn process_group_exists(group: i64) -> bool {
     let Ok(group) = i32::try_from(group) else {
@@ -636,6 +676,53 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn a_squash_keeps_its_patch_id_and_an_extra_change_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path();
+        let rev = |args: &[&str]| {
+            runtime::git_output(repository, args)
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        let commit = |file: &str, content: &str| {
+            fs::write(repository.join(file), content).unwrap();
+            git(repository, &["add", file]);
+            git(repository, &["commit", "-q", "-m", content]);
+            rev(&["rev-parse", "HEAD"])
+        };
+        git(repository, &["init", "-q", "-b", "main"]);
+        commit("base.txt", "base");
+        git(repository, &["switch", "-q", "-c", "ticket"]);
+        commit("one.txt", "one");
+        let verified = commit("two.txt", "two");
+        git(repository, &["switch", "-q", "-c", "squashed", "main"]);
+        git(repository, &["merge", "-q", "--squash", "ticket"]);
+        git(repository, &["commit", "-q", "-m", "Squashed"]);
+        let squashed = rev(&["rev-parse", "HEAD"]);
+        let extra = commit("three.txt", "three");
+
+        let id = |commit: &str| patch_id(repository, "main", commit).unwrap();
+        assert_ne!(verified, squashed);
+        assert_eq!(id(&verified), id(&squashed));
+        assert!(!id(&verified).is_empty());
+        assert_ne!(id(&verified), id(&extra));
+        assert_eq!(
+            shortstat(repository, "main", &verified).unwrap(),
+            "2 files changed, 2 insertions(+)"
+        );
+        assert_eq!(
+            shortstat(repository, &verified, &verified).unwrap(),
+            "no changes"
+        );
+        let missing = patch_id(repository, "origin/main", &verified).unwrap_err();
+        assert!(
+            format!("{missing:#}").contains("origin/main"),
+            "{missing:#}"
+        );
     }
 
     #[test]
