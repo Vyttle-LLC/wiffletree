@@ -111,6 +111,18 @@ const DRAWINGS: &[(&str, &str)] = &[
     ("refresh", r#"<path d="M20 10a8 8 0 1 0-1 7M20 4v6h-6"/>"#),
     ("folder", r#"<path d="M3 7V5h7l2 3h9v11H3V7Z"/>"#),
     (
+        "server",
+        r#"<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/>"#,
+    ),
+    (
+        "git-pull-request",
+        r#"<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="m13 3.5-2.5 2.5L13 8.5"/>"#,
+    ),
+    (
+        "git-merge",
+        r#"<circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 7.5v9M6 7.5c0 3 3 4.5 9.5 4.5"/>"#,
+    ),
+    (
         "ellipsis",
         r#"<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>"#,
     ),

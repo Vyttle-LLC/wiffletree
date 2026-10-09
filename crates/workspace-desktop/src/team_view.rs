@@ -167,6 +167,12 @@ impl Workspace {
                         .waiver
                         .as_ref()
                         .map(|reason| waiver_block(ticket, reason, p)),
+                )
+                .children(
+                    ticket
+                        .pull_request
+                        .as_ref()
+                        .map(|pr| pr_block(&ticket.id, pr, tree::pr_checked(snapshot, ticket), p)),
                 );
             let rounds = tree::verification_lines(ticket);
             if !rounds.is_empty() {
@@ -269,6 +275,41 @@ fn waiver_block(ticket: &Ticket, reason: &str, p: Palette) -> Div {
                 .child(reason.to_owned()),
         )
         .child(hint(left, p).text_size(px(11.)))
+}
+
+/// The ticket's PR as the watcher last read it, with a link to it on GitHub.
+fn pr_block(ticket_id: &str, pr: &PullRequest, checked: Option<String>, p: Palette) -> Div {
+    let url = pr.url.clone();
+    let mut details = format!("Head {}", short_sha(&pr.head));
+    if let Some(checked) = checked {
+        details.push_str(&format!(" · {}", checked.to_lowercase()));
+    }
+    div()
+        .border_l_2()
+        .border_color(p.focus)
+        .rounded_r(px(6.))
+        .bg(p.focus.opacity(0.06))
+        .px(px(10.))
+        .py(px(6.))
+        .text_size(px(12.))
+        .child(tree::pr_sentence(pr))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_x(px(6.))
+                .text_size(px(11.))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("pr-link-{ticket_id}")))
+                        .cursor_pointer()
+                        .text_color(p.focus)
+                        .hover(|d| d.underline())
+                        .child("Open on GitHub")
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
+                .child(hint(details, p).text_size(px(11.))),
+        )
 }
 
 /// Each entry's id, summary, place and decision, with its status as a pill.

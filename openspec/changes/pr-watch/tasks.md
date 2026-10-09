@@ -21,11 +21,11 @@
 
 ## 4. Desktop
 
-- [ ] 4.1 In `tree.rs`, add `pr_line(&PullRequest) -> Vec<PrPart>` (text and tone) and `pr_sentence` for tooltips and cards. Verify with tests for every mockup state: no PR, checks running, failed, passed, behind, conflict, draft, blocked, merged and closed. Include the spec's "#142 · checks ✓ · 1 thread · behind".
-- [ ] 4.2 In `sidebar.rs::ticket_row`, draw the two-line row when a PR exists, with green and red only for passed checks, failed checks and a conflict, and focus for merged. Add the PR sentence and check time to the tooltip. In `assets.rs`, add the `git-pull-request` and `git-merge` drawings. Verify that a ticket without a PR keeps its 30 px single row, and compare against `design/mockups/current/pr-watch.html`.
-- [ ] 4.3 In `team_view.rs::tickets`, add the PR block with its sentence, head, check time and an "Open on GitHub" link via `cx.open_url`. Verify against the mockup's ticket cards.
-- [ ] 4.4 In `repositories_view.rs::repositories_page`, add "· K open PR(s)" and the check-status line: checked, failed with the retry time, not on GitHub, or not checked yet. Verify with a unit-tested helper for the count and status text, covering the "Repository row" and "Check failed" scenarios.
-- [ ] 4.5 In `conversation.rs`, draw `pr:` messages as Wiffletree notices instead of `human_message`, and leave them out of `waiting_messages`. Verify the "Sender label" scenario's chat half.
+- [x] 4.1 In `tree.rs`, add `pr_line(&PullRequest) -> Vec<PrPart>` (text and tone) and `pr_sentence` for tooltips and cards. Verify with tests for every mockup state: no PR, checks running, failed, passed, behind, conflict, draft, blocked, merged and closed. Include the spec's "#142 · checks ✓ · 1 thread · behind".
+- [x] 4.2 In `sidebar.rs::ticket_row`, draw the two-line row when a PR exists, with green and red only for passed checks, failed checks and a conflict, and focus for merged. Add the PR sentence and check time to the tooltip. In `assets.rs`, add the `git-pull-request` and `git-merge` drawings. Verify that a ticket without a PR keeps its 30 px single row, and compare against `design/mockups/current/pr-watch.html`.
+- [x] 4.3 In `team_view.rs::tickets`, add the PR block with its sentence, head, check time and an "Open on GitHub" link via `cx.open_url`. Verify against the mockup's ticket cards.
+- [x] 4.4 In `repositories_view.rs::repositories_page`, add "· K open PR(s)" and the check-status line: checked, failed with the retry time, not on GitHub, or not checked yet. A repository without open tickets shows no PR status (review finding F6). Verify with a unit-tested helper for the count and status text, covering the "Repository row" and "Check failed" scenarios.
+- [x] 4.5 In `conversation.rs`, draw `pr:` messages as Wiffletree notices instead of `human_message`, and leave them out of `waiting_messages`. Verify the "Sender label" scenario's chat half.
 
 ## 5. Docs
 

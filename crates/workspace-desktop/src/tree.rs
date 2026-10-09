@@ -1,4 +1,5 @@
 //! The sidebar's shape: each project's coordinator, its ticket workspaces, and their agents.
+use crate::ui::age;
 use std::collections::BTreeSet;
 use workspace_core::*;
 
@@ -83,6 +84,110 @@ pub fn waiver_note(ticket: &Ticket) -> Option<String> {
     Some(format!(
         "Accepted with waiver · {open} open finding{plural}"
     ))
+}
+
+/// How a part of a ticket's PR line is colored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Muted,
+    Good,
+    Bad,
+    Merged,
+}
+#[derive(Debug, PartialEq)]
+pub struct PrPart {
+    pub text: String,
+    pub tone: Tone,
+}
+
+/// A ticket row's PR line, such as "#142 · checks ✓ · 1 thread · behind", in parts. Only the
+/// parts that apply appear; a finished PR shows `merged` or `closed` instead of its checks.
+pub fn pr_line(pr: &PullRequest) -> Vec<PrPart> {
+    let part = |text: &str, tone| PrPart {
+        text: text.into(),
+        tone,
+    };
+    let mut parts = vec![part(&format!("#{}", pr.number), Tone::Muted)];
+    match pr.state {
+        PrState::Merged => parts.push(part("merged", Tone::Merged)),
+        PrState::Closed => parts.push(part("closed", Tone::Muted)),
+        PrState::Open => {
+            match pr.checks {
+                CheckState::Success => parts.push(part("checks ✓", Tone::Good)),
+                CheckState::Failure => parts.push(part("checks ✗", Tone::Bad)),
+                CheckState::Pending => parts.push(part("checks …", Tone::Muted)),
+                CheckState::None => {}
+            }
+            if pr.unresolved_threads > 0 {
+                let plural = if pr.unresolved_threads == 1 { "" } else { "s" };
+                parts.push(part(
+                    &format!("{} thread{plural}", pr.unresolved_threads),
+                    Tone::Muted,
+                ));
+            }
+            let merge_word = match pr.merge_state {
+                _ if pr.draft => Some(("draft", Tone::Muted)),
+                MergeState::Behind => Some(("behind", Tone::Muted)),
+                MergeState::Dirty => Some(("conflict", Tone::Bad)),
+                MergeState::Blocked => Some(("blocked", Tone::Muted)),
+                _ => None,
+            };
+            if let Some((word, tone)) = merge_word {
+                parts.push(part(word, tone));
+            }
+        }
+    }
+    parts
+}
+
+/// The PR in full words, for the row's tooltip and the ticket's card.
+pub fn pr_sentence(pr: &PullRequest) -> String {
+    let mut parts = vec![match pr.state {
+        PrState::Merged => match &pr.merge_commit {
+            Some(commit) => format!(
+                "PR #{} merged into {} as {}",
+                pr.number,
+                pr.base,
+                short_sha(commit)
+            ),
+            None => format!("PR #{} merged into {}", pr.number, pr.base),
+        },
+        PrState::Closed => format!("PR #{} closed without merging", pr.number),
+        PrState::Open if pr.draft => format!("PR #{} draft into {}", pr.number, pr.base),
+        PrState::Open => format!("PR #{} open into {}", pr.number, pr.base),
+    }];
+    if pr.state == PrState::Open {
+        match pr.checks {
+            CheckState::Success => parts.push("checks passed".into()),
+            CheckState::Failure => parts.push("checks failed".into()),
+            CheckState::Pending => parts.push("checks running".into()),
+            CheckState::None => {}
+        }
+        if pr.unresolved_threads > 0 {
+            let plural = if pr.unresolved_threads == 1 { "" } else { "s" };
+            parts.push(format!(
+                "{} unresolved thread{plural}",
+                pr.unresolved_threads
+            ));
+        }
+        match pr.merge_state {
+            MergeState::Behind => parts.push(format!("behind {}", pr.base)),
+            MergeState::Dirty => parts.push(format!("conflicts with {}", pr.base)),
+            MergeState::Blocked => parts.push("blocked".into()),
+            _ => {}
+        }
+    }
+    parts.join(" · ")
+}
+
+/// When the ticket's repository last had its PRs checked, as "Checked 3m ago".
+pub fn pr_checked(snapshot: &Snapshot, ticket: &Ticket) -> Option<String> {
+    let at = snapshot
+        .pull_request_checks
+        .iter()
+        .find(|c| c.repository_id == ticket.repository_id)?
+        .checked_at?;
+    Some(format!("Checked {}", age(at).to_lowercase()))
 }
 
 /// One decision-ledger entry as the Tickets panel lists it.
@@ -526,5 +631,75 @@ mod tests {
             archive.contains(&(1, "sagechat-sms (retired)".to_owned())),
             "{archive:?}"
         );
+    }
+
+    fn pr(state: PrState, checks: CheckState, merge_state: MergeState) -> PullRequest {
+        PullRequest {
+            number: 142,
+            url: "https://github.com/o/r/pull/142".into(),
+            state,
+            draft: false,
+            base: "main".into(),
+            head: "3daf610aa".into(),
+            merge_state,
+            checks,
+            unresolved_threads: 0,
+            comments: CommentCursors::default(),
+            merge_commit: (state == PrState::Merged).then(|| "be5f484cc".into()),
+        }
+    }
+    fn line(pr: &PullRequest) -> String {
+        pr_line(pr)
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+    fn tones(pr: &PullRequest) -> Vec<Tone> {
+        pr_line(pr).iter().map(|p| p.tone).collect()
+    }
+
+    #[test]
+    fn the_pr_line_shows_only_the_parts_that_apply() {
+        use {CheckState as C, MergeState as M, PrState as S};
+        let mut behind = pr(S::Open, C::Success, M::Behind);
+        behind.unresolved_threads = 1;
+        assert_eq!(line(&behind), "#142 · checks ✓ · 1 thread · behind");
+        assert_eq!(
+            tones(&behind),
+            [Tone::Muted, Tone::Good, Tone::Muted, Tone::Muted]
+        );
+        assert_eq!(
+            pr_sentence(&behind),
+            "PR #142 open into main · checks passed · 1 unresolved thread · behind main"
+        );
+        let mut running = pr(S::Open, C::Pending, M::Clean);
+        running.unresolved_threads = 2;
+        assert_eq!(line(&running), "#142 · checks … · 2 threads");
+        let failed = pr(S::Open, C::Failure, M::Unstable);
+        assert_eq!(line(&failed), "#142 · checks ✗");
+        assert_eq!(tones(&failed), [Tone::Muted, Tone::Bad]);
+        assert_eq!(line(&pr(S::Open, C::Success, M::Clean)), "#142 · checks ✓");
+        let conflict = pr(S::Open, C::Success, M::Dirty);
+        assert_eq!(line(&conflict), "#142 · checks ✓ · conflict");
+        assert_eq!(tones(&conflict)[2], Tone::Bad);
+        assert_eq!(
+            pr_sentence(&conflict),
+            "PR #142 open into main · checks passed · conflicts with main"
+        );
+        let mut draft = pr(S::Open, C::None, M::Blocked);
+        draft.draft = true;
+        assert_eq!(line(&draft), "#142 · draft");
+        assert_eq!(pr_sentence(&draft), "PR #142 draft into main · blocked");
+        assert_eq!(line(&pr(S::Open, C::None, M::Blocked)), "#142 · blocked");
+        let mut merged = pr(S::Merged, C::Success, M::Unknown);
+        merged.number = 141;
+        merged.unresolved_threads = 1;
+        assert_eq!(line(&merged), "#141 · merged");
+        assert_eq!(tones(&merged), [Tone::Muted, Tone::Merged]);
+        assert_eq!(pr_sentence(&merged), "PR #141 merged into main as be5f484");
+        let closed = pr(S::Closed, C::Failure, M::Dirty);
+        assert_eq!(line(&closed), "#142 · closed");
+        assert_eq!(pr_sentence(&closed), "PR #142 closed without merging");
     }
 }
