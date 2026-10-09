@@ -125,10 +125,11 @@ pub fn pr_line(pr: &PullRequest) -> Vec<PrPart> {
                     Tone::Muted,
                 ));
             }
+            // A conflict outranks the draft flag, so the error color is never hidden.
             let merge_word = match pr.merge_state {
+                MergeState::Dirty => Some(("conflict", Tone::Bad)),
                 _ if pr.draft => Some(("draft", Tone::Muted)),
                 MergeState::Behind => Some(("behind", Tone::Muted)),
-                MergeState::Dirty => Some(("conflict", Tone::Bad)),
                 MergeState::Blocked => Some(("blocked", Tone::Muted)),
                 _ => None,
             };
@@ -691,6 +692,13 @@ mod tests {
         draft.draft = true;
         assert_eq!(line(&draft), "#142 · draft");
         assert_eq!(pr_sentence(&draft), "PR #142 draft into main · blocked");
+        draft.merge_state = M::Dirty;
+        assert_eq!(line(&draft), "#142 · conflict");
+        assert_eq!(tones(&draft)[1], Tone::Bad);
+        assert_eq!(
+            pr_sentence(&draft),
+            "PR #142 draft into main · conflicts with main"
+        );
         assert_eq!(line(&pr(S::Open, C::None, M::Blocked)), "#142 · blocked");
         let mut merged = pr(S::Merged, C::Success, M::Unknown);
         merged.number = 141;
