@@ -454,6 +454,7 @@ fn a_failure_goes_to_the_implementer_and_only_failed_verifiers_re_run() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0].id, format!("verification:{}:1:1", f.ticket.id));
     assert_eq!(sent[0].sender, None, "sent as Wiffletree");
+    assert_eq!(host_notice(&sent[0].id), Some("Wiffletree"));
     assert!(
         sent[0].body.contains("F1 · src/calls.rs:42 · fail"),
         "{}",
