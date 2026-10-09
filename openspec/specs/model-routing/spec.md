@@ -5,13 +5,6 @@ Let the human decide which providers and models run on this machine, and make co
 
 ## Requirements
 
-### Requirement: Bounded turn concurrency
-Active reasoning SHALL respect global and project limits and release capacity after completion or failure. Inspection and attention handling SHALL not consume reasoning slots.
-
-#### Scenario: Project exhausted
-- **WHEN** one project is at its limit while another has capacity
-- **THEN** the former waits and the latter remains eligible within the global limit
-
 ### Requirement: Runtime model discovery
 A read-only Codex feasibility probe SHALL initialize app-server, paginate the model catalog, extract supported efforts and shut down without starting inference.
 

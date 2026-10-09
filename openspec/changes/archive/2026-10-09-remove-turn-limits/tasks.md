@@ -20,5 +20,5 @@
 
 ## 4. Verify and archive
 
-- [ ] 4.1 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace` and `python3 scripts/test_communications.py`, all passing.
-- [ ] 4.2 Run `openspec archive remove-turn-limits`, then `openspec validate --all --strict`, which must pass.
+- [x] 4.1 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace` and `python3 scripts/test_communications.py`, all passing.
+- [x] 4.2 Run `openspec archive remove-turn-limits`, then `openspec validate --all --strict`, which must pass.

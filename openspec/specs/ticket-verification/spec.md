@@ -6,7 +6,7 @@ Verify a ticket with every configured verifier at one pinned commit, send failur
 ## Requirements
 
 ### Requirement: Configured verifiers
-The workspace SHALL hold one verification setting: an ordered list of verifiers, a round cap and a cycle cap. Each verifier SHALL name a role (`tester` or `reviewer`), a short focus that is unique in the list, an optional instruction, and optionally a provider that limits the coordinator's model choice for that verifier. A saved `size` SHALL be ignored. The round cap SHALL default to 3, the cycle cap SHALL default to 2, and each SHALL accept values from 1 to 5. With no saved setting, the list SHALL be a tester (focus "Tests"), a Claude reviewer (focus "Correctness", instruction "Correctness against the ticket's acceptance criteria.") and a Codex reviewer (focus "Regressions", instruction "Regressions and test coverage."), which fits the default project turn limit of 4. A saved setting SHALL keep its verifiers and caps; a saved setting without a cycle cap SHALL use the default. The setting SHALL be edited only on the Models page's Review card.
+The workspace SHALL hold one verification setting: an ordered list of verifiers, a round cap and a cycle cap. Each verifier SHALL name a role (`tester` or `reviewer`), a short focus that is unique in the list, an optional instruction, and optionally a provider that limits the coordinator's model choice for that verifier. A saved `size` SHALL be ignored. The round cap SHALL default to 3, the cycle cap SHALL default to 2, and each SHALL accept values from 1 to 5. With no saved setting, the list SHALL be a tester (focus "Tests"), a Claude reviewer (focus "Correctness", instruction "Correctness against the ticket's acceptance criteria.") and a Codex reviewer (focus "Regressions", instruction "Regressions and test coverage."). A saved setting SHALL keep its verifiers and caps; a saved setting without a cycle cap SHALL use the default. The setting SHALL be edited only on the Models page's Review card.
 
 #### Scenario: Default setting
 - **WHEN** the human has never saved a verification setting
@@ -19,34 +19,6 @@ The workspace SHALL hold one verification setting: an ordered list of verifiers,
 #### Scenario: Invalid setting
 - **WHEN** the human saves two verifiers with the same focus, a round cap of 0 or a cycle cap of 6
 - **THEN** the setting is rejected and the previous setting stays in effect
-
-### Requirement: One call starts every verifier
-`verify_ticket` SHALL take a `ticket_id` and a `verifiers` list with one `{focus, profile, reason}` entry per configured verifier. It SHALL refuse with nothing started when an entry is missing, duplicated or unknown; when a reason is not one line; when a profile's provider differs from the verifier's configured provider, or is outside its role's providers (a reviewer may use any enabled provider), so a tester or reviewer with a configured provider must satisfy both; when a profile is not allowed on this machine; or when an existing verifier session it would reuse would be held. An existing verifier session SHALL be reused only when its pinned profile equals the submitted one; otherwise the host SHALL archive it and start a fresh verifier on the submitted profile and reason, never changing a pinned model. Provider and model refusals SHALL record a `model_rejected` event, and the host SHALL never substitute a model. On success it SHALL record the ticket worktree's HEAD commit as the round's pinned commit, assign or resume one agent per configured verifier, pin each new verifier to its choice with the coordinator and reason recorded like an assignment, send each one message naming the pinned commit, and set the ticket's state to `verifying`. A verifier with the same role and focus SHALL be the same session in every round of a cycle and keep its model. `verify_ticket` SHALL also refuse when the ticket's state is not `ready_for_testing`, except a finished ticket that was never verified (no verification record, state `passed` or `failed`), when its worktree holds uncommitted or untracked files, when a cycle is already running, or when the number of verifiers exceeds the smaller of the project's turn limit less one and the host-wide worker turn limit, naming the reason.
-
-#### Scenario: Three verifiers from one call
-- **WHEN** three verifiers are configured and the project coordinator calls `verify_ticket` once with an allowed profile and reason for each on a ticket that is `ready_for_testing`
-- **THEN** three verifier sessions each receive a message naming the same commit, each pinned to its chosen profile with its reason
-- **AND** the ticket's state is `verifying`
-
-#### Scenario: Unready ticket
-- **WHEN** `verify_ticket` is called on a ticket whose implementer has not reported `ready_for_testing`
-- **THEN** the host refuses and starts no verifier
-
-#### Scenario: Wrong provider for a verifier
-- **WHEN** a Codex tester verifier is given a Claude profile
-- **THEN** the call fails with "Claude is not configured for Tester · Codex. Tester · Codex uses: Codex.", no verifier session is created and a `model_rejected` event is recorded
-
-#### Scenario: Turn limit too small
-- **WHEN** three verifiers are configured and the project's turn limit is 3
-- **THEN** `verify_ticket` refuses, naming the verifier count and the turn limit
-
-#### Scenario: More verifiers than the host can run
-- **WHEN** the project's turn limit is 20 and more verifiers are configured than the host-wide worker turn limit
-- **THEN** `verify_ticket` refuses, naming the verifier count and the host-wide limit
-
-#### Scenario: Verifier provider changed between cycles
-- **WHEN** a verifier ran cycle 1 on a Claude model, its provider is changed to Codex, and the next `verify_ticket` gives it a Codex profile
-- **THEN** cycle 2 runs on a fresh Codex verifier session with that profile and reason, and the Claude session is archived with its model unchanged
 
 ### Requirement: Ticket state during a cycle
 While a verification cycle is running, the ticket's state SHALL change only when a round starts, to `verifying` (for round 1 and every later round), and when a round ends, to `passed`, `failed` or `blocked` as defined by the cycle outcome rules. A verifier's verdict or the implementer's `ready_for_testing` SHALL NOT set the ticket's state during a cycle. Any other implementer report except `progress`, such as `blocked`, SHALL end the cycle immediately with outcome `blocked`, set the ticket to `blocked`, and wake the project coordinator with that report. `accept_ticket` SHALL refuse while a cycle is running.
@@ -85,7 +57,7 @@ While a verification cycle is running, the ticket's state SHALL change only when
 - **THEN** the ticket's state becomes `verifying` when round 2 starts, never `ready_for_testing`
 
 ### Requirement: Verifiers run concurrently
-The host SHALL start all of a round's verifier turns together rather than one after another: testers and reviewers in a running cycle SHALL share the ticket worktree as readers, and the round SHALL be admitted only when every one of its verifiers can start, never partially. While a round waits for capacity, the host SHALL start no new worker turn in any project, so other work cannot starve it; coordinator turns are unaffected. Each round's record SHALL store, per verifier, its `session_id` and the `message_id` of the message that started it; the verifier's run is the `provider_runs` row for that session whose `messages` list contains that `message_id`, and its interval is that row's `started_at` to `finished_at` (milliseconds since the Unix epoch).
+The host SHALL start all of a round's verifier turns together rather than one after another: testers and reviewers in a running cycle SHALL share the ticket worktree as readers, and the round SHALL be admitted only when every one of its verifiers can start, never partially. A round SHALL NOT wait for turn capacity, and a round that cannot start yet SHALL NOT hold back any other session's turn. Each round's record SHALL store, per verifier, its `session_id` and the `message_id` of the message that started it; the verifier's run is the `provider_runs` row for that session whose `messages` list contains that `message_id`, and its interval is that row's `started_at` to `finished_at` (milliseconds since the Unix epoch).
 
 #### Scenario: Two testers share the worktree
 - **WHEN** a round contains a Claude tester and a Codex tester on the same ticket
@@ -93,8 +65,11 @@ The host SHALL start all of a round's verifier turns together rather than one af
 
 #### Scenario: Overlap is provable from stored timestamps
 - **WHEN** an SH-1171-sized ticket finishes round 1 with three verifiers
-- **THEN** no verifier's turn started while another verifier of the round was waiting for capacity
-- **AND** for the three `provider_runs` rows identified by the round's `session_id` and `message_id` pairs, the latest `started_at` is earlier than the earliest `finished_at`
+- **THEN** for the three `provider_runs` rows identified by the round's `session_id` and `message_id` pairs, the latest `started_at` is earlier than the earliest `finished_at`
+
+#### Scenario: A waiting round holds no one else
+- **WHEN** a round waits because the ticket's implementer is still in a turn in the worktree
+- **THEN** workers on other tickets with due input start their turns
 
 ### Requirement: Verifiers are read-only and pinned
 A verifier SHALL NOT change the ticket worktree. When a verifier reports `passed` or `failed`, the host SHALL compare the worktree's HEAD with the round's pinned commit and check that the worktree has no uncommitted or untracked files. If either check fails, the host SHALL record that verifier's result as failed with the reason "worktree changed during verification", whatever it reported.
@@ -129,7 +104,7 @@ A round SHALL end when every verifier in it has reported. If any verifier's resu
 - **THEN** the report fails with an instruction to commit or discard them, and no round starts
 
 ### Requirement: Cycle outcomes reach the coordinator once
-Verifier verdicts and the implementer's `ready_for_testing` reports during a running cycle SHALL reach the project coordinator in the next batch, like progress, and SHALL NOT wake it. Check-ins are the one exception to this rule against a coordinator turn during a round: an agent's 30-minute check-in SHALL wake the project coordinator even while its ticket's cycle is running, and SHALL NOT count as a verdict or change the ticket's state or cycle. Other implementer reports follow the ticket-state rule above and wake it. The host SHALL wake the project coordinator once when the cycle ends: with state `passed` when every configured verifier's latest result passed, or with state `blocked` when a round at the cap still has a failed result, a failed round has no unarchived implementer to send its findings to, or any verifier reported `blocked`. The message SHALL be sent from Wiffletree and SHALL name the cycle number and the cycle cap, the rounds used and the round cap, every `open` ledger entry, every `untriaged` entry, and the ids of entries already decided, and SHALL include the report of any verifier that reported `blocked`. It SHALL offer only the actions allowed at that point: after a pass, triaging the untriaged entries and accepting; after a block, sending fixes and verifying again only while the cycle cap allows another cycle, accepting with a waiver only when no verifier reported `blocked`, closing the ticket, or asking the human. It SHALL NOT suggest starting a fresh cycle after a pass. Reaching a cap SHALL NOT create a question for the human; the project coordinator decides whether to ask. A later `verify_ticket` call within the cycle cap SHALL start a new cycle with every configured verifier.
+Verifier verdicts and the implementer's `ready_for_testing` reports during a running cycle SHALL reach the project coordinator in the next batch, like progress, and SHALL NOT wake it. Check-ins are the one exception to this rule against a coordinator turn during a round: an agent's check-in, for a 30-minute turn or for its turn count, SHALL wake the project coordinator even while its ticket's cycle is running, and SHALL NOT count as a verdict or change the ticket's state or cycle. Other implementer reports follow the ticket-state rule above and wake it. The host SHALL wake the project coordinator once when the cycle ends: with state `passed` when every configured verifier's latest result passed, or with state `blocked` when a round at the cap still has a failed result, a failed round has no unarchived implementer to send its findings to, or any verifier reported `blocked`. The message SHALL be sent from Wiffletree and SHALL name the cycle number and the cycle cap, the rounds used and the round cap, every `open` ledger entry, every `untriaged` entry, and the ids of entries already decided, and SHALL include the report of any verifier that reported `blocked`. It SHALL offer only the actions allowed at that point: after a pass, triaging the untriaged entries and accepting; after a block, sending fixes and verifying again only while the cycle cap allows another cycle, accepting with a waiver only when no verifier reported `blocked`, closing the ticket, or asking the human. It SHALL NOT suggest starting a fresh cycle after a pass. Reaching a cap SHALL NOT create a question for the human; the project coordinator decides whether to ask. A later `verify_ticket` call within the cycle cap SHALL start a new cycle with every configured verifier.
 
 #### Scenario: All pass
 - **WHEN** every verifier passes in round 1 and one of them reported a non-blocking finding
@@ -269,3 +244,27 @@ Starting a new cycle SHALL keep every earlier cycle of the ticket, with its roun
 #### Scenario: Human reads the ledger
 - **WHEN** the human opens the Tickets panel for a ticket with two cycles and five ledger entries
 - **THEN** the ticket's card shows both cycles' lines and all five entries with their status and reason
+
+### Requirement: One call starts any number of verifiers
+`verify_ticket` SHALL take a `ticket_id` and a `verifiers` list with one `{focus, profile, reason}` entry per configured verifier. It SHALL refuse with nothing started when an entry is missing, duplicated or unknown; when a reason is not one line; when a profile's provider differs from the verifier's configured provider, or is outside its role's providers (a reviewer may use any enabled provider), so a tester or reviewer with a configured provider must satisfy both; when a profile is not allowed on this machine; or when an existing verifier session it would reuse would be held. An existing verifier session SHALL be reused only when its pinned profile equals the submitted one; otherwise the host SHALL archive it and start a fresh verifier on the submitted profile and reason, never changing a pinned model. Provider and model refusals SHALL record a `model_rejected` event, and the host SHALL never substitute a model. On success it SHALL record the ticket worktree's HEAD commit as the round's pinned commit, assign or resume one agent per configured verifier, pin each new verifier to its choice with the coordinator and reason recorded like an assignment, send each one message naming the pinned commit, and set the ticket's state to `verifying`. A verifier with the same role and focus SHALL be the same session in every round of a cycle and keep its model. `verify_ticket` SHALL also refuse when the ticket's state is not `ready_for_testing`, except a finished ticket that was never verified (no verification record, state `passed` or `failed`), when its worktree holds uncommitted or untracked files, or when a cycle is already running, naming the reason. It SHALL NOT refuse because of how many verifiers are configured.
+
+#### Scenario: Three verifiers from one call
+- **WHEN** three verifiers are configured and the project coordinator calls `verify_ticket` once with an allowed profile and reason for each on a ticket that is `ready_for_testing`
+- **THEN** three verifier sessions each receive a message naming the same commit, each pinned to its chosen profile with its reason
+- **AND** the ticket's state is `verifying`
+
+#### Scenario: Unready ticket
+- **WHEN** `verify_ticket` is called on a ticket whose implementer has not reported `ready_for_testing`
+- **THEN** the host refuses and starts no verifier
+
+#### Scenario: Wrong provider for a verifier
+- **WHEN** a Codex tester verifier is given a Claude profile
+- **THEN** the call fails with "Claude is not configured for Tester · Codex. Tester · Codex uses: Codex.", no verifier session is created and a `model_rejected` event is recorded
+
+#### Scenario: Seven verifiers
+- **WHEN** seven verifiers are configured and the coordinator calls `verify_ticket` with a choice for each
+- **THEN** seven verifier sessions each receive a message naming the same commit, and the ticket's state is `verifying`
+
+#### Scenario: Verifier provider changed between cycles
+- **WHEN** a verifier ran cycle 1 on a Claude model, its provider is changed to Codex, and the next `verify_ticket` gives it a Codex profile
+- **THEN** cycle 2 runs on a fresh Codex verifier session with that profile and reason, and the Claude session is archived with its model unchanged
