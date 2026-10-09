@@ -1165,6 +1165,17 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_projects_open_ticket_is_still_queried() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let project = host.session(&ticket.coordinator_id).unwrap().project_id;
+        host.set_live(&project, true).unwrap();
+        host.set_live(&project, false).unwrap();
+        let queries = host.pull_request_queries().unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].1.tickets[0].ticket_id, ticket.id);
+    }
+
+    #[test]
     fn three_tickets_in_one_repository_are_one_query() {
         let (_home, mut host, ticket) = host_with_ticket();
         for title in ["Menu", "Footer"] {
