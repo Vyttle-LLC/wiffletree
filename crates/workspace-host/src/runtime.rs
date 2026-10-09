@@ -47,6 +47,15 @@ impl GitAnswer {
 }
 
 pub fn git_answer(path: &Path, args: &[&str]) -> Result<GitAnswer> {
+    git_query(path, args, None)
+}
+
+/// `git_answer` with `input` on Git's standard input, as `git patch-id` reads it.
+pub fn git_answer_with_input(path: &Path, args: &[&str], input: &str) -> Result<GitAnswer> {
+    git_query(path, args, Some(input.as_bytes().to_vec()))
+}
+
+fn git_query(path: &Path, args: &[&str], input: Option<Vec<u8>>) -> Result<GitAnswer> {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -55,7 +64,7 @@ pub fn git_answer(path: &Path, args: &[&str]) -> Result<GitAnswer> {
         .env("GIT_TERMINAL_PROMPT", "0")
         // Queries must not take index.lock in checkouts people and agents are working in.
         .env("GIT_OPTIONAL_LOCKS", "0");
-    let (status, output, error) = bounded_output(command, GIT_TIMEOUT)?;
+    let (status, output, error) = bounded_output(command, GIT_TIMEOUT, input)?;
     let error = String::from_utf8_lossy(&error);
     let lines = || error.lines().map(str::trim).filter(|l| !l.is_empty());
     let error = lines()
@@ -78,15 +87,25 @@ const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
 fn bounded_output(
     mut command: Command,
     timeout: Duration,
+    input: Option<Vec<u8>>,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     let deadline = Instant::now() + timeout;
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Process(
         command
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?,
     );
+    if let (Some(input), Some(mut pipe)) = (input, child.0.stdin.take()) {
+        // Written beside the readers so a full output pipe cannot stall the input.
+        std::thread::spawn(move || pipe.write_all(&input));
+    }
     let read = |pipe: Option<_>| -> Result<mpsc::Receiver<std::io::Result<Vec<u8>>>> {
         let pipe: Box<dyn Read + Send> = pipe.context("Missing Git pipe")?;
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -443,7 +462,7 @@ mod model_tests {
         let mut command = Command::new("sh");
         command.args(["-c", "exec >&- 2>&-; exec sleep 30"]);
         let started = Instant::now();
-        let error = bounded_output(command, Duration::from_secs(1)).unwrap_err();
+        let error = bounded_output(command, Duration::from_secs(1), None).unwrap_err();
         assert_eq!(error.to_string(), "Git query timed out");
         assert!(started.elapsed() < Duration::from_secs(5));
     }

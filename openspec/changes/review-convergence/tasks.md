@@ -7,7 +7,7 @@
 
 ## 2. Git helpers
 
-- [ ] 2.1 Add a stdin-taking Git helper beside `runtime::git_answer`. In `worktrees.rs`, add `merge_base`, `shortstat` and `patch_id` (diff from the merge-base piped to `git patch-id --stable`). Verify with a temp repository that a squash of two commits has the same patch id, an extra change differs, and a missing base ref returns an error naming it.
+- [x] 2.1 Add a stdin-taking Git helper beside `runtime::git_answer`. In `worktrees.rs`, add `merge_base`, `shortstat` and `patch_id` (diff from the merge-base piped to `git patch-id --stable`). Verify with a temp repository that a squash of two commits has the same patch id, an extra change differs, and a missing base ref returns an error naming it.
 
 ## 3. Findings, verdict and ledger (host)
 
