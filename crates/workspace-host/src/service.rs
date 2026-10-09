@@ -1455,7 +1455,7 @@ impl Actor {
                 .or_default();
             *turns += 1;
             let turns = *turns;
-            if turns % settings.checkin_human_turns as usize != 0 {
+            if !turns.is_multiple_of(settings.checkin_human_turns as usize) {
                 return Ok(());
             }
             for item in self.host.open_attention(&session.project_id)? {
@@ -1481,7 +1481,7 @@ impl Actor {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if turns == 0
-            || turns % settings.checkin_child_turns != 0
+            || !turns.is_multiple_of(settings.checkin_child_turns)
             || self.host.session(parent)?.archived
         {
             return Ok(());

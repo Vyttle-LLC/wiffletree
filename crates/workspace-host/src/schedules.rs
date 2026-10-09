@@ -1,5 +1,5 @@
 //! Coordinators' durable timers. The host owns the cadence; each fire is a message the owning
-//! session sends itself through the normal queue, so turn limits, live mode and held input apply.
+//! session sends itself through the normal queue, so live mode and held input apply.
 use crate::*;
 
 const MINUTE_MS: i64 = 60_000;
