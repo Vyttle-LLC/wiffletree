@@ -185,9 +185,10 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
     let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     for agent in &agents {
-        // Every input an agent received came from the coordinator.
+        // Every input an agent received came from the coordinator, apart from Wiffletree's
+        // verification findings.
         let senders: Vec<Option<String>> = db
-            .prepare("SELECT sender FROM messages WHERE recipient=?1 AND (sender IS NULL OR sender<>recipient)")
+            .prepare("SELECT sender FROM messages WHERE recipient=?1 AND (sender IS NULL OR sender<>recipient) AND id NOT LIKE 'verification:%'")
             .unwrap()
             .query_map([&agent.id], |r| r.get(0))
             .unwrap()

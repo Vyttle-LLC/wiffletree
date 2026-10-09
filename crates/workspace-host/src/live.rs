@@ -690,12 +690,20 @@ impl Host {
                 })?;
                 self.assignment_result(&worker)
             }
-            "report" => self.report(
-                &session,
-                string("kind")?,
-                string("body")?,
-                string("message_id")?,
-            ),
+            "report" => {
+                let findings: Vec<ReportedFinding> = match args.get("findings") {
+                    Some(findings) => serde_json::from_value(findings.clone())
+                        .context("Each finding needs a severity of blocking, non_blocking or pre_existing, a location and a summary")?,
+                    None => vec![],
+                };
+                self.report(
+                    &session,
+                    string("kind")?,
+                    string("body")?,
+                    string("message_id")?,
+                    &findings,
+                )
+            }
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 let choices: Vec<VerifierChoice> =

@@ -51,8 +51,9 @@ pub fn tools() -> Value {
         ),
         tool(
             "report",
-            "Report progress, a blocker or a result to your parent. Progress is batched into its next turn; other kinds wake it immediately. Ask for a decision with kind blocked and the exact question. Give concrete evidence. Never wait for discovery.",
-            json!({"message_id":string,"kind":{"type":"string","enum":["progress","blocked","ready_for_testing","passed","failed","completed"]},"body":string}),
+            "Report progress, a blocker or a result to your parent. Progress is batched into its next turn; other kinds wake it immediately. Ask for a decision with kind blocked and the exact question. Give concrete evidence. Never wait for discovery. Verifiers attach every finding to passed or failed: the host fails your check only for a blocking finding with a path:line location, a trigger and evidence. Give id only to report your own open, follow-up or won't-fix entry again.",
+            json!({"message_id":string,"kind":{"type":"string","enum":["progress","blocked","ready_for_testing","passed","failed","completed"]},"body":string,
+                "findings":{"type":"array","items":{"type":"object","properties":{"id":string,"severity":{"type":"string","enum":["blocking","non_blocking","pre_existing"]},"location":string,"summary":string,"trigger":string,"evidence":string},"required":["severity","location","summary","trigger","evidence"],"additionalProperties":false}}}),
             vec!["message_id", "kind", "body"]
         ),
         tool(

@@ -159,7 +159,7 @@ try:
         # Verifiers of one round overlap; a short check keeps that visible in the timestamps.
         if 'Verify ticket' in prompt: time.sleep(0.3)
         if 'FAIL_CODEX_ROUND_1' in prompt and 'Focus: Codex' in prompt and ': round 1 of' in prompt:
-            tool('report',message_id='failed',kind='failed',body='fix.txt is missing')
+            tool('report',message_id='failed',kind='failed',body='fix.txt is missing',findings=[{'severity':'blocking','location':'result.txt:1','summary':'fix.txt is missing','trigger':'Verify round 1','evidence':'ls shows no fix.txt'}])
         else:
             tool('report',message_id=str(uuid.uuid4()),kind='passed',body='Read result.txt: verified')
         result='TESTED'
