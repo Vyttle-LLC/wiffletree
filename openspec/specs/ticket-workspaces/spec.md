@@ -56,7 +56,7 @@ Every agent assigned to a ticket SHALL have the ticket's project coordinator as 
 - **AND** no attention item is created for the human until the project coordinator calls `ask_user`
 
 ### Requirement: Finishing a ticket
-`accept_ticket` SHALL require the ticket's state to be `passed` and its worktree HEAD to equal the commit the last verification round verified. Accepting or closing a ticket SHALL archive the ticket's agents, keep their conversations and the branch, and remove the worktree, deferring removal while an agent is still in its turn and refusing while the worktree is locked or holds uncommitted or untracked files. Neither SHALL merge, push or publish.
+`accept_ticket` SHALL require the ticket's state to be `passed` and its worktree HEAD to equal the commit the last verification round verified. Accepting or closing a ticket SHALL archive the ticket's agents, keep their conversations and the branch, and remove the worktree, refusing while the worktree is locked or holds uncommitted or untracked files. `close_ticket` SHALL also refuse while any of the ticket's agents has status Working, naming that agent; once an agent has reported, a turn it is still finishing only defers removal of the worktree, for accept and close alike. Neither SHALL merge, push or publish.
 
 #### Scenario: Commits after verification
 - **WHEN** the project coordinator accepts a passed ticket whose worktree HEAD has moved past the verified commit

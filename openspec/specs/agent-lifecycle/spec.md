@@ -6,7 +6,7 @@ Retire ticket agents when they are no longer needed, while keeping their convers
 ## Requirements
 
 ### Requirement: Verification retires its verifiers
-When a verification round ends and its failures go back to the implementer, the host SHALL archive every verifier whose result in that round is `passed` and SHALL keep the failed verifiers for the next round. When a cycle ends, as `passed` or `blocked`, the host SHALL archive every remaining verifier session of that cycle. The host SHALL NOT archive an implementer through verification. A verdict from an archived verifier SHALL be stored quietly for the coordinator and SHALL change neither the ticket nor any cycle.
+When a verification round ends and its failures go back to the implementer, the host SHALL archive every verifier whose result in that round is `passed` and SHALL keep the failed verifiers for the next round. When a cycle ends, as `passed` or `blocked`, the host SHALL archive every remaining verifier session of that cycle. The host SHALL NOT archive an implementer through verification. A verdict from an archived verifier SHALL be stored quietly for the coordinator and SHALL NOT change the ticket's state or a cycle's outcome. It is recorded on a round only when that is the ticket's latest round and still lists the verifier as pending for the input the verdict answers; a verdict answering an earlier cycle changes no record.
 
 #### Scenario: Passed verifiers retire after a failed round
 - **WHEN** round 1 ends with the Claude tester and the style reviewer passed and the Codex tester failed, below the cap
