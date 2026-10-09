@@ -14,10 +14,10 @@
 
 ## 3. Messages
 
-- [ ] 3.1 In `record_pull_requests`, send the merged and closed messages (`pr:{ticket}:merged:{number}`, `pr:{ticket}:closed:{number}`) to the ticket's coordinator with sender `None`, before saving. Skip a message whose id exists, and log a failed send to an archived coordinator. Verify the spec scenarios "Merge", "Merged head differs", "Restart after a merge", "Merge while the app was closed" and "Closed without merging", plus a simulated crash between send and save.
-- [ ] 3.2 Send the checks and conflict wakes (`pr:{ticket}:checks:{number}:{head}`, `pr:{ticket}:conflict:{number}:{head}`) on a snapshot change. An existing id is skipped before the budget is checked. The budget is 3 per PR, counted from existing ids, then a single `pr:{ticket}:budget:{number}` message, then silence. Verify the "Checks fail", "Same head, no repeat", "Conflict", "Budget used" and "New comment" scenarios, and that the implementer's queue stays empty.
-- [ ] 3.3 Make every watcher message text use only the ticket's title and id, PR numbers, base names, SHAs and fixed wording. Verify the "Hostile PR title" scenario across all five message kinds.
-- [ ] 3.4 In `service.rs::turn_prompt`, label `pr:` messages "Wiffletree PR watcher" through `host_notice`. Verify the "Sender label" scenario's turn-input half.
+- [x] 3.1 In `record_pull_requests`, send the merged and closed messages (`pr:{ticket}:merged:{number}`, `pr:{ticket}:closed:{number}`) to the ticket's coordinator with sender `None`, before saving. Skip a message whose id exists, and log a failed send to an archived coordinator. Verify the spec scenarios "Merge", "Merged head differs", "Restart after a merge", "Merge while the app was closed" and "Closed without merging", plus a simulated crash between send and save.
+- [x] 3.2 Send the checks and conflict wakes (`pr:{ticket}:checks:{number}:{head}`, `pr:{ticket}:conflict:{number}:{head}`) on a snapshot change. An existing id is skipped before the budget is checked. The budget is 3 per PR, counted from existing ids, then a single `pr:{ticket}:budget:{number}` message, then silence. Verify the "Checks fail", "Same head, no repeat", "Conflict", "Budget used" and "New comment" scenarios, and that the implementer's queue stays empty.
+- [x] 3.3 Make every watcher message text use only the ticket's title and id, PR numbers, base names, SHAs and fixed wording. Verify the "Hostile PR title" scenario across all five message kinds.
+- [x] 3.4 In `service.rs::turn_prompt`, label `pr:` messages "Wiffletree PR watcher" through `host_notice`. Verify the "Sender label" scenario's turn-input half.
 
 ## 4. Desktop
 

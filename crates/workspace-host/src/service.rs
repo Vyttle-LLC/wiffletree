@@ -52,6 +52,8 @@ fn turn_prompt(
                 "Sender: {}\nMessage ID: {}{status}\n\n{}{}",
                 if m.id.starts_with(schedules::FIRE_PREFIX) {
                     "your timer"
+                } else if let Some(label) = host_notice(&m.id) {
+                    label
                 } else {
                     m.sender.as_deref().unwrap_or("human")
                 },
@@ -2300,6 +2302,21 @@ mod tests {
             });
             assert_eq!(changes.try_recv().is_ok(), signalled);
         }
+    }
+
+    #[test]
+    fn a_pr_watcher_message_is_from_wiffletree_not_the_human() {
+        let (_home, mut host, ticket, coordinator) = ticket_fixture();
+        let id = format!("pr:{}:merged:141", ticket.id);
+        host.send(&id, None, &coordinator.id, "PR #141 merged.")
+            .unwrap();
+        let message = host.message(&id).unwrap();
+        let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
+        assert!(
+            prompt.contains("Sender: Wiffletree PR watcher\n"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Sender: human"), "{prompt}");
     }
 
     #[test]
