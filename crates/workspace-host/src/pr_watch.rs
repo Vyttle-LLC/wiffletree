@@ -5,7 +5,7 @@ use crate::*;
 use std::collections::{HashMap, HashSet};
 
 /// The interval while a repository has an open PR, and otherwise.
-const ACTIVE_MS: i64 = 60_000;
+pub(crate) const ACTIVE_MS: i64 = 60_000;
 pub(crate) const IDLE_MS: i64 = 300_000;
 const MAX_BACKOFF_MS: i64 = 1_800_000;
 /// Below this many API points, the next pass waits for GitHub's reset, leaving headroom for the
