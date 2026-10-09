@@ -2341,18 +2341,18 @@ mod tests {
     }
 
     #[test]
-    fn a_pr_watcher_message_is_from_wiffletree_not_the_human() {
+    fn host_messages_are_from_wiffletree_and_the_humans_stay_the_humans() {
         let (_home, mut host, ticket, coordinator) = ticket_fixture();
-        let id = format!("pr:{}:merged:141", ticket.id);
-        host.send(&id, None, &coordinator.id, "PR #141 merged.")
-            .unwrap();
-        let message = host.message(&id).unwrap();
-        let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
-        assert!(
-            prompt.contains("Sender: Wiffletree PR watcher\n"),
-            "{prompt}"
-        );
-        assert!(!prompt.contains("Sender: human"), "{prompt}");
+        for (id, sender) in [
+            (format!("pr:{}:merged:141", ticket.id), "Wiffletree PR watcher"),
+            (format!("verification:{}:1:outcome", ticket.id), "Wiffletree"),
+            ("m1".into(), "human"),
+        ] {
+            host.send(&id, None, &coordinator.id, "Body").unwrap();
+            let message = host.message(&id).unwrap();
+            let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
+            assert!(prompt.contains(&format!("Sender: {sender}\n")), "{prompt}");
+        }
     }
 
     #[test]

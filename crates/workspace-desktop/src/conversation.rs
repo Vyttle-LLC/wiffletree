@@ -1099,9 +1099,11 @@ mod tests {
     }
 
     #[test]
-    fn pr_watcher_messages_are_wiffletree_notices_not_the_humans() {
+    fn host_messages_are_wiffletree_notices_not_the_humans() {
         assert!(from_human(&message("m1", "Hello")));
+        assert!(from_human(&message("answer:a", "Human answer to Q: yes")));
         assert!(!from_human(&message("pr:t:merged:141", "PR #141 merged.")));
+        assert!(!from_human(&message("verification:t:1:outcome", "Passed")));
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!from_human(&reply));

@@ -780,11 +780,20 @@ pub struct PullRequestCheck {
 }
 /// Messages the host sends as Wiffletree rather than as the human, and their sender label.
 pub fn host_notice(id: &str) -> Option<&'static str> {
-    id.starts_with(PR_NOTICE_PREFIX)
-        .then_some("Wiffletree PR watcher")
+    if id.starts_with(PR_NOTICE_PREFIX) {
+        Some("Wiffletree PR watcher")
+    } else {
+        HOST_NOTICE_PREFIXES
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+            .then_some("Wiffletree")
+    }
 }
 /// The id prefix of the PR watcher's messages.
 pub const PR_NOTICE_PREFIX: &str = "pr:";
+/// The id prefixes of the host's other messages without a sender: verification results, kept
+/// worktrees and migration notices. Inbox answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 3] = ["verification:", "worktree-kept:", "migration:"];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verification {
