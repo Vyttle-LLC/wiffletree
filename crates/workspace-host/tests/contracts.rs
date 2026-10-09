@@ -21,6 +21,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         "create_ticket",
         "assign_ticket",
         "verify_ticket",
+        "triage_findings",
         "accept_ticket",
         "close_ticket",
         "archive_agent",
@@ -29,6 +30,24 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
     ] {
         assert!(names.contains(&name), "{name}");
     }
+    let schema = |name: &str| {
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["inputSchema"]
+            .clone()
+    };
+    assert_eq!(
+        schema("report")["properties"]["findings"]["items"]["properties"]["severity"]["enum"],
+        serde_json::json!(["blocking", "non_blocking", "pre_existing"])
+    );
+    assert!(schema("accept_ticket")["properties"]["waived"].is_object());
+    assert_eq!(
+        schema("triage_findings")["properties"]["decisions"]["items"]["properties"]["decision"]["enum"],
+        serde_json::json!(["fix_now", "follow_up", "wont_fix"])
+    );
     assert!(
         !names.contains(&"stop_turn"),
         "stop_agents replaces stop_turn"
@@ -58,10 +77,12 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = provider::skill(Role::ProjectOrchestrator);
+    assert!(coordinator.contains("Project coordinator — v9"));
     for tool in [
         "create_ticket",
         "assign_ticket",
         "verify_ticket",
+        "triage_findings",
         "accept_ticket",
         "close_ticket",
         "archive_agent",
@@ -71,4 +92,41 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         assert!(coordinator.contains(tool), "{tool}");
     }
     assert!(!coordinator.contains("stop_turn"));
+    for phrase in [
+        "Never start a fresh cycle to chase them",
+        "waived",
+        "product, security or data-loss decision",
+    ] {
+        assert!(coordinator.contains(phrase), "{phrase}");
+    }
+    assert!(!coordinator.contains("for a fresh cycle with every verifier"));
+}
+
+#[test]
+fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
+    let implementer = provider::skill(Role::Implementer);
+    assert!(implementer.contains("Implementer — v4"));
+    assert!(implementer.contains(
+        "If a finding is wrong or out of scope, tell the coordinator in one sentence with evidence"
+    ));
+    assert!(implementer.contains("smallest change"));
+    assert!(!implementer.contains("Do not argue"));
+}
+
+#[test]
+fn verifiers_report_located_evidenced_findings_without_patches() {
+    for role in [Role::Tester, Role::Reviewer] {
+        let verifier = provider::skill(role);
+        assert!(verifier.contains("Tester / reviewer — v5"));
+        for phrase in [
+            "severity, `path:line` location",
+            "trigger and the evidence",
+            "write no patches",
+            "A finding is blocking only if it breaks an acceptance criterion",
+            "step-by-step trace citing `file:line`",
+            "pre_existing",
+        ] {
+            assert!(verifier.contains(phrase), "{role:?}: {phrase}");
+        }
+    }
 }

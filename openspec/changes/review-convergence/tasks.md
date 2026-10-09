@@ -31,10 +31,10 @@
 
 ## 6. Role contracts
 
-- [ ] 6.1 `skills/tester.md` v5: findings format, no patches, the definition of blocking and of a race, pre-existing, re-check scope from round 2, and already-decided entries.
-- [ ] 6.2 `skills/implementer.md` v4: replace "commit the fixes… Do not argue" with the smallest-fix, one-sentence objection and avoid-over-engineering text from design decision 12.
-- [ ] 6.3 `skills/main-coordinator.md` v9: triage, waiver, ask-the-human cases, the stop rule and the cycle cap. Drop "call verify_ticket again for a fresh cycle with every verifier".
-- [ ] 6.4 Update `tests/contracts.rs` for the tool list (`triage_findings`, new arguments) and the skill versions and phrases. Verify the "Bundled instructions", "Implementer may object" and "Verifier findings format" scenarios.
+- [x] 6.1 `skills/tester.md` v5: findings format, no patches, the definition of blocking and of a race, pre-existing, re-check scope from round 2, and already-decided entries.
+- [x] 6.2 `skills/implementer.md` v4: replace "commit the fixes… Do not argue" with the smallest-fix, one-sentence objection and avoid-over-engineering text from design decision 12.
+- [x] 6.3 `skills/main-coordinator.md` v9: triage, waiver, ask-the-human cases, the stop rule and the cycle cap. Drop "call verify_ticket again for a fresh cycle with every verifier".
+- [x] 6.4 Update `tests/contracts.rs` for the tool list (`triage_findings`, new arguments) and the skill versions and phrases. Verify the "Bundled instructions", "Implementer may object" and "Verifier findings format" scenarios.
 
 ## 7. Desktop
 
