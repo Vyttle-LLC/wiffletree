@@ -513,28 +513,49 @@ pub struct HostSettings {
 
 /// The highest verification round cap the settings accept.
 pub const MAX_VERIFICATION_ROUNDS: u32 = 5;
-/// Who verifies a ticket when `verify_ticket` is called, and how many rounds a cycle may take.
+/// The highest verification cycle cap the settings accept.
+pub const MAX_VERIFICATION_CYCLES: u32 = 5;
+/// Who verifies a ticket when `verify_ticket` is called, how many rounds a cycle may take and
+/// how many cycles a ticket may start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationSettings {
     pub verifiers: Vec<VerifierConfig>,
     pub max_rounds: u32,
+    /// Settings saved before the cycle cap existed use the default.
+    #[serde(default = "default_max_cycles")]
+    pub max_cycles: u32,
+}
+fn default_max_cycles() -> u32 {
+    2
 }
 impl Default for VerificationSettings {
-    /// A tester and a Claude and a Codex review, which fit the default turn limit; two rounds.
+    /// A tester and a Claude and a Codex review with their lenses, which fit the default turn
+    /// limit; three rounds and two cycles.
     fn default() -> Self {
-        let verifier = |role, focus: &str, provider| VerifierConfig {
+        let verifier = |role, focus: &str, instruction: Option<&str>, provider| VerifierConfig {
             role,
             focus: focus.into(),
-            instruction: None,
+            instruction: instruction.map(Into::into),
             provider,
         };
         Self {
             verifiers: vec![
-                verifier(Role::Tester, "Tests", None),
-                verifier(Role::Reviewer, "Claude", Some(Provider::Claude)),
-                verifier(Role::Reviewer, "Codex", Some(Provider::Codex)),
+                verifier(Role::Tester, "Tests", None, None),
+                verifier(
+                    Role::Reviewer,
+                    "Correctness",
+                    Some("Correctness against the ticket's acceptance criteria."),
+                    Some(Provider::Claude),
+                ),
+                verifier(
+                    Role::Reviewer,
+                    "Regressions",
+                    Some("Regressions and test coverage."),
+                    Some(Provider::Codex),
+                ),
             ],
-            max_rounds: 2,
+            max_rounds: 3,
+            max_cycles: default_max_cycles(),
         }
     }
 }
@@ -543,6 +564,10 @@ impl VerificationSettings {
         ensure!(
             (1..=MAX_VERIFICATION_ROUNDS).contains(&self.max_rounds),
             "The round cap must be 1–{MAX_VERIFICATION_ROUNDS}"
+        );
+        ensure!(
+            (1..=MAX_VERIFICATION_CYCLES).contains(&self.max_cycles),
+            "The cycle cap must be 1–{MAX_VERIFICATION_CYCLES}"
         );
         ensure!(
             !self.verifiers.is_empty(),
@@ -609,8 +634,18 @@ pub struct Ticket {
     pub worktree: String,
     pub branch: String,
     pub state: String,
+    /// The latest verification cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<Verification>,
+    /// Earlier cycles, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_cycles: Vec<Verification>,
+    /// Every finding verifiers recorded, across all cycles, with the coordinator's decisions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ledger: Vec<LedgerEntry>,
+    /// Why the coordinator accepted the ticket after a blocked cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiver: Option<String>,
 }
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
@@ -699,6 +734,93 @@ impl VerifierResult {
             Self::Blocked => "blocked",
         }
     }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Blocking,
+    NonBlocking,
+    /// A bug that predates the change under review.
+    PreExisting,
+}
+/// One verifier finding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub severity: Severity,
+    /// `path:line`.
+    pub location: String,
+    pub summary: String,
+    /// What concretely makes the defect happen.
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub evidence: String,
+}
+impl Finding {
+    /// Only an evidenced blocking finding can fail a verifier's check: severity `blocking`, a
+    /// location ending in `:<line>`, and a trigger and evidence.
+    pub fn is_evidenced_blocking(&self) -> bool {
+        let located = self.location.rsplit_once(':').is_some_and(|(path, line)| {
+            !path.trim().is_empty() && !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit())
+        });
+        self.severity == Severity::Blocking
+            && located
+            && !self.trigger.trim().is_empty()
+            && !self.evidence.trim().is_empty()
+    }
+}
+/// A finding as a verifier reports it; `id` reports a ledger entry again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedFinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub finding: Finding,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryStatus {
+    /// An evidenced blocking finding routed to the implementer.
+    Open,
+    /// Its verifier's later check no longer found it.
+    Fixed,
+    /// Waiting for the coordinator's decision.
+    Untriaged,
+    FixNow,
+    FollowUp,
+    WontFix,
+}
+impl EntryStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Fixed => "fixed",
+            Self::Untriaged => "untriaged",
+            Self::FixNow => "fix now",
+            Self::FollowUp => "follow-up",
+            Self::WontFix => "won't fix",
+        }
+    }
+    /// Decided by the coordinator not to be fixed in this ticket.
+    pub fn is_settled(self) -> bool {
+        matches!(self, Self::FollowUp | Self::WontFix)
+    }
+}
+/// One finding in a ticket's decision ledger.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerEntry {
+    /// `F1`, `F2`, … in the ticket.
+    pub id: String,
+    #[serde(flatten)]
+    pub finding: Finding,
+    /// The verifier focus, cycle and round that last reported it.
+    pub focus: String,
+    pub cycle: u32,
+    pub round: u32,
+    pub status: EntryStatus,
+    /// The coordinator's one-line reason for its decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 /// Why a leftover worktree may or may not be removed; earlier classes take precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

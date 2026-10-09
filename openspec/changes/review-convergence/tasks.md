@@ -1,9 +1,9 @@
 ## 1. Core types
 
-- [ ] 1.1 In `workspace-core/src/lib.rs`, add `Severity`, `Finding`, `ReportedFinding` (finding plus optional `id`), `EntryStatus` and `LedgerEntry`, and a `Finding::is_evidenced_blocking` check (`blocking`, location ending `:<line>`, non-empty trigger and evidence). Verify with unit tests for each rejection case and serde round-trips in snake_case.
-- [ ] 1.2 Add `Ticket.ledger`, `Ticket.previous_cycles` and `Ticket.waiver`, all `#[serde(default)]`. Verify that a ticket JSON without them still decodes.
-- [ ] 1.3 Add `VerificationSettings.max_cycles` (default 2, validated 1–5). Change the `max_rounds` default to 3 and the default verifiers to Tests, Correctness (Claude, with its instruction) and Regressions (Codex, with its instruction). Verify that a saved settings file without `max_cycles` loads with 2 and keeps its verifiers, and that a cycle cap of 6 is rejected.
-- [ ] 1.4 Move the one-line reason check in `selection.rs` into a shared helper with a neutral message, keeping model-reason errors unchanged. Verify that the existing selection tests pass.
+- [x] 1.1 In `workspace-core/src/lib.rs`, add `Severity`, `Finding`, `ReportedFinding` (finding plus optional `id`), `EntryStatus` and `LedgerEntry`, and a `Finding::is_evidenced_blocking` check (`blocking`, location ending `:<line>`, non-empty trigger and evidence). Verify with unit tests for each rejection case and serde round-trips in snake_case.
+- [x] 1.2 Add `Ticket.ledger`, `Ticket.previous_cycles` and `Ticket.waiver`, all `#[serde(default)]`. Verify that a ticket JSON without them still decodes.
+- [x] 1.3 Add `VerificationSettings.max_cycles` (default 2, validated 1–5). Change the `max_rounds` default to 3 and the default verifiers to Tests, Correctness (Claude, with its instruction) and Regressions (Codex, with its instruction). Verify that a saved settings file without `max_cycles` loads with 2 and keeps its verifiers, and that a cycle cap of 6 is rejected.
+- [x] 1.4 Move the one-line reason check in `selection.rs` into a shared helper with a neutral message, keeping model-reason errors unchanged. Verify that the existing selection tests pass.
 
 ## 2. Git helpers
 

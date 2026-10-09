@@ -77,6 +77,7 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
                 verifier(Role::Reviewer, "Style", None),
             ],
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
         let project = host.create_project("SH-1171").unwrap();

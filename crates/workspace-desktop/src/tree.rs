@@ -264,6 +264,7 @@ mod tests {
                 })
                 .to_vec(),
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
         let implementer = host

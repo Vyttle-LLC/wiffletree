@@ -119,6 +119,7 @@ impl Fixture {
         host.set_verification(VerificationSettings {
             verifiers,
             max_rounds: cap,
+            max_cycles: 2,
         })
         .unwrap();
         let project = host.create_project("Calls").unwrap();
@@ -317,6 +318,7 @@ fn verify_ticket_refuses_unready_dirty_running_and_oversized_cycles() {
         .set_verification(VerificationSettings {
             verifiers: many,
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     let host_wide = f.verify().unwrap_err().to_string();
@@ -336,6 +338,7 @@ fn verify_ticket_refuses_unready_dirty_running_and_oversized_cycles() {
         .set_verification(VerificationSettings {
             verifiers: three_verifiers(),
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     f.verify().unwrap();
@@ -842,10 +845,12 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
         VerificationSettings {
             verifiers: duplicate,
             max_rounds: 2,
+            max_cycles: 2,
         },
         VerificationSettings {
             verifiers: three_verifiers(),
             max_rounds: 0,
+            max_cycles: 2,
         },
     ] {
         assert!(f.host.set_verification(invalid).is_err());
@@ -854,13 +859,18 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
 }
 
 #[test]
-fn without_a_saved_setting_a_tester_and_two_reviewers_verify_with_a_cap_of_two() {
+fn without_a_saved_setting_a_tester_and_two_lens_reviewers_verify_with_caps_of_three_and_two() {
     let directory = tempfile::tempdir().unwrap();
     let host = Host::open(directory.path()).unwrap();
     let settings = host.settings().verification;
-    assert_eq!(settings.max_rounds, 2);
+    assert_eq!((settings.max_rounds, settings.max_cycles), (3, 2));
     assert_eq!(settings, VerificationSettings::default());
-    assert_eq!(settings.verifiers.len(), 3);
+    let focuses: Vec<_> = settings
+        .verifiers
+        .iter()
+        .map(|v| v.focus.as_str())
+        .collect();
+    assert_eq!(focuses, ["Tests", "Correctness", "Regressions"]);
 }
 
 #[test]
@@ -952,6 +962,7 @@ fn a_verifier_dropped_from_the_settings_stays_quiet_when_it_reports_late() {
         .set_verification(VerificationSettings {
             verifiers: vec![verifier(Role::Tester, "New", None)],
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
@@ -1025,6 +1036,7 @@ fn a_verifier_whose_provider_changed_starts_a_fresh_session_and_retires_the_old_
         .set_verification(VerificationSettings {
             verifiers: vec![verifier(Role::Reviewer, "Review", Some(Provider::Codex))],
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
     let sol = profile(Provider::Codex, "gpt-6.1-sol", "high");

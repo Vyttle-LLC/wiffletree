@@ -2184,6 +2184,7 @@ mod tests {
                 })
                 .collect(),
             max_rounds: 2,
+            max_cycles: 2,
         })
         .unwrap();
         let implementer = host

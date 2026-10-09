@@ -244,4 +244,9 @@ fn a_reason_is_one_short_line() {
         assert!(Selection::check_reason(broken).is_err(), "{broken:?}");
     }
     assert!(Selection::check_reason(&"x".repeat(MAX_REASON_CHARS + 1)).is_err());
+    let model = Selection::check_reason(" ").unwrap_err().to_string();
+    assert_eq!(model, "Give a one-line reason for this model");
+    let neutral = one_line_reason(" ").unwrap_err().to_string();
+    assert_eq!(neutral, "Give a one-line reason");
+    assert!(one_line_reason("one\ntwo").is_err());
 }

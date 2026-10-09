@@ -189,6 +189,9 @@ impl Host {
             branch,
             state: "planned".into(),
             verification: None,
+            previous_cycles: vec![],
+            ledger: vec![],
+            waiver: None,
         };
         self.db.execute(
             "INSERT INTO tickets VALUES (?1,?2,?3)",
