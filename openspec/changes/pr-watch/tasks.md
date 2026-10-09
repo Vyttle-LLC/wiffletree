@@ -29,6 +29,6 @@
 
 ## 5. Docs
 
-- [ ] 5.1 Update `docs/DEVELOPMENT.md`. Describe the PR watcher (read-only, cadence, `gh` requirement, messages, budget) and revise the "Current limits" bullet so merges remain manual while PR status is now watched. Verify that the text matches the specs.
-- [ ] 5.2 Update the watcher paragraphs of `docs/PRD.md` (`:384-404`). Note the v1 slice: GraphQL polling without conditional requests, and coordinator-only wakes with a budget, with comment routing deferred. Verify that no other PRD section changes meaning.
-- [ ] 5.3 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `cargo build -p workspace-host`, `python3 scripts/test_communications.py` and `openspec validate --all --strict`, and paste the output in the report.
+- [x] 5.1 Update `docs/DEVELOPMENT.md`. Describe the PR watcher (read-only, cadence, `gh` requirement, messages, budget) and revise the "Current limits" bullet so merges remain manual while PR status is now watched. Verify that the text matches the specs.
+- [x] 5.2 Update the watcher paragraphs of `docs/PRD.md` (`:384-404`). Note the v1 slice: GraphQL polling without conditional requests, and coordinator-only wakes with a budget, with comment routing deferred. Verify that no other PRD section changes meaning.
+- [x] 5.3 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `cargo build -p workspace-host`, `python3 scripts/test_communications.py` and `openspec validate --all --strict`, and paste the output in the report.

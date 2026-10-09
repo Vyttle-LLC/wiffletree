@@ -385,6 +385,8 @@ Watchers observe configured base refs, worker and feature heads, GitHub PR comme
 
 For the local-first release, use GitHub polling with conditional requests, adaptive backoff and rate-limit handling. A later webhook relay is optional. GitHub observation is not guaranteed in real time; show when state was last verified.
 
+The first slice polls GitHub's GraphQL API through `gh`: one read-only query per repository, without conditional requests, which GraphQL does not offer. It records each open ticket's PR and shows when it was last checked. It tells the coordinator once when a PR merges or closes, and wakes only the coordinator on failed checks or a conflict, once per head and at most 3 times per PR. Routing comments to workers, attaching check logs and branch updates come later.
+
 Proposed policies:
 
 - Base advanced: notify only, prepare an update, or update automatically when explicitly enabled and idle.
