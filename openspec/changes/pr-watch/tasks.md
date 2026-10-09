@@ -1,7 +1,7 @@
 ## 1. Core types
 
-- [ ] 1.1 In `workspace-core/src/lib.rs`, add `PullRequest`, `PrState`, `MergeState` (GitHub's seven states in snake_case, with `#[serde(other)] Unknown`) and `CheckState`, plus `Ticket.pull_request` (`#[serde(default, skip_serializing_if = "Option::is_none")]`). Verify that a stored ticket without the field decodes, that an unknown merge-state string decodes as `Unknown`, and that the types round-trip.
-- [ ] 1.2 Add `PullRequestCheck` (repository id, `checked_at`, `error`, `next_at`), `Snapshot.pull_request_checks` (`#[serde(default)]`), and the shared `host_notice(id)` helper for `pr:` ids. Verify that a snapshot without the field decodes and that `host_notice` matches only `pr:` ids.
+- [x] 1.1 In `workspace-core/src/lib.rs`, add `PullRequest`, `PrState`, `MergeState` (GitHub's seven states in snake_case, with `#[serde(other)] Unknown`) and `CheckState`, plus `Ticket.pull_request` (`#[serde(default, skip_serializing_if = "Option::is_none")]`). Verify that a stored ticket without the field decodes, that an unknown merge-state string decodes as `Unknown`, and that the types round-trip.
+- [x] 1.2 Add `PullRequestCheck` (repository id, `checked_at`, `error`, `next_at`), `Snapshot.pull_request_checks` (`#[serde(default)]`), and the shared `host_notice(id)` helper for `pr:` ids. Verify that a snapshot without the field decodes and that `host_notice` matches only `pr:` ids.
 
 ## 2. Watcher host module
 
