@@ -23,7 +23,8 @@ Verification cycles do not converge, and the host causes most of it. Any concern
 
 ### Modified Capabilities
 - `ticket-verification`: findings and the host-computed verdict; routing only evidenced blocking findings, sent as the host; the decision ledger and `triage_findings`; `max_cycles` and the new round default; verifier memory and round-2 scope; cycle history; default lenses; the cycle-end message.
-- `ticket-workspaces`: `accept_ticket` with a waiver and patch-equivalent HEADs, and gating on the latest cycle rather than the ticket's state string; the waived glyph on the sidebar's ticket row; the role contracts' new duties.
+- `ticket-workspaces`: `triage_findings` in the coordinator's tools; `accept_ticket` with a waiver and patch-equivalent HEADs, and gating on the latest cycle rather than the ticket's state string; the waived glyph on the sidebar's ticket row; the role contracts' new duties.
+- `native-workspace`: the cycle cap on the Models page's Review card.
 
 ## Impact
 

@@ -18,7 +18,7 @@ See proposal.md for why. The current flow, on origin/main 04debd9:
 ## Decisions
 
 ### 1. Findings ride on `report`; no new verifier tool
-`report` gains an optional `findings` array. Each item has `severity` (`blocking` | `non_blocking` | `pre_existing`), `location` (`path:line`), `summary` (one line), `trigger`, `evidence`, and an optional `id` that re-reports an existing open entry. Findings are recorded only when the report is a verdict for the verifier's current round (`Routing::Verdict`). In any other report they are ignored, and the body still carries the text. Length bounds match the other text fields. A malformed item, or an `id` that is not an open entry of the reporting verifier's focus, refuses the whole report so the verifier can correct it.
+`report` gains an optional `findings` array. Each item has `severity` (`blocking` | `non_blocking` | `pre_existing`), `location` (`path:line`), `summary` (one line), `trigger`, `evidence`, and an optional `id` that re-reports an existing open entry. Findings are recorded only when the report is a verdict for the verifier's current round (`Routing::Verdict`). In any other report they are ignored, and the body still carries the text. Length bounds match the other text fields. A malformed item, or an `id` that is not an entry of the reporting verifier's focus, refuses the whole report so the verifier can correct it. Re-reporting an entry the coordinator has already decided is ignored and fails nothing (decision 5).
 *Alternative:* a separate `report_findings` tool. Rejected because it adds a second call that has to be ordered with the verdict.
 
 ### 2. The host computes the result
@@ -49,7 +49,7 @@ When this differs from the reported kind, `VerifierRun.reason` says why ("report
 ### 5. `triage_findings`
 This is a coordinator tool on tickets it owns: `{ticket_id, decisions: [{id, decision: fix_now | follow_up | wont_fix, reason}]}`.
 
-- Each `id` must be `untriaged`, or `open` (see open decision 1).
+- Each `id` must be `untriaged` or `open`. Deciding an `open` entry overrules a routed blocking finding mid-cycle, which is how the implementer's objection takes effect. From then on, rounds list the entry as already decided, and re-reporting its id fails nothing.
 - Each reason is one line, checked with the same limits as `Selection::check_reason`, through a shared helper with a neutral message.
 - The call is all or nothing, records a `findings_triaged` event, and wakes nobody.
 - A decided entry cannot be decided again.
@@ -109,10 +109,16 @@ A waiver sets `Ticket.waiver = Some(reason)`. The cycle outcome stays `Blocked`,
 - **`communication.md`.** Unchanged.
 
 ### 13. Desktop
-- `sidebar.rs::ticket_row`: when `state == "accepted"` and `waiver` is set, draw a dashed amber ring instead of the dot. It is a new `waived` drawing in `assets.rs::DRAWINGS`, colored `p.yellow`: a dashed ring with a check, where the check tells it apart from an agent's `disconnected` ring. Its tooltip reads "Accepted with waiver · N open findings". Every other state keeps its dot.
+- `sidebar.rs::ticket_row`: when `state == "accepted"` and `waiver` is set, draw a dashed amber ring instead of the dot. It is a new `waived` drawing in `assets.rs::DRAWINGS`, colored `p.yellow`: a dashed ring with a check, where the check tells it apart from an agent's `disconnected` ring. Its tooltip reads "Accepted with waiver · N open findings". Every other state keeps its dot. As today, accepted tickets leave the tree unless **Show archived** is on (settled decision 2), so the ring shows there and the waiver always shows in the Tickets panel.
 - `tree.rs`: `verification_lines` adds one summary line per earlier cycle. A new `ledger_lines`, or a small struct the panel renders, supplies the ledger.
 - `team_view.rs::tickets`: show the waiver block, the cycle lines, and a "Decision ledger" section listing each entry's id, summary, location, source, status pill and reason. This matches `design/mockups/current/review-convergence.html`.
 - `verifiers.rs`: add the cycle-cap selector.
+
+### Settled by the human (October 9, 2026)
+1. **Overruling mid-cycle: yes.** `triage_findings` may mark an `open` entry `wont_fix` or `follow_up` (decision 5).
+2. **Waived tickets in the tree: keep today's hiding.** Accepted tickets, waived or not, show only with **Show archived** (decision 13).
+3. **Saved verification settings: no migration.** Only unsaved settings get the new lenses and caps.
+4. **Acceptance gates on the latest cycle,** not on the state string (decision 10).
 
 ### Files and functions to change
 | File | Functions / items |
@@ -139,14 +145,8 @@ Its checklist line "passed this exact head" becomes: "the ticket's latest verifi
 - [A stacked ticket's diff includes its parent's commits] → The merge-base is taken against the repository base, not the parent branch. This only affects the memory lines and patch-id. A rebased stack keeps matching patch-ids when its own diff is unchanged.
 - [The patch-id needs the base ref locally] → If it is missing, acceptance falls back to exact-SHA matching and says why.
 - [Ledger growth in `workspace_context`] → Entries are bounded per report, and a ticket's cycles are capped, so a ticket holds at most a few dozen entries.
-- [Saved settings keep old defaults] → Existing `settings.json` files keep "Claude"/"Codex" and a round cap of 2. See open decision 3.
+- [Saved settings keep old defaults] → Existing `settings.json` files keep "Claude"/"Codex" and a round cap of 2. Nothing is migrated (settled decision 3). The human updates them in **Models → Review**.
 
 ## Migration Plan
 
 No data migration. New `Ticket` and `VerificationSettings` fields default when absent. A ticket verified before this change has an empty ledger and no history, and its next cycle counts from its stored cycle number. Rollback: older builds ignore the new JSON fields. A ticket accepted with a waiver stays accepted under an older build.
-
-## Open decisions for the human
-
-1. **Overruling a routed blocking finding mid-cycle.** May `triage_findings` mark an `open` entry `wont_fix` or `follow_up`? If so, the re-check is told it is decided, and a re-report of that id does not fail the round. Recommended: yes. Without it, the implementer's sanctioned objection can only end in a waiver after the round cap.
-2. **Where a waived ticket appears.** Accepting archives a ticket's agents, so the tree hides the ticket unless **Show archived** is on. The ring would mostly be seen there and in the Tickets panel. Recommended: keep today's hiding. The alternative is to keep waived tickets visible in the tree until the human dismisses them.
-3. **Saved verification settings.** Recommended: no migration; the human switches to the lenses and the new round cap in **Models → Review**. The alternative is to rewrite a saved list that exactly equals the old default.
