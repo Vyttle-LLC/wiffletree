@@ -44,5 +44,5 @@
 
 ## 8. Docs and checks
 
-- [ ] 8.1 Update the verification, triage and acceptance paragraphs of `docs/DEVELOPMENT.md` and the verification paragraph and Review card defaults of `docs/PRD.md`.
-- [ ] 8.2 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, and record the results in the ready_for_testing report.
+- [x] 8.1 Update the verification, triage and acceptance paragraphs of `docs/DEVELOPMENT.md` and the verification paragraph and Review card defaults of `docs/PRD.md`.
+- [x] 8.2 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, and record the results in the ready_for_testing report.
