@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Turn-count check-in settings study</title>
+<!--
+  Static study for the remove-turn-limits OpenSpec change. No script, no network.
+  Where the two turn-count check-in thresholds are chosen:
+  (a) recommended: a Check-ins section in the Settings window;
+  (b) alternative: a row on the Models page's Review card.
+  Selected values are simulated; nothing here is implemented host behavior.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:760px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.two{display:grid;grid-template-columns:minmax(0,560px) minmax(0,1fr);gap:20px;align-items:start}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:500}
+/* Settings window, mirroring settings.rs: 560px wide, title bar, sections split by a hairline. */
+.window{background:var(--base);border:1px solid var(--edge);border-radius:12px;overflow:hidden;box-shadow:0 12px 32px color-mix(in srgb,var(--text) 10%,transparent)}
+.titlebar{height:34px;display:flex;align-items:center;justify-content:center;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:12.5px;position:relative}
+.lights{position:absolute;left:12px;display:flex;gap:7px}.lights i{width:11px;height:11px;border-radius:50%;background:var(--overlay)}
+.body{padding:20px;display:flex;flex-direction:column;gap:16px}
+.section{display:flex;flex-direction:column;gap:8px}
+.section-head{display:flex;align-items:center;justify-content:space-between;min-height:24px}
+.rule{height:1px;background:color-mix(in srgb,var(--edge) 25%,transparent)}
+.hint{font-size:12px;color:var(--subtle)}
+.segments{display:flex;gap:4px;flex-wrap:wrap}
+.seg{font-size:11px;padding:2px 9px;border-radius:6px;border:1px solid var(--edge);background:var(--surface);color:var(--text)}
+.seg.on{background:var(--focus);border-color:var(--focus);color:var(--base)}
+.line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.line .name{width:150px;flex:none}
+.btn{font-size:11.5px;padding:3px 10px;border-radius:6px;border:1px solid var(--edge);background:var(--surface)}
+.new{outline:2px dashed color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:6px;border-radius:4px}
+/* Models page card, mirroring models_view.rs. */
+.card{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px}
+.card-title{display:flex;align-items:baseline;gap:8px}.card-title b{font-weight:500;font-size:14px}
+.verifier{display:grid;grid-template-columns:170px 130px minmax(0,1fr);gap:10px;font-size:12px}
+.verifier span:not(:first-child){color:var(--subtle)}
+.notes{max-width:760px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+@media(max-width:1000px){.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<header class="intro">
+  <div class="eyebrow">Design study · remove turn limits</div>
+  <h1>Where the check-in thresholds are set</h1>
+  <p>Static study for the <span class="mono">remove-turn-limits</span> change. Wiffletree has no turn limits. Instead, a parent gets a check-in after a child has run N turns without a message from it, and the human gets an inbox item after the project coordinator has run M turns without them. Each threshold is a row of preset buttons, the same pattern as the round and cycle caps. Choosing one saves at once. Values are simulated.</p>
+</header>
+
+<div class="two">
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(a) Recommended · Settings window</div>
+    <div class="window" aria-label="Settings window">
+      <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Settings</div>
+      <div class="body">
+        <div class="section">
+          <div class="section-head"><span class="eyebrow">Appearance</span></div>
+          <div class="segments"><span class="seg on">System</span><span class="seg">Light</span><span class="seg">Dark</span></div>
+          <p class="hint">System follows macOS. This Mac remembers its own choice.</p>
+        </div>
+        <div class="rule"></div>
+        <div class="section">
+          <div class="section-head"><span class="eyebrow">Workspace folder</span><span class="btn">Choose…</span></div>
+          <div class="mono">~/wiffletree</div>
+          <p class="hint">New projects and tickets go here. Existing ones stay where they are.</p>
+        </div>
+        <div class="rule"></div>
+        <div class="section new">
+          <div class="section-head"><span class="eyebrow">Check-ins</span></div>
+          <div class="line"><span class="name">Agent, to its parent</span>
+            <div class="segments"><span class="seg">10</span><span class="seg on">25</span><span class="seg">50</span><span class="seg">100</span><span class="seg">250</span></div>
+          </div>
+          <div class="line"><span class="name">Coordinator, to you</span>
+            <div class="segments"><span class="seg">50</span><span class="seg on">100</span><span class="seg">250</span><span class="seg">500</span><span class="seg">1000</span></div>
+          </div>
+          <p class="hint">Turns without a message from the parent, or from you, before a check-in. Check-ins never pause work; the parent decides whether to stop it. Long turns also check in every 30 minutes.</p>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(a)</b> A third section under the workspace folder, the other host-wide setting in this window. Supervision applies to every project and role, so it sits with the workspace rather than with review. The window grows from 420 to about 540 px tall.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(b) Alternative · Models → Review card</div>
+    <div class="card" aria-label="Review card">
+      <div class="card-title"><b>Review</b><span class="hint">who verifies each ticket when the coordinator calls verify_ticket</span></div>
+      <div class="verifier"><span>Tester · Tests</span><span>Tester's providers</span><span></span></div>
+      <div class="verifier"><span>Reviewer · Correctness</span><span>Claude</span><span>Correctness against the ticket's acceptance criteria.</span></div>
+      <div class="verifier"><span>Reviewer · Regressions</span><span>Codex</span><span>Regressions and test coverage.</span></div>
+      <div class="line"><span>Round cap</span><div class="segments"><span class="seg">1</span><span class="seg">2</span><span class="seg on">3</span><span class="seg">4</span><span class="seg">5</span></div><span style="width:12px"></span><span>Cycle cap</span><div class="segments"><span class="seg">1</span><span class="seg on">2</span><span class="seg">3</span><span class="seg">4</span><span class="seg">5</span></div></div>
+      <div class="line new"><span>Check-in after</span><div class="segments"><span class="seg">10</span><span class="seg on">25</span><span class="seg">50</span><span class="seg">100</span><span class="seg">250</span></div><span class="hint">agent turns</span><span style="width:12px"></span><div class="segments"><span class="seg">50</span><span class="seg on">100</span><span class="seg">250</span><span class="seg">500</span><span class="seg">1000</span></div><span class="hint">coordinator turns</span></div>
+      <p class="hint">verify_ticket starts every verifier at once on the ticket's current commit… Changes here save at once.</p>
+    </div>
+    <p class="caption"><b>(b)</b> One more row under the caps. It's compact and reuses the card's selector code, but check-ins cover every agent, not just verifiers, so the Review card's title no longer describes everything on it.</p>
+  </section>
+</div>
+
+<ul class="notes">
+  <li>Defaults: 25 agent turns and 100 coordinator turns. Settings saved before this change get the defaults.</li>
+  <li>The host accepts 5–500 for agents and 10–1000 for the coordinator. A hand-edited value outside the presets still works; then no button is highlighted.</li>
+  <li>The dashed outline marks what's new and isn't part of the design.</li>
+</ul>
+</body>
+</html>
