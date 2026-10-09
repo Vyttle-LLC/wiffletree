@@ -2388,15 +2388,22 @@ mod tests {
             let context = actor.host.agent_context(&coordinator.id).unwrap();
             let team = context["team"].as_array().unwrap().iter();
             let member = team.clone().find(|s| s["id"] == implementer.id.as_str());
+            let own = actor.host.agent_context(&implementer.id).unwrap();
             (
                 session.unwrap().status,
                 member.unwrap()["status"].clone(),
                 context["tickets"][0]["agents"][0]["status"].clone(),
+                own["self"]["status"].clone(),
             )
         };
         assert_eq!(
             shown(&actor),
-            (Status::Working, json!("working"), json!("working"))
+            (
+                Status::Working,
+                json!("working"),
+                json!("working"),
+                json!("working")
+            )
         );
         // Ticket and agent operations still see the report.
         assert_eq!(
@@ -2416,7 +2423,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             shown(&actor),
-            (Status::Blocked, json!("blocked"), json!("blocked"))
+            (
+                Status::Blocked,
+                json!("blocked"),
+                json!("blocked"),
+                json!("blocked")
+            )
         );
     }
 

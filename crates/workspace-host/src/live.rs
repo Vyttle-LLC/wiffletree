@@ -501,7 +501,7 @@ impl Host {
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
-        let mut context = json!({"self":session,"project":self.project(&session.project_id)?,
+        let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,
             "repositories":self.project_repositories(&session.project_id)?,
             "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).map(|s|self.shown(s)).collect::<Vec<_>>(),
             "tickets":self.ticket_overview(&session.project_id)?,
