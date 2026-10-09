@@ -136,6 +136,48 @@ fn human_message(message: &Message, p: Palette) -> Div {
         )
 }
 
+/// Messages without a sender are the human's, apart from Wiffletree's own notices.
+fn from_human(message: &Message) -> bool {
+    message.sender.is_none() && host_notice(&message.id).is_none()
+}
+
+/// A notice from Wiffletree itself, such as the PR watcher's.
+fn notice_message(message: &Message, p: Palette) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .gap_3()
+        .child(avatar("server", p.subtle))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .min_h(px(26.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(host_notice(&message.id).unwrap_or("Wiffletree")),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            meta(format!("{:?}", message.receipt), p)
+                                .text_color(receipt_color(message.receipt, p)),
+                        )
+                        .child(meta(age(message.created_at), p)),
+                )
+                .child(markdown(&message.id, &message.body)),
+        )
+}
+
 /// A message written by an agent: this session's own reply, or another agent's report.
 fn agent_message(message: &Message, sender: Option<&Session>, own: bool, p: Palette) -> Div {
     let (kind, body) = match report(&message.body) {
@@ -195,7 +237,7 @@ impl Workspace {
     fn waiting_messages(&self) -> usize {
         self.messages
             .iter()
-            .filter(|m| m.sender.is_none() && m.receipt == Receipt::Queued)
+            .filter(|m| from_human(m) && m.receipt == Receipt::Queued)
             .count()
     }
 
@@ -623,7 +665,8 @@ impl Workspace {
         let current = session.clone();
         let transcript = list(self.list.clone(), move |ix, _, _| {
             let content = match messages.get(ix) {
-                Some(message) if message.sender.is_none() => human_message(message, p),
+                Some(message) if from_human(message) => human_message(message, p),
+                Some(message) if message.sender.is_none() => notice_message(message, p),
                 Some(message) => {
                     let sender = sessions
                         .iter()
@@ -1013,7 +1056,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, report, transcript_overlap};
+    use super::{first_line, from_human, report, transcript_overlap};
     use workspace_core::{Message, Receipt};
 
     #[test]
@@ -1053,6 +1096,15 @@ mod tests {
             created_at: 0,
             attachments: vec![],
         }
+    }
+
+    #[test]
+    fn pr_watcher_messages_are_wiffletree_notices_not_the_humans() {
+        assert!(from_human(&message("m1", "Hello")));
+        assert!(!from_human(&message("pr:t:merged:141", "PR #141 merged.")));
+        let mut reply = message("output:r", "Done");
+        reply.sender = Some("agent".into());
+        assert!(!from_human(&reply));
     }
 
     #[test]

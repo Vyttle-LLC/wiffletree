@@ -705,7 +705,20 @@ impl Workspace {
         let coordinator = ticket.coordinator_id.clone();
         let waiver = tree::waiver_note(ticket);
         let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
-        let detail = format!("{label} · {state}");
+        let has_pr = ticket.pull_request.is_some();
+        let mut detail = format!("{label} · {state}");
+        if let Some(pr) = &ticket.pull_request {
+            detail.push('\n');
+            detail.push_str(&tree::pr_sentence(pr));
+            if let Some(checked) = self
+                .snapshot
+                .as_ref()
+                .and_then(|s| tree::pr_checked(s, ticket))
+            {
+                detail.push('\n');
+                detail.push_str(&checked);
+            }
+        }
         // A waived acceptance is never drawn as passed.
         let mark = match waiver {
             Some(_) => icon("waived")
@@ -730,17 +743,55 @@ impl Workspace {
             v.select(coordinator.clone(), w, c);
             v.show_panel(Panel::Team, w, c);
         }))
-        .child(div().flex_none().child(icon("task").size(px(14.))))
+        // A PR adds a second line; the icon and mark stay beside the first.
+        .when(has_pr, |row| row.items_start().pt(px(6.)).pb(px(5.)))
+        .child(
+            div()
+                .flex_none()
+                .when(has_pr, |d| d.mt(px(1.)))
+                .child(icon("task").size(px(14.))),
+        )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_ellipsis()
-                .text_color(p.text)
-                .child(label),
+                .child(div().text_ellipsis().text_color(p.text).child(label))
+                .children(ticket.pull_request.as_ref().map(|pr| pr_line(pr, p))),
         )
-        .child(div().flex_none().child(mark))
+        .child(div().flex_none().when(has_pr, |d| d.mt(px(5.))).child(mark))
     }
+}
+
+/// A ticket row's second line: its PR, muted except for passed or failed checks, a conflict
+/// and a merge.
+fn pr_line(pr: &PullRequest, p: Palette) -> Div {
+    let glyph = if pr.state == PrState::Merged {
+        "git-merge"
+    } else {
+        "git-pull-request"
+    };
+    let mut line = div()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(11.))
+        .text_color(p.subtle)
+        .child(icon(glyph).size(px(11.)));
+    for (i, part) in tree::pr_line(pr).into_iter().enumerate() {
+        if i > 0 {
+            line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
+        }
+        let color = match part.tone {
+            tree::Tone::Muted => p.subtle,
+            tree::Tone::Good => p.green,
+            tree::Tone::Bad => p.red,
+            tree::Tone::Merged => p.focus,
+        };
+        line = line.child(div().text_color(color).child(part.text));
+    }
+    line
 }
 
 /// An idle coordinator shows its team's work, so a collapsed or quiet parent never hides it.

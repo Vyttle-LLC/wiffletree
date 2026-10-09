@@ -52,6 +52,8 @@ fn turn_prompt(
                 "Sender: {}\nMessage ID: {}{status}\n\n{}{}",
                 if m.id.starts_with(schedules::FIRE_PREFIX) {
                     "your timer"
+                } else if let Some(label) = host_notice(&m.id) {
+                    label
                 } else {
                     m.sender.as_deref().unwrap_or("human")
                 },
@@ -252,6 +254,23 @@ fn spawn_overlap_check(
         });
     });
 }
+/// Runs a repository's PR pass on its own thread and always reports back, even if it panics.
+fn spawn_pull_request_check(
+    sender: Sender<Event>,
+    repository: String,
+    fetch: impl FnOnce() -> pr_watch::Outcome + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(fetch)).unwrap_or_else(|_| {
+                pr_watch::Outcome::Failed("The PR check stopped unexpectedly".into())
+            });
+        let _ = sender.send_blocking(Event::PullRequests {
+            repository,
+            outcome,
+        });
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -278,6 +297,11 @@ enum Event {
         fetched_at: Option<i64>,
         /// `None` when the check panicked; the cached warnings then stand.
         warnings: Option<Vec<BranchWarnings>>,
+    },
+    /// A repository's PR pass finished on its own thread.
+    PullRequests {
+        repository: String,
+        outcome: pr_watch::Outcome,
     },
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
@@ -377,6 +401,7 @@ struct Actor {
     overlaps_running: HashSet<String>,
     /// No repository's check can be due before this.
     overlaps_due_at: i64,
+    pr_watch: pr_watch::Watch,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -476,12 +501,14 @@ impl Service {
                     overlaps_checked: HashMap::new(),
                     overlaps_running: HashSet::new(),
                     overlaps_due_at: 0,
+                    pr_watch: pr_watch::Watch::default(),
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
                     eprintln!("Workspace scheduler: {e:#}");
                 }
                 actor.refresh_overlaps(now());
+                actor.refresh_pull_requests(now(), true);
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
@@ -561,7 +588,34 @@ impl Actor {
             eprintln!("Workspace scheduler: {e:#}");
         }
         self.refresh_overlaps(now());
+        self.refresh_pull_requests(now(), dirty);
         self.signal(dirty);
+    }
+
+    /// Starts a PR pass for each due repository, one per repository at a time, and arms a
+    /// wake-up for the next, since a quiet host may see no other event for hours. The store is
+    /// read only when a pass is due or the event may have changed the open tickets.
+    fn refresh_pull_requests(&mut self, at: i64, tickets_changed: bool) {
+        if tickets_changed || self.pr_watch.next_due().is_some_and(|due| due <= at) {
+            match self.host.pull_request_queries() {
+                Ok(queries) => {
+                    self.pr_watch
+                        .keep(queries.iter().map(|(id, _)| id.as_str()));
+                    let due = self.pr_watch.start_due(at);
+                    for (repository, query) in queries {
+                        if due.contains(&repository) {
+                            spawn_pull_request_check(self.sender.clone(), repository, move || {
+                                pr_watch::fetch(&query)
+                            });
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Workspace PR watch: {e:#}"),
+            }
+        }
+        if let Some(due) = self.pr_watch.next_due() {
+            self.wake(due);
+        }
     }
 
     /// Checks each repository with open tickets at most every five minutes, after any event,
@@ -847,6 +901,21 @@ impl Actor {
                     self.host
                         .set_branch_warnings(repository, fetched_at, warnings)
                 })
+            }
+            Event::PullRequests {
+                repository,
+                outcome,
+            } => {
+                let at = now();
+                let Some(next_at) = self.pr_watch.finish(&repository, at, &outcome) else {
+                    return false;
+                };
+                self.host
+                    .record_pull_requests(&repository, &outcome, at, next_at)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Workspace PR watch: {e:#}");
+                        false
+                    })
             }
             Event::Wake(at) => {
                 if self.wake_at == Some(at) {
@@ -1997,6 +2066,7 @@ mod tests {
             overlaps_checked: HashMap::new(),
             overlaps_running: HashSet::new(),
             overlaps_due_at: 0,
+            pr_watch: pr_watch::Watch::default(),
         };
         (actor, changes, step_changes)
     }
@@ -2150,6 +2220,103 @@ mod tests {
         let next = 1_000 + overlaps::OVERLAP_REFRESH_MS;
         actor.refresh_overlaps(next);
         assert_eq!(actor.overlaps_checked[&repository], next);
+    }
+
+    #[test]
+    fn a_repository_has_one_pr_pass_at_a_time() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(4);
+        actor.sender = sender;
+        actor.refresh_pull_requests(1_000, true);
+        actor.refresh_pull_requests(i64::MAX, true);
+        assert!(actor.pr_watch.start_due(i64::MAX).is_empty());
+        assert_eq!(actor.wake_at, None);
+        let event = events.recv_blocking().unwrap();
+        assert!(
+            matches!(&event, Event::PullRequests { repository, .. } if *repository == ticket.repository_id)
+        );
+        // The fixture's base has no remote: its first status is news, and it is checked again
+        // after the idle interval.
+        assert!(actor.handle(event));
+        let due = actor.pr_watch.next_due().unwrap();
+        assert!(due >= 1_000 + pr_watch::IDLE_MS);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_pr_pass_that_panics_still_frees_its_repository() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(1);
+        let repository = ticket.repository_id.clone();
+        actor.pr_watch.keep([repository.as_str()]);
+        actor.pr_watch.start_due(0);
+        spawn_pull_request_check(sender, repository.clone(), || panic!("injected"));
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        let check = &actor.host.snapshot().unwrap().pull_request_checks[0];
+        assert_eq!(
+            check.error.as_deref(),
+            Some("The PR check stopped unexpectedly")
+        );
+        assert_eq!(actor.pr_watch.start_due(i64::MAX), [repository]);
+    }
+
+    #[test]
+    fn a_quiet_host_wakes_itself_for_the_next_pr_pass() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        actor.pr_watch.keep([repository.as_str()]);
+        actor.pr_watch.start_due(0);
+        actor.handle(Event::PullRequests {
+            repository: repository.clone(),
+            outcome: pr_watch::Outcome::NotOnGitHub,
+        });
+        actor.process(Event::Wake(0));
+        let due = actor.pr_watch.next_due().unwrap();
+        assert_eq!(actor.wake_at, Some(due));
+        // When the wake-up comes, it starts the pass with no other event.
+        actor.pr_watch.start_due(due);
+        actor.pr_watch.finish(
+            &repository,
+            now() - pr_watch::IDLE_MS,
+            &pr_watch::Outcome::NotOnGitHub,
+        );
+        actor.wake_at = None;
+        actor.process(Event::Wake(due));
+        assert!(actor.pr_watch.start_due(i64::MAX).is_empty());
+    }
+
+    #[test]
+    fn an_unchanged_pr_pass_sends_no_signal() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, changes, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        for signalled in [true, false] {
+            actor.pr_watch.keep([repository.as_str()]);
+            actor.pr_watch.start_due(i64::MAX);
+            actor.process(Event::PullRequests {
+                repository: repository.clone(),
+                outcome: pr_watch::Outcome::NotOnGitHub,
+            });
+            assert_eq!(changes.try_recv().is_ok(), signalled);
+        }
+    }
+
+    #[test]
+    fn a_pr_watcher_message_is_from_wiffletree_not_the_human() {
+        let (_home, mut host, ticket, coordinator) = ticket_fixture();
+        let id = format!("pr:{}:merged:141", ticket.id);
+        host.send(&id, None, &coordinator.id, "PR #141 merged.")
+            .unwrap();
+        let message = host.message(&id).unwrap();
+        let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
+        assert!(
+            prompt.contains("Sender: Wiffletree PR watcher\n"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Sender: human"), "{prompt}");
     }
 
     #[test]

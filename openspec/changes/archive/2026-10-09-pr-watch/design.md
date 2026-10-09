@@ -142,7 +142,7 @@ Watching continues while a project is paused, because it is read-only and costs 
   `Clean`, `Unstable`, `HasHooks` and `Unknown` add no word. A `pr_sentence` gives the tooltip's full wording.
 - **`sidebar.rs::ticket_row`.** When `pull_request` is set, the label becomes a two-line stack. The second line is the PR line at 11 px, muted. Good is `p.green`, bad is `p.red`, merged is `p.focus`, and the warning color stays reserved. Rows without a PR keep 30 px. The tooltip adds the PR sentence and "Checked 40 s ago" from `Snapshot.pull_request_checks`.
 - **`team_view.rs::tickets`.** A PR block, like `waiver_block`, with the sentence, the head, the check time and an "Open on GitHub" link through `cx.open_url`.
-- **`repositories_view.rs::repositories_page`.** The hint adds "· K open PR(s)", counting open tickets whose PR is `Open`. A second line reads "PRs checked … ago", "PR check failed …: <error> · retrying in …", or the not-on-GitHub status.
+- **`repositories_view.rs::repositories_page`.** The hint adds "· K open PR(s)", counting open tickets whose PR is `Open`. A second line reads "PRs checked … ago", "PR check failed …: <error> · retrying in …", or the not-on-GitHub status. A repository without open tickets is not watched and shows neither the count nor a check line.
 - **`assets.rs`.** New `git-pull-request` and `git-merge` drawings.
 
 The mockup is `design/mockups/current/pr-watch.html`.

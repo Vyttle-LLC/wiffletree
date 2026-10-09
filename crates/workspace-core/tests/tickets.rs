@@ -13,6 +13,7 @@ fn a_ticket_stored_before_repositories_and_verification_still_decodes() {
     assert!(ticket.running_cycle().is_none());
     assert!(ticket.previous_cycles.is_empty() && ticket.ledger.is_empty());
     assert_eq!(ticket.waiver, None);
+    assert_eq!(ticket.pull_request, None);
 }
 
 fn finding(severity: Severity, location: &str, trigger: &str, evidence: &str) -> Finding {

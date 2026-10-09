@@ -335,6 +335,9 @@ pub struct Snapshot {
     /// Open tickets whose branch has fallen behind its base or overlaps another's.
     #[serde(default)]
     pub branch_warnings: Vec<BranchWarnings>,
+    /// When each watched repository's PRs were last checked, and why a check failed.
+    #[serde(default)]
+    pub pull_request_checks: Vec<PullRequestCheck>,
 }
 /// A session's input waiting for a turn: held after an interrupted turn, or queued.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,6 +646,9 @@ pub struct Ticket {
     /// Why the coordinator accepted the ticket after a blocked cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiver: Option<String>,
+    /// The ticket branch's GitHub PR, as the PR watcher last read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<PullRequest>,
 }
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
@@ -656,6 +662,129 @@ impl Ticket {
             .filter(|v| v.outcome == VerificationOutcome::Running)
     }
 }
+/// A ticket branch's GitHub PR, as the PR watcher last read it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    pub state: PrState,
+    pub draft: bool,
+    /// The branch the PR merges into.
+    pub base: String,
+    /// The PR's head commit.
+    pub head: String,
+    pub merge_state: MergeState,
+    pub checks: CheckState,
+    pub unresolved_threads: u32,
+    pub comments: CommentCursors,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit: Option<String>,
+}
+impl PullRequest {
+    /// What changed from `old`, such as "checks failure, new head 9e03c1b".
+    pub fn changes(old: Option<&Self>, new: &Self) -> String {
+        let Some(old) = old else {
+            return format!("found, {}", serde_name(&new.state));
+        };
+        let mut changes = vec![];
+        if old.number != new.number {
+            changes.push(format!("now PR #{}", new.number));
+        }
+        if old.state != new.state {
+            changes.push(serde_name(&new.state));
+        }
+        if old.draft != new.draft {
+            changes.push(if new.draft { "draft" } else { "ready" }.into());
+        }
+        if old.head != new.head {
+            changes.push(format!("new head {}", short_sha(&new.head)));
+        }
+        if old.merge_state != new.merge_state {
+            changes.push(format!("merge state {}", serde_name(&new.merge_state)));
+        }
+        if old.checks != new.checks {
+            changes.push(format!("checks {}", serde_name(&new.checks)));
+        }
+        if old.unresolved_threads != new.unresolved_threads {
+            changes.push(format!("{} unresolved threads", new.unresolved_threads));
+        }
+        if old.comments != new.comments {
+            changes.push("new comments".into());
+        }
+        if changes.is_empty() {
+            changes.push("details".into());
+        }
+        changes.join(", ")
+    }
+}
+/// A unit enum variant's serialized name, such as `has_hooks`.
+fn serde_name(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+/// The first seven characters of a commit id.
+pub fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Closed,
+    Merged,
+}
+/// GitHub's `MergeStateStatus`. GitHub computes it lazily and reports `Unknown` meanwhile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeState {
+    Clean,
+    Behind,
+    Blocked,
+    /// Conflicts with the base.
+    Dirty,
+    Unstable,
+    HasHooks,
+    #[serde(other)]
+    Unknown,
+}
+/// The head commit's check rollup; `None` when the commit has no checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    None,
+    Pending,
+    Success,
+    Failure,
+}
+/// The newest comment id of each kind. The kinds' ids are not ordered against each other.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentCursors {
+    pub issue: Option<u64>,
+    pub review: Option<u64>,
+    /// The newest reply inside any review thread.
+    pub inline: Option<u64>,
+}
+/// A repository's latest PR check. Kept in memory only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestCheck {
+    pub repository_id: String,
+    /// The last successful check.
+    pub checked_at: Option<i64>,
+    /// Why the last check failed.
+    pub error: Option<String>,
+    /// False when the base's remote is not on github.com, so nothing is checked.
+    pub watched: bool,
+    pub next_at: i64,
+}
+/// Messages the host sends as Wiffletree rather than as the human, and their sender label.
+pub fn host_notice(id: &str) -> Option<&'static str> {
+    id.starts_with(PR_NOTICE_PREFIX)
+        .then_some("Wiffletree PR watcher")
+}
+/// The id prefix of the PR watcher's messages.
+pub const PR_NOTICE_PREFIX: &str = "pr:";
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verification {
