@@ -494,13 +494,13 @@ impl HostSettings {
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
         ensure!(
             CHECKIN_CHILD_TURNS.contains(&child_turns),
-            "Child check-ins must come every {}–{} turns",
+            "Agent check-ins must come every {}–{} turns",
             CHECKIN_CHILD_TURNS.start(),
             CHECKIN_CHILD_TURNS.end()
         );
         ensure!(
             CHECKIN_HUMAN_TURNS.contains(&human_turns),
-            "Coordinator check-ins must come every {}–{} turns",
+            "Your check-ins must come every {}–{} coordinator turns",
             CHECKIN_HUMAN_TURNS.start(),
             CHECKIN_HUMAN_TURNS.end()
         );
@@ -560,11 +560,11 @@ impl VerificationSettings {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=MAX_VERIFICATION_ROUNDS).contains(&self.max_rounds),
-            "The round cap must be 1–{MAX_VERIFICATION_ROUNDS}"
+            "Rounds per review must be 1–{MAX_VERIFICATION_ROUNDS}"
         );
         ensure!(
             (1..=MAX_VERIFICATION_CYCLES).contains(&self.max_cycles),
-            "The cycle cap must be 1–{MAX_VERIFICATION_CYCLES}"
+            "Reviews per ticket must be 1–{MAX_VERIFICATION_CYCLES}"
         );
         ensure!(
             !self.verifiers.is_empty(),

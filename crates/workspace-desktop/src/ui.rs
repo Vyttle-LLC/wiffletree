@@ -35,6 +35,27 @@ pub(super) fn hint(text: impl Into<SharedString>, p: Palette) -> Div {
         .text_color(p.subtle)
         .child(text.into())
 }
+/// A setting in plain words: its label and control on one line, and a one-line caption.
+pub(super) fn setting(
+    label: &'static str,
+    control: impl IntoElement,
+    caption: &'static str,
+    p: Palette,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(label)
+                .child(control),
+        )
+        .child(hint(caption, p))
+}
 pub(super) fn card(p: Palette) -> Div {
     div()
         .w_full()

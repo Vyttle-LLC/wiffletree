@@ -1,9 +1,10 @@
-//! The Models page's Review card: who verifies tickets, the round cap and the cycle cap. Each
+//! The Models page's Review card: who verifies tickets, rounds per review and reviews per
+//! ticket (the round and cycle caps). Each
 //! change saves at once, apart from the page's Save, because the host keeps it in its settings
 //! file.
 use super::*;
 use gpui_component::{ActiveTheme, Sizable, button::ButtonVariants, input::Input};
-use ui::{hint, icon, segment};
+use ui::{hint, icon, segment, setting};
 
 pub(super) struct VerifierEditor {
     bridge: Bridge,
@@ -237,19 +238,20 @@ impl Render for VerifierEditor {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child("Round cap")
-                    .child(rounds)
-                    .child(div().w(px(12.)))
-                    .child("Cycle cap")
-                    .child(cycles),
-            )
+            .child(setting(
+                "Rounds per review",
+                rounds,
+                "The first review plus re-checks after the implementer's fixes. If the last round still finds blocking problems, the review stops and the coordinator decides.",
+                p,
+            ))
+            .child(setting(
+                "Reviews per ticket",
+                cycles,
+                "Full reviews with fresh reviewers. After the last one, the coordinator accepts, accepts with a waiver, closes the ticket or asks you.",
+                p,
+            ))
             .child(hint(
-                "verify_ticket starts every verifier at once on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. Only failed verifiers re-run, up to the round cap, and a ticket may start up to the cycle cap of cycles. Changes here save at once.",
+                "verify_ticket starts every verifier at once on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. Changes here save at once.",
                 p,
             ))
             .children(self.error.clone().map(|error| hint(error, p).text_color(p.red)))
