@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · PR watcher study</title>
+<!--
+  Static study for the pr-watch OpenSpec change. No script, no network.
+  (a) Sidebar ticket rows with a PR line: no PR yet, checks running, failed, passed, behind,
+      conflict and merged.
+  (b) The Repositories page row with its open-PR count and when PRs were last checked.
+  (c) The ticket card in the Team panel and the coordinator's merged message.
+  Sample data is simulated; nothing here is implemented host behavior.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:760px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;align-items:start}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:500}
+/* (a) Sidebar, mirroring sidebar.rs: 30px rows, task icon, label, trailing state dot. */
+.tree{display:grid;gap:1px}
+.row{min-height:30px;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:6px;font-size:12.5px}
+.row:hover{background:var(--overlay)}
+.row.d1{padding-left:24px}.row.d2{padding-left:40px}
+.row .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row svg{width:14px;height:14px;flex:none;color:var(--subtle)}
+.row.pr{align-items:flex-start;padding-top:6px;padding-bottom:5px}
+.row.pr>svg{margin-top:2px}.row.pr>.dot{margin-top:6px}
+.stackline{flex:1;min-width:0}
+.stackline .label{display:block}
+/* The new PR line: muted except where checks or a conflict need attention. */
+.prline{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--subtle);white-space:nowrap;overflow:hidden}
+.prline svg{width:11px;height:11px;color:currentColor}
+.prline .sep{color:var(--muted)}
+.ok{color:var(--green)}.bad{color:var(--red)}.merged{color:var(--focus)}
+.dot{width:6px;height:6px;border-radius:50%;margin-right:3px;flex:none}
+.dot.green{background:var(--green)}.dot.red{background:var(--red)}.dot.focus{background:var(--focus)}.dot.muted{background:var(--muted)}
+.tooltip{margin:6px 0 0 24px;padding:8px 10px;border:1px solid var(--edge);border-radius:8px;background:var(--base);font-size:11px;box-shadow:0 8px 24px color-mix(in srgb,var(--text) 10%,transparent)}
+.legend{display:grid;gap:6px;margin-top:14px;padding-top:12px;border-top:1px solid var(--edge);font-size:11px;color:var(--subtle)}
+.legend span{display:flex;align-items:center;gap:8px}
+.legend svg{width:11px;height:11px;flex:none}
+/* (b) Repositories page, mirroring repositories_view.rs. */
+.repo{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 25%,transparent)}
+.repo>svg{width:16px;height:16px;color:var(--subtle);flex:none}
+.repo .name{flex:1;min-width:0}
+.repo .name b{font-weight:500}
+.hint{font-size:12px;color:var(--subtle)}
+.counts{text-align:right}
+.counts .when{font-size:10.5px;color:var(--muted)}
+.counts .when.bad{color:var(--red)}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.focus{color:var(--focus);background:color-mix(in srgb,var(--focus) 12%,transparent)}
+.new{font-weight:500;color:var(--text)}
+/* (c) Team panel card and the coordinator conversation. */
+.card{border:1px solid color-mix(in srgb,var(--edge) 40%,transparent);background:var(--base);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:9px}
+.card-head{display:flex;align-items:flex-start;gap:8px}
+.card-head .title{flex:1;font-weight:500}
+.prbox{border-left:2px solid var(--focus);padding:6px 10px;background:color-mix(in srgb,var(--focus) 6%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+.prbox b{font-weight:500}
+.prbox a{color:var(--focus);text-decoration:none}
+.stack{display:grid;gap:20px}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.message{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:var(--base);font-size:12.5px}
+.message .from{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:var(--subtle)}
+.message .from b{color:var(--text);font-weight:500}
+.message code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.notes{max-width:760px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+@media(max-width:900px){.grid,.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="task" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="orbit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><path d="M10.4 21.9a10 10 0 0 0 9.94-15.93M13.6 2.1A10 10 0 0 0 3.66 18.03"/></symbol>
+  <symbol id="bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M2 14h2M20 14h2M9 13v2M15 13v2"/></symbol>
+  <symbol id="pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="m13 3.5-2.5 2.5L13 8.5"/></symbol>
+  <symbol id="merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 7.5v9M6 7.5c0 3 3 4.5 9.5 4.5"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></symbol>
+  <symbol id="cross" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="running" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="12" cy="12" r="8" stroke-dasharray="3 4"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · PR watcher</div>
+  <h1>Pull request status on tickets and repositories</h1>
+  <p>Static study for the <span class="mono">pr-watch</span> OpenSpec change. The host polls GitHub for each open ticket’s PR without a model. It shows (a) the PR on the ticket row, (b) the open-PR count on the repository row, and (c) the ticket card and the message the coordinator gets when a PR merges. Sample data is simulated.</p>
+</header>
+
+<div class="grid">
+  <!-- (a) Sidebar tree -->
+  <section>
+    <div class="panel" aria-label="Sidebar tree">
+      <div class="eyebrow" style="padding:0 8px;margin:2px 0 8px">Projects</div>
+      <nav class="tree">
+        <div class="row"><svg><use href="#orbit"/></svg><span class="label">wiffletree-improvements</span><span class="dot focus" title="Team working"></span></div>
+
+        <div class="row d1"><svg><use href="#task"/></svg><span class="label">wiffletree · Session search</span><span class="dot focus" title="Working"></span></div>
+        <div class="row d2"><svg><use href="#bot"/></svg><span class="label">Implementer</span></div>
+
+        <div class="row d1 pr"><svg><use href="#task"/></svg>
+          <div class="stackline"><span class="label">wiffletree · PR watcher</span>
+            <div class="prline"><svg><use href="#pr"/></svg>#142<span class="sep">·</span><svg><use href="#running"/></svg>checks<span class="sep">·</span>1 thread</div></div>
+          <span class="dot green" title="Passed"></span></div>
+
+        <div class="row d1 pr"><svg><use href="#task"/></svg>
+          <div class="stackline"><span class="label">wiffletree · Model guide</span>
+            <div class="prline"><svg><use href="#pr"/></svg>#143<span class="sep">·</span><span class="bad">checks ✗</span></div></div>
+          <span class="dot green" title="Passed"></span></div>
+
+        <div class="row d1 pr"><svg><use href="#task"/></svg>
+          <div class="stackline"><span class="label">wiffletree · Archive specs</span>
+            <div class="prline"><svg><use href="#pr"/></svg>#140<span class="sep">·</span><span class="ok">checks ✓</span></div></div>
+          <span class="dot green" title="Passed"></span></div>
+
+        <div class="row d1 pr"><svg><use href="#task"/></svg>
+          <div class="stackline"><span class="label">sage-agents · Bundle PR skill</span>
+            <div class="prline"><svg><use href="#pr"/></svg>#88<span class="sep">·</span><span class="ok">checks ✓</span><span class="sep">·</span>1 thread<span class="sep">·</span>behind</div></div>
+          <span class="dot green" title="Passed"></span></div>
+
+        <div class="row d1 pr"><svg><use href="#task"/></svg>
+          <div class="stackline"><span class="label">wiffletree · Review convergence</span>
+            <div class="prline"><svg><use href="#pr"/></svg>#139<span class="sep">·</span><span class="ok">checks ✓</span><span class="sep">·</span><span class="bad">conflict</span></div></div>
+          <span class="dot green" title="Passed"></span></div>
+
+        <div class="row d1 pr"><svg><use href="#task"/></svg>
+          <div class="stackline"><span class="label">wiffletree · Overlap warnings</span>
+            <div class="prline merged"><svg><use href="#merge"/></svg>#141<span class="sep">·</span>merged</div></div>
+          <span class="dot green" title="Passed"></span></div>
+        <div class="row d2"><svg><use href="#bot"/></svg><span class="label">Implementer</span></div>
+      </nav>
+      <div class="tooltip"><b>wiffletree · PR watcher</b> · Passed<br>PR #142 open into main · checks running · 1 unresolved thread<br><span class="subtle">Checked 40 s ago</span></div>
+      <div class="legend">
+        <span><svg><use href="#pr"/></svg> An open PR for the ticket’s branch, found by the host</span>
+        <span><svg class="ok"><use href="#check"/></svg> Checks passed · <span class="bad">✗</span> failed · <svg><use href="#running"/></svg> running</span>
+        <span>behind · conflict · draft · blocked: GitHub’s merge state, only when it needs a look</span>
+        <span><svg class="merged"><use href="#merge"/></svg> Merged; the ticket waits for the coordinator to accept it</span>
+      </div>
+    </div>
+    <p class="caption"><b>(a)</b> A ticket with a PR gets a second, muted line under its label; a ticket without one keeps today’s single row. Only failed checks and a conflict take color. The state dot still describes the ticket, not the PR. Hover adds the base, full wording and when GitHub was last checked.</p>
+  </section>
+
+  <div class="stack">
+    <!-- (b) Repositories page -->
+    <section>
+      <div class="panel" aria-label="Repositories page">
+        <div class="eyebrow" style="margin-bottom:6px">Settings · Repositories</div>
+        <div class="repo">
+          <svg><use href="#folder"/></svg>
+          <div class="name"><b>wiffletree</b><div class="mono subtle">~/dev/personal/wiffletree</div></div>
+          <div class="counts"><div class="hint">1 project · 6 open tickets · <span class="new">5 open PRs</span></div><div class="when">PRs checked 40 s ago</div></div>
+          <span class="pill subtle">origin/main</span>
+        </div>
+        <div class="repo">
+          <svg><use href="#folder"/></svg>
+          <div class="name"><b>sage-agents</b><div class="mono subtle">~/dev/sagehaven/sage-agents</div></div>
+          <div class="counts"><div class="hint">2 projects · 1 open ticket · <span class="new">1 open PR</span></div><div class="when bad">PR check failed 3 min ago: gh is not logged in · retrying in 4 min</div></div>
+          <span class="pill subtle">origin/main</span>
+        </div>
+        <div class="repo">
+          <svg><use href="#folder"/></svg>
+          <div class="name"><b>personal-brain</b><div class="mono subtle">~/dev/personal/personal-brain</div></div>
+          <div class="counts"><div class="hint">1 project · 0 open tickets</div><div class="when">No open tickets; PRs not checked</div></div>
+          <span class="pill subtle">origin/main</span>
+        </div>
+      </div>
+      <p class="caption"><b>(b)</b> Each repository row adds its open-PR count beside the open tickets, and says when PRs were last checked or why the check failed. A failed check keeps the last known PR lines; it never clears them.</p>
+    </section>
+
+    <!-- (c) Ticket card and the coordinator's message -->
+    <section class="two">
+      <div>
+        <div class="panel" aria-label="Team panel ticket card">
+          <div class="eyebrow" style="margin-bottom:8px">Team · Tickets</div>
+          <div class="card">
+            <div class="card-head"><span class="title">wiffletree · Overlap warnings</span><span class="pill green">Passed</span></div>
+            <div class="prbox"><b>PR #141 merged</b> into main as be5f484 · <a href="#">Open on GitHub</a><br><span class="subtle small">Head 7c1c59e, the ticket worktree’s HEAD · checked 40 s ago</span></div>
+            <div class="hint">Verification cycle 1: passed, 2 of 3 rounds</div>
+          </div>
+          <div class="card" style="margin-top:10px">
+            <div class="card-head"><span class="title">wiffletree · Review convergence</span><span class="pill green">Passed</span></div>
+            <div class="prbox"><b>PR #139</b> open into main · checks passed · conflicts with main · <a href="#">Open on GitHub</a><br><span class="subtle small">Head 3daf610 · checked 1 min ago</span></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="message" aria-label="Coordinator merged message">
+          <div class="from"><svg width="14" height="14"><use href="#server"/></svg><b>Wiffletree PR watcher</b> · to the coordinator</div>
+          <p>PR #141 for ticket “Overlap warnings” (<code>8d1e…</code>) merged into main as <code>be5f484</code>. Its head <code>7c1c59e</code> is the ticket worktree’s HEAD. Accept the ticket with <code>accept_ticket</code>.</p>
+        </div>
+        <div class="message" style="margin-top:10px" aria-label="Merged message, head differs">
+          <div class="from"><svg width="14" height="14"><use href="#server"/></svg><b>Wiffletree PR watcher</b> · to the coordinator</div>
+          <p>PR #144 for ticket “Usage chart” (<code>b02c…</code>) merged into main as <code>41aa9d0</code>. Its head <code>9e03c1b</code> differs from the ticket worktree’s HEAD <code>5f2e7a0</code>, so the merge may hold commits verification never saw. Check what changed before you call <code>accept_ticket</code>.</p>
+        </div>
+        <div class="panel" style="margin-top:10px" aria-label="workspace_context excerpt">
+          <div class="eyebrow" style="margin-bottom:6px">workspace_context · tickets[]</div>
+<pre>{
+  "title": "Review convergence",
+  "state": "passed",
+  "pull_request": {
+    "number": 139, "state": "open", "draft": false,
+    "url": "https://github.com/…/pull/139",
+    "base": "main", "head": "3daf610…",
+    "merge_state": "dirty", "checks": "success",
+    "unresolved_threads": 0,
+    "comments": { "issue": 2391, "review": 1877, "inline": 4190331 }
+  }
+}</pre>
+        </div>
+      </div>
+    </section>
+    <p class="caption"><b>(c)</b> The Team panel’s ticket card names the PR, its head and when it was checked, with a link to GitHub. When the PR merges, the coordinator gets one message from Wiffletree, never in the human’s name. It says whether the merged head is the ticket worktree’s HEAD, which <span class="mono">accept_ticket</span> checks against the verified commit. The snapshot also rides on the ticket in <span class="mono">workspace_context</span>. No PR title, body or comment text is ever copied into a message.</p>
+  </div>
+</div>
+
+<ul class="notes">
+  <li>The host makes one read-only <span class="mono">gh api graphql</span> call per repository per pass: about every 60 s while the repository has an open PR, every 5 min otherwise, and backing off after failures. It never comments, labels, pushes, rebases or merges.</li>
+  <li>Settled after this study (see <span class="mono">design.md</span>, “Settled by the human”). Failed checks and conflicts wake only the coordinator, without PR text, at most once per head and 3 times per PR, then one “budget used” message. A PR closed without merging sends one message. New comments wake nobody; that is deferred to a later change. These messages are not drawn here.</li>
+  <li>This is a static design study, not the GPUI implementation.</li>
+</ul>
+</body>
+</html>
