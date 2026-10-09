@@ -980,6 +980,7 @@ impl Actor {
                 cancelled,
             } => {
                 let mut active = self.active.remove(id).unwrap();
+                self.host.in_turn.remove(id);
                 let failed = error.is_some();
                 // A turn its parent stopped is finished rather than held: the parent decides
                 // what runs next, and the session's next turn is told about the stop instead.
@@ -1882,7 +1883,9 @@ impl Actor {
                 "turn_scheduled",
                 &format!("{run}; queue_ms={}", now() - queued_at),
             )
-        })
+        })?;
+        self.host.in_turn.insert(session.id.clone());
+        Ok(())
     }
     /// The turn's whole prompt. A session's first turn since the host started also says what
     /// the restart interrupted and which of its timers fired late.
@@ -2344,8 +2347,14 @@ mod tests {
     fn host_messages_are_from_wiffletree_and_the_humans_stay_the_humans() {
         let (_home, mut host, ticket, coordinator) = ticket_fixture();
         for (id, sender) in [
-            (format!("pr:{}:merged:141", ticket.id), "Wiffletree PR watcher"),
-            (format!("verification:{}:1:outcome", ticket.id), "Wiffletree"),
+            (
+                format!("pr:{}:merged:141", ticket.id),
+                "Wiffletree PR watcher",
+            ),
+            (
+                format!("verification:{}:1:outcome", ticket.id),
+                "Wiffletree",
+            ),
             ("m1".into(), "human"),
         ] {
             host.send(&id, None, &coordinator.id, "Body").unwrap();
@@ -2353,6 +2362,64 @@ mod tests {
             let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
             assert!(prompt.contains(&format!("Sender: {sender}\n")), "{prompt}");
         }
+    }
+
+    #[test]
+    fn a_running_turn_shows_as_working_after_a_blocked_report() {
+        let (_home, mut host, ticket, coordinator) = ticket_fixture();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let input = actor.host.messages(&implementer.id, None, 10).unwrap();
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        actor
+            .record_turn_start("run", &implementer, &input, &json!({}), &runtime)
+            .unwrap();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("run", vec![]));
+        let report = json!({"message_id":"stuck","kind":"blocked","body":"Need a decision"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        let shown = |actor: &Actor| {
+            let snapshot = actor.host.snapshot().unwrap();
+            let session = snapshot.sessions.iter().find(|s| s.id == implementer.id);
+            let context = actor.host.agent_context(&coordinator.id).unwrap();
+            let team = context["team"].as_array().unwrap().iter();
+            let member = team.clone().find(|s| s["id"] == implementer.id.as_str());
+            (
+                session.unwrap().status,
+                member.unwrap()["status"].clone(),
+                context["tickets"][0]["agents"][0]["status"].clone(),
+            )
+        };
+        assert_eq!(
+            shown(&actor),
+            (Status::Working, json!("working"), json!("working"))
+        );
+        // Ticket and agent operations still see the report.
+        assert_eq!(
+            actor.host.session(&implementer.id).unwrap().status,
+            Status::Blocked
+        );
+        actor
+            .provider_event(
+                &implementer.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: None,
+                    usage: Value::Null,
+                    cancelled: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            shown(&actor),
+            (Status::Blocked, json!("blocked"), json!("blocked"))
+        );
     }
 
     #[test]
