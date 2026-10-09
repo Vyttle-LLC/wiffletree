@@ -2,13 +2,10 @@
 mod selection;
 mod steps;
 mod usage;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 pub use selection::*;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, path::PathBuf};
 pub use steps::*;
 pub use usage::*;
 
@@ -106,7 +103,6 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub brain: Option<String>,
-    pub turn_limit: usize,
     /// The workspace repositories this project may use; `None` means all of them.
     #[serde(default)]
     pub repositories: Option<Vec<String>>,
@@ -273,47 +269,6 @@ pub struct ModelCapability {
     pub provider: Provider,
     pub model: String,
     pub efforts: Vec<String>,
-}
-
-/// Active turns only: idle coordinators and administrative operations take no slot.
-pub struct TurnLimits {
-    global: usize,
-    active: BTreeMap<String, String>,
-}
-impl TurnLimits {
-    pub fn new(global: usize) -> Result<Self> {
-        ensure!(global > 0 && global <= 64, "Invalid global turn limit");
-        Ok(Self {
-            global,
-            active: BTreeMap::new(),
-        })
-    }
-    pub fn acquire(&mut self, session: &str, project: &str, project_limit: usize) -> Result<()> {
-        ensure!(
-            project_limit > 0 && project_limit <= 64,
-            "Invalid project turn limit"
-        );
-        if self.active.contains_key(session) {
-            bail!("Session already has an active turn");
-        }
-        ensure!(self.active.len() < self.global, "Global turn limit reached");
-        ensure!(
-            self.active
-                .values()
-                .filter(|p| p.as_str() == project)
-                .count()
-                < project_limit,
-            "Project turn limit reached"
-        );
-        self.active.insert(session.into(), project.into());
-        Ok(())
-    }
-    pub fn release(&mut self, session: &str) {
-        self.active.remove(session);
-    }
-    pub fn active(&self) -> usize {
-        self.active.len()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,6 +464,48 @@ pub struct HostSettings {
     pub workspaces_dir: String,
     #[serde(default)]
     pub verification: VerificationSettings,
+    /// Turns a session runs without a message from its parent before the parent gets a check-in.
+    #[serde(default = "default_checkin_child_turns")]
+    pub checkin_child_turns: u32,
+    /// Turns the project coordinator runs without the human before the human gets a check-in.
+    #[serde(default = "default_checkin_human_turns")]
+    pub checkin_human_turns: u32,
+}
+fn default_checkin_child_turns() -> u32 {
+    25
+}
+fn default_checkin_human_turns() -> u32 {
+    100
+}
+/// The child check-in thresholds the settings accept.
+pub const CHECKIN_CHILD_TURNS: std::ops::RangeInclusive<u32> = 5..=500;
+/// The human check-in thresholds the settings accept.
+pub const CHECKIN_HUMAN_TURNS: std::ops::RangeInclusive<u32> = 10..=1000;
+impl HostSettings {
+    /// Settings with `workspaces_dir` and every default.
+    pub fn new(workspaces_dir: String) -> Self {
+        Self {
+            workspaces_dir,
+            verification: VerificationSettings::default(),
+            checkin_child_turns: default_checkin_child_turns(),
+            checkin_human_turns: default_checkin_human_turns(),
+        }
+    }
+    pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
+        ensure!(
+            CHECKIN_CHILD_TURNS.contains(&child_turns),
+            "Agent check-ins must come every {}–{} turns",
+            CHECKIN_CHILD_TURNS.start(),
+            CHECKIN_CHILD_TURNS.end()
+        );
+        ensure!(
+            CHECKIN_HUMAN_TURNS.contains(&human_turns),
+            "Your check-ins must come every {}–{} coordinator turns",
+            CHECKIN_HUMAN_TURNS.start(),
+            CHECKIN_HUMAN_TURNS.end()
+        );
+        Ok(())
+    }
 }
 
 /// The highest verification round cap the settings accept.
@@ -563,11 +560,11 @@ impl VerificationSettings {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=MAX_VERIFICATION_ROUNDS).contains(&self.max_rounds),
-            "The round cap must be 1–{MAX_VERIFICATION_ROUNDS}"
+            "Rounds per review must be 1–{MAX_VERIFICATION_ROUNDS}"
         );
         ensure!(
             (1..=MAX_VERIFICATION_CYCLES).contains(&self.max_cycles),
-            "The cycle cap must be 1–{MAX_VERIFICATION_CYCLES}"
+            "Reviews per ticket must be 1–{MAX_VERIFICATION_CYCLES}"
         );
         ensure!(
             !self.verifiers.is_empty(),
@@ -1105,6 +1102,11 @@ pub enum Command {
     /// Validates and saves the verification setting; answers with `HostSettings`.
     SetVerification {
         verification: VerificationSettings,
+    },
+    /// Validates and saves both check-in thresholds; answers with `HostSettings`.
+    SetCheckIns {
+        child_turns: u32,
+        human_turns: u32,
     },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,

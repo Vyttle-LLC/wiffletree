@@ -123,6 +123,10 @@ fn ticket_commands_round_trip() {
         Command::SetVerification {
             verification: VerificationSettings::default(),
         },
+        Command::SetCheckIns {
+            child_turns: 25,
+            human_turns: 100,
+        },
     ] {
         let encoded = serde_json::to_value(&command).unwrap();
         let decoded: Command = serde_json::from_value(encoded.clone()).unwrap();

@@ -77,7 +77,12 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator — v9"));
+    assert!(coordinator.contains("Project coordinator — v10"));
+    for role in Role::ALL {
+        let skill = provider::skill(role);
+        assert!(skill.contains("Wiffletree communication contract — v5"));
+        assert!(skill.contains("run of turns without a message from your parent"));
+    }
     for tool in [
         "create_ticket",
         "assign_ticket",
@@ -96,6 +101,8 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         "Never start a fresh cycle to chase them",
         "waived",
         "product, security or data-loss decision",
+        "Treat each check-in as a decision",
+        "without a message from you",
     ] {
         assert!(coordinator.contains(phrase), "{phrase}");
     }

@@ -309,64 +309,35 @@ fn one_call_starts_every_verifier_on_the_same_commit() {
 }
 
 #[test]
-fn verify_ticket_refuses_unready_dirty_running_and_oversized_cycles() {
-    let mut f = Fixture::ready(three_verifiers(), 2);
+fn verify_ticket_refuses_dirty_and_running_cycles_but_starts_any_number_of_verifiers() {
+    let mut many = three_verifiers();
+    for focus in ["A", "B", "C", "D"] {
+        many.push(verifier(Role::Reviewer, focus, None));
+    }
+    let mut f = Fixture::ready(many, 2);
     let sessions = f.host.sessions().unwrap().len();
 
     std::fs::write(f.worktree().join("scratch.txt"), "draft").unwrap();
     let dirty = f.verify().unwrap_err().to_string();
     assert!(dirty.contains("uncommitted or untracked"), "{dirty}");
-    std::fs::remove_file(f.worktree().join("scratch.txt")).unwrap();
-
-    let mut project = f.host.project(&f.coordinator.project_id).unwrap();
-    let db = rusqlite::Connection::open(f.host.home.join("workspace.sqlite3")).unwrap();
-    let set_turn_limit = |project: &mut Project, limit: usize| {
-        project.turn_limit = limit;
-        db.execute(
-            "UPDATE projects SET data=?2 WHERE id=?1",
-            rusqlite::params![project.id, serde_json::to_string(project).unwrap()],
-        )
-        .unwrap();
-    };
-    set_turn_limit(&mut project, 3);
-    let small = f.verify().unwrap_err().to_string();
-    assert!(
-        small.contains("3 verifiers") && small.contains("turn limit of 3"),
-        "{small}"
-    );
-    set_turn_limit(&mut project, 20);
-    let mut many = three_verifiers();
-    for focus in ["A", "B", "C", "D"] {
-        many.push(verifier(Role::Reviewer, focus, None));
-    }
-    f.host
-        .set_verification(VerificationSettings {
-            verifiers: many,
-            max_rounds: 2,
-            max_cycles: 2,
-        })
-        .unwrap();
-    let host_wide = f.verify().unwrap_err().to_string();
-    assert!(
-        host_wide.contains("7 verifiers") && host_wide.contains("host-wide limit is 6"),
-        "{host_wide}"
-    );
     assert_eq!(
         f.host.sessions().unwrap().len(),
         sessions,
         "no verifier started"
     );
-    assert_eq!(f.current().state, "ready_for_testing");
+    std::fs::remove_file(f.worktree().join("scratch.txt")).unwrap();
 
-    set_turn_limit(&mut project, 4);
-    f.host
-        .set_verification(VerificationSettings {
-            verifiers: three_verifiers(),
-            max_rounds: 2,
-            max_cycles: 2,
-        })
-        .unwrap();
-    f.verify().unwrap();
+    let ticket = f.verify().unwrap();
+    let round = &ticket.verification.unwrap().rounds[0];
+    assert_eq!(round.verifiers.len(), 7);
+    assert_eq!(f.host.sessions().unwrap().len(), sessions + 7);
+    for run in &round.verifiers {
+        assert_eq!(
+            f.host.message(&run.message_id).unwrap().recipient,
+            run.session_id
+        );
+    }
+    assert_eq!(f.current().state, "verifying");
     let running = f.verify().unwrap_err().to_string();
     assert!(running.contains("already running"), "{running}");
 }

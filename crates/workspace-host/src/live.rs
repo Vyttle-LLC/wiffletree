@@ -598,7 +598,9 @@ impl Host {
         Ok(self
             .open_attention(&session.project_id)?
             .into_iter()
-            .filter(|a| a.session_id == session.id && !a.is_permission())
+            .filter(|a| {
+                a.session_id == session.id && !a.is_permission() && !is_check_in(&a.operation_id)
+            })
             .collect())
     }
     /// A coordinator's exact model and one-line reason, checked against the machine's model
@@ -841,6 +843,10 @@ impl Host {
                 ensure!(
                     !attention.is_permission(),
                     "Permission requests close when the human decides"
+                );
+                ensure!(
+                    !is_check_in(&attention.operation_id),
+                    "Check-ins close when the human steps in"
                 );
                 if attention.answer.is_some() {
                     return Ok(serde_json::to_value(attention)?);

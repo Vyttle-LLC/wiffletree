@@ -3,7 +3,6 @@
 //! back to the implementer, only failed verifiers re-run, rounds are capped, and the project
 //! coordinator wakes once, when the cycle ends. Verifiers are archived once the cycle no longer
 //! needs them, so every cycle starts fresh sessions.
-use crate::service::{HOST_WORKER_TURNS, worker_turns};
 use crate::*;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -310,18 +309,6 @@ impl Host {
             settings.max_cycles
         );
         let coordinator = self.session(&ticket.coordinator_id)?;
-        let project = self.project(&coordinator.project_id)?;
-        let count = settings.verifiers.len();
-        let worker_turns = worker_turns(&project);
-        ensure!(
-            count <= worker_turns,
-            "{count} verifiers cannot run at once: the project's turn limit of {} leaves {worker_turns} worker turns",
-            project.turn_limit
-        );
-        ensure!(
-            count <= HOST_WORKER_TURNS,
-            "{count} verifiers cannot run at once: the host-wide limit is {HOST_WORKER_TURNS} worker turns"
-        );
         let chosen = self.verifier_choices(&coordinator, &settings.verifiers, choices)?;
         let commit = head(&ticket)?;
         self.atomically(|host| {
@@ -386,7 +373,7 @@ impl Host {
             host.start_round(&mut ticket)?;
             Self::event(
                 &host.db,
-                &project.id,
+                &coordinator.project_id,
                 Some(&ticket.coordinator_id),
                 "verification_started",
                 &format!("{}; cycle {cycle}", ticket.id),
