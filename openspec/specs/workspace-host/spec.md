@@ -59,7 +59,7 @@ The host SHALL NOT limit how many turns run at once, in a project or across the 
 - **THEN** all nine turns start in the same scheduling pass
 
 #### Scenario: Long-running project keeps going
-- **WHEN** a project's sessions have run 150 turns since the human last messaged it
+- **WHEN** a project's sessions have run 150 turns since the human last stepped in
 - **THEN** the project stays live and its next due turn starts
 
 #### Scenario: Old store
@@ -70,7 +70,7 @@ The host SHALL NOT limit how many turns run at once, in a project or across the 
 The host SHALL tell a session's parent about long or repetitive work, and SHALL never pause or stop work for it. Each check-in SHALL be a durable message from the session to its parent whose body starts with `[check-in]`, names the session, its ticket if any, and recent activity, and says how to stop it with `stop_agents`. A check-in SHALL wake the parent, also while the session's ticket is being verified, and SHALL NOT count as a report or a verdict.
 - **Time:** when a turn has run 30 minutes, and every 30 minutes after while it runs, the parent SHALL receive a check-in naming the elapsed time, the last provider event and the latest step.
 - **Turn count:** when a session with a parent starts its Nth turn since its parent last sent it a message, where N is the `checkin_child_turns` setting, and at every further multiple of N, the parent SHALL receive a check-in naming the turn count, when the parent last messaged it, and the start of the session's last reply.
-- **Human:** a session without a parent, the project coordinator, SHALL raise a human inbox item instead of a message: for its own 30-minute turns, cleared when a newer one is raised or the turn ends; and when it starts its Mth turn since the human last messaged it, retried its input or answered one of its questions, where M is the `checkin_human_turns` setting, and at every further multiple of M, cleared when the human next does one of those things or a newer one is raised.
+- **Human:** a session without a parent, the project coordinator, SHALL raise a human inbox item instead of a message: for its own 30-minute turns, cleared when a newer one is raised or the turn ends; and when it starts its Mth turn since the human last stepped in anywhere in the project, where M is the `checkin_human_turns` setting, and at every further multiple of M, cleared when the human next steps in or a newer one is raised. The human steps in by sending any session of the project a message, answering or resolving any of its inbox items, including permission requests, or retrying any of its sessions' input.
 A host restart SHALL clear open time check-ins, and the human's turn count SHALL start again from zero.
 
 #### Scenario: Thirty-minute check-in
@@ -87,7 +87,7 @@ A host restart SHALL clear open time check-ins, and the human's turn count SHALL
 - **THEN** its parent has received no turn-count check-in
 
 #### Scenario: Coordinator runs 100 turns without the human
-- **WHEN** `checkin_human_turns` is 100 and the project coordinator starts its 100th turn since the human last messaged it
+- **WHEN** `checkin_human_turns` is 100 and the project coordinator starts its 100th turn since the human last stepped in
 - **THEN** the human's inbox gains one item naming the coordinator and the turn count, the project stays live and the turn runs
 - **AND** the item stays open after that turn ends, and the human's next message to the coordinator clears it
 

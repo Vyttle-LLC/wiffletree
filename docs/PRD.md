@@ -242,7 +242,7 @@ Treat the derived wiki as compiler-managed. Editing a decision through the app r
 
 ### Timed events and maintenance
 
-A persistent scheduler in the Rust host runs without a renderer and, in the headless delivery stage, without any connected client. Store each job’s owner, project or brain scope, schedule and timezone, enabled state, procedure version, provider/model if needed, budget, timeout, retry policy, next run and run history. Support manual run, pause, resume and cancellation. Scheduled work obeys the same permissions, attention handling, provider limits and concurrency controls as interactive work.
+A persistent scheduler in the Rust host runs without a renderer and, in the headless delivery stage, without any connected client. Store each job’s owner, project or brain scope, schedule and timezone, enabled state, procedure version, provider/model if needed, budget, timeout, retry policy, next run and run history. Support manual run, pause, resume and cancellation. Scheduled work obeys the same permissions, attention handling and provider limits as interactive work.
 
 Initial built-in jobs and proposed defaults:
 
@@ -399,7 +399,7 @@ Proposed policies:
 
 Default to preparing updates and routing feedback; automatic branch writes are opt-in. Dependency order is base branch → feature integration branch → workers. Serialize updates with other Git operations, verify the worktree is clean, and hold on conflicts or unexpected remote changes. Recheck state before committing an update.
 
-Deduplicate repeated notifications, coalesce bursts, and require a meaningful new event before waking an orchestrator. Respect paused projects, concurrency limits and spending policy. PR text is external input, not authority to expand scope or change permissions.
+Deduplicate repeated notifications, coalesce bursts, and require a meaningful new event before waking an orchestrator. Respect paused projects and spending policy. PR text is external input, not authority to expand scope or change permissions.
 
 Use ordinary OS file observations and scheduled remote refreshes. Under normal connected conditions, propose active PR refresh at 60 seconds and idle refresh at 5 minutes; increase intervals when rate limits or energy constraints require it. Detect base changes with a proposed active fetch interval of 2 minutes and idle interval of 15 minutes. These intervals are configurable and should be tuned with usage measurements.
 
@@ -478,7 +478,7 @@ Implementation requirements: bounded queues with backpressure, virtualization of
 
 Pause or spool noisy producers when buffers fill. Set queue and disk limits and surface backlogs. Store raw transcripts on disk with an explicit retention policy rather than keeping all history in memory. Avoid one polling loop per agent; consolidate by repository and PR. Sleeping sessions must not generate model calls.
 
-Bound concurrent model work globally and per project. Proposed default: 4 active turns, configurable. Coordinators consume a slot only while reasoning. Queue pending work visibly and reserve a path for user interruption and permission handling.
+Model work has no concurrency limit; parents supervise it through check-ins. Queue pending work visibly and reserve a path for user interruption and permission handling.
 
 ## Reliability and control
 

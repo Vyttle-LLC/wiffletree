@@ -76,6 +76,12 @@ pub(crate) const CHECK_IN: &str = "check-in:";
 /// Prefix of the inbox item raised when the project coordinator has run many turns without the
 /// human; reserved like `CHECK_IN`.
 pub(crate) const TURN_COUNT: &str = "turn-count:";
+/// Whether an inbox item is a host check-in rather than an agent's question.
+pub(crate) fn is_check_in(operation: &str) -> bool {
+    [CHECK_IN, TURN_COUNT]
+        .iter()
+        .any(|prefix| operation.starts_with(prefix))
+}
 fn ensure_unreserved(operation: &str) -> Result<()> {
     for prefix in [CHECK_IN, TURN_COUNT] {
         ensure!(

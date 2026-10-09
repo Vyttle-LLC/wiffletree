@@ -1476,7 +1476,7 @@ impl Actor {
             return Ok(());
         };
         let (turns, since): (u32, Option<i64>) = self.host.db.query_row(
-            "WITH last AS (SELECT MAX(created_at) AS at FROM messages WHERE recipient=?1 AND sender=?2) SELECT (SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND started_at>COALESCE(last.at,0)), last.at FROM last",
+            "WITH last AS (SELECT MAX(created_at) AS at FROM messages WHERE recipient=?1 AND sender=?2) SELECT (SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND started_at>=COALESCE(last.at,0)), last.at FROM last",
             params![session.id, parent],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -3054,7 +3054,7 @@ mod tests {
     }
 
     #[test]
-    fn an_urgent_report_beyond_the_turn_limit_still_wakes_at_once() {
+    fn an_urgent_report_beyond_max_turn_messages_still_wakes_at_once() {
         let (_home, mut actor, parent, child) = actor_with_child();
         for n in 0..MAX_TURN_MESSAGES {
             report(&mut actor, &child, "progress", &format!("step {n}"));
@@ -3355,6 +3355,55 @@ mod tests {
         assert!(items(&actor).is_empty(), "stepping in clears it");
         run_turns(&mut actor, &root, base + 200, 99);
         assert!(items(&actor).is_empty(), "and restarts the count");
+    }
+
+    #[test]
+    fn the_coordinator_can_neither_see_nor_close_its_turn_count_check_in() {
+        let (_home, mut actor, root, _) = actor_with_child();
+        run_turns(&mut actor, &root, now() + 10_000, 100);
+        let session = actor.host.session(&root).unwrap();
+        let item = actor
+            .host
+            .open_attention(&session.project_id)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.operation_id.starts_with(TURN_COUNT))
+            .unwrap();
+
+        assert!(actor.host.open_questions(&session).unwrap().is_empty());
+        let refused = actor
+            .host
+            .agent_tool(
+                &root,
+                "close_question",
+                json!({"request_id":item.operation_id,"resolution":"Settled"}),
+            )
+            .unwrap_err();
+
+        assert!(
+            refused
+                .to_string()
+                .contains("Check-ins close when the human steps in"),
+            "{refused}"
+        );
+        let open = actor.host.open_attention(&session.project_id).unwrap();
+        assert!(open.iter().any(|a| a.id == item.id), "it stays open");
+    }
+
+    #[test]
+    fn a_turn_started_in_the_same_millisecond_as_the_parent_message_counts() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        let at = now() + 10_000;
+        actor.host.send("go", Some(&parent), &child, "Go").unwrap();
+        actor
+            .host
+            .db
+            .execute("UPDATE messages SET created_at=?1 WHERE id='go'", [at])
+            .unwrap();
+
+        run_turns(&mut actor, &child, at, 25);
+
+        assert_eq!(turn_check_ins(&actor, &parent).len(), 1);
     }
 
     #[test]

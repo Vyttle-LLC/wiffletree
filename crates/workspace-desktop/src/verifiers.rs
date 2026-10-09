@@ -1,7 +1,6 @@
 //! The Models page's Review card: who verifies tickets, rounds per review and reviews per
-//! ticket (the round and cycle caps). Each
-//! change saves at once, apart from the page's Save, because the host keeps it in its settings
-//! file.
+//! ticket (the round and cycle caps). Each change saves at once, apart from the page's Save,
+//! because the host keeps it in its settings file.
 use super::*;
 use gpui_component::{ActiveTheme, Sizable, button::ButtonVariants, input::Input};
 use ui::{hint, icon, segment, setting};
