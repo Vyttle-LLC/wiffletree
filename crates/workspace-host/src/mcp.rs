@@ -39,7 +39,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "verify_ticket",
-            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. For each verifier in model_selection.verifiers, give its focus, an exact profile within its provider (or, without one, its role's providers) and the models allowed on this machine, guided by the guide, and a one-line reason. Any refused choice starts no verifier, and nothing is substituted. A verifier session that already exists under that focus is reused only if your profile matches its pinned one; otherwise it is archived and a fresh verifier starts on your choice. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked.",
+            "Coordinator: once the implementer reports ready_for_testing, start every configured verifier on the ticket's current commit at once. For each verifier in model_selection.verifiers, give its focus, an exact profile within its provider (or, without one, its role's providers) and the models allowed on this machine, guided by the guide, and a one-line reason. Any refused choice starts no verifier, and nothing is substituted. A verifier session that already exists under that focus is reused only if your profile matches its pinned one; otherwise it is archived and a fresh verifier starts on your choice. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. You wake once, when the cycle passes or is blocked. A ticket may start only as many cycles as the cycle cap allows.",
             json!({"ticket_id":string,"verifiers":{"type":"array","items":{"type":"object","properties":{"focus":string,"profile":profile,"reason":string},"required":["focus","profile","reason"],"additionalProperties":false}}}),
             vec!["ticket_id", "verifiers"]
         ),
@@ -85,6 +85,12 @@ pub fn tools() -> Value {
             "Coordinator: list your active timers with their cadence and next fire time.",
             json!({}),
             vec![]
+        ),
+        tool(
+            "triage_findings",
+            "Coordinator: decide each untriaged finding in a ticket's ledger once: fix_now, follow_up or wont_fix, each with a one-line reason. An open finding is already routed to the implementer; overrule it only with follow_up or wont_fix, for example after the implementer's objection. Decisions never change, and the call applies all of them or none. It messages no one: send fix_now work to the implementer with send_message, then verify again.",
+            json!({"ticket_id":string,"decisions":{"type":"array","items":{"type":"object","properties":{"id":string,"decision":{"type":"string","enum":["fix_now","follow_up","wont_fix"]},"reason":string},"required":["id","decision","reason"],"additionalProperties":false}}}),
+            vec!["ticket_id", "decisions"]
         ),
         tool(
             "accept_ticket",

@@ -5,6 +5,8 @@
 //! needs them, so every cycle starts fresh sessions.
 use crate::service::{HOST_WORKER_TURNS, worker_turns};
 use crate::*;
+use serde::Deserialize;
+use std::collections::BTreeSet;
 
 const REPORT_KINDS: [&str; 6] = [
     "progress",
@@ -214,13 +216,73 @@ fn untriage_orphans(ticket: &mut Ticket) {
     }
 }
 
-/// An entry as the implementer and coordinator read it.
-fn entry_text(entry: &LedgerEntry) -> String {
-    let finding = &entry.finding;
+/// An entry's id, location and summary.
+fn entry_line(entry: &LedgerEntry) -> String {
     format!(
-        "{} · {} · {}\n  Trigger: {}\n  Evidence: {}",
-        entry.id, finding.location, finding.summary, finding.trigger, finding.evidence
+        "{} · {} · {}",
+        entry.id, entry.finding.location, entry.finding.summary
     )
+}
+
+/// An entry with its trigger and evidence, as the implementer must read it.
+fn entry_text(entry: &LedgerEntry) -> String {
+    format!(
+        "{}\n  Trigger: {}\n  Evidence: {}",
+        entry_line(entry),
+        entry.finding.trigger,
+        entry.finding.evidence
+    )
+}
+
+/// The open and untriaged entries and the ids already decided, each as a paragraph.
+fn ledger_summary(ledger: &[LedgerEntry]) -> Vec<String> {
+    let lines = |status: EntryStatus| {
+        ledger
+            .iter()
+            .filter(|e| e.status == status)
+            .map(|e| format!("- {}", entry_line(e)))
+            .collect::<Vec<_>>()
+    };
+    let decided: Vec<&str> = ledger
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.status,
+                EntryStatus::FixNow | EntryStatus::FollowUp | EntryStatus::WontFix
+            )
+        })
+        .map(|e| e.id.as_str())
+        .collect();
+    let mut paragraphs = vec![];
+    for (title, lines) in [
+        ("Open findings", lines(EntryStatus::Open)),
+        ("Untriaged findings", lines(EntryStatus::Untriaged)),
+    ] {
+        if !lines.is_empty() {
+            paragraphs.push(format!("{title}:\n{}", lines.join("\n")));
+        }
+    }
+    if !decided.is_empty() {
+        paragraphs.push(format!("Already decided: {}", decided.join(", ")));
+    }
+    paragraphs
+}
+
+/// Joins a message's non-empty paragraphs.
+fn paragraphs(parts: Vec<String>) -> String {
+    parts
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A coordinator's decision on one ledger entry.
+#[derive(Deserialize)]
+pub(crate) struct Triage {
+    id: String,
+    decision: EntryStatus,
+    reason: String,
 }
 
 impl Host {
@@ -247,6 +309,13 @@ impl Host {
             "The worktree has uncommitted or untracked files; ask the implementer to commit or discard them"
         );
         let settings = self.settings().verification;
+        let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
+        ensure!(
+            cycle <= settings.max_cycles,
+            "Ticket \"{}\" has used its {} verification cycles; accept it with a waiver, close it or ask the human. Only the human can raise the cycle cap, in Models → Review.",
+            ticket.title,
+            settings.max_cycles
+        );
         let coordinator = self.session(&ticket.coordinator_id)?;
         let project = self.project(&coordinator.project_id)?;
         let count = settings.verifiers.len();
@@ -262,7 +331,6 @@ impl Host {
         );
         let chosen = self.verifier_choices(&coordinator, &settings.verifiers, choices)?;
         let commit = head(&ticket)?;
-        let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
         self.atomically(|host| {
             let mut verifiers = vec![];
             for (config, (profile, reason)) in settings.verifiers.iter().zip(chosen) {
@@ -311,6 +379,7 @@ impl Host {
                     reason: None,
                 });
             }
+            ticket.previous_cycles.extend(ticket.verification.take());
             ticket.verification = Some(Verification {
                 cycle,
                 max_rounds: settings.max_rounds,
@@ -321,18 +390,67 @@ impl Host {
                     verifiers,
                 }],
             });
-            let instructions = settings
-                .verifiers
-                .iter()
-                .map(|v| (v.focus.as_str(), v.instruction.as_deref()))
-                .collect();
-            host.start_round(&mut ticket, &instructions)?;
+            host.start_round(&mut ticket)?;
             Self::event(
                 &host.db,
                 &project.id,
                 Some(&ticket.coordinator_id),
                 "verification_started",
                 &format!("{}; cycle {cycle}", ticket.id),
+            )?;
+            Ok(ticket)
+        })
+    }
+    /// Records the coordinator's decision on each named entry, all or none, and wakes nobody. An
+    /// untriaged entry takes any decision; an open one, already routed for a fix, only follow-up
+    /// or won't-fix, which overrules it. A decision never changes.
+    pub(crate) fn triage_findings(
+        &mut self,
+        ticket_id: &str,
+        decisions: &[Triage],
+    ) -> Result<Ticket> {
+        let mut ticket = self.ticket(ticket_id)?;
+        let mut named = BTreeSet::new();
+        for triage in decisions {
+            let id = &triage.id;
+            ensure!(named.insert(id), "{id} is named twice");
+            let entry = ticket
+                .ledger
+                .iter_mut()
+                .find(|e| &e.id == id)
+                .with_context(|| format!("Ticket \"{}\" has no finding {id}", ticket.title))?;
+            ensure!(
+                matches!(
+                    triage.decision,
+                    EntryStatus::FixNow | EntryStatus::FollowUp | EntryStatus::WontFix
+                ),
+                "Decide {id} with fix_now, follow_up or wont_fix"
+            );
+            match entry.status {
+                EntryStatus::Untriaged => {}
+                EntryStatus::Open => ensure!(
+                    triage.decision != EntryStatus::FixNow,
+                    "{id} is open and already routed to the implementer; overrule it only with follow_up or wont_fix"
+                ),
+                status => bail!("{id} is already {}", status.label()),
+            }
+            entry.status = triage.decision;
+            entry.reason = Some(one_line_reason(&triage.reason)?.to_owned());
+        }
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        self.atomically(|host| {
+            host.save_ticket(&ticket)?;
+            let decided = decisions
+                .iter()
+                .map(|t| format!("{} {}", t.id, t.decision.label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Self::event(
+                &host.db,
+                &coordinator.project_id,
+                Some(&coordinator.id),
+                "findings_triaged",
+                &format!("{}; {decided}", ticket.id),
             )?;
             Ok(ticket)
         })
@@ -383,34 +501,71 @@ impl Host {
         }
         Ok(chosen)
     }
-    /// Sends the current round's messages and marks the ticket `verifying`. `instructions` maps
-    /// a focus to its configured instruction; later rounds have none.
-    fn start_round(
-        &mut self,
-        ticket: &mut Ticket,
-        instructions: &std::collections::HashMap<&str, Option<&str>>,
-    ) -> Result<()> {
+    /// Sends the current round's messages and marks the ticket `verifying`. Each message carries
+    /// the ticket's review memory: the diff under review, the entries already decided and the
+    /// verifier's own open entries. From round 2 on, it limits the check to those entries and
+    /// the new diff.
+    fn start_round(&mut self, ticket: &mut Ticket) -> Result<()> {
         ticket.state = "verifying".into();
         self.save_ticket(ticket)?;
+        let settings = self.settings().verification;
         let verification = ticket.verification.as_ref().context("No verification")?;
         let round = verification.current_round().context("No round")?;
+        let mut memory = vec![self.diff_lines(ticket, &round.commit)];
+        if let [.., previous, _] = verification.rounds.as_slice() {
+            let stat =
+                worktrees::shortstat(Path::new(&ticket.worktree), &previous.commit, &round.commit)
+                    .unwrap_or_else(|e| format!("unavailable: {e:#}"));
+            memory.push(format!(
+                "New since round {}: {}..{}, {stat}",
+                previous.round, previous.commit, round.commit
+            ));
+        }
+        let decided: Vec<String> = ticket
+            .ledger
+            .iter()
+            .filter(|e| e.status.is_settled())
+            .map(|e| format!("- {} ({})", entry_line(e), e.status.label()))
+            .collect();
+        if !decided.is_empty() {
+            memory.push(format!(
+                "Already decided; do not re-raise unless the cited code changed:\n{}",
+                decided.join("\n")
+            ));
+        }
+        let memory = memory.join("\n");
         for run in &round.verifiers {
-            let instruction = instructions
-                .get(run.focus.as_str())
-                .copied()
-                .flatten()
+            let instruction = settings
+                .verifiers
+                .iter()
+                .find(|v| v.focus == run.focus)
+                .and_then(|v| v.instruction.as_deref())
                 .map_or(String::new(), |i| format!("Instruction: {i}\n"));
             let again = if round.round > 1 {
-                "The implementer committed fixes for your earlier failure; check again.\n\n"
+                "Check only whether your open blocking findings are fixed and whether the new diff introduces a blocking defect; do not raise new findings on code you already reviewed.\n\n"
             } else {
                 ""
+            };
+            let open: Vec<String> = ticket
+                .ledger
+                .iter()
+                .filter(|e| e.status == EntryStatus::Open && e.focus == run.focus)
+                .map(|e| format!("- {}", entry_line(e)))
+                .collect();
+            let open = if open.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nYour open findings; report one again by its id only if it is still present:\n{}",
+                    open.join("\n")
+                )
             };
             self.send(
                 &run.message_id,
                 Some(&ticket.coordinator_id),
                 &run.session_id,
                 &format!(
-                    "{again}Verify ticket \"{}\" at commit {}: round {} of at most {}.\n\nTicket brief:\n{}\n\nFocus: {}\n{instruction}Worktree: {}\nBranch: {}\n\nYou are read-only: do not edit, stage, commit or switch branches in the worktree. Check commit {}, then report passed, failed or blocked with evidence.",
+                    "{again}Verify ticket \"{}\" at commit {}: round {} of at most {}.\n\nTicket brief:\n{}\n\nFocus: {}\n{instruction}Worktree: {}\nBranch: {}\n\n{memory}{open}\n\nYou are read-only: do not edit, stage, commit or switch branches in the worktree. Check commit {}, then report passed, failed or blocked, with every finding in findings.",
                     ticket.title,
                     round.commit,
                     round.round,
@@ -424,6 +579,19 @@ impl Host {
             )?;
         }
         Ok(())
+    }
+    /// The base commit and the diff from it to `commit`, or why they are unavailable.
+    fn diff_lines(&self, ticket: &Ticket, commit: &str) -> String {
+        let worktree = Path::new(&ticket.worktree);
+        let lines = || -> Result<String> {
+            let base = self.ticket_repository(ticket)?.base;
+            let merge_base = worktrees::merge_base(worktree, &base, commit)?;
+            let stat = worktrees::shortstat(worktree, &merge_base, commit)?;
+            Ok(format!(
+                "Base: {merge_base} ({base})\nDiff: {merge_base}..{commit}, {stat}"
+            ))
+        };
+        lines().unwrap_or_else(|e| format!("Base unavailable: {e:#}"))
     }
     /// Stores a report to the reporter's parent and applies it to the ticket. During a running
     /// verification cycle only the cycle moves the ticket, and verdicts and the implementer's
@@ -672,12 +840,14 @@ impl Host {
             self.send(&id, None, &implementer, &body)?;
             return self.retire(&passed);
         }
+        let rounds = format!(
+            "cycle {cycle} of {}, {} of {} rounds",
+            self.settings().verification.max_cycles,
+            round.round,
+            verification.max_rounds
+        );
+        let ledger = ledger_summary(&ticket.ledger);
         let (outcome, summary) = if blocked || !failed.is_empty() {
-            let unresolved: Vec<&VerifierRun> = round
-                .verifiers
-                .iter()
-                .filter(|v| v.result != VerifierResult::Passed)
-                .collect();
             let why = if blocked {
                 "a verifier could not verify".to_owned()
             } else if below_cap {
@@ -685,17 +855,29 @@ impl Host {
             } else {
                 format!("the round cap of {} was reached", verification.max_rounds)
             };
-            (
-                VerificationOutcome::Blocked,
-                format!(
-                    "Wiffletree verification of ticket \"{}\" ({}) is blocked after {} of {} rounds: {why}. Decide whether to fix further, verify again, close the ticket or ask the human.\n\n{}",
-                    ticket.title,
-                    ticket.id,
-                    round.round,
-                    verification.max_rounds,
-                    self.findings(&unresolved)?
-                ),
-            )
+            let blocked_runs: Vec<&VerifierRun> = round
+                .verifiers
+                .iter()
+                .filter(|v| v.result == VerifierResult::Blocked)
+                .collect();
+            let mut actions = vec![];
+            if cycle < self.settings().verification.max_cycles {
+                actions.push("send the implementer fixes and call verify_ticket again");
+            }
+            if !blocked {
+                actions.push(
+                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings",
+                );
+            }
+            actions.extend(["close the ticket", "or ask the human"]);
+            let mut parts = vec![format!(
+                "Wiffletree verification of ticket \"{}\" ({}) is blocked after {rounds}: {why}.",
+                ticket.title, ticket.id
+            )];
+            parts.extend(ledger);
+            parts.push(self.findings(&blocked_runs)?);
+            parts.push(format!("Decide: {}.", actions.join("; ")));
+            (VerificationOutcome::Blocked, paragraphs(parts))
         } else {
             let passes = verification
                 .latest_results()
@@ -711,13 +893,22 @@ impl Host {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            (
-                VerificationOutcome::Passed,
-                format!(
-                    "Wiffletree verification of ticket \"{}\" ({}) passed in {} of {} rounds; verified commit {}.\n{passes}\n\nAccept the ticket or start a fresh cycle.",
-                    ticket.title, ticket.id, round.round, verification.max_rounds, round.commit
-                ),
-            )
+            let next = if ticket
+                .ledger
+                .iter()
+                .any(|e| e.status == EntryStatus::Untriaged)
+            {
+                "Triage the untriaged findings with triage_findings, then accept the ticket."
+            } else {
+                "Accept the ticket."
+            };
+            let mut parts = vec![format!(
+                "Wiffletree verification of ticket \"{}\" ({}) passed in {rounds}; verified commit {}.\n{passes}",
+                ticket.title, ticket.id, round.commit
+            )];
+            parts.extend(ledger);
+            parts.push(next.into());
+            (VerificationOutcome::Passed, paragraphs(parts))
         };
         let id = format!("verification:{}:{cycle}:outcome", ticket.id);
         let coordinator = ticket.coordinator_id.clone();
@@ -769,7 +960,7 @@ impl Host {
             commit,
             verifiers,
         });
-        self.start_round(&mut ticket, &Default::default())
+        self.start_round(&mut ticket)
     }
     /// The implementer that last reported ready_for_testing, else the ticket's only one.
     fn ready_implementer(&self, ticket: &Ticket) -> Result<Option<String>> {
@@ -789,7 +980,7 @@ impl Host {
             .optional()?;
         Ok(latest.or_else(|| implementers.into_iter().next()))
     }
-    /// Each verifier's report, or the host's reason for overriding it.
+    /// The reports of verifiers that could not verify, for the coordinator.
     fn findings(&self, runs: &[&VerifierRun]) -> Result<String> {
         let mut findings = vec![];
         for run in runs {

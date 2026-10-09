@@ -714,6 +714,16 @@ impl Host {
                     self.verify_ticket(&ticket.id, &choices)?,
                 )?)
             }
+            "triage_findings" => {
+                let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                let decisions: Vec<verification::Triage> =
+                    serde_json::from_value(args.get("decisions").cloned().context(
+                        "Missing decisions: give each finding's id, decision and reason",
+                    )?)?;
+                Ok(serde_json::to_value(
+                    self.triage_findings(&ticket.id, &decisions)?,
+                )?)
+            }
             "accept_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 Ok(serde_json::to_value(self.accept_ticket(&ticket.id)?)?)

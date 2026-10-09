@@ -19,10 +19,10 @@
 
 ## 4. Triage, caps, memory and history (host)
 
-- [ ] 4.1 Add the coordinator-only `triage_findings` tool (`mcp.rs`, `live.rs::agent_tool`, `verification.rs`). It is all or nothing, accepts any decision on `untriaged` entries and only `follow_up` or `wont_fix` on `open` ones, refuses decided, unknown or duplicate ids, `fix_now` on an open entry and multi-line reasons, records `findings_triaged` and messages nobody. Verify the "Triage once", "All or nothing", "Overruling a routed finding mid-cycle" and "Fix now does not overrule" scenarios, and that a worker calling it is refused.
-- [ ] 4.2 In `verify_ticket`, move the previous `verification` into `previous_cycles`, and refuse once the next cycle would exceed `max_cycles`, with the waiver, close or ask guidance. Verify the "Third cycle refused" and "Second cycle" scenarios, and that a raised cap allows cycle 3.
-- [ ] 4.3 In `start_round`, add the base, the diff range with its shortstat, the new-since-last-round range from round 2 on, the already-decided entries, the verifier's own open entries and the round-2 re-check prefix. Have `next_round` pass the configured instructions. Verify the message text for round 1, round 2 and a missing base.
-- [ ] 4.4 Rewrite the cycle-end message in `end_round`: cycle n of the cap, open, untriaged and decided ids, and only the legal next actions. Remove "or start a fresh cycle". Verify the "All pass", "Cap reached", "Last cycle blocked" and "Verifier cannot verify" scenarios.
+- [x] 4.1 Add the coordinator-only `triage_findings` tool (`mcp.rs`, `live.rs::agent_tool`, `verification.rs`). It is all or nothing, accepts any decision on `untriaged` entries and only `follow_up` or `wont_fix` on `open` ones, refuses decided, unknown or duplicate ids, `fix_now` on an open entry and multi-line reasons, records `findings_triaged` and messages nobody. Verify the "Triage once", "All or nothing", "Overruling a routed finding mid-cycle" and "Fix now does not overrule" scenarios, and that a worker calling it is refused.
+- [x] 4.2 In `verify_ticket`, move the previous `verification` into `previous_cycles`, and refuse once the next cycle would exceed `max_cycles`, with the waiver, close or ask guidance. Verify the "Third cycle refused" and "Second cycle" scenarios, and that a raised cap allows cycle 3.
+- [x] 4.3 In `start_round`, add the base, the diff range with its shortstat, the new-since-last-round range from round 2 on, the already-decided entries, the verifier's own open entries and the round-2 re-check prefix. Have `next_round` pass the configured instructions. Verify the message text for round 1, round 2 and a missing base.
+- [x] 4.4 Rewrite the cycle-end message in `end_round`: cycle n of the cap, open, untriaged and decided ids, and only the legal next actions. Remove "or start a fresh cycle". Verify the "All pass", "Cap reached", "Last cycle blocked" and "Verifier cannot verify" scenarios.
 
 ## 5. Acceptance (host)
 
