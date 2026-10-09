@@ -94,8 +94,8 @@ pub fn tools() -> Value {
         ),
         tool(
             "accept_ticket",
-            "Coordinator: accept a ticket whose verification passed at the commit still checked out. Does not merge or publish. Archives its agents and removes its worktree, keeping conversations and branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
-            json!({"ticket_id":string}),
+            "Coordinator: accept a ticket whose latest verification cycle passed at the commit still checked out or a patch-equivalent one, such as a squash. Triage every untriaged finding first. After a blocked cycle in which every verifier checked, give waived: a one-line reason for accepting the open findings it names; the cycle stays blocked and the waiver is recorded. Does not merge or publish. Archives its agents and removes its worktree, keeping conversations and branch, once any agent still in its turn finishes; refuses while the worktree has uncommitted or untracked files.",
+            json!({"ticket_id":string,"waived":string}),
             vec!["ticket_id"]
         ),
         tool(

@@ -682,7 +682,8 @@ impl Verification {
         }
         latest
     }
-    /// The commit the last round verified; `accept_ticket` requires HEAD to equal it.
+    /// The commit the last round verified; `accept_ticket` requires HEAD to equal it or to be
+    /// patch-equivalent to it.
     pub fn verified_commit(&self) -> Option<&str> {
         self.current_round().map(|r| r.commit.as_str())
     }

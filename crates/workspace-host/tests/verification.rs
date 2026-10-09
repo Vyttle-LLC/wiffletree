@@ -408,7 +408,7 @@ fn a_first_pass_neither_passes_the_ticket_nor_allows_acceptance() {
         )
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("verifying"), "{refused}");
+    assert!(refused.contains("cycle 1 is still running"), "{refused}");
     assert_eq!(f.current().state, "verifying");
     assert_eq!(f.host.sessions().unwrap(), agents);
     assert!(f.worktree().exists());
@@ -1961,4 +1961,158 @@ fn workspace_context_lists_each_tickets_ledger_and_earlier_cycles() {
     );
     assert_eq!(ticket["previous_cycles"][0]["cycle"], 1);
     assert_eq!(ticket["verification"]["cycle"], 2);
+}
+
+impl Fixture {
+    fn accept(&mut self, waived: Option<&str>) -> anyhow::Result<Value> {
+        let coordinator = self.coordinator.id.clone();
+        let mut args = json!({"ticket_id":self.ticket.id});
+        if let Some(waived) = waived {
+            args["waived"] = json!(waived);
+        }
+        self.host.agent_tool(&coordinator, "accept_ticket", args)
+    }
+}
+
+#[test]
+fn a_report_after_a_passed_cycle_does_not_block_acceptance() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let implementer = f.implementer.id.clone();
+    f.report(&implementer, "pr-opened", "completed").unwrap();
+    assert_eq!(f.current().state, "completed");
+
+    f.accept(None).unwrap();
+
+    assert_eq!(f.current().state, "accepted");
+}
+
+#[test]
+fn a_squash_after_verification_is_accepted_without_a_new_cycle() {
+    let mut f = one_tester(3);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    f.fix("two");
+    f.report(&f.verifier("Codex"), "pass-2", "passed").unwrap();
+    let verified = f.round().commit;
+    git(f.worktree(), &["reset", "-q", "--soft", "main"]);
+    git(f.worktree(), &["commit", "-q", "-m", "Squashed"]);
+    assert_ne!(git(f.worktree(), &["rev-parse", "HEAD"]), verified);
+
+    f.accept(None).unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "accepted");
+    assert_eq!(ticket.verification.unwrap().cycle, 1);
+}
+
+#[test]
+fn a_moved_head_without_a_comparable_patch_is_refused_with_the_reason() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    git(f.worktree(), &["commit", "-q", "--amend", "-m", "Reworded"]);
+    let db = rusqlite::Connection::open(f.host.home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE repositories SET data=json_set(data,'$.base','origin/gone')",
+        [],
+    )
+    .unwrap();
+
+    let refused = f.accept(None).unwrap_err().to_string();
+
+    assert!(
+        refused.contains("could not be compared") && refused.contains("origin/gone"),
+        "{refused}"
+    );
+    assert_eq!(f.current().state, "passed");
+}
+
+#[test]
+fn untriaged_findings_block_acceptance_until_triaged() {
+    let mut f = one_tester(2);
+    let findings = json!([finding("non_blocking", "Naming")]);
+    f.report_findings(&f.verifier("Codex"), "pass", "passed", findings)
+        .unwrap();
+
+    let refused = f.accept(None).unwrap_err().to_string();
+
+    assert!(refused.contains("Triage F1"), "{refused}");
+    assert!(f.worktree().exists());
+    f.triage(json!([decision(
+        "F1",
+        "follow_up",
+        "Rename in the cleanup ticket"
+    )]))
+    .unwrap();
+    f.accept(None).unwrap();
+    assert_eq!(f.current().state, "accepted");
+}
+
+/// A cycle blocked at a round cap of 1 with F1 open.
+fn blocked_at_the_cap() -> Fixture {
+    let mut f = one_tester(1);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    assert_eq!(f.current().state, "blocked");
+    f
+}
+
+#[test]
+fn a_waiver_accepts_a_blocked_cycle_and_records_the_open_findings() {
+    let mut f = blocked_at_the_cap();
+    let waiver = "F1 needs a base ref the host always fetches";
+
+    f.accept(Some(waiver)).unwrap();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "accepted");
+    assert_eq!(ticket.waiver.as_deref(), Some(waiver));
+    assert_eq!(
+        ticket.verification.unwrap().outcome,
+        VerificationOutcome::Blocked
+    );
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    let events = f
+        .host
+        .activity(&f.coordinator.project_id, None, 50)
+        .unwrap();
+    let accepted = events.iter().find(|e| e.kind == "ticket_accepted").unwrap();
+    assert_eq!(
+        accepted.detail,
+        format!("{}; waived: {waiver}; open: F1", f.ticket.id)
+    );
+}
+
+#[test]
+fn a_waiver_is_refused_without_a_fully_checked_blocked_cycle() {
+    let mut blocked = blocked_at_the_cap();
+    let refused = blocked.accept(None).unwrap_err().to_string();
+    assert!(refused.contains("waived"), "{refused}");
+    let refused = blocked.accept(Some("Two\nlines"));
+    assert!(refused.is_err());
+
+    let mut cannot = one_tester(2);
+    cannot
+        .report(&cannot.verifier("Codex"), "cannot", "blocked")
+        .unwrap();
+    let refused = cannot
+        .accept(Some("Accept anyway"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("could not verify"), "{refused}");
+
+    let mut passed = one_tester(2);
+    passed
+        .report(&passed.verifier("Codex"), "pass", "passed")
+        .unwrap();
+    let refused = passed
+        .accept(Some("Accept anyway"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("nothing to waive"), "{refused}");
+
+    for f in [&blocked, &cannot, &passed] {
+        let ticket = f.current();
+        assert_ne!(ticket.state, "accepted");
+        assert_eq!(ticket.waiver, None);
+        assert!(f.worktree().exists());
+    }
 }

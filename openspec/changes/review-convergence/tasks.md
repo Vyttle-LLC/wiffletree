@@ -26,8 +26,8 @@
 
 ## 5. Acceptance (host)
 
-- [ ] 5.1 Rewrite `live.rs::accept_ticket` to gate on the latest cycle. It refuses while a cycle is running and while the ledger has untriaged entries, and accepts a HEAD that is equal or patch-equivalent. Verify the "Report after a passed cycle" scenario, which reproduces the bug where a `completed` report after a pass made accept refuse, plus "Squashed after verification", "Commits after verification" and "Untriaged findings block acceptance".
-- [ ] 5.2 Add the optional `waived` argument (`mcp.rs` schema and description, `agent_tool`). It is allowed only after a blocked cycle with no blocked or pending verifier, and stores `Ticket.waiver`. The `finish_ticket` event body names the reason and the open ids, and the outcome and entries stay unchanged. Verify the "Accept with a waiver" and "Waiver refused" scenarios.
+- [x] 5.1 Rewrite `live.rs::accept_ticket` to gate on the latest cycle. It refuses while a cycle is running and while the ledger has untriaged entries, and accepts a HEAD that is equal or patch-equivalent. Verify the "Report after a passed cycle" scenario, which reproduces the bug where a `completed` report after a pass made accept refuse, plus "Squashed after verification", "Commits after verification" and "Untriaged findings block acceptance".
+- [x] 5.2 Add the optional `waived` argument (`mcp.rs` schema and description, `agent_tool`). It is allowed only after a blocked cycle with no blocked or pending verifier, and stores `Ticket.waiver`. The `finish_ticket` event body names the reason and the open ids, and the outcome and entries stay unchanged. Verify the "Accept with a waiver" and "Waiver refused" scenarios.
 
 ## 6. Role contracts
 
