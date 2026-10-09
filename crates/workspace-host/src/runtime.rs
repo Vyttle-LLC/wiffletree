@@ -79,6 +79,31 @@ fn git_query(path: &Path, args: &[&str], input: Option<Vec<u8>>) -> Result<GitAn
     })
 }
 
+/// Runs GitHub's `gh` in `path` without prompts and returns its output, or its last error line.
+pub fn gh_output(path: &Path, args: &[&str]) -> Result<String> {
+    tool_output("gh", path, args)
+}
+
+fn tool_output(program: &str, path: &Path, args: &[&str]) -> Result<String> {
+    let mut command = Command::new(program);
+    command
+        .current_dir(path)
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("NO_COLOR", "1");
+    let (status, output, error) = bounded_output(command, GH_TIMEOUT, None)
+        .with_context(|| format!("{program} could not run"))?;
+    let error = String::from_utf8_lossy(&error);
+    let last = error.lines().map(str::trim).rfind(|l| !l.is_empty());
+    ensure!(
+        status.success(),
+        "{program} failed: {}",
+        last.unwrap_or("no error output")
+    );
+    Ok(String::from_utf8(output)?)
+}
+
+const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
 
@@ -465,6 +490,29 @@ mod model_tests {
         let error = bounded_output(command, Duration::from_secs(1), None).unwrap_err();
         assert_eq!(error.to_string(), "Git query timed out");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_missing_or_failing_gh_says_why() {
+        let folder = tempfile::tempdir().unwrap();
+        let missing = tool_output("wiffletree-no-such-gh", folder.path(), &[]).unwrap_err();
+        assert!(
+            format!("{missing:#}").starts_with("wiffletree-no-such-gh could not run: "),
+            "{missing:#}"
+        );
+        let failed = tool_output(
+            "sh",
+            folder.path(),
+            &[
+                "-c",
+                "echo 'first' >&2; echo 'To get started, run: gh auth login' >&2; exit 4",
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            failed.to_string(),
+            "sh failed: To get started, run: gh auth login"
+        );
     }
 
     #[test]
