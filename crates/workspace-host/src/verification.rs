@@ -145,8 +145,8 @@ fn is_failing(ledger: &[LedgerEntry], reported: &ReportedFinding) -> bool {
 }
 
 /// Applies a completed check to the ledger: the focus's open entries it did not report again are
-/// fixed, an open entry it reports again takes the new report, and new findings are added. A
-/// settled entry reported again is left alone.
+/// fixed, an open entry it reports again stays open with the new report, and new findings are
+/// added. A settled entry reported again is left alone.
 fn record_findings(
     ledger: &mut Vec<LedgerEntry>,
     focus: &str,
@@ -178,7 +178,6 @@ fn record_findings(
             Some(entry) => {
                 entry.finding = reported.finding.clone();
                 (entry.cycle, entry.round) = (cycle, round);
-                entry.status = status(&reported.finding);
             }
             None => {
                 let id = format!("F{}", ledger.len() + 1);
@@ -197,18 +196,14 @@ fn record_findings(
 }
 
 /// When a cycle ends, an open entry that none of its verifiers could re-check awaits triage.
-fn untriage_orphans(ticket: &mut Ticket) {
-    let Some(verification) = &ticket.verification else {
-        return;
-    };
+fn untriage_orphans(verification: &Verification, ledger: &mut [LedgerEntry]) {
     let focuses: Vec<&str> = verification
         .rounds
         .iter()
         .flat_map(|r| &r.verifiers)
         .map(|run| run.focus.as_str())
         .collect();
-    for entry in ticket
-        .ledger
+    for entry in ledger
         .iter_mut()
         .filter(|e| e.status == EntryStatus::Open && !focuses.contains(&e.focus.as_str()))
     {
@@ -216,7 +211,6 @@ fn untriage_orphans(ticket: &mut Ticket) {
     }
 }
 
-/// An entry's id, location and summary.
 fn entry_line(entry: &LedgerEntry) -> String {
     format!(
         "{} · {} · {}",
@@ -268,7 +262,6 @@ fn ledger_summary(ledger: &[LedgerEntry]) -> Vec<String> {
     paragraphs
 }
 
-/// Joins a message's non-empty paragraphs.
 fn paragraphs(parts: Vec<String>) -> String {
     parts
         .into_iter()
@@ -688,8 +681,8 @@ impl Host {
                     Routing::Ends => {
                         if let Some(verification) = &mut ticket.verification {
                             verification.outcome = VerificationOutcome::Blocked;
+                            untriage_orphans(verification, &mut ticket.ledger);
                         }
-                        untriage_orphans(&mut ticket);
                         ticket.state = "blocked".into();
                         host.save_ticket(&ticket)?;
                         host.retire(&cycle_verifiers(&ticket))?;
@@ -846,6 +839,8 @@ impl Host {
             round.round,
             verification.max_rounds
         );
+        // The cycle ends here, so its message already lists orphaned entries as untriaged.
+        untriage_orphans(verification, &mut ticket.ledger);
         let ledger = ledger_summary(&ticket.ledger);
         let (outcome, summary) = if blocked || !failed.is_empty() {
             let why = if blocked {
@@ -912,7 +907,6 @@ impl Host {
         };
         let id = format!("verification:{}:{cycle}:outcome", ticket.id);
         let coordinator = ticket.coordinator_id.clone();
-        untriage_orphans(&mut ticket);
         ticket.state = match outcome {
             VerificationOutcome::Passed => "passed",
             _ => "blocked",

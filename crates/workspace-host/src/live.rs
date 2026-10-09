@@ -394,6 +394,7 @@ impl Host {
         if ticket.state == "accepted" {
             return Ok(ticket);
         }
+        ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
         if let Some(cycle) = ticket.running_cycle() {
             bail!(
                 "Verification cycle {} is still running; accept the ticket once it ends",

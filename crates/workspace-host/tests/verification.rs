@@ -1574,10 +1574,21 @@ fn an_open_entry_whose_verifier_left_the_settings_awaits_triage_when_the_next_cy
         .unwrap();
     f.verify().unwrap();
     assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    f.coordinator_reads();
 
     f.report(&f.verifier("New"), "pass", "passed").unwrap();
 
     assert_eq!(f.entry("F1").status, EntryStatus::Untriaged);
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    assert!(
+        body.contains("Untriaged findings:\n- F1 · src/calls.rs:42 · Busy line"),
+        "{body}"
+    );
+    assert!(!body.contains("Open findings"), "{body}");
+    assert!(
+        body.contains("Triage the untriaged findings with triage_findings"),
+        "{body}"
+    );
 }
 
 impl Fixture {
@@ -2136,4 +2147,42 @@ fn a_saved_cycle_cap_survives_restart_and_reaches_the_coordinator() {
     assert_eq!(host.settings().verification.max_cycles, 3);
     assert_eq!(context["model_selection"]["max_cycles"], 3);
     assert_eq!(context["model_selection"]["max_rounds"], 3);
+}
+
+#[test]
+fn an_open_finding_reported_again_without_evidence_stays_open() {
+    let mut f = one_tester(3);
+    f.fail(&f.verifier("Codex"), "Busy line").unwrap();
+    f.fix("two");
+    let mut again = blocking("Busy line");
+    again["id"] = json!("F1");
+    again["evidence"] = json!("");
+
+    f.report_findings(&f.verifier("Codex"), "again", "failed", json!([again]))
+        .unwrap();
+
+    let entry = f.entry("F1");
+    assert_eq!(entry.status, EntryStatus::Open);
+    assert_eq!((entry.round, entry.finding.evidence.as_str()), (2, ""));
+    assert_eq!(f.ledger().len(), 1);
+    assert_eq!(f.run("Codex").result, VerifierResult::Passed);
+}
+
+#[test]
+fn a_closed_ticket_cannot_be_accepted() {
+    let mut f = one_tester(2);
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let coordinator = f.coordinator.id.clone();
+    f.host
+        .agent_tool(
+            &coordinator,
+            "close_ticket",
+            json!({"ticket_id":f.ticket.id}),
+        )
+        .unwrap();
+
+    let refused = f.accept(None).unwrap_err().to_string();
+
+    assert!(refused.contains("already closed"), "{refused}");
+    assert_eq!(f.current().state, "closed");
 }
