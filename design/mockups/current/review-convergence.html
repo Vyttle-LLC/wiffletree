@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Review convergence study</title>
+<!--
+  Static study for the review-convergence OpenSpec change. No script, no network.
+  (a) Sidebar ticket rows: passed, blocked and accepted with a waiver.
+  (b) Where the decision ledger appears: the human's Team panel and the coordinator's
+      cycle-end message and workspace_context.
+  Sample data is simulated; nothing here is implemented host behavior.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:500;letter-spacing:-.02em;margin:0 0 4px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:760px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:20px;align-items:start}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:500}
+/* (a) Sidebar, mirroring sidebar.rs: 30px rows, task icon, label, trailing state glyph. */
+.tree{display:grid;gap:1px}
+.row{min-height:30px;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:6px;font-size:12.5px}
+.row:hover{background:var(--overlay)}
+.row.d1{padding-left:24px}.row.d2{padding-left:40px}
+.row .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row.archived .label{color:var(--subtle)}
+.row svg{width:14px;height:14px;flex:none;color:var(--subtle)}
+.dot{width:6px;height:6px;border-radius:50%;margin-right:3px;flex:none}
+.dot.green{background:var(--green)}.dot.red{background:var(--red)}.dot.focus{background:var(--focus)}
+.glyph-waived{width:12px!important;height:12px!important;color:var(--yellow)!important;margin-right:0}
+.toggle{display:flex;justify-content:space-between;align-items:center;margin:2px 0 8px;padding:0 8px}
+.switch{font-size:10px;padding:2px 7px;border-radius:20px;background:var(--overlay);color:var(--subtle)}
+.tooltip{margin:6px 0 0 24px;padding:8px 10px;border:1px solid var(--edge);border-radius:8px;background:var(--base);font-size:11px;box-shadow:0 8px 24px color-mix(in srgb,var(--text) 10%,transparent)}
+.legend{display:grid;gap:6px;margin-top:14px;padding-top:12px;border-top:1px solid var(--edge);font-size:11px;color:var(--subtle)}
+.legend span{display:flex;align-items:center;gap:8px}
+.legend svg,.legend .dot{flex:none}
+/* (b) Team panel card, mirroring team_view.rs: card, pill, hint lines. */
+.card{border:1px solid color-mix(in srgb,var(--edge) 40%,transparent);background:var(--base);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:9px}
+.card-head{display:flex;align-items:flex-start;gap:8px}
+.card-head .title{flex:1;font-weight:500}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.pill.blue{color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,transparent)}
+.pill.muted{color:var(--subtle);background:var(--overlay)}
+.hint{font-size:12px;color:var(--subtle)}
+.waiver{border-left:2px solid var(--yellow);padding:6px 10px;background:color-mix(in srgb,var(--yellow) 6%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+.waiver b{font-weight:500}
+.section{display:flex;align-items:center;justify-content:space-between;min-height:24px}
+.cycles{display:grid;gap:2px}
+.ledger{display:grid;gap:0;border-top:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.entry{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:4px 10px;padding:9px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.entry .pill{align-self:start}
+.entry .id{font:11px ui-monospace,monospace;color:var(--subtle);padding-top:1px}
+.entry .what{font-size:12px}
+.entry .where{font:10.5px ui-monospace,monospace;color:var(--subtle);margin-top:2px}
+.entry .why{grid-column:2/4;font-size:11px;color:var(--subtle)}
+.entry .why i{font-style:normal;color:var(--text)}
+.stack{display:grid;gap:20px}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+/* Coordinator conversation, mirroring the chat column. */
+.message{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:var(--base);font-size:12.5px}
+.message .from{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:var(--subtle)}
+.message .from b{color:var(--text);font-weight:500}
+.message ul{margin:6px 0 8px;padding-left:18px}
+.message li{margin:3px 0}
+.message code,.tool code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+.tool{border:1px dashed var(--edge);border-radius:10px;padding:10px 12px;font-size:11px;color:var(--subtle)}
+pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.notes{max-width:760px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+@media(max-width:900px){.grid,.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="task" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="orbit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><path d="M10.4 21.9a10 10 0 0 0 9.94-15.93M13.6 2.1A10 10 0 0 0 3.66 18.03"/></symbol>
+  <symbol id="bot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M2 14h2M20 14h2M9 13v2M15 13v2"/></symbol>
+  <symbol id="waived" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" stroke-dasharray="3.5 3"/><path d="m8 12 3 3 5-6"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · review convergence</div>
+  <h1>Waived acceptance and the decision ledger</h1>
+  <p>Static study for the <span class="mono">review-convergence</span> OpenSpec change. It shows (a) a ticket accepted with a waiver beside passed and blocked tickets in the sidebar, and (b) where the coordinator and the human read a ticket’s decision ledger. Sample data is simulated.</p>
+</header>
+
+<div class="grid">
+  <!-- (a) Sidebar tree -->
+  <section>
+    <div class="panel" aria-label="Sidebar tree">
+      <div class="toggle"><span class="eyebrow">Projects</span><span class="switch">Show archived · on</span></div>
+      <nav class="tree">
+        <div class="row"><svg><use href="#orbit"/></svg><span class="label">wiffletree-improvements</span><span class="dot focus" title="Team working"></span></div>
+        <div class="row d1"><svg><use href="#task"/></svg><span class="label">wiffletree · Archive specs</span><span class="dot green" title="Passed"></span></div>
+        <div class="row d2"><svg><use href="#bot"/></svg><span class="label">Implementer</span></div>
+        <div class="row d1"><svg><use href="#task"/></svg><span class="label">sage-agents · Bundle PR skill</span><span class="dot red" title="Blocked"></span></div>
+        <div class="row d2"><svg><use href="#bot"/></svg><span class="label">Implementer</span></div>
+        <div class="row d1 archived"><svg><use href="#task"/></svg><span class="label">wiffletree · Review convergence</span><svg class="glyph-waived"><use href="#waived"/></svg></div>
+        <div class="row d1 archived"><svg><use href="#task"/></svg><span class="label">wiffletree · Model guide</span><span class="dot green" title="Accepted"></span></div>
+      </nav>
+      <div class="tooltip"><b>wiffletree · Review convergence</b> · Accepted with waiver<br><span class="subtle">Cycle 2 of 2 blocked after 3 of 3 rounds · 1 open blocking finding (F3)</span></div>
+      <div class="legend">
+        <span><i class="dot green"></i> Passed or accepted, as today</span>
+        <span><i class="dot red"></i> Blocked or failed, as today</span>
+        <span><svg class="glyph-waived"><use href="#waived"/></svg> New: accepted with a waiver. A dashed ring, never the passed dot</span>
+      </div>
+    </div>
+    <p class="caption"><b>(a)</b> Ticket rows keep today’s state dots. Only a waived acceptance changes: it gets a dashed amber ring, so “good enough” stays visible and is never drawn as passed. Hover names the cycle and the open findings.</p>
+  </section>
+
+  <!-- (b) Where the ledger appears -->
+  <div class="stack">
+    <section>
+      <div class="panel" aria-label="Team panel">
+        <div class="section"><span class="eyebrow">Team · Tickets</span></div>
+        <div class="card">
+          <div class="card-head">
+            <span class="title">wiffletree · Review convergence</span>
+            <span class="pill yellow">Accepted with waiver</span>
+          </div>
+          <div class="waiver"><b>Waived by the coordinator.</b> F3 only affects worktrees without a fetched base; the host fetches before every cycle. Follow-up: “Fetch base before patch-id”.<br><span class="subtle small">Open at acceptance: F3 · verdict stays blocked</span></div>
+          <div class="cycles">
+            <div class="hint">Verification cycle 2: blocked, 3 of 3 rounds</div>
+            <div class="hint">Round 1 at 7d21c4e: Tester passed, Correctness passed, Regressions failed</div>
+            <div class="hint">Round 2 at 9b07d13: Regressions failed</div>
+            <div class="hint">Round 3 at e52f0c8: Regressions failed</div>
+            <div class="hint">Verification cycle 1: passed, 2 of 3 rounds ›</div>
+          </div>
+          <div class="section"><span class="eyebrow">Decision ledger · 6</span><span class="small subtle">0 untriaged</span></div>
+          <div class="ledger">
+            <div class="entry">
+              <span class="id">F1</span>
+              <div><div class="what">Waived ticket counted as passed in the outcome event</div><div class="where">verification.rs:546 · Correctness · cycle 1, round 1</div></div>
+              <span class="pill green">Fixed</span>
+              <div class="why">Blocking · routed to the implementer · fixed in round 2</div>
+            </div>
+            <div class="entry">
+              <span class="id">F3</span>
+              <div><div class="what">accept_ticket fails when the base ref is not fetched</div><div class="where">live.rs:398 · Regressions · cycle 2, round 1</div></div>
+              <span class="pill red">Open</span>
+              <div class="why">Blocking · evidence: failing test <i>accept_without_base_ref</i> · still open after round 3</div>
+            </div>
+            <div class="entry">
+              <span class="id">F2</span>
+              <div><div class="what">Name ledger_lines reads as UI code in the host crate</div><div class="where">tree.rs:64 · Correctness · cycle 1, round 1</div></div>
+              <span class="pill muted">Won’t fix</span>
+              <div class="why">Non-blocking · <i>Matches verification_lines beside it.</i></div>
+            </div>
+            <div class="entry">
+              <span class="id">F4</span>
+              <div><div class="what">findings() truncates mid-report at half the message bound</div><div class="where">verification.rs:645 · Regressions · cycle 1, round 1</div></div>
+              <span class="pill blue">Follow-up</span>
+              <div class="why">Pre-existing · <i>Ticket “Truncate findings by entry”.</i></div>
+            </div>
+            <div class="entry">
+              <span class="id">F5</span>
+              <div><div class="what">No test for a triage call naming an unknown entry</div><div class="where">live.rs:712 · Tester · cycle 1, round 1</div></div>
+              <span class="pill yellow">Fix now</span>
+              <div class="why">Non-blocking · <i>Cheap and in scope.</i> Fixed before cycle 2</div>
+            </div>
+            <div class="entry">
+              <span class="id">F6</span>
+              <div><div class="what">Waiver reason is not length-checked like other reasons</div><div class="where">live.rs:390 · Correctness · cycle 2, round 1</div></div>
+              <span class="pill blue">Follow-up</span>
+              <div class="why">Non-blocking · <i>Fold into the reason-length ticket.</i></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(b) Human:</b> the Team panel’s ticket card, where verification lines already appear, keeps every cycle and adds the ledger and the waiver. Each entry shows its severity, location, source, decision and one-line reason.</p>
+    </section>
+
+    <section class="two">
+      <div>
+        <div class="message" aria-label="Coordinator cycle-end message">
+          <div class="from"><svg width="14" height="14"><use href="#server"/></svg><b>Wiffletree</b> · to the coordinator · cycle end</div>
+          <p>Verification of “Review convergence” is <b>blocked</b> after 3 of 3 rounds: the round cap was reached. This was cycle 2 of at most 2.</p>
+          <p style="margin-top:8px">Open blocking:</p>
+          <ul><li><code>F3</code> live.rs:398 accept_ticket fails when the base ref is not fetched · failing test</li></ul>
+          <p>Untriaged:</p>
+          <ul>
+            <li><code>F6</code> non-blocking · live.rs:390 Waiver reason is not length-checked</li>
+          </ul>
+          <p>Already decided: F2 won’t fix, F4 follow-up, F5 fix now. Triage the rest with <code>triage_findings</code>. No cycles are left: accept with a waiver, close the ticket, or ask the human.</p>
+        </div>
+        <div class="tool" style="margin-top:10px"><code>triage_findings</code> · ticket_id, decisions: [{id: "F2", decision: "wont_fix", reason: "Matches verification_lines beside it."}, …] → each entry is decided once</div>
+      </div>
+      <div>
+        <div class="panel" aria-label="workspace_context excerpt">
+          <div class="eyebrow" style="margin-bottom:6px">workspace_context · tickets[]</div>
+<pre>{
+  "title": "Review convergence",
+  "state": "accepted",
+  "waiver": "F3 only affects worktrees…",
+  "verification": { "cycle": 2, "outcome": "blocked", … },
+  "previous_cycles": [{ "cycle": 1, "outcome": "passed", … }],
+  "ledger": [
+    { "id": "F3", "severity": "blocking",
+      "location": "crates/workspace-host/src/live.rs:398",
+      "summary": "accept_ticket fails when…",
+      "trigger": "worktree without origin/main",
+      "evidence": "test accept_without_base_ref fails",
+      "source": { "focus": "Regressions",
+                  "cycle": 2, "round": 1 },
+      "status": "open" },
+    { "id": "F2", "severity": "non_blocking", …,
+      "status": "wont_fix",
+      "reason": "Matches verification_lines beside it." }
+  ]
+}</pre>
+        </div>
+      </div>
+    </section>
+    <p class="caption"><b>(b) Coordinator:</b> one wake at cycle end, sent as Wiffletree rather than in the coordinator’s name, listing open blocking findings and the entries it still has to triage. The full ledger is on the ticket in <span class="mono">workspace_context</span>.</p>
+  </div>
+</div>
+
+<ul class="notes">
+  <li>Accepted tickets archive their agents, so today they leave the tree unless <b>Show archived</b> is on. This study shows the archived view. Settled: waived tickets follow the same rule and show only with Show archived; the waiver is always on the Tickets panel card.</li>
+  <li>Implementers see only routed blocking findings, sent as Wiffletree. Verifiers see “already decided” entries (won’t fix, follow-up) in their round input and are told not to re-raise them unless the cited code changed.</li>
+  <li>This is a static design study, not the GPUI implementation.</li>
+</ul>
+</body>
+</html>
