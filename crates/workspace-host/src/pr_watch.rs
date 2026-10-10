@@ -5,7 +5,7 @@ use crate::*;
 use std::collections::{HashMap, HashSet};
 
 /// The interval while a repository has an open PR, and otherwise.
-const ACTIVE_MS: i64 = 60_000;
+pub(crate) const ACTIVE_MS: i64 = 60_000;
 pub(crate) const IDLE_MS: i64 = 300_000;
 const MAX_BACKOFF_MS: i64 = 1_800_000;
 /// Below this many API points, the next pass waits for GitHub's reset, leaving headroom for the
@@ -1162,6 +1162,17 @@ mod tests {
         host.record_pull_requests(&ticket.repository_id, &pass, 0, 0)
             .unwrap();
         assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, None);
+    }
+
+    #[test]
+    fn a_paused_projects_open_ticket_is_still_queried() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let project = host.session(&ticket.coordinator_id).unwrap().project_id;
+        host.set_live(&project, true).unwrap();
+        host.set_live(&project, false).unwrap();
+        let queries = host.pull_request_queries().unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].1.tickets[0].ticket_id, ticket.id);
     }
 
     #[test]

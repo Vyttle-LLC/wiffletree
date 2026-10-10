@@ -218,9 +218,11 @@ fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usi
 }
 
 /// When the repository's PRs were last checked, or why not, and whether the check failed. A
-/// repository without open tickets is not watched and shows nothing.
+/// repository is not watched, and shows nothing, without an open ticket whose coordinator is
+/// not archived.
 fn pr_check_status(snapshot: &Snapshot, repository: &Repository) -> Option<(String, bool)> {
-    open_tickets(snapshot, repository).next()?;
+    let archived = |id: &str| snapshot.sessions.iter().any(|s| s.id == id && s.archived);
+    open_tickets(snapshot, repository).find(|t| !archived(&t.coordinator_id))?;
     let check = snapshot
         .pull_request_checks
         .iter()
@@ -321,6 +323,20 @@ mod tests {
             pr_check_status(&snapshot, &repository).unwrap().0,
             "Not on GitHub; PRs not watched"
         );
+    }
+
+    #[test]
+    fn a_repository_whose_coordinator_is_archived_shows_no_check() {
+        let (mut snapshot, repository) = snapshot(1, 1);
+        snapshot.pull_request_checks = vec![check(Some(ui::now() - 3 * 60_000), None, 0)];
+        snapshot.sessions = vec![
+            serde_json::from_value(serde_json::json!({"id": "c", "project_id": "p",
+                "parent_id": null, "repository_id": null, "name": "Main",
+                "role": "project_orchestrator", "provider": "claude", "status": "ready",
+                "archived": true}))
+            .unwrap(),
+        ];
+        assert_eq!(pr_check_status(&snapshot, &repository), None);
     }
 
     #[test]

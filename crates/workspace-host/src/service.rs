@@ -402,6 +402,10 @@ struct Actor {
     /// No repository's check can be due before this.
     overlaps_due_at: i64,
     pr_watch: pr_watch::Watch,
+    /// Something changed since the PR watcher last read its tickets; see `refresh_pull_requests`.
+    pr_tickets_stale: bool,
+    /// A change cannot make the PR watcher read its tickets before this.
+    pr_tickets_due_at: i64,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -502,6 +506,8 @@ impl Service {
                     overlaps_running: HashSet::new(),
                     overlaps_due_at: 0,
                     pr_watch: pr_watch::Watch::default(),
+                    pr_tickets_stale: true,
+                    pr_tickets_due_at: 0,
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -594,11 +600,16 @@ impl Actor {
 
     /// Starts a PR pass for each due repository, one per repository at a time, and arms a
     /// wake-up for the next, since a quiet host may see no other event for hours. The store is
-    /// read only when a pass is due or the event may have changed the open tickets.
-    fn refresh_pull_requests(&mut self, at: i64, tickets_changed: bool) {
-        if tickets_changed || self.pr_watch.next_due().is_some_and(|due| due <= at) {
+    /// read only when a pass is due, or at most once a minute after a change, so most events
+    /// cost no store read.
+    fn refresh_pull_requests(&mut self, at: i64, changed: bool) {
+        self.pr_tickets_stale |= changed;
+        let relist = self.pr_tickets_stale && at >= self.pr_tickets_due_at;
+        if relist || self.pr_watch.next_due().is_some_and(|due| due <= at) {
             match self.host.pull_request_queries() {
                 Ok(queries) => {
+                    self.pr_tickets_stale = false;
+                    self.pr_tickets_due_at = at.saturating_add(pr_watch::ACTIVE_MS);
                     self.pr_watch
                         .keep(queries.iter().map(|(id, _)| id.as_str()));
                     let due = self.pr_watch.start_due(at);
@@ -613,7 +624,8 @@ impl Actor {
                 Err(e) => eprintln!("Workspace PR watch: {e:#}"),
             }
         }
-        if let Some(due) = self.pr_watch.next_due() {
+        let relist_at = self.pr_tickets_stale.then_some(self.pr_tickets_due_at);
+        if let Some(due) = self.pr_watch.next_due().into_iter().chain(relist_at).min() {
             self.wake(due);
         }
     }
@@ -968,6 +980,7 @@ impl Actor {
                 cancelled,
             } => {
                 let mut active = self.active.remove(id).unwrap();
+                self.host.in_turn.remove(id);
                 let failed = error.is_some();
                 // A turn its parent stopped is finished rather than held: the parent decides
                 // what runs next, and the session's next turn is told about the stop instead.
@@ -1610,13 +1623,11 @@ impl Actor {
             Err(e) => eprintln!("Workspace timers: {e:#}"),
         }
         let in_rounds = self.admit_rounds()?;
-        // Quiet messages ride along with the next turn but never start one.
-        let messages=self.host.db.prepare(&format!("SELECT m.* FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') ORDER BY s.role<>'project_orchestrator',m.sequence LIMIT 100", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut considered = HashSet::new();
+        // Quiet messages ride along with the next turn but never start one. Each recipient's
+        // oldest due message stands for it, so a long queue cannot hide other sessions.
+        let messages=self.host.db.prepare(&format!("SELECT m.*,MIN(m.sequence) AS first FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') GROUP BY m.recipient ORDER BY s.role<>'project_orchestrator',first", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         for message in messages {
-            if !considered.insert(message.recipient.clone())
-                || in_rounds.contains(&message.recipient)
-            {
+            if in_rounds.contains(&message.recipient) {
                 continue;
             }
             let session = self.host.session(&message.recipient)?;
@@ -1870,7 +1881,9 @@ impl Actor {
                 "turn_scheduled",
                 &format!("{run}; queue_ms={}", now() - queued_at),
             )
-        })
+        })?;
+        self.host.in_turn.insert(session.id.clone());
+        Ok(())
     }
     /// The turn's whole prompt. A session's first turn since the host started also says what
     /// the restart interrupted and which of its timers fired late.
@@ -2067,6 +2080,8 @@ mod tests {
             overlaps_running: HashSet::new(),
             overlaps_due_at: 0,
             pr_watch: pr_watch::Watch::default(),
+            pr_tickets_stale: true,
+            pr_tickets_due_at: 0,
         };
         (actor, changes, step_changes)
     }
@@ -2245,6 +2260,28 @@ mod tests {
     }
 
     #[test]
+    fn a_change_reads_the_pr_tickets_at_most_once_a_minute() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, _events) = async_channel::bounded(4);
+        actor.sender = sender;
+        let repository = ticket.repository_id.clone();
+        let not_watched = |actor: &mut Actor, at| {
+            let outcome = pr_watch::Outcome::NotOnGitHub;
+            actor.pr_watch.finish(&repository, at, &outcome).is_none()
+        };
+        actor.refresh_pull_requests(1_000, true);
+        actor.host.close_ticket(&ticket.id).unwrap();
+        // The close is a change, but the tickets were read less than a minute ago.
+        actor.refresh_pull_requests(2_000, true);
+        assert!(!not_watched(&mut actor, 2_000));
+        let relist_at = 1_000 + pr_watch::ACTIVE_MS;
+        assert_eq!(actor.wake_at, Some(relist_at));
+        actor.refresh_pull_requests(relist_at, false);
+        assert!(not_watched(&mut actor, relist_at));
+    }
+
+    #[test]
     fn a_pr_pass_that_panics_still_frees_its_repository() {
         let (_home, host, ticket, _) = ticket_fixture();
         let (mut actor, _, _) = idle_actor(host);
@@ -2305,18 +2342,109 @@ mod tests {
     }
 
     #[test]
-    fn a_pr_watcher_message_is_from_wiffletree_not_the_human() {
+    fn host_messages_are_from_wiffletree_and_the_humans_stay_the_humans() {
         let (_home, mut host, ticket, coordinator) = ticket_fixture();
-        let id = format!("pr:{}:merged:141", ticket.id);
-        host.send(&id, None, &coordinator.id, "PR #141 merged.")
+        for (id, sender) in [
+            (
+                format!("pr:{}:merged:141", ticket.id),
+                "Wiffletree PR watcher",
+            ),
+            (
+                format!("verification:{}:1:outcome", ticket.id),
+                "Wiffletree",
+            ),
+            ("m1".into(), "human"),
+        ] {
+            host.send(&id, None, &coordinator.id, "Body").unwrap();
+            let message = host.message(&id).unwrap();
+            let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
+            assert!(prompt.contains(&format!("Sender: {sender}\n")), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_running_turn_shows_as_working_after_a_blocked_report() {
+        let (_home, mut host, ticket, coordinator) = ticket_fixture();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
             .unwrap();
-        let message = host.message(&id).unwrap();
-        let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
-        assert!(
-            prompt.contains("Sender: Wiffletree PR watcher\n"),
-            "{prompt}"
+        let (mut actor, _, _) = idle_actor(host);
+        let input = actor.host.messages(&implementer.id, None, 10).unwrap();
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        actor
+            .record_turn_start("run", &implementer, &input, &json!({}), &runtime)
+            .unwrap();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("run", vec![]));
+        let report = json!({"message_id":"stuck","kind":"blocked","body":"Need a decision"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        let shown = |actor: &Actor| {
+            let snapshot = actor.host.snapshot().unwrap();
+            let session = snapshot.sessions.iter().find(|s| s.id == implementer.id);
+            let context = actor.host.agent_context(&coordinator.id).unwrap();
+            let team = context["team"].as_array().unwrap().iter();
+            let member = team.clone().find(|s| s["id"] == implementer.id.as_str());
+            let own = actor.host.agent_context(&implementer.id).unwrap();
+            (
+                session.unwrap().status,
+                member.unwrap()["status"].clone(),
+                context["tickets"][0]["agents"][0]["status"].clone(),
+                own["self"]["status"].clone(),
+            )
+        };
+        assert_eq!(
+            shown(&actor),
+            (
+                Status::Working,
+                json!("working"),
+                json!("working"),
+                json!("working")
+            )
         );
-        assert!(!prompt.contains("Sender: human"), "{prompt}");
+        // Ticket and agent operations still see the report.
+        assert_eq!(
+            actor.host.session(&implementer.id).unwrap().status,
+            Status::Blocked
+        );
+        actor
+            .provider_event(
+                &implementer.id,
+                "run",
+                ProviderEvent::Finished {
+                    error: None,
+                    usage: Value::Null,
+                    cancelled: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            shown(&actor),
+            (
+                Status::Blocked,
+                json!("blocked"),
+                json!("blocked"),
+                json!("blocked")
+            )
+        );
+    }
+
+    #[test]
+    fn a_paused_coordinators_long_queue_does_not_hide_a_runnable_worker() {
+        let (_home, mut actor, reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
+        for n in 0..101 {
+            actor
+                .host
+                .send(&format!("busy-{n}"), None, &coordinator.id, "Busy")
+                .unwrap();
+        }
+        actor.schedule().unwrap();
+        // A unit test cannot launch a provider, so the reviewer's provider is disabled: the
+        // scheduler reaching it holds its turn where it would otherwise start it.
+        assert!(actor.host.session_runtime(&reviewer.id).unwrap().held);
     }
 
     #[test]

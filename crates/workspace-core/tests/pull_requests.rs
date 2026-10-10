@@ -62,12 +62,20 @@ fn a_snapshot_stored_before_pull_request_checks_decodes() {
 }
 
 #[test]
-fn only_pr_ids_are_host_notices() {
+fn only_the_hosts_own_ids_are_host_notices() {
     assert_eq!(
         host_notice("pr:t:merged:141"),
         Some("Wiffletree PR watcher")
     );
-    for id in ["timer:s:1", "verification:t:1:outcome", "output:r", "xpr:t"] {
+    for id in [
+        "verification:t:1:outcome",
+        "verification:t:1:2",
+        "worktree-kept:t:1",
+        "migration:s",
+    ] {
+        assert_eq!(host_notice(id), Some("Wiffletree"), "{id}");
+    }
+    for id in ["timer:s:1", "answer:a", "output:r", "xpr:t", "m1"] {
         assert_eq!(host_notice(id), None, "{id}");
     }
 }
