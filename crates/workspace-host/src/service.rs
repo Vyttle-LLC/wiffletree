@@ -1230,6 +1230,11 @@ impl Actor {
             Some(index) => index,
             None if active.steps.len() >= MAX_RUN_STEPS => {
                 active.omitted_steps += 1;
+                // The checklist follows a plan the run has no room left to keep.
+                if update.kind == StepKind::Plan {
+                    self.host.plan_recorded(session_id, update.plan.as_ref())?;
+                    self.progress_dirty = true;
+                }
                 return Ok(());
             }
             None => {
@@ -5119,6 +5124,34 @@ mod tests {
         }
         let page = actor.steps(&session, None, 0).unwrap();
         assert_eq!((page.steps.len(), page.omitted_steps), (MAX_RUN_STEPS, 3));
+    }
+
+    #[test]
+    fn the_checklist_follows_a_plan_the_full_run_cannot_keep() {
+        let mut crew = Crew::new();
+        let early = crew.provider_plan("early", 1, 4);
+        crew.handle(early);
+        for n in 1..MAX_RUN_STEPS {
+            let step = update(
+                &n.to_string(),
+                StepKind::Read,
+                StepState::Succeeded,
+                "notes.txt",
+            );
+            crew.handle(Event::Provider {
+                session: crew.implementer.id.clone(),
+                run: "run".into(),
+                event: ProviderEvent::Step(step),
+            });
+        }
+        crew.progress.try_recv().unwrap();
+        let late = crew.provider_plan("late", 3, 4);
+        crew.handle(late);
+        assert_eq!((crew.checklist(), crew.progress.len()), (Some((3, 4)), 1));
+        // The run still keeps no more than its limit, and counts the plan it left out.
+        let page = crew.actor.steps(&crew.implementer.id, None, 0).unwrap();
+        assert_eq!((page.steps.len(), page.omitted_steps), (MAX_RUN_STEPS, 1));
+        assert_eq!(crew.plan_steps().len(), 1);
     }
 
     #[test]

@@ -68,7 +68,8 @@ impl Workspace {
     }
 
     /// One agent of a ticket: role and focus, model, figure, elapsed time and bar. Selecting
-    /// it opens its conversation; an archived verifier's is read-only, as elsewhere.
+    /// it opens its conversation, leaving the panel open with the row marked; an archived
+    /// verifier's conversation is read-only, as elsewhere.
     fn crew_row(
         &self,
         agent: &AgentProgress,
@@ -89,6 +90,7 @@ impl Workspace {
         ];
         let figure = figure.into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let id = session.id.clone();
+        let selected = self.selected.as_ref() == Some(&id);
         Some(
             div()
                 .id(SharedString::from(format!("crew-{id}")))
@@ -100,7 +102,8 @@ impl Workspace {
                 .rounded_md()
                 .cursor_pointer()
                 .when(session.archived, |d| d.opacity(0.7))
-                .hover(move |d| d.bg(p.overlay.opacity(0.7)))
+                .when(selected, |d| d.bg(p.overlay))
+                .hover(move |d| d.bg(p.overlay.opacity(if selected { 1. } else { 0.7 })))
                 .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
                 .child(
                     div()
@@ -110,7 +113,7 @@ impl Workspace {
                         .child(
                             icon(session_icon(session.role))
                                 .size(px(14.))
-                                .text_color(p.subtle),
+                                .text_color(if selected { p.text } else { p.subtle }),
                         )
                         .child(div().flex_1().min_w_0().text_ellipsis().child(label))
                         .child(
@@ -162,11 +165,15 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{Panel, clock_runs};
-    use workspace_core::{AgentProgress, BarState};
+    use crate::progress::ProgressBoard;
+    use workspace_core::*;
 
     fn agent(working: bool) -> AgentProgress {
+        named("agent", working)
+    }
+    fn named(id: &str, working: bool) -> AgentProgress {
         AgentProgress {
-            session_id: "agent".into(),
+            session_id: id.into(),
             state: BarState::InProgress,
             plan: None,
             word: None,
@@ -186,5 +193,40 @@ mod tests {
         // Closed, or another panel shown, while an agent works.
         assert!(!clock_runs(None, &[&working]));
         assert!(!clock_runs(Some(Panel::Team), &[&working]));
+    }
+
+    #[test]
+    fn the_crew_timer_follows_the_project_of_the_selected_conversation() {
+        let ticket = |id: &str, agent: &str| TicketProgress {
+            ticket_id: id.into(),
+            stage: Stage::Implementing,
+            state: BarState::InProgress,
+            position: 3_000,
+            agents: vec![agent.into()],
+        };
+        let project = |id: &str, ticket: &str| ProjectProgress {
+            project_id: id.into(),
+            phase: Phase::Implementing,
+            state: BarState::InProgress,
+            position: Some(3_000),
+            accepted: 0,
+            tickets: vec![ticket.into()],
+            coordinator_id: format!("{id}-coordinator"),
+        };
+        let mut board = ProgressBoard::default();
+        board.merge(ProgressPage {
+            revision: 1,
+            complete: true,
+            agents: vec![named("busy", true), named("idle", false)],
+            tickets: vec![ticket("one", "busy"), ticket("two", "idle")],
+            projects: vec![project("working", "one"), project("quiet", "two")],
+        });
+        // The open panel lists the selected conversation's project, so a selection in
+        // another project changes whether the timer runs.
+        let runs = |project| {
+            let crew = board.crew(board.project(project).unwrap());
+            clock_runs(Some(Panel::Crew), &crew)
+        };
+        assert!(runs("working") && !runs("quiet"));
     }
 }

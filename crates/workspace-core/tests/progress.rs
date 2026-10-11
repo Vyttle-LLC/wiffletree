@@ -210,17 +210,6 @@ fn a_rewritten_plan_may_lower_the_figure() {
 }
 
 #[test]
-fn a_new_run_drops_the_old_checklist() {
-    // The host removes a session's plan when its run starts.
-    let mut world = World::new()
-        .ticket("assigned")
-        .implementer(Status::Working)
-        .plan("implementer", 4, 6);
-    world.plans.remove("implementer");
-    assert_eq!(world.agent_progress("implementer").state, Indeterminate);
-}
-
-#[test]
 fn between_turns_the_checklist_stays_without_the_word_working() {
     let world = World::new()
         .ticket("assigned")

@@ -1,6 +1,7 @@
 //! The progress board as the host last described it. The host signals when a figure changed
 //! and the client asks only for the entries changed since its cursor, never for a snapshot.
 use super::*;
+use activity::paced_reply;
 use std::{collections::HashMap, time::Duration};
 
 #[derive(Default)]
@@ -46,15 +47,6 @@ impl ProgressBoard {
     }
 }
 
-async fn progress_page(bridge: Bridge, after: u64) -> Result<ProgressPage, String> {
-    let value = bridge
-        .request(Command::Progress { after })?
-        .recv()
-        .await
-        .map_err(|_| "Host disconnected".to_string())??;
-    serde_json::from_value(value).map_err(|e| e.to_string())
-}
-
 impl Workspace {
     /// Reads the board once, then again whenever the host says a figure changed.
     pub(super) fn watch_progress(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -78,10 +70,16 @@ impl Workspace {
     /// Asks for the entries changed since the last page; one request at a time.
     fn fetch_progress(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Plans change a few times a turn, so progress needs no pacing.
-        if self.progress_fetch.begin(Duration::ZERO).is_none() {
+        let Some(wait) = self.progress_fetch.begin(Duration::ZERO) else {
             return;
-        }
-        let page = progress_page(self.bridge.clone(), self.progress.revision);
+        };
+        let after = self.progress.revision;
+        let page = paced_reply(
+            self.bridge.clone(),
+            Command::Progress { after },
+            wait,
+            cx.background_executor().clone(),
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = page.await;
             let _ = cx.update(|window, cx| {

@@ -41,3 +41,9 @@
 
 - [x] 6.1 Update `docs/PRD.md` (the conversation and tree sections: the strip, the sidebar bars and the crew panel, that progress is derived, and the `set_plan` checklist tool) and `docs/DEVELOPMENT.md` (the board, `Command::Progress`, the third signal and `set_plan`). Verify that the text matches the specs.
 - [x] 6.2 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `python3 scripts/test_communications.py` and `openspec validate --all --strict`, and paste the output in the report.
+
+## 7. Follow-ups after review
+
+- [x] 7.1 Keep the Crew panel open when an agent row is selected, with that row marked: `Panel::Crew` is available to every role and `Panel::kept_for` decides what `select` keeps. Verify with a test of `kept_for` and in the running app.
+- [x] 7.2 Call `sync_crew_clock` from `select`, and let the checklist follow a provider plan that arrives after the run holds `MAX_RUN_STEPS` steps without storing the step. Verify the timer's condition per project in `crew_panel.rs` and the checklist in `service.rs`.
+- [x] 7.3 Verify `Host::run_started` through the real service in `tests/restart.rs`, assert the whole tool list in `tests/contracts.rs`, and fetch the board with `activity::paced_reply`.

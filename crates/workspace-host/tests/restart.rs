@@ -276,9 +276,31 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
         .ok();
         restarted.is_some()
     });
-    let after = board(&restarted.unwrap());
+    let service = restarted.unwrap();
+    let after = board(&service);
     assert_eq!(
         (after.agents, after.tickets, after.projects),
         (before.agents, before.tickets, before.projects)
+    );
+
+    // The worker's next turn starts with no checklist, so it is indeterminate until it writes one.
+    request(
+        &service,
+        Command::Send {
+            id: "next".into(),
+            sender: None,
+            recipient: worker.id.clone(),
+            body: "JUST_REPLY HANG_UNTIL_CANCELLED".into(),
+            attachments: vec![],
+        },
+    );
+    let agent = |page: ProgressPage| page.agents.into_iter().find(|a| a.session_id == worker.id);
+    until("the worker's next turn", || {
+        agent(board(&service)).is_some_and(|a| a.working)
+    });
+    let running = agent(board(&service)).unwrap();
+    assert_eq!(
+        (running.state, running.plan),
+        (BarState::Indeterminate, None)
     );
 }

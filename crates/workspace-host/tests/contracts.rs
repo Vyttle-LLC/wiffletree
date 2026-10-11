@@ -17,20 +17,31 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    for name in [
-        "create_ticket",
-        "assign_ticket",
-        "verify_ticket",
-        "triage_findings",
-        "accept_ticket",
-        "close_ticket",
-        "archive_agent",
-        "stop_agents",
-        "resume_agent",
-        "set_plan",
-    ] {
-        assert!(names.contains(&name), "{name}");
-    }
+    // The whole list, in the order it is offered, so a tool cannot be added unnoticed.
+    assert_eq!(
+        names,
+        [
+            "workspace_context",
+            "create_ticket",
+            "assign_ticket",
+            "verify_ticket",
+            "send_message",
+            "report",
+            "set_plan",
+            "stop_agents",
+            "resume_agent",
+            "schedule",
+            "unschedule",
+            "list_schedules",
+            "triage_findings",
+            "accept_ticket",
+            "close_ticket",
+            "archive_agent",
+            "ask_user",
+            "close_question",
+            "request_permission",
+        ]
+    );
     let schema = |name: &str| {
         tools
             .as_array()

@@ -60,7 +60,8 @@ enum Panel {
     Attention,
     Git,
     Files,
-    /// Opened from the coordinator's progress strip, not from the rail.
+    /// Opened from the coordinator's progress strip, not from the rail. It lists the whole
+    /// project, so it stays open whichever of the project's agents is selected.
     Crew,
 }
 
@@ -837,10 +838,8 @@ impl Workspace {
         self.page = None;
         self.list.reset(self.transcript_rows());
         self.panel_data = Value::Null;
-        if let Some(role) = self.selected_session().map(|s| s.role)
-            && self.panel.is_some_and(|panel| !panel.available(role))
-        {
-            self.panel = Some(Panel::Overview);
+        if let Some(role) = self.selected_session().map(|s| s.role) {
+            self.panel = self.panel.map(|panel| panel.kept_for(role));
         }
         self.sync_composer(window, cx);
         self.sync_context(window, cx);
@@ -849,6 +848,7 @@ impl Workspace {
         self.activity = None;
         self.fetch_steps(window, cx);
         self.sync_activity_clock(window, cx);
+        self.sync_crew_clock(window, cx);
         cx.notify();
     }
     /// Adds dropped files to the selected session's draft. Each refused file is named with
