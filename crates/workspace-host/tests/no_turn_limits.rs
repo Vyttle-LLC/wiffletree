@@ -2,10 +2,7 @@
 //! CLIs: no project or host-wide turn limit holds workers back. Kept in its own test binary
 //! because it sets the provider environment for the process.
 use serde_json::Value;
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::path::Path;
 use workspace_core::*;
 use workspace_host::{Host, service::Service};
 
@@ -18,21 +15,28 @@ fn request(service: &Service, command: Command) -> Value {
         .unwrap()
 }
 
-fn working(service: &Service, sessions: &[String]) -> usize {
-    let snapshot: Snapshot = serde_json::from_value(request(service, Command::Snapshot)).unwrap();
-    snapshot
-        .sessions
-        .iter()
-        .filter(|s| sessions.contains(&s.id) && s.status == Status::Working)
-        .count()
+/// Waits for `done` on the host's change signal, which every turn start and finish sends, so
+/// no deadline or polling interval depends on the machine's load.
+fn until(service: &Service, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
+    let changes = service.changes();
+    loop {
+        let snapshot: Snapshot =
+            serde_json::from_value(request(service, Command::Snapshot)).unwrap();
+        if done(&snapshot) {
+            return snapshot;
+        }
+        changes.recv_blocking().unwrap();
+    }
 }
 
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+fn runtimes<'a>(
+    snapshot: &'a Snapshot,
+    sessions: &'a [String],
+) -> impl Iterator<Item = &'a SessionRuntime> {
+    snapshot
+        .runtimes
+        .iter()
+        .filter(|r| sessions.contains(&r.session_id))
 }
 
 fn git(path: &Path, args: &[&str]) {
@@ -108,9 +112,24 @@ fn ten_workers_in_two_projects_run_at_once() {
     )
     .unwrap();
 
-    until("every worker in a turn at once", || {
-        working(&service, &workers) == workers.len()
+    // Every turn started before any of them finished, so all ten ran at once. A limit would
+    // start some only after others finished, however long that took.
+    let started = until(&service, |s| {
+        runtimes(s, &workers)
+            .filter(|r| r.last_started_at.is_some())
+            .count()
+            == workers.len()
     });
+    let last_start = runtimes(&started, &workers)
+        .filter_map(|r| r.last_started_at)
+        .max()
+        .unwrap();
+    for runtime in runtimes(&started, &workers) {
+        assert!(
+            runtime.last_finished_at.is_none_or(|f| f > last_start),
+            "{runtime:?} finished before the last turn started at {last_start}"
+        );
+    }
 
     for worker in &workers {
         request(
@@ -121,5 +140,7 @@ fn ten_workers_in_two_projects_run_at_once() {
             },
         );
     }
-    until("the turns to stop", || working(&service, &workers) == 0);
+    until(&service, |s| {
+        runtimes(s, &workers).all(|r| r.last_finished_at.is_some())
+    });
 }

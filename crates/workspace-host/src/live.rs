@@ -501,9 +501,9 @@ impl Host {
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
-        let mut context = json!({"self":session,"project":self.project(&session.project_id)?,
+        let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,
             "repositories":self.project_repositories(&session.project_id)?,
-            "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).collect::<Vec<_>>(),
+            "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).map(|s|self.shown(s)).collect::<Vec<_>>(),
             "tickets":self.ticket_overview(&session.project_id)?,
             "runtime":self.session_runtime(id)?,
             "memory":self.logs(&session.project_id,None,10)?,
@@ -546,7 +546,7 @@ impl Host {
                 .iter()
                 .filter(|r| r.ticket_id.as_ref() == Some(&ticket.id))
             {
-                let s = self.session(&runtime.session_id)?;
+                let s = self.shown(self.session(&runtime.session_id)?);
                 agents.push(json!({"id":s.id,"name":s.name,"role":s.role,"focus":runtime.focus,"status":s.status,"archived":s.archived}));
             }
             let mut entry = serde_json::to_value(&ticket)?;
