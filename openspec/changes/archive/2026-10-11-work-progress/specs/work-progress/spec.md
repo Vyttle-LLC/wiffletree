@@ -257,7 +257,7 @@ Each project row, ticket row and unarchived agent row in the sidebar tree SHALL 
 - **THEN** its row shows an empty track and no figure, at the same height as its neighbours
 
 ### Requirement: Crew panel
-The coordinator's strip SHALL carry a crew button labelled with the number of agents the panel lists, such as "6 agents". Activating it SHALL open a crew panel beside the conversation, without replacing it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents and the verifiers of its latest cycle, each once, including a verifier the host archived after it passed. Verifiers of earlier cycles and other archived agents SHALL NOT be listed. Each agent row SHALL show its role and focus, its model, its figure, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and a listed agent is working. Selecting an agent row SHALL select that agent's conversation.
+The coordinator's strip SHALL carry a crew button labelled with the number of agents the panel lists, such as "6 agents". Activating it SHALL open a crew panel beside the conversation, without replacing it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents and the verifiers of its latest cycle, each once, including a verifier the host archived after it passed. Verifiers of earlier cycles and other archived agents SHALL NOT be listed. Each agent row SHALL show its role and focus, its model, its figure, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and a listed agent is working. The crew button SHALL appear only on the coordinator's strip. Selecting an agent row SHALL select that agent's conversation and SHALL leave the panel open, still listing the whole project's crew, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
 
 #### Scenario: Open the crew
 - **WHEN** the human activates "6 agents" on the coordinator's strip
@@ -274,6 +274,14 @@ The coordinator's strip SHALL carry a crew button labelled with the number of ag
 #### Scenario: Accepted ticket
 - **WHEN** a ticket is accepted
 - **THEN** its card shows "Accepted · 100%" and no agent rows
+
+#### Scenario: Step through the crew
+- **WHEN** the crew panel is open and the human selects the implementer's row, then a reviewer's row
+- **THEN** each selection shows that agent's conversation and strip, the panel stays open listing the whole project's crew, and the selected agent's row is marked
+
+#### Scenario: Leave the crew
+- **WHEN** an agent selected from the crew panel is shown and the human closes the panel
+- **THEN** the panel closes, and that agent's strip offers no crew button
 
 #### Scenario: Idle panel
 - **WHEN** the panel is open and no listed agent is working

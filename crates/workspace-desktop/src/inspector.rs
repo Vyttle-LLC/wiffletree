@@ -52,10 +52,19 @@ pub(super) fn copyable(label: &'static str, value: &str, p: Palette) -> Div {
 impl Panel {
     pub(super) fn available(self, role: Role) -> bool {
         match self {
-            Self::Attention | Self::Crew => role == Role::ProjectOrchestrator,
+            Self::Attention => role == Role::ProjectOrchestrator,
             Self::Team => !role.is_worker(),
             Self::Git => role != Role::ProjectOrchestrator,
             _ => true,
+        }
+    }
+    /// The panel shown once a session of `role` is selected: this one where that session
+    /// has it, Overview otherwise.
+    pub(super) fn kept_for(self, role: Role) -> Self {
+        if self.available(role) {
+            self
+        } else {
+            Self::Overview
         }
     }
     fn icon(self) -> &'static str {
@@ -190,7 +199,11 @@ impl Workspace {
             Panel::Files => (self.files_head(p, cx), self.files_live(p)),
             _ => (None, None),
         };
-        let (scope, subtitle) = (scope(role), self.owner_name());
+        // The crew is the project's, whichever of its agents is selected.
+        let (scope, subtitle) = match panel {
+            Panel::Crew => ("Project", self.project_name()),
+            _ => (scope(role), self.owner_name()),
+        };
         div()
             .size_full()
             .flex()
@@ -801,5 +814,22 @@ impl Workspace {
             );
         }
         body.child(history)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use super::Panel;
+    use workspace_core::Role;
+
+    #[test]
+    fn the_crew_panel_stays_open_whichever_agent_is_selected() {
+        for role in Role::ALL {
+            assert!(Panel::Crew.kept_for(role) == Panel::Crew);
+        }
+        // A panel the selected session does not have still gives way to Overview.
+        assert!(Panel::Attention.kept_for(Role::Implementer) == Panel::Overview);
+        assert!(Panel::Git.kept_for(Role::ProjectOrchestrator) == Panel::Overview);
     }
 }

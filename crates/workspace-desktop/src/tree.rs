@@ -432,6 +432,8 @@ pub fn rows<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use workspace_host::Host;
 
     fn agent(word: Option<Word>, plan: Option<(u32, u32)>, working: bool) -> AgentProgress {
         let state = match word {
@@ -646,8 +648,6 @@ mod tests {
         );
         assert_eq!(elapsed_label(&agent(None, None, false), MINUTE), None);
     }
-    use std::path::Path;
-    use workspace_host::Host;
 
     fn git(path: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
