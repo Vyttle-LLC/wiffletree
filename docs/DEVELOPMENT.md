@@ -114,9 +114,15 @@ The delivered prompt lists every attachment's absolute path after the message te
 
 The adapters decode Claude stream-json and Codex `exec --json` into work steps (`crates/workspace-host/src/stream.rs`). Recorded and synthetic streams for both providers are in `crates/workspace-host/tests/fixtures/streams/`; when a CLI changes its output, record a new turn, sanitize paths and account details, and update the fixture tests. Claude currently streams redacted thinking, so thinking rarely appears. Codex command titles drop the `/bin/zsh -lc` wrapper.
 
-The host keeps a running turn's steps in memory and stores each one when it starts and when its state changes. `steps` returns one run's steps changed after a revision cursor (`run_id: null` means the latest run), and `run_summaries` returns duration and counts for finished runs. The desktop listens to a step signal separate from state changes and fetches at most about 30 times a second, so streaming never reloads the snapshot. Bounds: 200-character titles, 40-character notes, 4 KiB details (output keeps its tail, prose its head), and 2,000 steps per run, with omitted amounts counted. Steps of runs finished more than 30 days ago are pruned when the store opens, and steps left running by a stopped host are marked interrupted.
+The host keeps a running turn's steps in memory and stores each one when it starts, when its state changes and when it learns which files it touches. `steps` returns one run's steps changed after a revision cursor (`run_id: null` means the latest run), and `run_summaries` returns duration and counts for finished runs. The desktop listens to a step signal separate from state changes and fetches at most about 30 times a second, so streaming never reloads the snapshot. Bounds: 200-character titles, 40-character notes, 4 KiB details (output keeps its tail, prose its head), and 2,000 steps per run, with omitted amounts counted. Steps of runs finished more than 30 days ago are pruned when the store opens, and steps left running by a stopped host are marked interrupted.
 
 Headless: `{"type":"steps","session_id":"…","run_id":null,"after":0}` and `{"type":"run_summaries","session_id":"…","run_ids":["…"]}`.
+
+## Files panel
+
+The **Files** button on the inspector rail shows which files agents are in. For a ticket agent it is a tree of the files its read and edit steps touched over the whole ticket, with counts, `+N −M` from the worktree's Git diff against the ticket base, and a highlighted row while a read or write runs; **Whole tree** lists the rest of the worktree around them. For the project coordinator it rolls every open ticket's agents up by ticket or by agent and tags in yellow a file that several agents, or two tickets in one repository, touched.
+
+The counts come from stored steps, so they share the steps' bounds: a run keeps its first 2,000 steps, and steps are pruned 30 days after their run. Files touched only through shell commands are not counted, which includes every read by a Codex agent; their writes still appear with line counts from the Git diff. The panel asks the host only while it is open, and Git is read off the host thread.
 
 ## Usage and provider quota
 

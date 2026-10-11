@@ -7,6 +7,7 @@ mod context_view;
 mod conversation;
 mod creation;
 mod data_dir;
+mod files_view;
 mod history_sheet;
 mod inspector;
 mod leftovers;
@@ -56,6 +57,7 @@ enum Panel {
     Events,
     Attention,
     Git,
+    Files,
 }
 
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
@@ -143,6 +145,8 @@ struct Workspace {
     history: Option<WeakEntity<history_sheet::HistorySheet>>,
     /// Finished runs' durations and step counts, keyed by run.
     run_summaries: BTreeMap<String, RunSummary>,
+    /// What the Files panel shows; fetched only while that panel is open.
+    files: files_view::Files,
 }
 impl Workspace {
     fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -253,6 +257,7 @@ impl Workspace {
             activity_clock: false,
             history: None,
             run_summaries: BTreeMap::new(),
+            files: Default::default(),
         };
         if let Some(changes) = view.bridge.changes() {
             cx.spawn_in(window, async move |this, cx| {
@@ -1022,6 +1027,7 @@ impl Workspace {
                     )
                 }
             }
+            Some(Panel::Files) => self.fetch_files(window, cx),
             _ => {}
         }
     }

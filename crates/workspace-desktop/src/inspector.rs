@@ -66,6 +66,7 @@ impl Panel {
             Self::Events => "activity",
             Self::Attention => "inbox",
             Self::Git => "git",
+            Self::Files => "folder",
         }
     }
     fn title(self) -> &'static str {
@@ -76,6 +77,7 @@ impl Panel {
             Self::Events => "Events",
             Self::Attention => "Inbox",
             Self::Git => "Git",
+            Self::Files => "Files",
         }
     }
 }
@@ -109,6 +111,7 @@ impl Workspace {
             Panel::Team,
             Panel::Attention,
             Panel::Git,
+            Panel::Files,
             Panel::Memory,
             Panel::Events,
         ]
@@ -177,6 +180,12 @@ impl Workspace {
             Panel::Events => self.events_panel(p),
             Panel::Attention => self.attention_panel(p, cx),
             Panel::Git => self.git_panel(p),
+            Panel::Files => self.files_panel(p, cx),
+        };
+        // The Files panel keeps its counts and what is live now in view while its tree scrolls.
+        let (head, foot) = match panel {
+            Panel::Files => (self.files_head(p, cx), self.files_live(p)),
+            _ => (None, None),
         };
         let (scope, subtitle) = (scope(role), self.owner_name());
         div()
@@ -227,6 +236,7 @@ impl Workspace {
                             })),
                     ),
             )
+            .children(head)
             .child(
                 div()
                     .w_full()
@@ -237,6 +247,7 @@ impl Workspace {
                     .text_size(px(13.))
                     .child(body.w_full()),
             )
+            .children(foot)
     }
 
     fn stat(value: usize, label: &'static str, p: Palette) -> Div {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use ui::{icon, mono, now};
 
 /// Step fetches start no closer together than this, about 30 a second.
-const STEP_PACE: Duration = Duration::from_millis(33);
+pub(super) const STEP_PACE: Duration = Duration::from_millis(33);
 /// The card and its minimized line keep fixed heights, so streaming never moves the transcript.
 const CARD_HEIGHT: f32 = 128.;
 const LINE_HEIGHT: f32 = 40.;
@@ -94,15 +94,15 @@ pub(super) struct StepFetch {
     started: Option<Instant>,
 }
 impl StepFetch {
-    /// Claims the next request and says how long to wait to keep the pace, or records that
+    /// Claims the next request and says how long to wait to keep `pace`, or records that
     /// one more is owed when a request is already out.
-    pub fn begin(&mut self) -> Option<Duration> {
+    pub fn begin(&mut self, pace: Duration) -> Option<Duration> {
         if self.in_flight {
             self.dirty = true;
             return None;
         }
         let wait = self.started.map_or(Duration::ZERO, |started| {
-            STEP_PACE.saturating_sub(started.elapsed())
+            pace.saturating_sub(started.elapsed())
         });
         self.in_flight = true;
         self.started = Some(Instant::now() + wait);
@@ -115,13 +115,13 @@ impl StepFetch {
     }
 }
 
-/// Waits out the pace, then asks the host for a page of steps.
-pub(super) async fn step_page(
+/// Waits out the pace, then asks the host and decodes its reply.
+pub(super) async fn paced_reply<T: serde::de::DeserializeOwned>(
     bridge: Bridge,
     command: Command,
     wait: Duration,
     executor: BackgroundExecutor,
-) -> Result<StepPage, String> {
+) -> Result<T, String> {
     if !wait.is_zero() {
         executor.timer(wait).await;
     }
@@ -140,8 +140,12 @@ impl Workspace {
         };
         cx.spawn_in(window, async move |this, cx| {
             while changes.recv().await.is_ok() {
-                let fetched = cx
-                    .update(|window, cx| this.update(cx, |view, cx| view.fetch_steps(window, cx)));
+                let fetched = cx.update(|window, cx| {
+                    this.update(cx, |view, cx| {
+                        view.fetch_steps(window, cx);
+                        view.fetch_files(window, cx);
+                    })
+                });
                 if !matches!(fetched, Ok(Ok(()))) {
                     break;
                 }
@@ -155,7 +159,7 @@ impl Workspace {
         let Some(session_id) = self.selected.clone() else {
             return;
         };
-        let Some(wait) = self.step_fetch.begin() else {
+        let Some(wait) = self.step_fetch.begin(STEP_PACE) else {
             return;
         };
         let after = self
@@ -168,7 +172,7 @@ impl Workspace {
             run_id: None,
             after,
         };
-        let page = step_page(
+        let page = paced_reply(
             self.bridge.clone(),
             command,
             wait,
@@ -577,6 +581,7 @@ mod tests {
             title: id.into(),
             note: None,
             detail: None,
+            paths: vec![],
             omitted: 0,
             seq,
             revision,

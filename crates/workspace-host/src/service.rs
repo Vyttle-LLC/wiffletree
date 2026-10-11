@@ -551,9 +551,22 @@ impl Service {
 }
 impl Actor {
     /// Repository scans run Git once per new repository, so they leave the host thread free
-    /// for agents and send back only what the store needs.
+    /// for agents and send back only what the store needs. The Files panel's Git reads leave
+    /// it the same way, after the store has answered which files the agents touched.
     fn scan_in_background(&mut self, command: &Command, reply: &Reply) -> Result<bool> {
         match command {
+            Command::Files {
+                session_id,
+                whole_tree,
+            } => {
+                let report = self.host.ticket_files(session_id)?;
+                let (whole_tree, reply) = (*whole_tree, reply.clone());
+                std::thread::spawn(move || {
+                    let result = serde_json::to_value(files::with_git(report, whole_tree))
+                        .map_err(|e| e.to_string());
+                    let _ = reply.try_send(result);
+                });
+            }
             Command::DiscoverRepositories { folders } => {
                 let known = self.host.known_paths()?;
                 let (folders, reply) = (folders.clone(), reply.clone());
@@ -1132,7 +1145,7 @@ impl Actor {
         Ok(latest + 1)
     }
     /// Merges an adapter's update into the turn's steps. Text deltas stay in memory; the store
-    /// is written when a step starts or changes state.
+    /// is written when a step starts, changes state or learns which files it touches.
     fn record_step(&mut self, session_id: &str, run: &str, update: StepUpdate) -> Result<()> {
         let revision = self.next_revision(session_id)?;
         let active = self.active.get_mut(session_id).context("No active turn")?;
@@ -1153,6 +1166,7 @@ impl Actor {
                     title: String::new(),
                     note: None,
                     detail: None,
+                    paths: vec![],
                     omitted: 0,
                     seq: active.steps.len() as u32,
                     revision,
@@ -1163,13 +1177,15 @@ impl Actor {
             }
         };
         let step = &mut active.steps[index];
-        let persist = existing.is_none() || step.state != update.state;
+        let persist =
+            existing.is_none() || step.state != update.state || step.paths != update.paths;
         step.parent_id = update.parent_id;
         step.kind = update.kind;
         step.state = update.state;
         step.title = update.title;
         step.note = update.note;
         step.detail = update.detail;
+        step.paths = update.paths;
         step.omitted = 0;
         step.revision = revision;
         if step.state != StepState::Running {
@@ -3259,6 +3275,7 @@ mod tests {
             title: "cargo test".into(),
             note: None,
             detail: None,
+            paths: vec![],
             omitted: 0,
             seq: 0,
             revision: 1,
@@ -4351,6 +4368,7 @@ mod tests {
             title: title.into(),
             note: None,
             detail: Some(title.into()),
+            paths: vec![],
         }
     }
 
@@ -4382,6 +4400,40 @@ mod tests {
                 .unwrap()
                 .steps
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_files_reply_is_finished_off_the_host_thread() {
+        let (_home, mut actor, ticket, tester, _) = ticket_in_turn();
+        let command = Command::Files {
+            session_id: tester.id.clone(),
+            whole_tree: false,
+        };
+        let (reply, replies) = async_channel::bounded(1);
+        // Claimed for a reply thread, where Git is read, instead of answered by the host.
+        assert!(actor.scan_in_background(&command, &reply).unwrap());
+        let report: Vec<TicketFiles> =
+            serde_json::from_value(replies.recv_blocking().unwrap().unwrap()).unwrap();
+        assert_eq!(report[0].ticket_id, ticket.id);
+        assert_eq!(report[0].agents[0].session_id, tester.id);
+    }
+
+    #[test]
+    fn a_running_step_is_stored_again_when_its_files_arrive() {
+        let (_home, mut actor, session, run) = actor_with_turn();
+        // Claude announces a tool call before its input, and so before its path.
+        let mut read = update("tool", StepKind::Read, StepState::Running, "Read");
+        for paths in [vec![], vec!["src/a.rs".to_owned()]] {
+            read.paths = paths;
+            actor
+                .provider_event(&session, &run, ProviderEvent::Step(read.clone()))
+                .unwrap();
+        }
+        let files = actor.host.file_activity(&session).unwrap();
+        assert_eq!(
+            (files[0].path.as_str(), files[0].reading),
+            ("src/a.rs", true)
         );
     }
 

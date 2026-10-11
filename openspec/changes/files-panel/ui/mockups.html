@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wiffletree · Files panel mockup</title>
+<style>
+  :root {
+    --base:#1A262D; --surface:#22373E; --overlay:#2A434A; --text:#F3F2ED; --subtle:#AFBFBC;
+    --muted:#829B99; --edge:#496063; --accent:#E6977E; --green:#A0CBB0; --yellow:#E4C17A;
+    --blue:#9AC4D8; --magenta:#CFADD0;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:28px; background:#111a1f; color:var(--text);
+         font:13px/1.45 -apple-system, "SF Pro Text", system-ui, sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p.lead { color:var(--subtle); margin:0 0 24px; max-width:860px; }
+  .row { display:flex; gap:28px; flex-wrap:wrap; align-items:flex-start; }
+  figure { margin:0; }
+  figcaption { color:var(--subtle); margin:0 0 8px; font-size:12px; }
+  figcaption b { color:var(--text); }
+  .window { display:flex; width:520px; height:560px; background:var(--base);
+            border:1px solid var(--edge); border-radius:10px; overflow:hidden; }
+  .chat { width:86px; flex:none; border-right:1px solid rgba(73,96,99,.35); padding:12px 10px;
+          color:var(--muted); font-size:11px; }
+  .chat i { display:block; height:8px; border-radius:4px; background:var(--overlay); margin:8px 0; }
+  .panel { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .head { padding:12px 14px 10px; border-bottom:1px solid rgba(73,96,99,.35); }
+  .eyebrow { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .title { font-size:15px; font-weight:600; margin-top:2px; }
+  .sub { color:var(--subtle); font-size:11.5px; margin-top:2px; }
+  .seg { display:inline-flex; margin-top:9px; border:1px solid var(--edge); border-radius:6px; overflow:hidden; font-size:11.5px; }
+  .seg span { padding:3px 9px; color:var(--subtle); }
+  .seg span.on { background:var(--overlay); color:var(--text); }
+  .tree { flex:1; overflow:auto; padding:8px 6px; font:12px/1 ui-monospace, "SF Mono", Menlo, monospace; }
+  .n { display:flex; align-items:center; gap:6px; height:24px; padding:0 8px; border-radius:5px; white-space:nowrap; }
+  .n.dir { color:var(--subtle); }
+  .n.repo { color:var(--text); font-family:-apple-system, system-ui, sans-serif; font-weight:600; font-size:12px; margin-top:6px; }
+  .n .name { overflow:hidden; text-overflow:ellipsis; }
+  .n .sp { flex:1; }
+  .d1 { padding-left:22px; } .d2 { padding-left:36px; } .d3 { padding-left:50px; } .d4 { padding-left:64px; }
+  .live { background:rgba(230,151,126,.10); }
+  .mark { font-family:-apple-system, system-ui, sans-serif; font-size:10.5px; padding:2px 6px; border-radius:9px; }
+  .read { color:var(--blue); background:rgba(154,196,216,.13); }
+  .write { color:var(--accent); background:rgba(230,151,126,.16); }
+  .stat { font-size:10.5px; color:var(--muted); }
+  .add { color:var(--green); } .del { color:#FFA6B8; }
+  .dot { width:7px; height:7px; border-radius:50%; flex:none; }
+  .pulse { animation:pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  .who { font-family:-apple-system, system-ui, sans-serif; font-size:10.5px; padding:2px 6px; border-radius:4px; background:var(--overlay); color:var(--subtle); }
+  .clash { color:var(--yellow); background:rgba(228,193,122,.14); }
+  .now { border-top:1px solid rgba(73,96,99,.35); padding:9px 14px; font-size:11.5px; color:var(--subtle); }
+  .now div { display:flex; gap:7px; align-items:center; height:20px; }
+  .now code { color:var(--text); font:11.5px ui-monospace, Menlo, monospace; }
+  .rail { width:64px; flex:none; background:var(--surface); border-left:1px solid rgba(73,96,99,.35);
+          display:flex; flex-direction:column; align-items:center; gap:4px; padding:8px 0; }
+  .rb { width:54px; height:50px; border-radius:8px; display:flex; flex-direction:column; align-items:center;
+        justify-content:center; gap:3px; color:var(--subtle); font-size:10px; }
+  .rb svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+  .rb.on { background:rgba(230,151,126,.10); color:var(--accent); }
+  .legend { margin-top:22px; color:var(--subtle); max-width:860px; }
+  .legend li { margin:4px 0; }
+</style>
+</head>
+<body>
+<h1>Files panel — mockup</h1>
+<p class="lead">A new <b>Files</b> button on the right rail. For an agent it shows the files that agent has touched in its ticket's worktree, live. For the coordinator it rolls every agent's files up by ticket. Sample data only.</p>
+
+<div class="row">
+  <figure>
+    <figcaption><b>Implementer selected</b> — this agent's files, updating as it works</figcaption>
+    <div class="window">
+      <div class="chat">conversation<i></i><i style="width:70%"></i><i></i><i style="width:50%"></i></div>
+      <div class="panel">
+        <div class="head">
+          <div class="eyebrow">Agent · Implementer</div>
+          <div class="title">Files</div>
+          <div class="sub">wiffletree · 5 read · 3 changed this ticket</div>
+          <div class="seg"><span class="on">Touched</span><span>Whole tree</span></div>
+        </div>
+        <div class="tree">
+          <div class="n dir">▾ crates</div>
+          <div class="n dir d1">▾ workspace-core/src</div>
+          <div class="n d2"><span class="name">steps.rs</span><span class="sp"></span><span class="stat"><span class="add">+18</span> <span class="del">−2</span></span><span class="mark write">edited ×2</span></div>
+          <div class="n dir d1">▾ workspace-desktop/src</div>
+          <div class="n d2 live"><span class="dot pulse" style="background:var(--accent)"></span><span class="name">inspector.rs</span><span class="sp"></span><span class="mark write">writing…</span></div>
+          <div class="n d2"><span class="name">main.rs</span><span class="sp"></span><span class="stat"><span class="add">+4</span> <span class="del">−0</span></span><span class="mark write">edited</span></div>
+          <div class="n d2"><span class="name">activity.rs</span><span class="sp"></span><span class="mark read">read ×3</span></div>
+          <div class="n d2"><span class="name">ui.rs</span><span class="sp"></span><span class="mark read">read</span></div>
+          <div class="n dir d1">▾ workspace-host/src</div>
+          <div class="n d2 live"><span class="dot pulse" style="background:var(--blue)"></span><span class="name">stream.rs</span><span class="sp"></span><span class="mark read">reading…</span></div>
+          <div class="n d2"><span class="name">steps.rs</span><span class="sp"></span><span class="mark read">read</span></div>
+          <div class="n dir">▾ docs</div>
+          <div class="n d1"><span class="name">PRD.md</span><span class="sp"></span><span class="mark read">read</span></div>
+        </div>
+        <div class="now">
+          <div><span class="dot pulse" style="background:var(--accent)"></span>writing <code>inspector.rs</code></div>
+          <div><span class="dot pulse" style="background:var(--blue)"></span>reading <code>stream.rs</code></div>
+        </div>
+      </div>
+      <div class="rail">
+        <div class="rb"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>Overview</div>
+        <div class="rb"><svg viewBox="0 0 24 24"><circle cx="12" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M12 8.5v4M12 12.5 6 15.5M12 12.5l6 3"/></svg>Git</div>
+        <div class="rb on"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg>Files</div>
+        <div class="rb"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>Events</div>
+      </div>
+    </div>
+  </figure>
+
+  <figure>
+    <figcaption><b>Coordinator selected</b> — rollup of every agent in the project</figcaption>
+    <div class="window">
+      <div class="chat">conversation<i></i><i style="width:60%"></i><i></i><i style="width:80%"></i></div>
+      <div class="panel">
+        <div class="head">
+          <div class="eyebrow">Project</div>
+          <div class="title">Files</div>
+          <div class="sub">2 tickets · 4 agents · 2 working now</div>
+          <div class="seg"><span class="on">By ticket</span><span>By agent</span></div>
+        </div>
+        <div class="tree">
+          <div class="n repo">▾ Files panel · wiffletree <span class="sp"></span><span class="stat">3 changed</span></div>
+          <div class="n dir d1">▾ crates/workspace-desktop/src</div>
+          <div class="n d2 live"><span class="dot pulse" style="background:var(--accent)"></span><span class="name">inspector.rs</span><span class="sp"></span><span class="who">Implementer</span><span class="mark write">writing…</span></div>
+          <div class="n d2"><span class="name">main.rs</span><span class="sp"></span><span class="who">Implementer</span><span class="mark write">edited</span></div>
+          <div class="n d2 live"><span class="dot pulse" style="background:var(--blue)"></span><span class="name">activity.rs</span><span class="sp"></span><span class="who">Reviewer</span><span class="mark read">reading…</span></div>
+          <div class="n dir d1">▾ crates/workspace-core/src</div>
+          <div class="n d2"><span class="name">steps.rs</span><span class="sp"></span><span class="who clash">2 agents</span><span class="mark write">edited</span></div>
+
+          <div class="n repo">▾ Step paths · wiffletree <span class="sp"></span><span class="stat">1 changed</span></div>
+          <div class="n dir d1">▾ crates/workspace-host/src</div>
+          <div class="n d2"><span class="name">stream.rs</span><span class="sp"></span><span class="who">Implementer</span><span class="mark write">edited ×4</span></div>
+          <div class="n d2"><span class="name">steps.rs</span><span class="sp"></span><span class="who">Tester</span><span class="mark read">read</span></div>
+          <div class="n dir d1">▾ crates/workspace-core/src</div>
+          <div class="n d2"><span class="name">steps.rs</span><span class="sp"></span><span class="who clash">also in Files panel</span><span class="mark read">read</span></div>
+        </div>
+        <div class="now">
+          <div><span class="dot pulse" style="background:var(--accent)"></span>Implementer writing <code>inspector.rs</code></div>
+          <div><span class="dot pulse" style="background:var(--blue)"></span>Reviewer reading <code>activity.rs</code></div>
+        </div>
+      </div>
+      <div class="rail">
+        <div class="rb"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>Overview</div>
+        <div class="rb"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9"/></svg>Tickets</div>
+        <div class="rb on"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v10H4z"/></svg>Files</div>
+        <div class="rb"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>Events</div>
+      </div>
+    </div>
+  </figure>
+</div>
+
+<ul class="legend">
+  <li><b>Pulsing dot + highlighted row</b>: a read or write is in progress right now. The strip at the bottom repeats what is live so it stays visible while the tree scrolls.</li>
+  <li><b>read / edited</b> badges and counts persist for the life of the ticket, so the tree doubles as a record of what the agent looked at.</li>
+  <li><b>+/− line counts</b> come from the worktree's Git diff against the ticket's base.</li>
+  <li><b>Yellow tag</b> in the rollup: the same file is being touched by more than one agent or ticket.</li>
+  <li><b>Touched / Whole tree</b>: default shows only files the agent touched; the toggle shows the full worktree with touched files marked.</li>
+</ul>
+</body>
+</html>

@@ -14,6 +14,8 @@ pub struct StepUpdate {
     pub title: String,
     pub note: Option<String>,
     pub detail: Option<String>,
+    /// Files a read or edit touched, relative to the working directory when inside it.
+    pub paths: Vec<String>,
 }
 impl StepUpdate {
     fn new(id: impl Into<String>, kind: StepKind, title: impl Into<String>) -> Self {
@@ -25,6 +27,7 @@ impl StepUpdate {
             title: title.into(),
             note: None,
             detail: None,
+            paths: vec![],
         }
     }
 }
@@ -270,6 +273,7 @@ impl CodexSteps {
                     .map(|p| relative(p, &self.cwd))
                     .collect();
                 let mut step = StepUpdate::new(id, StepKind::FileEdit, paths.join(", "));
+                step.paths = paths;
                 if changes.len() > 1 {
                     step.note = Some(format!("{} files", changes.len()));
                 }
@@ -345,6 +349,9 @@ fn claude_tool(id: &str, name: &str, input: &Value, cwd: &str) -> StepUpdate {
         },
     };
     let mut step = StepUpdate::new(id, kind, title);
+    if matches!(kind, StepKind::Read | StepKind::FileEdit) && !step.title.is_empty() {
+        step.paths = vec![step.title.clone()];
+    }
     if step.title.trim().is_empty() {
         name.clone_into(&mut step.title);
     }
@@ -532,6 +539,14 @@ mod tests {
         assert!(failed.detail.as_deref().unwrap().contains("No such file"));
         let edit = actions.iter().find(|s| s.kind == FileEdit).unwrap();
         assert_eq!(edit.note.as_deref(), Some("+1 −1"));
+        // Only read and edit steps name files.
+        assert_eq!(
+            actions
+                .iter()
+                .map(|s| s.paths.join(","))
+                .collect::<Vec<_>>(),
+            ["", "", "", "notes.txt", "notes.txt", "", "", ""]
+        );
         // Redacted thinking produces no step; every narration block finished.
         assert!(steps.iter().all(|s| s.kind != Thinking));
         assert!(
@@ -596,6 +611,7 @@ mod tests {
             Some("✓ Write the module\n◻ Report progress\n◻ Search for TODOs")
         );
         assert_eq!(steps[3].note.as_deref(), Some("+3"));
+        assert_eq!(steps[3].paths, ["src/new.rs"]);
         assert_eq!(
             steps[4].detail.as_deref(),
             Some("Report rejected: missing message_id")
@@ -672,6 +688,8 @@ mod tests {
             && u.detail.as_deref() == Some("running 3 tests\n")));
         assert_eq!(steps[5].note.as_deref(), Some("exit 101"));
         assert_eq!(steps[6].note.as_deref(), Some("2 files"));
+        assert_eq!(steps[6].paths, ["src/lib.rs", "tests/parse.rs"]);
+        assert!(steps[5].paths.is_empty());
         assert_eq!(
             codex.reply().as_deref(),
             Some("Fixed the parser and added a regression test.")

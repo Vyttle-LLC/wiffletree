@@ -53,6 +53,9 @@ pub struct Step {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Files a read or edit step touched, relative to the working directory when inside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     /// Bytes dropped from `detail` to respect `MAX_STEP_DETAIL`.
     #[serde(default)]
     pub omitted: usize,
