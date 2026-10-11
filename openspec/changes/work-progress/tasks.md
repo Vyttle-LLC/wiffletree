@@ -35,7 +35,7 @@
 - [x] 5.1 In `src/conversation.rs`, add `progress_strip` at a fixed height directly under `conversation_header`: the project form for a coordinator (phase, segmented bar, figure, crew button) and the agent form for a worker (step label, bar, own percentage and the ticket's figure). Verify the spec scenarios "Coordinator selected", "Worker selected", "Worker with no plan" and "Steady layout" in the running app.
 - [x] 5.2 In `src/sidebar.rs`, add the 3 px track and the short figure to `project_row`, `ticket_row` and `session_row`, reserving the track on every unarchived row. Verify the scenarios "Rows under one project", "Blocked ticket row" and "Idle agent with no plan", and that a ticket row with a PR line still lays out correctly.
 - [x] 5.3 Create `src/crew_panel.rs` and add `Panel::Crew` in `src/main.rs`, opened by the strip's crew button: ticket cards with stage, percentage and bar, and agent rows with role and focus, model (`models::profile_label`), figure, elapsed time and bar, each linking to its conversation. Verify the spec scenarios "Open the crew", "Archived passed verifier", "Earlier cycle's verifiers" and "Accepted ticket".
-- [x] 5.4 Run the crew panel's 30-second elapsed-time timer only while the panel is open and a listed agent is working. Verify the "Idle panel" scenario in the running app.
+- [x] 5.4 Run the crew panel's 30-second elapsed-time timer only while the panel is open and a listed agent is working. Verify the "Idle panel" scenario with a unit test of the timer's condition in `crew_panel.rs`; a timer that is not running cannot be observed in the app.
 
 ## 6. Docs and validation
 

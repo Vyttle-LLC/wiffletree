@@ -7,6 +7,12 @@ use ui::{card, empty_state, hint, icon, progress_bar, session_icon};
 /// How often the elapsed times redraw while a listed agent works.
 const CREW_TICK: Duration = Duration::from_secs(30);
 
+/// The elapsed-time timer runs only while the crew panel is open and an agent it lists is
+/// working; `sync_crew_clock` starts it on this and each tick stops it when this ends.
+fn clock_runs(panel: Option<Panel>, crew: &[&AgentProgress]) -> bool {
+    panel == Some(Panel::Crew) && crew.iter().any(|agent| agent.working)
+}
+
 impl Workspace {
     /// The selected project's board entry.
     pub(super) fn project_progress(&self) -> Option<&ProjectProgress> {
@@ -121,15 +127,9 @@ impl Workspace {
         )
     }
 
-    /// The crew panel is open and one of the agents it lists is working.
     fn crew_working(&self) -> bool {
-        self.panel == Some(Panel::Crew)
-            && self.project_progress().is_some_and(|project| {
-                self.progress
-                    .crew(project)
-                    .iter()
-                    .any(|agent| agent.working)
-            })
+        let crew = self.project_progress().map(|p| self.progress.crew(p));
+        clock_runs(self.panel, &crew.unwrap_or_default())
     }
 
     /// Redraws the elapsed times every half minute, only while the panel is open and a
@@ -155,5 +155,36 @@ impl Workspace {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use super::{Panel, clock_runs};
+    use workspace_core::{AgentProgress, BarState};
+
+    fn agent(working: bool) -> AgentProgress {
+        AgentProgress {
+            session_id: "agent".into(),
+            state: BarState::InProgress,
+            plan: None,
+            word: None,
+            working,
+            run_started_at: Some(0),
+            run_finished_at: None,
+        }
+    }
+
+    #[test]
+    fn the_crew_timer_runs_only_while_the_panel_is_open_and_a_listed_agent_works() {
+        let (working, idle) = (agent(true), agent(false));
+        assert!(clock_runs(Some(Panel::Crew), &[&idle, &working]));
+        // An idle panel: open, with no listed agent working.
+        assert!(!clock_runs(Some(Panel::Crew), &[&idle]));
+        assert!(!clock_runs(Some(Panel::Crew), &[]));
+        // Closed, or another panel shown, while an agent works.
+        assert!(!clock_runs(None, &[&working]));
+        assert!(!clock_runs(Some(Panel::Team), &[&working]));
     }
 }
