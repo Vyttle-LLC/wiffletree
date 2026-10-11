@@ -52,7 +52,7 @@ pub(super) fn copyable(label: &'static str, value: &str, p: Palette) -> Div {
 impl Panel {
     pub(super) fn available(self, role: Role) -> bool {
         match self {
-            Self::Attention => role == Role::ProjectOrchestrator,
+            Self::Attention | Self::Crew => role == Role::ProjectOrchestrator,
             Self::Team => !role.is_worker(),
             Self::Git => role != Role::ProjectOrchestrator,
             _ => true,
@@ -67,6 +67,7 @@ impl Panel {
             Self::Attention => "inbox",
             Self::Git => "git",
             Self::Files => "folder",
+            Self::Crew => "team",
         }
     }
     fn title(self) -> &'static str {
@@ -78,6 +79,7 @@ impl Panel {
             Self::Attention => "Inbox",
             Self::Git => "Git",
             Self::Files => "Files",
+            Self::Crew => "Crew",
         }
     }
 }
@@ -181,6 +183,7 @@ impl Workspace {
             Panel::Attention => self.attention_panel(p, cx),
             Panel::Git => self.git_panel(p),
             Panel::Files => self.files_panel(p, cx),
+            Panel::Crew => self.crew_panel(p, cx),
         };
         // The Files panel keeps its counts and what is live now in view while its tree scrolls.
         let (head, foot) = match panel {

@@ -1,15 +1,21 @@
 //! The selected session's conversation: header, transcript, notices and composer.
 use super::*;
 use gpui_component::{
-    Disableable,
+    Disableable, Selectable,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
     text::TextView,
 };
-use ui::{age, banner, brand_image, effort_label, hint, humanize, icon, pill, session_icon};
+use ui::{
+    age, banner, brand_image, effort_label, hint, humanize, icon, pill, progress_bar,
+    segmented_bar, session_icon,
+};
 
 /// Wide enough for the composer, narrow enough that message lines stay readable.
 const COLUMN: f32 = 720.;
+/// The progress strip never changes height, so the transcript below it never moves.
+const STRIP_HEIGHT: f32 = 36.;
+const STRIP_BAR: f32 = 6.;
 
 /// Kinds an agent can pass to the host's `report` tool.
 const REPORT_KINDS: [&str; 6] = [
@@ -1031,6 +1037,93 @@ impl Workspace {
             }))
     }
 
+    /// The progress strip pinned under the title: the project for a coordinator, and for any
+    /// other agent its own checklist beside its ticket's figure. Its height is fixed and it
+    /// is always drawn, so a progress change never moves the transcript.
+    fn progress_strip(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+        let project = self
+            .project_progress()
+            .filter(|project| project.coordinator_id == session.id);
+        let strip = div()
+            .flex_none()
+            .h(px(STRIP_HEIGHT))
+            .px_6()
+            .flex()
+            .items_center()
+            .gap_3()
+            .bg(p.surface)
+            .border_b_1()
+            .border_color(p.edge.opacity(0.3))
+            .text_size(px(12.));
+        let (label, bar, figure) = match project {
+            Some(project) => self.project_strip(project, p),
+            None => self.agent_strip(session, p),
+        };
+        strip
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(relative(0.55))
+                    .text_ellipsis()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label),
+            )
+            .child(div().flex_1().min_w(px(80.)).child(bar))
+            .child(div().flex_none().text_color(p.subtle).child(figure))
+            .children(project.map(|project| {
+                let crew = self.progress.crew(project).len();
+                button("crew")
+                    .outline()
+                    .xsmall()
+                    .label(tree::crew_label(crew))
+                    .selected(self.panel == Some(Panel::Crew))
+                    .tooltip("Every ticket and the agents working on it")
+                    .on_click(cx.listener(|v, _, w, c| v.toggle_panel(Panel::Crew, w, c)))
+            }))
+    }
+
+    /// A project's phase, its bar with a segment per ticket, and its figure. Before any
+    /// ticket exists the bar is the coordinator's own.
+    fn project_strip(&self, project: &ProjectProgress, p: Palette) -> (String, Div, String) {
+        let tickets = self.progress.tickets_of(project);
+        let bar = if tickets.is_empty() {
+            progress_bar(project.position, project.state, STRIP_BAR, p)
+        } else {
+            let segments: Vec<_> = tickets.iter().map(|t| (t.position, t.state)).collect();
+            segmented_bar(&segments, STRIP_BAR, p)
+        };
+        (
+            project.phase.label().into(),
+            bar,
+            tree::project_summary(project),
+        )
+    }
+
+    /// An agent's own label and bar, or its ticket's stage and bar when it has nothing of
+    /// its own to show.
+    fn agent_strip(&self, session: &Session, p: Palette) -> (String, Div, String) {
+        let agent = self.progress.agent(&session.id);
+        let ticket = self
+            .ticket_of(&session.id)
+            .and_then(|ticket| self.progress.ticket(&ticket.id));
+        let figure = tree::strip_figure(agent, ticket);
+        let own = agent.and_then(|agent| Some((tree::strip_label(agent)?, agent)));
+        match (own, ticket) {
+            (Some((label, agent)), _) => {
+                let bar = progress_bar(agent.position(), agent.state, STRIP_BAR, p);
+                (label, bar, figure)
+            }
+            (None, Some(ticket)) => {
+                let bar = progress_bar(Some(ticket.position), ticket.state, STRIP_BAR, p);
+                (ticket.stage.label().into(), bar, figure)
+            }
+            (None, None) => {
+                let empty = progress_bar(None, BarState::InProgress, STRIP_BAR, p);
+                (String::new(), empty, figure)
+            }
+        }
+    }
+
     pub(super) fn conversation(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let Some(session) = self.selected_session() else {
             return div();
@@ -1043,6 +1136,7 @@ impl Workspace {
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(p.overlay))
             .on_drop(cx.listener(|v, paths: &ExternalPaths, _, c| v.attach_files(paths.paths(), c)))
             .child(self.conversation_header(session, p, cx))
+            .child(self.progress_strip(session, p, cx))
             .children(self.pagination(p, cx))
             .child(if self.list.item_count() == 0 {
                 self.empty_conversation(session.role, p, cx)

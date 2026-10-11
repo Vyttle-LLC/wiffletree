@@ -6,6 +6,7 @@ mod bridge;
 mod context_view;
 mod conversation;
 mod creation;
+mod crew_panel;
 mod data_dir;
 mod files_view;
 mod history_sheet;
@@ -17,6 +18,7 @@ mod models;
 mod models_view;
 mod palette;
 mod preferences;
+mod progress;
 mod project_name;
 mod repositories_view;
 mod settings;
@@ -58,6 +60,8 @@ enum Panel {
     Attention,
     Git,
     Files,
+    /// Opened from the coordinator's progress strip, not from the rail.
+    Crew,
 }
 
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
@@ -147,6 +151,10 @@ struct Workspace {
     run_summaries: BTreeMap<String, RunSummary>,
     /// What the Files panel shows; fetched only while that panel is open.
     files: files_view::Files,
+    /// How far along every agent, ticket and project is, as the host last derived it.
+    progress: progress::ProgressBoard,
+    progress_fetch: activity::StepFetch,
+    crew_clock: bool,
 }
 impl Workspace {
     fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -258,6 +266,9 @@ impl Workspace {
             history: None,
             run_summaries: BTreeMap::new(),
             files: Default::default(),
+            progress: Default::default(),
+            progress_fetch: Default::default(),
+            crew_clock: false,
         };
         if let Some(changes) = view.bridge.changes() {
             cx.spawn_in(window, async move |this, cx| {
@@ -277,6 +288,7 @@ impl Workspace {
             .detach();
         }
         view.watch_steps(window, cx);
+        view.watch_progress(window, cx);
         view.request(Command::Snapshot, window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
@@ -972,6 +984,7 @@ impl Workspace {
         self.panel = Some(panel);
         self.panel_data = Value::Null;
         self.load_panel(window, cx);
+        self.sync_crew_clock(window, cx);
         cx.notify();
     }
     /// Opens a workspace page in place of the conversation.

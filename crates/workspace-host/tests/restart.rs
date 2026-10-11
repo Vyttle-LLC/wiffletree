@@ -233,4 +233,52 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
         assert!(prompt.contains(&expected), "{expected}\n{prompt}");
     }
     assert!(prompts(scratch.path(), &other.id).is_empty());
+
+    // The worker records a checklist; a restart rebuilds the same board from stored steps.
+    request(
+        &service,
+        Command::Send {
+            id: "plan".into(),
+            sender: None,
+            recipient: worker.id.clone(),
+            body: "JUST_REPLY SET_PLAN".into(),
+            attachments: vec![],
+        },
+    );
+    let board = |service: &Service| -> ProgressPage {
+        serde_json::from_value(request(service, Command::Progress { after: 0 })).unwrap()
+    };
+    let checklist = |page: &ProgressPage| {
+        let agent = page.agents.iter().find(|a| a.session_id == worker.id);
+        agent.and_then(|a| Some((a.plan.as_ref()?.done, a.plan.as_ref()?.total, a.working)))
+    };
+    // The worker's turn result wakes its coordinator; wait for that turn to end as well.
+    until(
+        "the checklist turn and the coordinator's turn after it",
+        || {
+            let page = board(&service);
+            checklist(&page) == Some((3, 6, false)) && page.agents.iter().all(|a| !a.working)
+        },
+    );
+    let before = board(&service);
+    let ticket = &before.tickets[0];
+    assert_eq!(
+        (ticket.stage, ticket.state, percent(ticket.position)),
+        (Stage::Implementing, BarState::InProgress, 30)
+    );
+    drop(service);
+    let mut restarted = None;
+    until("the stopped host to release the store", || {
+        restarted = Service::start(
+            home.path().to_path_buf(),
+            env!("CARGO_BIN_EXE_workspace-host").into(),
+        )
+        .ok();
+        restarted.is_some()
+    });
+    let after = board(&restarted.unwrap());
+    assert_eq!(
+        (after.agents, after.tickets, after.projects),
+        (before.agents, before.tickets, before.projects)
+    );
 }

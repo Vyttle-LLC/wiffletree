@@ -56,6 +56,51 @@ pub(super) fn setting(
         )
         .child(hint(caption, p))
 }
+/// A bar's fill color: green when finished, red when blocked, otherwise `active`.
+pub(super) fn bar_color(state: BarState, active: Hsla, p: Palette) -> Hsla {
+    match state {
+        BarState::Finished => p.green,
+        BarState::Blocked => p.red,
+        BarState::InProgress | BarState::Indeterminate => active,
+    }
+}
+/// A progress track `height` px tall, filled to `position` in its state's color. An
+/// indeterminate bar is striped across its whole width; the stripes do not move.
+pub(super) fn progress_bar(position: Option<u16>, state: BarState, height: f32, p: Palette) -> Div {
+    let track = div()
+        .w_full()
+        .flex_none()
+        .h(px(height))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(p.edge.opacity(0.6));
+    if state == BarState::Indeterminate {
+        let stripes = pattern_slash(p.subtle.opacity(0.75), height, height * 2.);
+        return track.child(div().size_full().bg(stripes));
+    }
+    let filled = f32::from(position.unwrap_or(0)) / f32::from(FULL_POSITION);
+    track.child(
+        div()
+            .h_full()
+            .w(relative(filled))
+            .rounded_full()
+            .bg(bar_color(state, p.focus, p)),
+    )
+}
+/// One bar of equal segments, each filled to its own position in its own state.
+pub(super) fn segmented_bar(segments: &[(u16, BarState)], height: f32, p: Palette) -> Div {
+    let segment = |&(position, state): &(u16, BarState)| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .child(progress_bar(Some(position), state, height, p))
+    };
+    div()
+        .w_full()
+        .flex()
+        .gap(px(2.))
+        .children(segments.iter().map(segment))
+}
 pub(super) fn card(p: Palette) -> Div {
     div()
         .w_full()

@@ -264,6 +264,7 @@ mod tests {
             note: None,
             detail: None,
             paths: vec![path.into()],
+            plan: None,
             omitted: 0,
             seq: revision as u32,
             revision,

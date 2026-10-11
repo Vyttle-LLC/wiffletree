@@ -91,6 +91,9 @@ try:
     else:
         emit({'type':'item.completed','item':{'id':'fixture-say','type':'agent_message','text':'Checking the workspace.'}})
         emit({'type':'item.started','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'','exit_code':None,'status':'in_progress'}})
+    # A checklist is a work step: three of six items done.
+    if 'SET_PLAN' in prompt:
+        assert tool('set_plan',items=[{'text':f'Step {n}','done':n<=3} for n in range(1,7)])=={'done':3,'total':6}
     # A retried turn finishes, so a test can see the redelivered input run.
     if 'HANG_UNTIL_CANCELLED' in prompt and 'Retry of interrupted turn' not in prompt:time.sleep(30)
     if claude: emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'fixture-ls','content':'result.txt'}]}})

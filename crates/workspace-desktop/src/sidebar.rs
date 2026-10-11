@@ -7,8 +7,8 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use ui::{
-    brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, pill, session_icon,
-    status_glyph, status_label, ticket_state_color,
+    bar_color, brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, pill,
+    progress_bar, session_icon, status_glyph, status_label, ticket_state_color,
 };
 
 const INDENT: f32 = 14.;
@@ -447,13 +447,18 @@ impl Workspace {
         }
     }
 
+    /// A tree row. Its children wrap, so a progress track added last takes its own line under
+    /// the label.
     fn row(&self, id: SharedString, depth: usize, selected: bool, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
-            .min_h(px(30.))
+            .min_h(px(36.))
+            .py(px(5.))
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap_2()
+            .gap_x_2()
+            .gap_y(px(3.))
             .pl(px(8. + depth as f32 * INDENT))
             .pr_2()
             .rounded_md()
@@ -499,6 +504,7 @@ impl Workspace {
                 n => format!(" · {n} items need you"),
             }
         );
+        let project = self.progress.project(&project_id);
         let archived = root.archived;
         let archive_id = id.clone();
         let toggle_id = project_id.clone();
@@ -635,6 +641,11 @@ impl Workspace {
                         }),
                 )
             })
+            .children(figure(
+                project.and_then(tree::project_figure),
+                project.map(|project| project.state),
+                p,
+            ))
             // Needs you outranks every other state, so it takes the status slot.
             .child(if attention > 0 {
                 needs_you_badge(attention, p)
@@ -642,6 +653,12 @@ impl Workspace {
                 div()
                     .flex_none()
                     .child(status_glyph(self.shown_status(root), 12., p))
+            })
+            .when(!root.archived, |row| {
+                row.child(track(
+                    project.map(|project| (project.position, project.state)),
+                    p,
+                ))
             })
     }
 
@@ -656,6 +673,7 @@ impl Workspace {
         let id = session.id.clone();
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
         let status = self.shown_status(session);
+        let agent = self.progress.agent(&session.id);
         let detail = format!(
             "{} · {} · {:?} · {}",
             session.name,
@@ -692,7 +710,15 @@ impl Workspace {
                         .child(waiting),
                 )
             })
+            .children(figure(
+                agent.and_then(tree::agent_figure),
+                agent.map(|agent| agent.state),
+                p,
+            ))
             .child(div().flex_none().child(status_glyph(status, 12., p)))
+            .when(!session.archived, |row| {
+                row.child(track(agent.map(|agent| (agent.position(), agent.state)), p))
+            })
     }
 
     fn ticket_row(
@@ -706,6 +732,7 @@ impl Workspace {
         let waiver = tree::waiver_note(ticket);
         let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
         let has_pr = ticket.pull_request.is_some();
+        let progress = self.progress.ticket(&ticket.id);
         let mut detail = format!("{label} · {state}");
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
@@ -758,8 +785,37 @@ impl Workspace {
                 .child(div().text_ellipsis().text_color(p.text).child(label))
                 .children(ticket.pull_request.as_ref().map(|pr| pr_line(pr, p))),
         )
+        .children(figure(
+            progress.and_then(tree::ticket_figure),
+            progress.map(|progress| progress.state),
+            p,
+        ))
         .child(div().flex_none().when(has_pr, |d| d.mt(px(5.))).child(mark))
+        .child(track(
+            progress.map(|progress| (Some(progress.position), progress.state)),
+            p,
+        ))
     }
+}
+
+/// The short progress figure before a row's status glyph, red when blocked and green when
+/// finished.
+fn figure(text: Option<String>, state: Option<BarState>, p: Palette) -> Option<Div> {
+    let color = bar_color(state?, p.subtle, p);
+    Some(
+        div()
+            .flex_none()
+            .text_size(px(11.))
+            .text_color(color)
+            .child(text?),
+    )
+}
+
+/// The thin progress track under a row's label. A row with nothing to show keeps an empty
+/// track, so its height never depends on its progress.
+fn track(progress: Option<(Option<u16>, BarState)>, p: Palette) -> Div {
+    let (position, state) = progress.unwrap_or((None, BarState::InProgress));
+    progress_bar(position, state, 3., p)
 }
 
 /// A ticket row's second line: its PR, muted except for passed or failed checks, a conflict

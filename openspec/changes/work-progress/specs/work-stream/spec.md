@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Provider output becomes work steps
-The host SHALL turn Claude and Codex streamed output into provider-neutral work steps. Each step SHALL have a stable identity within its run, a kind (narration, thinking, command, file edit, tool call, search or plan), a short title, an optional bounded detail and a state: running, succeeded, failed or interrupted. A plan step SHALL also carry its counts as data: the number of items done, the total number of items, and the text of the first unfinished item, bounded like a title. A step that the provider reports in several events SHALL update one step rather than create duplicates. Provider events the host cannot classify SHALL NOT fail the turn.
+The host SHALL turn Claude and Codex streamed output into provider-neutral work steps. Each step SHALL have a stable identity within its run, a kind (narration, thinking, command, file edit, tool call, search or plan), a short title, an optional bounded detail and a state: running, succeeded, failed or interrupted. A plan step SHALL also carry its counts as data: the number of items done, the total number of items, and the text of the first unfinished item, bounded like a title. A checklist an agent records with the workspace tool `set_plan` SHALL become a plan step of its current run in the same form. A step that the provider reports in several events SHALL update one step rather than create duplicates. Provider events the host cannot classify SHALL NOT fail the turn.
 
 #### Scenario: Claude tool call
 - **WHEN** a Claude turn emits a tool use followed by its tool result
@@ -18,6 +18,10 @@ The host SHALL turn Claude and Codex streamed output into provider-neutral work 
 #### Scenario: Plan counts
 - **WHEN** a Claude `TodoWrite` or a Codex `todo_list` lists three items, the first completed and the second "Add a median-of-15 harness"
 - **THEN** the plan step is titled "Plan · 1 of 3 done" and carries 1 done, 3 total and the current item "Add a median-of-15 harness"
+
+#### Scenario: Plan from the workspace tool
+- **WHEN** an agent calls `set_plan` with three items, the first done
+- **THEN** its run shows a plan step titled "Plan · 1 of 3 done" with each item listed in its detail, as a provider plan would
 
 #### Scenario: Plan step stored before this change
 - **WHEN** a stored plan step has no counts
