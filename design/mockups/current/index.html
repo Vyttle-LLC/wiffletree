@@ -1843,6 +1843,36 @@ html&gt;body{padding:0}&lt;/style&gt;
 #celadon-chat .turn-group code,#celadon-chat .ac-narration code{font:12px ui-monospace,SFMono-Regular,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
 #celadon-chat .turn-foot{padding:10px 20px;font-size:10px;color:var(--subtle);border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
 @media(prefers-reduced-motion:reduce){#celadon-chat .ac-body,#celadon-chat .ac-toggle .lucide{transition:none}#celadon-chat .wt-spin,#celadon-chat .step-row.new,#celadon-chat .sheet.turn-sheet{animation:none}#celadon-chat .ac-narration.streaming{animation:none;background:none;color:var(--text)}}
+/* Work progress: strip under the session title, bars in the tree and the crew panel. */
+#celadon-chat .wp-strip{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:40px;padding:8px 28px;background:var(--surface);border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent);font-size:12px}
+#celadon-chat .wp-label{flex:0 1 auto;min-width:0;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#celadon-chat .wp-label b{font-weight:600}
+#celadon-chat .wp-grow{flex:1;min-width:80px}
+#celadon-chat .wp-meta{color:var(--subtle);white-space:nowrap;font-variant-numeric:tabular-nums}
+#celadon-chat .wp-crew{font-size:11px;background:var(--overlay);border:1px solid var(--edge);border-radius:20px;padding:3px 10px;white-space:nowrap}
+#celadon-chat .wp-crew[aria-pressed=true]{background:var(--wash);color:var(--read-accent,var(--accent))}
+#celadon-chat .wp-crew .lucide{width:12px;height:12px}
+#celadon-chat .wp-bar{display:flex;height:6px;border-radius:6px;background:var(--overlay);overflow:hidden}
+#celadon-chat .wp-bar.thin{height:3px;background:color-mix(in srgb,var(--edge) 60%,transparent)}
+#celadon-chat .wp-bar i{display:block;height:100%;background:var(--focus)}
+#celadon-chat .wp-bar i.done{background:var(--green)}
+#celadon-chat .wp-bar i.blocked{background:var(--red)}
+#celadon-chat .wp-bar i.unknown{width:100%;background:repeating-linear-gradient(115deg,var(--muted) 0 6px,transparent 6px 12px)}
+#celadon-chat .wp-bar.seg{gap:2px;background:none}
+#celadon-chat .wp-bar.seg span{flex:1;display:block;background:var(--overlay);border-radius:6px;overflow:hidden}
+#celadon-chat .tree .agent-row.wp-row{flex-wrap:wrap;row-gap:5px}
+#celadon-chat .tree .wp-row&gt;.wp-bar{flex:0 0 100%}
+#celadon-chat .wp-fig{flex:none;font-size:11px;font-weight:400;color:var(--subtle);font-variant-numeric:tabular-nums}
+#celadon-chat .wp-fig.blocked{color:var(--read-red,var(--red))}
+#celadon-chat .wp-fig.done{color:var(--read-green,var(--green))}
+#celadon-chat .wp-card{border:1px solid color-mix(in srgb,var(--edge) 70%,transparent);border-radius:10px;padding:11px;margin-top:10px;background:var(--base)}
+#celadon-chat .wp-card-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px;font-weight:600;margin-bottom:7px}
+#celadon-chat .wp-stage{font-size:11px;font-weight:400;color:var(--subtle);white-space:nowrap;font-variant-numeric:tabular-nums}
+#celadon-chat .wp-agent{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;width:100%;margin-top:6px;padding:6px;border-radius:6px;font-size:12px}
+#celadon-chat .wp-agent .wp-bar{grid-column:1/-1}
+#celadon-chat .wp-agent small{font-size:11px;color:var(--subtle);margin-left:5px}
+#celadon-chat .wp-agent .wp-fig{justify-self:end}
+@media(max-width:540px){#celadon-chat .wp-strip{padding:8px 16px}#celadon-chat .wp-label{max-width:100%}#celadon-chat .tree .task-row.wp-row{height:auto!important}}
 &lt;/style&gt;
 &lt;script&gt;
 (()=&gt;{
@@ -2126,6 +2156,101 @@ root.addEventListener(&#x27;click&#x27;,event=&gt;{
 });
 state.activityMinimized=priv.activityMinimized===true;
 root.addEventListener(&#x27;toggle&#x27;,event=&gt;{const id=event.target.dataset?.step;if(!id)return;event.target.open?openDetails.add(id):openDetails.delete(id);},true);
+
+// Work progress study: bars derived from each agent&#x27;s plan steps and each ticket&#x27;s stage.
+// Sample checklists and stages only. Once an agent&#x27;s scripted turn runs, its plan steps replace its sample checklist.
+const samplePlans={theme:{done:7,total:7},toolbar:{done:2,total:5,current:&#x27;Run the browser integration test&#x27;},profiler:{done:3,total:6,current:&#x27;Trace module init order&#x27;},palette:{done:4,total:5,current:&#x27;Check the contrast report&#x27;}};
+const sampleTickets={chrome:{stage:&#x27;Verifying&#x27;,passed:1,verifiers:3},feature:{stage:&#x27;Implementing&#x27;,implementer:&#x27;profiler&#x27;},paletteRepo:{stage:&#x27;Implementing&#x27;,implementer:&#x27;palette&#x27;}};
+const sampleModels={theme:&#x27;Codex&#x27;,toolbar:&#x27;Codex&#x27;,reviewer:&#x27;Opus&#x27;,profiler:&#x27;Codex&#x27;,baseline:&#x27;Sonnet&#x27;,palette:&#x27;Sonnet&#x27;,verifier:&#x27;Codex&#x27;};
+const sampleMinutes={theme:41,toolbar:18,reviewer:4,profiler:12,baseline:6,palette:23,verifier:9};
+const isTicket=key=&gt;entities[key].role===&#x27;Task orchestrator&#x27;;
+const percent=fraction=&gt;Math.round(fraction*100);
+function turnPlan(turn){
+ const last=revealed(turn).filter(e=&gt;e.k===&#x27;plan&#x27;).at(-1);if(!last)return null;
+ const items=last.d.split(&#x27;\n&#x27;),done=items.filter(i=&gt;i.startsWith(&#x27;✓&#x27;)).length;
+ return {done,total:items.length,current:items.find(i=&gt;!i.startsWith(&#x27;✓&#x27;))?.slice(2)};
+}
+function agentProgress(key){
+ const phase=agentPhase(key),turn=turns[key],live=turn?.events===startupTurn,plan=live?turnPlan(turn):samplePlans[key]||null,fraction=plan?plan.done/plan.total:null;
+ if(phase.kind===&#x27;done&#x27;||(live&amp;&amp;turn.done))return {state:&#x27;done&#x27;,plan,fraction:1,figure:&#x27;done&#x27;};
+ if(phase.label===&#x27;Blocked&#x27;)return {state:&#x27;blocked&#x27;,plan,fraction,figure:&#x27;blocked&#x27;};
+ if(phase.kind===&#x27;working&#x27;&amp;&amp;!plan)return {state:&#x27;unknown&#x27;,plan,fraction,figure:&#x27;working&#x27;};
+ return {state:plan?&#x27;active&#x27;:&#x27;idle&#x27;,plan,fraction,figure:plan?`${plan.done} of ${plan.total}`:&#x27;&#x27;};
+}
+function ticketProgress(key){
+ const t=sampleTickets[key]||{stage:&#x27;Implementing&#x27;,implementer:childKeys(key)[0]};
+ if(t.stage===&#x27;Verifying&#x27;)return {...t,state:&#x27;active&#x27;,fraction:.6+.3*t.passed/t.verifiers};
+ const implementer=t.implementer?agentProgress(t.implementer):null;
+ return {...t,state:implementer?.state===&#x27;unknown&#x27;?&#x27;unknown&#x27;:&#x27;active&#x27;,fraction:.6*(implementer?.fraction||0)};
+}
+function ticketFigure(t){return t.state===&#x27;unknown&#x27;?t.stage.toLowerCase():percent(t.fraction)+&#x27;%&#x27;;}
+function projectProgress(){
+ const tickets=childKeys(&#x27;project&#x27;).filter(isTicket).map(ticketProgress);
+ return {tickets,phase:tickets.some(t=&gt;t.stage===&#x27;Implementing&#x27;)?&#x27;Implementing&#x27;:&#x27;Verifying&#x27;,fraction:tickets.reduce((sum,t)=&gt;sum+t.fraction,0)/tickets.length};
+}
+function ticketOf(key){const owner=taskOwner(key);return owner!==key&amp;&amp;isTicket(owner)?ticketProgress(owner):null;}
+function rowProgress(key){
+ if(key===&#x27;project&#x27;){const p=projectProgress();return {state:&#x27;active&#x27;,fraction:p.fraction,figure:percent(p.fraction)+&#x27;%&#x27;};}
+ if(!isTicket(key))return agentProgress(key);
+ const t=ticketProgress(key);return {...t,figure:t.state===&#x27;unknown&#x27;?&#x27;&#x27;:ticketFigure(t)};
+}
+const tone=p=&gt;p.state===&#x27;done&#x27;||p.state===&#x27;blocked&#x27;?p.state:&#x27;&#x27;;
+function barFill(p){return p.state===&#x27;unknown&#x27;?&#x27;&lt;i class=&quot;unknown&quot;&gt;&lt;/i&gt;&#x27;:`&lt;i class=&quot;${tone(p)}&quot; style=&quot;width:${percent(p.fraction||0)}%&quot;&gt;&lt;/i&gt;`;}
+function progressBar(p,thin){return `&lt;div class=&quot;wp-bar ${thin?&#x27;thin&#x27;:&#x27;&#x27;}&quot; aria-hidden=&quot;true&quot;&gt;${barFill(p)}&lt;/div&gt;`;}
+function progressStrip(){
+ const key=state.entity;let label,bar,meta,crew=&#x27;&#x27;;
+ if(key===&#x27;project&#x27;){
+  const p=projectProgress(),agents=p.tickets.length?childKeys(&#x27;project&#x27;).filter(isTicket).flatMap(childKeys).length:0;
+  label=`&lt;b&gt;${p.phase}&lt;/b&gt;`;bar=`&lt;div class=&quot;wp-bar seg&quot; aria-hidden=&quot;true&quot;&gt;${p.tickets.map(t=&gt;`&lt;span&gt;${barFill(t)}&lt;/span&gt;`).join(&#x27;&#x27;)}&lt;/div&gt;`;
+  meta=`${percent(p.fraction)}% · 0 of ${p.tickets.length} tickets accepted`;
+  crew=button(`${agents} agents ${icon(&#x27;chevron-right&#x27;)}`,`data-crew aria-pressed=&quot;${state.crew===true}&quot; aria-label=&quot;${state.crew?&#x27;Hide&#x27;:&#x27;Show&#x27;} the crew: ${agents} agents&quot;`,&#x27;wp-crew&#x27;);
+ }else if(isTicket(key)){
+  const t=ticketProgress(key);
+  label=`&lt;b&gt;${t.stage}&lt;/b&gt;${t.stage===&#x27;Verifying&#x27;?` · ${t.passed} of ${t.verifiers} verifiers passed`:&#x27;&#x27;}`;bar=progressBar(t);meta=t.state===&#x27;unknown&#x27;?&#x27;&#x27;:ticketFigure(t);
+ }else{
+  const a=agentProgress(key),t=ticketOf(key),ticket=t?`ticket ${ticketFigure(t)}`:&#x27;&#x27;;
+  if(a.state===&#x27;idle&#x27;&amp;&amp;t){label=`&lt;b&gt;${t.stage}&lt;/b&gt;`;bar=progressBar(t);meta=ticket;}
+  else{
+   const step=a.plan&amp;&amp;a.plan.done&lt;a.plan.total?`Step ${a.plan.done+1} of ${a.plan.total}`:&#x27;&#x27;;
+   label=a.state===&#x27;active&#x27;?`&lt;b&gt;${step||`${a.plan.total} of ${a.plan.total}`}&lt;/b&gt;${a.plan.current?` · ${esc(a.plan.current)}`:&#x27;&#x27;}`:`&lt;b&gt;${{unknown:&#x27;Working&#x27;,done:&#x27;Done&#x27;,blocked:&#x27;Blocked&#x27;,idle:&#x27;Idle&#x27;}[a.state]}&lt;/b&gt;${a.state===&#x27;blocked&#x27;&amp;&amp;step?` · ${step.toLowerCase()}`:&#x27;&#x27;}`;
+   bar=progressBar(a);meta=[a.fraction===null||a.state===&#x27;unknown&#x27;?&#x27;&#x27;:percent(a.fraction)+&#x27;%&#x27;,ticket].filter(Boolean).join(&#x27; · &#x27;);
+  }
+ }
+ return `&lt;div class=&quot;wp-strip&quot; data-progress-strip role=&quot;group&quot; aria-label=&quot;Progress&quot;&gt;&lt;span class=&quot;wp-label&quot;&gt;${label}&lt;/span&gt;&lt;div class=&quot;wp-grow&quot;&gt;${bar}&lt;/div&gt;&lt;span class=&quot;wp-meta&quot;&gt;${meta}&lt;/span&gt;${crew}&lt;/div&gt;`;
+}
+function crewPanel(){
+ const e=entities.project,minutes=key=&gt;turns[key]?.events===startupTurn?Math.floor(seconds(turns[key])/60):sampleMinutes[key];
+ const cards=childKeys(&#x27;project&#x27;).filter(isTicket).map(key=&gt;{
+  const t=ticketProgress(key);
+  return `&lt;section class=&quot;wp-card&quot;&gt;&lt;div class=&quot;wp-card-head&quot;&gt;&lt;span&gt;${esc(entities[key].name)}&lt;/span&gt;&lt;span class=&quot;wp-stage&quot;&gt;${t.stage}${t.state===&#x27;unknown&#x27;?&#x27;&#x27;:&#x27; · &#x27;+ticketFigure(t)}&lt;/span&gt;&lt;/div&gt;${progressBar(t,true)}${childKeys(key).map(k=&gt;{const a=agentProgress(k),m=minutes(k);return button(`&lt;span&gt;${esc(entities[k].name)}&lt;small&gt;${esc(sampleModels[k]||entities[k].provider)}&lt;/small&gt;&lt;/span&gt;&lt;span class=&quot;wp-fig ${tone(a)}&quot;&gt;${[a.figure,m===undefined?&#x27;&#x27;:m+&#x27;m&#x27;].filter(Boolean).join(&#x27; · &#x27;)}&lt;/span&gt;${progressBar(a,true)}`,`data-agent=&quot;${k}&quot;`,&#x27;wp-agent&#x27;);}).join(&#x27;&#x27;)}&lt;/section&gt;`;
+ }).join(&#x27;&#x27;);
+ return `&lt;aside class=&quot;inspector&quot; data-crew-panel aria-label=&quot;Crew side panel&quot;&gt;&lt;header class=&quot;inspector-heading&quot;&gt;&lt;div&gt;&lt;div class=&quot;eyebrow&quot;&gt;Project&lt;/div&gt;&lt;h2&gt;Crew&lt;/h2&gt;&lt;div class=&quot;inspector-owner&quot;&gt;${esc(e.name)}&lt;/div&gt;&lt;/div&gt;${button(icon(&#x27;x&#x27;),&#x27;data-crew aria-label=&quot;Close crew panel&quot;&#x27;)}&lt;/header&gt;&lt;div class=&quot;inspector-body&quot;&gt;&lt;p class=&quot;small subtle&quot;&gt;Every ticket and the agents working on it. Sample data.&lt;/p&gt;${cards}&lt;/div&gt;&lt;div class=&quot;pane-handle inspector-handle&quot; role=&quot;separator&quot; aria-label=&quot;Resize inspector&quot; tabindex=&quot;0&quot; data-resize=&quot;inspector&quot;&gt;&lt;/div&gt;&lt;/aside&gt;`;
+}
+tree=function(){
+ function node(key,depth){
+  const e=entities[key],phase=agentPhase(key),p=rowProgress(key),detail=esc(e.name+&#x27; — &#x27;+phase.detail+(p.figure?&#x27; · &#x27;+p.figure:&#x27;&#x27;));
+  return button(`&lt;span class=&quot;tree-leading&quot;&gt;${icon(key===&#x27;project&#x27;?&#x27;orbit&#x27;:isTicket(key)?&#x27;layers-2&#x27;:&#x27;corner-down-right&#x27;)}&lt;/span&gt;&lt;span class=&quot;tree-name&quot;&gt;${esc(e.name)}${isTicket(key)?`&lt;small&gt;${esc(e.repo)}&lt;/small&gt;`:&#x27;&#x27;}&lt;/span&gt;&lt;span class=&quot;wp-fig ${tone(p)}&quot;&gt;${p.figure}&lt;/span&gt;&lt;span class=&quot;agent-state ${phase.kind}&quot;&gt;${icon(phase.symbol)}&lt;/span&gt;${progressBar(p,true)}`,`data-agent=&quot;${key}&quot; aria-label=&quot;${detail}&quot; data-tooltip=&quot;${detail}&quot; aria-pressed=&quot;${state.entity===key}&quot;`,`depth${depth} agent-row wp-row ${isTicket(key)?&#x27;task-row&#x27;:&#x27;&#x27;} ${phase.kind===&#x27;input&#x27;?&#x27;needs-input&#x27;:&#x27;&#x27;} ${state.entity===key?&#x27;tree-selected&#x27;:&#x27;&#x27;}`)+childKeys(key).map(k=&gt;node(k,depth+1)).join(&#x27;&#x27;);
+ }
+ return node(&#x27;project&#x27;,0);
+};
+let shownProgress=&#x27;&#x27;;
+const progressMarkup=()=&gt;progressStrip()+tree()+(state.crew?crewPanel():&#x27;&#x27;);
+const turnRender=render,turnRefresh=refreshTurn;
+render=function(){
+ if(state.entity!==&#x27;project&#x27;||state.view!==&#x27;chat&#x27;)state.crew=false;
+ turnRender();
+ root.querySelector(&#x27;.sessionbar&#x27;).insertAdjacentHTML(&#x27;afterend&#x27;,progressStrip());
+ if(state.crew){const layout=root.querySelector(&#x27;.conversation-layout&#x27;);layout.classList.add(&#x27;inspector-open&#x27;);layout.querySelector(&#x27;.toolrail&#x27;).insertAdjacentHTML(&#x27;beforebegin&#x27;,crewPanel());}
+ shownProgress=progressMarkup();icons();
+};
+// A turn tick redraws the bars only when a figure changed, as the app would on a progress signal.
+refreshTurn=function(key){
+ turnRefresh(key);const markup=progressMarkup();if(markup===shownProgress)return;shownProgress=markup;
+ root.querySelector(&#x27;[data-progress-strip]&#x27;).outerHTML=progressStrip();root.querySelector(&#x27;.tree&#x27;).innerHTML=tree();
+ const crew=root.querySelector(&#x27;[data-crew-panel]&#x27;);if(crew)crew.outerHTML=crewPanel();
+ icons();
+};
+root.addEventListener(&#x27;click&#x27;,event=&gt;{if(!event.target.closest(&#x27;[data-crew]&#x27;))return;state.crew=!state.crew;state.view=&#x27;chat&#x27;;render();});
 
 render();
 if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:render});tweak.addToggle(design,&#x27;atmosphere&#x27;,{label:&#x27;Ambient color&#x27;});tweak.addSlider(design,&#x27;radius&#x27;,{label:&#x27;Window corner radius&#x27;,min:4,max:24,unit:&#x27;px&#x27;});tweak.addSlider(design,&#x27;spacing&#x27;,{label:&#x27;Workspace spacing&#x27;,min:14,max:24,unit:&#x27;px&#x27;});}

@@ -304,6 +304,36 @@
 #celadon-chat .turn-group code,#celadon-chat .ac-narration code{font:12px ui-monospace,SFMono-Regular,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
 #celadon-chat .turn-foot{padding:10px 20px;font-size:10px;color:var(--subtle);border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
 @media(prefers-reduced-motion:reduce){#celadon-chat .ac-body,#celadon-chat .ac-toggle .lucide{transition:none}#celadon-chat .wt-spin,#celadon-chat .step-row.new,#celadon-chat .sheet.turn-sheet{animation:none}#celadon-chat .ac-narration.streaming{animation:none;background:none;color:var(--text)}}
+/* Work progress: strip under the session title, bars in the tree and the crew panel. */
+#celadon-chat .wp-strip{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:40px;padding:8px 28px;background:var(--surface);border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent);font-size:12px}
+#celadon-chat .wp-label{flex:0 1 auto;min-width:0;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#celadon-chat .wp-label b{font-weight:600}
+#celadon-chat .wp-grow{flex:1;min-width:80px}
+#celadon-chat .wp-meta{color:var(--subtle);white-space:nowrap;font-variant-numeric:tabular-nums}
+#celadon-chat .wp-crew{font-size:11px;background:var(--overlay);border:1px solid var(--edge);border-radius:20px;padding:3px 10px;white-space:nowrap}
+#celadon-chat .wp-crew[aria-pressed=true]{background:var(--wash);color:var(--read-accent,var(--accent))}
+#celadon-chat .wp-crew .lucide{width:12px;height:12px}
+#celadon-chat .wp-bar{display:flex;height:6px;border-radius:6px;background:var(--overlay);overflow:hidden}
+#celadon-chat .wp-bar.thin{height:3px;background:color-mix(in srgb,var(--edge) 60%,transparent)}
+#celadon-chat .wp-bar i{display:block;height:100%;background:var(--focus)}
+#celadon-chat .wp-bar i.done{background:var(--green)}
+#celadon-chat .wp-bar i.blocked{background:var(--red)}
+#celadon-chat .wp-bar i.unknown{width:100%;background:repeating-linear-gradient(115deg,var(--muted) 0 6px,transparent 6px 12px)}
+#celadon-chat .wp-bar.seg{gap:2px;background:none}
+#celadon-chat .wp-bar.seg span{flex:1;display:block;background:var(--overlay);border-radius:6px;overflow:hidden}
+#celadon-chat .tree .agent-row.wp-row{flex-wrap:wrap;row-gap:5px}
+#celadon-chat .tree .wp-row>.wp-bar{flex:0 0 100%}
+#celadon-chat .wp-fig{flex:none;font-size:11px;font-weight:400;color:var(--subtle);font-variant-numeric:tabular-nums}
+#celadon-chat .wp-fig.blocked{color:var(--read-red,var(--red))}
+#celadon-chat .wp-fig.done{color:var(--read-green,var(--green))}
+#celadon-chat .wp-card{border:1px solid color-mix(in srgb,var(--edge) 70%,transparent);border-radius:10px;padding:11px;margin-top:10px;background:var(--base)}
+#celadon-chat .wp-card-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px;font-weight:600;margin-bottom:7px}
+#celadon-chat .wp-stage{font-size:11px;font-weight:400;color:var(--subtle);white-space:nowrap;font-variant-numeric:tabular-nums}
+#celadon-chat .wp-agent{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;width:100%;margin-top:6px;padding:6px;border-radius:6px;font-size:12px}
+#celadon-chat .wp-agent .wp-bar{grid-column:1/-1}
+#celadon-chat .wp-agent small{font-size:11px;color:var(--subtle);margin-left:5px}
+#celadon-chat .wp-agent .wp-fig{justify-self:end}
+@media(max-width:540px){#celadon-chat .wp-strip{padding:8px 16px}#celadon-chat .wp-label{max-width:100%}#celadon-chat .tree .task-row.wp-row{height:auto!important}}
 </style>
 <script>
 (()=>{
@@ -587,6 +617,101 @@ root.addEventListener('click',event=>{
 });
 state.activityMinimized=priv.activityMinimized===true;
 root.addEventListener('toggle',event=>{const id=event.target.dataset?.step;if(!id)return;event.target.open?openDetails.add(id):openDetails.delete(id);},true);
+
+// Work progress study: bars derived from each agent's plan steps and each ticket's stage.
+// Sample checklists and stages only. Once an agent's scripted turn runs, its plan steps replace its sample checklist.
+const samplePlans={theme:{done:7,total:7},toolbar:{done:2,total:5,current:'Run the browser integration test'},profiler:{done:3,total:6,current:'Trace module init order'},palette:{done:4,total:5,current:'Check the contrast report'}};
+const sampleTickets={chrome:{stage:'Verifying',passed:1,verifiers:3},feature:{stage:'Implementing',implementer:'profiler'},paletteRepo:{stage:'Implementing',implementer:'palette'}};
+const sampleModels={theme:'Codex',toolbar:'Codex',reviewer:'Opus',profiler:'Codex',baseline:'Sonnet',palette:'Sonnet',verifier:'Codex'};
+const sampleMinutes={theme:41,toolbar:18,reviewer:4,profiler:12,baseline:6,palette:23,verifier:9};
+const isTicket=key=>entities[key].role==='Task orchestrator';
+const percent=fraction=>Math.round(fraction*100);
+function turnPlan(turn){
+ const last=revealed(turn).filter(e=>e.k==='plan').at(-1);if(!last)return null;
+ const items=last.d.split('\n'),done=items.filter(i=>i.startsWith('✓')).length;
+ return {done,total:items.length,current:items.find(i=>!i.startsWith('✓'))?.slice(2)};
+}
+function agentProgress(key){
+ const phase=agentPhase(key),turn=turns[key],live=turn?.events===startupTurn,plan=live?turnPlan(turn):samplePlans[key]||null,fraction=plan?plan.done/plan.total:null;
+ if(phase.kind==='done'||(live&&turn.done))return {state:'done',plan,fraction:1,figure:'done'};
+ if(phase.label==='Blocked')return {state:'blocked',plan,fraction,figure:'blocked'};
+ if(phase.kind==='working'&&!plan)return {state:'unknown',plan,fraction,figure:'working'};
+ return {state:plan?'active':'idle',plan,fraction,figure:plan?`${plan.done} of ${plan.total}`:''};
+}
+function ticketProgress(key){
+ const t=sampleTickets[key]||{stage:'Implementing',implementer:childKeys(key)[0]};
+ if(t.stage==='Verifying')return {...t,state:'active',fraction:.6+.3*t.passed/t.verifiers};
+ const implementer=t.implementer?agentProgress(t.implementer):null;
+ return {...t,state:implementer?.state==='unknown'?'unknown':'active',fraction:.6*(implementer?.fraction||0)};
+}
+function ticketFigure(t){return t.state==='unknown'?t.stage.toLowerCase():percent(t.fraction)+'%';}
+function projectProgress(){
+ const tickets=childKeys('project').filter(isTicket).map(ticketProgress);
+ return {tickets,phase:tickets.some(t=>t.stage==='Implementing')?'Implementing':'Verifying',fraction:tickets.reduce((sum,t)=>sum+t.fraction,0)/tickets.length};
+}
+function ticketOf(key){const owner=taskOwner(key);return owner!==key&&isTicket(owner)?ticketProgress(owner):null;}
+function rowProgress(key){
+ if(key==='project'){const p=projectProgress();return {state:'active',fraction:p.fraction,figure:percent(p.fraction)+'%'};}
+ if(!isTicket(key))return agentProgress(key);
+ const t=ticketProgress(key);return {...t,figure:t.state==='unknown'?'':ticketFigure(t)};
+}
+const tone=p=>p.state==='done'||p.state==='blocked'?p.state:'';
+function barFill(p){return p.state==='unknown'?'<i class="unknown"></i>':`<i class="${tone(p)}" style="width:${percent(p.fraction||0)}%"></i>`;}
+function progressBar(p,thin){return `<div class="wp-bar ${thin?'thin':''}" aria-hidden="true">${barFill(p)}</div>`;}
+function progressStrip(){
+ const key=state.entity;let label,bar,meta,crew='';
+ if(key==='project'){
+  const p=projectProgress(),agents=p.tickets.length?childKeys('project').filter(isTicket).flatMap(childKeys).length:0;
+  label=`<b>${p.phase}</b>`;bar=`<div class="wp-bar seg" aria-hidden="true">${p.tickets.map(t=>`<span>${barFill(t)}</span>`).join('')}</div>`;
+  meta=`${percent(p.fraction)}% · 0 of ${p.tickets.length} tickets accepted`;
+  crew=button(`${agents} agents ${icon('chevron-right')}`,`data-crew aria-pressed="${state.crew===true}" aria-label="${state.crew?'Hide':'Show'} the crew: ${agents} agents"`,'wp-crew');
+ }else if(isTicket(key)){
+  const t=ticketProgress(key);
+  label=`<b>${t.stage}</b>${t.stage==='Verifying'?` · ${t.passed} of ${t.verifiers} verifiers passed`:''}`;bar=progressBar(t);meta=t.state==='unknown'?'':ticketFigure(t);
+ }else{
+  const a=agentProgress(key),t=ticketOf(key),ticket=t?`ticket ${ticketFigure(t)}`:'';
+  if(a.state==='idle'&&t){label=`<b>${t.stage}</b>`;bar=progressBar(t);meta=ticket;}
+  else{
+   const step=a.plan&&a.plan.done<a.plan.total?`Step ${a.plan.done+1} of ${a.plan.total}`:'';
+   label=a.state==='active'?`<b>${step||`${a.plan.total} of ${a.plan.total}`}</b>${a.plan.current?` · ${esc(a.plan.current)}`:''}`:`<b>${{unknown:'Working',done:'Done',blocked:'Blocked',idle:'Idle'}[a.state]}</b>${a.state==='blocked'&&step?` · ${step.toLowerCase()}`:''}`;
+   bar=progressBar(a);meta=[a.fraction===null||a.state==='unknown'?'':percent(a.fraction)+'%',ticket].filter(Boolean).join(' · ');
+  }
+ }
+ return `<div class="wp-strip" data-progress-strip role="group" aria-label="Progress"><span class="wp-label">${label}</span><div class="wp-grow">${bar}</div><span class="wp-meta">${meta}</span>${crew}</div>`;
+}
+function crewPanel(){
+ const e=entities.project,minutes=key=>turns[key]?.events===startupTurn?Math.floor(seconds(turns[key])/60):sampleMinutes[key];
+ const cards=childKeys('project').filter(isTicket).map(key=>{
+  const t=ticketProgress(key);
+  return `<section class="wp-card"><div class="wp-card-head"><span>${esc(entities[key].name)}</span><span class="wp-stage">${t.stage}${t.state==='unknown'?'':' · '+ticketFigure(t)}</span></div>${progressBar(t,true)}${childKeys(key).map(k=>{const a=agentProgress(k),m=minutes(k);return button(`<span>${esc(entities[k].name)}<small>${esc(sampleModels[k]||entities[k].provider)}</small></span><span class="wp-fig ${tone(a)}">${[a.figure,m===undefined?'':m+'m'].filter(Boolean).join(' · ')}</span>${progressBar(a,true)}`,`data-agent="${k}"`,'wp-agent');}).join('')}</section>`;
+ }).join('');
+ return `<aside class="inspector" data-crew-panel aria-label="Crew side panel"><header class="inspector-heading"><div><div class="eyebrow">Project</div><h2>Crew</h2><div class="inspector-owner">${esc(e.name)}</div></div>${button(icon('x'),'data-crew aria-label="Close crew panel"')}</header><div class="inspector-body"><p class="small subtle">Every ticket and the agents working on it. Sample data.</p>${cards}</div><div class="pane-handle inspector-handle" role="separator" aria-label="Resize inspector" tabindex="0" data-resize="inspector"></div></aside>`;
+}
+tree=function(){
+ function node(key,depth){
+  const e=entities[key],phase=agentPhase(key),p=rowProgress(key),detail=esc(e.name+' — '+phase.detail+(p.figure?' · '+p.figure:''));
+  return button(`<span class="tree-leading">${icon(key==='project'?'orbit':isTicket(key)?'layers-2':'corner-down-right')}</span><span class="tree-name">${esc(e.name)}${isTicket(key)?`<small>${esc(e.repo)}</small>`:''}</span><span class="wp-fig ${tone(p)}">${p.figure}</span><span class="agent-state ${phase.kind}">${icon(phase.symbol)}</span>${progressBar(p,true)}`,`data-agent="${key}" aria-label="${detail}" data-tooltip="${detail}" aria-pressed="${state.entity===key}"`,`depth${depth} agent-row wp-row ${isTicket(key)?'task-row':''} ${phase.kind==='input'?'needs-input':''} ${state.entity===key?'tree-selected':''}`)+childKeys(key).map(k=>node(k,depth+1)).join('');
+ }
+ return node('project',0);
+};
+let shownProgress='';
+const progressMarkup=()=>progressStrip()+tree()+(state.crew?crewPanel():'');
+const turnRender=render,turnRefresh=refreshTurn;
+render=function(){
+ if(state.entity!=='project'||state.view!=='chat')state.crew=false;
+ turnRender();
+ root.querySelector('.sessionbar').insertAdjacentHTML('afterend',progressStrip());
+ if(state.crew){const layout=root.querySelector('.conversation-layout');layout.classList.add('inspector-open');layout.querySelector('.toolrail').insertAdjacentHTML('beforebegin',crewPanel());}
+ shownProgress=progressMarkup();icons();
+};
+// A turn tick redraws the bars only when a figure changed, as the app would on a progress signal.
+refreshTurn=function(key){
+ turnRefresh(key);const markup=progressMarkup();if(markup===shownProgress)return;shownProgress=markup;
+ root.querySelector('[data-progress-strip]').outerHTML=progressStrip();root.querySelector('.tree').innerHTML=tree();
+ const crew=root.querySelector('[data-crew-panel]');if(crew)crew.outerHTML=crewPanel();
+ icons();
+};
+root.addEventListener('click',event=>{if(!event.target.closest('[data-crew]'))return;state.crew=!state.crew;state.view='chat';render();});
 
 render();
 if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:render});tweak.addToggle(design,'atmosphere',{label:'Ambient color'});tweak.addSlider(design,'radius',{label:'Window corner radius',min:4,max:24,unit:'px'});tweak.addSlider(design,'spacing',{label:'Workspace spacing',min:14,max:24,unit:'px'});}
