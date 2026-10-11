@@ -2762,6 +2762,24 @@ mod tests {
     }
 
     #[test]
+    fn a_held_turns_report_is_not_a_question_waiting() {
+        let (_home, mut actor, reviewer, _) = codex_reviewer_on_a_disabled_provider();
+        actor.schedule().unwrap();
+        let held: i64 = actor
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender=?1 AND id LIKE 'report:%:turn-held:%'",
+                [&reviewer.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(held, 1);
+        let snapshot = actor.host.snapshot().unwrap();
+        assert_eq!(snapshot.questions_waiting(&reviewer.id), 0);
+    }
+
+    #[test]
     fn a_paused_coordinators_long_queue_does_not_hide_a_runnable_worker() {
         let (_home, mut actor, reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
         for n in 0..101 {

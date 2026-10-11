@@ -306,9 +306,10 @@ impl Host {
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
-    /// leaves the question waiting and a restart changes nothing.
+    /// leaves the question waiting and a restart changes nothing. The host's own `turn-held:`
+    /// reports are not the agent's questions.
     pub(crate) fn questions_waiting(&self) -> Result<Vec<QuestionsWaiting>> {
-        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND s.parent_id=r.recipient WHERE substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND a.sender=r.recipient AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
+        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND s.parent_id=r.recipient WHERE substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.id,length(r.sender)+9,10)<>'turn-held:' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND a.sender=r.recipient AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
         Ok(self.db.prepare("SELECT recipient,SUM(receipt='held'),SUM(receipt='queued' AND quiet=0) FROM messages WHERE receipt IN ('held','queued') GROUP BY recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
