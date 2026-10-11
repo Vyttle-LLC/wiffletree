@@ -14,7 +14,7 @@ const MAX_LIVE: usize = 4;
 
 /// A row of the file tree. A directory with a single directory inside is one row, "core/src".
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Node {
+struct Node {
     name: String,
     /// The path from the tree's root; for a file, the path it was built from.
     path: String,
@@ -24,7 +24,7 @@ pub(super) struct Node {
 
 /// Builds the tree from flat paths: shared directories merge, and directories sort before
 /// files, each by name, so rows stay put as activity changes.
-pub(super) fn tree<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<Node> {
+fn tree<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<Node> {
     #[derive(Default)]
     struct Dir<'a> {
         dirs: BTreeMap<&'a str, Dir<'a>>,
@@ -144,6 +144,19 @@ fn shared(report: &[TicketFiles], ticket: &TicketFiles, path: &str) -> Option<St
         .map(|t| format!("also in {}", t.title))
 }
 
+/// The ticket's changed files its tree lists. Only the implementer writes in the worktree,
+/// so changes no step named, such as a shell command's, are its own; a verifier's view keeps
+/// to the files it touched.
+fn listed_changes(ticket: &TicketFiles, rollup: bool) -> impl Iterator<Item = &LineCount> {
+    let writer = |a: &AgentFiles| a.role == Role::Implementer;
+    let all = rollup || ticket.agents.first().is_some_and(writer);
+    let touched = move |change: &&LineCount| {
+        let named = |a: &AgentFiles| a.files.iter().any(|f| f.path == change.path);
+        all || ticket.agents.iter().any(named)
+    };
+    ticket.changes.iter().filter(touched)
+}
+
 fn groups(report: &[TicketFiles], rollup: bool, by_agent: bool) -> Vec<Group> {
     let mut groups = vec![];
     for ticket in report {
@@ -192,17 +205,9 @@ fn groups(report: &[TicketFiles], rollup: bool, by_agent: bool) -> Vec<Group> {
                 }
             }
         }
-        // Only the implementer writes in the worktree, so changes no step named, such as a
-        // shell command's, are its own. A verifier's view keeps to the files it touched.
-        let writer = |a: &AgentFiles| a.role == Role::Implementer;
-        let all_changes = rollup || ticket.agents.first().is_some_and(writer);
-        for change in &ticket.changes {
-            let lines = Some((change.added, change.removed));
-            if all_changes {
-                marks.entry(change.path.clone()).or_default().lines = lines;
-            } else if let Some(mark) = marks.get_mut(&change.path) {
-                mark.lines = lines;
-            }
+        for change in listed_changes(ticket, rollup) {
+            marks.entry(change.path.clone()).or_default().lines =
+                Some((change.added, change.removed));
         }
         let listed = ticket.tree.iter().flatten().map(String::as_str);
         groups.push(Group {
@@ -241,7 +246,7 @@ fn summary(report: &[TicketFiles], rollup: bool) -> Option<String> {
             "{} · {} read · {} changed this ticket",
             ticket.repository,
             read.count(),
-            ticket.changes.len()
+            listed_changes(ticket, rollup).count()
         ));
     }
     let agents = || report.iter().flat_map(|t| &t.agents);
@@ -262,7 +267,6 @@ pub(super) struct Files {
     rollup: bool,
     report: Vec<TicketFiles>,
     groups: Vec<Group>,
-    live: Vec<Live>,
     whole_tree: bool,
     by_agent: bool,
     /// Why the last request failed; shown until one succeeds.
@@ -273,7 +277,48 @@ pub(super) struct Files {
 impl Files {
     fn regroup(&mut self) {
         self.groups = groups(&self.report, self.rollup, self.by_agent);
-        self.live = live(&self.report, self.rollup);
+    }
+    /// The request for the session's files and how long to wait before sending it, only
+    /// while the Files panel is the one showing.
+    fn request(
+        &mut self,
+        panel: Option<Panel>,
+        session_id: &str,
+        agent: bool,
+    ) -> Option<(Command, Duration)> {
+        if panel != Some(Panel::Files) {
+            return None;
+        }
+        let wait = self.fetch.begin(FILES_PACE)?;
+        let command = Command::Files {
+            session_id: session_id.to_owned(),
+            whole_tree: agent && self.whole_tree,
+        };
+        Some((command, wait))
+    }
+    /// The title and text of the empty state standing in for the tree, if it has no rows.
+    fn blank(&self) -> Option<(&'static str, String)> {
+        let (title, text) = if let Some(error) = &self.error {
+            return Some(("Files unavailable", error.clone()));
+        } else if self.groups.is_empty() && self.rollup {
+            (
+                "No open tickets",
+                "Tickets appear here with the files their agents read and change.",
+            )
+        } else if self.groups.is_empty() {
+            (
+                "No ticket",
+                "Files appear here for agents working in a ticket's worktree.",
+            )
+        } else if !self.rollup && self.groups[0].nodes.is_empty() {
+            (
+                "Nothing touched yet",
+                "Files this agent reads or edits appear here as it works.",
+            )
+        } else {
+            return None;
+        };
+        Some((title, text.to_owned()))
     }
     fn is_open(&self, group: &Group, dir: &Node) -> bool {
         let inside = format!("{}/", dir.path);
@@ -350,19 +395,12 @@ fn badge(mark: &Mark, p: Palette) -> Option<Div> {
 impl Workspace {
     /// Asks for the selected session's files, only while the Files panel shows them.
     pub(super) fn fetch_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panel != Some(Panel::Files) {
-            return;
-        }
         let Some(session) = self.selected_session() else {
             return;
         };
         let (session_id, agent) = (session.id.clone(), session.role.is_worker());
-        let Some(wait) = self.files.fetch.begin(FILES_PACE) else {
+        let Some((command, wait)) = self.files.request(self.panel, &session_id, agent) else {
             return;
-        };
-        let command = Command::Files {
-            session_id: session_id.clone(),
-            whole_tree: agent && self.files.whole_tree,
         };
         let reply = paced_reply(
             self.bridge.clone(),
@@ -472,7 +510,8 @@ impl Workspace {
 
     /// What is being read and written now, pinned under the tree.
     pub(super) fn files_live(&self, p: Palette) -> Option<Div> {
-        let live = &self.files()?.live;
+        let files = self.files()?;
+        let live = live(&files.report, files.rollup);
         if live.is_empty() {
             return None;
         }
@@ -513,33 +552,8 @@ impl Workspace {
         let Some(files) = self.files() else {
             return hint("Loading files…", p);
         };
-        if let Some(error) = &files.error {
-            return empty_state("folder", "Files unavailable", error.clone(), p);
-        }
-        if files.groups.is_empty() {
-            return if files.rollup {
-                empty_state(
-                    "folder",
-                    "No open tickets",
-                    "Tickets appear here with the files their agents read and change.",
-                    p,
-                )
-            } else {
-                empty_state(
-                    "folder",
-                    "No ticket",
-                    "Files appear here for agents working in a ticket's worktree.",
-                    p,
-                )
-            };
-        }
-        if !files.rollup && files.groups[0].nodes.is_empty() {
-            return empty_state(
-                "folder",
-                "Nothing touched yet",
-                "Files this agent reads or edits appear here as it works.",
-                p,
-            );
+        if let Some((title, text)) = files.blank() {
+            return empty_state("folder", title, text, p);
         }
         let mut rows = vec![];
         for group in &files.groups {
@@ -701,8 +715,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Files, Group, Node, groups, row_key, tree};
-    use workspace_core::{AgentFiles, FileActivity, LineCount, Role, TicketFiles};
+    use super::{Files, Group, Live, Node, Panel, groups, live, row_key, summary, tree};
+    use workspace_core::{AgentFiles, Command, FileActivity, LineCount, Role, TicketFiles};
 
     /// The tree as indented names, directories ending in "/".
     fn outline(nodes: &[Node], depth: usize, out: &mut Vec<String>) {
@@ -918,5 +932,154 @@ mod tests {
         ];
         assert_eq!(paths(vec![agent("Implementer", &[])], false), every_change);
         assert_eq!(paths(vec![agent("Reviewer", &[])], true), every_change);
+    }
+
+    fn files_of(report: Vec<TicketFiles>, rollup: bool) -> Files {
+        let mut files = Files {
+            rollup,
+            report,
+            ..Default::default()
+        };
+        files.regroup();
+        files
+    }
+
+    #[test]
+    fn the_header_counts_the_changes_the_tree_lists_for_the_viewing_role() {
+        let report = |agents| {
+            let mut report = vec![ticket("Panel", "web", agents)];
+            let count = |path: &str| LineCount {
+                path: path.into(),
+                added: 1,
+                removed: 0,
+            };
+            report[0].changes = vec![count("src/a.rs"), count("gen/out.rs"), count("docs/x.md")];
+            report
+        };
+        let head = |agents, rollup| summary(&report(agents), rollup).unwrap();
+        let touched = &[("src/a.rs", 1, 0), ("src/b.rs", 1, 0)];
+        assert_eq!(
+            head(vec![agent("Reviewer", touched)], false),
+            "web · 2 read · 1 changed this ticket"
+        );
+        assert_eq!(
+            head(vec![agent("Reviewer", &[])], false),
+            "web · 0 read · 0 changed this ticket"
+        );
+        assert_eq!(
+            head(vec![agent("Implementer", touched)], false),
+            "web · 2 read · 3 changed this ticket"
+        );
+        assert_eq!(
+            head(
+                vec![agent("Implementer", &[]), agent("Reviewer", &[])],
+                true
+            ),
+            "1 tickets · 2 agents · 0 working now"
+        );
+        assert_eq!(summary(&[], false), None);
+    }
+
+    #[test]
+    fn the_live_strip_lists_files_being_read_or_written_and_names_agents_only_in_the_rollup() {
+        let mut busy = agent("Implementer", &[("src/done.rs", 1, 0)]);
+        busy.files.push(FileActivity {
+            path: "crates/core/src/steps.rs".into(),
+            reading: true,
+            ..Default::default()
+        });
+        busy.files.push(FileActivity {
+            path: "README.md".into(),
+            writing: true,
+            ..Default::default()
+        });
+        let report = [ticket("Panel", "web", vec![busy])];
+        let entry = |who: Option<&str>, writing, file: &str| Live {
+            who: who.map(str::to_owned),
+            writing,
+            file: file.into(),
+        };
+        assert_eq!(
+            live(&report, false),
+            [
+                entry(None, false, "steps.rs"),
+                entry(None, true, "README.md")
+            ]
+        );
+        assert_eq!(
+            live(&report, true),
+            [
+                entry(Some("Implementer"), false, "steps.rs"),
+                entry(Some("Implementer"), true, "README.md")
+            ]
+        );
+        assert!(live(&[ticket("Idle", "web", vec![agent("Reviewer", &[])])], true).is_empty());
+    }
+
+    #[test]
+    fn nothing_is_requested_while_the_panel_is_closed_and_a_closed_panel_does_not_use_up_the_pace()
+    {
+        let mut files = Files::default();
+        assert!(files.request(None, "agent", true).is_none());
+        assert!(files.request(Some(Panel::Git), "agent", true).is_none());
+        // Opening the panel afterwards still gets its request at once.
+        let (command, wait) = files.request(Some(Panel::Files), "agent", true).unwrap();
+        assert!(matches!(
+            command,
+            Command::Files {
+                whole_tree: false,
+                ..
+            }
+        ));
+        assert!(wait.is_zero());
+        // One request at a time: a second owes another instead of going out.
+        assert!(files.request(Some(Panel::Files), "agent", true).is_none());
+        assert!(files.fetch.finish());
+
+        files.whole_tree = true;
+        let (agent_asks, _) = files.request(Some(Panel::Files), "agent", true).unwrap();
+        assert!(matches!(
+            agent_asks,
+            Command::Files {
+                whole_tree: true,
+                ..
+            }
+        ));
+        files.fetch.finish();
+        let (coordinator_asks, _) = files.request(Some(Panel::Files), "pm", false).unwrap();
+        assert!(matches!(
+            coordinator_asks,
+            Command::Files {
+                whole_tree: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_empty_tree_says_why_and_a_failed_fetch_says_what_failed() {
+        let blank = |files: &Files| files.blank().map(|(title, _)| title);
+        assert_eq!(blank(&files_of(vec![], true)), Some("No open tickets"));
+        assert_eq!(blank(&files_of(vec![], false)), Some("No ticket"));
+        let untouched = vec![ticket("Panel", "web", vec![agent("Reviewer", &[])])];
+        assert_eq!(
+            blank(&files_of(untouched.clone(), false)),
+            Some("Nothing touched yet")
+        );
+        // The rollup shows each ticket's own heading even when its agents touched nothing.
+        assert_eq!(blank(&files_of(untouched, true)), None);
+        let worked = vec![ticket(
+            "Panel",
+            "web",
+            vec![agent("Reviewer", &[("a.rs", 1, 0)])],
+        )];
+        assert_eq!(blank(&files_of(worked, false)), None);
+
+        let mut failed = files_of(vec![], false);
+        failed.error = Some("host is gone".into());
+        assert_eq!(
+            failed.blank(),
+            Some(("Files unavailable", "host is gone".into()))
+        );
     }
 }

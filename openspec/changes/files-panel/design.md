@@ -10,7 +10,7 @@ See proposal.md for why and `ui/mockups.html` for the approved look. At origin/m
 A Claude tool call is first announced with empty input, and its path arrives with the complete message while the step is still running. `record_step` therefore also writes the step when its paths change. That is one more write per file tool call, and it keeps the store the only source: the file queries never read a running turn's memory.
 
 ### 2. File activity is a tally over stored steps
-`Host::file_activity(session)` tallies the session's `read` and `file_edit` steps across all runs in one SQL query, per path: succeeded reads, succeeded edits, and whether a step on it is `Running`. Failed and interrupted steps count nothing, so a file whose only read failed is not listed. The result is sorted by path. It uses the existing `steps_session` index to find the session's steps and decodes none of them in Rust. No index or table is added.
+`Host::file_activity(session)` tallies the session's `read` and `file_edit` steps across all runs, per path: succeeded reads, succeeded edits, and whether a step on it is `Running`. Failed and interrupted steps count nothing, so a file whose only read failed is not listed. The result is sorted by path. It uses the existing `steps_session` index to find the session's steps and decodes only each step's kind, state and paths in Rust; SQLite's JSON functions were about four to eight times slower on the host thread (see [the measurement](../../../docs/performance/files-tally.md)). No index or table is added.
 
 *Consequences of deriving from steps:*
 - A run keeps its first `MAX_RUN_STEPS` (2,000) steps. Files touched only after that in one run are missing from the counts. Their edits still appear through the Git line counts.

@@ -28,7 +28,9 @@ impl Host {
             paths: Vec<Cow<'a, str>>,
         }
         let mut files: BTreeMap<String, FileActivity> = BTreeMap::new();
-        let mut steps = self.db.prepare("SELECT data FROM steps WHERE session_id=?1")?;
+        let mut steps = self
+            .db
+            .prepare("SELECT data FROM steps WHERE session_id=?1")?;
         let mut rows = steps.query([session_id])?;
         while let Some(row) = rows.next()? {
             let Ok(touch) = serde_json::from_str::<Touch>(row.get_ref(0)?.as_str()?) else {

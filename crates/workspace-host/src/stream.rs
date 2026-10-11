@@ -726,8 +726,14 @@ mod tests {
     fn a_path_outside_the_worktree_is_kept_as_given_and_a_tool_announced_before_its_input_has_none()
     {
         let read = |input: Value| claude_tool("t", "Read", &input, CWD);
-        assert_eq!(read(json!({"file_path": "/work/repo/src/a.rs"})).paths, ["src/a.rs"]);
-        assert_eq!(read(json!({"file_path": "/etc/hosts"})).paths, ["/etc/hosts"]);
+        assert_eq!(
+            read(json!({"file_path": "/work/repo/src/a.rs"})).paths,
+            ["src/a.rs"]
+        );
+        assert_eq!(
+            read(json!({"file_path": "/etc/hosts"})).paths,
+            ["/etc/hosts"]
+        );
         // A sibling directory sharing the worktree's prefix is still outside it.
         assert_eq!(
             read(json!({"file_path": "/work/repo-other/a.rs"})).paths,
