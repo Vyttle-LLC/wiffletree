@@ -8,12 +8,15 @@ The UI leads with the project coordinator's conversation. The native hierarchy i
 
 While a worker is working, a fixed-height activity card replaces the working indicator. It shows the latest narration line and the three most recent steps. Clicking it opens the turn's full history in a drawer on the right. The chevron minimizes the card to one line that still shows the current step, and the choice carries over to other agents. A finished turn collapses to a “Worked 4m 53s · 12 steps” line above its reply. Open Baseline tests or Profiler to watch a turn run, or theme-init for a finished one. The native app's behavior is specified in `openspec/specs/work-stream`.
 
+Progress bars appear in three places. A strip pinned under the session title shows the project's segmented bar when the coordinator is selected, and an agent's own checklist plus its ticket's figure when a worker is selected. Every project, ticket and agent row in the sidebar carries a thin bar and a short figure. The “7 agents” button on the coordinator's strip opens the crew panel, which lists each ticket with its stage and each of its agents with model, checklist count and elapsed time. Striped means working with nothing to count, red means blocked, green means finished. This is a simulation: the checklists, stages, models and times are sample data, and opening a working agent starts its scripted turn, so its bar is striped until that turn's first plan step and then follows the plan steps. The sample project has no accepted or blocked ticket; `openspec/changes/work-progress` specifies every state.
+
 **Wiffletree** is the product name, selected October 5, 2026; **Tidal** remains the selected brand color palette as of October 2, 2026. The current study uses Wiffletree branding and paired Tidal light and dark modes. Celadon remains its sample project; it is no longer the product's theme family. See [Brand colors](brand.md) for the palette, semantic roles, and usage rules. The [brand kit](brand/README.md) pairs the selected red Interlock open-joint symbol with the original two-tone wordmark; [preview both appearances](brand/png/preview.png).
 
 ## Prototype boundaries
 
 - Chat submission, permissions, Git actions, PR data, timers, and usage are local simulations.
 - Activity cards and turn histories replay scripted sample steps; they read no provider output.
+- Progress bars are computed in the page from sample checklists and stages; no host derives them and nothing is read from an agent.
 - Context selection and sent file-reference chips are interactive. File imports retain only names and sizes in the session; no durable upload or provider delivery is implemented.
 - Some presentation choices and drafts persist in browser storage. Sample conversations, created agents, approvals, and imported file metadata may reset on reload.
 - The file-picker flow was not verified end to end in the sandboxed in-app browser. Selection of sample context files, sent references, task/agent creation, and approval routing were exercised.
