@@ -2700,6 +2700,68 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_report_waits_until_the_parents_answer_reaches_a_turn() {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let input = actor.host.messages(&implementer.id, None, 10).unwrap();
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        actor
+            .record_turn_start("run", &implementer, &input, &json!({}), &runtime)
+            .unwrap();
+        let taken = input.iter().map(|m| m.id.clone()).collect();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("run", taken));
+        // The snapshot's status and count, which `workspace_context` must match.
+        let waiting = |host: &Host| {
+            let snapshot = host.snapshot().unwrap();
+            let count = snapshot.questions_waiting(&implementer.id);
+            let context = host.agent_context(&coordinator.id).unwrap();
+            let team = context["team"].as_array().unwrap();
+            let member = team.iter().find(|s| s["id"] == implementer.id.as_str());
+            assert_eq!(member.unwrap()["questions_waiting"], json!(count));
+            let session = snapshot.sessions.iter().find(|s| s.id == implementer.id);
+            (session.unwrap().status, count)
+        };
+        let ask = |host: &mut Host, id: &str| {
+            let report = json!({"message_id":id,"kind":"blocked","body":"Need a decision"});
+            host.agent_tool(&implementer.id, "report", report).unwrap();
+        };
+        assert_eq!(waiting(&actor.host), (Status::Working, 0));
+        ask(&mut actor.host, "first");
+        assert_eq!(waiting(&actor.host), (Status::Working, 1));
+        let finished = ProviderEvent::Finished {
+            error: None,
+            usage: Value::Null,
+            cancelled: false,
+        };
+        actor
+            .provider_event(&implementer.id, "run", finished)
+            .unwrap();
+        assert_eq!(waiting(&actor.host), (Status::Blocked, 1));
+        // A queued answer has not reached the agent yet.
+        actor
+            .host
+            .send("answer", Some(&coordinator.id), &implementer.id, "Yes")
+            .unwrap();
+        assert_eq!(waiting(&actor.host), (Status::Blocked, 1));
+        ask(&mut actor.host, "second");
+        assert_eq!(waiting(&actor.host), (Status::Blocked, 2));
+        drop(actor);
+        let (mut actor, _, _) = idle_actor(Host::open(home.path().join("home")).unwrap());
+        assert_eq!(waiting(&actor.host), (Status::Blocked, 2));
+        // The answer was sent before the second question, so its delivery settles only the first.
+        let answer = [actor.host.message("answer").unwrap()];
+        actor
+            .record_turn_start("next", &implementer, &answer, &json!({}), &runtime)
+            .unwrap();
+        assert_eq!(waiting(&actor.host), (Status::Working, 1));
+    }
+
+    #[test]
     fn a_paused_coordinators_long_queue_does_not_hide_a_runnable_worker() {
         let (_home, mut actor, reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
         for n in 0..101 {

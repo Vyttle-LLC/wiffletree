@@ -501,9 +501,22 @@ impl Host {
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
+        let waiting = self.questions_waiting()?;
+        let mut team = Vec::new();
+        for member in self.sessions()? {
+            if member.project_id == session.project_id {
+                let count = waiting
+                    .iter()
+                    .find(|q| q.session_id == member.id)
+                    .map_or(0, |q| q.count);
+                let mut entry = serde_json::to_value(self.shown(member))?;
+                entry["questions_waiting"] = json!(count);
+                team.push(entry);
+            }
+        }
         let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,
             "repositories":self.project_repositories(&session.project_id)?,
-            "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).map(|s|self.shown(s)).collect::<Vec<_>>(),
+            "team":team,
             "tickets":self.ticket_overview(&session.project_id)?,
             "runtime":self.session_runtime(id)?,
             "memory":self.logs(&session.project_id,None,10)?,

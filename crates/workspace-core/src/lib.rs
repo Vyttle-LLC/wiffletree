@@ -342,6 +342,15 @@ pub struct Snapshot {
     /// When each watched repository's PRs were last checked, and why a check failed.
     #[serde(default)]
     pub pull_request_checks: Vec<PullRequestCheck>,
+    /// Sessions with a `blocked` report their parent has not answered.
+    #[serde(default)]
+    pub questions_waiting: Vec<QuestionsWaiting>,
+}
+/// How many of a session's `blocked` reports wait for its parent's answer to reach it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionsWaiting {
+    pub session_id: String,
+    pub count: u32,
 }
 /// A session's input waiting for a turn: held after an interrupted turn, or queued.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +445,12 @@ impl Snapshot {
             .iter()
             .filter(|r| project.uses(&r.id))
             .collect()
+    }
+    pub fn questions_waiting(&self, session_id: &str) -> u32 {
+        self.questions_waiting
+            .iter()
+            .find(|q| q.session_id == session_id)
+            .map_or(0, |q| q.count)
     }
 }
 
