@@ -166,6 +166,7 @@ mod tests {
             title: title.into(),
             note: None,
             detail,
+            paths: vec![],
             omitted: 0,
             seq: 0,
             revision: 1,

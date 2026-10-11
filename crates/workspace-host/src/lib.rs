@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 pub mod attachments;
 pub mod context;
+mod files;
 mod flatten;
 pub mod live;
 pub mod mcp;
@@ -1171,6 +1172,12 @@ impl Host {
                 run_id,
                 after,
             } => serde_json::to_value(self.steps(&session_id, run_id.as_deref(), after)?)?,
+            Command::Files {
+                session_id,
+                whole_tree,
+            } => {
+                serde_json::to_value(files::with_git(self.ticket_files(&session_id)?, whole_tree))?
+            }
             Command::RunSummaries {
                 session_id,
                 run_ids,

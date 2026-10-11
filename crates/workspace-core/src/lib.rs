@@ -1,8 +1,10 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
+mod files;
 mod selection;
 mod steps;
 mod usage;
 use anyhow::{Result, ensure};
+pub use files::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
@@ -1165,6 +1167,13 @@ pub enum Command {
         session_id: String,
         run_id: Option<String>,
         after: u64,
+    },
+    /// The files a ticket agent touched, or every agent's on a coordinator's open tickets;
+    /// answered with `Vec<TicketFiles>`. `whole_tree` also lists each worktree's files.
+    Files {
+        session_id: String,
+        #[serde(default)]
+        whole_tree: bool,
     },
     /// Duration and step counts for up to a page of the session's runs.
     RunSummaries {

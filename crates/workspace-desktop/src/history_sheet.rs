@@ -2,7 +2,8 @@
 //! paragraph followed by the steps that came after it, updating live while the turn runs.
 use super::*;
 use activity::{
-    RunActivity, StepFetch, clock, duration, state_glyph, step_count, step_page, step_row,
+    RunActivity, STEP_PACE, StepFetch, clock, duration, paced_reply, state_glyph, step_count,
+    step_row,
 };
 use conversation::markdown;
 use gpui_component::ActiveTheme;
@@ -37,7 +38,7 @@ impl HistorySheet {
         if finished {
             return;
         }
-        let Some(wait) = self.fetch.begin() else {
+        let Some(wait) = self.fetch.begin(STEP_PACE) else {
             return;
         };
         let command = Command::Steps {
@@ -45,7 +46,7 @@ impl HistorySheet {
             run_id: Some(self.run_id.clone()),
             after: self.run.revision,
         };
-        let page = step_page(
+        let page = paced_reply(
             self.bridge.clone(),
             command,
             wait,
