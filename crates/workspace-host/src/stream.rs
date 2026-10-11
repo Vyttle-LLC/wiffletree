@@ -723,6 +723,36 @@ mod tests {
     }
 
     #[test]
+    fn a_path_outside_the_worktree_is_kept_as_given_and_a_tool_announced_before_its_input_has_none()
+    {
+        let read = |input: Value| claude_tool("t", "Read", &input, CWD);
+        assert_eq!(read(json!({"file_path": "/work/repo/src/a.rs"})).paths, ["src/a.rs"]);
+        assert_eq!(read(json!({"file_path": "/etc/hosts"})).paths, ["/etc/hosts"]);
+        // A sibling directory sharing the worktree's prefix is still outside it.
+        assert_eq!(
+            read(json!({"file_path": "/work/repo-other/a.rs"})).paths,
+            ["/work/repo-other/a.rs"]
+        );
+        let announced = read(json!({}));
+        assert!(announced.paths.is_empty());
+        assert_eq!(announced.title, "Read");
+
+        let mut claude = ClaudeSteps::new(Path::new(CWD));
+        let start = json!({"type": "stream_event", "event": {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}
+        }});
+        let announced = claude.event(&start);
+        assert_eq!(announced.len(), 1);
+        assert!(announced[0].paths.is_empty());
+        let full = json!({"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": "/work/repo/a.rs"}
+        }]}});
+        let sharpened = claude.event(&full);
+        assert_eq!(sharpened[0].paths, ["a.rs"]);
+    }
+
+    #[test]
     fn a_plan_counts_its_items_and_names_the_first_unfinished_one() {
         let counts = |todos: &[(bool, &str)]| plan("plan", todos.iter().copied()).plan.unwrap();
         let finished = counts(&[(true, "Write"), (true, "Test")]);
