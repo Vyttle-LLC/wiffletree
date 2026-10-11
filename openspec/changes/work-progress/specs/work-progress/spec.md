@@ -26,6 +26,8 @@ An agent's progress SHALL be a checklist count, items done out of total, taken f
 
 When a new run starts, the previous run's checklist SHALL be dropped, so the agent is indeterminate until the new run's first plan step.
 
+An agent's figure SHALL be its checklist count, such as "3 of 6", except in these cases, where it is a word: "passed" for a finished verifier whose latest result is `passed`; "done" for any other finished agent; "failed" for a blocked verifier whose latest result in the ticket's latest cycle is `failed`; "blocked" for any other blocked agent; and "working" for an indeterminate agent. An idle agent with no checklist SHALL have no figure.
+
 #### Scenario: Checklist count
 - **WHEN** a working agent's latest plan step lists six items, three of them done, and the fourth is "Update the design README"
 - **THEN** its progress is 3 of 6 (50%), in progress, and its current step is "Update the design README"
@@ -56,19 +58,27 @@ When a new run starts, the previous run's checklist SHALL be dropped, so the age
 
 #### Scenario: Blocked agent
 - **WHEN** an agent at 3 of 7 reports `blocked`
-- **THEN** its bar stays at 3 of 7 and is shown as blocked
+- **THEN** its bar stays at 3 of 7 and is shown as blocked, with the figure "blocked"
+
+#### Scenario: Verifier failed
+- **WHEN** a verifier whose last plan read 4 of 5 reports `failed` with an evidenced blocking finding, and the host records its result as failed
+- **THEN** its bar stays at 4 of 5 and is shown as blocked, with the figure "failed"
+
+#### Scenario: Failed verifier starts the next round
+- **WHEN** that verifier's turn for round 2 starts and it has not written a plan yet
+- **THEN** it is indeterminate with the figure "working"
 
 ### Requirement: Ticket progress
-A ticket's progress SHALL be a stage and a position in percent, taken from the first of these that applies:
+A ticket's progress SHALL be a stage and a position in percent. Only the states `accepted`, `assigned`, `ready_for_testing`, `blocked` and `closed` are read by name; a ticket's state can also hold any other report kind, such as `passed`, `failed` or `completed`, and for those the verification record decides. The progress SHALL be taken from the first of these that applies:
 
 1. State `accepted`: stage **Accepted**, 100%, finished.
 2. State `assigned`: stage **Implementing**, 0–60%: 60% times the implementer's checklist fraction. The implementer is the ticket's unarchived implementer; a finished implementer counts as a full checklist, and one without a plan counts as zero.
 3. State `ready_for_testing`: stage **Implementing**, 60%.
-4. The ticket has a verification record, its latest cycle's outcome is `passed` and its state is `passed`: stage **Awaiting acceptance**, 90%.
-5. The ticket has a verification record: stage **Verifying**, 60–90%: 60% plus 30% times the share of the latest cycle's verifiers whose latest result in that cycle is `passed`.
+4. The ticket has a verification record and its latest cycle's outcome is `passed`: stage **Awaiting acceptance**, 90%.
+5. The ticket has a verification record whose latest cycle is running or blocked: stage **Verifying**, 60–90%: 60% plus 30% times the share of the latest cycle's verifiers whose latest result in that cycle is `passed`.
 6. Otherwise: stage **Implementing**, as in rule 2.
 
-A ticket in state `blocked` SHALL keep the position rules 5 or 6 give it and SHALL be shown as blocked. A ticket in the Implementing stage whose implementer is working without a plan SHALL be indeterminate: it shows its stage and no percentage, and counts as its stage's lowest position. A ticket's position SHALL NOT exceed 90% before it is accepted. A position is derived from the current records only, so it MAY move backwards.
+A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and SHALL be shown as blocked. A ticket under rule 2 or 6 whose implementer is working without a plan SHALL be indeterminate: it shows its stage and no percentage, and counts as 0%. A ticket under rule 3 SHALL stay at 60% whatever its implementer is doing. Rule 2 applies to every `assigned` ticket, including one re-assigned for a fix after a cycle: it follows the checklist of the implementer's fix run. A ticket's position SHALL NOT exceed 90% before it is accepted. A position is derived from the current records only, so it MAY move backwards.
 
 #### Scenario: Implementing
 - **WHEN** a ticket is `assigned` and its implementer's checklist is 3 of 6
@@ -82,6 +92,10 @@ A ticket in state `blocked` SHALL keep the position rules 5 or 6 give it and SHA
 - **WHEN** the implementer reports `ready_for_testing` and no cycle has started
 - **THEN** the ticket is Implementing at 60%
 
+#### Scenario: Ready, then the implementer starts another run
+- **WHEN** a ticket is `ready_for_testing` and its implementer starts a new run with no plan
+- **THEN** the ticket stays Implementing at 60%, not indeterminate, while the implementer's own bar is striped
+
 #### Scenario: Verifying
 - **WHEN** a ticket is `verifying` in round 1 with three configured verifiers and one has passed
 - **THEN** the ticket is Verifying at 70%
@@ -93,6 +107,19 @@ A ticket in state `blocked` SHALL keep the position rules 5 or 6 give it and SHA
 #### Scenario: Awaiting acceptance
 - **WHEN** every verifier of the latest cycle has passed and the ticket's state is `passed`
 - **THEN** the ticket is Awaiting acceptance at 90%
+
+#### Scenario: Another report kind after a pass
+- **WHEN** the latest cycle passed and the implementer then reports `completed`, so the ticket's state is `completed`
+- **THEN** the ticket is still Awaiting acceptance at 90%, not Verifying
+
+#### Scenario: Re-assigned for a fix after a pass
+- **WHEN** a ticket Awaiting acceptance at 90% is assigned again for a fix, so its state is `assigned`, and the implementer's fix run has no plan yet
+- **THEN** the ticket shows "Implementing" with a striped bar and no percentage
+- **AND** once the fix run's plan reads 1 of 2 the ticket is Implementing at 30%
+
+#### Scenario: Finished without verification
+- **WHEN** a ticket has no verification record and its implementer reports `completed`, so the ticket's state is `completed`
+- **THEN** the ticket is Implementing at 60%
 
 #### Scenario: Accepted
 - **WHEN** the coordinator accepts the ticket
@@ -143,7 +170,7 @@ A project's progress SHALL be the equal-weight average of its tickets' positions
 - **THEN** the project shows "Done" at 100%, finished
 
 ### Requirement: Progress strip
-The selected conversation SHALL show one progress strip pinned directly under its session title. The strip SHALL NOT scroll with the transcript and SHALL keep a fixed height, so progress changes never move the transcript. For a project coordinator, the strip SHALL show the project's phase label, its segmented bar, its percentage and "N of M tickets accepted", and a crew button. For an agent on a ticket, it SHALL show the agent's own progress, as "Step K of N" with the current step, the bar and the percentage, followed by the ticket's figure, such as "ticket 30%". K SHALL be the number of the first unfinished item. An agent with nothing of its own to show SHALL show only its ticket's stage and figure. A session with neither a ticket nor a project of its own SHALL show its own progress alone.
+The selected conversation SHALL show one progress strip pinned directly under its session title. The strip SHALL NOT scroll with the transcript and SHALL keep a fixed height, so progress changes never move the transcript. For a project coordinator, the strip SHALL show the project's phase label, its segmented bar, its percentage and "N of M tickets accepted", and a crew button. For an agent on a ticket, it SHALL show the agent's own progress, as "Step K of N" with the current step, the bar and the percentage, followed by the ticket's figure, such as "ticket 30%". K SHALL be the number of items done plus one. When every item of a working agent's plan is done, the strip SHALL read "N of N" with no step label, never "Step N+1". An agent with nothing of its own to show SHALL show only its ticket's stage and figure. A session with neither a ticket nor a project of its own SHALL show its own progress alone.
 
 #### Scenario: Coordinator selected
 - **WHEN** the human selects the coordinator of a project at 56% with one of four tickets accepted and six agents in its crew
@@ -152,6 +179,10 @@ The selected conversation SHALL show one progress strip pinned directly under it
 #### Scenario: Worker selected
 - **WHEN** the human selects an implementer at 3 of 6 whose ticket is at 30%
 - **THEN** the strip reads "Step 4 of 6 · Update the design README", shows a bar at 50%, and "50% · ticket 30%"
+
+#### Scenario: Every item done
+- **WHEN** the human selects a working implementer whose plan reads 6 of 6, on a ticket at 60%
+- **THEN** the strip reads "6 of 6" with no step label, shows a full bar, and "100% · ticket 60%"
 
 #### Scenario: Worker with no plan
 - **WHEN** the human selects a working verifier with no plan, on a ticket at 70%

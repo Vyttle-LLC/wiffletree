@@ -2212,7 +2212,7 @@ function progressStrip(){
   if(a.state===&#x27;idle&#x27;&amp;&amp;t){label=`&lt;b&gt;${t.stage}&lt;/b&gt;`;bar=progressBar(t);meta=ticket;}
   else{
    const step=a.plan&amp;&amp;a.plan.done&lt;a.plan.total?`Step ${a.plan.done+1} of ${a.plan.total}`:&#x27;&#x27;;
-   label=a.state===&#x27;active&#x27;?`&lt;b&gt;${step||`${a.plan.total} of ${a.plan.total} done`}&lt;/b&gt;${a.plan.current?` · ${esc(a.plan.current)}`:&#x27;&#x27;}`:`&lt;b&gt;${{unknown:&#x27;Working&#x27;,done:&#x27;Done&#x27;,blocked:&#x27;Blocked&#x27;,idle:&#x27;Idle&#x27;}[a.state]}&lt;/b&gt;${a.state===&#x27;blocked&#x27;&amp;&amp;step?` · ${step.toLowerCase()}`:&#x27;&#x27;}`;
+   label=a.state===&#x27;active&#x27;?`&lt;b&gt;${step||`${a.plan.total} of ${a.plan.total}`}&lt;/b&gt;${a.plan.current?` · ${esc(a.plan.current)}`:&#x27;&#x27;}`:`&lt;b&gt;${{unknown:&#x27;Working&#x27;,done:&#x27;Done&#x27;,blocked:&#x27;Blocked&#x27;,idle:&#x27;Idle&#x27;}[a.state]}&lt;/b&gt;${a.state===&#x27;blocked&#x27;&amp;&amp;step?` · ${step.toLowerCase()}`:&#x27;&#x27;}`;
    bar=progressBar(a);meta=[a.fraction===null||a.state===&#x27;unknown&#x27;?&#x27;&#x27;:percent(a.fraction)+&#x27;%&#x27;,ticket].filter(Boolean).join(&#x27; · &#x27;);
   }
  }

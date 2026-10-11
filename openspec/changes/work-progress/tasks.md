@@ -25,7 +25,7 @@
 
 - [ ] 4.1 In `src/bridge.rs`, expose `progress_changes()`. Create `src/progress.rs` with the client board (maps by id, merged from pages, pruning entries nothing refers to) and `watch_progress` / `fetch_progress` with one request in flight and a dirty flag, as `activity.rs:137-213` does for steps; start the watcher from `main.rs` where `watch_steps` starts. Verify the merge and pruning with unit tests, and by running the app that a plan step causes no `Command::Snapshot`.
 - [ ] 4.2 In `src/ui.rs`, add `progress_bar(position, state, p)`, `segmented_bar(segments, p)` and the striped indeterminate track (`gpui::pattern_slash` if the pinned GPUI has it, otherwise slanted fixed divs), using `p.focus`, `p.green`, `p.red` and `p.edge`. Verify all four states in Tidal Light and Tidal Dark in the running app against `design/mockups/current/index.html`.
-- [ ] 4.3 In `src/tree.rs`, add `agent_figure`, `ticket_figure`, `project_figure`, `strip_label` and `elapsed_label`. Verify with tests for every figure in the spec: "3 of 5", "working", "done", "passed", "failed", "blocked", "70%", "56% · 1 of 4 tickets accepted", "Step 4 of 6 · …" and "50% · ticket 30%".
+- [ ] 4.3 In `src/tree.rs`, add `agent_figure`, `ticket_figure`, `project_figure`, `strip_label` and `elapsed_label`. Verify with tests for every figure in the spec: "3 of 5", "working", "done", "passed", "failed", "blocked", "70%", "56% · 1 of 4 tickets accepted", "Step 4 of 6 · …", "6 of 6" for a finished checklist, and "50% · ticket 30%".
 
 ## 5. Desktop: the three placements (`workspace-desktop`)
 

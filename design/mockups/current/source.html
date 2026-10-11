@@ -673,7 +673,7 @@ function progressStrip(){
   if(a.state==='idle'&&t){label=`<b>${t.stage}</b>`;bar=progressBar(t);meta=ticket;}
   else{
    const step=a.plan&&a.plan.done<a.plan.total?`Step ${a.plan.done+1} of ${a.plan.total}`:'';
-   label=a.state==='active'?`<b>${step||`${a.plan.total} of ${a.plan.total} done`}</b>${a.plan.current?` · ${esc(a.plan.current)}`:''}`:`<b>${{unknown:'Working',done:'Done',blocked:'Blocked',idle:'Idle'}[a.state]}</b>${a.state==='blocked'&&step?` · ${step.toLowerCase()}`:''}`;
+   label=a.state==='active'?`<b>${step||`${a.plan.total} of ${a.plan.total}`}</b>${a.plan.current?` · ${esc(a.plan.current)}`:''}`:`<b>${{unknown:'Working',done:'Done',blocked:'Blocked',idle:'Idle'}[a.state]}</b>${a.state==='blocked'&&step?` · ${step.toLowerCase()}`:''}`;
    bar=progressBar(a);meta=[a.fraction===null||a.state==='unknown'?'':percent(a.fraction)+'%',ticket].filter(Boolean).join(' · ');
   }
  }
