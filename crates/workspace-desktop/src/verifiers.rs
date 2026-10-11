@@ -9,7 +9,8 @@ use ui::{hint, icon, segment, setting};
 pub(super) struct VerifierEditor {
     bridge: Bridge,
     verification: Option<VerificationSettings>,
-    /// The verifiers are part of a setup the human has not saved yet.
+    /// The verifiers are part of a setup the human has not saved yet: until the workspace
+    /// reports a saved one, changes stay here and nothing is asked of the host.
     unsaved: bool,
     error: Option<String>,
     /// The verifier being added.
@@ -29,10 +30,10 @@ fn provider_note(verifier: &VerifierConfig) -> String {
 
 impl VerifierEditor {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut editor = Self {
+        Self {
             bridge,
             verification: None,
-            unsaved: false,
+            unsaved: models::verifiers_held(None),
             error: None,
             draft: VerifierConfig {
                 role: Role::Reviewer,
@@ -45,9 +46,7 @@ impl VerifierEditor {
                 InputState::new(window, cx)
                     .placeholder("Optional instruction, e.g. Run reviso:style with Codex")
             }),
-        };
-        editor.ask_host(Command::Settings, cx);
-        editor
+        }
     }
 
     pub(super) fn verification(&self) -> Option<&VerificationSettings> {
@@ -64,9 +63,12 @@ impl VerifierEditor {
         self.error = None;
         cx.notify();
     }
-    /// The page saved the draft; later changes save at once.
-    pub(super) fn saved(&mut self) {
-        self.unsaved = false;
+    /// The store has a saved setup: shows the host's verifiers, and changes save at once.
+    pub(super) fn setup_saved(&mut self, cx: &mut Context<Self>) {
+        if self.unsaved {
+            self.unsaved = false;
+            self.ask_host(Command::Settings, cx);
+        }
     }
 
     /// Shows the host's saved setting, or its error beside the setting it still uses.

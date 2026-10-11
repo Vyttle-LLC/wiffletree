@@ -165,6 +165,9 @@ impl ModelSelection {
     pub fn is_enabled(&self, provider: Provider) -> bool {
         self.providers.get(&provider).is_some_and(|a| a.enabled)
     }
+    pub fn any_enabled(&self) -> bool {
+        PROVIDERS.iter().any(|&p| self.is_enabled(p))
+    }
     pub fn allowed(&self, provider: Provider) -> &[AllowedModel] {
         self.providers
             .get(&provider)
@@ -234,10 +237,7 @@ impl ModelSelection {
         })
     }
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            PROVIDERS.iter().any(|&p| self.is_enabled(p)),
-            "Enable at least one provider"
-        );
+        ensure!(self.any_enabled(), "Enable at least one provider");
         for (provider, access) in &self.providers {
             ensure!(
                 !access.enabled || !access.models.is_empty(),

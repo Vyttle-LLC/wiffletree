@@ -691,10 +691,20 @@ impl Workspace {
                 self.request(Command::Snapshot, window, cx);
             }
             Command::SetModelSelection { selection, .. } => {
-                // The draft was saved; the next snapshot carries its new revision.
-                self.saved_model_selection = *selection;
+                // The host answers with the saved selection at its new revision, so the store
+                // reads as saved before the next snapshot arrives.
+                let saved: ModelSelection = serde_json::from_value(value)
+                    .map_err(|e| e.to_string())
+                    .unwrap_or_else(|e| {
+                        eprintln!("Saved model selection: {e}");
+                        *selection.clone()
+                    });
+                self.model_selection =
+                    models::after_save(&self.model_selection, &selection, &saved);
+                self.saved_model_selection = saved;
                 self.suggested = None;
-                self.verifiers.update(cx, |editor, _| editor.saved());
+                self.verifiers
+                    .update(cx, |editor, cx| editor.setup_saved(cx));
                 self.toast("Models saved", window, cx);
                 self.request(Command::Snapshot, window, cx);
             }
@@ -750,6 +760,10 @@ impl Workspace {
                 .map(|s| s.id.clone());
         }
         self.sync_model_selection(&snapshot.model_selection, window, cx);
+        if !models::verifiers_held(Some(&snapshot.model_selection)) {
+            self.verifiers
+                .update(cx, |editor, cx| editor.setup_saved(cx));
+        }
         self.snapshot = Some(snapshot);
         self.offer_suggestion(window, cx);
         self.load_error = None;

@@ -552,10 +552,12 @@ fn a_fresh_store_saves_nothing_and_starts_no_agent_until_a_setup_is_saved() {
     assert!(host.create_project("Still too early").is_err());
     assert!(!home.path().join("settings.json").exists());
 
-    for provider in PROVIDERS {
+    for signed_in in [&[Provider::Claude][..], &[Provider::Codex], &PROVIDERS] {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open(home.path()).unwrap();
-        let setup = suggest(&detected(&[provider]));
+        let setup = suggest(&detected(signed_in));
+        let provider = signed_in[0];
+        assert_eq!(setup.verification.verifiers.len(), signed_in.len() + 1);
         save(&mut host, &setup).unwrap();
         // Exactly what was shown is saved, verifiers included, and survives a restart.
         drop(host);
@@ -588,6 +590,29 @@ fn a_refused_first_save_keeps_the_verifiers_unsaved_too() {
     setup.selection.role_providers.clear();
     assert!(save(&mut host, &setup).is_err());
     assert!(!home.path().join("settings.json").exists());
+}
+
+#[test]
+fn a_first_save_whose_selection_write_fails_leaves_the_settings_file_as_it_was() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open(home.path()).unwrap();
+    Connection::open(home.path().join("workspace.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse BEFORE INSERT ON model_selection
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let setup = suggest(&detected(&PROVIDERS));
+    let settings = home.path().join("settings.json");
+    assert!(save(&mut host, &setup).is_err());
+    assert!(!host.model_selection().unwrap().is_saved());
+    assert!(!settings.exists());
+    // Settings saved earlier, such as the check-ins, come back byte for byte.
+    host.set_check_ins(30, 200).unwrap();
+    let before = std::fs::read(&settings).unwrap();
+    assert!(save(&mut host, &suggest(&detected(&[Provider::Claude]))).is_err());
+    assert_eq!(std::fs::read(&settings).unwrap(), before);
 }
 
 #[test]

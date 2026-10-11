@@ -19,12 +19,12 @@ pub fn detect(provider: Provider) -> ProviderStatus {
         return ProviderStatus::default();
     };
     let (signed_in, plan) = match provider {
-        Provider::Claude => status_output(&binary, &["auth", "status", "--json"])
+        Provider::Claude => status_output(&binary, &["auth", "status", "--json"], TIMEOUT)
             .map(|[stdout, _]| claude_status(&stdout))
             .unwrap_or_default(),
         Provider::Codex => {
             // Codex prints its status on stderr.
-            let signed_in = status_output(&binary, &["login", "status"])
+            let signed_in = status_output(&binary, &["login", "status"], TIMEOUT)
                 .is_some_and(|streams| streams.iter().any(|text| codex_signed_in(text)));
             let plan = context::codex_home()
                 .ok()
@@ -40,8 +40,9 @@ pub fn detect(provider: Provider) -> ProviderStatus {
     }
 }
 
-/// The command's stdout and stderr, or `None` when it cannot run or outlasts `TIMEOUT`.
-fn status_output(binary: &Path, args: &[&str]) -> Option<[String; 2]> {
+/// The command's stdout and stderr, or `None` when it cannot run or outlasts `timeout`, in
+/// which case it is killed.
+fn status_output(binary: &Path, args: &[&str], timeout: Duration) -> Option<[String; 2]> {
     struct Killed(std::process::Child);
     impl Drop for Killed {
         fn drop(&mut self) {
@@ -69,7 +70,7 @@ fn status_output(binary: &Path, args: &[&str]) -> Option<[String; 2]> {
     };
     let stdout = read(Box::new(child.0.stdout.take()?));
     let stderr = read(Box::new(child.0.stderr.take()?));
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let left = || deadline.saturating_duration_since(Instant::now());
     Some([
         stdout.recv_timeout(left()).ok()?,
@@ -196,10 +197,41 @@ mod tests {
     }
 
     #[test]
-    fn a_cli_that_cannot_run_or_hangs_gives_no_output() {
-        assert!(status_output(Path::new("/nonexistent/cli"), &["status"]).is_none());
-        let [stdout, stderr] =
-            status_output(Path::new("/bin/sh"), &["-c", "echo out; echo err >&2"]).unwrap();
+    fn a_cli_that_cannot_run_gives_no_output() {
+        assert!(status_output(Path::new("/nonexistent/cli"), &["status"], TIMEOUT).is_none());
+    }
+
+    #[test]
+    fn a_finished_cli_gives_both_streams() {
+        let [stdout, stderr] = status_output(
+            Path::new("/bin/sh"),
+            &["-c", "echo out; echo err >&2"],
+            TIMEOUT,
+        )
+        .unwrap();
         assert_eq!((stdout.as_str(), stderr.as_str()), ("out\n", "err\n"));
+    }
+
+    #[test]
+    fn a_hanging_cli_is_given_up_on_at_the_timeout_and_killed() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let started = Instant::now();
+        let output = status_output(
+            Path::new("/bin/sh"),
+            &["-c", &script],
+            Duration::from_millis(300),
+        );
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        let alive = ProcessCommand::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the hanging CLI was left running");
     }
 }

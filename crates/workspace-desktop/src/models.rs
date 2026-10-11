@@ -1,7 +1,7 @@
 //! Pure helpers behind the Models page and the model pickers.
 use workspace_core::{
-    AllowedModel, Chooser, ModelProfile, ModelSelection, PROVIDERS, Provider, ProviderStatus, Role,
-    Selection, Session,
+    AllowedModel, Chooser, Detection, ModelProfile, ModelSelection, PROVIDERS, Provider,
+    ProviderStatus, Role, Selection, Session, Setup, VerificationSettings, suggest,
 };
 use workspace_host::runtime::ModelOption;
 
@@ -203,15 +203,10 @@ pub fn status_label(status: &ProviderStatus) -> String {
     if !status.signed_in {
         return "CLI found · not signed in".into();
     }
-    let plan = status.plan.as_deref().map(|plan| {
-        let mut letters = plan.chars();
-        let initial: String = letters
-            .next()
-            .into_iter()
-            .flat_map(char::to_uppercase)
-            .collect();
-        format!(" · {initial}{} plan", letters.as_str())
-    });
+    let plan = status
+        .plan
+        .as_deref()
+        .map(|plan| format!(" · {} plan", crate::ui::humanize(plan)));
     format!("CLI found · signed in{}", plan.unwrap_or_default())
 }
 /// The one-line fix for a provider a suggested setup left out, or `None` when it is usable.
@@ -224,6 +219,67 @@ pub fn fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
         (true, true) => None,
         (true, false) => Some(format!("Run {sign_in}, then Refresh to add it.")),
         (false, _) => Some(format!("Install {product} and run {sign_in}.")),
+    }
+}
+
+/// Whether the Review card holds its verifiers as a draft: until a snapshot shows a saved
+/// setup, nothing the human changes there may reach the host.
+pub fn verifiers_held(saved: Option<&ModelSelection>) -> bool {
+    !saved.is_some_and(ModelSelection::is_saved)
+}
+/// Whether the draft still is the suggested setup, verifiers included.
+pub fn untouched(
+    suggested: &Setup,
+    selection: &ModelSelection,
+    verification: Option<&VerificationSettings>,
+) -> bool {
+    *selection == suggested.selection && verification == Some(&suggested.verification)
+}
+/// A setup to suggest after a detection pass.
+#[derive(Debug, PartialEq)]
+pub struct Offer {
+    pub suggested: Setup,
+    /// The draft follows it: it was untouched, or nothing was suggested before.
+    pub replaces_draft: bool,
+}
+/// What a detection pass suggests for a store with no saved setup; `None` on a saved store,
+/// before every provider is detected, or when `shown` already is that suggestion. A draft the
+/// human edited is kept.
+pub fn offer(
+    saved: &ModelSelection,
+    shown: Option<&Setup>,
+    selection: &ModelSelection,
+    verification: Option<&VerificationSettings>,
+    detection: &Detection,
+) -> Option<Offer> {
+    if saved.is_saved() || !PROVIDERS.iter().all(|p| detection.contains_key(p)) {
+        return None;
+    }
+    let suggested = suggest(detection);
+    if shown == Some(&suggested) {
+        return None;
+    }
+    Some(Offer {
+        replaces_draft: shown.is_none_or(|shown| untouched(shown, selection, verification)),
+        suggested,
+    })
+}
+/// Save needs a valid draft that differs from what is saved; a suggested setup is unsaved from
+/// the start, so it needs no edit first.
+pub fn can_save(suggested: bool, edited: bool, selection: &ModelSelection) -> bool {
+    (suggested || edited) && selection.validate().is_ok()
+}
+/// The draft once the host has saved `sent`: it takes the saved revision unless the human
+/// edited it meanwhile.
+pub fn after_save(
+    draft: &ModelSelection,
+    sent: &ModelSelection,
+    saved: &ModelSelection,
+) -> ModelSelection {
+    if draft == sent {
+        saved.clone()
+    } else {
+        draft.clone()
     }
 }
 
@@ -347,6 +403,10 @@ mod tests {
         };
         let signed_in = status(true, true, Some("max"));
         assert_eq!(status_label(&signed_in), "CLI found · signed in · Max plan");
+        assert_eq!(
+            status_label(&status(true, true, Some("free_workspace"))),
+            "CLI found · signed in · Free workspace plan"
+        );
         assert_eq!(fix_hint(Provider::Claude, &signed_in), None);
         // An unknown plan is left out, never guessed.
         assert_eq!(
@@ -369,6 +429,132 @@ mod tests {
             fix_hint(Provider::Codex, &missing).unwrap(),
             "Install Codex and run codex login."
         );
+    }
+    fn detected(signed_in: &[Provider]) -> Detection {
+        PROVIDERS
+            .into_iter()
+            .map(|provider| {
+                let found = signed_in.contains(&provider);
+                let status = ProviderStatus {
+                    installed: found,
+                    signed_in: found,
+                    plan: None,
+                };
+                (provider, status)
+            })
+            .collect()
+    }
+    fn offered(
+        saved: &ModelSelection,
+        shown: Option<&Setup>,
+        draft: &Setup,
+        detection: &Detection,
+    ) -> Option<Offer> {
+        offer(
+            saved,
+            shown,
+            &draft.selection,
+            Some(&draft.verification),
+            detection,
+        )
+    }
+    #[test]
+    fn an_untouched_suggestion_follows_refresh_and_an_edited_one_is_kept() {
+        let unsaved = ModelSelection::default();
+        let claude = suggest(&detected(&[Provider::Claude]));
+        let both = suggest(&detected(&PROVIDERS));
+        // The first detection fills the empty draft.
+        assert_eq!(
+            offer(
+                &unsaved,
+                None,
+                &unsaved,
+                None,
+                &detected(&[Provider::Claude])
+            ),
+            Some(Offer {
+                suggested: claude.clone(),
+                replaces_draft: true
+            })
+        );
+        // The same detection again offers nothing new.
+        assert_eq!(
+            offered(
+                &unsaved,
+                Some(&claude),
+                &claude,
+                &detected(&[Provider::Claude])
+            ),
+            None
+        );
+        // Signing in to Codex and refreshing: the untouched draft follows.
+        assert_eq!(
+            offered(&unsaved, Some(&claude), &claude, &detected(&PROVIDERS)),
+            Some(Offer {
+                suggested: both.clone(),
+                replaces_draft: true
+            })
+        );
+        // An edited selection or an edited verifier list is kept.
+        let mut edited = claude.clone();
+        edited.selection.guide.push_str("Mine.");
+        let mut fewer = claude.clone();
+        fewer.verification.verifiers.pop();
+        for draft in [edited, fewer] {
+            assert_eq!(
+                offered(&unsaved, Some(&claude), &draft, &detected(&PROVIDERS)),
+                Some(Offer {
+                    suggested: both.clone(),
+                    replaces_draft: false
+                })
+            );
+        }
+        // Half a detection pass suggests nothing yet.
+        let half: Detection = detected(&PROVIDERS).into_iter().take(1).collect();
+        assert_eq!(offer(&unsaved, None, &unsaved, None, &half), None);
+    }
+    #[test]
+    fn a_saved_store_is_never_offered_a_suggestion() {
+        let both = suggest(&detected(&PROVIDERS));
+        // The host's answer to the first save carries revision 1; a detection result that lands
+        // before the next snapshot must find the store saved.
+        let saved = ModelSelection {
+            revision: 1,
+            ..both.selection.clone()
+        };
+        let draft = after_save(&both.selection, &both.selection, &saved);
+        assert_eq!(draft, saved);
+        assert_eq!(
+            offer(
+                &saved,
+                None,
+                &draft,
+                Some(&both.verification),
+                &detected(&[])
+            ),
+            None
+        );
+        // An edit made while the save was in flight stays, as unsaved changes.
+        let mut edited = both.selection.clone();
+        edited.guide.push_str("Mine.");
+        assert_eq!(after_save(&edited, &both.selection, &saved), edited);
+    }
+    #[test]
+    fn verifiers_are_held_until_a_snapshot_shows_a_saved_setup() {
+        assert!(verifiers_held(None));
+        assert!(verifiers_held(Some(&ModelSelection::default())));
+        assert!(!verifiers_held(Some(&selection())));
+    }
+    #[test]
+    fn save_needs_a_valid_draft_and_no_edit_on_a_suggestion() {
+        let both = suggest(&detected(&PROVIDERS)).selection;
+        let neither = suggest(&detected(&[])).selection;
+        assert!(can_save(true, false, &both));
+        assert!(!can_save(true, false, &neither));
+        assert!(!can_save(true, true, &neither));
+        // A saved setup needs an edit first.
+        assert!(!can_save(false, false, &selection()));
+        assert!(can_save(false, true, &selection()));
     }
     #[test]
     fn refreshed_catalog_preserves_saved_models_without_crossing_providers() {

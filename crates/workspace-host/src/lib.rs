@@ -1151,15 +1151,7 @@ impl Host {
             Command::SetModelSelection {
                 selection,
                 verification,
-            } => {
-                // Both are checked before either is saved.
-                selection.validate()?;
-                if let Some(verification) = verification {
-                    verification.validate()?;
-                    self.set_verification(verification)?;
-                }
-                serde_json::to_value(self.set_model_selection(&selection)?)?
-            }
+            } => serde_json::to_value(self.set_setup(&selection, verification)?)?,
             Command::RequestAttention {
                 session_id,
                 host,

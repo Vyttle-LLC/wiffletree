@@ -116,6 +116,27 @@ impl Host {
         self.save_settings(&settings)?;
         Ok(settings)
     }
+    /// Saves a model selection with the verifiers sent with it, or neither: both are checked
+    /// first, and a failed selection write puts the settings file back as it was.
+    pub fn set_setup(
+        &mut self,
+        selection: &ModelSelection,
+        verification: Option<VerificationSettings>,
+    ) -> Result<ModelSelection> {
+        selection.validate()?;
+        let Some(verification) = verification else {
+            return self.set_model_selection(selection);
+        };
+        let path = self.home.join(FILE);
+        let previous = fs::read(&path).ok();
+        self.set_verification(verification)?;
+        self.set_model_selection(selection).inspect_err(|_| {
+            let _ = match &previous {
+                Some(bytes) => fs::write(&path, bytes),
+                None => fs::remove_file(&path),
+            };
+        })
+    }
     /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.
     pub fn set_check_ins(&mut self, child_turns: u32, human_turns: u32) -> Result<HostSettings> {
         HostSettings::validate_check_ins(child_turns, human_turns)?;

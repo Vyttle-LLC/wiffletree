@@ -31,10 +31,12 @@ impl Workspace {
         self.saved_model_selection = saved.clone();
     }
 
-    /// The draft still is the suggested setup, verifiers included.
     fn suggestion_untouched(&self, suggested: &Setup, cx: &App) -> bool {
-        self.model_selection == suggested.selection
-            && self.verifiers.read(cx).verification() == Some(&suggested.verification)
+        models::untouched(
+            suggested,
+            &self.model_selection,
+            self.verifiers.read(cx).verification(),
+        )
     }
 
     fn show_suggestion(&mut self, setup: &Setup, window: &mut Window, cx: &mut Context<Self>) {
@@ -50,31 +52,27 @@ impl Workspace {
     /// On a store with no saved setup, suggests one from the last detection. An untouched
     /// suggestion follows a new detection; one the human edited is kept.
     pub(super) fn offer_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let detected = PROVIDERS.iter().all(|p| self.detection.contains_key(p));
-        if self.snapshot.is_none()
-            || self.saved_model_selection.is_saved()
-            || self.catalog_pending > 0
-            || !detected
-        {
+        if self.snapshot.is_none() || self.catalog_pending > 0 {
             return;
         }
-        let next = suggest(&self.detection);
-        if self.suggested.as_ref() == Some(&next) {
+        let Some(offer) = models::offer(
+            &self.saved_model_selection,
+            self.suggested.as_ref(),
+            &self.model_selection,
+            self.verifiers.read(cx).verification(),
+            &self.detection,
+        ) else {
             return;
+        };
+        if offer.replaces_draft {
+            self.show_suggestion(&offer.suggested, window, cx);
         }
-        let untouched = self
-            .suggested
-            .as_ref()
-            .is_none_or(|shown| self.suggestion_untouched(shown, cx));
-        if untouched {
-            self.show_suggestion(&next, window, cx);
-        }
-        self.suggested = Some(next);
+        self.suggested = Some(offer.suggested);
     }
 
     /// The first-run notice: what was suggested, or why nothing could be.
     fn suggestion_banner(&self, suggested: &Setup, p: Palette) -> Div {
-        let found = PROVIDERS.iter().any(|&p| suggested.selection.is_enabled(p));
+        let found = suggested.selection.any_enabled();
         let (color, title, note) = if found {
             (
                 p.accent,
@@ -374,11 +372,7 @@ impl Workspace {
                 p,
             ))
             .child(
-                if self.suggested.is_some()
-                    && !PROVIDERS
-                        .iter()
-                        .any(|&p| self.model_selection.is_enabled(p))
-                {
+                if self.suggested.is_some() && !self.model_selection.any_enabled() {
                     hint("Available once a provider is enabled.", p).into_any_element()
                 } else {
                     self.verifiers.clone().into_any_element()
@@ -456,9 +450,12 @@ impl Workspace {
         let dirty = untouched.is_some() || self.model_selection_dirty();
         let invalid = self.model_selection.validate().err();
         let loading = self.catalog_pending > 0;
-        let no_provider = !PROVIDERS
-            .iter()
-            .any(|&p| self.model_selection.is_enabled(p));
+        let no_provider = !self.model_selection.any_enabled();
+        let can_save = models::can_save(
+            untouched.is_some(),
+            self.model_selection_dirty(),
+            &self.model_selection,
+        );
         let state = match (&invalid, untouched) {
             (Some(_), Some(_)) if no_provider => {
                 hint("Enable at least one provider to save", p).text_color(p.red)
@@ -507,7 +504,7 @@ impl Workspace {
                 button("save-models")
                     .primary()
                     .label("Save")
-                    .disabled(!dirty || invalid.is_some())
+                    .disabled(!can_save)
                     .on_click(cx.listener(|v, _, w, c| v.save_model_selection(w, c))),
             )
     }
