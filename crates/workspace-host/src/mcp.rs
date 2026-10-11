@@ -57,6 +57,12 @@ pub fn tools() -> Value {
             vec!["message_id", "kind", "body"]
         ),
         tool(
+            "set_plan",
+            "Record your checklist for this turn: the steps you expect, in order, each with its text and whether it is done. Send the whole list every time; it replaces the last one. Call it when you start work and again as items finish or the plan changes. It only shows your progress to the human: it messages no one and never replaces report. At most 50 items of up to 200 characters each.",
+            json!({"items":{"type":"array","maxItems":50,"items":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":200},"done":{"type":"boolean"}},"required":["text","done"],"additionalProperties":false}}}),
+            vec!["items"]
+        ),
+        tool(
             "stop_agents",
             "Stop your direct children named in session_ids, or all of them when omitted, for example after a check-in shows one stuck or on the wrong path. Running turns stop and their input is not retried; idle children are paused. Each stays paused, so messages and timer fires wait until you call resume_agent. Give the reason; the next turn is told why. Returns stopped, paused_idle or already_paused per agent. Other arguments are refused, so a mistyped session_ids never stops every child.",
             json!({"session_ids":{"type":"array","items":string},"reason":string}),

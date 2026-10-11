@@ -226,6 +226,34 @@ fn only_arguments(tool: &str, args: &Value, allowed: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+/// The id of the plan step `set_plan` records; one per run, updated in place.
+const SET_PLAN_STEP: &str = "set_plan";
+/// A `set_plan` checklist as (done, text) pairs. Input over the bounds is refused, never cut.
+fn plan_items(args: &Value) -> Result<Vec<(bool, String)>> {
+    only_arguments("set_plan", args, &["items"])?;
+    let items = args["items"].as_array().context("Missing items")?;
+    ensure!(
+        items.len() <= MAX_PLAN_ITEMS,
+        "set_plan takes at most {MAX_PLAN_ITEMS} items, not {}",
+        items.len()
+    );
+    items
+        .iter()
+        .zip(1..)
+        .map(|(item, number)| {
+            only_arguments("A set_plan item", item, &["text", "done"])?;
+            let text = item["text"].as_str().unwrap_or_default().trim();
+            let done = item["done"].as_bool();
+            let done = done.with_context(|| format!("Item {number} needs done: true or false"))?;
+            ensure!(!text.is_empty(), "Item {number} needs a text");
+            ensure!(
+                text.chars().count() <= MAX_STEP_TITLE,
+                "Item {number} is longer than {MAX_STEP_TITLE} characters"
+            );
+            Ok((done, text.to_owned()))
+        })
+        .collect()
+}
 /// Provider output is not Markdown, so it is fenced to show verbatim.
 fn runtime_stopped(error: &str) -> String {
     let longest = error
@@ -320,6 +348,7 @@ pub struct Service {
     handle: Arc<Handle>,
     changes: Receiver<()>,
     step_changes: Receiver<()>,
+    progress_changes: Receiver<()>,
 }
 struct Active {
     run: String,
@@ -379,6 +408,11 @@ struct Actor {
     /// step signal must never hold back a state change.
     steps_changed: Sender<()>,
     steps_dirty: bool,
+    /// Progress has its own signal too, sent only when a figure on the board changed, so a
+    /// plan step never reloads the snapshot and other steps never fetch progress.
+    progress_changed: Sender<()>,
+    /// A plan step or a turn start may have moved a figure since the last signal.
+    progress_dirty: bool,
     /// Each session's latest step revision, seeded from the store on first use.
     revisions: HashMap<String, u64>,
     active: HashMap<String, Active>,
@@ -412,6 +446,7 @@ impl Service {
         let (sender, receiver) = async_channel::bounded(256);
         let (changed, changes) = async_channel::bounded(1);
         let (steps_changed, step_changes) = async_channel::bounded(1);
+        let (progress_changed, progress_changes) = async_channel::bounded(1);
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let worker = sender.clone();
         std::thread::Builder::new()
@@ -488,6 +523,8 @@ impl Service {
                     changed,
                     steps_changed,
                     steps_dirty: false,
+                    progress_changed,
+                    progress_dirty: false,
                     revisions: HashMap::new(),
                     active: HashMap::new(),
                     permissions: HashMap::new(),
@@ -528,6 +565,7 @@ impl Service {
             handle: Arc::new(Handle { sender }),
             changes,
             step_changes,
+            progress_changes,
         })
     }
     pub fn request(
@@ -547,6 +585,10 @@ impl Service {
     /// Signals that some session's work steps changed; fetch them with `Command::Steps`.
     pub fn step_changes(&self) -> Receiver<()> {
         self.step_changes.clone()
+    }
+    /// Signals that a figure on the progress board changed; fetch it with `Command::Progress`.
+    pub fn progress_changes(&self) -> Receiver<()> {
+        self.progress_changes.clone()
     }
 }
 impl Actor {
@@ -698,6 +740,7 @@ impl Actor {
                     Command::Snapshot
                         | Command::Messages { .. }
                         | Command::Steps { .. }
+                        | Command::Progress { .. }
                         | Command::RunSummaries { .. }
                         | Command::Logs { .. }
                         | Command::Activity { .. }
@@ -839,6 +882,7 @@ impl Actor {
                     match name.as_str() {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
+                        "set_plan" => return self.set_plan(&id, &args).map(Some),
                         _ => {}
                     }
                     if name == "request_permission" {
@@ -881,7 +925,8 @@ impl Actor {
                     }
                     _ => {}
                 }
-                name != "workspace_context"
+                // A checklist is a work step, not a state change: it reloads no snapshot.
+                !matches!(name.as_str(), "workspace_context" | "set_plan")
             }
             Event::Provider {
                 session,
@@ -1135,6 +1180,36 @@ impl Actor {
         if std::mem::take(&mut self.steps_dirty) {
             let _ = self.steps_changed.try_send(());
         }
+        if std::mem::take(&mut self.progress_dirty) || state_changed {
+            match self.host.refresh_progress() {
+                Ok(true) => drop(self.progress_changed.try_send(())),
+                Ok(false) => {}
+                Err(e) => eprintln!("Workspace progress: {e:#}"),
+            }
+        }
+    }
+    /// Tells clients about a state change made outside an event's own handling.
+    fn state_changed(&mut self) {
+        let _ = self.changed.try_send(());
+        self.progress_dirty = true;
+    }
+    /// Records the caller's checklist as its run's plan step, as a provider's plan would be.
+    /// It writes that step and nothing else: no message, no status, no state signal.
+    fn set_plan(&mut self, caller: &str, args: &Value) -> Result<Value> {
+        let items = plan_items(args)?;
+        let active = self.active.get(caller).context("No active turn")?;
+        ensure!(
+            active.steps.len() < MAX_RUN_STEPS
+                || active.steps.iter().any(|s| s.id == SET_PLAN_STEP),
+            "This turn has reached its limit of {MAX_RUN_STEPS} steps; the checklist was not recorded"
+        );
+        let run = active.run.clone();
+        let todos = items.iter().map(|(done, text)| (*done, text.as_str()));
+        let mut update = stream::plan(SET_PLAN_STEP, todos);
+        update.state = StepState::Succeeded;
+        let counts = update.plan.clone().context("A plan has counts")?;
+        self.record_step(caller, &run, update)?;
+        Ok(json!({"done":counts.done,"total":counts.total}))
     }
     fn next_revision(&mut self, session_id: &str) -> Result<u64> {
         let latest = match self.revisions.get(session_id) {
@@ -1145,7 +1220,8 @@ impl Actor {
         Ok(latest + 1)
     }
     /// Merges an adapter's update into the turn's steps. Text deltas stay in memory; the store
-    /// is written when a step starts, changes state or learns which files it touches.
+    /// is written when a step starts, changes state, learns which files it touches or, for a
+    /// plan, changes its counts.
     fn record_step(&mut self, session_id: &str, run: &str, update: StepUpdate) -> Result<()> {
         let revision = self.next_revision(session_id)?;
         let active = self.active.get_mut(session_id).context("No active turn")?;
@@ -1167,6 +1243,7 @@ impl Actor {
                     note: None,
                     detail: None,
                     paths: vec![],
+                    plan: None,
                     omitted: 0,
                     seq: active.steps.len() as u32,
                     revision,
@@ -1177,8 +1254,10 @@ impl Actor {
             }
         };
         let step = &mut active.steps[index];
-        let persist =
-            existing.is_none() || step.state != update.state || step.paths != update.paths;
+        let persist = existing.is_none()
+            || step.state != update.state
+            || step.paths != update.paths
+            || step.plan != update.plan;
         step.parent_id = update.parent_id;
         step.kind = update.kind;
         step.state = update.state;
@@ -1186,6 +1265,7 @@ impl Actor {
         step.note = update.note;
         step.detail = update.detail;
         step.paths = update.paths;
+        step.plan = update.plan;
         step.omitted = 0;
         step.revision = revision;
         if step.state != StepState::Running {
@@ -1194,6 +1274,11 @@ impl Actor {
         steps::bound(step);
         if persist {
             self.host.save_step(session_id, step)?;
+        }
+        if step.kind == StepKind::Plan {
+            let plan = step.plan.clone();
+            self.host.plan_recorded(session_id, plan.as_ref())?;
+            self.progress_dirty = true;
         }
         self.steps_dirty = true;
         Ok(())
@@ -1620,7 +1705,7 @@ impl Actor {
                 }
                 // Fires and next-fire times show in the client even when no turn starts.
                 if pass.changed {
-                    let _ = self.changed.try_send(());
+                    self.state_changed();
                 }
             }
             Err(e) => eprintln!("Workspace timers: {e:#}"),
@@ -1782,7 +1867,7 @@ impl Actor {
             runtime.held = true;
             self.host.save_runtime(&runtime)?;
             self.host.set_status(&session.id, Status::Blocked)?;
-            let _ = self.changed.try_send(());
+            self.state_changed();
             Host::event(
                 &self.host.db,
                 &session.project_id,
@@ -1983,7 +2068,10 @@ impl Actor {
         );
         self.wake(active.next_check_in);
         self.active.insert(session.id.clone(), active);
-        let _ = self.changed.try_send(());
+        if let Err(e) = self.host.run_started(&session.id) {
+            eprintln!("Workspace progress: {e:#}");
+        }
+        self.state_changed();
         if let Err(e) = self.check_in_by_turns(&session, &run) {
             eprintln!("Workspace check-in: {e:#}");
         }
@@ -2069,6 +2157,9 @@ mod tests {
             changed,
             steps_changed,
             steps_dirty: false,
+            // A test that reads the progress signal installs its own sender.
+            progress_changed: async_channel::bounded(1).0,
+            progress_dirty: false,
             revisions: HashMap::new(),
             active: HashMap::new(),
             permissions: HashMap::new(),
@@ -3276,6 +3367,7 @@ mod tests {
             note: None,
             detail: None,
             paths: vec![],
+            plan: None,
             omitted: 0,
             seq: 0,
             revision: 1,
@@ -4369,6 +4461,7 @@ mod tests {
             note: None,
             detail: Some(title.into()),
             paths: vec![],
+            plan: None,
         }
     }
 
@@ -4604,6 +4697,410 @@ mod tests {
             .unwrap();
         actor.signal(false);
         assert_eq!(step_changes.len(), 1);
+    }
+
+    /// A ticket whose implementer is mid-turn in run `run`, with the board as a client last
+    /// read it and the signals a client listens to.
+    struct Crew {
+        home: tempfile::TempDir,
+        actor: Actor,
+        ticket: Ticket,
+        implementer: Session,
+        coordinator: Session,
+        changes: Receiver<()>,
+        progress: Receiver<()>,
+    }
+    impl Crew {
+        fn new() -> Self {
+            let (home, mut host, ticket, coordinator) = ticket_fixture();
+            let implementer = host
+                .assign_ticket(
+                    &ticket.id,
+                    Role::Implementer,
+                    Provider::Claude,
+                    "Build",
+                    None,
+                )
+                .unwrap();
+            host.db
+                .execute(
+                    "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES ('run',?1,'[]',1,'{}')",
+                    [&implementer.id],
+                )
+                .unwrap();
+            host.set_status(&implementer.id, Status::Working).unwrap();
+            let (mut actor, changes, _) = idle_actor(host);
+            let (progress_changed, progress) = async_channel::bounded(1);
+            actor.progress_changed = progress_changed;
+            actor
+                .active
+                .insert(implementer.id.clone(), active_turn("run", vec![]));
+            actor.host.refresh_progress().unwrap();
+            Self {
+                home,
+                actor,
+                ticket,
+                implementer,
+                coordinator,
+                changes,
+                progress,
+            }
+        }
+        /// Handles an event and signals as `process` does, without the scheduler.
+        fn handle(&mut self, event: Event) {
+            let state_changed = self.actor.handle(event);
+            self.actor.signal(state_changed);
+        }
+        /// A plan step from the provider's own plan tool.
+        fn provider_plan(&self, id: &str, done: usize, total: usize) -> Event {
+            let items = checklist(done, total);
+            let mut plan =
+                stream::plan(id, items.iter().map(|(done, text)| (*done, text.as_str())));
+            plan.state = StepState::Succeeded;
+            Event::Provider {
+                session: self.implementer.id.clone(),
+                run: "run".into(),
+                event: ProviderEvent::Step(plan),
+            }
+        }
+        fn set_plan(&mut self, items: Value) -> std::result::Result<Value, String> {
+            let (reply, result) = async_channel::bounded(1);
+            self.handle(Event::Tool {
+                token: String::new(),
+                name: "set_plan".into(),
+                args: json!({ "items": items }),
+                reply,
+            });
+            result.try_recv().unwrap()
+        }
+        fn checklist(&mut self) -> Option<(u32, u32)> {
+            let page = self.actor.host.progress(0).unwrap();
+            let agent = page
+                .agents
+                .iter()
+                .find(|a| a.session_id == self.implementer.id);
+            agent?.plan.as_ref().map(|plan| (plan.done, plan.total))
+        }
+        fn plan_steps(&self) -> Vec<Step> {
+            let page = self.actor.steps(&self.implementer.id, None, 0).unwrap();
+            let plans = page.steps.into_iter().filter(|s| s.kind == StepKind::Plan);
+            plans.collect()
+        }
+    }
+
+    /// `total` items, the first `done` of them finished.
+    fn checklist(done: usize, total: usize) -> Vec<(bool, String)> {
+        (1..=total)
+            .map(|n| (n <= done, format!("Item {n}")))
+            .collect()
+    }
+    fn items(done: usize, total: usize) -> Value {
+        let items = checklist(done, total);
+        json!(
+            items
+                .iter()
+                .map(|(done, text)| json!({"text":text,"done":done}))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    #[test]
+    fn set_plan_records_one_plan_step_and_signals_progress_but_not_state() {
+        let mut crew = Crew::new();
+        assert_eq!(crew.set_plan(items(3, 6)), Ok(json!({"done":3,"total":6})));
+        let steps = crew.plan_steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            (steps[0].title.as_str(), steps[0].state),
+            ("Plan · 3 of 6 done", StepState::Succeeded)
+        );
+        assert_eq!(
+            steps[0].detail.as_deref().unwrap().lines().nth(3),
+            Some("◻ Item 4")
+        );
+        let counts = steps[0].plan.clone().unwrap();
+        assert_eq!(
+            (counts.done, counts.total, counts.current.as_deref()),
+            (3, 6, Some("Item 4"))
+        );
+        assert_eq!((crew.progress.len(), crew.changes.len()), (1, 0));
+        // A later call updates the same step, and the store has it before the turn ends.
+        assert_eq!(crew.set_plan(items(4, 6)), Ok(json!({"done":4,"total":6})));
+        assert_eq!(crew.plan_steps().len(), 1);
+        let stored = crew
+            .actor
+            .host
+            .steps(&crew.implementer.id, Some("run"), 0)
+            .unwrap();
+        assert_eq!(stored.steps[0].plan.as_ref().map(|plan| plan.done), Some(4));
+        assert_eq!(crew.checklist(), Some((4, 6)));
+    }
+
+    #[test]
+    fn set_plan_refuses_input_over_its_bounds_and_records_nothing() {
+        let mut crew = Crew::new();
+        let long = "x".repeat(MAX_STEP_TITLE + 1);
+        for (items, limit) in [
+            (items(0, MAX_PLAN_ITEMS + 1), "at most 50 items, not 51"),
+            (
+                json!([{"text":long,"done":false}]),
+                "Item 1 is longer than 200 characters",
+            ),
+            (
+                json!([{"text":"Plan","done":true},{"text":"  ","done":false}]),
+                "Item 2 needs a text",
+            ),
+            (json!([{"text":"Plan"}]), "Item 1 needs done"),
+            (json!([{"text":"Plan","done":false,"note":"x"}]), "not note"),
+        ] {
+            let error = crew.set_plan(items).unwrap_err();
+            assert!(error.contains(limit), "{error}");
+        }
+        let (reply, result) = async_channel::bounded(1);
+        crew.handle(Event::Tool {
+            token: String::new(),
+            name: "set_plan".into(),
+            args: json!({"items":[],"percent":50}),
+            reply,
+        });
+        assert!(
+            result
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("not percent")
+        );
+        assert!(crew.plan_steps().is_empty());
+        assert_eq!((crew.checklist(), crew.progress.len()), (None, 0));
+        // The largest allowed checklist is recorded whole.
+        let full = json!(vec![
+            json!({"text":"x".repeat(MAX_STEP_TITLE),"done":false});
+            MAX_PLAN_ITEMS
+        ]);
+        assert_eq!(
+            crew.set_plan(full),
+            Ok(json!({"done":0,"total":MAX_PLAN_ITEMS}))
+        );
+    }
+
+    #[test]
+    fn the_latest_plan_step_is_the_checklist_whichever_tool_wrote_it() {
+        let mut crew = Crew::new();
+        let native = crew.provider_plan("toolu_1", 1, 2);
+        crew.handle(native);
+        assert_eq!(crew.checklist(), Some((1, 2)));
+        crew.set_plan(items(2, 5)).unwrap();
+        assert_eq!(crew.checklist(), Some((2, 5)));
+        let native = crew.provider_plan("toolu_2", 2, 2);
+        crew.handle(native);
+        assert_eq!(crew.checklist(), Some((2, 2)));
+        // The stored steps agree, so a restart rebuilds the same checklist.
+        let stored = crew.actor.host.latest_plans().unwrap();
+        assert_eq!(stored[&crew.implementer.id].total, 2);
+    }
+
+    #[test]
+    fn only_a_changed_plan_signals_progress_and_a_burst_leaves_one_signal() {
+        let mut crew = Crew::new();
+        let command = Event::Provider {
+            session: crew.implementer.id.clone(),
+            run: "run".into(),
+            event: ProviderEvent::Step(update("ls", StepKind::Command, StepState::Succeeded, "ls")),
+        };
+        crew.handle(command);
+        assert_eq!(crew.progress.len(), 0);
+        let plan = crew.provider_plan("plan", 2, 5);
+        crew.handle(plan);
+        assert_eq!((crew.progress.len(), crew.changes.len()), (1, 0));
+        for done in 0..=5 {
+            let plan = crew.provider_plan("plan", done, 5);
+            crew.handle(plan);
+        }
+        assert_eq!((crew.progress.len(), crew.changes.len()), (1, 0));
+        crew.progress.try_recv().unwrap();
+        // The same plan again changes no figure; the next change after a read signals again.
+        let same = crew.provider_plan("plan", 5, 5);
+        crew.handle(same);
+        assert_eq!(crew.progress.len(), 0);
+        let rewritten = crew.provider_plan("plan", 5, 6);
+        crew.handle(rewritten);
+        assert_eq!(crew.progress.len(), 1);
+    }
+
+    #[test]
+    fn the_progress_cursor_returns_only_what_changed() {
+        let mut crew = Crew::new();
+        let board = crew.actor.host.progress(0).unwrap();
+        let agents: Vec<_> = board.agents.iter().map(|a| a.session_id.as_str()).collect();
+        assert_eq!(agents, [&crew.coordinator.id, &crew.implementer.id]);
+        assert_eq!((board.tickets.len(), board.projects.len()), (1, 1));
+        assert!(board.complete);
+        assert_eq!(board.tickets[0].state, BarState::Indeterminate);
+        let unchanged = crew.actor.host.progress(board.revision).unwrap();
+        assert_eq!(unchanged.revision, board.revision);
+        assert!(unchanged.agents.is_empty() && unchanged.tickets.is_empty());
+        assert!(unchanged.projects.is_empty());
+        // One plan change moves the agent, its ticket and its project, and nothing else.
+        let plan = crew.provider_plan("plan", 3, 6);
+        crew.handle(plan);
+        let page = crew.actor.host.progress(board.revision).unwrap();
+        assert!(page.revision > board.revision);
+        let agents: Vec<_> = page.agents.iter().map(|a| a.session_id.as_str()).collect();
+        assert_eq!(agents, [&crew.implementer.id]);
+        assert_eq!(page.tickets.len(), 1);
+        assert_eq!(
+            (page.tickets[0].state, percent(page.tickets[0].position)),
+            (BarState::InProgress, 30)
+        );
+        assert_eq!(
+            (page.projects.len(), page.projects[0].position.map(percent)),
+            (1, Some(30))
+        );
+        assert!(!page.complete);
+        // A closed ticket is gone from the board, so the next page is the whole board again.
+        let mut ticket = crew.actor.host.ticket(&crew.ticket.id).unwrap();
+        ticket.state = "closed".into();
+        crew.actor.host.save_ticket(&ticket).unwrap();
+        let closed = crew.actor.host.progress(page.revision).unwrap();
+        assert!(closed.complete && closed.tickets.is_empty());
+        assert_eq!((closed.agents.len(), closed.projects.len()), (2, 1));
+        assert!(closed.projects[0].tickets.is_empty());
+        assert_eq!(closed.projects[0].phase, Phase::Planning);
+    }
+
+    #[test]
+    fn a_workers_progress_never_wakes_or_messages_anyone() {
+        let mut crew = Crew::new();
+        crew.actor
+            .host
+            .set_live(&crew.coordinator.project_id, true)
+            .unwrap();
+        let records = |actor: &Actor| {
+            let messages: i64 = actor
+                .host
+                .db
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+                .unwrap();
+            let sessions = actor.host.sessions().unwrap();
+            let state = actor.host.ticket(&crew.ticket.id).unwrap().state;
+            (messages, sessions, state, actor.active.len())
+        };
+        let before = records(&crew.actor);
+        for done in 0..20 {
+            let native = crew.provider_plan(&format!("toolu_{done}"), done, 20);
+            crew.actor.process(native);
+            let (reply, result) = async_channel::bounded(1);
+            crew.actor.process(Event::Tool {
+                token: String::new(),
+                name: "set_plan".into(),
+                args: json!({ "items": items(done, 40) }),
+                reply,
+            });
+            result.try_recv().unwrap().unwrap();
+        }
+        assert_eq!(records(&crew.actor), before);
+        let queued: i64 = crew
+            .actor
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued'",
+                [&crew.coordinator.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0);
+        assert_eq!((crew.changes.len(), crew.progress.len()), (0, 1));
+    }
+
+    #[test]
+    fn a_restart_rebuilds_the_board_from_stored_steps_even_for_an_archived_verifier() {
+        let mut crew = Crew::new();
+        let plan = crew.provider_plan("plan", 3, 6);
+        crew.handle(plan);
+        // A reviewer failed at 4 of 5; its cycle ended blocked and the host archived it.
+        let host = &mut crew.actor.host;
+        let reviewer = host
+            .assign_ticket(
+                &crew.ticket.id,
+                Role::Reviewer,
+                Provider::Claude,
+                "Review",
+                Some("Style"),
+            )
+            .unwrap();
+        host.db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,detail) VALUES ('review',?1,'[]',2,?2,'{}')",
+                params![reviewer.id, now()],
+            )
+            .unwrap();
+        crew.actor
+            .active
+            .insert(reviewer.id.clone(), active_turn("review", vec![]));
+        let mut plan = stream::plan(
+            "plan",
+            checklist(4, 5).iter().map(|(d, t)| (*d, t.as_str())),
+        );
+        plan.state = StepState::Succeeded;
+        crew.actor
+            .record_step(&reviewer.id, "review", plan)
+            .unwrap();
+        crew.actor.active.remove(&reviewer.id);
+        let host = &mut crew.actor.host;
+        let mut ticket = host.ticket(&crew.ticket.id).unwrap();
+        ticket.state = "blocked".into();
+        ticket.verification = Some(Verification {
+            cycle: 1,
+            max_rounds: 1,
+            outcome: VerificationOutcome::Blocked,
+            rounds: vec![VerificationRound {
+                round: 1,
+                commit: "abc".into(),
+                verifiers: vec![VerifierRun {
+                    session_id: reviewer.id.clone(),
+                    role: Role::Reviewer,
+                    focus: "Style".into(),
+                    message_id: "verify".into(),
+                    result: VerifierResult::Failed,
+                    report_id: None,
+                    reason: None,
+                }],
+            }],
+        });
+        host.save_ticket(&ticket).unwrap();
+        host.set_status(&reviewer.id, Status::Blocked).unwrap();
+        host.set_status(&crew.implementer.id, Status::Ready)
+            .unwrap();
+        let mut archived = host.session(&reviewer.id).unwrap();
+        archived.archived = true;
+        host.db
+            .execute(
+                "UPDATE sessions SET data=?2 WHERE id=?1",
+                params![archived.id, encode(&archived).unwrap()],
+            )
+            .unwrap();
+        let before = host.progress(0).unwrap();
+        let failed = before
+            .agents
+            .iter()
+            .find(|a| a.session_id == reviewer.id)
+            .unwrap();
+        assert_eq!(
+            (failed.state, failed.word),
+            (BarState::Blocked, Some(Word::Failed))
+        );
+        assert_eq!(
+            failed.plan.as_ref().map(|p| (p.done, p.total)),
+            Some((4, 5))
+        );
+        let store = crew.home.path().join("home");
+        drop(crew.actor);
+        let after = Host::open(&store).unwrap().progress(0).unwrap();
+        assert_eq!(
+            (after.agents, after.tickets, after.projects),
+            (before.agents, before.tickets, before.projects)
+        );
     }
 
     #[test]

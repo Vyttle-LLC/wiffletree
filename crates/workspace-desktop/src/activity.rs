@@ -582,6 +582,7 @@ mod tests {
             note: None,
             detail: None,
             paths: vec![],
+            plan: None,
             omitted: 0,
             seq,
             revision,

@@ -9,6 +9,7 @@ mod memory;
 mod overlaps;
 mod policies;
 mod pr_watch;
+mod progress;
 pub mod provider;
 mod repositories;
 pub mod runtime;
@@ -45,6 +46,9 @@ pub struct Host {
     base_fetched_at: std::collections::HashMap<String, i64>,
     /// Each watched repository's latest PR check; see `pr_watch`.
     pull_request_checks: std::collections::HashMap<String, PullRequestCheck>,
+    /// Each session's latest checklist; `None` until first read from stored steps.
+    plans: Option<std::collections::HashMap<String, PlanCounts>>,
+    progress: progress::Progress,
 }
 struct StoreLock(File);
 impl Drop for StoreLock {
@@ -164,6 +168,8 @@ impl Host {
             branch_warnings: Default::default(),
             base_fetched_at: Default::default(),
             pull_request_checks: Default::default(),
+            plans: None,
+            progress: Default::default(),
         };
         host.recover()?;
         host.migrate_opus_defaults()?;
@@ -1182,6 +1188,7 @@ impl Host {
                 session_id,
                 run_ids,
             } => serde_json::to_value(self.run_summaries(&session_id, &run_ids)?)?,
+            Command::Progress { after } => serde_json::to_value(self.progress(after)?)?,
             Command::Settings => serde_json::to_value(self.settings())?,
             Command::SetWorkspacesDir { path } => {
                 serde_json::to_value(self.set_workspaces_dir(&path)?)?

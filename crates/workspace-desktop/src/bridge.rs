@@ -61,4 +61,7 @@ impl Bridge {
     pub fn step_changes(&self) -> Option<Receiver<()>> {
         self.service.as_ref().ok().map(Service::step_changes)
     }
+    pub fn progress_changes(&self) -> Option<Receiver<()>> {
+        self.service.as_ref().ok().map(Service::progress_changes)
+    }
 }

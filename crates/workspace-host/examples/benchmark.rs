@@ -143,6 +143,7 @@ fn main() -> Result<()> {
                     note: Some("exit 0".into()),
                     detail: Some("x".repeat(512)),
                     paths: vec![],
+                    plan: None,
                     omitted: 0,
                     seq: seq as u32,
                     revision,

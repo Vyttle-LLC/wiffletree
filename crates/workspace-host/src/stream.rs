@@ -2,7 +2,7 @@
 //! Unknown or partial events produce no step; they never fail a turn.
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
-use workspace_core::{StepKind, StepState};
+use workspace_core::{MAX_STEP_TITLE, PlanCounts, StepKind, StepState};
 
 /// What an adapter knows about a step. The service assigns its order, revision and times.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +16,8 @@ pub struct StepUpdate {
     pub detail: Option<String>,
     /// Files a read or edit touched, relative to the working directory when inside it.
     pub paths: Vec<String>,
+    /// A plan step's checklist counts.
+    pub plan: Option<PlanCounts>,
 }
 impl StepUpdate {
     fn new(id: impl Into<String>, kind: StepKind, title: impl Into<String>) -> Self {
@@ -28,6 +30,7 @@ impl StepUpdate {
             note: None,
             detail: None,
             paths: vec![],
+            plan: None,
         }
     }
 }
@@ -362,8 +365,8 @@ fn claude_tool(id: &str, name: &str, input: &Value, cwd: &str) -> StepUpdate {
     step
 }
 
-/// "Plan · 1 of 3 done", with each item listed in the detail.
-fn plan<'a>(id: &str, todos: impl Iterator<Item = (bool, &'a str)>) -> StepUpdate {
+/// "Plan · 1 of 3 done", with each item listed in the detail and the counts as data.
+pub(crate) fn plan<'a>(id: &str, todos: impl Iterator<Item = (bool, &'a str)>) -> StepUpdate {
     let todos: Vec<_> = todos.collect();
     let done = todos.iter().filter(|(done, _)| *done).count();
     let mut step = StepUpdate::new(
@@ -371,6 +374,12 @@ fn plan<'a>(id: &str, todos: impl Iterator<Item = (bool, &'a str)>) -> StepUpdat
         StepKind::Plan,
         format!("Plan · {done} of {} done", todos.len()),
     );
+    let current = todos.iter().find(|(done, _)| !done);
+    step.plan = Some(PlanCounts {
+        done: done as u32,
+        total: todos.len() as u32,
+        current: current.map(|(_, text)| crate::steps::clip(text.trim(), MAX_STEP_TITLE)),
+    });
     step.detail = Some(
         todos
             .iter()
@@ -610,6 +619,15 @@ mod tests {
             steps[2].detail.as_deref(),
             Some("✓ Write the module\n◻ Report progress\n◻ Search for TODOs")
         );
+        assert_eq!(
+            steps[2].plan,
+            Some(PlanCounts {
+                done: 1,
+                total: 3,
+                current: Some("Report progress".into()),
+            })
+        );
+        assert!(steps.iter().all(|s| s.plan.is_none() || s.kind == Plan));
         assert_eq!(steps[3].note.as_deref(), Some("+3"));
         assert_eq!(steps[3].paths, ["src/new.rs"]);
         assert_eq!(
@@ -682,6 +700,14 @@ mod tests {
                 ),
             ]
         );
+        assert_eq!(
+            steps[1].plan,
+            Some(PlanCounts {
+                done: 1,
+                total: 2,
+                current: Some("Fix the bug".into()),
+            })
+        );
         // The command shows its output while it runs.
         assert!(updates.iter().any(|u| u.id == "item_test"
             && u.state == Running
@@ -694,6 +720,25 @@ mod tests {
             codex.reply().as_deref(),
             Some("Fixed the parser and added a regression test.")
         );
+    }
+
+    #[test]
+    fn a_plan_counts_its_items_and_names_the_first_unfinished_one() {
+        let counts = |todos: &[(bool, &str)]| plan("plan", todos.iter().copied()).plan.unwrap();
+        let finished = counts(&[(true, "Write"), (true, "Test")]);
+        assert_eq!(
+            (finished.done, finished.total, finished.current),
+            (2, 2, None)
+        );
+        let empty = counts(&[]);
+        assert_eq!((empty.done, empty.total, empty.current), (0, 0, None));
+        // Items finished out of order: the current item is the first one still open.
+        let long = "x".repeat(MAX_STEP_TITLE + 50);
+        let open = counts(&[(false, &long), (true, "Later")]);
+        assert_eq!((open.done, open.total), (1, 2));
+        let current = open.current.unwrap();
+        assert_eq!(current.chars().count(), MAX_STEP_TITLE);
+        assert!(current.ends_with('…'));
     }
 
     #[test]

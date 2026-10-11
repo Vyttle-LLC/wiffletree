@@ -1,10 +1,12 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 mod files;
+mod progress;
 mod selection;
 mod steps;
 mod usage;
 use anyhow::{Result, ensure};
 pub use files::*;
+pub use progress::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
@@ -1174,6 +1176,11 @@ pub enum Command {
         session_id: String,
         #[serde(default)]
         whole_tree: bool,
+    },
+    /// The progress entries changed after `after`; `0` asks for the whole board. Answered
+    /// with a `ProgressPage`.
+    Progress {
+        after: u64,
     },
     /// Duration and step counts for up to a page of the session's runs.
     RunSummaries {

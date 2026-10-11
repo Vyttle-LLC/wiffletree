@@ -1,22 +1,46 @@
 ## Purpose
 
-Shows how far along each agent, each ticket and the whole project is, as progress bars the host derives from what it already records. Agents report nothing extra.
+Shows how far along each agent, each ticket and the whole project is, as progress bars the host derives from what it records. An agent's only part is to keep a checklist of its own steps.
 
 ## ADDED Requirements
 
-### Requirement: Progress is derived, never reported
-The host SHALL derive all progress from records it already keeps: an agent's plan steps, its session status, the ticket's state and the ticket's verification record. Agents SHALL get no new tool, no new report kind or field and no new instruction for progress. Progress SHALL NOT include cost or token estimates. A percentage SHALL be shown as a whole number, rounded to the nearest percent, and SHALL be shown only where these rules define one.
+### Requirement: Progress is derived from host records
+The host SHALL derive all progress from records it keeps: an agent's plan steps, its session status, the ticket's state and the ticket's verification record. An agent SHALL never report a percentage, a stage or a ticket's or project's progress. The only thing an agent supplies is its own checklist, as a plan step: through the workspace tool `set_plan`, or through its provider's own plan tool where one exists. Agents SHALL get no new report kind or field. Progress SHALL NOT include cost or token estimates. A percentage SHALL be shown as a whole number, rounded to the nearest percent, and SHALL be shown only where these rules define one.
 
-#### Scenario: Agents have nothing new to call
+#### Scenario: One new tool
 - **WHEN** an agent lists its workspace tools after this change
-- **THEN** the list is the same as before, and its role instructions do not mention progress
+- **THEN** the only addition is `set_plan`, and `report` is unchanged
 
 #### Scenario: An agent that never writes a plan
-- **WHEN** an implementer works through a whole turn without writing a plan
+- **WHEN** an implementer works through a whole turn without calling `set_plan` or a provider plan tool
 - **THEN** its bar is indeterminate for that turn and no percentage is shown for it
 
+### Requirement: Checklist tool
+The workspace tool server SHALL offer `set_plan` to every role. Its one argument, `items`, is the agent's whole checklist in order, each item a `text` and a `done` flag; each call replaces the checklist. The host SHALL record a call as a plan step in the caller's current run, with the same counts as a provider plan step: the first call of a run adds the step and later calls update it. The step SHALL appear in the work stream like any other plan step. When a run has plan steps from both `set_plan` and the provider's own plan tool, the most recently recorded one SHALL be the agent's checklist. The host SHALL refuse a call with more than 50 items, an item whose text is empty or longer than 200 characters, a missing `done` flag, or any other argument, with an error naming the limit, and SHALL record nothing for a refused call. A call SHALL NOT wake, notify or message any agent, SHALL NOT change a session's status or a ticket's state, and SHALL NOT write a conversation message. The communication instructions the host gives every agent SHALL ask it, in a few sentences, to record a checklist at the start of work and keep it current, and SHALL say that the checklist is display only and never replaces `report`.
+
+#### Scenario: A call records a plan step
+- **WHEN** a working agent calls `set_plan` with six items, three of them done
+- **THEN** its current run has one plan step titled "Plan · 3 of 6 done" carrying 3 done, 6 total and the fourth item as the current item, and its progress is 3 of 6
+
+#### Scenario: A later call updates the same step
+- **WHEN** that agent calls `set_plan` again with four of the six items done
+- **THEN** the run still has one plan step from the tool, now reading 4 of 6
+
+#### Scenario: Over the bounds
+- **WHEN** an agent calls `set_plan` with 51 items, or with an item of 201 characters, or with an empty item
+- **THEN** the call fails with an error naming the limit, and its checklist is unchanged
+
+#### Scenario: Latest plan wins
+- **WHEN** an agent's provider plan tool records 1 of 2 and the agent then calls `set_plan` with 2 of 5
+- **THEN** its progress is 2 of 5
+- **AND** if the provider plan tool then records 2 of 2, its progress is 2 of 2
+
+#### Scenario: A call wakes no one
+- **WHEN** a worker calls `set_plan` twenty times during its turn
+- **THEN** its coordinator is not woken, no message is written, and no session's status or ticket's state changes
+
 ### Requirement: Agent progress
-An agent's progress SHALL be a checklist count, items done out of total, taken from the latest plan step of its current run. Its current step SHALL be the first unfinished item of that plan. A plan with no items SHALL count as no plan. The agent's state SHALL be the first of these that applies:
+An agent's progress SHALL be a checklist count, items done out of total, taken from the latest plan step of its current run, whether `set_plan` or the provider's own plan tool recorded it. Its current step SHALL be the first unfinished item of that plan. A plan with no items SHALL count as no plan. The agent's state SHALL be the first of these that applies:
 
 1. **Finished, 100%**: the agent is a verifier whose latest result in the ticket's latest cycle is `passed`, or its session status is `Done`.
 2. **Blocked**: its session status is `Blocked`. It keeps the checklist position of its latest run, or has no position when that run had no plan.
@@ -78,7 +102,7 @@ A ticket's progress SHALL be a stage and a position in percent. Only the states 
 5. The ticket has a verification record whose latest cycle is running or blocked: stage **Verifying**, 60–90%: 60% plus 30% times the share of the latest cycle's verifiers whose latest result in that cycle is `passed`.
 6. Otherwise: stage **Implementing**, as in rule 2.
 
-A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and SHALL be shown as blocked. A ticket under rule 2 or 6 whose implementer is working without a plan SHALL be indeterminate: it shows its stage and no percentage, and counts as 0%. A ticket under rule 3 SHALL stay at 60% whatever its implementer is doing. Rule 2 applies to every `assigned` ticket, including one re-assigned for a fix after a cycle: it follows the checklist of the implementer's fix run. A ticket's position SHALL NOT exceed 90% before it is accepted. A position is derived from the current records only, so it MAY move backwards.
+A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and SHALL be shown as blocked. A ticket under rule 2 or 6 whose implementer is working without a plan SHALL be indeterminate: it shows its stage and no percentage, and counts as 0%. Blocked wins over indeterminate: a `blocked` ticket SHALL be shown as blocked, never striped, at the position its rule gives, until its state changes. Under rule 6 that position follows the implementer's current checklist, so it is 0% while a new run has written no plan. A ticket under rule 3 SHALL stay at 60% whatever its implementer is doing. Rule 2 applies to every `assigned` ticket, including one re-assigned for a fix after a cycle: it follows the checklist of the implementer's fix run. A ticket's position SHALL NOT exceed 90% before it is accepted. A position is derived from the current records only, so it MAY move backwards.
 
 #### Scenario: Implementing
 - **WHEN** a ticket is `assigned` and its implementer's checklist is 3 of 6
@@ -129,6 +153,11 @@ A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and 
 - **WHEN** a ticket's implementer reports `blocked` at 3 of 7 before any verification
 - **THEN** the ticket is shown as blocked at 26%
 
+#### Scenario: Blocked, then the implementer starts another run
+- **WHEN** a ticket is in state `blocked`, the coordinator answers its implementer with a message, and the implementer's new run has no plan yet
+- **THEN** the ticket is still shown as blocked, in red and without stripes, while the implementer's own bar is striped
+- **AND** a ticket blocked at the round cap with two of three verifiers passed stays blocked at 80% whatever its implementer is doing
+
 #### Scenario: Blocked at the round cap
 - **WHEN** a cycle of three verifiers ends blocked at the round cap with two passed
 - **THEN** the ticket is shown as blocked at 80%
@@ -143,7 +172,7 @@ A ticket in state `blocked` SHALL keep the position rules 4, 5 or 6 give it and 
 - **THEN** the ticket is Implementing at 60%
 
 ### Requirement: Project progress
-A project's progress SHALL be the equal-weight average of its tickets' positions, leaving out tickets in state `closed`. It SHALL be drawn as one bar with a segment of equal width per counted ticket, in the order the tickets were created, each segment filled to its ticket's position in its ticket's state. It SHALL show a phase label and the figure "N of M tickets accepted", where M is the number of counted tickets. The phase label SHALL be "Done" when every counted ticket is accepted, "Blocked" when every unaccepted ticket is blocked, and otherwise the least advanced stage among the tickets that are neither accepted nor blocked: Implementing, then Verifying, then Awaiting acceptance. When the project has no counted ticket, the label SHALL be "Planning" and the bar SHALL be the project coordinator's own agent progress.
+A project's progress SHALL be the equal-weight average of its tickets' positions, leaving out tickets in state `closed`. It SHALL be drawn as one bar with a segment of equal width per counted ticket, in the order the tickets were created, each segment filled to its ticket's position in its ticket's state. It SHALL show a phase label and the figure "N of M tickets accepted", where M is the number of counted tickets. The phase label SHALL be "Done" when every counted ticket is accepted, "Blocked" when every unaccepted ticket is blocked, and otherwise the least advanced stage among the tickets that are neither accepted nor blocked: Implementing, then Verifying, then Awaiting acceptance. When the project has no counted ticket, the label SHALL be "Planning" and the bar SHALL be the project coordinator's own agent progress, with a percentage only when the coordinator has a checklist.
 
 #### Scenario: Average of four tickets
 - **WHEN** a project's tickets are Accepted at 100%, Verifying at 70%, Implementing at 30% and blocked at 24%
@@ -156,6 +185,10 @@ A project's progress SHALL be the equal-weight average of its tickets' positions
 #### Scenario: No tickets and no plan
 - **WHEN** a project has no ticket and its coordinator is working with no plan
 - **THEN** the project shows "Planning" with a striped bar and no percentage
+
+#### Scenario: No tickets and an idle coordinator
+- **WHEN** a project has no ticket and its coordinator is idle with no checklist
+- **THEN** the project shows "Planning" with an empty track and no percentage
 
 #### Scenario: Closed ticket
 - **WHEN** one of a project's three tickets is closed, and the other two are at 100% and 50%
@@ -170,7 +203,7 @@ A project's progress SHALL be the equal-weight average of its tickets' positions
 - **THEN** the project shows "Done" at 100%, finished
 
 ### Requirement: Progress strip
-The selected conversation SHALL show one progress strip pinned directly under its session title. The strip SHALL NOT scroll with the transcript and SHALL keep a fixed height, so progress changes never move the transcript. For a project coordinator, the strip SHALL show the project's phase label, its segmented bar, its percentage and "N of M tickets accepted", and a crew button. For an agent on a ticket, it SHALL show the agent's own progress, as "Step K of N" with the current step, the bar and the percentage, followed by the ticket's figure, such as "ticket 30%". K SHALL be the number of items done plus one. When every item of a working agent's plan is done, the strip SHALL read "N of N" with no step label, never "Step N+1". An agent with nothing of its own to show SHALL show only its ticket's stage and figure. A session with neither a ticket nor a project of its own SHALL show its own progress alone.
+The selected conversation SHALL show one progress strip pinned directly under its session title. The strip SHALL NOT scroll with the transcript and SHALL keep a fixed height, so progress changes never move the transcript. For a project coordinator, the strip SHALL show the project's phase label, its segmented bar, its percentage and "N of M tickets accepted", and a crew button. For an agent on a ticket, it SHALL show the agent's own progress, as "Step K of N" with the current step, the bar and the percentage, followed by the ticket's figure, such as "ticket 30%". K SHALL be the number of items done plus one. When every item of a working agent's plan is done, the strip SHALL read "N of N" with no step label, never "Step N+1". "Step K of N" is the label of a working agent only. A finished agent's label SHALL be "Done", or "Passed" for a verifier whose latest result is `passed`. A blocked agent's label SHALL be "Failed" for a verifier whose latest result is `failed`, and otherwise "Blocked · step K of N", or "Blocked" when its latest run had no plan. An idle agent with a checklist from its latest run SHALL read "K of N", where K is the number of items done, with no "Step" and no current item. An agent with nothing of its own to show SHALL show only its ticket's stage and figure. A session with neither a ticket nor a project of its own SHALL show its own progress alone.
 
 #### Scenario: Coordinator selected
 - **WHEN** the human selects the coordinator of a project at 56% with one of four tickets accepted and six agents in its crew
@@ -183,6 +216,22 @@ The selected conversation SHALL show one progress strip pinned directly under it
 #### Scenario: Every item done
 - **WHEN** the human selects a working implementer whose plan reads 6 of 6, on a ticket at 60%
 - **THEN** the strip reads "6 of 6" with no step label, shows a full bar, and "100% · ticket 60%"
+
+#### Scenario: Finished agent
+- **WHEN** the human selects an implementer that reported `ready_for_testing` with its plan at 5 of 6, on a ticket at 60%
+- **THEN** the strip reads "Done", not "Step 6 of 6", shows a full green bar, and "100% · ticket 60%"
+
+#### Scenario: Passed and failed verifiers
+- **WHEN** the human selects a verifier whose latest result is `passed`, and then one whose latest result is `failed` at 4 of 5
+- **THEN** the first strip reads "Passed" with a full green bar, and the second reads "Failed" with a red bar at 80%
+
+#### Scenario: Blocked agent
+- **WHEN** the human selects an implementer that reported `blocked` at 3 of 7, and then one that reported `blocked` without ever writing a plan
+- **THEN** the first strip reads "Blocked · step 4 of 7" with a red bar at 43%, and the second reads "Blocked" with an empty track
+
+#### Scenario: Idle agent with a past checklist
+- **WHEN** the human selects an agent whose turn ended at 4 of 6 without a report
+- **THEN** the strip reads "4 of 6", with no "Step" and no current item, and shows a bar at 67%
 
 #### Scenario: Worker with no plan
 - **WHEN** the human selects a working verifier with no plan, on a ticket at 70%
@@ -231,7 +280,7 @@ The coordinator's strip SHALL carry a crew button labelled with the number of ag
 - **THEN** no elapsed-time timer runs
 
 ### Requirement: Progress states
-Every bar SHALL be in exactly one of four states: in progress, drawn in the focus color; indeterminate, drawn as a striped track with no percentage; blocked, drawn in red at the position it had; or finished, drawn in green at 100%. An idle bar SHALL be drawn as in progress. No bar SHALL show a percentage that these rules do not define.
+Every bar SHALL be in exactly one of four states: in progress, drawn in the focus color; indeterminate, drawn as a striped track with no percentage; blocked, drawn in red at the position it had; or finished, drawn in green at 100%. An idle bar SHALL be drawn as in progress. When a bar would be both blocked and indeterminate, it SHALL be blocked. No bar SHALL show a percentage that these rules do not define.
 
 #### Scenario: Blocked keeps its position
 - **WHEN** a ticket at 80% becomes blocked
@@ -246,20 +295,32 @@ Every bar SHALL be in exactly one of four states: in progress, drawn in the focu
 - **THEN** its bar is striped across its whole width and shows no percentage
 
 ### Requirement: Progress delivery without waking agents
-The host SHALL keep progress current whenever a plan step, a session's status, a ticket or a verification record changes, and SHALL rebuild the same figures from stored steps and records after a restart. Progress SHALL reach the desktop app incrementally: the host signals only when a figure actually changed, and the client then requests only the progress entries changed since its last cursor, never a full workspace snapshot. A step that is not a plan step SHALL cause no progress signal. Progress changes SHALL NOT wake, notify or message any agent, and SHALL NOT delay message receipts, permission requests or failures.
+The host SHALL keep progress current whenever a plan step, a session's status, a ticket or a verification record changes, and SHALL rebuild the same figures from stored steps and records after a restart, for every agent the board lists, including the archived verifiers of an open ticket's latest cycle. Stored steps are kept for a limited time: an agent whose latest run's steps were pruned SHALL show no checklist. Progress SHALL reach the desktop app incrementally: the host signals only when a figure actually changed, and the client then requests only the progress entries changed since its last cursor, never a full workspace snapshot. When an entry has left the board since that cursor, such as a closed ticket or an archived agent, the host SHALL answer once with the whole board, marked complete, and the client SHALL replace what it holds. A step that is not a plan step SHALL cause no progress signal. Progress changes SHALL NOT wake, notify or message any agent, and SHALL NOT delay message receipts, permission requests or failures.
 
 #### Scenario: A plan step arrives
 - **WHEN** a worker's plan goes from 2 of 5 to 3 of 5
 - **THEN** the desktop receives that agent's entry, its ticket's and its project's, and no snapshot reload occurs
+
+#### Scenario: An entry leaves the board
+- **WHEN** a ticket is closed after the desktop last read the board
+- **THEN** the next page is the whole board, marked complete, without that ticket, and the desktop no longer shows a figure for it
 
 #### Scenario: Ordinary steps
 - **WHEN** a worker streams narration and runs commands without changing its plan
 - **THEN** no progress signal is sent
 
 #### Scenario: Coordinator stays asleep
-- **WHEN** a worker's progress changes during its turn
-- **THEN** its coordinator is not woken and receives no message because of it
+- **WHEN** a worker's progress changes during its turn, by a burst of `set_plan` calls or of provider plan steps
+- **THEN** its coordinator is not woken and receives no message because of it, and no session's status changes
 
 #### Scenario: Restart
 - **WHEN** the host restarts while an implementer's stored plan reads 3 of 6 and its ticket is `assigned`
 - **THEN** after the restart the implementer shows 3 of 6 and the ticket 30%
+
+#### Scenario: Restart with an archived verifier
+- **WHEN** a cycle ended blocked with a verifier failed at 4 of 5, the host archived it, and the host restarts
+- **THEN** the crew panel still lists that verifier as "failed" at 4 of 5
+
+#### Scenario: Pruned run
+- **WHEN** an idle agent's latest run finished so long ago that the host pruned its steps
+- **THEN** the agent shows an empty track and no figure

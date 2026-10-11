@@ -229,6 +229,119 @@ pub fn ledger_rows(ticket: &Ticket) -> Vec<LedgerRow> {
         .collect()
 }
 
+/// An agent's short figure: its word, or its checklist count such as "3 of 6". An idle agent
+/// with no checklist has none.
+pub fn agent_figure(agent: &AgentProgress) -> Option<String> {
+    match (agent.word, &agent.plan) {
+        (Some(word), _) => Some(word.label().into()),
+        (None, Some(plan)) => Some(format!("{} of {}", plan.done, plan.total)),
+        (None, None) => None,
+    }
+}
+
+/// A ticket's short figure: "blocked", or its percentage. A striped ticket has none.
+pub fn ticket_figure(ticket: &TicketProgress) -> Option<String> {
+    match ticket.state {
+        BarState::Blocked => Some("blocked".into()),
+        BarState::Indeterminate => None,
+        _ => Some(format!("{}%", percent(ticket.position))),
+    }
+}
+
+/// A project's percentage; none while it plans with no checklist to count.
+pub fn project_figure(project: &ProjectProgress) -> Option<String> {
+    project
+        .position
+        .map(|position| format!("{}%", percent(position)))
+}
+
+/// The coordinator's strip figure, such as "56% · 1 of 4 tickets accepted". Before any ticket
+/// exists it is the percentage alone.
+pub fn project_summary(project: &ProjectProgress) -> String {
+    let tickets = project.tickets.len();
+    let accepted = (tickets > 0).then(|| {
+        let plural = if tickets == 1 { "" } else { "s" };
+        format!("{} of {tickets} ticket{plural} accepted", project.accepted)
+    });
+    let parts = project_figure(project).into_iter().chain(accepted);
+    parts.collect::<Vec<_>>().join(" · ")
+}
+
+/// "6 agents", the crew button's label.
+pub fn crew_label(agents: usize) -> String {
+    format!("{agents} agent{}", if agents == 1 { "" } else { "s" })
+}
+
+/// The strip's label for an agent. Only a working agent reads "Step K of N" with its current
+/// item; `None` when the agent has nothing of its own to show.
+pub fn strip_label(agent: &AgentProgress) -> Option<String> {
+    // The item being worked on, or the finished count when every item is done.
+    let step = agent.plan.as_ref().map(|plan| {
+        if plan.done < plan.total {
+            format!("Step {} of {}", plan.done + 1, plan.total)
+        } else {
+            format!("{} of {}", plan.total, plan.total)
+        }
+    });
+    match (agent.word, &agent.plan) {
+        (Some(Word::Passed), _) => Some("Passed".into()),
+        (Some(Word::Done), _) => Some("Done".into()),
+        (Some(Word::Failed), _) => Some("Failed".into()),
+        (Some(Word::Blocked), _) => Some(match step {
+            Some(step) => format!("Blocked · {}", step.to_lowercase()),
+            None => "Blocked".into(),
+        }),
+        (Some(Word::Working), _) => Some("Working".into()),
+        (None, Some(plan)) if agent.working => Some(match &plan.current {
+            Some(current) => format!("{} · {current}", step?),
+            None => step?,
+        }),
+        (None, Some(plan)) => Some(format!("{} of {}", plan.done, plan.total)),
+        (None, None) => None,
+    }
+}
+
+/// The strip's figure for an agent: its own percentage, then its ticket's, such as
+/// "50% · ticket 30%". A striped ticket is named by its stage.
+pub fn strip_figure(agent: Option<&AgentProgress>, ticket: Option<&TicketProgress>) -> String {
+    let own = agent
+        .and_then(AgentProgress::position)
+        .map(|position| format!("{}%", percent(position)));
+    let ticket = ticket.map(|ticket| {
+        let figure = ticket_figure(ticket).unwrap_or_else(|| ticket.stage.label().to_lowercase());
+        format!("ticket {figure}")
+    });
+    own.into_iter()
+        .chain(ticket)
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A crew card's heading figure, such as "Verifying · 70%" or "Verifying · 80% · blocked".
+pub fn stage_figure(ticket: &TicketProgress) -> String {
+    let stage = ticket.stage.label();
+    let position = percent(ticket.position);
+    match ticket.state {
+        BarState::Indeterminate => stage.into(),
+        BarState::Blocked => format!("{stage} · {position}% · blocked"),
+        _ => format!("{stage} · {position}%"),
+    }
+}
+
+/// How long the agent's run has taken, in whole minutes: since it started while the agent
+/// works, and otherwise the length of its latest run.
+pub fn elapsed_label(agent: &AgentProgress, now: i64) -> Option<String> {
+    let started = agent.run_started_at?;
+    let end = if agent.working {
+        now
+    } else {
+        agent
+            .run_finished_at
+            .filter(|&finished| finished >= started)?
+    };
+    Some(format!("{}m", (end - started).max(0) / 60_000))
+}
+
 /// Newest project first. Archived sessions appear only when `show_archived`; a ticket whose
 /// agents are all archived, such as a closed one, goes with them.
 pub fn rows<'a>(
@@ -319,6 +432,220 @@ pub fn rows<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent(word: Option<Word>, plan: Option<(u32, u32)>, working: bool) -> AgentProgress {
+        let state = match word {
+            Some(Word::Passed | Word::Done) => BarState::Finished,
+            Some(Word::Failed | Word::Blocked) => BarState::Blocked,
+            Some(Word::Working) => BarState::Indeterminate,
+            None => BarState::InProgress,
+        };
+        AgentProgress {
+            session_id: "agent".into(),
+            state,
+            plan: plan.map(|(done, total)| PlanCounts {
+                done,
+                total,
+                current: (done < total).then(|| "Update the design README".into()),
+            }),
+            word,
+            working,
+            run_started_at: None,
+            run_finished_at: None,
+        }
+    }
+    fn ticket_at(stage: Stage, state: BarState, position: u16) -> TicketProgress {
+        TicketProgress {
+            ticket_id: "ticket".into(),
+            stage,
+            state,
+            position,
+            agents: vec![],
+        }
+    }
+    fn project_at(
+        state: BarState,
+        position: Option<u16>,
+        accepted: u32,
+        tickets: usize,
+    ) -> ProjectProgress {
+        ProjectProgress {
+            project_id: "project".into(),
+            phase: Phase::Implementing,
+            state,
+            position,
+            accepted,
+            tickets: (0..tickets).map(|n| n.to_string()).collect(),
+            coordinator_id: "coordinator".into(),
+        }
+    }
+
+    #[test]
+    fn an_agents_figure_is_its_word_or_its_checklist_count() {
+        let figure = |word, plan, working| agent_figure(&agent(word, plan, working));
+        assert_eq!(figure(None, Some((3, 5)), true).as_deref(), Some("3 of 5"));
+        assert_eq!(figure(None, Some((4, 6)), false).as_deref(), Some("4 of 6"));
+        assert_eq!(
+            figure(Some(Word::Working), None, true).as_deref(),
+            Some("working")
+        );
+        assert_eq!(
+            figure(Some(Word::Done), Some((5, 6)), false).as_deref(),
+            Some("done")
+        );
+        assert_eq!(
+            figure(Some(Word::Passed), Some((3, 5)), false).as_deref(),
+            Some("passed")
+        );
+        assert_eq!(
+            figure(Some(Word::Failed), Some((4, 5)), false).as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            figure(Some(Word::Blocked), Some((3, 7)), false).as_deref(),
+            Some("blocked")
+        );
+        assert_eq!(figure(None, None, false), None);
+    }
+
+    #[test]
+    fn ticket_and_project_figures_show_a_percentage_only_where_one_is_defined() {
+        use BarState::*;
+        let figure = |state, position| ticket_figure(&ticket_at(Stage::Verifying, state, position));
+        assert_eq!(figure(InProgress, 7_000).as_deref(), Some("70%"));
+        assert_eq!(figure(Finished, 10_000).as_deref(), Some("100%"));
+        assert_eq!(figure(Blocked, 2_571).as_deref(), Some("blocked"));
+        assert_eq!(figure(Indeterminate, 0), None);
+        let project = project_at(InProgress, Some(5_600), 1, 4);
+        assert_eq!(project_figure(&project).as_deref(), Some("56%"));
+        assert_eq!(project_summary(&project), "56% · 1 of 4 tickets accepted");
+        assert_eq!(
+            project_summary(&project_at(InProgress, Some(5_000), 0, 1)),
+            "50% · 0 of 1 ticket accepted"
+        );
+        // Planning: the coordinator's own checklist, or stripes with no figure at all.
+        assert_eq!(
+            project_summary(&project_at(InProgress, Some(2_500), 0, 0)),
+            "25%"
+        );
+        assert_eq!(project_summary(&project_at(Indeterminate, None, 0, 0)), "");
+        assert_eq!(
+            (crew_label(6), crew_label(1)),
+            ("6 agents".into(), "1 agent".into())
+        );
+    }
+
+    #[test]
+    fn the_strip_says_step_k_of_n_only_for_a_working_agent() {
+        let label = |word, plan, working| strip_label(&agent(word, plan, working));
+        assert_eq!(
+            label(None, Some((3, 6)), true).as_deref(),
+            Some("Step 4 of 6 · Update the design README")
+        );
+        assert_eq!(label(None, Some((6, 6)), true).as_deref(), Some("6 of 6"));
+        assert_eq!(
+            label(Some(Word::Working), None, true).as_deref(),
+            Some("Working")
+        );
+        // Finished and blocked agents are named by their state, never by a next step.
+        assert_eq!(
+            label(Some(Word::Done), Some((5, 6)), false).as_deref(),
+            Some("Done")
+        );
+        assert_eq!(
+            label(Some(Word::Passed), Some((3, 5)), false).as_deref(),
+            Some("Passed")
+        );
+        assert_eq!(
+            label(Some(Word::Failed), Some((4, 5)), false).as_deref(),
+            Some("Failed")
+        );
+        assert_eq!(
+            label(Some(Word::Blocked), Some((3, 7)), false).as_deref(),
+            Some("Blocked · step 4 of 7")
+        );
+        assert_eq!(
+            label(Some(Word::Blocked), None, false).as_deref(),
+            Some("Blocked")
+        );
+        // An idle agent keeps its count, with no step and no current item.
+        assert_eq!(label(None, Some((4, 6)), false).as_deref(), Some("4 of 6"));
+        assert_eq!(label(None, None, false), None);
+    }
+
+    #[test]
+    fn the_strip_figure_joins_the_agents_percentage_and_its_tickets() {
+        use BarState::*;
+        let at = |state, position| ticket_at(Stage::Implementing, state, position);
+        let working = agent(None, Some((3, 6)), true);
+        assert_eq!(
+            strip_figure(Some(&working), Some(&at(InProgress, 3_000))),
+            "50% · ticket 30%"
+        );
+        let finished = agent(None, Some((6, 6)), true);
+        assert_eq!(
+            strip_figure(Some(&finished), Some(&at(InProgress, 6_000))),
+            "100% · ticket 60%"
+        );
+        let done = agent(Some(Word::Done), Some((5, 6)), false);
+        assert_eq!(
+            strip_figure(Some(&done), Some(&at(InProgress, 6_000))),
+            "100% · ticket 60%"
+        );
+        let planless = agent(Some(Word::Working), None, true);
+        let verifying = ticket_at(Stage::Verifying, InProgress, 7_000);
+        assert_eq!(
+            strip_figure(Some(&planless), Some(&verifying)),
+            "ticket 70%"
+        );
+        assert_eq!(
+            strip_figure(Some(&planless), Some(&at(Indeterminate, 0))),
+            "ticket implementing"
+        );
+        assert_eq!(
+            strip_figure(Some(&planless), Some(&at(Blocked, 2_571))),
+            "ticket blocked"
+        );
+        assert_eq!(strip_figure(Some(&working), None), "50%");
+        assert_eq!(strip_figure(None, None), "");
+    }
+
+    #[test]
+    fn a_crew_card_names_the_stage_and_percentage() {
+        use BarState::*;
+        let figure = |stage, state, position| stage_figure(&ticket_at(stage, state, position));
+        assert_eq!(
+            figure(Stage::Verifying, InProgress, 7_000),
+            "Verifying · 70%"
+        );
+        assert_eq!(figure(Stage::Accepted, Finished, 10_000), "Accepted · 100%");
+        assert_eq!(
+            figure(Stage::Verifying, Blocked, 8_000),
+            "Verifying · 80% · blocked"
+        );
+        assert_eq!(
+            figure(Stage::Implementing, Indeterminate, 0),
+            "Implementing"
+        );
+    }
+
+    #[test]
+    fn elapsed_time_runs_while_working_and_is_the_runs_length_otherwise() {
+        const MINUTE: i64 = 60_000;
+        let mut running = agent(None, None, true);
+        (running.run_started_at, running.run_finished_at) = (Some(MINUTE), Some(30_000));
+        assert_eq!(
+            elapsed_label(&running, 13 * MINUTE + 59_000).as_deref(),
+            Some("12m")
+        );
+        let mut finished = agent(Some(Word::Done), None, false);
+        (finished.run_started_at, finished.run_finished_at) = (Some(MINUTE), Some(42 * MINUTE));
+        assert_eq!(
+            elapsed_label(&finished, 500 * MINUTE).as_deref(),
+            Some("41m")
+        );
+        assert_eq!(elapsed_label(&agent(None, None, false), MINUTE), None);
+    }
     use std::path::Path;
     use workspace_host::Host;
 

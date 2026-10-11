@@ -27,6 +27,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         "archive_agent",
         "stop_agents",
         "resume_agent",
+        "set_plan",
     ] {
         assert!(names.contains(&name), "{name}");
     }
@@ -44,6 +45,18 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         serde_json::json!(["blocking", "non_blocking", "pre_existing"])
     );
     assert!(schema("accept_ticket")["properties"]["waived"].is_object());
+    let plan = schema("set_plan");
+    assert_eq!(plan["required"], serde_json::json!(["items"]));
+    let items = &plan["properties"]["items"];
+    assert_eq!(items["maxItems"], workspace_core::MAX_PLAN_ITEMS);
+    assert_eq!(
+        items["items"]["required"],
+        serde_json::json!(["text", "done"])
+    );
+    assert_eq!(
+        items["items"]["properties"]["text"]["maxLength"],
+        workspace_core::MAX_STEP_TITLE
+    );
     assert_eq!(
         schema("triage_findings")["properties"]["decisions"]["items"]["properties"]["decision"]["enum"],
         serde_json::json!(["fix_now", "follow_up", "wont_fix"])
@@ -80,7 +93,10 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     assert!(coordinator.contains("Project coordinator — v10"));
     for role in Role::ALL {
         let skill = provider::skill(role);
-        assert!(skill.contains("Wiffletree communication contract — v5"));
+        assert!(skill.contains("Wiffletree communication contract — v6"));
+        // Every role is asked for a checklist, which is display only.
+        assert!(skill.contains("record a checklist of the steps you expect with set_plan"));
+        assert!(skill.contains("never replaces report"));
         assert!(skill.contains("run of turns without a message from your parent"));
     }
     for tool in [
