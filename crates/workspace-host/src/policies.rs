@@ -1,9 +1,27 @@
 use crate::*;
 
 const UNPINNED: &str = "This agent has no pinned model. Choose one from its model menu; Wiffletree never substitutes a model.";
+/// Why nothing starts on a store whose human has not saved a setup yet.
+pub(crate) const NO_SETUP: &str = "No model setup is saved on this machine yet. Open Models, review the suggested setup and press Save. Agents cannot start until a setup is saved.";
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Host {
+    /// Opens a store and, when it has no saved setup, saves the one suggested with both
+    /// providers signed in. Tests, benchmarks and scripted stores start from it; the app only
+    /// ever saves the setup the human pressed Save on.
+    pub fn open_set_up(home: impl AsRef<Path>) -> Result<Self> {
+        let mut host = Self::open(home)?;
+        if !host.model_selection()?.is_saved() {
+            let signed_in = ProviderStatus {
+                installed: true,
+                signed_in: true,
+                plan: None,
+            };
+            let detection = PROVIDERS.map(|p| (p, signed_in.clone())).into();
+            host.set_model_selection(&suggest(&detection).selection)?;
+        }
+        Ok(host)
+    }
     pub fn model_selection(&self) -> Result<ModelSelection> {
         Ok(self
             .db
@@ -145,8 +163,9 @@ impl Host {
         Ok(())
     }
     /// Turns tiered role policies into the machine's model selection. Unpinned sessions are
-    /// pinned first, so no agent changes model. A fresh store gets today's built-ins converted.
-    /// The legacy rows stay as they were; only this migration reads them.
+    /// pinned first, so no agent changes model. A fresh store gets no selection: the human
+    /// saves the first one from the Models page. The legacy rows stay as they were; only this
+    /// migration reads them.
     pub(crate) fn migrate_model_selection(&mut self) -> Result<()> {
         if self.migrated("model-selection")? {
             return Ok(());
@@ -162,9 +181,7 @@ impl Host {
                 saved.push(policy);
             }
         }
-        let selection = if saved.is_empty() {
-            legacy::fresh()
-        } else {
+        if !saved.is_empty() {
             for session in &sessions {
                 let runtime = runtimes.iter().find(|r| r.session_id == session.id);
                 if runtime.is_some_and(|r| r.profile.is_some()) {
@@ -190,13 +207,13 @@ impl Host {
                 });
                 tx.execute("INSERT INTO runtimes VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET data=excluded.data", params![session.id, encode(&runtime)?])?;
             }
-            legacy::convert(&saved, legacy::guide(&saved, &verifier_sizes, &date))
-        };
-        selection.validate()?;
-        tx.execute(
-            "INSERT INTO model_selection VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-            [encode(&selection)?],
-        )?;
+            let selection = legacy::convert(&saved, legacy::guide(&saved, &verifier_sizes, &date));
+            selection.validate()?;
+            tx.execute(
+                "INSERT INTO model_selection VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                [encode(&selection)?],
+            )?;
+        }
         tx.execute(
             "INSERT INTO policy_migrations VALUES ('model-selection')",
             [],
@@ -219,8 +236,6 @@ impl Host {
 pub(crate) mod legacy {
     use super::*;
     use serde::Deserialize;
-
-    pub const STARTER_GUIDE: &str = "Pick the model by the size and risk of the work. Claude: small, contained change → Sonnet; large or cross-cutting → Opus. Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high. Raise effort for migrations, data or security changes.\n";
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
@@ -326,26 +341,6 @@ pub(crate) mod legacy {
             })
             .collect()
     }
-    /// A new install: today's built-ins converted, plus the models the starter guide recommends.
-    pub fn fresh() -> ModelSelection {
-        let mut selection = convert(&builtins(), STARTER_GUIDE.into());
-        for (provider, model, effort) in [
-            (Provider::Claude, "sonnet", "high"),
-            (Provider::Claude, "sonnet", "medium"),
-            (Provider::Codex, "gpt-6.1-sol", "high"),
-        ] {
-            selection
-                .providers
-                .entry(provider)
-                .or_default()
-                .models
-                .push(AllowedModel {
-                    model: model.into(),
-                    effort: effort.into(),
-                });
-        }
-        selection
-    }
     /// Unions every role's allowed models per provider, defaults first; default providers become
     /// role providers. Reviewers take their providers from the verifiers instead.
     pub fn convert(policies: &[Policy], guide: String) -> ModelSelection {
@@ -417,7 +412,10 @@ pub(crate) mod legacy {
         verifier_sizes: &[(VerifierConfig, String)],
         date: &str,
     ) -> String {
-        let mut out = format!("{STARTER_GUIDE}\n## Previous settings (migrated {date})\n");
+        let mut out = format!(
+            "{}\n## Previous settings (migrated {date})\n",
+            starter_guide(&PROVIDERS)
+        );
         let same = |a: &Policy, b: &Policy| {
             Policy {
                 role: b.role,

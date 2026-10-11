@@ -73,7 +73,7 @@ fn fixture() -> Fixture {
     );
     git(&repo, &["push", "-q", "origin", "main"]);
     git(&repo, &["fetch", "-q", "origin"]);
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let workspaces = directory.path().join("workspaces");
     host.set_workspaces_dir(workspaces.to_str().unwrap())
         .unwrap();

@@ -1,7 +1,7 @@
 //! Pure helpers behind the Models page and the model pickers.
 use workspace_core::{
-    AllowedModel, Chooser, ModelProfile, ModelSelection, PROVIDERS, Provider, Role, Selection,
-    Session,
+    AllowedModel, Chooser, ModelProfile, ModelSelection, PROVIDERS, Provider, ProviderStatus, Role,
+    Selection, Session,
 };
 use workspace_host::runtime::ModelOption;
 
@@ -195,6 +195,38 @@ pub fn toggle_role_provider(selection: &mut ModelSelection, role: Role, provider
     }
 }
 
+/// "CLI found · signed in · Max plan", as the Providers card shows what detection found.
+pub fn status_label(status: &ProviderStatus) -> String {
+    if !status.installed {
+        return "CLI not found".into();
+    }
+    if !status.signed_in {
+        return "CLI found · not signed in".into();
+    }
+    let plan = status.plan.as_deref().map(|plan| {
+        let mut letters = plan.chars();
+        let initial: String = letters
+            .next()
+            .into_iter()
+            .flat_map(char::to_uppercase)
+            .collect();
+        format!(" · {initial}{} plan", letters.as_str())
+    });
+    format!("CLI found · signed in{}", plan.unwrap_or_default())
+}
+/// The one-line fix for a provider a suggested setup left out, or `None` when it is usable.
+pub fn fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
+    let (product, sign_in) = match provider {
+        Provider::Claude => ("Claude Code", "claude auth login"),
+        Provider::Codex => ("Codex", "codex login"),
+    };
+    match (status.installed, status.signed_in) {
+        (true, true) => None,
+        (true, false) => Some(format!("Run {sign_in}, then Refresh to add it.")),
+        (false, _) => Some(format!("Install {product} and run {sign_in}.")),
+    }
+}
+
 /// A group of the human's model picker.
 pub struct PickerGroup {
     pub heading: String,
@@ -306,6 +338,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_status_reads_as_found_signed_in_and_plan_with_a_fix_when_unusable() {
+        let status = |installed, signed_in, plan: Option<&str>| ProviderStatus {
+            installed,
+            signed_in,
+            plan: plan.map(Into::into),
+        };
+        let signed_in = status(true, true, Some("max"));
+        assert_eq!(status_label(&signed_in), "CLI found · signed in · Max plan");
+        assert_eq!(fix_hint(Provider::Claude, &signed_in), None);
+        // An unknown plan is left out, never guessed.
+        assert_eq!(
+            status_label(&status(true, true, None)),
+            "CLI found · signed in"
+        );
+        let signed_out = status(true, false, None);
+        assert_eq!(status_label(&signed_out), "CLI found · not signed in");
+        assert_eq!(
+            fix_hint(Provider::Codex, &signed_out).unwrap(),
+            "Run codex login, then Refresh to add it."
+        );
+        let missing = status(false, false, None);
+        assert_eq!(status_label(&missing), "CLI not found");
+        assert_eq!(
+            fix_hint(Provider::Claude, &missing).unwrap(),
+            "Install Claude Code and run claude auth login."
+        );
+        assert_eq!(
+            fix_hint(Provider::Codex, &missing).unwrap(),
+            "Install Codex and run codex login."
+        );
+    }
     #[test]
     fn refreshed_catalog_preserves_saved_models_without_crossing_providers() {
         let options = choices(

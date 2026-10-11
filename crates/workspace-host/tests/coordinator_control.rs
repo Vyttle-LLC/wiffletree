@@ -106,7 +106,7 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
     git(&repo, &["init", "-q"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let (main, child) = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let project = host.create_project("Control").unwrap();

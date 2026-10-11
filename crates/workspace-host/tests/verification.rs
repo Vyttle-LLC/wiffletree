@@ -118,7 +118,7 @@ impl Fixture {
             &repository,
             &["commit", "-q", "--allow-empty", "-m", "Base"],
         );
-        let mut host = Host::open(directory.path().join("home")).unwrap();
+        let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
         host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
             .unwrap();
         both_providers(&mut host);
@@ -857,7 +857,7 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
 #[test]
 fn without_a_saved_setting_a_tester_and_two_lens_reviewers_verify_with_caps_of_three_and_two() {
     let directory = tempfile::tempdir().unwrap();
-    let host = Host::open(directory.path()).unwrap();
+    let host = Host::open_set_up(directory.path()).unwrap();
     let settings = host.settings().verification;
     assert_eq!((settings.max_rounds, settings.max_cycles), (3, 2));
     assert_eq!(settings, VerificationSettings::default());
@@ -2103,13 +2103,13 @@ fn a_waiver_is_refused_without_a_fully_checked_blocked_cycle() {
 #[test]
 fn a_saved_cycle_cap_survives_restart_and_reaches_the_coordinator() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let mut settings = host.settings().verification;
     settings.max_cycles = 3;
     host.set_verification(settings).unwrap();
     drop(host);
 
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     host.create_project("Calls").unwrap();
     let coordinator = host.sessions().unwrap().remove(0);
     let context = host

@@ -144,6 +144,10 @@ impl fmt::Display for Rejection {
 impl std::error::Error for Rejection {}
 
 impl ModelSelection {
+    /// Whether the human has saved a setup; a store without one holds revision 0.
+    pub fn is_saved(&self) -> bool {
+        self.revision > 0
+    }
     /// The providers whose models a coordinator may give `role`, in display order.
     pub fn providers_for(&self, role: Role) -> Vec<Provider> {
         PROVIDERS

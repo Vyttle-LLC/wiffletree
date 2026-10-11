@@ -32,8 +32,13 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         raise AssertionError(value)
     try:
         # A cross-provider handoff: Codex implements and Claude tests.
-        selection=snapshot()['model_selection']
-        selection['role_providers']={**selection['role_providers'],'implementer':['codex'],'tester':['claude']}
+        # A fresh store has no setup and starts nothing until one is saved.
+        try:request({'type':'create_project','name':'Too early'})
+        except AssertionError as refusal:assert 'Open Models' in str(refusal),refusal
+        else:raise AssertionError('A project started before a setup was saved')
+        models=lambda model:[{'model':model,'effort':effort} for effort in ('high','medium')]
+        selection={'revision':0,'guide':'','providers':{'claude':{'enabled':True,'models':models('opus')+models('sonnet')},'codex':{'enabled':True,'models':models('gpt-6.1-sol')}},
+            'role_providers':{'project_orchestrator':['claude'],'implementer':['codex'],'tester':['claude']}}
         request({'type':'set_model_selection','selection':selection})
         request({'type':'set_workspaces_dir','path':str(tmp/'workspaces')})
         project=request({'type':'create_project','name':'Protocol fixture'})

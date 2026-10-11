@@ -242,7 +242,7 @@ mod tests {
         fs::write(repository.join("notes.txt"), "one\ntwo\n").unwrap();
         git(&repository, &["add", "."]);
         git(&repository, &["commit", "-q", "-m", "F"]);
-        let mut host = Host::open(home.path().join("home")).unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
         host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let project = host.create_project("Files").unwrap();

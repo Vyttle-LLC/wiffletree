@@ -1,6 +1,7 @@
 //! The Models page's Review card: who verifies tickets, rounds per review and reviews per
 //! ticket (the round and cycle caps). Each change saves at once, apart from the page's Save,
-//! because the host keeps it in its settings file.
+//! because the host keeps it in its settings file. Until the machine's first setup is saved,
+//! changes stay in the draft and the page's Save sends them.
 use super::*;
 use gpui_component::{ActiveTheme, Sizable, button::ButtonVariants, input::Input};
 use ui::{hint, icon, segment, setting};
@@ -8,6 +9,8 @@ use ui::{hint, icon, segment, setting};
 pub(super) struct VerifierEditor {
     bridge: Bridge,
     verification: Option<VerificationSettings>,
+    /// The verifiers are part of a setup the human has not saved yet.
+    unsaved: bool,
     error: Option<String>,
     /// The verifier being added.
     draft: VerifierConfig,
@@ -29,6 +32,7 @@ impl VerifierEditor {
         let mut editor = Self {
             bridge,
             verification: None,
+            unsaved: false,
             error: None,
             draft: VerifierConfig {
                 role: Role::Reviewer,
@@ -44,6 +48,25 @@ impl VerifierEditor {
         };
         editor.ask_host(Command::Settings, cx);
         editor
+    }
+
+    pub(super) fn verification(&self) -> Option<&VerificationSettings> {
+        self.verification.as_ref()
+    }
+    /// Shows `verification` as an unsaved draft, which the page's Save sends.
+    pub(super) fn hold_draft(
+        &mut self,
+        verification: VerificationSettings,
+        cx: &mut Context<Self>,
+    ) {
+        self.verification = Some(verification);
+        self.unsaved = true;
+        self.error = None;
+        cx.notify();
+    }
+    /// The page saved the draft; later changes save at once.
+    pub(super) fn saved(&mut self) {
+        self.unsaved = false;
     }
 
     /// Shows the host's saved setting, or its error beside the setting it still uses.
@@ -65,6 +88,8 @@ impl VerifierEditor {
                 });
             let _ = this.update(cx, |view, cx| {
                 match answer {
+                    // An unsaved draft is not replaced by the host's defaults.
+                    Ok(_) if view.unsaved => {}
                     Ok(settings) => {
                         view.verification = Some(settings.verification);
                         view.error = None;
@@ -83,6 +108,17 @@ impl VerifierEditor {
             return;
         };
         change(&mut verification);
+        if self.unsaved {
+            match verification.validate() {
+                Ok(()) => {
+                    self.verification = Some(verification);
+                    self.error = None;
+                }
+                Err(error) => self.error = Some(error.to_string()),
+            }
+            cx.notify();
+            return;
+        }
         self.ask_host(Command::SetVerification { verification }, cx);
     }
 
@@ -250,7 +286,14 @@ impl Render for VerifierEditor {
                 p,
             ))
             .child(hint(
-                "verify_ticket starts every verifier at once on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. Changes here save at once.",
+                format!(
+                    "verify_ticket starts every verifier at once on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. {}",
+                    if self.unsaved {
+                        "Changes here are saved with the setup."
+                    } else {
+                        "Changes here save at once."
+                    }
+                ),
                 p,
             ))
             .children(self.error.clone().map(|error| hint(error, p).text_color(p.red)))

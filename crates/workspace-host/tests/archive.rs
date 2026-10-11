@@ -136,7 +136,7 @@ fn passed(host: &mut Host, ticket: &Ticket) -> Session {
 #[test]
 fn archiving_a_project_hides_its_tree_stops_it_and_keeps_its_history() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
     host.send("kept", None, &root.id, "Keep this conversation")
         .unwrap();
@@ -151,7 +151,7 @@ fn archiving_a_project_hides_its_tree_stops_it_and_keeps_its_history() {
     assert!(refused.to_string().contains("archived"), "{refused}");
     drop(host);
 
-    let host = Host::open(directory.path().join("home")).unwrap();
+    let host = Host::open_set_up(directory.path().join("home")).unwrap();
     assert!(host.session(&root.id).unwrap().archived);
     assert_eq!(
         host.messages(&root.id, None, 100).unwrap()[0].body,
@@ -162,7 +162,7 @@ fn archiving_a_project_hides_its_tree_stops_it_and_keeps_its_history() {
 #[test]
 fn archiving_a_project_removes_clean_worktrees_and_restoring_re_creates_them() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
     host.send("kept", None, &coordinator.id, "Keep this conversation")
@@ -173,7 +173,7 @@ fn archiving_a_project_removes_clean_worktrees_and_restoring_re_creates_them() {
     assert!(!Path::new(&ticket.worktree).exists());
     assert!(branch_exists(directory.path(), &ticket));
     drop(host);
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     assert_eq!(host.ticket(&ticket.id).unwrap().state, "planned");
     assert_eq!(
         host.messages(&coordinator.id, None, 100).unwrap()[0].body,
@@ -196,7 +196,7 @@ fn archiving_a_project_removes_clean_worktrees_and_restoring_re_creates_them() {
 #[test]
 fn restoring_without_the_ticket_branch_names_the_ticket() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
     host.set_archived(&coordinator.id, true).unwrap();
@@ -218,7 +218,7 @@ fn restoring_without_the_ticket_branch_names_the_ticket() {
 #[test]
 fn unsaved_work_blocks_the_whole_archive() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
     let clean = worked_ticket(&mut host, &coordinator, "Clean");
     let modified = worked_ticket(&mut host, &coordinator, "Modified");
@@ -240,7 +240,7 @@ fn unsaved_work_blocks_the_whole_archive() {
 #[test]
 fn closing_or_accepting_removes_a_clean_worktree_and_refuses_unsaved_work() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let closing = worked_ticket(&mut host, &coordinator, "Review");
     let accepting = worked_ticket(&mut host, &coordinator, "Toolbar");
@@ -277,7 +277,7 @@ fn closing_or_accepting_removes_a_clean_worktree_and_refuses_unsaved_work() {
 #[test]
 fn missing_worktrees_neither_block_archiving_nor_opening_and_restore_re_creates_them() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let open = worked_ticket(&mut host, &coordinator, "Toolbar");
     let closing = worked_ticket(&mut host, &coordinator, "Review");
@@ -288,7 +288,7 @@ fn missing_worktrees_neither_block_archiving_nor_opening_and_restore_re_creates_
     host.close_ticket(&closing.id).unwrap();
     host.set_archived(&coordinator.id, true).unwrap();
     drop(host);
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     host.set_archived(&coordinator.id, false).unwrap();
 
     assert!(Path::new(&open.worktree).join("style.css").exists());
@@ -343,7 +343,7 @@ fn notices(host: &Host, session: &Session) -> Vec<String> {
 #[test]
 fn accepting_while_the_tester_is_in_its_turn_removes_the_worktree_when_the_turn_ends() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let (ticket, tester) = reported_in_turn(&mut host, &db, &coordinator);
@@ -365,7 +365,7 @@ fn accepting_while_the_tester_is_in_its_turn_removes_the_worktree_when_the_turn_
 
     // The pending removal survives a restart.
     drop(host);
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     assert_eq!(
         host.pending_worktree_removals().unwrap(),
         std::slice::from_ref(&ticket.id)
@@ -381,7 +381,7 @@ fn accepting_while_the_tester_is_in_its_turn_removes_the_worktree_when_the_turn_
 #[test]
 fn work_left_after_acceptance_keeps_the_worktree_and_tells_the_coordinator_once() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let (ticket, tester) = reported_in_turn(&mut host, &db, &coordinator);
@@ -407,7 +407,7 @@ fn work_left_after_acceptance_keeps_the_worktree_and_tells_the_coordinator_once(
 #[test]
 fn closing_while_the_reviewer_is_in_its_turn_removes_the_worktree_when_the_turn_ends() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Review");
@@ -433,7 +433,7 @@ fn closing_while_the_reviewer_is_in_its_turn_removes_the_worktree_when_the_turn_
 #[test]
 fn archiving_mid_turn_defers_removal_and_an_archived_tree_asks_the_human_about_kept_work() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let clean = worked_ticket(&mut host, &coordinator, "Clean");
@@ -472,7 +472,7 @@ fn archiving_mid_turn_defers_removal_and_an_archived_tree_asks_the_human_about_k
 #[test]
 fn restoring_cancels_a_pending_removal() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
@@ -492,7 +492,7 @@ fn restoring_cancels_a_pending_removal() {
 #[test]
 fn an_unmarked_finished_ticket_keeps_its_worktree_when_turns_end() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Legacy");
@@ -509,7 +509,7 @@ fn an_unmarked_finished_ticket_keeps_its_worktree_when_turns_end() {
 
     finish_turn(&db, &mut host, &agent);
     drop(host);
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     host.settle_pending_worktrees();
 
     assert!(Path::new(&ticket.worktree).exists());
@@ -518,7 +518,7 @@ fn an_unmarked_finished_ticket_keeps_its_worktree_when_turns_end() {
 #[test]
 fn a_locked_worktree_blocks_the_archive_before_anything_is_removed() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let first = worked_ticket(&mut host, &coordinator, "First");
     let locked = worked_ticket(&mut host, &coordinator, "Locked");
@@ -543,7 +543,7 @@ fn a_locked_worktree_blocks_the_archive_before_anything_is_removed() {
 #[test]
 fn a_failed_archive_re_creates_the_worktrees_it_removed() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
     let db = rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
@@ -562,7 +562,7 @@ fn a_failed_archive_re_creates_the_worktrees_it_removed() {
 #[test]
 fn an_empty_folder_left_on_a_stale_worktree_is_replaced_and_any_other_folder_refused() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
     let worktree = Path::new(&ticket.worktree);
@@ -597,7 +597,7 @@ fn fail_activity(directory: &Path, kind: &str) -> rusqlite::Connection {
 #[test]
 fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Review");
     let reviewer = host
@@ -621,7 +621,7 @@ fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it
 #[test]
 fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Review");
     let db = rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
@@ -641,7 +641,7 @@ fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
     host.send("after", None, &root.id, "Still writable")
         .unwrap();
     drop(host);
-    let host = Host::open(directory.path().join("home")).unwrap();
+    let host = Host::open_set_up(directory.path().join("home")).unwrap();
     assert_eq!(
         host.messages(&root.id, None, 10).unwrap()[0].body,
         "Still writable"
@@ -651,7 +651,7 @@ fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
 #[test]
 fn a_failed_restore_keeps_the_pending_removal() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
@@ -677,7 +677,7 @@ fn a_failed_restore_keeps_the_pending_removal() {
 #[test]
 fn a_refused_notice_falls_back_to_the_inbox_and_settles_once() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let (ticket, tester) = reported_in_turn(&mut host, &db, &coordinator);
@@ -744,7 +744,7 @@ impl Drop for Orphan {
 #[test]
 fn an_orphaned_provider_process_defers_removal_until_it_exits() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
@@ -774,7 +774,7 @@ fn an_orphaned_provider_process_defers_removal_until_it_exits() {
 #[test]
 fn archiving_while_only_an_orphan_runs_defers_removal_whatever_its_run_outcome() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (_root, coordinator) = team(&mut host, directory.path());
     let db = store(directory.path());
     let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");

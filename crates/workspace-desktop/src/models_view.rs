@@ -31,6 +31,77 @@ impl Workspace {
         self.saved_model_selection = saved.clone();
     }
 
+    /// The draft still is the suggested setup, verifiers included.
+    fn suggestion_untouched(&self, suggested: &Setup, cx: &App) -> bool {
+        self.model_selection == suggested.selection
+            && self.verifiers.read(cx).verification() == Some(&suggested.verification)
+    }
+
+    fn show_suggestion(&mut self, setup: &Setup, window: &mut Window, cx: &mut Context<Self>) {
+        self.model_selection = setup.selection.clone();
+        self.guide_input.update(cx, |input, cx| {
+            input.set_value(setup.selection.guide.clone(), window, cx)
+        });
+        self.verifiers.update(cx, |editor, cx| {
+            editor.hold_draft(setup.verification.clone(), cx)
+        });
+    }
+
+    /// On a store with no saved setup, suggests one from the last detection. An untouched
+    /// suggestion follows a new detection; one the human edited is kept.
+    pub(super) fn offer_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let detected = PROVIDERS.iter().all(|p| self.detection.contains_key(p));
+        if self.snapshot.is_none()
+            || self.saved_model_selection.is_saved()
+            || self.catalog_pending > 0
+            || !detected
+        {
+            return;
+        }
+        let next = suggest(&self.detection);
+        if self.suggested.as_ref() == Some(&next) {
+            return;
+        }
+        let untouched = self
+            .suggested
+            .as_ref()
+            .is_none_or(|shown| self.suggestion_untouched(shown, cx));
+        if untouched {
+            self.show_suggestion(&next, window, cx);
+        }
+        self.suggested = Some(next);
+    }
+
+    /// The first-run notice: what was suggested, or why nothing could be.
+    fn suggestion_banner(&self, suggested: &Setup, p: Palette) -> Div {
+        let found = PROVIDERS.iter().any(|&p| suggested.selection.is_enabled(p));
+        let (color, title, note) = if found {
+            (
+                p.accent,
+                "Suggested setup · not saved yet",
+                "We filled this in from the CLIs signed in on this machine. Change anything you like, then Save. Agents cannot start until a setup is saved.",
+            )
+        } else {
+            (
+                p.yellow,
+                "No signed-in CLI found",
+                "Install Claude Code or Codex and sign in, then press Refresh. Wiffletree uses your existing CLI sign-in and needs at least one provider.",
+            )
+        };
+        div()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(color)
+            .bg(color.opacity(0.08))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(hint(note, p))
+    }
+
     fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
         div()
             .flex()
@@ -43,11 +114,28 @@ impl Workspace {
     fn provider_section(&self, provider: Provider, p: Palette, cx: &mut Context<Self>) -> Div {
         let selection = &self.model_selection;
         let enabled = selection.is_enabled(provider);
-        let status = match self.cli_found.get(&provider) {
-            Some(true) => hint("● CLI found", p).text_color(p.green),
-            Some(false) => hint("○ CLI not found", p),
+        let detected = self.detection.get(&provider);
+        let status = match detected {
+            Some(found) => {
+                let label = models::status_label(found);
+                match (found.installed, found.signed_in) {
+                    (true, true) => hint(format!("● {label}"), p).text_color(p.green),
+                    (true, false) => hint(format!("● {label}"), p).text_color(p.yellow),
+                    (false, _) => hint(format!("○ {label}"), p),
+                }
+            }
             None => hint("Checking CLI…", p),
         };
+        // A suggested setup marks what it enabled and says how to add what it left out.
+        let suggested = self
+            .suggested
+            .as_ref()
+            .is_some_and(|s| s.selection.is_enabled(provider));
+        let fix = self
+            .suggested
+            .as_ref()
+            .and(detected)
+            .and_then(|found| models::fix_hint(provider, found));
         let rows = models::model_rows(&self.model_catalog, provider, selection);
         let allowed = models::allowed_models(selection, provider);
         let row_of = |model: &str| rows.iter().find(|r| r.model == model);
@@ -194,11 +282,25 @@ impl Workspace {
                             .child(provider.label()),
                     )
                     .child(status)
-                    .when(!enabled, |d| {
+                    .when(suggested, |d| {
+                        d.child(
+                            div()
+                                .px_2()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(p.accent)
+                                .text_xs()
+                                .text_color(p.accent)
+                                .child("Suggested"),
+                        )
+                    })
+                    .when(!enabled && fix.is_none(), |d| {
                         d.child(hint("Disabled: coordinators may not choose its models.", p))
-                    }),
+                    })
+                    .children(fix.map(|fix| hint(fix, p))),
             )
-            .child(rows)
+            // A first-run page lists models only under the providers in use.
+            .when(enabled || self.suggested.is_none(), |d| d.child(rows))
     }
 
     fn provider_ticks(
@@ -271,7 +373,17 @@ impl Workspace {
                 "who verifies each ticket when the coordinator calls verify_ticket",
                 p,
             ))
-            .child(self.verifiers.clone())
+            .child(
+                if self.suggested.is_some()
+                    && !PROVIDERS
+                        .iter()
+                        .any(|&p| self.model_selection.is_enabled(p))
+                {
+                    hint("Available once a provider is enabled.", p).into_any_element()
+                } else {
+                    self.verifiers.clone().into_any_element()
+                },
+            )
     }
 
     fn guide_card(&self, p: Palette) -> Div {
@@ -305,6 +417,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_3()
+            .children(
+                self.suggested
+                    .as_ref()
+                    .map(|suggested| self.suggestion_banner(suggested, p)),
+            )
             .child(hint(
                 "Settings apply to this machine only. Coordinators may only use enabled providers, the providers set for each role, and allowed models. Your own choices are never limited.",
                 p,
@@ -331,9 +448,29 @@ impl Workspace {
     }
 
     pub(super) fn models_footer(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let dirty = self.model_selection_dirty();
+        // A suggested setup is unsaved from the start: Save needs no edit first.
+        let untouched = self
+            .suggested
+            .as_ref()
+            .map(|suggested| self.suggestion_untouched(suggested, cx));
+        let dirty = untouched.is_some() || self.model_selection_dirty();
         let invalid = self.model_selection.validate().err();
         let loading = self.catalog_pending > 0;
+        let no_provider = !PROVIDERS
+            .iter()
+            .any(|&p| self.model_selection.is_enabled(p));
+        let state = match (&invalid, untouched) {
+            (Some(_), Some(_)) if no_provider => {
+                hint("Enable at least one provider to save", p).text_color(p.red)
+            }
+            (Some(error), _) if dirty => hint(error.to_string(), p).text_color(p.red),
+            (None, Some(true)) => hint("Suggested setup · not saved yet", p),
+            _ if dirty => hint("Unsaved changes", p),
+            _ if loading && !self.saved_model_selection.is_saved() => {
+                hint("Checking the CLIs on this machine…", p)
+            }
+            _ => hint("Saved", p),
+        };
         div()
             .flex()
             .items_center()
@@ -347,24 +484,21 @@ impl Workspace {
                     .tooltip("Refresh model lists from the installed CLIs")
                     .on_click(cx.listener(|v, _, w, c| v.refresh_models(w, c))),
             )
-            .child(
-                match (&invalid, dirty) {
-                    (Some(error), true) => hint(error.to_string(), p).text_color(p.red),
-                    (_, true) => hint("Unsaved changes", p),
-                    _ => hint("Saved", p),
-                }
-                .flex_1()
-                .min_w_0(),
-            )
-            .when(dirty, |d| {
+            .child(state.flex_1().min_w_0())
+            .when(dirty && untouched != Some(true), |d| {
                 d.child(
                     button("discard-models")
                         .ghost()
                         .label("Discard")
                         .on_click(cx.listener(|v, _, w, c| {
-                            let saved = v.saved_model_selection.clone();
-                            v.model_selection = v.saved_model_selection.clone();
-                            v.sync_model_selection(&saved, w, c);
+                            // Before the first save there is only the suggestion to go back to.
+                            if let Some(suggested) = v.suggested.clone() {
+                                v.show_suggestion(&suggested, w, c);
+                            } else {
+                                let saved = v.saved_model_selection.clone();
+                                v.model_selection = v.saved_model_selection.clone();
+                                v.sync_model_selection(&saved, w, c);
+                            }
                             c.notify();
                         })),
                 )

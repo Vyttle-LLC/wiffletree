@@ -68,7 +68,11 @@ struct Outcome {
 /// closed, so the rest of the backlog is handled after reading has ended, however fast or slow
 /// the machine is.
 fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
-    let mut session = Host::open(home).unwrap().sessions().unwrap().remove(0);
+    let mut session = Host::open_set_up(home)
+        .unwrap()
+        .sessions()
+        .unwrap()
+        .remove(0);
     session.provider = Provider::Codex;
     let turn = Turn {
         run_id: new_id(),
@@ -157,7 +161,7 @@ fn an_exited_providers_output_is_read_fully_and_its_pipe_let_go() {
         std::env::set_var("WORKSPACE_CODEX_BIN", &provider);
         std::env::set_var("FIXTURE_DIR", home.path());
     }
-    Host::open(home.path())
+    Host::open_set_up(home.path())
         .unwrap()
         .create_project("Backlog")
         .unwrap();

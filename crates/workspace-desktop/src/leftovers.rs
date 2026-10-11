@@ -314,7 +314,7 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "Base"]);
-        let mut host = Host::open(directory.path().join("home")).unwrap();
+        let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
         host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let project = host.create_project("Old work").unwrap();

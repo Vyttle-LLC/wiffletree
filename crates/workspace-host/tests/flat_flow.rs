@@ -66,7 +66,7 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
     git(&repo, &["init", "-q"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let (project, main) = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
         testers_on_both_providers(&mut host);

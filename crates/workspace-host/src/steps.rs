@@ -232,7 +232,7 @@ mod tests {
     fn restart_interrupts_running_steps_and_prunes_old_runs() {
         let home = tempfile::tempdir().unwrap();
         let (session, old_run, new_run) = {
-            let mut host = Host::open(home.path()).unwrap();
+            let mut host = Host::open_set_up(home.path()).unwrap();
             host.create_project("Steps").unwrap();
             let session = host.sessions().unwrap().remove(0).id;
             let old_finish = now() - STEP_RETENTION_MS - 1;
@@ -249,7 +249,7 @@ mod tests {
             }
             (session, "old", "new")
         };
-        let host = Host::open(home.path()).unwrap();
+        let host = Host::open_set_up(home.path()).unwrap();
         assert!(
             host.steps(&session, Some(old_run), 0)
                 .unwrap()
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn latest_plans_read_each_sessions_latest_run_archived_or_not() {
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         // One project per case; each project's coordinator is the session.
         let mut sessions = vec![];
         for name in ["two runs", "no plan", "no counts", "archived", "pruned"] {
@@ -334,14 +334,14 @@ mod tests {
         // Every run above finished long ago, so reopening the store prunes their steps and
         // no agent keeps a checklist.
         drop(host);
-        let host = Host::open(home.path()).unwrap();
+        let host = Host::open_set_up(home.path()).unwrap();
         assert!(host.latest_plans().unwrap().is_empty());
     }
 
     #[test]
     fn run_summaries_count_actions_and_failures_and_skip_unknown_runs() {
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Steps").unwrap();
         let session = host.sessions().unwrap().remove(0).id;
         for run in ["busy", "quiet"] {

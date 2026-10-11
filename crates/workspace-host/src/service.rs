@@ -2138,7 +2138,7 @@ mod tests {
         Receiver<()>,
     ) {
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Steps").unwrap();
         let session = host.sessions().unwrap().remove(0).id;
         let run = new_id();
@@ -2242,7 +2242,7 @@ mod tests {
                     .success()
             );
         }
-        let mut host = Host::open(home.path().join("home")).unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
         host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let project = host.create_project("Start").unwrap();
@@ -3160,7 +3160,7 @@ mod tests {
     /// An idle coordinator with one child that reports to it.
     fn actor_with_child() -> (tempfile::TempDir, Actor, String, String) {
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         let project = host.create_project("Reports").unwrap();
         let parent = host.sessions().unwrap().remove(0).id;
         let repo = home.path().join("repo");
@@ -3275,7 +3275,7 @@ mod tests {
     #[test]
     fn a_timer_that_cannot_fire_arms_its_retry_not_a_wake_in_the_past() {
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Full").unwrap();
         let session = host.sessions().unwrap().remove(0);
         let args = json!({"label":"check","prompt":"Check","every":"30m"});
@@ -3298,7 +3298,7 @@ mod tests {
     fn a_fire_queued_before_a_stop_that_turns_late_at_start_is_listed_as_missed() {
         let home = tempfile::tempdir().unwrap();
         let session = {
-            let mut host = Host::open(home.path()).unwrap();
+            let mut host = Host::open_set_up(home.path()).unwrap();
             host.create_project("Monitor").unwrap();
             let session = host.sessions().unwrap().remove(0);
             let args = json!({"label":"check","prompt":"Check","every":"30m"});
@@ -3317,7 +3317,7 @@ mod tests {
                 .unwrap();
             session
         };
-        let host = Host::open(home.path()).unwrap();
+        let host = Host::open_set_up(home.path()).unwrap();
         let (mut actor, _, _) = idle_actor(host);
         actor.schedule().unwrap();
         let input = actor.due_input(&session.id).unwrap().unwrap();
@@ -3338,7 +3338,7 @@ mod tests {
     fn a_one_shot_fire_queued_on_time_before_a_stop_is_late_and_missed_after_it() {
         let home = tempfile::tempdir().unwrap();
         let session = {
-            let mut host = Host::open(home.path()).unwrap();
+            let mut host = Host::open_set_up(home.path()).unwrap();
             host.create_project("Once").unwrap();
             let session = host.sessions().unwrap().remove(0);
             let args = json!({"label":"once","prompt":"Check once","at":"+10m"});
@@ -3360,7 +3360,7 @@ mod tests {
                 .unwrap();
             session
         };
-        let host = Host::open(home.path()).unwrap();
+        let host = Host::open_set_up(home.path()).unwrap();
         let (mut actor, _, _) = idle_actor(host);
         actor.schedule().unwrap();
         let input = actor.due_input(&session.id).unwrap().unwrap();
@@ -4715,7 +4715,7 @@ mod tests {
     fn the_first_turn_after_a_restart_names_the_cut_off_turn_its_timers_and_missed_fires() {
         let home = tempfile::tempdir().unwrap();
         let (session, run, timer) = {
-            let mut host = Host::open(home.path()).unwrap();
+            let mut host = Host::open_set_up(home.path()).unwrap();
             host.create_project("Monitor").unwrap();
             let session = host.sessions().unwrap().remove(0);
             let args =
@@ -4739,7 +4739,7 @@ mod tests {
                 .unwrap();
             (session, run, timer["id"].as_str().unwrap().to_owned())
         };
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         recover_unfinished_turns(&mut host).unwrap();
         let (mut actor, _, _) = idle_actor(host);
         actor.schedule().unwrap();
@@ -5229,7 +5229,7 @@ mod tests {
         );
         let store = crew.home.path().join("home");
         drop(crew.actor);
-        let after = Host::open(&store).unwrap().progress(0).unwrap();
+        let after = Host::open_set_up(&store).unwrap().progress(0).unwrap();
         assert_eq!(
             (after.agents, after.tickets, after.projects),
             (before.agents, before.tickets, before.projects)

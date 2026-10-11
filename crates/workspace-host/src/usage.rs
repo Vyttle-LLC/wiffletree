@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn counts_request_updates_once_and_keeps_interrupted_input_on_restart() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let session = root(&mut host, "Project");
         let time = now() - 1000;
         run(&host, &session, "run", time, Value::Null);
@@ -638,7 +638,7 @@ mod tests {
             1
         );
         drop(host);
-        let host = Host::open(directory.path()).unwrap();
+        let host = Host::open_set_up(directory.path()).unwrap();
         let report = host
             .usage_report(7, None, None, "America/New_York")
             .unwrap();
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn codex_resume_subtracts_persisted_counters_and_rolls_back_failed_writes() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let mut session = root(&mut host, "Codex");
         session.provider = Provider::Codex;
         host.db
@@ -684,7 +684,7 @@ mod tests {
         )
         .unwrap();
         drop(host);
-        let host = Host::open(directory.path()).unwrap();
+        let host = Host::open_set_up(directory.path()).unwrap();
         run(&host, &session, "third", time, Value::Null);
         host.db.execute_batch("CREATE TRIGGER reject_usage BEFORE INSERT ON usage_requests BEGIN SELECT RAISE(ABORT,'disk failure'); END;").unwrap();
         let usage = json!({"input_tokens":200,"output_tokens":40,"cached_input_tokens":40});
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn unknown_resumed_baseline_and_counter_reset_never_become_fresh_tokens() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let mut session = root(&mut host, "Codex");
         session.provider = Provider::Codex;
         host.db
@@ -744,7 +744,7 @@ mod tests {
     #[test]
     fn coordinator_own_and_workers_reconcile_without_rolling_up_twice() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let main = root(&mut host, "Project");
         let other = root(&mut host, "Other");
         let time = now() - 1000;
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn migration_backfills_codex_once_but_does_not_sum_legacy_claude_session_totals() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let claude = root(&mut host, "Claude");
         let mut codex = root(&mut host, "Codex");
         codex.provider = Provider::Codex;
@@ -843,7 +843,7 @@ mod tests {
             .unwrap();
         drop(host);
         for _ in 0..2 {
-            let host = Host::open(directory.path()).unwrap();
+            let host = Host::open_set_up(directory.path()).unwrap();
             let report = host
                 .usage_report(7, None, None, "America/New_York")
                 .unwrap();
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn local_days_handle_dst_and_prior_days_without_coverage() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let session = root(&mut host, "Project");
         let now = at("2026-11-01T20:00:00Z");
         host.db
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn calendar_days_with_a_midnight_clock_change_do_not_panic() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = Host::open(directory.path()).unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
         let session = root(&mut host, "Project");
         for (id, time) in [
             ("before", at("2026-09-06T03:59:59Z")),
@@ -938,7 +938,7 @@ mod tests {
     #[test]
     fn quota_trends_skip_resets_and_failures_keep_the_age_of_last_good_reading() {
         let directory = tempfile::tempdir().unwrap();
-        let host = Host::open(directory.path()).unwrap();
+        let host = Host::open_set_up(directory.path()).unwrap();
         let end = at("2026-10-01T16:00:00Z");
         let reset = end + 3_600_000;
         for (time, used, reset) in [

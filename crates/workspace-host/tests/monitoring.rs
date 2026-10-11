@@ -90,7 +90,7 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
         assert!(git.success());
     }
     let monitored = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Monitor").unwrap()
     };
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");

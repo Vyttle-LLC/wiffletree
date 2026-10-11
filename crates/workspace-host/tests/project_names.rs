@@ -4,7 +4,7 @@ use workspace_host::Host;
 #[test]
 fn rename_keeps_project_identity_conversation_and_other_projects_after_restart() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let project = host.create_project("New project").unwrap();
     let other = host.create_project("Other feature").unwrap();
     let root = host
@@ -25,7 +25,7 @@ fn rename_keeps_project_identity_conversation_and_other_projects_after_restart()
     assert_eq!(renamed.id, project.id);
     drop(host);
 
-    let host = Host::open(directory.path()).unwrap();
+    let host = Host::open_set_up(directory.path()).unwrap();
     let saved = host.session(&root.id).unwrap();
     assert_eq!(host.project(&project.id).unwrap().name, "Notifications");
     assert_eq!(saved.name, "Notifications");
@@ -42,7 +42,7 @@ fn rename_keeps_project_identity_conversation_and_other_projects_after_restart()
 #[test]
 fn invalid_rename_preserves_saved_names() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let project = host.create_project("Original").unwrap();
     for name in [" ".to_string(), "a".repeat(129)] {
         assert!(host.rename_project(&project.id, &name).is_err());
@@ -55,7 +55,7 @@ fn invalid_rename_preserves_saved_names() {
 #[test]
 fn coordinator_update_failure_rolls_back_project_name_and_activity() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let project = host.create_project("Original").unwrap();
     let db = rusqlite::Connection::open(directory.path().join("workspace.sqlite3")).unwrap();
     db.execute_batch(

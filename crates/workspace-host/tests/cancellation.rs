@@ -96,7 +96,7 @@ fn every_way_a_turn_ends_stops_its_whole_process_group_promptly() {
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
     let groups = scratch.path().join("groups");
     let main = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Process groups").unwrap();
         host.sessions().unwrap().remove(0)
     };

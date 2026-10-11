@@ -6,7 +6,7 @@ use workspace_host::{Host, now, service::Service};
 const MINUTE: i64 = 60_000;
 
 fn project(home: &tempfile::TempDir) -> (Host, Session) {
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     host.create_project("Monitor").unwrap();
     let root = host.sessions().unwrap().remove(0);
     (host, root)
@@ -55,7 +55,7 @@ fn a_timer_keeps_its_cadence_across_restarts_and_folds_missed_slots_into_one_lat
 
     // A host kill and restart keeps the schedule.
     drop(host);
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     assert_eq!(next_fire(&host), Some(first));
 
     // On time: one fire from the session to itself, not late.
@@ -87,7 +87,7 @@ fn a_timer_keeps_its_cadence_across_restarts_and_folds_missed_slots_into_one_lat
 
     // Down across three slots: one late fire, then the next slot on the original cadence.
     drop(host);
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let back = first + 95 * MINUTE;
     assert_eq!(
         host.fire_due_schedules(back).unwrap().next,

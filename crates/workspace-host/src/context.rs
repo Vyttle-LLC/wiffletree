@@ -132,7 +132,7 @@ fn parse_claude(report: &str) -> Result<ContextUsage> {
     Ok(usage)
 }
 
-fn codex_home() -> Result<PathBuf> {
+pub(crate) fn codex_home() -> Result<PathBuf> {
     if let Some(home) = std::env::var_os("CODEX_HOME") {
         return Ok(home.into());
     }

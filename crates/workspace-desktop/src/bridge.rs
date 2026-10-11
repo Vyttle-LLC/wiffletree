@@ -22,7 +22,8 @@ impl Bridge {
                         .recv_blocking()?
                         .map_err(anyhow::Error::msg)?,
                 )?;
-                if snapshot.projects.is_empty() {
+                // A store without a saved setup starts nothing, the demo project included.
+                if snapshot.projects.is_empty() && snapshot.model_selection.is_saved() {
                     let project: Project = serde_json::from_value(
                         service
                             .request(Command::CreateProject {

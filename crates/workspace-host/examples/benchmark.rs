@@ -25,7 +25,7 @@ fn samples(
 }
 fn main() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let mut host = Host::open(directory.path())?;
+    let mut host = Host::open_set_up(directory.path())?;
     let mut projects = Vec::new();
     for i in 0..5 {
         projects.push(host.create_project(&format!("Fixture {i}"))?);
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     }
     tx.commit()?;
     drop(db);
-    let mut host = Host::open(directory.path())?;
+    let mut host = Host::open_set_up(directory.path())?;
     // 45 agents across the projects' repositories, for 50 sessions with the coordinators.
     for i in 0..45 {
         let (project_id, repo) = &repositories[i % repositories.len()];
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
     tx.commit()?;
     let seed_ms = seed_started.elapsed().as_secs_f64() * 1000.;
     drop(db);
-    let mut host = Host::open(directory.path())?;
+    let mut host = Host::open_set_up(directory.path())?;
     let results = vec![
         samples("indexed transcript page (100 rows)", 1000, |_| {
             std::hint::black_box(host.messages(&session.id, None, 100)?);
@@ -205,7 +205,7 @@ fn main() -> Result<()> {
     ];
     drop(host);
     let reopen = samples("host restart and cached snapshot", 100, |_| {
-        let host = Host::open(directory.path())?;
+        let host = Host::open_set_up(directory.path())?;
         std::hint::black_box(host.snapshot()?);
         Ok(())
     })?;
