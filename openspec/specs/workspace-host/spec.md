@@ -132,3 +132,26 @@ A session whose turn is running SHALL show the status `working` in the snapshot 
 - **WHEN** an implementer reports `blocked` and keeps working in the same turn
 - **THEN** the sidebar and `workspace_context` show it as working, and `workspace_context` lists its `blocked` report
 - **AND** when the turn ends it shows as blocked
+
+### Requirement: A report during a running turn does not move the ticket yet
+A ticket whose state a report set outside a verification cycle (`blocked`, `failed`, `completed`, `passed` or `ready_for_testing`) SHALL keep showing the state it had before that report, in the snapshot, in `workspace_context` and on its progress bar, while the reporter's turn is running. When that turn ends, the ticket SHALL show the state of the turn's last such report. The reported state SHALL be stored at once and is what ticket operations such as `verify_ticket` check; if an operation or another report moves the ticket before the turn ends, the ticket SHALL show that new state. Reports routed by a running verification cycle are unaffected. After a host restart no turn counts as running, so the stored state shows.
+
+#### Scenario: Blocked report mid-turn on a passed ticket
+- **WHEN** an implementer reports `blocked` on a ticket that passed verification and keeps working in the same turn
+- **THEN** the snapshot and `workspace_context` show the ticket as `passed` and its bar is not blocked
+- **AND** when the turn ends they show it as `blocked`
+
+#### Scenario: A later report in the same turn
+- **WHEN** the implementer then reports `completed` before the turn ends
+- **THEN** the ticket shows `completed` once the turn ends, never `blocked`
+
+#### Scenario: Restart
+- **WHEN** the host restarts after a mid-turn `blocked` report
+- **THEN** the ticket shows `blocked`
+
+### Requirement: A message to a session in a turn is queued behind it
+The `send_message` tool result SHALL read `queued_behind_turn` and carry `recipient_turn_started_at` whenever the recipient's turn is running, whatever status the recipient reported during it. A paused or disconnected recipient SHALL still read `queued_while_held`.
+
+#### Scenario: Recipient reported blocked mid-turn
+- **WHEN** a worker reports `blocked`, keeps working, and its coordinator sends it a message
+- **THEN** the result is `queued_behind_turn` with the time the worker's turn started

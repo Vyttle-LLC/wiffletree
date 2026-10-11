@@ -534,7 +534,7 @@ impl Host {
         let runtimes = self.runtimes()?;
         let warnings = self.open_branch_warnings()?;
         let mut overview = vec![];
-        for ticket in self.tickets()? {
+        for ticket in self.shown_tickets()? {
             if !self
                 .session(&ticket.coordinator_id)
                 .is_ok_and(|s| s.project_id == project)
@@ -702,14 +702,16 @@ impl Host {
                 let mut receipt = serde_json::to_value(&message)?;
                 // Tool result only: the stored receipt stays `queued` until the next turn starts.
                 let recipient = self.session(&recipient.id)?;
-                if message.receipt == Receipt::Queued && recipient.status == Status::Working {
+                let held = matches!(recipient.status, Status::Paused | Status::Disconnected);
+                // A turn still runs after its session reported, whatever status that stored.
+                let in_turn =
+                    recipient.status == Status::Working || self.in_turn.contains(&recipient.id);
+                if message.receipt == Receipt::Queued && !held && in_turn {
                     receipt["receipt"] = json!("queued_behind_turn");
                     receipt["recipient_turn_started_at"] =
                         json!(self.session_runtime(&recipient.id)?.last_started_at);
                 }
-                if message.receipt == Receipt::Queued
-                    && matches!(recipient.status, Status::Paused | Status::Disconnected)
-                {
+                if message.receipt == Receipt::Queued && held {
                     receipt["receipt"] = json!("queued_while_held");
                     receipt["hint"] = json!(
                         match self.session_runtime(&recipient.id)?.stopped_by {

@@ -1038,7 +1038,7 @@ impl Actor {
                 cancelled,
             } => {
                 let mut active = self.active.remove(id).unwrap();
-                self.host.in_turn.remove(id);
+                self.host.turn_ended(id);
                 let failed = error.is_some();
                 // A turn its parent stopped is finished rather than held: the parent decides
                 // what runs next, and the session's next turn is told about the stop instead.
@@ -2541,6 +2541,161 @@ mod tests {
                 json!("blocked"),
                 json!("blocked")
             )
+        );
+    }
+
+    /// A ticket in `state` whose implementer is in its turn, run `run`, started at 7.
+    fn implementer_in_turn(state: &str) -> (tempfile::TempDir, Actor, Ticket, Session, Session) {
+        let (home, mut host, mut ticket, coordinator) = ticket_fixture();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+            .unwrap();
+        ticket.state = state.into();
+        host.save_ticket(&ticket).unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        let input = actor.host.messages(&implementer.id, None, 10).unwrap();
+        let mut runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        runtime.last_started_at = Some(7);
+        actor
+            .record_turn_start("run", &implementer, &input, &json!({}), &runtime)
+            .unwrap();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("run", vec![]));
+        (home, actor, ticket, implementer, coordinator)
+    }
+
+    fn report_blocked(actor: &mut Actor, implementer: &Session) {
+        let report = json!({"message_id":"stuck","kind":"blocked","body":"Need a decision"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+    }
+
+    fn finish_turn(actor: &mut Actor, session: &Session, run: &str) {
+        let finished = ProviderEvent::Finished {
+            error: None,
+            usage: Value::Null,
+            cancelled: false,
+        };
+        actor.provider_event(&session.id, run, finished).unwrap();
+    }
+
+    /// The ticket's state in the snapshot and in the coordinator's `workspace_context`.
+    fn shown_ticket_state(host: &Host, coordinator: &Session) -> (String, Value) {
+        let context = host.agent_context(&coordinator.id).unwrap();
+        (
+            host.snapshot().unwrap().tickets[0].state.clone(),
+            context["tickets"][0]["state"].clone(),
+        )
+    }
+
+    #[test]
+    fn a_message_to_a_session_that_reported_blocked_mid_turn_queues_behind_its_turn() {
+        let (_home, mut actor, _, implementer, coordinator) = implementer_in_turn("assigned");
+        report_blocked(&mut actor, &implementer);
+        let send = |actor: &mut Actor, id: &str| {
+            let message = json!({"recipient":implementer.id,"message_id":id,"body":"Go on"});
+            actor
+                .host
+                .agent_tool(&coordinator.id, "send_message", message)
+                .unwrap()
+        };
+        let behind = send(&mut actor, "answer");
+        assert_eq!(behind["receipt"], "queued_behind_turn");
+        assert_eq!(behind["recipient_turn_started_at"], 7);
+        // A turn being stopped is held, not merely busy.
+        actor
+            .host
+            .set_status(&implementer.id, Status::Paused)
+            .unwrap();
+        let held = send(&mut actor, "held");
+        assert_eq!(held["receipt"], "queued_while_held");
+        assert!(held.get("recipient_turn_started_at").is_none());
+        actor
+            .host
+            .set_status(&implementer.id, Status::Blocked)
+            .unwrap();
+        finish_turn(&mut actor, &implementer, "run");
+        let idle = send(&mut actor, "idle");
+        assert_eq!(idle["receipt"], "queued");
+        assert!(idle.get("recipient_turn_started_at").is_none());
+    }
+
+    #[test]
+    fn a_ticket_keeps_its_state_until_the_turn_that_reported_blocked_ends() {
+        let (_home, mut actor, ticket, implementer, coordinator) = implementer_in_turn("passed");
+        report_blocked(&mut actor, &implementer);
+        assert_eq!(
+            shown_ticket_state(&actor.host, &coordinator),
+            ("passed".into(), json!("passed"))
+        );
+        let bar = |actor: &mut Actor| actor.host.progress(0).unwrap().tickets[0].state;
+        assert_ne!(bar(&mut actor), BarState::Blocked);
+        // Ticket operations still see the report.
+        assert_eq!(actor.host.ticket(&ticket.id).unwrap().state, "blocked");
+
+        finish_turn(&mut actor, &implementer, "run");
+        let blocked = ("blocked".to_string(), json!("blocked"));
+        assert_eq!(shown_ticket_state(&actor.host, &coordinator), blocked);
+        assert_eq!(bar(&mut actor), BarState::Blocked);
+
+        // The report stands into the next turn.
+        actor
+            .host
+            .send("next", None, &implementer.id, "Carry on")
+            .unwrap();
+        let input = [actor.host.message("next").unwrap()];
+        let runtime = actor.host.session_runtime(&implementer.id).unwrap();
+        actor
+            .record_turn_start("run-2", &implementer, &input, &json!({}), &runtime)
+            .unwrap();
+        assert_eq!(shown_ticket_state(&actor.host, &coordinator), blocked);
+    }
+
+    #[test]
+    fn the_last_report_of_a_turn_is_the_one_that_shows_when_it_ends() {
+        let (_home, mut actor, _, implementer, coordinator) = implementer_in_turn("passed");
+        report_blocked(&mut actor, &implementer);
+        let report = json!({"message_id":"over","kind":"completed","body":"Worked around it"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        assert_eq!(
+            shown_ticket_state(&actor.host, &coordinator),
+            ("passed".into(), json!("passed"))
+        );
+        finish_turn(&mut actor, &implementer, "run");
+        assert_eq!(
+            shown_ticket_state(&actor.host, &coordinator),
+            ("completed".into(), json!("completed"))
+        );
+    }
+
+    #[test]
+    fn a_ticket_another_operation_moved_stops_showing_its_state_before_the_report() {
+        let (_home, mut actor, ticket, implementer, coordinator) = implementer_in_turn("assigned");
+        let report = json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        assert_eq!(shown_ticket_state(&actor.host, &coordinator).0, "assigned");
+        actor.host.close_ticket(&ticket.id).unwrap();
+        assert_eq!(actor.host.snapshot().unwrap().tickets[0].state, "closed");
+    }
+
+    #[test]
+    fn a_restart_shows_the_blocked_state_a_mid_turn_report_stored() {
+        let (home, mut actor, _, implementer, coordinator) = implementer_in_turn("passed");
+        report_blocked(&mut actor, &implementer);
+        drop(actor);
+        let host = Host::open(home.path().join("home")).unwrap();
+        assert_eq!(
+            shown_ticket_state(&host, &coordinator),
+            ("blocked".into(), json!("blocked"))
         );
     }
 
