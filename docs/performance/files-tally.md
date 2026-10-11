@@ -25,7 +25,7 @@ p50 / p95 in milliseconds, per request. The two columns are the same fixtures; "
 | One agent, one run of 2,000 mixed steps | 2.74 / 2.87 | 0.81 / 0.91 |
 | One agent, 20,000 mixed steps (ten runs) | 36.57 / 39.37 | 10.11 / 10.51 |
 | One agent, 20,000 worst-case steps | 113.79 / 117.26 | 14.04 / 14.28 |
-| Coordinator rollup: five agents, four of them with 20,000 worst-case steps | 378.15 / 398.26 | 55.14 / 68.91 |
+| Coordinator rollup: five agents (one ordinary, one with 20,000 mixed steps, three with 20,000 worst-case steps) | 378.15 / 398.26 | 55.14 / 68.91 |
 
 ## Reading
 
