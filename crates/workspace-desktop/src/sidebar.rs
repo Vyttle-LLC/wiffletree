@@ -40,6 +40,7 @@ impl Workspace {
                 .filter(|s| s.parent_id.is_none())
         };
         let projects = roots().filter(|s| !s.archived).count();
+        let offers_new_project = self.offers_new_project();
         let archived = self
             .snapshot
             .iter()
@@ -91,7 +92,12 @@ impl Workspace {
                         button("new-project")
                             .ghost()
                             .icon(icon("plus"))
-                            .tooltip("New project · ⌘N")
+                            .tooltip(if offers_new_project {
+                                "New project · ⌘N"
+                            } else {
+                                "New project is available once your models are set up"
+                            })
+                            .when(!offers_new_project, |d| d.opacity(0.4))
                             .disabled(self.creating_project)
                             .on_click(cx.listener(|v, _, w, c| v.new_project(w, c))),
                     ),
@@ -177,7 +183,11 @@ impl Workspace {
                             .text_color(if selected { p.text } else { p.subtle })
                             .child(icon(glyph).size(px(14.))),
                     )
-                    .child(label),
+                    .child(label)
+                    // Until a setup is saved, Models is where to go next.
+                    .when(page == Page::Models && !self.offers_new_project(), |d| {
+                        d.child(div().size(px(6.)).rounded_full().bg(p.accent))
+                    }),
             );
         }
         nav
@@ -349,7 +359,11 @@ impl Workspace {
         };
         if snapshot.projects.is_empty() {
             return tree.child(div().px_2().py_3().child(hint(
-                "No projects yet. Create one to brief a coordinator.",
+                if self.offers_new_project() {
+                    "No projects yet. Create one to brief a coordinator."
+                } else {
+                    "Set up your models to create your first project."
+                },
                 p,
             )));
         }

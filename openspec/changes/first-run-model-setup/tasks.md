@@ -17,7 +17,14 @@
 - [x] 3.3 Hold the Review card's verifiers as a draft until the first save sends them.
 - [x] 3.4 `--demo-repository` creates its project only once a setup is saved.
 
-## 4. Verify
+## 4. Welcome
 
-- [x] 4.1 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `python3 scripts/test_communications.py` and `openspec validate --all --strict`.
-- [x] 4.2 Drive a debug build on fresh stores through `scripts/drive_desktop.py`: both signed in, Claude only, neither, an edit kept across Refresh, an untouched suggestion following Refresh, Save, and a saved store reopened unchanged.
+- [x] 4.1 `welcome.rs`: `start_screen` (opening, checking, welcome with and without a signed-in CLI, start with a project) and `offers_new_project`, both pure and tested.
+- [x] 4.2 Start detection on the first snapshot of a store with no saved setup; a saved store still waits for its Models page.
+- [x] 4.3 Draw the welcome on the start screen; dim the sidebar +, change its tooltip and the empty-tree hint, mark the Models entry, and send + and ⌘N to the Models page until a setup is saved.
+
+## 5. Verify
+
+- [x] 5.1 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `python3 scripts/test_communications.py` and `openspec validate --all --strict`.
+- [x] 5.2 Drive a debug build on fresh stores through `scripts/drive_desktop.py`: both signed in, Claude only, neither, an edit kept across Refresh, an untouched suggestion following Refresh, Save, and a saved store reopened unchanged.
+- [x] 5.3 Drive the welcome on fresh stores: both signed in, none signed in then Check again with one signed in, the checking state, ⌘N and the sidebar + before Save, and the start screen after Save and after reopening the saved store.

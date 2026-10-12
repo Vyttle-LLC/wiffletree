@@ -10,6 +10,11 @@ pub(super) struct NameEdit {
 
 impl Workspace {
     pub(super) fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The host would refuse; the Models page is where a first setup is saved.
+        if !self.offers_new_project() {
+            self.open_page(Page::Models, window, cx);
+            return;
+        }
         if self.creating_project || self.project_edit.as_ref().is_some_and(|e| e.saving) {
             return;
         }
