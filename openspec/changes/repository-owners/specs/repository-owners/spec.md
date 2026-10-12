@@ -5,7 +5,7 @@ Show which GitHub organizations and users own the workspace's repositories, and 
 ## ADDED Requirements
 
 ### Requirement: A repository's owner comes from its origin remote
-The host SHALL take each workspace repository's GitHub owner and name from the push URL of its `origin` remote, read on disk without a network request. Only HTTPS and SSH URLs on `github.com` SHALL name an owner. A repository with no `origin`, or with an `origin` elsewhere, SHALL have no owner. Each workspace repository SHALL be counted separately, so two folders that are clones of the same GitHub repository count as two repositories of that owner.
+The host SHALL take each workspace repository's GitHub owner and name from the push URL of its `origin` remote, read on disk without a network request. Only HTTPS and SSH URLs on `github.com` SHALL name an owner. `origin` SHALL name an owner only when it has exactly one push URL and its fetch URL names the same GitHub repository. A repository with no `origin`, with an `origin` elsewhere, or with an `origin` that fails that test SHALL have no owner, and its row SHALL say why. Each workspace repository SHALL be counted separately, so two folders that are clones of the same GitHub repository count as two repositories of that owner.
 
 #### Scenario: Owner from an SSH remote
 - **WHEN** a repository's `origin` is `git@github.com:Vyttle-LLC/wiffletree.git`
@@ -14,6 +14,10 @@ The host SHALL take each workspace repository's GitHub owner and name from the p
 #### Scenario: No GitHub remote
 - **WHEN** a repository has no `origin`, or its `origin` is on another host
 - **THEN** it has no owner and is listed as not on GitHub
+
+#### Scenario: More than one push URL
+- **WHEN** a repository's `origin` has two push URLs, the first under an allowed owner
+- **THEN** it has no owner, cannot be allowed, and its row says its `origin` pushes to more than one place
 
 #### Scenario: Owners without GitHub access
 - **WHEN** `gh` is missing or not signed in
@@ -24,7 +28,7 @@ The host SHALL take each workspace repository's GitHub owner and name from the p
 - **THEN** their owner's count includes both
 
 ### Requirement: Fork status and visibility are read from GitHub, read-only
-The host SHALL ask GitHub, through `gh`, whether each repository with an owner is a fork, what it is a fork of, whether it is public, whether its owner is an organization or a user, and which owner and name GitHub reports for it. It SHALL read all of the workspace's repositories with one request, or with as few requests as their number requires, off the thread that serves host commands, and SHALL NOT write anything to GitHub. It SHALL read a repository again when its answer is missing or more than a day old, or when its `origin` has changed, and SHALL do so when repositories are added and when the human returns to the app. The owner a repository counts under SHALL be the one GitHub reports. When the read fails, the previous answers SHALL be kept, repositories without an answer SHALL stay unanswered, and the Repositories page SHALL say why.
+The host SHALL ask GitHub, through `gh`, whether each repository with an owner is a fork, what it is a fork of, whether it is public, whether its owner is an organization or a user, and which owner and name GitHub reports for it. It SHALL read all of the workspace's repositories with one request, or with as few requests as their number requires, off the thread that serves host commands, and SHALL NOT write anything to GitHub. It SHALL read a repository again when its answer is missing or more than a day old, or when its `origin` has changed, and SHALL do so when repositories are added and when the human returns to the app. The owner a repository counts under SHALL be the one GitHub reports. When GitHub answers for some repositories of a request and cannot resolve another, the host SHALL record the answers it got and SHALL mark only the unresolved repository as not found, with GitHub's reason. When the read fails altogether, the previous answers SHALL be kept, repositories without an answer SHALL stay unanswered, and the Repositories page SHALL say why.
 
 #### Scenario: One request for the workspace
 - **WHEN** the workspace has 34 repositories on GitHub and none has an answer yet
@@ -33,6 +37,10 @@ The host SHALL ask GitHub, through `gh`, whether each repository with an owner i
 #### Scenario: A transferred repository
 - **WHEN** a repository's `origin` names owner `old-org` and GitHub reports it as `new-org/app`
 - **THEN** it is listed and checked under `new-org`
+
+#### Scenario: One repository cannot be resolved
+- **WHEN** GitHub answers for 33 of the workspace's repositories and reports that the 34th does not exist or cannot be seen
+- **THEN** the 33 have their fork status and visibility recorded, and only the 34th is shown as not found on GitHub and asks first
 
 #### Scenario: GitHub cannot be read
 - **WHEN** `gh` is not signed in
@@ -58,7 +66,7 @@ The host SHALL keep a list of allowed entries in this machine's host settings. A
 - **THEN** no tool changes the allowed list
 
 ### Requirement: Which repositories publish without asking
-A repository SHALL publish without asking only when all of these hold: its `origin` is on `github.com`; GitHub has answered for it; its base tracks `origin`; and its entry is in the allowed list. A repository that is not a fork SHALL use its owner as its entry. A fork SHALL use `owner/name` as its entry, and an allowed owner SHALL NOT cover it. Every other repository SHALL ask first. There SHALL be no per-repository override of an allowed owner.
+A repository SHALL publish without asking only when all of these hold: its `origin` names an owner; GitHub has answered for it; its base tracks `origin`; and its entry is in the allowed list. A repository that is not a fork SHALL use its owner as its entry. A fork SHALL use `owner/name` as its entry, and an allowed owner SHALL NOT cover it. Every other repository SHALL ask first. There SHALL be no per-repository override of an allowed owner.
 
 #### Scenario: An allowed owner's repository
 - **WHEN** `Vyttle-LLC` is allowed and `Vyttle-LLC/wiffletree` is not a fork

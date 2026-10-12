@@ -31,7 +31,7 @@ The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id and a
 - **THEN** it is refused and nothing is sent
 
 ### Requirement: Checks before anything leaves the machine
-Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, still names the repository the host recorded for it, and is the remote its base tracks. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. The host SHALL make the same checks again, for the same commit, when the human approves a step.
+Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. The host SHALL make the same checks again, for the same commit, when the human approves a step and immediately before it sends anything.
 
 #### Scenario: Never reviewed
 - **WHEN** `publish_ticket` is called for a ticket that has had no verification cycle
@@ -57,6 +57,10 @@ Before pushing or asking the human, the host SHALL refuse a publish unless all o
 - **WHEN** the ticket's repository has no GitHub `origin`
 - **THEN** it is refused, saying there is nowhere to push
 
+#### Scenario: A second push URL
+- **WHEN** the repository's `origin` has two push URLs, the first under an allowed owner and the second under another owner
+- **THEN** `publish_ticket` is refused and nothing is pushed to either
+
 #### Scenario: HEAD moves while a card waits
 - **WHEN** the human approves a push after the worktree's HEAD has moved to different changes
 - **THEN** nothing is pushed and the caller is told
@@ -76,6 +80,36 @@ The host SHALL record the commit it last pushed for each ticket. It SHALL push a
 - **WHEN** GitHub's branch has a commit the host did not push and the worktree does not contain
 - **THEN** the host refuses, pushes nothing, and says the branch has commits Wiffletree did not push
 
+### Requirement: Only the ticket's branch is pushed
+A push by the host SHALL create or update exactly one ref at the destination, the ticket's branch, whatever the repository's or the user's Git configuration says. It SHALL NOT send tags, other branches or submodule commits, and SHALL NOT push to any destination other than the one push URL it checked.
+
+#### Scenario: Tags are configured to follow
+- **WHEN** Git is configured to push annotated tags along with commits and the reviewed commit has a tag GitHub does not have
+- **THEN** the host pushes the ticket's branch and the tag is not sent
+
+#### Scenario: Submodules are configured to be pushed
+- **WHEN** Git is configured to push submodule commits on demand
+- **THEN** the host pushes only the ticket's branch of the repository itself
+
+#### Scenario: Other refspecs are configured
+- **WHEN** the remote is configured to push all branches by default
+- **THEN** the destination gains only the ticket's branch
+
+### Requirement: The owner is confirmed with GitHub before anything is sent
+Immediately before the host pushes or opens a pull request, it SHALL ask GitHub which owner and name the repository currently has and whether it is a fork, read-only, and SHALL compare the answer with the repository the request named. If they differ, the host SHALL send nothing, SHALL record the new answer, and SHALL tell the caller where the repository now lives; a publish requested after that SHALL be decided on the new owner. If GitHub gives no answer, the host SHALL send nothing and SHALL tell the caller why, whether or not the human approved the step.
+
+#### Scenario: Transferred after it was allowed
+- **WHEN** `allowed-org/app` was recorded yesterday, GitHub has since transferred it to `other-org`, its `origin` still has the old URL, and `publish_ticket` is called after a passed review
+- **THEN** nothing is pushed, the repository is recorded under `other-org`, and the caller is told it moved
+
+#### Scenario: Publishing again after the transfer
+- **WHEN** `publish_ticket` is called again and `other-org` is not allowed
+- **THEN** the push waits for the human's approval on an item naming `other-org/app`
+
+#### Scenario: GitHub cannot be reached
+- **WHEN** GitHub cannot be read when a push is about to run, even one the human approved
+- **THEN** nothing is pushed and the caller is told GitHub could not confirm the repository
+
 ### Requirement: An allowed owner's repository publishes without asking after a passed review
 When the ticket's latest verification cycle passed and its repository publishes without asking (see repository-owners), the host SHALL run every step of the publish without asking the human.
 
@@ -88,7 +122,7 @@ When the ticket's latest verification cycle passed and its repository publishes 
 - **THEN** the host pushes the new commit without asking
 
 ### Requirement: Elsewhere the human approves each step
-When the ticket's repository does not publish without asking, the host SHALL NOT push or open a pull request until the human approves that step in the Inbox. Each push and each pull request SHALL be its own approval, including every later push to the same pull request. The host SHALL write the item: it SHALL name the repository and whether it is public, the branch, the commit and its size, and how the review ended, and for a pull request the base branch and the full title and description. Approving SHALL run exactly that step for exactly that commit. Denying SHALL send nothing and SHALL tell the caller so. The item SHALL be an approval the human can only approve or deny: the human SHALL NOT be able to dismiss it and no agent SHALL be able to close or answer it. The request SHALL survive a host restart. A publish requested again for the same commit SHALL return the waiting status, and one requested for a newer commit SHALL withdraw the old item and raise a new one.
+When the ticket's repository does not publish without asking, the host SHALL NOT push or open a pull request until the human approves that step in the Inbox. Each push and each pull request SHALL be its own approval, including every later push to the same pull request. The host SHALL write the item: it SHALL name the repository and whether it is public, the branch, the commit and its size, and how the review ended, and for a pull request the base branch and the full title and description. Approving SHALL run exactly that step for exactly what the item showed: that repository, branch, base branch, commit, title and description. If any of them is no longer current when the human answers or when the step is about to run, such as a changed base, a changed `origin` or a moved HEAD, the host SHALL send nothing, SHALL withdraw the item and SHALL tell the caller what changed. Denying SHALL send nothing and SHALL tell the caller so. The item SHALL be an approval the human can only approve or deny: the human SHALL NOT be able to dismiss it and no agent SHALL be able to close or answer it. The request SHALL survive a host restart. While an item waits, the same publish requested again SHALL return the waiting status, and one requested with a newer commit or a different title or description SHALL withdraw the old item and raise a new one. After a request has ended, by denial, failure or interruption, a publish requested again SHALL raise a new item, also for the same step and commit.
 
 #### Scenario: Push waits for approval
 - **WHEN** `publish_ticket` is called for a reviewed ticket in a repository whose owner is not allowed
@@ -113,6 +147,18 @@ When the ticket's repository does not publish without asking, the host SHALL NOT
 #### Scenario: Approval after a restart
 - **WHEN** the host restarts while a push waits for approval and the human then approves it
 - **THEN** the host makes its checks and pushes
+
+#### Scenario: The base changes while an approval waits
+- **WHEN** a pull request approval shows base `main`, the repository's base is then changed to `origin/release`, and the human approves the item
+- **THEN** no pull request is opened, the item is withdrawn, and the caller is told the base changed
+
+#### Scenario: Asking again after a denial
+- **WHEN** the human denies the pull request for commit C, the implementer corrects the description and calls `publish_ticket` again for C
+- **THEN** a new approval is raised showing the corrected description
+
+#### Scenario: Asking again after an interruption
+- **WHEN** the human approved a push, the host stopped while it ran, and the caller calls `publish_ticket` again for the same commit
+- **THEN** a new approval is raised for that push
 
 #### Scenario: Newer commit
 - **WHEN** a push for commit A waits for approval and `publish_ticket` is called after commit B passed review
@@ -142,7 +188,7 @@ When the ticket's latest verification cycle ended blocked, the host SHALL NOT pu
 - **THEN** the human is asked again for that commit
 
 ### Requirement: Results arrive as messages from Wiffletree
-`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. When the steps have finished, failed or been denied, the host SHALL send the caller one message, labelled as coming from Wiffletree, that starts the caller's next turn. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
+`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
 
 #### Scenario: Success
 - **WHEN** the host has pushed a ticket's branch and opened PR #45
@@ -151,6 +197,14 @@ When the ticket's latest verification cycle ended blocked, the host SHALL NOT pu
 #### Scenario: Push fails
 - **WHEN** `git push` fails because the host has no credentials for the remote
 - **THEN** the caller gets a message with Git's error, saying nothing was pushed
+
+#### Scenario: Retry after a failed push
+- **WHEN** a push for commit C failed, the caller was told, the cause was fixed and `publish_ticket` is called again for C
+- **THEN** the caller gets a second message with the new result
+
+#### Scenario: The coordinator retries after the implementer
+- **WHEN** the implementer's publish of commit C failed and the coordinator then publishes C
+- **THEN** the coordinator gets the result of its own request
 
 #### Scenario: Waiting status
 - **WHEN** a step waits for the human

@@ -7,6 +7,7 @@ See proposal.md for why. The code this builds on, at origin/main fb9b217:
 - **Review.** `live.rs::accept_ticket` (`:393`) requires the latest verification cycle to have passed, or to have ended blocked with a waiver, and calls `check_verified_head` (`:446`), which accepts HEAD when it is the verified commit or has the same patch id against the repository's base (`worktrees::patch_id`, `worktrees.rs:542`). Findings live in the ticket's ledger (`LedgerEntry`, `workspace-core/src/lib.rs:968`).
 - **Tools.** `mcp.rs::tools` (`:17`) lists them. `service.rs` handles `Event::Tool` (`:881`): a few tools are handled by the actor itself (`stop_agents`, `:895`), the rest go to `Host::agent_tool` (`live.rs:692`). Ticket tools check `owned_ticket` (`live.rs:879`).
 - **Approvals.** The Inbox holds `Attention` items (`workspace-core/src/lib.rs:239`), stored in the `attention` table and answered once (`Host::resolve_attention`, `lib.rs:938`). An item whose operation starts with `permission:` is an approval (`Attention::is_permission`, `:253`): the desktop draws Deny and Approve (`inspector.rs:632-662`), the human cannot dismiss it (`lib.rs:979`) and the coordinator cannot close it (`live.rs:860`).
+- **Ids are single-use.** `Host::request_attention` returns the existing item, answered or not, for the same session and operation, and refuses a changed prompt (`lib.rs:892-906`). `Host::send` returns the existing message for a repeated id and refuses a different body or recipient (`lib.rs:721`).
 - **Settings.** `HostSettings` (`workspace-core/src/lib.rs:486`) lives in the host's `settings.json`, written by `settings.rs::save_settings` (`:172`). It already holds one per-machine value, `workspaces_dir`.
 - **Instructions.** `provider.rs::skill` (`:85`) joins `skills/communication.md` with the role's file and passes it on every turn. Line 12 of `communication.md` names "the open-pr skill" twice. `provider.rs::configure` launches Claude with `--dangerously-skip-permissions` (`:168`) and Codex with `--dangerously-bypass-approvals-and-sandbox` (`:178`).
 - **Measured here** (`gh` 2.94.0, October 12, 2026): one GraphQL call with one aliased `repository(owner:, name:)` per repository answered `isFork`, `visibility` and `nameWithOwner` for this workspace's 33 distinct GitHub repositories at a cost of 1 rate-limit point. The workspace has 34 repositories, all with a GitHub `origin`: Sage-Social 29 (28 distinct; two folders are clones of the same repository), MHohlios 3, Vyttle-LLC 1, celadon-theme 1. None is a fork.
@@ -56,6 +57,8 @@ On this proposal:
 ### 1. The owner comes from `origin`, read on disk
 A repository's GitHub owner and name are parsed from `git remote get-url --push origin` with the existing `pr_watch::github_repository`. No network is needed, so owners are listed even when `gh` is missing. A repository with no `origin`, or one not on `github.com`, has no owner and cannot be allowed.
 
+`origin` must have exactly one push URL (`git remote get-url --push --all origin` prints one line), and its fetch URL must name the same GitHub repository. Git pushes to every push URL of a remote, so a second one would be a destination nobody checked; and the host reads GitHub's branch through the fetch URL, so the two must agree. A repository that fails either test has no owner recorded, its row says why, and `publish_ticket` refuses it.
+
 The watcher uses the *base's* remote instead. The two differ only when the base is a local branch (`main`) or tracks another remote (`upstream/main`). A push always goes to `origin`, so `origin` is what authority must be decided on. A repository whose base does not track `origin` never publishes without asking, and `publish_ticket` refuses it, because its PR would cross repositories, which the watcher cannot follow (`pr_watch.rs:194`).
 
 ### 2. Fork status and visibility: one batched read, not the watcher's query
@@ -67,12 +70,15 @@ QUERY: r0: repository(owner: $o0, name: $n0) { nameWithOwner isFork visibility
          parent { nameWithOwner } owner { __typename } } … rateLimit { remaining resetAt }
 ```
 
-It follows the watcher's rules: raw-string `-f` variables only, `runtime::gh_output`, read-only.
+It follows the watcher's rules: raw-string `-f` variables only, read-only.
+
+`gh api graphql` exits non-zero when any one aliased repository cannot be resolved, while still printing the others' data, and `runtime::gh_output` discards the output of a failed call (`runtime.rs:87-103`). So `runtime.rs` gains `gh_answer(path, args)`, which returns the exit status, the output and the error line, as `git_answer` (`:49`) does for Git. `read_github` parses `data` whenever it is present. A repository whose alias came back `null`, such as one that was deleted or that this account cannot see, is recorded alone with the reason GitHub gave (`GitHubRepository.problem`); every other repository in the call gets its answer. Only an answer with no `data` at all, as when `gh` is not signed in, counts as a failed read.
 
 - **Why not extend the watcher's per-repository query**, as the brief preferred: that query runs only for repositories with an open ticket. In this project that is 1 of 34. The human ticks owners before any ticket exists, and a list where 33 rows say "fork status unknown" is not one anyone can decide on. One extra call for the whole workspace costs 1 point; adding the fields to the watcher as well would give two writers for the same facts.
 - **When it runs.** With each repository refresh (`service.rs:628`), for repositories whose facts are missing, older than a day, or whose `origin` changed. So: at launch, when repositories are added, and at most once a minute when the human returns while something is still unread.
-- **The owner is the one GitHub reports.** A renamed or transferred repository still answers at its old URL. `nameWithOwner` gives where a push would really land, and the allowed list is checked against that.
-- **Failure.** If `gh` is missing, not signed in or rate-limited, the facts stay unknown and the page says why. A repository with unknown facts always asks.
+- **The owner is the one GitHub reports.** A renamed or transferred repository still answers at its old URL. `nameWithOwner` gives where a push would really land. It is stored beside the owner and name the URL gives, the allowed list is checked against it, and it is the repository a request names; the URL's own owner and name are kept only to notice when `origin` is edited.
+- **Failure.** If `gh` is missing, not signed in or rate-limited, earlier answers are kept, repositories without one stay unanswered, and the page says why. A repository with no answer, or one GitHub could not find, always asks.
+- **This answer is for the page and for the first decision.** It can be a day old. What is actually sent is decided on a fresh answer (decision 7).
 
 ### 3. Where it is stored
 All on JSON that is already stored; nothing new in SQL.
@@ -80,15 +86,20 @@ All on JSON that is already stored; nothing new in SQL.
 ```rust
 // workspace-core/src/lib.rs
 pub struct Repository { …, pub github: Option<GitHubRepository> }      // `origin` on github.com
-pub struct GitHubRepository { pub owner: String, pub name: String,
-    pub facts: Option<GitHubFacts> }                                     // None until GitHub answered
-pub struct GitHubFacts { pub organization: bool, pub fork: bool, pub parent: Option<String>,
+pub struct GitHubRepository { pub owner: String, pub name: String,      // as `origin`'s URL names it
+    pub facts: Option<GitHubFacts>,                                      // None until GitHub answered
+    pub problem: Option<String> }                                        // why GitHub gave no answer
+pub struct GitHubFacts { pub name_with_owner: String,                    // where GitHub says it is now
+    pub organization: bool, pub fork: bool, pub parent: Option<String>,
     pub public: bool, pub checked_at: i64 }
 pub struct HostSettings { …, pub allowed_owners: Vec<String> }          // per machine
 pub struct Ticket { …, pub publishing: Option<PublishRequest>,          // step running or waiting
     pub pushed: Option<String> }                                         // commit the host last pushed
-pub struct PublishRequest { pub caller: String, pub commit: String, pub step: PublishStep,
-    pub title: Option<String>, pub body: Option<String>,
+pub struct PublishRequest { pub id: String, pub caller: String,        // one per accepted call
+    pub repository: String, pub push_url: String,                        // what the card shows and
+    pub branch: String, pub base: String, pub commit: String,            // what will be sent,
+    pub title: Option<String>, pub body: Option<String>,                 // frozen at the request
+    pub step: PublishStep,
     pub waiting: Option<String>,                                         // the Inbox item, when asking
     pub blocked_review_approved: bool }                                  // decision 8
 pub enum PublishStep { Push, OpenPullRequest }
@@ -101,7 +112,7 @@ pub enum PublishStep { Push, OpenPullRequest }
 ### 4. One rule for "without asking", shared by the page and the host
 A new `workspace-core/src/owners.rs` holds the rule and the grouping, so the desktop and the host cannot disagree:
 
-- `owner_entry(&Repository) -> Option<String>`: the owner, or `owner/name` for a fork; `None` without GitHub facts.
+- `owner_entry(&Repository) -> Option<String>`: the owner GitHub reports, or its `owner/name` for a fork; `None` without GitHub facts.
 - `is_allowed(&Repository, allowed: &[String]) -> bool`: true only when the repository has a GitHub `origin`, GitHub has answered, its base tracks `origin`, and its entry is in the list.
 - `owner_entries(&[Repository]) -> …`: the rows of the owners block: each owner with its repository count and how many are public, each fork with its parent, and the repositories with no GitHub remote.
 
@@ -116,47 +127,55 @@ Counts are of workspace repositories, so two clones of one GitHub repository cou
 *Why one tool and not `push` plus `open_pull_request`:* the decided rules never allow a push without review, so "push only" is not a separate thing an agent needs before the PR exists. One call is one agent turn, and the host still asks the human about each step separately (decision 8). *Why not let agents pass a branch, remote or base:* every one of those is a way to aim the operation somewhere else. The host takes the branch from the ticket, the remote is `origin`, and the PR's base is the repository's configured base. A plan that wants a feature branch sets the repository's base to it.
 
 ### 6. What the host checks before anything leaves
-A new `workspace-host/src/publish.rs` holds `Host::publish_ticket(caller, ticket_id, title, body)`. Every check is local and fast, runs on the host thread, and refuses at once with its reason:
+A new `workspace-host/src/publish.rs` holds `Host::publish_ticket(caller, ticket_id, title, body)`. Every check here is local and fast, runs on the host thread, and refuses at once with its reason:
 
 1. The caller is the ticket's coordinator (`owned_ticket`, `live.rs:879`) or an implementer among `ticket_agents` (`live.rs:302`). Verifiers are refused.
 2. The ticket is open and no other step for it is running.
 3. The ticket has a verification cycle and none is running, and `check_verified_head` (`live.rs:446`, made `pub(crate)`) accepts the worktree's HEAD: the commit the cycle's last round checked, or a patch-equivalent one. A ticket that was never reviewed is refused.
 4. The worktree is on the ticket's branch (`git symbolic-ref --short HEAD` equals `Ticket.branch`). The host pushes that branch and no other.
-5. `origin`, read again now, is the GitHub repository recorded for the repository, and the base tracks `origin`.
+5. `origin`, read again now, has exactly one push URL, its fetch URL names the same repository, the URL still names the owner and name recorded when GitHub was asked, and the base tracks `origin`.
 6. Authority. A step runs without asking only when both hold: the cycle **passed**, and `is_allowed` is true. Otherwise the host asks the human (decision 8).
 
-Checks 2 to 5 run again, for the recorded commit, when the human approves a card. If HEAD has moved to different changes by then, or a new cycle has started, nothing is pushed and the caller is told.
+**The request is frozen.** When the checks pass, the host saves a `PublishRequest` on the ticket with a new id and everything that will be sent: GitHub's `owner/name`, the push URL, the branch, the base branch, the commit, and the title and description. The card is drawn from that record, and the steps are run from it. Nothing is read from the repository's current configuration at the moment of sending except to compare it with the record.
+
+**Every later moment compares with the record.** When the human approves a card, and again at the start of every run on the publishing thread, the host makes checks 2 to 5 again and compares the current push URL, recorded repository, ticket branch and repository base with the frozen ones. If anything differs, or HEAD is no longer the frozen commit or patch-equivalent to it, or a new cycle has started, nothing is sent: the request is cleared, any waiting card is withdrawn, and the caller is told what changed and to call again. A new call is a new request with its own card, showing the new values. So an approval given for "into `main`" can never open a PR into `release`.
 
 ### 7. How the host pushes and opens the PR
 Network work runs on its own thread, like the watcher's passes (`spawn_pull_request_check`, `service.rs:286`), and reports back with a new `Event::Published`.
 
+- **First, GitHub's current answer.** The stored facts can be a day old, and a repository transferred to another owner keeps answering, and accepting pushes, at its old URL. So before anything is sent, the thread asks GitHub about this one repository (`nameWithOwner`, `isFork`; one read-only call) and compares it with the frozen `repository` and the fork status the decision was made on.
+  - Same: go on.
+  - Different: nothing is sent. The new answer is recorded, the request is cleared, and the caller is told the repository is now `<owner>/<name>` and to call again. The new call decides on the new owner, and asks the human if that owner is not allowed.
+  - No answer (GitHub unreachable, `gh` not signed in, repository not found): nothing is sent and the caller is told why. An unconfirmed destination is never pushed to, with or without the human's approval.
 - **Push.** `runtime.rs` gains `git_push(path, args)`, on `bounded_output` (`:112`) with a 10-minute deadline, because `git push` runs the repository's pre-push hooks. The thread reads GitHub's head for the branch with `git ls-remote origin refs/heads/<branch>` and then:
   - same commit: nothing to do;
-  - branch absent, or its head is an ancestor of the commit: `git push origin <commit>:refs/heads/<branch>`;
+  - branch absent, or its head is an ancestor of the commit: `git push --no-follow-tags --recurse-submodules=no origin <commit>:refs/heads/<branch>`;
   - its head is the commit the host last pushed (`Ticket.pushed`), as after a squash or a clean rebase: the same push with `--force-with-lease=refs/heads/<branch>:<that commit>`;
   - anything else: refuse. GitHub has commits the host did not put there, and overwriting them is the PR keeper's question (change 3), not this change's.
-- **Open.** `gh pr create --repo <owner>/<name> --head <branch> --base <base branch> --title <title> --body <body>` through `runtime::gh_output`. Arguments are passed as an argument list, never through a shell.
+- **Only that one ref.** The explicit refspec overrides `remote.origin.push` and `push.default`. `--no-follow-tags` and `--recurse-submodules=no` override `push.followTags` and `push.recurseSubmodules`, which would otherwise send tags and submodule commits along. A remote configured as a mirror makes the command fail rather than send more. The tests set those options in the repository's and the global Git configuration and check that the destination gained exactly one ref.
+- **Open.** `gh pr create --repo <owner>/<name> --head <branch> --base <base branch> --title <title> --body <body>` through `runtime::gh_output`, with every value taken from the frozen request. Arguments are passed as an argument list, never through a shell.
 - **After.** `Host::record_published` saves `Ticket.pushed`, records a `ticket_pushed` or `pull_request_opened` activity event, starts or asks for the next step, and marks the repository due in the watcher (a new `Watch::check_now`, `pr_watch.rs:296`) so the ticket row shows the PR within seconds.
 
 ### 8. When the human is asked, and what the card says
-When check 6 says ask, the host saves the request on the ticket (`Ticket.publishing`) and raises an Inbox item with `Host::request_attention` (`lib.rs:876`) under the operation `publish:<ticket>:<step>:<commit>`.
+When check 6 says ask, the host raises an Inbox item with `Host::request_attention` (`lib.rs:876`) under the operation `publish:<request id>:<step>` and notes it on the request.
 
+- **Why the request id, and not the ticket and commit.** An operation can exist only once per session (`lib.rs:892-906`), and a second publish for the same step and commit is ordinary: after a denial and a corrected description, after a failed push, after a restart. Each accepted call is a new request with a new id, as provider permissions already use `permission:<new id>` (`service.rs:906`), so each gets its own card.
 - **It is an approval, not a question.** `Attention::is_permission` (`workspace-core/src/lib.rs:253`) becomes true for `publish:` operations too. The card then gets Deny and an approve button, the human cannot dismiss it, and the coordinator's `close_question` cannot close it. That is how "the human's approval is something the app records and checks" is met: the only thing that starts the step is the human's click on the host's own card, stored in the `attention` table.
-- **The host writes the card.** The desktop draws it from `Ticket.publishing`, the ticket's verification record and ledger, and the repository's facts: repository and visibility, branch, commit and its size, how the review ended, and for the PR the full title and description. The agent's only words on it are the PR's title and description, which are what the human is approving.
-- **Owner not allowed: each step asks.** The push and the PR are two cards. Each later push to the same PR asks again.
+- **The host writes the card.** The desktop draws it from the frozen request, the ticket's verification record and ledger, and the repository's facts: repository and visibility, branch, commit and its size, how the review ended, and for the PR the base branch and the full title and description. The agent's only words on it are the PR's title and description, which are what the human is approving.
+- **Owner not allowed: each step asks.** The push and the PR are two cards of one request. Each later push to the same PR is a new request and asks again.
 - **Review ended blocked: always asks, and the card says so.** It states that the review ended blocked, names any verifier that could not check, and lists the open findings: every ledger entry that is neither fixed nor settled as follow-up or won't-fix, each with its id, severity, verifier, location and summary.
   - In a repository whose owner is not allowed, that notice and list appear on each step's card.
   - In an allowed owner's repository there is one card for the commit. It names everything that would be sent (the push and, with no open PR, the PR and its title). Approving it sets `blocked_review_approved`, and the steps for that commit then run without a second card, because the owner is allowed and the review was the only reason to ask.
   - The approval covers one commit. A later push is a new commit with its own review.
-- **Approve runs it.** `service.rs` handles the answer beside parked permissions (`:857`): `approved` re-runs checks 2 to 5 and starts the step; anything else clears the request and tells the caller nothing was sent. The request and the Inbox item are both stored, so an approval given after a restart still works; parked provider permissions (`service.rs:398`) are in memory only, which is why this does not reuse that map.
-- **Repeats.** Calling `publish_ticket` again for the same commit returns the waiting status; calling it for a newer commit withdraws the old card and raises a new one.
+- **Approve runs it.** `service.rs` handles the answer beside parked permissions (`:857`): `approved` makes the comparison in decision 6 and starts the step; anything else clears the request and tells the caller nothing was sent. The request and the Inbox item are both stored, so an approval given after a restart still works; parked provider permissions (`service.rs:398`) are in memory only, which is why this does not reuse that map.
+- **Repeats.** While a card waits, the same call again (same commit, title and description) returns the waiting status. A call that differs in any of them withdraws the old card and starts a new request. Once a request has ended, by success, failure, denial or interruption, the next call is a new request.
 
 ### 9. The result arrives as a message
-`publish_ticket` returns at once: a refusal, `publishing` (the steps the host is running) or `waiting_for_human` (the step and the reason). When the steps finish, fail or are denied, the host sends the caller one message with id `publish:<ticket>:<commit>` and no sender, so it starts the caller's next turn. `publish:` joins `HOST_NOTICE_PREFIXES` (`workspace-core/src/lib.rs:817`), so the turn input and the chat label it "Wiffletree".
+`publish_ticket` returns at once: a refusal, `publishing` (the steps the host is running) or `waiting_for_human` (the step and the reason). When a request ends, by success, failure, denial, withdrawal or interruption, the host sends its caller one message with id `publish:<request id>` and no sender, so it starts the caller's next turn. The id is the request's because `Host::send` refuses a repeated id with a different body or recipient (`lib.rs:721`): a second attempt at the same commit, or the coordinator retrying after the implementer, must still get its own result. `publish:` joins `HOST_NOTICE_PREFIXES` (`workspace-core/src/lib.rs:817`), so the turn input and the chat label it "Wiffletree".
 
 *Why not hold the tool call open until the push ends:* a push with hooks can take minutes and a human's approval can take hours. Provider tool-call time limits differ, and a parked call does not survive a restart. One path for both cases is simpler than two.
 
-A step that was running when the host stopped is cleared at the next start and the caller is told to call again. Repeating is safe: pushing the same commit is a no-op, and `gh pr create` refuses a second PR for the same branch.
+A request whose step was running when the host stopped is ended at the next start, and the caller is told it was interrupted and to call again. Repeating is safe: pushing the same commit is a no-op, and `gh pr create` refuses a second PR for the same branch. Where the human must approve, the new request raises a new card.
 
 ### 10. The instructions, in Wiffletree's own words
 `skills/communication.md` line 12 (version becomes v7). The two sentences that name the open-pr skill, including the coordinator's merge into a plan's feature branch, and the clause "except as the open-pr skill allows", are replaced by:
@@ -185,7 +204,7 @@ See `design/mockups/current/repository-owners.html`.
 **Closes:**
 - The instructions no longer point at a skill Wiffletree does not ship, and no longer leave "where may I push" to an agent's reading of text.
 - An agent no longer needs its shell to publish. The path it is told to use checks the owner, the branch and the review every time.
-- Through that path, an unreviewed commit, another branch, another remote, a merge and a comment are impossible, whatever any message says. A commit whose review ended blocked leaves only after the human has seen the open findings.
+- Through that path, an unreviewed commit, another branch, a tag, another remote or push URL, a merge and a comment are impossible, whatever any message or Git setting says. The owner is confirmed with GitHub before each publish, so a transferred repository is not pushed to on a stale answer. A commit whose review ended blocked leaves only after the human has seen the open findings.
 - Where the human must approve, a coordinator's or another agent's "the human said yes" does nothing. Only the human's click on the host's card starts a step.
 
 **Does not close:**
@@ -199,7 +218,9 @@ Closing these needs credentials the agents do not hold, or a sandbox. Neither is
 
 - [A pre-push hook hangs or takes very long] → the push has a 10-minute deadline and is killed; the caller is told it failed and may call again.
 - [The host's `git push` lacks credentials the human's terminal has, such as an SSH agent] → the push fails with Git's own error in the result message. Nothing is retried silently.
-- [GitHub facts are up to a day old] → fork status does not change for a given repository, and a changed `origin` forces a fresh read. Visibility is shown but does not decide authority, so a stale value cannot widen it.
+- [GitHub facts on the page are up to a day old] → the page can lag, but nothing is sent on them: each publish confirms the owner and fork status with GitHub first (decision 7). Visibility is shown but does not decide authority.
+- [GitHub cannot be reached when a ticket is published] → nothing is sent and the caller is told; it calls again later. `gh pr create` would have failed anyway.
+- [A pre-push hook sends something itself] → hooks are the repository's own code and run as they do for the human's pushes; this change does not inspect them.
 - [The watcher has not yet seen a PR the host just opened, and `publish_ticket` is called again] → `gh pr create` refuses a second PR for the branch; the watcher is told to check at once.
 - [An allowed owner includes a repository where opening a PR itself has effects, such as CI with cloud credentials] → accepted; the human chose owners only (settled decision 8). The stored list already takes `owner/name` entries, so an "ask first" exception could be added later without a migration.
 - [A coordinator publishes blocked reviews routinely and the human approves by habit] → the card leads with the blocked result and the open findings, and the coordinator's instructions limit it to cases it would otherwise waive.
