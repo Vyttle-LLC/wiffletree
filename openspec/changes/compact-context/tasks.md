@@ -1,0 +1,35 @@
+One implementation ticket. Host tests go in a new `crates/workspace-host/tests/compaction.rs`, driven by `tests/fixtures/provider.py` with recorded streams in `tests/fixtures/streams`. Each task names the tests it must add.
+
+## 1. Core types
+
+- [ ] 1.1 In `workspace-core/src/lib.rs`, add `Compaction` (`instructions`, `requested_at`, `state`), `CompactionState` (`queued`, `running`), `CompactionResult` (`compacted`, `nothing_to_compact`, `failed`, `interrupted`) and `CompactionOutcome` (`result`, `reason`, `at`). Add `SessionRuntime.compaction` and `SessionRuntime.last_compaction`, both `#[serde(default)]` and skipped when `None`. Test: a stored runtime without the fields still decodes, and both round-trip in snake_case.
+- [ ] 1.2 Add the commands `CompactContext { session_id, instructions }`, `CancelCompaction { session_id }` and `DismissCompaction { session_id }`.
+- [ ] 1.3 Move the token formatter `compact` from `workspace-desktop/src/context_view.rs` to `workspace-core`, with its existing test, and use it from both crates.
+
+## 2. Provider: the bare command and its records
+
+- [ ] 2.1 Before changing arguments, compact a throwaway Claude session twice: once with a turn's full arguments and once with the context probe's empty MCP configuration. Compare `cacheReadInputTokens` in `modelUsage`. Keep design decision 5 unless the two are equal, and record the numbers in the ready_for_testing report.
+- [ ] 2.2 Give `Turn` a kind (prompt, or compaction with optional instructions). For a compaction, `provider::input` returns exactly `/compact` or `/compact <instructions>` as plain text, and `configure` adds no `--input-format`. Tests in `provider.rs`: the stdin bytes with and without instructions, and that the arguments still include `--resume`, the model and the `agent_workspace` MCP configuration.
+- [ ] 2.3 In `provider::run`, read `system` records with subtype `status` that carry `compact_result` (and `compact_error`), and subtype `compact_boundary` (`pre_tokens`, `post_tokens`), and emit `ProviderEvent::Compaction`. A normal turn's stream is read as before. Add recorded streams `compact-success`, `compact-nothing` and `compact-failed` from the ticket brief's records.
+- [ ] 2.4 For a compaction, take usage from the result record's `modelUsage`: one `ProviderEvent::Usage` per model with request id `compact:<run>:<model>`, its counts mapped to the names `usage::normalize` reads, and `total_cost_usd` kept in the run's `detail.result`. Test in `usage.rs`: zero `usage` with a `modelUsage` entry records one request with the entry's input, cache-read, cache-write and output counts, and an empty `modelUsage` records none.
+
+## 3. Host: request, order and the run
+
+- [ ] 3.1 Handle `CompactContext`, `CancelCompaction` and `DismissCompaction` in `service.rs`, with the refusals and the instruction rules of design decision 2, and the events `compaction_requested` and `compaction_cancelled`. Tests: the spec scenarios "Codex agent", "No provider session yet", "Second request", "Cancel before it starts" and "Cancel after it started"; instructions over 1,000 characters are refused and a line break becomes a space. In `tests/contracts.rs`, assert that no agent tool mentions compaction.
+- [ ] 3.2 In `schedule`, add the compaction pass before the message pass and skip sessions that have a request in the message pass. Add `start_compaction`: a `provider_runs` row with `messages` `[]` and `detail.kind` `"compaction"`, the request set to `running`, a `compacting` map beside `active`, and no change to `active`, `in_turn`, receipts, status or the human turn count. Tests: "Idle agent", "Requested mid-turn with a message waiting" (the message stays `queued` until the compaction settles, then one turn takes it), "The turn fails", "Paused agent", and that a stopped project's request waits.
+- [ ] 3.3 Settle a finished compaction: map the stream to an outcome in the order of design decision 6, settle the run, clear the request, set `last_compaction`, write the `compaction:<run>` conversation message of decision 8, and record `context_compacted` or `compaction_failed`. Send the parent nothing and append no reply. Tests: "Success", "Nothing to compact", "Failure with exit code 0", "No status record", "Parent stays asleep", "Blocked agent" and "Paused while compacting"; the message bodies for a compaction with and without instructions, and no message for nothing to compact.
+- [ ] 3.4 Make `check_in_by_turns` count only runs without `detail.kind`. Test: "Check-in count" from the spec, and that a long compaction raises no time check-in.
+- [ ] 3.5 In startup recovery, settle unfinished compaction runs as `interrupted` before `recover_unfinished_turns` marks sessions disconnected, and leave queued requests alone. Tests: "Restart while queued" and "Restart while compacting" (outcome interrupted, the `Compaction interrupted` line, status unchanged, nothing started).
+
+## 4. Desktop
+
+- [ ] 4.1 `context_view.rs::context_card`: the Compact row with its three hints, the inline form with per-session state, the queued and running blocks, and the three notices with Dismiss, wired to the commands through `bridge.rs`. Keep the chosen wording in small pure functions (row hint and button label by provider, provider session and status; queued text; notice title and body) and unit-test each case in the spec's "Compact action on the Context card" and "The Context card follows a compaction" requirements.
+- [ ] 4.2 `context_chip` adds "compact queued" or "compacting". `ui.rs::session_badge` reads "Compacting" with the working glyph while a compaction runs. Disable the card's refresh button and the header's Pause button while it runs. Unit tests for the chip note and the badge label.
+- [ ] 4.3 `sync_context` measures again when `last_compaction.at` is newer than what the card shows, and never while a compaction runs. Test the freshness check as a pure function.
+- [ ] 4.4 `conversation.rs`: draw a `compaction:` message as one line at the turn summary's indent, red for the failure and interrupted bodies, and never as a bubble or with a turn summary. Unit test that such a message is classified as a compaction line and not as a reply.
+- [ ] 4.5 Compare every state by eye with `design/mockups/current/compact-context.html` in light and dark, and list any difference in the ready_for_testing report.
+
+## 5. Docs and checks
+
+- [ ] 5.1 Update the context paragraph of `docs/PRD.md` and the turn scheduling and usage paragraphs of `docs/DEVELOPMENT.md`.
+- [ ] 5.2 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, and record the results in the ready_for_testing report.

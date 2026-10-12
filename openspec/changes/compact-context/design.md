@@ -1,0 +1,156 @@
+## Context
+
+See proposal.md for why. The current behavior, on origin/main fb9b217:
+
+- `workspace-desktop/src/context_view.rs`: `context_chip` draws the header chip and `context_card` the Context card. `sync_context` measures again when the selected session's `last_finished_at` is newer than what the card shows and the session is not working. The measurement is `workspace_host::context::usage`, which runs `claude -p /context …` with `--no-session-persistence`: the existing precedent for a bare slash command.
+- `workspace-host/src/service.rs`: `schedule` starts a turn for each session with due input unless it is paused, disconnected, held or already in `active`. `start_turn` writes a `provider_runs` row, marks the input delivered and builds the prompt with `turn_prompt`, which wraps every message. The `ProviderEvent::Finished` arm settles the run, appends the reply, completes or holds the input, and messages the parent. `check_in_by_turns` counts a session's `provider_runs` rows since its parent's last message. `recover_unfinished_turns` marks every session with an unfinished run `Disconnected` at startup.
+- `workspace-host/src/provider.rs`: `input` is what the provider reads on stdin; `configure` builds the arguments. In `run`, the Claude `init` arm fails the run unless the `agent_workspace` MCP server is connected, the `result` arm takes `value["usage"]`, and `system` records other than `init` are ignored.
+- `workspace-host/src/usage.rs`: `record_usage(run, request, model, usage, complete, at)` writes one `usage_requests` row per provider request, keyed by a run. Claude's rows come from `stream_event` records during a turn.
+- `SessionRuntime` (`workspace-core/src/lib.rs`) is stored as JSON in `runtimes.data` and reaches the desktop in the snapshot.
+
+Verified on throwaway sessions with Claude Code 2.1.295 (the ticket brief has the full records):
+
+- A stdin prompt that is exactly `/compact`, or `/compact <instructions>`, to `claude -p --output-format stream-json --verbose --resume <id>` runs the compact command. The session id does not change.
+- The stream is, in order: a `system` `status` record with `"status":"compacting"`; a `system` `status` record with `"compact_result":"success"`; a `system` `init`; a `system` `compact_boundary` with `compact_metadata.pre_tokens` and `post_tokens`; replayed `user` records holding the summary; a `result` with an empty `result` and `num_turns` 0.
+- The `result` record's `usage` is all zeros. The tokens and cost are in `modelUsage` and `total_cost_usd`.
+- A session with nothing new gives `"compact_result":"failed","compact_error":"Not enough messages to compact."`, exit code 0 and `is_error:false`.
+- `codex exec … resume` has no compact command.
+
+## Goals / Non-Goals
+
+**Goals:** one human action that compacts a Claude agent now or right after its running turn; a request that is never lost and never runs unseen; an outcome read from what Claude reported, not from the exit code; the compaction's tokens in the ledger; no effect on parents, check-ins or message delivery beyond the ordering.
+
+**Non-Goals:** a coordinator or agent tool; Codex compaction (`codex app-server`'s `thread/compact/start` is a separate route); changing or recording Claude's automatic compaction; a cost column or any new Usage page UI; summarizing conversations for the transcript.
+
+## Decisions
+
+### 1. The request lives on the session's runtime
+`SessionRuntime` gains two fields, both `#[serde(default)]` and skipped when empty:
+
+- `compaction: Option<Compaction>` with `instructions: Option<String>`, `requested_at`, and `state`: `queued` or `running`.
+- `last_compaction: Option<CompactionOutcome>` with `result` (`compacted`, `nothing_to_compact`, `failed` or `interrupted`), an optional `reason`, and `at`.
+
+A session has at most one request. Because the runtime is already persisted and already in the snapshot, the request survives a restart and reaches the card without a new table or a new query.
+*Alternative:* a queued message with a reserved id, so the existing queue orders it. Rejected because a message is input to a turn: it would need exceptions in delivery, receipts, the waiting count and `MAX_TURN_MESSAGES`.
+
+### 2. Three commands, human only
+- `CompactContext { session_id, instructions }` stores a `queued` request. It is refused, with the reason, when the session's provider is not Claude, when it has no provider session id, when it is archived, or when it already has a request. `instructions` is trimmed, empty becomes `None`, line breaks become spaces so the command stays one line, and more than 1,000 characters is refused.
+- `CancelCompaction { session_id }` removes a `queued` request. It is refused once the request is `running`.
+- `DismissCompaction { session_id }` clears `last_compaction`.
+
+They are client commands only. `mcp.rs` gains no tool, so no agent or coordinator can call them. Each records an event (`compaction_requested`, `compaction_cancelled`), which the Events panel already lists.
+
+### 3. One rule for when it runs
+A queued compaction starts when a turn for that session could start, and before any input is taken:
+
+- In `schedule`, before the message pass, each session with a `queued` request is started if it is not in a turn, not paused or disconnected, not archived, its project is live, and `hold_reason` is `None`. A request does not need due input, so an idle agent compacts at the next pass, which the command triggers.
+- The message pass skips every session that has a request, queued or running. That is the whole ordering rule: waiting messages stay `queued` and are delivered by the first turn after the compaction settles.
+- The worktree and verification-round gates do not apply. A compaction runs no tools and writes no files in the worktree.
+
+What follows from the rule, with nothing extra to build:
+
+| Situation | What happens to a queued request |
+|---|---|
+| The turn ends normally | It runs at once, then the waiting messages are delivered. |
+| The turn fails, or a parent or the human stops or pauses the agent | The session is paused or disconnected, so the request waits, still shown and still cancellable. It runs when the agent is resumed, before the retried or new input. |
+| The project is stopped | It waits the same way until the project runs. |
+| The host restarts | The request is in the runtime, so it is still queued. The interrupted turn leaves the session disconnected, so it waits as above. |
+| Claude is disabled in Models | It waits, like the agent's turns. |
+
+A request therefore never disappears and never runs while the person cannot see it: the chip and the card show it for as long as it waits.
+*Alternative:* cancel the request when the turn it waited on does not end normally. Rejected as the default because it loses a request the person made; it is listed under open questions.
+
+### 4. A compaction run is not a turn
+`start_compaction` in `service.rs` is separate from `start_turn`:
+
+- It writes a `provider_runs` row with `messages` `[]` and `detail.kind` `"compaction"`, because `usage_requests.run_id` references a run and an open run already defers worktree removal.
+- It sets the request `running`, keeps the session's stored status as it is, and tracks the process in a new `compacting` map beside `active`. It does not touch `active`, `in_turn`, the human turn count or any message receipt.
+- `check_in_by_turns` counts only rows whose `detail.kind` is absent, so a compaction never counts toward a check-in. `check_in_long_turns` walks `active`, so it never reports one.
+- When it finishes, the host settles the run, records the outcome (decision 6), clears the request, writes the conversation line (decision 8) and sets `last_compaction`. It appends no reply and sends the parent nothing.
+
+**Stop and Pause while it runs.** A compaction that has started is not interrupted: a human Pause or Stop, a parent's `stop_agents` and a project Stop still set the session's status, and the compaction finishes. No turn follows, because the session is then paused. Only host shutdown ends the process, by the process group's existing drop.
+
+**Status.** The stored status does not change, so an agent that was Blocked is Blocked again afterwards. The desktop draws "Compacting" from `compaction.state` (decision 9). `send_message` to a compacting agent returns the plain `queued` receipt.
+
+### 5. The bare command, with a turn's arguments
+`Turn` gains a kind: a prompt, or a compaction with its optional instructions. For a compaction, `provider::input` returns exactly `/compact` or `/compact <instructions>` as plain text, with no wrapper and no attachments, and `configure` adds no `--input-format`.
+
+Every other argument is the same as a turn's: model, effort, the appended role instructions, `--resume`, and the `agent_workspace` MCP configuration with a fresh token that is never registered in `active`. So the `init` check in `provider::run` is **satisfied, not bypassed**, and stays one unconditional check. A tool call under that token is refused by the existing token lookup; a compaction makes none.
+*Alternative:* the context probe's empty MCP configuration, skipping the `init` check for compactions. Rejected for now because it changes the tool list the summary request is built from. If that misses the prompt cache the turns built, an 800k-token compaction is billed as fresh input. Task 2.1 measures both on a throwaway session before the choice is final.
+
+### 6. The outcome is read from the status record
+`provider::run` gains two Claude arms and emits one new event, `ProviderEvent::Compaction`:
+
+- `system` with subtype `status` and a `compact_result` field: `success`, or `failed` with `compact_error`.
+- `system` with subtype `compact_boundary`: `pre_tokens` and `post_tokens`.
+
+The host maps them in this order:
+
+1. `compact_result` is `success` → **compacted**. The figures come from the boundary record; if it is missing, the line has none.
+2. `compact_result` is `failed` and `compact_error` starts with "Not enough messages to compact" → **nothing to compact**, with Claude's text as the reason.
+3. Anything else → **failed**, with the first of: `compact_error`, the `result` text when `is_error` is true, the existing "exited without a successful terminal result" text. This covers a missing status record, a nonzero exit and a process that could not start.
+
+The exit code and `is_error` never decide success. If a later CLI rewords "Not enough messages", case 2 falls into case 3: louder than intended, never wrong.
+
+### 7. Ledger rows from `modelUsage`
+For a compaction, the `result` arm reads `modelUsage` instead of `usage`. Each model entry becomes one `ProviderEvent::Usage` with request id `compact:<run>:<model>`, that model's name, `complete` true, and its `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens` mapped to the field names `usage::normalize` already reads. `record_usage` then attributes the row to the agent and its coordinator as for any request. `total_cost_usd` is kept in the run's `detail.result`; the ledger has no cost column and gains none. An empty or missing `modelUsage` records no row, as missing usage does today. Turns keep reading `usage`.
+
+### 8. The conversation line
+The host writes one message from the session to itself with id `compaction:<run>`, receipt `completed`, the same shape as `output:`, `stopped:` and `error:` entries. A message a session sends itself is not turn input and wakes nobody.
+
+| Outcome | Body |
+|---|---|
+| compacted | `Context compacted · 812k → 41k`, plus a second line `Kept: <instructions>` when some were given |
+| failed | `Compaction failed · context unchanged` |
+| interrupted (decision 10) | `Compaction interrupted` |
+| nothing to compact | no message |
+
+`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter `compact` moves from `context_view.rs` to `workspace-core`, so the line and the card print figures the same way.
+
+### 9. Desktop
+All of it matches `design/mockups/current/compact-context.html`.
+
+- **Row** (`context_card`): a hint and a button under the card's body. Claude with a provider session: "Replace the conversation with a summary." and **Compact…**, or **Compact after this turn** while the agent is working. Codex: the button disabled with "Not available for Codex agents: the Codex CLI has no compact command." No provider session: disabled with "Available after this agent's first turn."
+- **Form:** opened in place by the button; view state only, kept per session like a draft. "What to keep · optional", the consequence line, **Cancel**, and **Compact now** or **Compact after this turn**. While working, the consequence line also says it runs when the turn ends, before waiting messages.
+- **Queued:** the form's place shows "Compacts when this turn ends", "Keeping: …" when a note was given, and **Cancel**. When the agent is not in a turn and the request is waiting (decision 3's table), the text is "Compacts when this agent runs again".
+- **Running:** "Compacting…", a striped bar from `ui::progress_bar`, and "Messages you send now are delivered when it finishes." No Cancel. The refresh button and the header's Pause button are disabled.
+- **Notices** from `last_compaction`, each with **Dismiss**: "Nothing to compact" in the subtle color with "Claude said: <reason> The context is unchanged."; "Compaction failed" in red with the reason and "The context is unchanged."; "Compaction interrupted" in red with "Wiffletree stopped while Claude was compacting. The figure above was measured again." A compacted outcome shows no notice; the lower figure is the result. A notice is also cleared by the next request.
+- **Chip** (`context_chip`): after the percentage, "compact queued" or "compacting".
+- **Badge** (`ui.rs::session_badge`): "Compacting" with the working glyph and color while `compaction.state` is `running`. The sidebar is unchanged.
+- **Measuring again:** `sync_context` treats `last_compaction.at` like `last_finished_at`, so every outcome triggers one `/context` measurement. It never measures while a compaction is running.
+
+### 10. Restart
+At startup, before `recover_unfinished_turns` marks sessions disconnected, each unfinished run whose `detail.kind` is `"compaction"` is settled as `interrupted`: the request is cleared, `last_compaction` is `interrupted`, the `Compaction interrupted` line is written, and the session's status is left alone. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged", never runs the compaction again by itself, and lets the measurement show the truth. A `queued` request is untouched by a restart.
+
+### Open questions for the human
+Each has a default above, so the build is not blocked. They are product calls, not technical ones.
+
+1. **A queued compaction whose turn did not end normally** (failed, stopped, paused, interrupted by a restart, or the project was stopped). Default: it stays queued, visible and cancellable, and runs when the agent next runs, before its input. The other choice is to cancel it and say so on the card. Keeping it never loses a request; cancelling never surprises someone who resumes an agent days later.
+2. **The waiting wording.** The approved mockup has only "Compacts when this turn ends". Default 1 needs a second text for an agent that is not in a turn: "Compacts when this agent runs again".
+3. **Pause or Stop while a compaction runs.** Default: the compaction finishes and the agent is then paused. The mockup already shows Pause disabled in this state; a parent's `stop_agents` and a project Stop behave the same way.
+4. **A compaction cut off by a host restart.** Default: a third line, "Compaction interrupted", and a notice saying the figure was measured again, because "context unchanged" could be false. The approved wording covers only "failed".
+5. **The figures in the line.** They are Claude's `pre_tokens` and `post_tokens`. In the verified run those were 28k and 2k for a session whose card would also count the system prompt and tools, so the line's second figure can be lower than the card's. Default: print Claude's figures as they are.
+
+### Files and functions to change
+| File | Functions / items |
+|---|---|
+| `crates/workspace-core/src/lib.rs` | `Compaction`, `CompactionState`, `CompactionOutcome`, `CompactionResult` (new); `SessionRuntime` (`compaction`, `last_compaction`); `Command` (`CompactContext`, `CancelCompaction`, `DismissCompaction`); `compact` token formatter (moved) |
+| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass, skip in the message pass), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `check_in_by_turns` (count), `recover_unfinished_turns` (interrupted compactions) |
+| `crates/workspace-host/src/provider.rs` | `Turn` (kind), `input`, `configure`, `run` (`status`, `compact_boundary`, `modelUsage`), `ProviderEvent::Compaction` |
+| `crates/workspace-host/src/usage.rs` | a `modelUsage` entry mapped to the fields `normalize` reads |
+| `crates/workspace-desktop/src/` | `context_view.rs` (`context_card`, `context_chip`, `sync_context`, form state), `ui.rs::session_badge`, `conversation.rs` (compaction line, Pause), `bridge.rs` |
+| Tests | new `crates/workspace-host/tests/compaction.rs`; recorded streams in `tests/fixtures/streams`; unit tests in `provider.rs`, `usage.rs`, `context_view.rs`, `conversation.rs` |
+| Docs | `docs/PRD.md` (context paragraph), `docs/DEVELOPMENT.md` (turn scheduling and usage paragraphs) |
+
+## Risks / Trade-offs
+
+- [The summary request may miss the prompt cache] → Decision 5 keeps a turn's arguments so the request has the same prefix, and task 2.1 measures `cacheReadInputTokens` before the argument list is final. The form already says a compaction costs a model call.
+- [The CLI's records are not a documented contract] → Only three fields are read (`compact_result`, `compact_error`, the boundary's token counts). An unrecognized stream ends as "failed" with the CLI's own text, and the measurement that follows shows the real context.
+- [A request waits a long time on a paused agent] → It is on the chip and the card the whole time and can be cancelled. Open question 1.
+- [The line's figures and the card's can differ] → Open question 5.
+- [A compaction on a very full session can itself fail for size] → It ends as "failed" with Claude's reason; Claude's automatic compaction is unchanged and still applies.
+- [`last_compaction.at` drives a measurement on every outcome] → One `/context` call with no model request, the same call a finished turn already triggers.
+
+## Migration Plan
+
+No data migration. The new `SessionRuntime` fields default when absent, and `provider_runs.detail.kind` is absent on every existing row, which is how a turn is recognized. Rollback: an older build ignores the new runtime fields; it draws a `compaction:` message without the one-line treatment, and a compaction run would count as one turn toward a check-in.
