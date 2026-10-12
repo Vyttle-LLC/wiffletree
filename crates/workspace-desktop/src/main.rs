@@ -29,6 +29,7 @@ mod ui;
 mod update;
 mod usage_view;
 mod verifiers;
+mod welcome;
 use bridge::Bridge;
 use creation::{Creation, CreationForm};
 use gpui::{prelude::*, *};
@@ -765,6 +766,11 @@ impl Workspace {
                 .update(cx, |editor, cx| editor.setup_saved(cx));
         }
         self.snapshot = Some(snapshot);
+        // A store with no saved setup checks the CLIs at once, so the welcome and the Models
+        // page share one result. A saved store waits for its Models page, as before.
+        if !self.saved_model_selection.is_saved() && !self.catalog_loaded {
+            self.refresh_models(window, cx);
+        }
         self.offer_suggestion(window, cx);
         self.load_error = None;
         self.sync_composer(window, cx);

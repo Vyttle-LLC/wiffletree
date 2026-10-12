@@ -64,6 +64,42 @@ While no model selection is saved, the host SHALL refuse to create a project, an
 - **WHEN** the human saves the suggested setup and creates a project
 - **THEN** its coordinator starts on a provider of the saved setup
 
+### Requirement: Welcome on first run
+While no model selection is saved, the start screen SHALL show a welcome that leads to the Models page instead of offering a project, and detection SHALL start when the app opens so the welcome and the Models page share one result. A store with a saved model selection SHALL NOT show the welcome and SHALL NOT run detection before its Models page is opened.
+
+- **A CLI signed in:** two steps, Set up your models and Start a project; each provider as detected, signed in with its plan when known or with its one-line fix; and a Review suggested setup button that opens the Models page.
+- **No CLI signed in:** three steps, Sign in to a CLI, Set up your models and Start a project; each provider's one-line fix; and a Check again button that runs detection again.
+- **Detection not finished:** a checking state. The no-CLI welcome SHALL NOT show before every provider has a result.
+
+A fix on the welcome SHALL NOT name a control the welcome does not have: a signed-out CLI's fix says to run its sign-in command, without the Models page's Refresh.
+
+While no model selection is saved, New project SHALL NOT be offered: the start screen has no New project button, the sidebar's New project button is dimmed and says it is available once models are set up, and that button and the New Project shortcut SHALL open the Models page without asking the host to create a project. The sidebar SHALL say to set up models to create the first project and SHALL mark its Models entry. After the first save, without a restart, the start screen SHALL offer a project and New project SHALL work everywhere.
+
+#### Scenario: Both signed in
+- **WHEN** a fresh store is opened with both CLIs signed in
+- **THEN** the start screen welcomes the human, lists both providers with their plans, and Review suggested setup opens the Models page with the suggestion
+
+#### Scenario: No CLI signed in
+- **WHEN** a fresh store is opened with no signed-in CLI
+- **THEN** the welcome shows the three steps and each provider's fix
+- **AND** after the human signs in and presses Check again, it shows the two steps with that provider found
+
+#### Scenario: Detection still running
+- **WHEN** a fresh store is opened and a CLI has not answered yet
+- **THEN** the start screen shows that it is checking the CLIs, not the no-CLI welcome
+
+#### Scenario: New project before the first save
+- **WHEN** the human presses the New Project shortcut or the sidebar's New project button on a store with no saved setup
+- **THEN** the Models page opens, no project is requested and no error is shown
+
+#### Scenario: After the first save
+- **WHEN** the human saves the suggested setup and closes the Models page
+- **THEN** the start screen reads "Start with a project." and New project creates a project
+
+#### Scenario: Saved store
+- **WHEN** a store with a saved setup and no projects is opened
+- **THEN** the start screen reads "Start with a project.", the sidebar is unmarked and no CLI status command has run
+
 ## MODIFIED Requirements
 
 ### Requirement: Model selection migration

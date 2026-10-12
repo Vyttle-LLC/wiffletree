@@ -1,5 +1,6 @@
 //! Shared visual primitives and the window layout.
 use super::*;
+use crate::welcome::StartScreen;
 use gpui_component::{
     Icon, Selectable,
     button::ButtonVariants,
@@ -476,6 +477,7 @@ impl Workspace {
 
     /// Shown in place of the conversation until a session can be selected.
     fn start_screen(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let kind = self.start_screen_kind();
         let content = if let Some(error) = &self.load_error {
             empty_state(
                 "triangle-alert",
@@ -483,7 +485,7 @@ impl Workspace {
                 error.clone(),
                 p,
             )
-        } else if self.snapshot.is_none() {
+        } else if kind == StartScreen::Opening {
             div()
                 .flex()
                 .items_center()
@@ -491,9 +493,13 @@ impl Workspace {
                 .text_color(p.subtle)
                 .child(Spinner::new().small())
                 .child("Opening your workspace…")
+        } else if kind == StartScreen::Checking {
+            Self::checking_clis(p)
         } else {
+            let welcome = kind != StartScreen::StartWithProject;
             div()
                 .max_w(px(420.))
+                .when(welcome, |d| d.w_full().max_w(px(440.)))
                 .flex()
                 .flex_col()
                 .items_start()
@@ -512,20 +518,30 @@ impl Workspace {
                         .mt_2()
                         .text_size(px(26.))
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Start with a project."),
+                        .child(if welcome {
+                            "Welcome to Wiffletree."
+                        } else {
+                            "Start with a project."
+                        }),
                 )
-                .child(hint(
-                    "A project is one outcome: a feature, a bug, a migration. Its coordinator plans the work with you and runs each ticket in its own repository worktree with its own agents.",
-                    p,
-                ))
-                .child(
-                    button("first-project")
-                        .primary()
-                        .icon(icon("plus"))
-                        .label("New project")
-                        .mt_2()
-                        .on_click(cx.listener(|v, _, w, c| v.new_project(w, c))),
-                )
+                .map(|d| {
+                    if welcome {
+                        let signed_in = kind == StartScreen::WelcomeWithCli;
+                        return d.child(self.welcome_steps(signed_in, p, cx));
+                    }
+                    d.child(hint(
+                        "A project is one outcome: a feature, a bug, a migration. Its coordinator plans the work with you and runs each ticket in its own repository worktree with its own agents.",
+                        p,
+                    ))
+                    .child(
+                        button("first-project")
+                            .primary()
+                            .icon(icon("plus"))
+                            .label("New project")
+                            .mt_2()
+                            .on_click(cx.listener(|v, _, w, c| v.new_project(w, c))),
+                    )
+                })
         };
         div()
             .size_full()
