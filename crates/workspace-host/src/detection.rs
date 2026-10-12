@@ -2,15 +2,9 @@
 //! own status only: no inference, and no token contents leave this module.
 use crate::*;
 use base64::Engine as _;
-use std::{
-    io::Read,
-    process::{Command as ProcessCommand, Stdio},
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::{process::Command as ProcessCommand, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const OUTPUT_LIMIT: u64 = 65_536;
 
 /// Blocks for up to `TIMEOUT`; call it off the UI thread. A missing, slow or failing CLI
 /// reads as not signed in.
@@ -19,12 +13,12 @@ pub fn detect(provider: Provider) -> ProviderStatus {
         return ProviderStatus::default();
     };
     let (signed_in, plan) = match provider {
-        Provider::Claude => status_output(&binary, &["auth", "status", "--json"], TIMEOUT)
+        Provider::Claude => status_output(&binary, &["auth", "status", "--json"])
             .map(|[stdout, _]| claude_status(&stdout))
             .unwrap_or_default(),
         Provider::Codex => {
             // Codex prints its status on stderr.
-            let signed_in = status_output(&binary, &["login", "status"], TIMEOUT)
+            let signed_in = status_output(&binary, &["login", "status"])
                 .is_some_and(|streams| streams.iter().any(|text| codex_signed_in(text)));
             let plan = context::codex_home()
                 .ok()
@@ -40,42 +34,13 @@ pub fn detect(provider: Provider) -> ProviderStatus {
     }
 }
 
-/// The command's stdout and stderr, or `None` when it cannot run or outlasts `timeout`, in
+/// The command's stdout and stderr, or `None` when it cannot run or outlasts `TIMEOUT`, in
 /// which case it is killed.
-fn status_output(binary: &Path, args: &[&str], timeout: Duration) -> Option<[String; 2]> {
-    struct Killed(std::process::Child);
-    impl Drop for Killed {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut child = Killed(
-        ProcessCommand::new(binary)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .ok()?,
-    );
-    let read = |stream: Box<dyn Read + Send>| {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stream.take(OUTPUT_LIMIT).read_to_end(&mut bytes);
-            let _ = sender.send(String::from_utf8_lossy(&bytes).into_owned());
-        });
-        receiver
-    };
-    let stdout = read(Box::new(child.0.stdout.take()?));
-    let stderr = read(Box::new(child.0.stderr.take()?));
-    let deadline = Instant::now() + timeout;
-    let left = || deadline.saturating_duration_since(Instant::now());
-    Some([
-        stdout.recv_timeout(left()).ok()?,
-        stderr.recv_timeout(left()).ok()?,
-    ])
+fn status_output(binary: &Path, args: &[&str]) -> Option<[String; 2]> {
+    let mut command = ProcessCommand::new(binary);
+    command.args(args);
+    let (_, stdout, stderr) = runtime::bounded_output(command, TIMEOUT, None).ok()?;
+    Some([stdout, stderr].map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Signed in and the plan, from `claude auth status --json`.
@@ -194,44 +159,5 @@ mod tests {
             let path = auth_file(directory.path(), contents);
             assert_eq!(codex_plan(&path), None, "{contents}");
         }
-    }
-
-    #[test]
-    fn a_cli_that_cannot_run_gives_no_output() {
-        assert!(status_output(Path::new("/nonexistent/cli"), &["status"], TIMEOUT).is_none());
-    }
-
-    #[test]
-    fn a_finished_cli_gives_both_streams() {
-        let [stdout, stderr] = status_output(
-            Path::new("/bin/sh"),
-            &["-c", "echo out; echo err >&2"],
-            TIMEOUT,
-        )
-        .unwrap();
-        assert_eq!((stdout.as_str(), stderr.as_str()), ("out\n", "err\n"));
-    }
-
-    #[test]
-    fn a_hanging_cli_is_given_up_on_at_the_timeout_and_killed() {
-        let directory = tempfile::tempdir().unwrap();
-        let pid_file = directory.path().join("pid");
-        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
-        let started = Instant::now();
-        let output = status_output(
-            Path::new("/bin/sh"),
-            &["-c", &script],
-            Duration::from_millis(300),
-        );
-        assert!(output.is_none());
-        assert!(started.elapsed() < Duration::from_secs(10));
-        let pid = fs::read_to_string(&pid_file).unwrap();
-        let alive = ProcessCommand::new("kill")
-            .args(["-0", pid.trim()])
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success();
-        assert!(!alive, "the hanging CLI was left running");
     }
 }

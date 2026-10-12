@@ -109,7 +109,7 @@ const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
 
 /// Runs the command with one deadline for its output and its exit; a command still running
 /// at the deadline is killed and reaped.
-fn bounded_output(
+pub(crate) fn bounded_output(
     mut command: Command,
     timeout: Duration,
     input: Option<Vec<u8>>,
@@ -481,6 +481,45 @@ fn claude_version_label(id: &str) -> String {
 #[cfg(test)]
 mod model_tests {
     use super::*;
+
+    #[test]
+    fn a_command_that_cannot_run_gives_an_error() {
+        let command = Command::new("/nonexistent/cli");
+        assert!(bounded_output(command, Duration::from_secs(1), None).is_err());
+    }
+
+    #[test]
+    fn a_finished_command_gives_both_streams() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo out; echo err >&2"]);
+        let (_, stdout, stderr) = bounded_output(command, Duration::from_secs(10), None).unwrap();
+        assert_eq!(
+            (stdout.as_slice(), stderr.as_slice()),
+            (&b"out\n"[..], &b"err\n"[..])
+        );
+    }
+
+    #[test]
+    fn a_hanging_command_is_given_up_on_at_the_deadline_and_killed() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
+        ]);
+        let started = Instant::now();
+        assert!(bounded_output(command, Duration::from_millis(300), None).is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the hanging command was left running");
+    }
 
     #[test]
     fn a_command_that_closes_its_output_then_hangs_is_killed_at_the_deadline() {

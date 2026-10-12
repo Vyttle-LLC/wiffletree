@@ -760,7 +760,7 @@ impl Workspace {
                 .map(|s| s.id.clone());
         }
         self.sync_model_selection(&snapshot.model_selection, window, cx);
-        if !models::verifiers_held(Some(&snapshot.model_selection)) {
+        if snapshot.model_selection.is_saved() {
             self.verifiers
                 .update(cx, |editor, cx| editor.setup_saved(cx));
         }

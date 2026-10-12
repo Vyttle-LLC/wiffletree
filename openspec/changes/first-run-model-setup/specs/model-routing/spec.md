@@ -16,7 +16,7 @@ For each provider the app SHALL detect whether its CLI is installed, whether it 
 - **THEN** Codex is shown as signed in with no plan, and nothing fails
 
 ### Requirement: Suggested setup on first run
-A store with no saved model selection SHALL save none on open. The Models page SHALL show a suggested setup as an unsaved draft, built only from providers that are installed and signed in, and SHALL enable Save without further edits when the suggestion is valid. Saving SHALL persist the model selection and the verifiers exactly as shown, together or not at all. The plan SHALL NOT change the suggestion.
+A store with no saved model selection SHALL save none on open. The Models page SHALL show a suggested setup as an unsaved draft, built only from providers that are installed and signed in, and SHALL enable Save without further edits when the suggestion is valid. Saving SHALL persist the model selection and the verifiers exactly as shown, together or not at all. The plan SHALL NOT change the suggestion. Until the first suggestion has arrived, the page SHALL NOT be editable and Save SHALL be disabled. A provider SHALL carry the Suggested tag only while it is enabled in the draft.
 
 - **Both providers:** Claude allows Opus and Sonnet at high and medium; Codex allows GPT 6.1 Sol at high and medium. The project coordinator and implementer use Claude and the tester uses Codex. The verifiers are a tester, a Claude reviewer and a Codex reviewer. The guide is the starter guide.
 - **One provider:** it is enabled with its models above and takes every role. The verifiers are a tester and one reviewer on it. The guide names only it. The other provider is disabled and shows a one-line fix.
@@ -36,6 +36,14 @@ Refresh SHALL run detection again. While the draft is still the suggestion as of
 #### Scenario: Neither signed in
 - **WHEN** a fresh store is opened with no signed-in CLI
 - **THEN** Save is disabled and the page tells the human to install and sign in to a CLI, then press Refresh
+
+#### Scenario: Before the first suggestion
+- **WHEN** a fresh store is opened and detection has not finished
+- **THEN** the page shows "Checking CLI…" with its controls disabled and Save disabled
+
+#### Scenario: Suggested provider switched off
+- **WHEN** the human switches off a suggested provider
+- **THEN** it no longer carries the Suggested tag, and switching it back on restores the tag
 
 #### Scenario: Refresh after signing in
 - **WHEN** the human signs in to Codex and presses Refresh while the Claude-only suggestion is untouched
