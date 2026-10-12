@@ -33,7 +33,7 @@ impl VerifierEditor {
         Self {
             bridge,
             verification: None,
-            unsaved: models::verifiers_held(None),
+            unsaved: true,
             error: None,
             draft: VerifierConfig {
                 role: Role::Reviewer,

@@ -222,10 +222,20 @@ pub fn fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
     }
 }
 
-/// Whether the Review card holds its verifiers as a draft: until a snapshot shows a saved
-/// setup, nothing the human changes there may reach the host.
-pub fn verifiers_held(saved: Option<&ModelSelection>) -> bool {
-    !saved.is_some_and(ModelSelection::is_saved)
+/// A store with no saved setup cannot be edited or saved until its first suggestion is shown,
+/// so an early edit is never overwritten and the first save always carries the suggested
+/// verifiers.
+pub fn editable(saved: &ModelSelection, suggested: Option<&Setup>) -> bool {
+    saved.is_saved() || suggested.is_some()
+}
+/// Whether a provider carries the "Suggested" tag: the suggestion enabled it and the draft
+/// still has it enabled.
+pub fn tagged_suggested(
+    suggested: Option<&Setup>,
+    draft: &ModelSelection,
+    provider: Provider,
+) -> bool {
+    draft.is_enabled(provider) && suggested.is_some_and(|s| s.selection.is_enabled(provider))
 }
 /// Whether the draft still is the suggested setup, verifiers included.
 pub fn untouched(
@@ -264,10 +274,10 @@ pub fn offer(
         suggested,
     })
 }
-/// Save needs a valid draft that differs from what is saved; a suggested setup is unsaved from
-/// the start, so it needs no edit first.
-pub fn can_save(suggested: bool, edited: bool, selection: &ModelSelection) -> bool {
-    (suggested || edited) && selection.validate().is_ok()
+/// Save needs an editable page and a valid draft that differs from what is saved; a suggested
+/// setup is unsaved from the start, so it needs no edit first.
+pub fn can_save(editable: bool, suggested: bool, edited: bool, selection: &ModelSelection) -> bool {
+    editable && (suggested || edited) && selection.validate().is_ok()
 }
 /// The draft once the host has saved `sent`: it takes the saved revision unless the human
 /// edited it meanwhile.
@@ -540,21 +550,47 @@ mod tests {
         assert_eq!(after_save(&edited, &both.selection, &saved), edited);
     }
     #[test]
-    fn verifiers_are_held_until_a_snapshot_shows_a_saved_setup() {
-        assert!(verifiers_held(None));
-        assert!(verifiers_held(Some(&ModelSelection::default())));
-        assert!(!verifiers_held(Some(&selection())));
+    fn a_fresh_store_is_editable_only_once_its_first_suggestion_is_shown() {
+        let unsaved = ModelSelection::default();
+        let suggested = suggest(&detected(&PROVIDERS));
+        assert!(!editable(&unsaved, None));
+        assert!(editable(&unsaved, Some(&suggested)));
+        // A saved store never waits for a suggestion.
+        assert!(editable(&selection(), None));
     }
     #[test]
-    fn save_needs_a_valid_draft_and_no_edit_on_a_suggestion() {
+    fn save_needs_an_editable_page_and_a_valid_draft_and_no_edit_on_a_suggestion() {
         let both = suggest(&detected(&PROVIDERS)).selection;
         let neither = suggest(&detected(&[])).selection;
-        assert!(can_save(true, false, &both));
-        assert!(!can_save(true, false, &neither));
-        assert!(!can_save(true, true, &neither));
+        assert!(can_save(true, true, false, &both));
+        assert!(!can_save(true, true, false, &neither));
+        assert!(!can_save(true, true, true, &neither));
         // A saved setup needs an edit first.
-        assert!(!can_save(false, false, &selection()));
-        assert!(can_save(false, true, &selection()));
+        assert!(!can_save(true, false, false, &selection()));
+        assert!(can_save(true, false, true, &selection()));
+        // Nothing saves before the first suggestion is shown.
+        assert!(!can_save(false, false, true, &selection()));
+    }
+    #[test]
+    fn the_suggested_tag_shows_only_while_the_provider_is_enabled_in_the_draft() {
+        let suggested = suggest(&detected(&PROVIDERS));
+        let mut draft = suggested.selection.clone();
+        assert!(tagged_suggested(Some(&suggested), &draft, Provider::Codex));
+        set_enabled(&mut draft, Provider::Codex, false);
+        assert!(!tagged_suggested(Some(&suggested), &draft, Provider::Codex));
+        assert!(tagged_suggested(Some(&suggested), &draft, Provider::Claude));
+        set_enabled(&mut draft, Provider::Codex, true);
+        assert!(tagged_suggested(Some(&suggested), &draft, Provider::Codex));
+        // A provider the suggestion left out is not tagged when the human turns it on.
+        let claude_only = suggest(&detected(&[Provider::Claude]));
+        let mut draft = claude_only.selection.clone();
+        set_enabled(&mut draft, Provider::Codex, true);
+        assert!(!tagged_suggested(
+            Some(&claude_only),
+            &draft,
+            Provider::Codex
+        ));
+        assert!(!tagged_suggested(None, &draft, Provider::Claude));
     }
     #[test]
     fn refreshed_catalog_preserves_saved_models_without_crossing_providers() {

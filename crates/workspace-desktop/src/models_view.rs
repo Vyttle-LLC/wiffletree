@@ -11,6 +11,11 @@ use gpui_component::{
 use ui::{card, effort_label, hint, icon};
 
 impl Workspace {
+    /// A fresh store waits for its first suggestion before anything can change.
+    fn models_editable(&self) -> bool {
+        models::editable(&self.saved_model_selection, self.suggested.as_ref())
+    }
+
     fn model_selection_dirty(&self) -> bool {
         self.model_selection != self.saved_model_selection
     }
@@ -125,10 +130,8 @@ impl Workspace {
             None => hint("Checking CLI…", p),
         };
         // A suggested setup marks what it enabled and says how to add what it left out.
-        let suggested = self
-            .suggested
-            .as_ref()
-            .is_some_and(|s| s.selection.is_enabled(provider));
+        let suggested = models::tagged_suggested(self.suggested.as_ref(), selection, provider);
+        let editable = self.models_editable();
         let fix = self
             .suggested
             .as_ref()
@@ -149,7 +152,7 @@ impl Workspace {
                     )))
                     .label(effort_label(&effort))
                     .checked(ticked.contains(&effort))
-                    .disabled(!enabled)
+                    .disabled(!enabled || !editable)
                     .on_click(cx.listener(move |v, _: &bool, _, c| {
                         models::toggle_effort(&mut v.model_selection, provider, &model, &value);
                         c.notify();
@@ -175,7 +178,7 @@ impl Workspace {
                             .ghost()
                             .xsmall()
                             .label("Remove")
-                            .disabled(!enabled)
+                            .disabled(!enabled || !editable)
                             .on_click(cx.listener(move |v, _, _, c| {
                                 models::remove_model(&mut v.model_selection, provider, &removed);
                                 c.notify();
@@ -200,7 +203,7 @@ impl Workspace {
             let current = draft.clone();
             button(SharedString::from(format!("draft-model-{provider:?}")))
                 .small()
-                .disabled(!enabled || unlisted.is_empty())
+                .disabled(!enabled || !editable || unlisted.is_empty())
                 .label(
                     draft
                         .as_ref()
@@ -231,7 +234,7 @@ impl Workspace {
             .small()
             .icon(icon("plus"))
             .label("Add")
-            .disabled(!enabled || added.is_none())
+            .disabled(!enabled || !editable || added.is_none())
             .on_click(cx.listener(move |v, _, _, c| {
                 if let Some(row) = &added {
                     models::add_model(&mut v.model_selection, provider, row);
@@ -269,6 +272,7 @@ impl Workspace {
                     .child(
                         Switch::new(SharedString::from(format!("enable-{provider:?}")))
                             .checked(enabled)
+                            .disabled(!editable)
                             .on_click(cx.listener(move |v, on: &bool, _, c| {
                                 models::set_enabled(&mut v.model_selection, provider, *on);
                                 c.notify();
@@ -310,7 +314,7 @@ impl Workspace {
     ) -> Div {
         let mut ticks = div().flex().gap_4();
         for provider in PROVIDERS {
-            let enabled = self.model_selection.is_enabled(provider);
+            let enabled = self.model_selection.is_enabled(provider) && self.models_editable();
             let toggle = toggle.clone();
             ticks = ticks.child(
                 Checkbox::new(SharedString::from(format!("{id}-{provider:?}")))
@@ -371,13 +375,13 @@ impl Workspace {
                 "who verifies each ticket when the coordinator calls verify_ticket",
                 p,
             ))
-            .child(
-                if self.suggested.is_some() && !self.model_selection.any_enabled() {
-                    hint("Available once a provider is enabled.", p).into_any_element()
-                } else {
-                    self.verifiers.clone().into_any_element()
-                },
-            )
+            .child(if !self.models_editable() {
+                hint("Available once the CLIs on this machine are checked.", p).into_any_element()
+            } else if self.suggested.is_some() && !self.model_selection.any_enabled() {
+                hint("Available once a provider is enabled.", p).into_any_element()
+            } else {
+                self.verifiers.clone().into_any_element()
+            })
     }
 
     fn guide_card(&self, p: Palette) -> Div {
@@ -389,7 +393,11 @@ impl Workspace {
                 "how coordinators pick the model and effort within a provider",
                 p,
             ))
-            .child(Textarea::new(&self.guide_input).w_full())
+            .child(
+                Textarea::new(&self.guide_input)
+                    .w_full()
+                    .disabled(!self.models_editable()),
+            )
             .child(
                 hint(
                     format!(
@@ -452,6 +460,7 @@ impl Workspace {
         let loading = self.catalog_pending > 0;
         let no_provider = !self.model_selection.any_enabled();
         let can_save = models::can_save(
+            self.models_editable(),
             untouched.is_some(),
             self.model_selection_dirty(),
             &self.model_selection,
