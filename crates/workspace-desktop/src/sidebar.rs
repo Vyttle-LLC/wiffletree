@@ -674,6 +674,10 @@ impl Workspace {
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
         let status = self.shown_status(session);
         let agent = self.progress.agent(&session.id);
+        let questions = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |s| s.questions_waiting(&session.id));
         let detail = format!(
             "{} · {} · {:?} · {}",
             session.name,
@@ -708,6 +712,15 @@ impl Workspace {
                         .text_size(px(11.))
                         .text_color(p.subtle)
                         .child(waiting),
+                )
+            })
+            .when_some(tree::questions_figure(questions), |d, questions| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(p.subtle)
+                        .child(questions),
                 )
             })
             .children(figure(

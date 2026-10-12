@@ -316,7 +316,7 @@ pub(super) fn needs_you_badge(count: usize, p: Palette) -> Div {
         .child(icon("attention").size(px(12.)))
         .child(count.to_string())
 }
-fn status_badge(status: Status, label: &'static str, p: Palette) -> Div {
+fn status_badge(status: Status, label: String, p: Palette) -> Div {
     let color = status_color(status, p);
     div()
         .flex_none()
@@ -342,7 +342,8 @@ pub(super) fn ticket_state_color(state: &str, p: Palette) -> Hsla {
 }
 
 impl Workspace {
-    /// A session's status badge; an idle coordinator whose team is working says so.
+    /// A session's status badge; an idle coordinator whose team is working says so. Questions
+    /// it still waits on share the status color: they go to its coordinator, not to you.
     pub(super) fn session_badge(&self, session: &Session, p: Palette) -> Div {
         let status = self.shown_status(session);
         let label = if status == session.status {
@@ -350,7 +351,11 @@ impl Workspace {
         } else {
             "Team working"
         };
-        status_badge(status, label, p)
+        let questions = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |s| s.questions_waiting(&session.id));
+        status_badge(status, crate::tree::badge_label(label, questions), p)
     }
     /// Sessions to list: archived ones appear only while the sidebar is showing them.
     pub(super) fn shown<'a>(&'a self, snapshot: &'a Snapshot) -> impl Iterator<Item = &'a Session> {

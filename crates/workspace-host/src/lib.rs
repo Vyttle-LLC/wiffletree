@@ -52,6 +52,15 @@ pub struct Host {
     progress: progress::Progress,
     /// Sessions in a turn this host started; see `shown`.
     pub(crate) in_turn: std::collections::HashSet<String>,
+    /// By ticket, the report that last set its state from a running turn; see `shown_ticket`.
+    pub(crate) mid_turn_reports: std::collections::HashMap<String, MidTurnReport>,
+}
+/// A report that set its ticket's state while the reporter's turn ran.
+pub(crate) struct MidTurnReport {
+    pub(crate) reporter: String,
+    /// The state the ticket showed before the report.
+    pub(crate) prior: String,
+    pub(crate) reported: String,
 }
 struct StoreLock(File);
 impl Drop for StoreLock {
@@ -174,6 +183,7 @@ impl Host {
             plans: None,
             progress: Default::default(),
             in_turn: Default::default(),
+            mid_turn_reports: Default::default(),
         };
         host.recover()?;
         host.migrate_opus_defaults()?;
@@ -190,6 +200,30 @@ impl Host {
             session.status = Status::Working;
         }
         session
+    }
+    /// A ticket shows the state it had before a report made in a turn that is still running,
+    /// until that turn ends or something else moves the ticket; the stored state is what
+    /// ticket operations check.
+    pub(crate) fn shown_ticket(&self, mut ticket: Ticket) -> Ticket {
+        if let Some(report) = self.mid_turn_reports.get(&ticket.id)
+            && report.reported == ticket.state
+        {
+            ticket.state = report.prior.clone();
+        }
+        ticket
+    }
+    pub(crate) fn shown_tickets(&self) -> Result<Vec<Ticket>> {
+        Ok(self
+            .tickets()?
+            .into_iter()
+            .map(|t| self.shown_ticket(t))
+            .collect())
+    }
+    /// The session's turn is over, so what it reported in it now shows.
+    pub(crate) fn turn_ended(&mut self, session: &str) {
+        self.in_turn.remove(session);
+        self.mid_turn_reports
+            .retain(|_, report| report.reporter != session);
     }
     fn recover(&mut self) -> Result<()> {
         let sessions = self.sessions()?;
@@ -269,7 +303,14 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect() })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()? })
+    }
+    /// Each session's `blocked` reports to its parent with no later message from that parent
+    /// taken by one of the session's turns. Read from stored messages, so a queued answer
+    /// leaves the question waiting and a restart changes nothing. The host's own `turn-held:`
+    /// reports are not the agent's questions.
+    pub(crate) fn questions_waiting(&self) -> Result<Vec<QuestionsWaiting>> {
+        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND s.parent_id=r.recipient WHERE substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.id,length(r.sender)+9,10)<>'turn-held:' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND a.sender=r.recipient AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
         Ok(self.db.prepare("SELECT recipient,SUM(receipt='held'),SUM(receipt='queued' AND quiet=0) FROM messages WHERE receipt IN ('held','queued') GROUP BY recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)

@@ -111,7 +111,8 @@ impl Host {
     }
     /// Derives the board again; true when any entry changed. Writes nothing and wakes no one.
     pub(crate) fn refresh_progress(&mut self) -> Result<bool> {
-        let (sessions, runtimes, tickets) = (self.sessions()?, self.runtimes()?, self.tickets()?);
+        let (sessions, runtimes, tickets) =
+            (self.sessions()?, self.runtimes()?, self.shown_tickets()?);
         let board = derive(&sessions, &runtimes, &tickets, self.plans()?);
         Ok(self.progress.replace(board))
     }

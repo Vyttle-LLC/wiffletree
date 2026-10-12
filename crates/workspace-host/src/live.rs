@@ -501,9 +501,22 @@ impl Host {
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {
         let session = self.session(id)?;
+        let waiting = self.questions_waiting()?;
+        let mut team = Vec::new();
+        for member in self.sessions()? {
+            if member.project_id == session.project_id {
+                let count = waiting
+                    .iter()
+                    .find(|q| q.session_id == member.id)
+                    .map_or(0, |q| q.count);
+                let mut entry = serde_json::to_value(self.shown(member))?;
+                entry["questions_waiting"] = json!(count);
+                team.push(entry);
+            }
+        }
         let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,
             "repositories":self.project_repositories(&session.project_id)?,
-            "team":self.sessions()?.into_iter().filter(|s|s.project_id==session.project_id).map(|s|self.shown(s)).collect::<Vec<_>>(),
+            "team":team,
             "tickets":self.ticket_overview(&session.project_id)?,
             "runtime":self.session_runtime(id)?,
             "memory":self.logs(&session.project_id,None,10)?,
@@ -534,7 +547,7 @@ impl Host {
         let runtimes = self.runtimes()?;
         let warnings = self.open_branch_warnings()?;
         let mut overview = vec![];
-        for ticket in self.tickets()? {
+        for ticket in self.shown_tickets()? {
             if !self
                 .session(&ticket.coordinator_id)
                 .is_ok_and(|s| s.project_id == project)
@@ -702,14 +715,16 @@ impl Host {
                 let mut receipt = serde_json::to_value(&message)?;
                 // Tool result only: the stored receipt stays `queued` until the next turn starts.
                 let recipient = self.session(&recipient.id)?;
-                if message.receipt == Receipt::Queued && recipient.status == Status::Working {
+                let held = matches!(recipient.status, Status::Paused | Status::Disconnected);
+                // A turn still runs after its session reported, whatever status that stored.
+                let in_turn =
+                    recipient.status == Status::Working || self.in_turn.contains(&recipient.id);
+                if message.receipt == Receipt::Queued && !held && in_turn {
                     receipt["receipt"] = json!("queued_behind_turn");
                     receipt["recipient_turn_started_at"] =
                         json!(self.session_runtime(&recipient.id)?.last_started_at);
                 }
-                if message.receipt == Receipt::Queued
-                    && matches!(recipient.status, Status::Paused | Status::Disconnected)
-                {
+                if message.receipt == Receipt::Queued && held {
                     receipt["receipt"] = json!("queued_while_held");
                     receipt["hint"] = json!(
                         match self.session_runtime(&recipient.id)?.stopped_by {

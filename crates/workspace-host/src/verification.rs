@@ -657,8 +657,19 @@ impl Host {
             if let Some(mut ticket) = ticket {
                 match routing {
                     Routing::Plain if ticket.is_open() => {
+                        let prior = host.shown_ticket(ticket.clone()).state;
                         ticket.state = kind.into();
                         host.save_ticket(&ticket)?;
+                        if host.in_turn.contains(&session.id) {
+                            host.mid_turn_reports.insert(
+                                ticket.id,
+                                MidTurnReport {
+                                    reporter: session.id.clone(),
+                                    prior,
+                                    reported: kind.into(),
+                                },
+                            );
+                        }
                     }
                     Routing::Plain | Routing::Unrouted | Routing::Late => {}
                     Routing::Verdict => {

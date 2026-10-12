@@ -240,6 +240,19 @@ pub fn agent_figure(agent: &AgentProgress) -> Option<String> {
     }
 }
 
+/// A sidebar row's figure for an agent's `blocked` reports its coordinator has not answered.
+pub fn questions_figure(count: u32) -> Option<String> {
+    (count > 0).then(|| format!("{count} question{}", if count == 1 { "" } else { "s" }))
+}
+
+/// A status badge's text: the status, then any questions waiting beside it.
+pub fn badge_label(status: &str, questions: u32) -> String {
+    match questions_figure(questions) {
+        Some(figure) => format!("{status} · {figure} waiting"),
+        None => status.into(),
+    }
+}
+
 /// A ticket's short figure: "blocked", or its percentage. A striped ticket has none.
 pub fn ticket_figure(ticket: &TicketProgress) -> Option<String> {
     match ticket.state {
@@ -509,6 +522,16 @@ mod tests {
             Some("blocked")
         );
         assert_eq!(figure(None, None, false), None);
+    }
+
+    #[test]
+    fn questions_waiting_sit_beside_the_status_and_vanish_at_zero() {
+        assert_eq!(badge_label("Working", 1), "Working · 1 question waiting");
+        assert_eq!(badge_label("Blocked", 2), "Blocked · 2 questions waiting");
+        assert_eq!(badge_label("Blocked", 0), "Blocked");
+        assert_eq!(questions_figure(1).as_deref(), Some("1 question"));
+        assert_eq!(questions_figure(2).as_deref(), Some("2 questions"));
+        assert_eq!(questions_figure(0), None);
     }
 
     #[test]
