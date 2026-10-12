@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Repository owners study</title>
+<!--
+  Static study for the repository-owners OpenSpec change. No script, no network.
+  (a) The Repositories page with the detected owners, a fork, a repository with no GitHub
+      remote, and the repository rows that follow from the ticks.
+  (b) What the human sees when an agent asks to push or to open a pull request in a repository
+      whose owner is not allowed, and what the agent gets back.
+  (c) The same request in an allowed owner's repository, a review that ended blocked, and what
+      the app refuses.
+  Sample data is simulated; nothing here is implemented host behavior.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font:500 14px/1.3 inherit;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:780px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:500}
+.stack{display:grid;gap:26px}
+.two{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;align-items:start}
+.col{display:grid;gap:10px}
+.hint{font-size:12px;color:var(--subtle)}
+.hint.never{margin-top:6px;color:var(--text);font-weight:500}
+.findings{display:grid;gap:6px}
+.findings>div{border-left:2px solid var(--red);padding:2px 0 2px 8px}
+.section{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.section .eyebrow{flex:1}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+svg.i{width:14px;height:14px;flex:none;color:var(--subtle)}
+/* (a) Owners, the new block at the top of repositories_view.rs. */
+.owners{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:10px;background:var(--base);margin:10px 0 18px}
+.owner{display:flex;align-items:center;gap:12px;padding:9px 12px;border-bottom:1px solid color-mix(in srgb,var(--edge) 35%,transparent)}
+.owner:last-child{border-bottom:0}
+.owner .who{flex:1;min-width:0}
+.owner .who b{font-weight:500}
+.owner .facts{font-size:11.5px;color:var(--subtle);text-align:right}
+.group{padding:6px 12px 4px;font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);border-bottom:1px solid color-mix(in srgb,var(--edge) 35%,transparent);background:color-mix(in srgb,var(--overlay) 45%,transparent)}
+.box{width:16px;height:16px;flex:none;border:1.5px solid var(--muted);border-radius:4px;display:grid;place-items:center;background:var(--surface)}
+.box.on{background:var(--focus);border-color:var(--focus)}
+.box.on svg{width:11px;height:11px;color:var(--surface)}
+.box.none{border-style:dashed;border-color:var(--edge);background:transparent}
+.repo{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 25%,transparent)}
+.repo .name{flex:1;min-width:0}
+.repo .name b{font-weight:500}
+.counts{text-align:right}
+.counts .when{font-size:10.5px;color:var(--muted)}
+.bad{color:var(--red)}
+.ok{color:var(--green)}
+.pub{font-weight:500;color:var(--text)}
+.more{padding:8px 0 0;font-size:11.5px;color:var(--muted)}
+/* (b) Inbox cards, mirroring inspector.rs attention_card. */
+.card{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);background:var(--base);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:9px}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ask{font-size:13.5px;font-weight:500}
+.facts-grid{display:grid;grid-template-columns:78px minmax(0,1fr);gap:4px 10px;font-size:12px}
+.facts-grid dt{color:var(--subtle)}
+.facts-grid dd{margin:0}
+dl{margin:0}
+.body{border:1px solid color-mix(in srgb,var(--edge) 45%,transparent);border-radius:8px;padding:8px 10px;background:var(--surface);font-size:12px;white-space:pre-line}
+.actions{display:flex;justify-content:flex-end;gap:8px}
+.btn{padding:5px 12px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.step{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin:2px 2px 0}
+.step b{color:var(--text);font-weight:500}
+.message{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:var(--base);font-size:12.5px}
+.message .from{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:var(--subtle)}
+.message .from b{color:var(--text);font-weight:500}
+code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.row{min-height:30px;display:flex;align-items:flex-start;gap:8px;padding:6px 8px 5px;border-radius:6px;font-size:12.5px;background:var(--base)}
+.row svg{width:14px;height:14px;flex:none;color:var(--subtle);margin-top:2px}
+.row .label{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.waitline{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--yellow)}
+.waitline svg{width:11px;height:11px;margin:0;color:currentColor}
+.dot{width:6px;height:6px;border-radius:50%;margin:6px 3px 0 auto;flex:none;background:var(--green)}
+.refused{border-left:2px solid var(--red);padding:6px 10px;background:color-mix(in srgb,var(--red) 6%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+.notes{max-width:820px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+.notes b{color:var(--text);font-weight:500}
+@media(max-width:900px){.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}.owner .facts{display:none}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="org" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 8h.01M15 8h.01M9 12h.01M15 12h.01M10 21v-4h4v4"/></symbol>
+  <symbol id="user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+  <symbol id="fork" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="12" cy="19" r="2.5"/><path d="M6 7.5V10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7.5M12 12v4.5"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></symbol>
+  <symbol id="push" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V6M6 11l6-6 6 6"/></symbol>
+  <symbol id="task" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Repository owners</div>
+  <h1>Where agents may open pull requests without asking</h1>
+  <p>Static study for the <span class="mono">repository-owners</span> OpenSpec change. Wiffletree lists the GitHub organizations and users your repositories belong to. You tick the owners you allow: there, agents may push a ticket’s branch and open and update its pull request without asking. Everywhere else, each push and each pull request waits for your approval. Wiffletree never approves, merges, closes or comments on a pull request. It shows (a) the Repositories page, (b) what you see when an agent asks in a repository whose owner you have not allowed, and (c) what happens where you have, including a review that ended blocked. Sample data is simulated.</p>
+</header>
+
+<div class="stack">
+  <!-- (a) Repositories page -->
+  <section>
+    <div class="panel" aria-label="Repositories page">
+      <div class="section"><div class="eyebrow">Open pull requests without asking · 3 of 4 owners allowed</div><span class="pill subtle">This Mac only</span></div>
+      <p class="hint">In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.</p>
+      <p class="hint never">Wiffletree never approves, merges, closes or comments on a pull request.</p>
+
+      <div class="owners">
+        <div class="owner">
+          <span class="box on" role="checkbox" aria-checked="true" aria-label="Allow Sage-Social"><svg><use href="#check"/></svg></span>
+          <svg class="i"><use href="#org"/></svg>
+          <div class="who"><b>Sage-Social</b><div class="small subtle">Organization</div></div>
+          <div class="facts">29 repositories · all private</div>
+        </div>
+        <div class="owner">
+          <span class="box on" role="checkbox" aria-checked="true" aria-label="Allow MHohlios"><svg><use href="#check"/></svg></span>
+          <svg class="i"><use href="#user"/></svg>
+          <div class="who"><b>MHohlios</b><div class="small subtle">User</div></div>
+          <div class="facts">3 repositories · all private</div>
+        </div>
+        <div class="owner">
+          <span class="box on" role="checkbox" aria-checked="true" aria-label="Allow Vyttle-LLC"><svg><use href="#check"/></svg></span>
+          <svg class="i"><use href="#org"/></svg>
+          <div class="who"><b>Vyttle-LLC</b><div class="small subtle">Organization</div></div>
+          <div class="facts">1 repository · <b class="pub">public</b></div>
+        </div>
+        <div class="owner">
+          <span class="box" role="checkbox" aria-checked="false" aria-label="Allow celadon-theme"></span>
+          <svg class="i"><use href="#org"/></svg>
+          <div class="who"><b>celadon-theme</b><div class="small subtle">Organization</div></div>
+          <div class="facts">1 repository · public</div>
+        </div>
+        <div class="group">Forks · allowed one at a time, never by their owner’s tick</div>
+        <div class="owner">
+          <span class="box" role="checkbox" aria-checked="false" aria-label="Allow the fork MHohlios/gpui-component"></span>
+          <svg class="i"><use href="#fork"/></svg>
+          <div class="who"><b>MHohlios/gpui-component</b> <span class="pill subtle">Example</span><div class="small subtle">Fork of longbridge/gpui-component</div></div>
+          <div class="facts">public · pull requests into the parent always wait for you</div>
+        </div>
+        <div class="group">Not on GitHub · nothing to push to</div>
+        <div class="owner">
+          <span class="box none" aria-hidden="true"></span>
+          <svg class="i"><use href="#folder"/></svg>
+          <div class="who"><b>scratch-prototypes</b> <span class="pill subtle">Example</span><div class="small subtle">No GitHub remote</div></div>
+          <div class="facts">cannot be allowed</div>
+        </div>
+      </div>
+
+      <div class="section"><div class="eyebrow">In the workspace · 34, and 2 examples</div><span class="btn ghost">Leftover worktrees…</span><span class="btn primary">+ Add repositories…</span></div>
+      <p class="hint">Every project uses all of these unless it chooses its own set in its Overview.</p>
+      <div class="repo">
+        <svg class="i"><use href="#folder"/></svg>
+        <div class="name"><b>wiffletree</b><div class="mono subtle">~/dev/personal/wiffletree</div></div>
+        <div class="counts"><div class="hint">1 project · 6 open tickets · 5 open PRs</div><div class="when">PRs checked 40 s ago</div></div>
+        <span class="pill green">Vyttle-LLC · without asking</span>
+        <span class="pill subtle">origin/main</span>
+      </div>
+      <div class="repo">
+        <svg class="i"><use href="#folder"/></svg>
+        <div class="name"><b>sage-agents</b><div class="mono subtle">~/dev/sagehaven/sage-agents</div></div>
+        <div class="counts"><div class="hint">2 projects · 1 open ticket · 1 open PR</div><div class="when">PRs checked 1 min ago</div></div>
+        <span class="pill green">Sage-Social · without asking</span>
+        <span class="pill subtle">origin/main</span>
+      </div>
+      <div class="repo">
+        <svg class="i"><use href="#folder"/></svg>
+        <div class="name"><b>celadon-website</b><div class="mono subtle">~/dev/personal/celadon-website</div></div>
+        <div class="counts"><div class="hint">1 project · 1 open ticket · 0 open PRs</div><div class="when">PRs checked 3 min ago</div></div>
+        <span class="pill yellow">celadon-theme · asks first</span>
+        <span class="pill subtle">origin/main</span>
+      </div>
+      <div class="repo">
+        <svg class="i"><use href="#folder"/></svg>
+        <div class="name"><b>gpui-component</b> <span class="pill subtle">Example</span><div class="mono subtle">~/dev/personal/gpui-component</div></div>
+        <div class="counts"><div class="hint">1 project · 0 open tickets</div></div>
+        <span class="pill yellow">Fork · asks first</span>
+        <span class="pill subtle">origin/main</span>
+      </div>
+      <div class="repo">
+        <svg class="i"><use href="#folder"/></svg>
+        <div class="name"><b>scratch-prototypes</b> <span class="pill subtle">Example</span><div class="mono subtle">~/dev/personal/scratch-prototypes</div></div>
+        <div class="counts"><div class="hint">1 project · 0 open tickets</div></div>
+        <span class="pill subtle">Not on GitHub</span>
+        <span class="pill subtle">main</span>
+      </div>
+      <div class="more">…31 more repositories</div>
+    </div>
+    <p class="caption"><b>(a)</b> A new block sits above the repository list. It has one row for each GitHub organization or user that owns a repository in the workspace, with how many repositories it owns here and whether they are private. <b>Nothing is ticked until you tick it.</b> A fork is listed on its own, so ticking MHohlios does not allow a public fork under MHohlios. A repository with no GitHub remote has no box, because there is nowhere to push. Each repository row then says which rule applies to it. The owner comes from the repository’s <span class="mono">origin</span> remote; whether it is a fork, and whether it is private, come from GitHub.</p>
+
+    <div class="panel" style="margin-top:14px" aria-label="Owners when GitHub cannot be read">
+      <div class="section"><div class="eyebrow">Open pull requests without asking · when GitHub can’t be read</div></div>
+      <div class="owners" style="margin-bottom:0">
+        <div class="owner">
+          <span class="box on" role="checkbox" aria-checked="true" aria-label="Allow Sage-Social"><svg><use href="#check"/></svg></span>
+          <svg class="i"><use href="#org"/></svg>
+          <div class="who"><b>Sage-Social</b><div class="small bad">Couldn’t check GitHub: gh is not logged in</div></div>
+          <div class="facts">29 repositories · <span class="bad">asking first until GitHub answers</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has said a repository is not a fork, Wiffletree treats it as not allowed, whatever is ticked. It asks GitHub again the next time you come back to Wiffletree.</p>
+  </section>
+
+  <!-- (b) An agent asks in a repository whose owner is not allowed -->
+  <section>
+    <div class="two">
+      <div class="col">
+        <div class="panel" aria-label="Inbox approvals">
+          <div class="eyebrow" style="margin-bottom:8px">Inbox · celadon-website · Fix palette contrast</div>
+          <div class="col">
+            <div class="step"><b>1</b> The agent asked to publish the ticket. The push comes first.</div>
+            <div class="card">
+              <div class="card-head"><span class="hint">Implementer · Fix palette contrast</span><span class="pill yellow">Approval</span></div>
+              <div class="ask">Push this branch to celadon-theme/website?</div>
+              <dl class="facts-grid">
+                <dt>Repository</dt><dd>celadon-theme/website · <b>public</b> · celadon-theme is not an allowed owner</dd>
+                <dt>Branch</dt><dd><span class="mono">wiffletree/fix-palette-contrast</span> · not on GitHub yet</dd>
+                <dt>Commit</dt><dd><span class="mono">9e03c1b</span> · 2 commits · 3 files changed, 41 insertions(+), 7 deletions(−)</dd>
+                <dt>Review</dt><dd>Passed at this commit · Tests, Correctness, Regressions</dd>
+              </dl>
+              <div class="hint small">Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed. Opening the pull request is a separate approval.</div>
+              <div class="actions"><span class="btn ghost">Deny</span><span class="btn primary">Push once</span></div>
+            </div>
+
+            <div class="step"><b>2</b> After the push, the pull request waits for its own approval.</div>
+            <div class="card">
+              <div class="card-head"><span class="hint">Implementer · Fix palette contrast</span><span class="pill yellow">Approval</span></div>
+              <div class="ask">Open this pull request in celadon-theme/website?</div>
+              <dl class="facts-grid">
+                <dt>Branches</dt><dd><span class="mono">wiffletree/fix-palette-contrast</span> → <span class="mono">main</span></dd>
+                <dt>Title</dt><dd>Fix palette contrast in dark mode</dd>
+                <dt>Description</dt><dd><div class="body">Muted text on the overlay surface fell below 4.5:1 in dark mode.
+
+- Darken the overlay token and lift muted text
+- Add a contrast check for every text and surface pair</div></dd>
+              </dl>
+              <div class="hint small">The title and description are the agent’s words, shown in full. Anyone who can see the repository will see them.</div>
+              <div class="actions"><span class="btn ghost">Deny</span><span class="btn primary">Open pull request</span></div>
+            </div>
+
+            <div class="step"><b>3</b> Later, a fix for a review comment has passed its own review.</div>
+            <div class="card">
+              <div class="card-head"><span class="hint">Coordinator · Fix palette contrast</span><span class="pill yellow">Approval</span></div>
+              <div class="ask">Push 1 new commit to celadon-theme/website?</div>
+              <dl class="facts-grid">
+                <dt>Updates</dt><dd>PR #212 · <span class="mono">wiffletree/fix-palette-contrast</span></dd>
+                <dt>Commit</dt><dd><span class="mono">b41d2aa</span> · 1 file changed, 6 insertions(+), 2 deletions(−)</dd>
+                <dt>Review</dt><dd>Cycle 2 passed at this commit</dd>
+              </dl>
+              <div class="actions"><span class="btn ghost">Deny</span><span class="btn primary">Push once</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="panel" aria-label="Sidebar ticket row while waiting">
+          <div class="eyebrow" style="margin-bottom:8px">Sidebar · the ticket while it waits</div>
+          <div class="row"><svg><use href="#task"/></svg>
+            <div style="flex:1;min-width:0"><span class="label">celadon-website · Fix palette contrast</span>
+              <div class="waitline"><svg><use href="#push"/></svg>push waits for your approval</div></div>
+            <span class="dot" title="Passed"></span></div>
+        </div>
+        <div class="panel" aria-label="What the agent gets back">
+          <div class="eyebrow" style="margin-bottom:6px">What the agent gets back · publish_ticket</div>
+<pre>{
+  "status": "waiting_for_human",
+  "step": "push",
+  "repository": "celadon-theme/website",
+  "reason": "celadon-theme is not an allowed owner",
+  "next": "Finish your turn. Wiffletree runs each step the
+           human approves and messages you the result."
+}</pre>
+        </div>
+        <div class="message" aria-label="Result after both approvals">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the Implementer, after both approvals</div>
+          <p>The human approved both steps. Pushed <code>wiffletree/fix-palette-contrast</code> at <code>9e03c1b</code> to celadon-theme/website and opened PR #212: https://github.com/celadon-theme/website/pull/212</p>
+        </div>
+        <div class="message" aria-label="Result after a denial">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the Implementer, if you deny</div>
+          <p>The human denied pushing <code>wiffletree/fix-palette-contrast</code> to celadon-theme/website. Nothing was sent. Do not push it or open the pull request another way.</p>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(b)</b> In a repository whose owner is not ticked, the agent’s request stops in your Inbox. Wiffletree writes the card, not the agent: it names the repository and whether it is public, the branch, the exact commit and that the review passed there. Approving runs that one step, for that one commit. The pull request is a second card, because it is a second thing leaving your machine, and it shows the title and description in full. Every later push to the same pull request asks again. To stop being asked for an owner, allow it on the Repositories page.</p>
+  </section>
+
+  <!-- (c) An allowed owner, a blocked review, and what the app refuses -->
+  <section>
+    <div class="two">
+      <div class="col">
+        <div class="message" aria-label="Allowed owner result">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the Implementer · no Inbox card</div>
+          <p>Pushed <code>wiffletree/repository-owners</code> at <code>4c2a9f1</code> to Vyttle-LLC/wiffletree and opened PR #45: https://github.com/Vyttle-LLC/wiffletree/pull/45</p>
+        </div>
+        <div class="message" aria-label="Allowed owner update">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the coordinator, after a later fix passed review</div>
+          <p>Pushed <code>wiffletree/repository-owners</code> at <code>77b01aa</code> to Vyttle-LLC/wiffletree. PR #45 now has this commit.</p>
+        </div>
+        <div class="panel" aria-label="Inbox approval for a blocked review">
+          <div class="eyebrow" style="margin-bottom:8px">Inbox · wiffletree · Session search · the review ended blocked</div>
+          <div class="card">
+            <div class="card-head"><span class="hint">Coordinator · Session search</span><span class="pill yellow">Approval</span></div>
+            <div class="ask">Publish this ticket although its review ended blocked?</div>
+            <dl class="facts-grid">
+              <dt>Repository</dt><dd>Vyttle-LLC/wiffletree · <b>public</b> · Vyttle-LLC is an allowed owner</dd>
+              <dt>Review</dt><dd><span class="bad">Cycle 2 ended blocked</span> at <span class="mono">c81f04d</span>, after 3 of 3 rounds · Tests passed, Correctness failed, Regressions passed</dd>
+              <dt>Open findings</dt><dd><div class="findings">
+                <div><b>F4</b> · blocking · Correctness · <span class="mono">crates/workspace-desktop/src/sidebar.rs:412</span><br>Search keeps the previous project’s matches after switching projects.</div>
+                <div><b>F6</b> · non-blocking · Correctness · <span class="mono">crates/workspace-desktop/src/tree.rs:88</span><br>Matching is case-sensitive for non-ASCII titles. Not triaged yet.</div>
+              </div></dd>
+              <dt>Would send</dt><dd>Push <span class="mono">wiffletree/session-search</span> at <span class="mono">c81f04d</span> and open its pull request, “Search sessions from the sidebar”</dd>
+            </dl>
+            <div class="hint small">Wiffletree asks because the review did not pass, even though the owner is allowed. Approving covers this commit only.</div>
+            <div class="actions"><span class="btn ghost">Deny</span><span class="btn primary">Publish anyway</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="panel" aria-label="What the app refuses">
+          <div class="eyebrow" style="margin-bottom:8px">Refused at once, in any repository</div>
+          <div class="col">
+            <div class="refused">This ticket has not been reviewed. Verify it before publishing it.</div>
+            <div class="refused">Verification cycle 2 is still running. Publish the ticket once it ends.</div>
+            <div class="refused">The worktree’s changes differ from the verified commit: verified <span class="mono">4c2a9f1</span>, current <span class="mono">a09d3e2</span>; verify again.</div>
+            <div class="refused">The worktree is on <span class="mono">main</span>, not the ticket’s branch <span class="mono">wiffletree/repository-owners</span>. Nothing was pushed.</div>
+            <div class="refused">GitHub’s <span class="mono">wiffletree/repository-owners</span> has commits Wiffletree did not push. Nothing was pushed; fetch them and verify again.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(c)</b> In an allowed owner’s repository the same request runs with no card, and the agent gets the result as a message from Wiffletree. <b>A review that ended blocked always asks you, in every repository.</b> The card says so and lists the findings that are still open; in an allowed owner’s repository it is one card for the commit, and elsewhere the same notice and findings appear on each step’s card. The remaining checks cannot be approved away: the commit being pushed is the one the review looked at (or one with the same changes, such as a squash), the branch is the ticket’s own, and nothing on GitHub is overwritten that Wiffletree did not put there. There is no operation for approving, merging, closing or commenting at all.</p>
+  </section>
+</div>
+
+<ul class="notes">
+  <li><b>What this does not stop.</b> Agents run with their provider’s permission prompts bypassed, so an agent’s shell can still run <span class="mono">git push</span> or <span class="mono">gh pr create</span> with your credentials. This change makes the app’s own operation the only path the instructions permit and the only one that needs no shell, and it checks every use of that path. Closing the shell needs scoped credentials or a sandbox, which this change does not add.</li>
+  <li>Reading GitHub for this page is one read-only <span class="mono">gh api graphql</span> call for the whole workspace (33 repositories cost 1 rate-limit point here), repeated at most daily and when a repository is added.</li>
+  <li><b>Counts are this workspace’s, read on October 12, 2026:</b> 34 repositories, all with a GitHub <span class="mono">origin</span>. Sage-Social has 29, which are 28 GitHub repositories, because two folders are clones of the same one. MHohlios has 3, Vyttle-LLC 1 and celadon-theme 1. It has no forks. The fork and the repository with no GitHub remote are examples, marked “Example”, because the design has to handle them. Which owners are allowed here is also only an example.</li>
+  <li>Settled with the human on October 12, 2026 (see <span class="mono">openspec/changes/repository-owners/design.md</span>): a fork is its own entry; owners only, with no per-repository override; merging is always the human’s; the ticket’s coordinator or its implementer calls <span class="mono">publish_ticket</span>; each step is approved separately; and a blocked review can be published only with the human’s approval. “Allowed” names an owner on this list. “Approve” is kept for your answer to an Inbox card.</li>
+  <li>This is a static design study, not the GPUI implementation.</li>
+</ul>
+</body>
+</html>
