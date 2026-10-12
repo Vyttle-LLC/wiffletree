@@ -1596,6 +1596,14 @@ fn main() -> anyhow::Result<()> {
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            // Quitting exits the process without dropping the host, so running turns are
+            // stopped here, before their provider processes could outlive the app.
+            let host = bridge.clone();
+            cx.on_app_quit(move |_| {
+                host.shutdown();
+                async {}
+            })
+            .detach();
             cx.on_action(|_: &About, _| show_about());
             // Settings needs no main window, so it opens even after that one is closed.
             // Deferred so ⌘, pressed inside Settings can still focus that window.

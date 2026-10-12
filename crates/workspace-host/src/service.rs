@@ -11,6 +11,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 type Reply = Sender<std::result::Result<Value, String>>;
@@ -28,6 +29,8 @@ const MAX_WAKE_SLEEP_MS: i64 = 60_000;
 /// How often a session held beside a leftover process is looked at again; the exit of a
 /// process the host does not own sends no event.
 const LEFTOVER_RETRY_MS: i64 = 2_000;
+/// How long a quit waits for running turns to stop: the grace period, and room to report it.
+const QUIT_WAIT: Duration = Duration::from_secs(3);
 /// SQL condition for turn input, on columns of the messages `table` alias. A session's other
 /// messages to itself are its own output; timer fires are the exception.
 fn is_turn_input(table: &str) -> String {
@@ -88,7 +91,8 @@ fn open_questions_reminder(questions: &[Attention]) -> String {
         "\n\nYour open inbox questions (request_id: question):\n{list}\nIf this message or the current state already settles one, call close_question for it before ending your turn."
     )
 }
-/// A clean exit stops turns this way; only an unexpected stop leaves runs unfinished for the next start.
+/// A clean exit stops turns this way. An unexpected stop, or a turn that outlasts the quit's
+/// wait, leaves its run unfinished for the next start.
 const QUIT_DURING_TURN: &str =
     "Wiffletree quit during a turn (app quit or restart to update); inspect work before retrying";
 const STOPPED_UNEXPECTEDLY: &str =
@@ -386,10 +390,21 @@ enum Event {
 }
 struct Handle {
     sender: Sender<Event>,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+impl Handle {
+    /// Stops the host thread and waits for it, which waits for running turns to stop.
+    fn shutdown(&self) {
+        let _ = self.sender.send_blocking(Event::Shutdown);
+        let worker = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
+    }
 }
 impl Drop for Handle {
     fn drop(&mut self) {
-        let _ = self.sender.try_send(Event::Shutdown);
+        self.shutdown();
     }
 }
 #[derive(Clone)]
@@ -502,7 +517,7 @@ impl Service {
         let (progress_changed, progress_changes) = async_channel::bounded(1);
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let worker = sender.clone();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("workspace-host".into())
             .spawn(move || {
                 let setup = (|| -> Result<_> {
@@ -607,7 +622,7 @@ impl Service {
                     }
                     actor.process(event);
                 }
-                actor.stop();
+                actor.stop(&receiver);
                 for (_, permission) in actor.permissions.drain() {
                     let _ = permission.reply.try_send(Err("Workspace stopped".into()));
                 }
@@ -617,7 +632,10 @@ impl Service {
             })?;
         readiness.recv()?.map_err(anyhow::Error::msg)?;
         Ok(Self {
-            handle: Arc::new(Handle { sender }),
+            handle: Arc::new(Handle {
+                sender,
+                worker: std::sync::Mutex::new(Some(thread)),
+            }),
             changes,
             step_changes,
             progress_changes,
@@ -633,6 +651,12 @@ impl Service {
             .try_send(Event::Command(command, reply))
             .map_err(|_| "Host queue is full or disconnected".to_string())?;
         Ok(receive)
+    }
+    /// Stops every running turn and then the host, returning once those turns' process groups
+    /// are stopped. Dropping the last handle does the same; an app that exits without dropping
+    /// it calls this first.
+    pub fn shutdown(&self) {
+        self.handle.shutdown();
     }
     pub fn changes(&self) -> Receiver<()> {
         self.changes.clone()
@@ -1088,6 +1112,12 @@ impl Actor {
             } => {
                 let mut active = self.active.remove(id).unwrap();
                 self.host.turn_ended(id);
+                // A quit cancels every turn; the record names the quit, as a retry's notes expect.
+                let error = if self.stopping && cancelled {
+                    Some(QUIT_DURING_TURN.into())
+                } else {
+                    error
+                };
                 let failed = error.is_some();
                 // A turn its parent stopped is finished rather than held: the parent decides
                 // what runs next, and the session's next turn is told about the stop instead.
@@ -1156,7 +1186,7 @@ impl Actor {
                 } else if session.status == Status::Working {
                     self.host.set_status(id, Status::Ready)?;
                 }
-                // Shutdown finishes turns without waiting for their processes; startup settles.
+                // A quit only stops turns; the next start settles.
                 if !self.stopping {
                     self.host.settle_pending_worktrees();
                 }
@@ -1212,27 +1242,24 @@ impl Actor {
         Ok(())
     }
     /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
-    /// Cancels every active turn and records it finished without waiting for its process.
-    fn stop(&mut self) {
+    /// Cancels every active turn and waits for each provider thread to report its end, which it
+    /// does once the provider's process group is stopped. A turn that outlasts the wait stays
+    /// unfinished, so the next start stops its process.
+    fn stop(&mut self, events: &Receiver<Event>) {
         self.stopping = true;
-        let interrupted = self
-            .active
-            .iter()
-            .map(|(id, a)| {
-                a.cancel.store(true, Ordering::Relaxed);
-                (id.clone(), a.run.clone())
-            })
-            .collect::<Vec<_>>();
-        for (id, run) in interrupted {
-            let _ = self.provider_event(
-                &id,
-                &run,
-                ProviderEvent::Finished {
-                    error: Some(QUIT_DURING_TURN.into()),
-                    usage: Value::Null,
-                    cancelled: false,
-                },
-            );
+        for active in self.active.values() {
+            active.cancel.store(true, Ordering::Relaxed);
+        }
+        let deadline = Instant::now() + QUIT_WAIT;
+        while !self.active.is_empty() && Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(event @ Event::Provider { .. }) => {
+                    self.handle(event);
+                }
+                // A stopping host answers nothing else.
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
         }
     }
     fn signal(&mut self, state_changed: bool) {
@@ -3452,8 +3479,22 @@ mod tests {
         let mut active = active_turn("run", vec![]);
         active.reported = true;
         actor.active.insert(tester.id.clone(), active);
+        // The provider thread reports the cancelled turn's end once its process is stopped.
+        let (sender, events) = async_channel::bounded(1);
+        let cancelled = ProviderEvent::Finished {
+            error: Some(provider::Cancelled.to_string()),
+            usage: Value::Null,
+            cancelled: true,
+        };
+        let _ = sender.try_send(Event::Provider {
+            session: tester.id.clone(),
+            run: "run".into(),
+            event: cancelled,
+        });
 
-        actor.stop();
+        actor.stop(&events);
+
+        assert!(actor.active.is_empty());
 
         assert!(Path::new(&ticket.worktree).exists());
         assert_eq!(
