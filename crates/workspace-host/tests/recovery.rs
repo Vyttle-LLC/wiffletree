@@ -15,7 +15,7 @@ fn project(host: &mut Host, name: &str) -> (Project, Session) {
 #[test]
 fn restart_preserves_queue_and_holds_ambiguous_delivery() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (_, session) = project(&mut host, "No repository required");
     host.send("first", None, &session.id, "Instruction")
         .unwrap();
@@ -25,7 +25,7 @@ fn restart_preserves_queue_and_holds_ambiguous_delivery() {
     host.advance_receipt("first", Receipt::Delivered).unwrap();
     host.set_status(&session.id, Status::Working).unwrap();
     drop(host);
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     assert_eq!(
         host.session(&session.id).unwrap().status,
         Status::Disconnected
@@ -46,8 +46,8 @@ fn restart_preserves_queue_and_holds_ambiguous_delivery() {
 #[test]
 fn store_owner_attention_and_blocked_state_are_independent() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
-    assert!(Host::open(directory.path()).is_err());
+    let mut host = Host::open_set_up(directory.path()).unwrap();
+    assert!(Host::open_set_up(directory.path()).is_err());
     let (_, session) = project(&mut host, "Attention");
     host.set_status(&session.id, Status::Blocked).unwrap();
     assert!(host.snapshot().unwrap().attention.is_empty());
@@ -71,7 +71,7 @@ fn store_owner_attention_and_blocked_state_are_independent() {
         .is_err()
     );
     drop(host);
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     host.resolve_attention(&attention.id, "denied").unwrap();
     assert!(host.resolve_attention(&attention.id, "approved").is_err());
     assert_eq!(host.session(&session.id).unwrap().status, Status::Blocked);
@@ -80,7 +80,7 @@ fn store_owner_attention_and_blocked_state_are_independent() {
 #[test]
 fn messages_and_logs_do_not_cross_project_boundaries() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (one, a) = project(&mut host, "One");
     let (two, b) = project(&mut host, "Two");
     assert!(
@@ -116,7 +116,7 @@ fn messages_and_logs_do_not_cross_project_boundaries() {
 #[test]
 fn transcript_keyset_and_simulator_are_bounded_and_idempotent() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (_, session) = project(&mut host, "Simulation");
     host.send("a", None, &session.id, "Hello").unwrap();
     let response = host.simulate("a").unwrap();
@@ -151,7 +151,7 @@ fn log(session: &str, milestone: &str) -> LogInput {
 fn markdown_preserves_external_content_and_recovers_receipt_gap() {
     let directory = tempfile::tempdir().unwrap();
     let brain = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Memory");
     host.attach_brain(&project.id, brain.path().to_str().unwrap())
         .unwrap();
@@ -198,7 +198,7 @@ fn markdown_preserves_external_content_and_recovers_receipt_gap() {
         before
     );
     drop(host);
-    let host = Host::open(directory.path()).unwrap();
+    let host = Host::open_set_up(directory.path()).unwrap();
     assert_eq!(host.logs(&project.id, None, 100).unwrap().len(), 2);
     assert_eq!(host.runs(&project.id).unwrap().len(), 2);
 }
@@ -209,7 +209,7 @@ fn markdown_symlink_destination_is_rejected_and_failure_is_recorded() {
     let directory = tempfile::tempdir().unwrap();
     let brain = tempfile::tempdir().unwrap();
     let outside = tempfile::NamedTempFile::new().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Memory");
     host.attach_brain(&project.id, brain.path().to_str().unwrap())
         .unwrap();
@@ -229,7 +229,7 @@ fn markdown_symlink_destination_is_rejected_and_failure_is_recorded() {
 #[test]
 fn model_settings_and_versioned_commands_survive_restart() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let mut selection = host.model_selection().unwrap();
     selection.guide = "Raise effort for migrations.".into();
     let selection = host.set_model_selection(&selection).unwrap();
@@ -241,7 +241,7 @@ fn model_settings_and_versioned_commands_survive_restart() {
     assert_eq!(response.id, "wrong-version");
     assert!(response.error.is_some());
     drop(host);
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     assert_eq!(host.model_selection().unwrap(), selection);
     let response = host.respond(Request {
         version: PROTOCOL_VERSION,
@@ -280,7 +280,7 @@ fn repository_coordinators_cannot_be_created_and_workers_keep_ownership() {
                 .success()
         );
     }
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, root) = project(&mut host, "Hierarchy");
     let repository = host
         .attach_repository(&project.id, repo.path().to_str().unwrap(), "HEAD")
@@ -346,7 +346,7 @@ fn repository_coordinators_cannot_be_created_and_workers_keep_ownership() {
         1
     );
     drop(host);
-    let host = Host::open(directory.path()).unwrap();
+    let host = Host::open_set_up(directory.path()).unwrap();
     assert_eq!(host.session(&worker.id).unwrap(), worker);
 }
 
@@ -357,7 +357,7 @@ fn brain_parent_symlink_is_rejected_before_creating_outside_directories() {
     let brain = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(outside.path(), brain.path().join("second-brain")).unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Memory");
     host.attach_brain(&project.id, brain.path().to_str().unwrap())
         .unwrap();
@@ -370,7 +370,7 @@ fn brain_parent_symlink_is_rejected_before_creating_outside_directories() {
 fn markdown_batches_keep_header_compiler_marker_and_newest_first_order() {
     let directory = tempfile::tempdir().unwrap();
     let brain = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Batch memory");
     host.attach_brain(&project.id, brain.path().to_str().unwrap())
         .unwrap();
@@ -398,13 +398,13 @@ fn markdown_batches_keep_header_compiler_marker_and_newest_first_order() {
 #[test]
 fn one_host_owns_a_store_until_it_closes() {
     let directory = tempfile::tempdir().unwrap();
-    let host = Host::open(directory.path()).unwrap();
-    let second = Host::open(directory.path()).err().unwrap();
+    let host = Host::open_set_up(directory.path()).unwrap();
+    let second = Host::open_set_up(directory.path()).err().unwrap();
     assert!(
         second
             .to_string()
             .contains("Another host already owns this store")
     );
     drop(host);
-    Host::open(directory.path()).unwrap();
+    Host::open_set_up(directory.path()).unwrap();
 }

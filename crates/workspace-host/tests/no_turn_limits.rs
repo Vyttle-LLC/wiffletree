@@ -58,7 +58,7 @@ fn ten_workers_in_two_projects_run_at_once() {
     git(&repo, &["init", "-q"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let workers = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let mut workers = vec![];

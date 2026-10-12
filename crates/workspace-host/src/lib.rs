@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 pub mod attachments;
 pub mod context;
+pub mod detection;
 mod files;
 mod flatten;
 pub mod live;
@@ -283,8 +284,9 @@ impl Host {
             home: Some(self.new_project_home(name)?),
             slug: None,
         };
-        let prefill = self
-            .model_selection()?
+        let selection = self.model_selection()?;
+        ensure!(selection.is_saved(), policies::NO_SETUP);
+        let prefill = selection
             .prefill(Role::ProjectOrchestrator)
             .context("Enable a provider in Models first")?;
         let session = Session {
@@ -1146,9 +1148,10 @@ impl Host {
                 limit,
             } => serde_json::to_value(self.messages(&session_id, before, limit)?)?,
             Command::Simulate { message_id } => serde_json::to_value(self.simulate(&message_id)?)?,
-            Command::SetModelSelection { selection } => {
-                serde_json::to_value(self.set_model_selection(&selection)?)?
-            }
+            Command::SetModelSelection {
+                selection,
+                verification,
+            } => serde_json::to_value(self.set_setup(&selection, verification)?)?,
             Command::RequestAttention {
                 session_id,
                 host,

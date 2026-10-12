@@ -114,7 +114,7 @@ fn current(role: Role) -> Value {
 /// Opens a store as it was before model selection: `setup` adds sessions on a fresh host, then
 /// each role gets its legacy row and pins and migrations are forgotten.
 fn seed(home: &Path, rows: impl Fn(Role) -> Value, setup: impl FnOnce(&mut Host)) -> Host {
-    let mut host = Host::open(home).unwrap();
+    let mut host = Host::open_set_up(home).unwrap();
     setup(&mut host);
     drop(host);
     let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
@@ -505,70 +505,114 @@ fn unpinned_sessions_keep_the_model_they_would_have_used() {
     host.configure_session(&ids[3], claude("sonnet", "medium"))
         .unwrap();
     drop(host);
-    let host = Host::open(home.path()).unwrap();
+    let host = Host::open_set_up(home.path()).unwrap();
     assert_eq!(profile(&host, &ids[3]), Some(claude("sonnet", "medium")));
 }
 
+fn detected(signed_in: &[Provider]) -> Detection {
+    signed_in
+        .iter()
+        .map(|&provider| {
+            let status = ProviderStatus {
+                installed: true,
+                signed_in: true,
+                plan: None,
+            };
+            (provider, status)
+        })
+        .collect()
+}
+fn save(host: &mut Host, setup: &Setup) -> anyhow::Result<Value> {
+    host.execute(Command::SetModelSelection {
+        selection: Box::new(setup.selection.clone()),
+        verification: Some(setup.verification.clone()),
+    })
+}
+
 #[test]
-fn a_fresh_store_gets_todays_built_ins_converted() {
+fn a_fresh_store_saves_nothing_and_starts_no_agent_until_a_setup_is_saved() {
     let home = tempfile::tempdir().unwrap();
-    let host = Host::open(home.path()).unwrap();
-    let selection = host.model_selection().unwrap();
-    assert_eq!(
-        selection,
-        ModelSelection {
-            revision: 1,
-            providers: [
-                (
-                    Provider::Claude,
-                    ProviderAccess {
-                        enabled: true,
-                        models: allowed(&[("opus", "high"), ("opus", "medium"), ("opus", "low"), ("sonnet", "high"), ("sonnet", "medium")]),
-                    },
-                ),
-                (
-                    Provider::Codex,
-                    ProviderAccess {
-                        enabled: true,
-                        models: allowed(&[("gpt-6.1-sol", "medium"), ("gpt-6.1-sol", "low"), ("gpt-6-astra", "high"), ("gpt-6.1-sol", "high")]),
-                    },
-                ),
-            ]
-            .into(),
-            role_providers: [
-                (Role::ProjectOrchestrator, BTreeSet::from([Provider::Claude])),
-                (Role::Implementer, BTreeSet::from([Provider::Claude])),
-                (Role::Tester, BTreeSet::from([Provider::Codex])),
-            ]
-            .into(),
-            guide: "Pick the model by the size and risk of the work. Claude: small, contained change → Sonnet; large or cross-cutting → Opus. Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high. Raise effort for migrations, data or security changes.\n".into(),
-        }
-    );
-    // The roles the migration gives today's built-in policies; the allowlist adds only the
-    // models the starter guide recommends.
+    let mut host = Host::open(home.path()).unwrap();
+    assert_eq!(host.model_selection().unwrap(), ModelSelection::default());
+    let refused = host.create_project("Too early").unwrap_err().to_string();
+    assert!(refused.contains("Open Models"), "{refused}");
+    assert!(host.snapshot().unwrap().sessions.is_empty());
+    // Reopening saves nothing either.
     drop(host);
-    let migrated = seed(
-        tempfile::tempdir().unwrap().path(),
-        |role| match role {
-            Role::ProjectOrchestrator | Role::TaskOrchestrator => opus_fixed(role, "high"),
-            Role::Implementer => opus_fixed(role, "medium"),
-            _ => codex_fixed(role),
-        },
-        |_| {},
-    )
-    .model_selection()
-    .unwrap();
-    assert_eq!(migrated.role_providers, selection.role_providers);
-    assert!(
-        !migrated
-            .allowed(Provider::Claude)
-            .iter()
-            .any(|m| m.model == "sonnet")
-    );
-    for provider in PROVIDERS {
-        let set = |s: &ModelSelection| s.allowed(provider).iter().cloned().collect::<BTreeSet<_>>();
-        assert!(set(&migrated).is_subset(&set(&selection)));
+    let mut host = Host::open(home.path()).unwrap();
+    let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM model_selection", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+    assert!(!home.path().join("settings.json").exists());
+
+    // With neither CLI signed in the suggestion cannot be saved, so nothing can start.
+    assert!(save(&mut host, &suggest(&detected(&[]))).is_err());
+    assert!(host.create_project("Still too early").is_err());
+    assert!(!home.path().join("settings.json").exists());
+
+    for signed_in in [&[Provider::Claude][..], &[Provider::Codex], &PROVIDERS] {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        let setup = suggest(&detected(signed_in));
+        let provider = signed_in[0];
+        assert_eq!(setup.verification.verifiers.len(), signed_in.len() + 1);
+        save(&mut host, &setup).unwrap();
+        // Exactly what was shown is saved, verifiers included, and survives a restart.
+        drop(host);
+        let mut host = Host::open(home.path()).unwrap();
+        let saved = host.model_selection().unwrap();
+        assert_eq!(
+            saved,
+            ModelSelection {
+                revision: 1,
+                ..setup.selection.clone()
+            }
+        );
+        assert_eq!(host.settings().verification, setup.verification);
+        host.create_project("Ready").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0);
+        assert_eq!(coordinator.provider, provider);
+        assert_eq!(host.turn_profile(&coordinator).unwrap().provider, provider);
     }
+}
+
+#[test]
+fn a_refused_first_save_keeps_the_verifiers_unsaved_too() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open(home.path()).unwrap();
+    let mut setup = suggest(&detected(&PROVIDERS));
+    setup.verification.verifiers.clear();
+    assert!(save(&mut host, &setup).is_err());
+    assert!(!host.model_selection().unwrap().is_saved());
+    let mut setup = suggest(&detected(&PROVIDERS));
+    setup.selection.role_providers.clear();
+    assert!(save(&mut host, &setup).is_err());
+    assert!(!home.path().join("settings.json").exists());
+}
+
+#[test]
+fn a_first_save_whose_selection_write_fails_leaves_the_settings_file_as_it_was() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open(home.path()).unwrap();
+    Connection::open(home.path().join("workspace.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse BEFORE INSERT ON model_selection
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let setup = suggest(&detected(&PROVIDERS));
+    let settings = home.path().join("settings.json");
+    assert!(save(&mut host, &setup).is_err());
+    assert!(!host.model_selection().unwrap().is_saved());
+    assert!(!settings.exists());
+    // Settings saved earlier, such as the check-ins, come back byte for byte.
+    host.set_check_ins(30, 200).unwrap();
+    let before = std::fs::read(&settings).unwrap();
+    assert!(save(&mut host, &suggest(&detected(&[Provider::Claude]))).is_err());
+    assert_eq!(std::fs::read(&settings).unwrap(), before);
 }
 
 #[test]
@@ -585,15 +629,16 @@ fn reopening_a_migrated_store_changes_nothing() {
     );
     host.set_model_selection(&edited).unwrap();
     drop(host);
-    let before = stored(home.path());
+    let settings = || std::fs::read(home.path().join("settings.json")).ok();
+    let before = (stored(home.path()), settings());
     drop(Host::open(home.path()).unwrap());
-    assert_eq!(stored(home.path()), before);
+    assert_eq!((stored(home.path()), settings()), before);
 }
 
 #[test]
 fn saving_validates_the_whole_selection_and_bumps_the_revision() {
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let saved = host.model_selection().unwrap();
     let mut invalid = saved.clone();
     invalid.role_providers.insert(Role::Tester, BTreeSet::new());
@@ -607,7 +652,7 @@ fn saving_validates_the_whole_selection_and_bumps_the_revision() {
 #[test]
 fn chat_override_is_unlimited_and_preserves_provider_identity() {
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     host.create_project("Chat overrides").unwrap();
     let root = host.sessions().unwrap().remove(0);
     let runtime = host.session_runtime(&root.id).unwrap();
@@ -638,7 +683,7 @@ fn chat_override_is_unlimited_and_preserves_provider_identity() {
     )
     .unwrap();
     drop(db);
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     assert_eq!(
         host.session_runtime(&root.id).unwrap().profile,
         Some(unlisted)

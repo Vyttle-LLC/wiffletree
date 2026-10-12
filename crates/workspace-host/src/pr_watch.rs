@@ -1009,7 +1009,7 @@ mod tests {
         fs::create_dir_all(&folder).unwrap();
         git(&folder, &["init", "-q", "-b", "main"]);
         git(&folder, &["commit", "-q", "--allow-empty", "-m", "start"]);
-        let mut host = Host::open(home.path().join("home")).unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
         host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let project = host.create_project("Start").unwrap();
@@ -1267,7 +1267,7 @@ mod tests {
         assert_eq!(host.ticket(&ticket.id).unwrap().state, ticket.state);
         // After a restart the recorded merge is no news.
         drop(host);
-        let mut host = Host::open(home.path().join("home")).unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
         host.record_pull_requests(&ticket.repository_id, &pass, 1, 1)
             .unwrap();
         assert_eq!(pull_request_events(&host), 2);

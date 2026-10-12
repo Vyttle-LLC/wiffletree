@@ -3,6 +3,7 @@ mod files;
 mod progress;
 mod selection;
 mod steps;
+mod suggestion;
 mod usage;
 use anyhow::{Result, ensure};
 pub use files::*;
@@ -11,6 +12,7 @@ pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
 pub use steps::*;
+pub use suggestion::*;
 pub use usage::*;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -1203,6 +1205,9 @@ pub enum Command {
     /// `ModelSelection` at its next revision.
     SetModelSelection {
         selection: Box<ModelSelection>,
+        /// The verifiers to save with it: the first save of a suggested setup sends them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verification: Option<VerificationSettings>,
     },
     RequestAttention {
         session_id: String,

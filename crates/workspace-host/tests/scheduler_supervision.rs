@@ -98,7 +98,7 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
     git(&repo, &["init", "-q"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let (reviewing, writer, other, busy) = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let reviewing = host.create_project("Reviewing").unwrap();

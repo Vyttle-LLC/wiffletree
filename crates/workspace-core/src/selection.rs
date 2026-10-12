@@ -144,6 +144,10 @@ impl fmt::Display for Rejection {
 impl std::error::Error for Rejection {}
 
 impl ModelSelection {
+    /// Whether the human has saved a setup; a store without one holds revision 0.
+    pub fn is_saved(&self) -> bool {
+        self.revision > 0
+    }
     /// The providers whose models a coordinator may give `role`, in display order.
     pub fn providers_for(&self, role: Role) -> Vec<Provider> {
         PROVIDERS
@@ -160,6 +164,9 @@ impl ModelSelection {
     }
     pub fn is_enabled(&self, provider: Provider) -> bool {
         self.providers.get(&provider).is_some_and(|a| a.enabled)
+    }
+    pub fn any_enabled(&self) -> bool {
+        PROVIDERS.iter().any(|&p| self.is_enabled(p))
     }
     pub fn allowed(&self, provider: Provider) -> &[AllowedModel] {
         self.providers
@@ -230,10 +237,7 @@ impl ModelSelection {
         })
     }
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            PROVIDERS.iter().any(|&p| self.is_enabled(p)),
-            "Enable at least one provider"
-        );
+        ensure!(self.any_enabled(), "Enable at least one provider");
         for (provider, access) in &self.providers {
             ensure!(
                 !access.enabled || !access.models.is_empty(),

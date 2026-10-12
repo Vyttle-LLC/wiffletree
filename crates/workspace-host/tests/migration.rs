@@ -97,7 +97,7 @@ fn fixture() -> Fixture {
     git(&repo, &["init", "-q"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let home = directory.path().join("home");
-    let mut host = Host::open(&home).unwrap();
+    let mut host = Host::open_set_up(&home).unwrap();
     host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
         .unwrap();
     let project = host.create_project("Flatten").unwrap();
@@ -267,7 +267,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
     let f = fixture();
     let before = kept(&f.home);
 
-    let mut host = Host::open(&f.home).unwrap();
+    let mut host = Host::open_set_up(&f.home).unwrap();
 
     assert_eq!(version(&f.home), 6);
     assert!(f.home.join("workspace.sqlite3.pre-flatten").exists());
@@ -402,7 +402,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
     let migrated = kept(&f.home);
     let backup = std::fs::read(f.home.join("workspace.sqlite3.pre-flatten")).unwrap();
     drop(host);
-    let host = Host::open(&f.home).unwrap();
+    let host = Host::open_set_up(&f.home).unwrap();
     assert_eq!(kept(&f.home), migrated);
     assert_eq!(
         std::fs::read(f.home.join("workspace.sqlite3.pre-flatten")).unwrap(),
@@ -432,7 +432,7 @@ fn a_failure_mid_migration_leaves_schema_5_for_a_full_retry() {
         ))
         .unwrap();
 
-    assert!(Host::open(&f.home).is_err());
+    assert!(Host::open_set_up(&f.home).is_err());
 
     assert_eq!(version(&f.home), 5);
     assert_eq!(kept(&f.home), before);
@@ -456,7 +456,7 @@ fn a_failure_mid_migration_leaves_schema_5_for_a_full_retry() {
 
     db.execute_batch("DROP TRIGGER fail_second").unwrap();
     drop(db);
-    let host = Host::open(&f.home).unwrap();
+    let host = Host::open_set_up(&f.home).unwrap();
     assert_eq!(version(&f.home), 6);
     assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
     assert_eq!(host.ticket(&f.closed.id).unwrap().coordinator_id, f.main.id);
@@ -489,7 +489,7 @@ fn an_implementer_mid_turn_at_upgrade_resumes_in_its_conversation_and_reports_to
         .unwrap();
     }
 
-    let mut host = Host::open(&f.home).unwrap();
+    let mut host = Host::open_set_up(&f.home).unwrap();
 
     let runtime = host.session_runtime(&f.implementer.id).unwrap();
     assert_eq!(
@@ -518,7 +518,7 @@ fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
             [&f.open.id],
         )
         .unwrap();
-    let mut host = Host::open(&f.home).unwrap();
+    let mut host = Host::open_set_up(&f.home).unwrap();
     let accept = json!({"ticket_id":f.open.id});
     let refused = host
         .agent_tool(&f.main.id, "accept_ticket", accept.clone())
@@ -599,7 +599,7 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
     .unwrap();
     drop(db);
 
-    let host = Host::open(&f.home).unwrap();
+    let host = Host::open_set_up(&f.home).unwrap();
     assert_eq!(version(&f.home), 6);
     // Schema 6 ran first: the team is retired and its ticket belongs to the coordinator.
     assert!(host.session(f.team).unwrap().archived);
@@ -654,7 +654,10 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
     let before = host.model_selection().unwrap();
     drop(host);
     assert_eq!(
-        Host::open(&f.home).unwrap().model_selection().unwrap(),
+        Host::open_set_up(&f.home)
+            .unwrap()
+            .model_selection()
+            .unwrap(),
         before
     );
 }

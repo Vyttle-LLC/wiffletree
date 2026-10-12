@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn a_stored_cadence_too_large_to_advance_finishes_instead_of_overflowing() {
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Overflow").unwrap();
         let session = host.sessions().unwrap().remove(0);
         let args = json!({"label":"check","prompt":"Check","every":"5m"});

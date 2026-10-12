@@ -61,7 +61,7 @@ fn discovery_deduplicates_roots_and_includes_worktrees_without_descending_into_r
         ],
     );
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let project = host.create_project("Import").unwrap();
     host.attach_repository(&project.id, app.to_str().unwrap(), "HEAD")
         .unwrap();
@@ -96,7 +96,7 @@ fn bulk_import_keeps_successes_and_existing_bases_and_is_retry_safe() {
     repo(&two, true);
     fs::write(two.join("local-draft.txt"), "Keep me").unwrap();
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let project = host.create_project("Import").unwrap();
     let existing = host
         .attach_repository(&project.id, one.to_str().unwrap(), "HEAD")
@@ -127,7 +127,7 @@ fn bulk_import_keeps_successes_and_existing_bases_and_is_retry_safe() {
             .is_err()
     );
     drop(host);
-    let host = Host::open(home.path()).unwrap();
+    let host = Host::open_set_up(home.path()).unwrap();
     assert_eq!(host.repositories().unwrap().len(), 2);
 }
 
@@ -159,7 +159,7 @@ fn projects_use_every_repository_until_they_choose_some() {
         repo(path, true);
     }
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let all = host.create_project("All").unwrap();
     let custom = host.create_project("Custom").unwrap();
     let first = host.add_repository(one.to_str().unwrap(), "HEAD").unwrap();
@@ -210,7 +210,7 @@ fn repositories_with_tickets_stay_in_the_workspace() {
     repo(&used, true);
     repo(&idle, true);
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let project = host.create_project("Remove").unwrap();
     let used = host.add_repository(used.to_str().unwrap(), "HEAD").unwrap();
     let idle = host.add_repository(idle.to_str().unwrap(), "HEAD").unwrap();
@@ -276,7 +276,7 @@ fn per_project_attachments_migrate_to_one_workspace_list() {
     .unwrap();
     drop(db);
 
-    let host = Host::open(home.path()).unwrap();
+    let host = Host::open_set_up(home.path()).unwrap();
     let ids: Vec<_> = host
         .repositories()
         .unwrap()
@@ -299,7 +299,7 @@ fn per_project_attachments_migrate_to_one_workspace_list() {
     );
     drop(host);
     assert_eq!(
-        Host::open(home.path())
+        Host::open_set_up(home.path())
             .unwrap()
             .repositories()
             .unwrap()
@@ -334,7 +334,7 @@ fn root_folders_pick_up_new_repositories_but_respect_dismissals() {
         ],
     );
     let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     let path = |p: &Path| p.to_str().unwrap().to_owned();
 
     // Unticked repositories in a remembered root stay out; a repository root is not a root folder.

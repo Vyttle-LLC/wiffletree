@@ -79,7 +79,7 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
     // Before the stop: project A is live, its worker is mid-turn and both coordinators have timers.
     // Project B was never started.
     let (live, idle, worker, other, work) = {
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
         let live = host.create_project("Live").unwrap();

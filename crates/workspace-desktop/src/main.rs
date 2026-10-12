@@ -106,8 +106,10 @@ struct Workspace {
     saved_model_selection: ModelSelection,
     guide_input: Entity<TextareaState>,
     verifiers: Entity<verifiers::VerifierEditor>,
-    /// Whether each provider's CLI was found when the model lists were last refreshed.
-    cli_found: BTreeMap<Provider, bool>,
+    /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
+    detection: Detection,
+    /// The setup last suggested from `detection`, while the store has no saved one.
+    suggested: Option<Setup>,
     /// The model each provider's Add row on the Providers card shows.
     model_drafts: BTreeMap<Provider, String>,
     model_catalog: Vec<workspace_host::runtime::ModelOption>,
@@ -180,6 +182,8 @@ impl Workspace {
         })
         .detach();
         let verifiers = cx.new(|cx| verifiers::VerifierEditor::new(bridge.clone(), window, cx));
+        // The Save bar follows the verifiers while they are part of an unsaved setup.
+        cx.observe(&verifiers, |_, _, cx| cx.notify()).detach();
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         cx.subscribe_in(
             &project_name,
@@ -230,7 +234,8 @@ impl Workspace {
             saved_model_selection: ModelSelection::default(),
             guide_input,
             verifiers,
-            cli_found: BTreeMap::new(),
+            detection: Detection::new(),
+            suggested: None,
             model_drafts: BTreeMap::new(),
             model_catalog: models::fallback(),
             catalog_pending: 0,
@@ -685,9 +690,21 @@ impl Workspace {
                 }
                 self.request(Command::Snapshot, window, cx);
             }
-            Command::SetModelSelection { selection } => {
-                // The draft was saved; the next snapshot carries its new revision.
-                self.saved_model_selection = *selection;
+            Command::SetModelSelection { selection, .. } => {
+                // The host answers with the saved selection at its new revision, so the store
+                // reads as saved before the next snapshot arrives.
+                let saved: ModelSelection = serde_json::from_value(value)
+                    .map_err(|e| e.to_string())
+                    .unwrap_or_else(|e| {
+                        eprintln!("Saved model selection: {e}");
+                        *selection.clone()
+                    });
+                self.model_selection =
+                    models::after_save(&self.model_selection, &selection, &saved);
+                self.saved_model_selection = saved;
+                self.suggested = None;
+                self.verifiers
+                    .update(cx, |editor, cx| editor.setup_saved(cx));
                 self.toast("Models saved", window, cx);
                 self.request(Command::Snapshot, window, cx);
             }
@@ -743,7 +760,12 @@ impl Workspace {
                 .map(|s| s.id.clone());
         }
         self.sync_model_selection(&snapshot.model_selection, window, cx);
+        if !models::verifiers_held(Some(&snapshot.model_selection)) {
+            self.verifiers
+                .update(cx, |editor, cx| editor.setup_saved(cx));
+        }
         self.snapshot = Some(snapshot);
+        self.offer_suggestion(window, cx);
         self.load_error = None;
         self.sync_composer(window, cx);
         if let Some(root) = new_root {
@@ -1055,18 +1077,18 @@ impl Workspace {
         for provider in PROVIDERS {
             let sender = sender.clone();
             std::thread::spawn(move || {
-                let found = workspace_host::provider::executable(provider).is_ok();
+                let status = workspace_host::detection::detect(provider);
                 let result = workspace_host::runtime::models(provider).map_err(|e| e.to_string());
-                let _ = sender.send_blocking((provider, found, result));
+                let _ = sender.send_blocking((provider, status, result));
             });
         }
         drop(sender);
         cx.spawn_in(window, async move |this, cx| {
-            while let Ok((provider, found, result)) = receiver.recv().await {
-                let updated = cx.update(|_, cx| {
+            while let Ok((provider, status, result)) = receiver.recv().await {
+                let updated = cx.update(|window, cx| {
                     this.update(cx, |view, cx| {
                         view.catalog_pending -= 1;
-                        view.cli_found.insert(provider, found);
+                        view.detection.insert(provider, status);
                         match result {
                             Ok(models) if !models.is_empty() => {
                                 view.model_catalog
@@ -1082,6 +1104,7 @@ impl Workspace {
                                 ));
                             }
                         }
+                        view.offer_suggestion(window, cx);
                         cx.notify();
                     })
                 });
@@ -1094,9 +1117,15 @@ impl Workspace {
         cx.notify();
     }
     fn save_model_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A first save also sends the verifiers shown; afterwards they save on their own.
+        let verification = self
+            .suggested
+            .as_ref()
+            .and_then(|_| self.verifiers.read(cx).verification().cloned());
         self.request(
             Command::SetModelSelection {
                 selection: Box::new(self.model_selection.clone()),
+                verification,
             },
             window,
             cx,

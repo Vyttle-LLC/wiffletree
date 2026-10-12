@@ -36,7 +36,7 @@ fn fixture() -> (
                 .success()
         );
     }
-    let mut host = Host::open(home.path()).unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
     host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
         .unwrap();
     let project = host.create_project("Feature").unwrap();
@@ -874,7 +874,7 @@ fn coordinator_ownership_and_runtime_recovery_are_enforced() {
         .unwrap();
     let home = host.home.clone();
     drop(host);
-    let mut host = Host::open(home).unwrap();
+    let mut host = Host::open_set_up(home).unwrap();
     assert_eq!(host.message("uncertain").unwrap().receipt, Receipt::Held);
     host.reconcile_session(&root.id, false).unwrap();
     assert_eq!(

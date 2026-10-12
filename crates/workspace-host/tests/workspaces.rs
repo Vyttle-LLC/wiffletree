@@ -39,7 +39,7 @@ struct Owner {
 /// A host whose workspaces live in `<directory>/workspaces`, with one project using the
 /// repository folder `Web App`.
 fn team(directory: &Path, project: &str) -> (Host, Project, Owner) {
-    let mut host = Host::open(directory.join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.join("home")).unwrap();
     host.set_workspaces_dir(directory.join("workspaces").to_str().unwrap())
         .unwrap();
     let project = host.create_project(project).unwrap();
@@ -210,7 +210,7 @@ fn legacy_projects_and_tickets_keep_their_stored_paths() {
     .unwrap();
     drop(db);
 
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     assert_eq!(host.project(&project.id).unwrap().home, None);
     assert_eq!(
         host.project_directory(&project.id).unwrap(),
@@ -256,7 +256,7 @@ fn legacy_projects_and_tickets_keep_their_stored_paths() {
 fn settings_round_trip_keep_unknown_fields_and_fall_back_when_missing_or_corrupt() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("settings.json");
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let default = host.settings();
     // Beta builds, like the host they test, default to their own folder.
     let folder = match option_env!("WIFFLETREE_CHANNEL") {
@@ -281,7 +281,7 @@ fn settings_round_trip_keep_unknown_fields_and_fall_back_when_missing_or_corrupt
     assert!(chosen.is_dir() && std::fs::read_dir(&chosen).unwrap().next().is_none());
     drop(host);
 
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     let reloaded: HostSettings =
         serde_json::from_value(host.execute(Command::Settings).unwrap()).unwrap();
     assert_eq!(reloaded, saved);
@@ -298,7 +298,7 @@ fn settings_round_trip_keep_unknown_fields_and_fall_back_when_missing_or_corrupt
 fn check_in_thresholds_default_for_old_settings_and_refuse_out_of_range_values() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("settings.json");
-    let mut host = Host::open(directory.path()).unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
     std::fs::write(
         &file,
         r#"{"workspaces_dir":"/tmp/w","verification":{"verifiers":[{"role":"tester","focus":"Tests"}],"max_rounds":2},"future_option":true}"#,
@@ -338,7 +338,7 @@ fn check_in_thresholds_default_for_old_settings_and_refuse_out_of_range_values()
 #[test]
 fn unusable_workspace_folders_are_refused_and_keep_the_saved_setting() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let kept = host
         .set_workspaces_dir(directory.path().join("kept").to_str().unwrap())
         .unwrap();
@@ -377,7 +377,7 @@ fn assert_names_only(error: &anyhow::Error, action: &str, folder: &Path) {
 #[test]
 fn checking_a_workspace_folder_never_writes_through_an_existing_file() {
     let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open(directory.path().join("home")).unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let outside = directory.path().join("outside.txt");
     std::fs::write(&outside, b"keep me").unwrap();
     let chosen = directory.path().join("chosen");
