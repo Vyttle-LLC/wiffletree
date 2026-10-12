@@ -96,14 +96,18 @@ pub(crate) const CHECK_IN: &str = "check-in:";
 /// Prefix of the inbox item raised when the project coordinator has run many turns without the
 /// human; reserved like `CHECK_IN`.
 pub(crate) const TURN_COUNT: &str = "turn-count:";
+/// Prefix of the inbox note for a provider process an earlier host left running that startup
+/// could not confirm and so did not stop; the rest is the run's id. Reserved like `CHECK_IN`.
+/// While the note is open, its session starts no turn.
+pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
 /// Whether an inbox item is a host check-in rather than an agent's question.
 pub(crate) fn is_check_in(operation: &str) -> bool {
-    [CHECK_IN, TURN_COUNT]
+    [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS]
         .iter()
         .any(|prefix| operation.starts_with(prefix))
 }
 fn ensure_unreserved(operation: &str) -> Result<()> {
-    for prefix in [CHECK_IN, TURN_COUNT] {
+    for prefix in [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS] {
         ensure!(
             !operation.starts_with(prefix),
             "IDs starting with \"{prefix}\" are reserved for workspace check-ins"

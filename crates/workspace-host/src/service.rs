@@ -25,6 +25,9 @@ const MAX_TURN_MESSAGES: usize = 20;
 /// Longest a wake-up sleeps before the actor looks again; macOS suspends sleeping threads
 /// while the Mac sleeps, so a long sleep could miss a timer by hours.
 const MAX_WAKE_SLEEP_MS: i64 = 60_000;
+/// How often a session held beside a leftover process is looked at again; the exit of a
+/// process the host does not own sends no event.
+const LEFTOVER_RETRY_MS: i64 = 2_000;
 /// SQL condition for turn input, on columns of the messages `table` alias. A session's other
 /// messages to itself are its own output; timer fires are the exception.
 fn is_turn_input(table: &str) -> String {
@@ -90,27 +93,61 @@ const QUIT_DURING_TURN: &str =
     "Wiffletree quit during a turn (app quit or restart to update); inspect work before retrying";
 const STOPPED_UNEXPECTEDLY: &str =
     "Host stopped unexpectedly during a turn; inspect the worktree before retrying held input";
-/// Marks turns the last host left unfinished as interrupted. Projects keep their live state, so
-/// queued work and timer fires run on their own after a restart; only the interrupted sessions
-/// wait, Disconnected with their input held, until the human retries or skips it.
+/// Marks turns the last host left unfinished as interrupted, after stopping the provider
+/// processes it left running. Projects keep their live state, so queued work and timer fires
+/// run on their own after a restart; only the interrupted sessions wait, Disconnected with
+/// their input held, until the human retries or skips it.
 fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
-    let interrupted = host
+    type Unfinished = (String, String, Option<i64>, Option<i64>);
+    let unfinished = host
         .db
-        .prepare("SELECT session_id FROM provider_runs WHERE finished_at IS NULL")?
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for id in interrupted {
-        let mut runtime = host.session_runtime(&id)?;
+        .prepare(
+            "SELECT id,session_id,process_group,process_started FROM provider_runs WHERE finished_at IS NULL",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<Vec<Unfinished>>>()?;
+    // Each stop can take the grace period, so the groups are stopped together.
+    let leftovers = std::thread::scope(|scope| {
+        let stops = unfinished
+            .iter()
+            .map(|(_, _, group, started)| {
+                scope.spawn(move || {
+                    group.map_or(provider::Leftover::Gone, |group| {
+                        provider::stop_leftover(group, *started)
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        stops
+            .into_iter()
+            .map(|stop| stop.join().unwrap_or(provider::Leftover::Running))
+            .collect::<Vec<_>>()
+    });
+    for ((run, session, group, _), leftover) in unfinished.iter().zip(leftovers) {
+        let mut runtime = host.session_runtime(session)?;
         runtime.last_error = Some(STOPPED_UNEXPECTEDLY.into());
         host.save_runtime(&runtime)?;
-        host.set_status(&id, Status::Disconnected)?;
+        host.set_status(session, Status::Disconnected)?;
+        // A restart never silently repeats a turn that may have had side effects: those
+        // sessions stay held for reconciliation, while the rest of a live project carries on.
+        let stopped_at = (leftover == provider::Leftover::Stopped).then(now);
+        host.db.execute(
+            "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4) WHERE id=?1",
+            params![run, now(), STOPPED_UNEXPECTEDLY, stopped_at],
+        )?;
+        if let (provider::Leftover::Running, Some(group)) = (leftover, group) {
+            let name = host.session(session)?.name;
+            host.request_attention(
+                session,
+                "local",
+                &format!("{LEFTOVER_PROCESS}{run}"),
+                &format!(
+                    "{name}: provider process {group} from its interrupted turn was still running when Wiffletree started. Wiffletree could not confirm it is still that agent's process, so it did not stop it. The agent starts no turn while process group {group} runs. Stop the process if it is the agent's, or dismiss this note if it is not."
+                ),
+                &[],
+            )?;
+        }
     }
-    // A restart never silently repeats a turn that may have had side effects: those
-    // sessions stay held for reconciliation, while the rest of a live project carries on.
-    host.db.execute(
-        "UPDATE provider_runs SET finished_at=?1,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?2)) WHERE finished_at IS NULL",
-        params![now(), STOPPED_UNEXPECTEDLY],
-    )?;
     // No turn runs any more, so no check-in still says one does.
     let check_ins = host
         .db
@@ -122,20 +159,31 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
     }
     Ok(())
 }
+/// Says that an interrupted turn's provider process outlived its host until startup stopped it,
+/// so the worktree may hold more than the turn's recorded steps show.
+fn stopped_at_startup(stopped_at: Option<i64>) -> String {
+    stopped_at.map_or_else(String::new, |at| {
+        format!(
+            " Its provider process kept running after the host stopped and was stopped at startup ({}), so it may have changed the worktree after the turn's last recorded step.",
+            schedules::rfc3339(at)
+        )
+    })
+}
 /// Names the turn that took this message and stopped before finishing, so a retry can find its partial work.
 fn interrupted_turn_note(host: &Host, message_id: &str) -> Result<String> {
     let run = host
         .db
         .query_row(
-            "SELECT id,started_at FROM provider_runs WHERE outcome IN ('failed','interrupted') AND EXISTS (SELECT 1 FROM json_each(messages) WHERE value=?1) ORDER BY started_at DESC LIMIT 1",
+            "SELECT id,started_at,json_extract(detail,'$.process_stopped_at') FROM provider_runs WHERE outcome IN ('failed','interrupted') AND EXISTS (SELECT 1 FROM json_each(messages) WHERE value=?1) ORDER BY started_at DESC LIMIT 1",
             [message_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get(2)?)),
         )
         .optional()?;
-    Ok(run.map_or_else(String::new, |(id, started_at)| {
+    Ok(run.map_or_else(String::new, |(id, started_at, stopped_at)| {
         let started = schedules::rfc3339(started_at);
+        let stopped = stopped_at_startup(stopped_at);
         format!(
-            "\nRetry of interrupted turn {id} (started {started}). Check the worktree for its partial work before repeating it."
+            "\nRetry of interrupted turn {id} (started {started}).{stopped} Check the worktree for its partial work before repeating it."
         )
     }))
 }
@@ -150,16 +198,17 @@ fn resume_note(
 ) -> Result<String> {
     let mut lines = Vec::new();
     let interrupted = host.db.query_row(
-        "SELECT id,started_at FROM provider_runs WHERE session_id=?1 AND started_at<?2 AND (outcome='interrupted' OR json_extract(detail,'$.result.error') IN (?3,?4)) AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1 AND started_at<?2)",
+        "SELECT id,started_at,json_extract(detail,'$.process_stopped_at') FROM provider_runs WHERE session_id=?1 AND started_at<?2 AND (outcome='interrupted' OR json_extract(detail,'$.result.error') IN (?3,?4)) AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1 AND started_at<?2)",
         params![session, started_at, QUIT_DURING_TURN, STOPPED_UNEXPECTEDLY],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get(2)?)),
     ).optional()?;
-    if let Some((run, started)) = interrupted
+    if let Some((run, started, stopped_at)) = interrupted
         && !notes.iter().any(|note| note.contains(&run))
     {
         lines.push(format!(
-            "- Interrupted turn {run} (started {}); check for its partial work.",
-            schedules::rfc3339(started)
+            "- Interrupted turn {run} (started {}); check for its partial work.{}",
+            schedules::rfc3339(started),
+            stopped_at_startup(stopped_at)
         ));
     }
     for timer in host.active_schedules(Some(session))? {
@@ -1000,10 +1049,10 @@ impl Actor {
         let session = self.host.session(id)?;
         let mut runtime = self.host.session_runtime(id)?;
         match event {
-            ProviderEvent::Spawned(process_group) => {
+            ProviderEvent::Spawned { group, started } => {
                 self.host.db.execute(
-                    "UPDATE provider_runs SET process_group=?2 WHERE id=?1",
-                    params![run, process_group],
+                    "UPDATE provider_runs SET process_group=?2,process_started=?3 WHERE id=?1",
+                    params![run, group, started],
                 )?;
             }
             ProviderEvent::Session(provider_id) => {
@@ -1751,7 +1800,7 @@ impl Actor {
             {
                 continue;
             }
-            if let Some(reason) = self.host.hold_reason(&session)? {
+            if let Some(reason) = self.hold_reason(&session)? {
                 // One session's hold must never stop the others from being scheduled.
                 if let Err(error) = self.hold_turn(&session, &input, &reason) {
                     eprintln!("Holding {}: {error:#}", session.id);
@@ -1858,7 +1907,7 @@ impl Actor {
         for (member, input) in inputs {
             // A held verifier reports blocked and never runs on a substitute; the rest of the
             // round runs, so the round ends and its blocked outcome wakes the coordinator.
-            if let Some(reason) = self.host.hold_reason(&member)? {
+            if let Some(reason) = self.hold_reason(&member)? {
                 if let Err(error) = self.hold_turn(&member, &input, &reason) {
                     eprintln!("Holding {}: {error:#}", member.id);
                 }
@@ -1870,6 +1919,37 @@ impl Actor {
             }
         }
         Ok(())
+    }
+    /// Why this session's turn cannot start now, if anything holds it.
+    fn hold_reason(&mut self, session: &Session) -> Result<Option<String>> {
+        if let Some(group) = self.leftover_process(session)? {
+            self.wake(now() + LEFTOVER_RETRY_MS);
+            return Ok(Some(format!(
+                "Provider process {group} from an earlier turn is still running. No turn starts until it exits or its inbox note is dismissed."
+            )));
+        }
+        self.host.hold_reason(session)
+    }
+    /// The process group startup left running for this session, while its inbox note is open.
+    /// Settles the note once the group has exited.
+    fn leftover_process(&mut self, session: &Session) -> Result<Option<i64>> {
+        let note = self
+            .host
+            .db
+            .query_row(
+                "SELECT a.id,r.process_group FROM attention a JOIN provider_runs r ON r.id=substr(a.operation_id,length(?2)+1) WHERE a.session_id=?1 AND substr(a.operation_id,1,length(?2))=?2 AND json_extract(a.data,'$.answer') IS NULL",
+                params![session.id, LEFTOVER_PROCESS],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((note, group)) = note else {
+            return Ok(None);
+        };
+        if provider::leftover_runs(group) {
+            return Ok(Some(group));
+        }
+        self.host.resolve_attention(&note, "The process exited")?;
+        Ok(None)
     }
     /// Keeps the input queued, blocks the session and tells its parent once per held input,
     /// through the agent's own `report` path so the parent wakes.
@@ -4921,6 +5001,150 @@ mod tests {
             (outcome.as_str(), error.as_str()),
             ("interrupted", STOPPED_UNEXPECTEDLY)
         );
+    }
+
+    /// A process in its own group, as a provider runs, standing in for one a stopped host left
+    /// running. Dropping it kills only this process.
+    struct LeftoverProcess(std::process::Child);
+    impl LeftoverProcess {
+        fn spawn() -> Self {
+            use std::os::unix::process::CommandExt;
+            let sleep = std::process::Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn();
+            Self(sleep.unwrap())
+        }
+        fn group(&self) -> i64 {
+            i64::from(self.0.id())
+        }
+        fn started(&self) -> i64 {
+            provider::process_start(self.0.id() as i32).unwrap()
+        }
+    }
+    impl Drop for LeftoverProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// An actor whose unfinished run took message `m1` and recorded `process` as its provider,
+    /// with the start time `kept`.
+    fn actor_with_leftover(
+        process: &LeftoverProcess,
+        kept: Option<i64>,
+    ) -> (tempfile::TempDir, Actor, Session, String) {
+        let (home, actor, session, run) = actor_with_turn();
+        actor
+            .host
+            .db
+            .execute(
+                "UPDATE provider_runs SET messages='[\"m1\"]',process_group=?2,process_started=?3 WHERE id=?1",
+                params![run, process.group(), kept],
+            )
+            .unwrap();
+        let session = actor.host.session(&session).unwrap();
+        (home, actor, session, run)
+    }
+
+    fn process_stopped_at(actor: &Actor, run: &str) -> Option<i64> {
+        let (outcome, stopped_at): (String, Option<i64>) = actor
+            .host
+            .db
+            .query_row(
+                "SELECT outcome,json_extract(detail,'$.process_stopped_at') FROM provider_runs WHERE id=?1",
+                [run],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "interrupted");
+        stopped_at
+    }
+
+    #[test]
+    fn startup_stops_the_process_an_unfinished_run_left_running() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) =
+            actor_with_leftover(&process, Some(process.started()));
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert_eq!(process.0.wait().unwrap().signal(), Some(libc::SIGTERM));
+        let stopped = schedules::rfc3339(process_stopped_at(&actor, &run).unwrap());
+        let open = actor.host.open_attention(&session.project_id).unwrap();
+        assert!(open.is_empty(), "{open:?}");
+        assert_eq!(actor.hold_reason(&session).unwrap(), None);
+        // Both notes an agent can get for the run say its process was stopped, and when.
+        let expected = format!("was stopped at startup ({stopped})");
+        let retry = interrupted_turn_note(&actor.host, "m1").unwrap();
+        assert!(retry.contains(&run) && retry.contains(&expected), "{retry}");
+        let resume = resume_note(&actor.host, &session.id, now() + 1, now() + 1, &[]).unwrap();
+        assert!(resume.contains(&expected), "{resume}");
+    }
+
+    #[test]
+    fn startup_signals_no_process_it_cannot_confirm_and_holds_its_session_until_it_exits() {
+        // The run kept no start time, or the id now belongs to a process started at another time.
+        let kept: [fn(i64) -> Option<i64>; 2] = [|_| None, |started| Some(started + 1)];
+        for kept in kept {
+            let mut process = LeftoverProcess::spawn();
+            let (_home, mut actor, session, run) =
+                actor_with_leftover(&process, kept(process.started()));
+
+            recover_unfinished_turns(&mut actor.host).unwrap();
+
+            // A signalled group is waited for, so a process still running was never signalled.
+            assert_eq!(process.0.try_wait().unwrap(), None);
+            assert_eq!(process_stopped_at(&actor, &run), None);
+            let retry = interrupted_turn_note(&actor.host, "m1").unwrap();
+            assert!(!retry.contains("stopped at startup"), "{retry}");
+            let group = process.group().to_string();
+            let notes = actor.host.open_attention(&session.project_id).unwrap();
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert_eq!(notes[0].operation_id, format!("{LEFTOVER_PROCESS}{run}"));
+            assert_eq!(notes[0].session_id, session.id);
+            assert!(notes[0].prompt.contains(&session.name), "{notes:?}");
+            assert!(notes[0].prompt.contains(&group), "{notes:?}");
+            let reason = actor.hold_reason(&session).unwrap().unwrap();
+            assert!(reason.contains(&group), "{reason}");
+            // The process's exit sends no event, so the hold arms its own wake-up.
+            assert!(actor.wake_at.is_some_and(|at| at > now()));
+
+            drop(process);
+            assert_eq!(actor.hold_reason(&session).unwrap(), None);
+            let open = actor.host.open_attention(&session.project_id).unwrap();
+            assert!(open.is_empty(), "{open:?}");
+        }
+    }
+
+    #[test]
+    fn dismissing_its_note_releases_a_session_held_beside_a_leftover_process() {
+        let mut process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, _) = actor_with_leftover(&process, None);
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        let note = actor.host.open_attention(&session.project_id).unwrap();
+        assert!(actor.hold_reason(&session).unwrap().is_some());
+
+        actor.host.dismiss_attention(&note[0].id).unwrap();
+
+        assert_eq!(actor.hold_reason(&session).unwrap(), None);
+        assert_eq!(process.0.try_wait().unwrap(), None);
+    }
+
+    #[test]
+    fn startup_raises_nothing_for_a_process_that_already_exited() {
+        let process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) =
+            actor_with_leftover(&process, Some(process.started()));
+        drop(process);
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert_eq!(process_stopped_at(&actor, &run), None);
+        let open = actor.host.open_attention(&session.project_id).unwrap();
+        assert!(open.is_empty(), "{open:?}");
     }
 
     #[test]
