@@ -112,7 +112,7 @@ impl Workspace {
             let Some(status) = self.detection.get(&provider) else {
                 continue;
             };
-            lines = lines.child(match models::fix_hint(provider, status) {
+            lines = lines.child(match models::welcome_fix_hint(provider, status) {
                 None => {
                     hint(format!("● {}", signed_in_label(provider, status)), p).text_color(p.green)
                 }

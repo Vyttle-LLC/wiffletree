@@ -71,6 +71,8 @@ While no model selection is saved, the start screen SHALL show a welcome that le
 - **No CLI signed in:** three steps, Sign in to a CLI, Set up your models and Start a project; each provider's one-line fix; and a Check again button that runs detection again.
 - **Detection not finished:** a checking state. The no-CLI welcome SHALL NOT show before every provider has a result.
 
+A fix on the welcome SHALL NOT name a control the welcome does not have: a signed-out CLI's fix says to run its sign-in command, without the Models page's Refresh.
+
 While no model selection is saved, New project SHALL NOT be offered: the start screen has no New project button, the sidebar's New project button is dimmed and says it is available once models are set up, and that button and the New Project shortcut SHALL open the Models page without asking the host to create a project. The sidebar SHALL say to set up models to create the first project and SHALL mark its Models entry. After the first save, without a restart, the start screen SHALL offer a project and New project SHALL work everywhere.
 
 #### Scenario: Both signed in

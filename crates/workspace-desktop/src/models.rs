@@ -211,13 +211,21 @@ pub fn status_label(status: &ProviderStatus) -> String {
 }
 /// The one-line fix for a provider a suggested setup left out, or `None` when it is usable.
 pub fn fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
+    fix(provider, status, ", then Refresh")
+}
+/// The same fix for the welcome, which has no Refresh to point at.
+pub fn welcome_fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
+    fix(provider, status, "")
+}
+/// `next` is what a signed-out CLI's fix says to do after signing in.
+fn fix(provider: Provider, status: &ProviderStatus, next: &str) -> Option<String> {
     let (product, sign_in) = match provider {
         Provider::Claude => ("Claude Code", "claude auth login"),
         Provider::Codex => ("Codex", "codex login"),
     };
     match (status.installed, status.signed_in) {
         (true, true) => None,
-        (true, false) => Some(format!("Run {sign_in}, then Refresh to add it.")),
+        (true, false) => Some(format!("Run {sign_in}{next} to add it.")),
         (false, _) => Some(format!("Install {product} and run {sign_in}.")),
     }
 }
@@ -438,6 +446,20 @@ mod tests {
         assert_eq!(
             fix_hint(Provider::Codex, &missing).unwrap(),
             "Install Codex and run codex login."
+        );
+        // The welcome has no Refresh, so its fix names none; the rest is the same text.
+        assert_eq!(welcome_fix_hint(Provider::Claude, &signed_in), None);
+        assert_eq!(
+            welcome_fix_hint(Provider::Codex, &signed_out).unwrap(),
+            "Run codex login to add it."
+        );
+        assert_eq!(
+            welcome_fix_hint(Provider::Claude, &signed_out).unwrap(),
+            "Run claude auth login to add it."
+        );
+        assert_eq!(
+            welcome_fix_hint(Provider::Claude, &missing),
+            fix_hint(Provider::Claude, &missing)
         );
     }
     fn detected(signed_in: &[Provider]) -> Detection {
