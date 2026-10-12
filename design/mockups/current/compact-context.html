@@ -93,6 +93,8 @@ svg.i{width:13px;height:13px;flex:none}
 .compacted .line{display:flex;align-items:center;gap:5px}
 .compacted .line b{font-weight:500;color:var(--text)}
 .compacted .kept{margin-left:18px}
+.compacted.failed{margin-left:0}
+.compacted.failed .line,.compacted.failed .line b{color:var(--red)}
 /* Usage ledger row. */
 .tiles{display:flex;gap:8px}
 .tile{flex:1;min-width:0;padding:8px 10px;border:1px solid color-mix(in srgb,var(--edge) 40%,transparent);border-radius:8px;background:var(--base)}
@@ -320,7 +322,7 @@ svg.i{width:13px;height:13px;flex:none}
           <div class="pad" style="display:grid;gap:10px">
             <div class="section"><span class="eyebrow">RECORDED IN THIS APP</span></div>
             <div class="tiles">
-              <div class="tile"><span class="hint">Requests</span><b>1,284</b><span class="hint">includes 1 compaction</span></div>
+              <div class="tile"><span class="hint">Requests</span><b>1,284</b><span class="hint">0 partial</span></div>
               <div class="tile"><span class="hint">Tokens</span><b>48.2M</b><span class="hint">2026-10-12</span></div>
             </div>
             <div class="card">
@@ -336,7 +338,7 @@ svg.i{width:13px;height:13px;flex:none}
         </div>
       </div>
     </div>
-    <p class="caption"><b>Done.</b> The work stream gets one line, <b>Context compacted · 812k → 41k</b>, with a “Kept:” line only when a note was given. It has no reply and is not a turn; the message that was waiting is delivered right after it and starts the next turn. The card is measured again and shows the lower figure in green, and the header chip follows. The compaction’s tokens are one row in the usage ledger. The Usage page shows totals today, so the row is drawn here as a record to make the accounting visible; the page itself would only gain the request in its counts.</p>
+    <p class="caption"><b>Done.</b> The work stream gets one line, <b>Context compacted · 812k → 41k</b>, with a “Kept:” line only when a note was given. It has no reply and is not a turn; the message that was waiting is delivered right after it and starts the next turn. The card is measured again and shows the lower figure in green, and the header chip follows. The compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. The Usage page gains nothing new: the row simply counts in its existing totals. The record is drawn here only to make the accounting visible.</p>
   </section>
 
   <!-- 6. Nothing to compact, or failed -->
@@ -370,9 +372,13 @@ svg.i{width:13px;height:13px;flex:none}
           </div>
           <div class="action"><span class="hint">Replace the conversation with a summary.</span><span class="btn">Compact…</span></div>
         </div>
+        <div>
+          <p class="step">The failure’s line in the work stream</p>
+          <div class="compacted failed"><div class="line"><svg class="i"><use href="#fold"/></svg><b>Compaction failed</b> · context unchanged</div></div>
+        </div>
       </div>
     </div>
-    <p class="caption"><b>No change.</b> Two cards, bar and legend folded away. <b>Top:</b> Claude had too little to summarize, said quietly with Claude’s own reason. <b>Bottom:</b> a real failure, in red. Both say the context is unchanged, both leave Compact available, and neither adds a line to the work stream. The card is measured again either way.</p>
+    <p class="caption"><b>No change.</b> Two cards, bar and legend folded away. <b>Top:</b> Claude had too little to summarize, said quietly with Claude’s own reason. <b>Bottom:</b> a real failure, in red. Both say the context is unchanged and both leave Compact available. A failure also leaves one line in the work stream, <b>Compaction failed · context unchanged</b>, so it is seen without opening the card; “nothing to compact” leaves no line. The card is measured again either way.</p>
   </section>
 
   <!-- 7. Codex -->
@@ -395,7 +401,7 @@ svg.i{width:13px;height:13px;flex:none}
             <span><i style="background:var(--yellow)"></i><em>conversation</em><b>201k</b><em>74%</em></span>
             <span><i class="free"></i><em>free</em><b>60k</b><em>22%</em></span>
           </div>
-          <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-5.5 · 2m ago</div>
+          <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-6.1-sol · 2m ago</div>
           <div class="action"><span class="hint">Not available for Codex agents: the Codex CLI has no compact command.</span><span class="btn off">Compact…</span></div>
         </div>
       </div>
