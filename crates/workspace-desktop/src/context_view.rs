@@ -1,25 +1,177 @@
-//! How full the selected session's context window is, and with what.
+//! How full the selected session's context window is, and with what; and the Compact action
+//! that asks Claude to replace the conversation with a summary.
 use super::*;
-use gpui_component::{Disableable, button::ButtonVariants};
-use ui::{age, card, hint, icon, section};
+use gpui_component::{Disableable, Sizable, button::ButtonVariants, spinner::Spinner};
+use ui::{age, card, hint, icon, progress_bar, section};
 use workspace_host::context::{ContextUsage, Probe};
 
-/// Whole numbers stay whole: `90k`, `4.2k`, `1M`, `601`.
-fn compact(tokens: u64) -> String {
-    let scaled = |value: f64, unit: &str| {
-        if value >= 10. || value.fract() < 0.05 {
-            format!("{value:.0}{unit}")
-        } else {
-            format!("{value:.1}{unit}")
+/// The Compact form on a session's Context card, while it is open.
+#[derive(Default)]
+pub(super) struct CompactForm {
+    /// What was typed, kept while another session is selected or the host is asked.
+    note: String,
+    /// Why the host refused the request, shown in the form.
+    refused: Option<String>,
+    sending: bool,
+}
+
+/// What a measurement is as fresh as: the session's last finished turn and the outcome of
+/// its last compaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Measured {
+    turn: Option<i64>,
+    compaction: Option<i64>,
+}
+impl Measured {
+    fn of(runtime: &SessionRuntime) -> Self {
+        Self {
+            turn: runtime.last_finished_at,
+            compaction: runtime.last_compaction.as_ref().map(|outcome| outcome.at),
         }
-    };
-    if tokens >= 1_000_000 {
-        scaled(tokens as f64 / 1e6, "M")
-    } else if tokens >= 1000 {
-        scaled(tokens as f64 / 1e3, "k")
-    } else {
-        tokens.to_string()
     }
+}
+
+fn compacting(runtime: Option<&SessionRuntime>) -> bool {
+    let request = runtime.and_then(|r| r.compaction.as_ref());
+    request.is_some_and(|c| c.state == CompactionState::Running)
+}
+
+/// Whether to measure the context now. A finished turn is measured once the agent has stopped
+/// working. A compaction's outcome is measured at once, even while the next turn runs, so the
+/// card never shows the old figure beside "Context compacted". Never while one is compacting.
+fn measure_now(seen: Option<Measured>, runtime: &SessionRuntime, working: bool) -> bool {
+    let now = Measured::of(runtime);
+    let new_outcome =
+        now.compaction.is_some() && seen.map(|s| s.compaction) != Some(now.compaction);
+    let new_turn = seen.map(|s| s.turn) != Some(now.turn);
+    !compacting(Some(runtime)) && (new_outcome || (new_turn && !working))
+}
+
+/// The Compact row: its hint, the button's label, and whether the button works.
+fn compact_action(
+    provider: Provider,
+    has_session: bool,
+    working: bool,
+) -> (&'static str, &'static str, bool) {
+    const HINT: &str = "Replace the conversation with a summary.";
+    match (provider, has_session, working) {
+        (Provider::Codex, _, _) => (
+            "Not available for Codex agents: the Codex CLI has no compact command.",
+            "Compact…",
+            false,
+        ),
+        (Provider::Claude, false, _) => (
+            "Available after this agent’s first turn.",
+            "Compact…",
+            false,
+        ),
+        (Provider::Claude, true, true) => (HINT, "Compact after this turn", true),
+        (Provider::Claude, true, false) => (HINT, "Compact…", true),
+    }
+}
+
+/// The form's consequence line and its confirm button.
+fn compact_form_text(working: bool) -> (&'static str, &'static str) {
+    if working {
+        (
+            "This agent is working. The compaction runs when this turn ends, before any waiting messages are delivered. It can’t be undone and uses one model call.",
+            "Compact after this turn",
+        )
+    } else {
+        (
+            "Claude replaces this agent’s conversation with a summary. This can’t be undone and uses one model call.",
+            "Compact now",
+        )
+    }
+}
+
+/// What a queued compaction waits for: its turn, or an agent that is paused, stopped or
+/// interrupted to run again.
+fn queued_text(working: bool) -> &'static str {
+    if working {
+        "Compacts when this turn ends"
+    } else {
+        "Compacts when this agent runs again"
+    }
+}
+
+/// What the header chip adds after its percentage while a compaction waits or runs.
+fn chip_note(compaction: Option<&Compaction>) -> Option<&'static str> {
+    Some(match compaction?.state {
+        CompactionState::Queued => "compact queued",
+        CompactionState::Running => "compacting",
+    })
+}
+
+/// The notice a compaction's outcome leaves on the card: its title, its text, and whether it is
+/// a failure. A compacted context needs none; the lower figure is the result.
+fn compaction_notice(outcome: &CompactionOutcome) -> Option<(&'static str, String, bool)> {
+    let reason = outcome.reason.as_deref().map(|reason| {
+        let reason = conversation::first_line(reason, 180);
+        if reason.ends_with(['.', '!', '?', '…']) {
+            format!("{reason} ")
+        } else {
+            format!("{reason}. ")
+        }
+    });
+    let reason = reason.unwrap_or_default();
+    match outcome.result {
+        CompactionResult::Compacted => None,
+        CompactionResult::NothingToCompact => {
+            let said = if reason.is_empty() {
+                ""
+            } else {
+                "Claude said: "
+            };
+            Some((
+                "Nothing to compact",
+                format!("{said}{reason}The context is unchanged."),
+                false,
+            ))
+        }
+        CompactionResult::Failed => Some((
+            "Compaction failed",
+            format!("{reason}The context is unchanged."),
+            true,
+        )),
+        CompactionResult::Interrupted => Some((
+            "Compaction interrupted",
+            "Wiffletree stopped while Claude was compacting. The figure above was measured again."
+                .into(),
+            true,
+        )),
+    }
+}
+
+/// A block under the measurement, marked along its left edge in `color`.
+fn notice(color: Hsla) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .px(px(10.))
+        .py(px(7.))
+        .border_l_2()
+        .border_color(color)
+        .rounded_r(px(6.))
+        .bg(color.opacity(0.07))
+        .text_size(px(12.))
+}
+
+fn notice_title(title: &'static str) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .font_weight(FontWeight::MEDIUM)
+        .child(title)
+}
+
+/// The part of the card under the measurement, set off by a rule.
+fn below_measurement(p: Palette) -> Div {
+    div()
+        .pt(px(9.))
+        .border_t_1()
+        .border_color(p.edge.opacity(0.4))
 }
 
 fn percent(tokens: u64, window: u64) -> u64 {
@@ -49,16 +201,92 @@ fn swatch(color: Hsla) -> Div {
 }
 
 impl Workspace {
-    /// Probes the selected session when its last turn is newer than what is shown.
+    /// Probes the selected session when its last turn or its last compaction is newer than
+    /// what is shown; see `measure_now`.
     pub(super) fn sync_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.selected_session() else {
             return;
         };
-        let finished = self.runtime(&session.id).and_then(|r| r.last_finished_at);
-        let current = self.context_seen.get(&session.id) == Some(&finished);
-        if !current && session.status != Status::Working {
+        let runtime = self.runtime(&session.id).cloned().unwrap_or_default();
+        let seen = self.context_seen.get(&session.id).copied();
+        if measure_now(seen, &runtime, session.status == Status::Working) {
             self.refresh_context(window, cx);
         }
+    }
+
+    /// Keeps what was typed in the Compact form with its session when another is selected.
+    pub(super) fn swap_compact_note(
+        &mut self,
+        old: Option<&str>,
+        new: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = self.compact_note.read(cx).value().to_string();
+        if let Some(form) = old.and_then(|old| self.compact_forms.get_mut(old)) {
+            form.note = typed;
+        }
+        let note = self.compact_forms.get(new).map(|form| form.note.clone());
+        self.compact_note.update(cx, |input, cx| {
+            input.set_value(note.unwrap_or_default(), window, cx)
+        });
+    }
+
+    fn open_compact_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected.clone() {
+            self.compact_forms.insert(id, CompactForm::default());
+            self.compact_note.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
+            cx.notify();
+        }
+    }
+
+    fn close_compact_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = &self.selected {
+            self.compact_forms.remove(id);
+            cx.notify();
+        }
+    }
+
+    /// Sends the request; nothing reaches the host before this.
+    fn confirm_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session_id) = self.selected.clone() else {
+            return;
+        };
+        let note = self.compact_note.read(cx).value().to_string();
+        let form = self.compact_forms.entry(session_id.clone()).or_default();
+        *form = CompactForm {
+            note: note.clone(),
+            refused: None,
+            sending: true,
+        };
+        let instructions = (!note.trim().is_empty()).then_some(note);
+        self.request(
+            Command::CompactContext {
+                session_id,
+                instructions,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// The host stored the request, so the card shows it in the form's place.
+    pub(super) fn compact_accepted(&mut self, session_id: &str) {
+        self.compact_forms.remove(session_id);
+    }
+
+    /// The host refused the request: its reason shows in the form, with what was typed.
+    pub(super) fn compact_refused(&mut self, session_id: &str, reason: &str) {
+        let form = self.compact_forms.entry(session_id.into()).or_default();
+        form.refused = Some(reason.into());
+        form.sending = false;
+    }
+
+    pub(super) fn compacting(&self, session_id: &str) -> bool {
+        compacting(self.runtime(session_id))
     }
 
     pub(super) fn refresh_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -70,7 +298,7 @@ impl Workspace {
         }
         let runtime = self.runtime(&session.id).cloned().unwrap_or_default();
         self.context_seen
-            .insert(session.id.clone(), runtime.last_finished_at);
+            .insert(session.id.clone(), Measured::of(&runtime));
         let (Some(provider_session), Some(directory), Some(profile)) = (
             runtime.provider_session_id,
             runtime.directory,
@@ -125,6 +353,9 @@ impl Workspace {
         let usage = self.context.get(&session.id)?.as_ref().ok()?;
         let filled = percent(usage.used, usage.window);
         let color = fill_color(filled, p);
+        let request = self
+            .runtime(&session.id)
+            .and_then(|r| r.compaction.as_ref());
         Some(
             div()
                 .id("context-chip")
@@ -158,8 +389,161 @@ impl Workspace {
                                 .bg(color),
                         ),
                 )
-                .child(format!("{filled}%")),
+                .child(format!("{filled}%"))
+                .when_some(chip_note(request), |chip, note| {
+                    chip.child(
+                        div()
+                            .pl(px(6.))
+                            .border_l_1()
+                            .border_color(color.opacity(0.35))
+                            .child(note),
+                    )
+                }),
         )
+    }
+
+    /// The Compact row, or in its place the form, the waiting request or the running
+    /// compaction; above it, the notice the last compaction left.
+    fn compact_section(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+        let runtime = self.runtime(&session.id);
+        let working = session.status == Status::Working;
+        if let Some(request) = runtime.and_then(|r| r.compaction.as_ref()) {
+            return match request.state {
+                CompactionState::Running => notice(p.focus)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Spinner::new()
+                                    .icon(icon("loader-circle"))
+                                    .with_size(px(13.))
+                                    .color(p.focus),
+                            )
+                            .child(notice_title("Compacting…")),
+                    )
+                    .child(progress_bar(None, BarState::Indeterminate, 4., p))
+                    .child(hint(
+                        "Messages you send now are delivered when it finishes.",
+                        p,
+                    )),
+                CompactionState::Queued => notice(p.focus)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icon("clock").size(px(13.)).text_color(p.focus))
+                            .child(notice_title(queued_text(working)))
+                            .child(
+                                button("compact-withdraw")
+                                    .outline()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|v, _, w, c| {
+                                        if let Some(session_id) = v.selected.clone() {
+                                            v.request(
+                                                Command::CancelCompaction { session_id },
+                                                w,
+                                                c,
+                                            );
+                                        }
+                                    })),
+                            ),
+                    )
+                    .when_some(request.instructions.as_ref(), |d, kept| {
+                        d.child(hint(format!("Keeping: {kept}"), p))
+                    }),
+            };
+        }
+        let outcome = runtime.and_then(|r| r.last_compaction.as_ref());
+        let left = outcome
+            .and_then(compaction_notice)
+            .map(|(title, text, failed)| {
+                let color = if failed { p.red } else { p.subtle };
+                notice(color)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(notice_title(title))
+                            .child(button("compact-dismiss").ghost().label("Dismiss").on_click(
+                                cx.listener(|v, _, w, c| {
+                                    if let Some(session_id) = v.selected.clone() {
+                                        v.request(Command::DismissCompaction { session_id }, w, c);
+                                    }
+                                }),
+                            )),
+                    )
+                    .child(hint(text, p))
+            });
+        let action = match self.compact_forms.get(&session.id) {
+            Some(form) => {
+                let (consequence, confirm) = compact_form_text(working);
+                below_measurement(p)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .text_size(px(12.))
+                            .child(div().font_weight(FontWeight::MEDIUM).child("What to keep"))
+                            .child(div().text_color(p.subtle).child("· optional")),
+                    )
+                    .child(Textarea::new(&self.compact_note).w_full())
+                    .child(hint(consequence, p))
+                    .when_some(form.refused.clone(), |d, reason| {
+                        d.child(hint(reason, p).text_color(p.red))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                button("compact-cancel")
+                                    .ghost()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|v, _, _, c| v.close_compact_form(c))),
+                            )
+                            .child(
+                                button("compact-confirm")
+                                    .primary()
+                                    .label(confirm)
+                                    .loading(form.sending)
+                                    .on_click(cx.listener(|v, _, w, c| v.confirm_compact(w, c))),
+                            ),
+                    )
+            }
+            None => {
+                let has_session = runtime.is_some_and(|r| r.provider_session_id.is_some());
+                let (reason, label, enabled) =
+                    compact_action(session.provider, has_session, working);
+                below_measurement(p)
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    // In a narrow panel the button wraps under the hint instead of squeezing it.
+                    .child(hint(reason, p).flex_1().min_w(px(120.)))
+                    .child(
+                        button("compact")
+                            .outline()
+                            .label(label)
+                            .disabled(!enabled)
+                            .on_click(cx.listener(|v, _, w, c| v.open_compact_form(w, c))),
+                    )
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .children(left)
+            .child(action)
     }
 
     fn context_breakdown(usage: &ContextUsage, p: Palette) -> Div {
@@ -184,7 +568,7 @@ impl Workspace {
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(compact(tokens)),
+                        .child(compact_tokens(tokens)),
                 )
                 .child(div().text_color(p.subtle).child(share(tokens, window)))
         };
@@ -217,7 +601,9 @@ impl Workspace {
                 .xsmall()
                 .icon(icon("refresh").size(px(13.)))
                 .loading(pending)
-                .disabled(pending || session.status == Status::Working)
+                .disabled(
+                    pending || session.status == Status::Working || self.compacting(&session.id),
+                )
                 .tooltip("Measure again · no model call")
                 .on_click(cx.listener(|v, _, w, c| v.refresh_context(w, c))),
         );
@@ -237,10 +623,10 @@ impl Workspace {
                 let limits = match usage.compacts_at {
                     Some(point) => format!(
                         "of {} · compacts at {}",
-                        compact(usage.window),
-                        compact(point)
+                        compact_tokens(usage.window),
+                        compact_tokens(point)
                     ),
-                    None => format!("of {}", compact(usage.window)),
+                    None => format!("of {}", compact_tokens(usage.window)),
                 };
                 div()
                     .flex()
@@ -255,7 +641,7 @@ impl Workspace {
                                 div()
                                     .text_size(px(15.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(compact(usage.used)),
+                                    .child(compact_tokens(usage.used)),
                             )
                             .child(hint(limits, p).flex_1().min_w_0())
                             .child(
@@ -290,21 +676,202 @@ impl Workspace {
                     ))
             }
         };
-        card(p).child(header).child(body)
+        card(p)
+            .child(header)
+            .child(body)
+            .child(self.compact_section(session, p, cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compact, percent};
+    use super::{
+        Measured, chip_note, compact_action, compact_form_text, compacting, compaction_notice,
+        measure_now, percent, queued_text,
+    };
+    use workspace_core::{
+        Compaction, CompactionOutcome, CompactionResult, CompactionState, Provider, SessionRuntime,
+    };
+
+    fn runtime(
+        turn: Option<i64>,
+        outcome: Option<i64>,
+        state: Option<CompactionState>,
+    ) -> SessionRuntime {
+        SessionRuntime {
+            last_finished_at: turn,
+            last_compaction: outcome.map(|at| CompactionOutcome {
+                result: CompactionResult::Compacted,
+                reason: None,
+                at,
+            }),
+            compaction: state.map(|state| Compaction {
+                instructions: None,
+                requested_at: 0,
+                state,
+            }),
+            ..Default::default()
+        }
+    }
 
     #[test]
-    fn token_counts_read_like_the_provider_prints_them() {
-        assert_eq!(compact(90_000), "90k");
-        assert_eq!(compact(4_200), "4.2k");
-        assert_eq!(compact(1_000_000), "1M");
-        assert_eq!(compact(601), "601");
-        assert_eq!(compact(987_000), "987k");
+    fn a_finished_turn_is_measured_once_the_agent_stops_and_a_compaction_outcome_at_once() {
+        let seen = |turn, compaction| Some(Measured { turn, compaction });
+        // A session never measured, and a newer turn, wait for the agent to stop working.
+        assert!(measure_now(None, &runtime(Some(1), None, None), false));
+        assert!(!measure_now(None, &runtime(Some(1), None, None), true));
+        assert!(measure_now(
+            seen(Some(1), None),
+            &runtime(Some(2), None, None),
+            false
+        ));
+        assert!(!measure_now(
+            seen(Some(1), None),
+            &runtime(Some(2), None, None),
+            true
+        ));
+        assert!(!measure_now(
+            seen(Some(2), None),
+            &runtime(Some(2), None, None),
+            false
+        ));
+        // Working with a newer compaction outcome: measured during the turn that followed.
+        assert!(measure_now(
+            seen(Some(2), None),
+            &runtime(Some(2), Some(3), None),
+            true
+        ));
+        assert!(measure_now(None, &runtime(Some(2), Some(3), None), true));
+        // Once, not on every refresh, and not again when the notice is dismissed.
+        assert!(!measure_now(
+            seen(Some(2), Some(3)),
+            &runtime(Some(2), Some(3), None),
+            true
+        ));
+        assert!(!measure_now(
+            seen(Some(2), Some(3)),
+            &runtime(Some(2), None, None),
+            true
+        ));
+        // Never while a compaction runs, whatever is newer.
+        let running = runtime(Some(4), Some(3), Some(CompactionState::Running));
+        assert!(!measure_now(seen(Some(2), None), &running, false));
+        // A queued one changes nothing about a finished turn's measurement.
+        let queued = runtime(Some(4), None, Some(CompactionState::Queued));
+        assert!(measure_now(seen(Some(2), None), &queued, false));
+    }
+
+    #[test]
+    fn the_compact_row_says_why_it_is_off_and_what_it_does_now() {
+        const HINT: &str = "Replace the conversation with a summary.";
+        assert_eq!(
+            compact_action(Provider::Claude, true, false),
+            (HINT, "Compact…", true)
+        );
+        assert_eq!(
+            compact_action(Provider::Claude, true, true),
+            (HINT, "Compact after this turn", true)
+        );
+        for working in [false, true] {
+            assert_eq!(
+                compact_action(Provider::Claude, false, working),
+                (
+                    "Available after this agent’s first turn.",
+                    "Compact…",
+                    false
+                )
+            );
+            for has_session in [false, true] {
+                assert_eq!(
+                    compact_action(Provider::Codex, has_session, working),
+                    (
+                        "Not available for Codex agents: the Codex CLI has no compact command.",
+                        "Compact…",
+                        false
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_form_names_the_cost_and_where_a_queued_compaction_falls() {
+        let (line, confirm) = compact_form_text(false);
+        assert_eq!(confirm, "Compact now");
+        assert_eq!(
+            line,
+            "Claude replaces this agent’s conversation with a summary. This can’t be undone and uses one model call."
+        );
+        let (line, confirm) = compact_form_text(true);
+        assert_eq!(confirm, "Compact after this turn");
+        for said in [
+            "runs when this turn ends, before any waiting messages are delivered",
+            "can’t be undone",
+            "one model call",
+        ] {
+            assert!(line.contains(said), "{said}");
+        }
+        assert_eq!(queued_text(true), "Compacts when this turn ends");
+        assert_eq!(queued_text(false), "Compacts when this agent runs again");
+    }
+
+    #[test]
+    fn the_chip_names_a_queued_or_running_compaction_and_nothing_otherwise() {
+        let queued = runtime(None, None, Some(CompactionState::Queued));
+        let running = runtime(None, None, Some(CompactionState::Running));
+        assert_eq!(
+            chip_note(queued.compaction.as_ref()),
+            Some("compact queued")
+        );
+        assert_eq!(chip_note(running.compaction.as_ref()), Some("compacting"));
+        assert_eq!(chip_note(None), None);
+        assert!(compacting(Some(&running)));
+        assert!(!compacting(Some(&queued)) && !compacting(None));
+    }
+
+    #[test]
+    fn each_outcome_but_a_compacted_one_leaves_its_notice() {
+        let outcome = |result, reason: Option<&str>| CompactionOutcome {
+            result,
+            reason: reason.map(str::to_owned),
+            at: 1,
+        };
+        assert_eq!(
+            compaction_notice(&outcome(CompactionResult::Compacted, None)),
+            None
+        );
+        assert_eq!(
+            compaction_notice(&outcome(
+                CompactionResult::NothingToCompact,
+                Some("Not enough messages to compact.")
+            )),
+            Some((
+                "Nothing to compact",
+                "Claude said: Not enough messages to compact. The context is unchanged.".into(),
+                false
+            ))
+        );
+        assert_eq!(
+            compaction_notice(&outcome(
+                CompactionResult::Failed,
+                Some("Claude stopped before finishing: the connection was lost\nTraceback")
+            )),
+            Some((
+                "Compaction failed",
+                "Claude stopped before finishing: the connection was lost. The context is unchanged."
+                    .into(),
+                true
+            ))
+        );
+        assert_eq!(
+            compaction_notice(&outcome(CompactionResult::Interrupted, None)),
+            Some((
+                "Compaction interrupted",
+                "Wiffletree stopped while Claude was compacting. The figure above was measured again."
+                    .into(),
+                true
+            ))
+        );
     }
 
     #[test]

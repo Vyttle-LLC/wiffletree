@@ -812,6 +812,9 @@ pub fn host_notice(id: &str) -> Option<&'static str> {
 }
 /// The id prefix of the PR watcher's messages.
 pub const PR_NOTICE_PREFIX: &str = "pr:";
+/// The id prefix of the line a compaction leaves in its session's conversation; the rest is
+/// the run's id. A session's other messages to itself are replies, under `output:` ids.
+pub const COMPACTION_LINE_PREFIX: &str = "compaction:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
 /// worktrees and migration notices. Inbox answers (`answer:`) carry the human's words.
 const HOST_NOTICE_PREFIXES: [&str; 3] = ["verification:", "worktree-kept:", "migration:"];
@@ -1056,6 +1059,46 @@ pub struct SessionRuntime {
     pub stopped_by: Option<Stopper>,
     pub last_started_at: Option<i64>,
     pub last_finished_at: Option<i64>,
+    /// The person's request to compact this session's context, until it has run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Compaction>,
+    /// How the last compaction ended, until it is dismissed or another is requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction: Option<CompactionOutcome>,
+}
+
+/// A request to replace a session's conversation with the provider's summary of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compaction {
+    /// What the summary should keep, on one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    pub requested_at: i64,
+    pub state: CompactionState,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionState {
+    /// Waiting for the session's turn to end, or for the session to run again.
+    Queued,
+    Running,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionOutcome {
+    pub result: CompactionResult,
+    /// The provider's own words for an outcome that changed nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub at: i64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionResult {
+    Compacted,
+    NothingToCompact,
+    Failed,
+    /// The host stopped while it ran; it is never run again.
+    Interrupted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1116,6 +1159,19 @@ pub enum Command {
     ReconcileSession {
         session_id: String,
         retry: bool,
+    },
+    /// Queues a compaction of a Claude session's context; only the human sends it.
+    CompactContext {
+        session_id: String,
+        instructions: Option<String>,
+    },
+    /// Withdraws a compaction that has not started.
+    CancelCompaction {
+        session_id: String,
+    },
+    /// Clears the notice the last compaction left.
+    DismissCompaction {
+        session_id: String,
     },
     ProviderCheck,
     Quotas,

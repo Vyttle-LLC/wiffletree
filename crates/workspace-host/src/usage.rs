@@ -47,6 +47,25 @@ pub fn normalize(provider: Provider, usage: &Value) -> Option<TokenTotals> {
         partial_requests: 0,
     })
 }
+/// The requests a compaction's result record reports, as (request id, model, usage). Its
+/// `usage` is zero; the counts are in `modelUsage`, one entry per model, under Claude's
+/// convention that `inputTokens` excludes cache reads and writes, which `normalize` adds.
+pub(crate) fn compaction_requests(run: &str, result: &Value) -> Vec<(String, String, Value)> {
+    let models = result["modelUsage"].as_object();
+    models
+        .into_iter()
+        .flatten()
+        .map(|(model, counts)| {
+            let usage = json!({
+                "input_tokens": counts["inputTokens"],
+                "output_tokens": counts["outputTokens"],
+                "cache_read_input_tokens": counts["cacheReadInputTokens"],
+                "cache_creation_input_tokens": counts["cacheCreationInputTokens"],
+            });
+            (format!("compact:{run}:{model}"), model.clone(), usage)
+        })
+        .collect()
+}
 fn day_start(zone: Tz, date: NaiveDate) -> Result<i64> {
     let midnight = date
         .and_hms_opt(0, 0, 0)
@@ -477,9 +496,10 @@ impl Host {
         }
         let mut coordinators: Vec<_> = coordinators.into_values().collect();
         coordinators.sort_by_key(|c| std::cmp::Reverse(c.own.total() + c.workers.total()));
-        let unreported_runs=self.db.query_row("SELECT COUNT(*) FROM provider_runs r JOIN sessions s ON s.id=r.session_id WHERE r.started_at>=?1 AND r.started_at<=?2
+        // A compaction that found nothing to compact made no request, so it reports none.
+        let unreported_runs=self.db.query_row(&format!("SELECT COUNT(*) FROM provider_runs r JOIN sessions s ON s.id=r.session_id WHERE r.started_at>=?1 AND r.started_at<=?2
             AND (?3 IS NULL OR s.project_id=?3) AND (?4 IS NULL OR COALESCE(CASE WHEN json_valid(r.detail) THEN json_extract(r.detail,'$.profile.provider') END,json_extract(s.data,'$.provider'))=?4)
-            AND NOT EXISTS(SELECT 1 FROM usage_requests u WHERE u.run_id=r.id)",params![start,timestamp,project,provider_tag],|r|r.get(0))?;
+            AND {IS_TURN_RUN} AND NOT EXISTS(SELECT 1 FROM usage_requests u WHERE u.run_id=r.id)"),params![start,timestamp,project,provider_tag],|r|r.get(0))?;
         let mut trends = Vec::new();
         for reading in self
             .quotas()?
@@ -648,6 +668,57 @@ mod tests {
         assert_eq!(report.totals.partial_requests, 1);
         assert_eq!(report.coordinators[0].own.total(), 370);
         assert_eq!(report.unreported_runs, 1);
+    }
+    #[test]
+    fn a_compaction_is_counted_from_model_usage_with_cached_tokens_added_to_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let session = root(&mut host, "Compact");
+        let time = now() - 1000;
+        let compaction = |id: &str| {
+            host.db.execute("INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES(?1,?2,'[]',?3,?3,'compacted',?4)",
+                params![id,session.id,time,json!({"kind":"compaction","profile":{"provider":"claude","model":"fixture"}}).to_string()]).unwrap();
+        };
+        compaction("compaction");
+        // The result record's own usage is zero; only modelUsage says what was spent.
+        let result = json!({"type":"result","is_error":false,
+            "usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},
+            "modelUsage":{"claude-opus-5-5":{"inputTokens":1502,"outputTokens":2960,"cacheReadInputTokens":811900,"cacheCreationInputTokens":0,"costUSD":0.48}}});
+        let requests = compaction_requests("compaction", &result);
+        for (request, model, usage) in &requests {
+            host.record_usage("compaction", request, Some(model), usage, true, time)
+                .unwrap();
+        }
+        let row: (String, String, i64, i64, i64, i64, String, String) = host.db.query_row(
+            "SELECT request_id,model,input,cache_read,cache_write,output,session_id,coordinator_id FROM usage_requests",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        ).unwrap();
+        assert_eq!(
+            row,
+            (
+                "compact:compaction:claude-opus-5-5".into(),
+                "claude-opus-5-5".into(),
+                813_402,
+                811_900,
+                0,
+                2_960,
+                session.id.clone(),
+                session.id.clone()
+            )
+        );
+        // A compaction that spent nothing reports no request, and is not an unreported turn.
+        compaction("nothing");
+        assert!(compaction_requests("nothing", &json!({"modelUsage":{}})).is_empty());
+        assert!(compaction_requests("nothing", &json!({"usage":{}})).is_empty());
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.totals.requests, 1);
+        assert_eq!(report.totals.input, 813_402);
+        assert_eq!(report.totals.cache_read, 811_900);
+        assert_eq!(report.coordinators[0].own.output, 2_960);
+        assert_eq!(report.unreported_runs, 0);
     }
     #[test]
     fn codex_resume_subtracts_persisted_counters_and_rolls_back_failed_writes() {

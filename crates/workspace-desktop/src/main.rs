@@ -137,8 +137,11 @@ struct Workspace {
     usage_day: Option<String>,
     context: BTreeMap<String, Result<workspace_host::context::ContextUsage, String>>,
     context_pending: BTreeSet<String>,
-    /// The turn each session's context was last measured after.
-    context_seen: BTreeMap<String, Option<i64>>,
+    /// What each session's context was last measured after.
+    context_seen: BTreeMap<String, context_view::Measured>,
+    /// The Compact form of each session that has it open, and the field they share.
+    compact_forms: BTreeMap<String, context_view::CompactForm>,
+    compact_note: Entity<TextareaState>,
     last_repository_refresh: Option<std::time::Instant>,
     /// A downloaded release that installs on restart or quit.
     update: Option<update::Staged>,
@@ -263,6 +266,12 @@ impl Workspace {
             context: BTreeMap::new(),
             context_pending: BTreeSet::new(),
             context_seen: BTreeMap::new(),
+            compact_forms: BTreeMap::new(),
+            compact_note: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 6)
+                    .placeholder("For example: the failing test names and the migration plan")
+            }),
             last_repository_refresh: None,
             update: None,
             checking_update: false,
@@ -691,6 +700,10 @@ impl Workspace {
                 }
                 self.request(Command::Snapshot, window, cx);
             }
+            Command::CompactContext { session_id, .. } => {
+                self.compact_accepted(&session_id);
+                self.request(Command::Snapshot, window, cx);
+            }
             Command::SetModelSelection { selection, .. } => {
                 // The host answers with the saved selection at its new revision, so the store
                 // reads as saved before the next snapshot arrives.
@@ -853,6 +866,7 @@ impl Workspace {
                 .insert(old.clone(), self.input.read(cx).value().to_string());
         }
         let draft = self.drafts.get(&id).cloned().unwrap_or_default();
+        self.swap_compact_note(self.selected.clone().as_deref(), &id, window, cx);
         self.refused_files.clear();
         self.input
             .update(cx, |input, cx| input.set_value(draft, window, cx));
@@ -1264,6 +1278,10 @@ impl Workspace {
     fn form_failed(&mut self, command: &Command, error: &str, cx: &mut Context<Self>) -> bool {
         if matches!(command, Command::CreateProject { .. }) {
             self.creating_project = false;
+        }
+        if let Command::CompactContext { session_id, .. } = command {
+            self.compact_refused(session_id, error);
+            return true;
         }
         if let Command::RenameProject { project_id, .. } = command
             && let Some(edit) = &mut self.project_edit

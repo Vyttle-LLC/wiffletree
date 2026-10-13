@@ -1,5 +1,6 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 pub mod attachments;
+pub mod compaction;
 pub mod context;
 pub mod detection;
 mod files;
@@ -100,6 +101,10 @@ pub(crate) const TURN_COUNT: &str = "turn-count:";
 /// could not confirm and so did not stop; the rest is the run's id. Reserved like `CHECK_IN`.
 /// While the note is open, its session starts no turn.
 pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
+/// SQL condition for a `provider_runs` row that is a turn. A compaction's row has a `kind`
+/// and must not count as the session's turn: not for check-ins, not as its latest turn.
+pub(crate) const IS_TURN_RUN: &str =
+    "CASE WHEN json_valid(detail) THEN json_extract(detail,'$.kind') END IS NULL";
 /// Whether an inbox item is a host check-in rather than an agent's question.
 pub(crate) fn is_check_in(operation: &str) -> bool {
     [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS]
@@ -1054,6 +1059,21 @@ impl Host {
             }
             Command::ReconcileSession { session_id, retry } => {
                 self.reconcile_session(&session_id, retry)?;
+                json!({"saved":true})
+            }
+            Command::CompactContext {
+                session_id,
+                instructions,
+            } => {
+                self.request_compaction(&session_id, instructions.as_deref())?;
+                json!({"saved":true})
+            }
+            Command::CancelCompaction { session_id } => {
+                self.cancel_compaction(&session_id)?;
+                json!({"saved":true})
+            }
+            Command::DismissCompaction { session_id } => {
+                self.dismiss_compaction(&session_id)?;
                 json!({"saved":true})
             }
             Command::CreateTicket {

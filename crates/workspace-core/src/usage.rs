@@ -1,6 +1,25 @@
 use crate::Provider;
 use serde::{Deserialize, Serialize};
 
+/// A token count as the Context card prints it; whole numbers stay whole: `90k`, `4.2k`,
+/// `1M`, `601`.
+pub fn compact_tokens(tokens: u64) -> String {
+    let scaled = |value: f64, unit: &str| {
+        if value >= 10. || value.fract() < 0.05 {
+            format!("{value:.0}{unit}")
+        } else {
+            format!("{value:.1}{unit}")
+        }
+    };
+    if tokens >= 1_000_000 {
+        scaled(tokens as f64 / 1e6, "M")
+    } else if tokens >= 1000 {
+        scaled(tokens as f64 / 1e3, "k")
+    } else {
+        tokens.to_string()
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TokenTotals {
     pub input: u64,

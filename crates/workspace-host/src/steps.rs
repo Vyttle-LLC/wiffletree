@@ -25,7 +25,7 @@ impl Host {
         let run = self
             .db
             .query_row(
-                "SELECT id,started_at,finished_at,COALESCE(json_extract(detail,'$.omitted_steps'),0) FROM provider_runs WHERE session_id=?1 AND (?2 IS NULL OR id=?2) ORDER BY started_at DESC,rowid DESC LIMIT 1",
+                &format!("SELECT id,started_at,finished_at,COALESCE(json_extract(detail,'$.omitted_steps'),0) FROM provider_runs WHERE session_id=?1 AND (id=?2 OR (?2 IS NULL AND {IS_TURN_RUN})) ORDER BY started_at DESC,rowid DESC LIMIT 1"),
                 params![session_id, run_id],
                 |r| {
                     Ok(StepPage {
@@ -87,12 +87,12 @@ impl Host {
     /// The latest plan of each session's latest run, archived sessions included, as stored. A
     /// run whose latest plan step has no counts, or whose steps were pruned, has no entry.
     pub(crate) fn latest_plans(&self) -> Result<HashMap<String, PlanCounts>> {
-        let mut statement = self.db.prepare(
+        let mut statement = self.db.prepare(&format!(
             "SELECT s.session_id,s.data FROM provider_runs r JOIN steps s ON s.run_id=r.id
-             WHERE r.rowid=(SELECT l.rowid FROM provider_runs l WHERE l.session_id=r.session_id ORDER BY l.started_at DESC,l.rowid DESC LIMIT 1)
+             WHERE r.rowid=(SELECT l.rowid FROM provider_runs l WHERE l.session_id=r.session_id AND {IS_TURN_RUN} ORDER BY l.started_at DESC,l.rowid DESC LIMIT 1)
                AND json_extract(s.data,'$.kind')='plan'
-             ORDER BY s.revision",
-        )?;
+             ORDER BY s.revision"
+        ))?;
         let steps = statement.query_map([], |row| Ok((row.get(0)?, decode::<Step>(row, 1)?)))?;
         let mut plans = HashMap::new();
         for step in steps {
@@ -259,6 +259,39 @@ mod tests {
         let page = host.steps(&session, Some(new_run), 0).unwrap();
         assert_eq!(page.steps[0].state, StepState::Interrupted);
         assert_eq!(host.step_revision(&session).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_compaction_is_never_a_sessions_latest_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.create_project("Steps").unwrap();
+        let session = host.sessions().unwrap().remove(0).id;
+        for (run, started, detail) in [
+            ("turn", 1000, "{}"),
+            ("compaction", 2000, r#"{"kind":"compaction"}"#),
+        ] {
+            host.db
+                .execute(
+                    "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,detail) VALUES (?1,?2,'[]',?3,?3,?4)",
+                    params![run, session, started, detail],
+                )
+                .unwrap();
+        }
+        let mut plan = step(StepKind::Plan, "Plan", None);
+        (plan.run_id, plan.revision) = ("turn".into(), 1);
+        plan.plan = Some(PlanCounts {
+            done: 3,
+            total: 6,
+            current: None,
+        });
+        host.save_step(&session, &plan).unwrap();
+
+        let page = host.steps(&session, None, 0).unwrap();
+
+        assert_eq!(page.run_id.as_deref(), Some("turn"));
+        assert_eq!(page.steps.len(), 1);
+        assert_eq!(host.latest_plans().unwrap()[&session].done, 3);
     }
 
     #[test]

@@ -75,6 +75,7 @@ fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
         .remove(0);
     session.provider = Provider::Codex;
     let turn = Turn {
+        kind: workspace_host::provider::TurnKind::Prompt,
         run_id: new_id(),
         session,
         profile: ModelProfile {

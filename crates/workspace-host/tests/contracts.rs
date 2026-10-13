@@ -93,6 +93,13 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
 }
 
 #[test]
+fn no_agent_tool_requests_cancels_or_runs_a_compaction() {
+    // Compacting an agent's context is the human's action, on the Context card only.
+    let tools = mcp::tools().to_string().to_lowercase();
+    assert!(!tools.contains("compact"), "{tools}");
+}
+
+#[test]
 fn bundled_instructions_describe_the_flat_hierarchy() {
     for role in Role::ALL {
         let skill = provider::skill(role).to_lowercase();
