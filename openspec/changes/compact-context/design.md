@@ -70,7 +70,7 @@ A request therefore never disappears and never runs while the person cannot see 
 
 **Stop and Pause while it runs.** A compaction that has started is not interrupted: a human Pause or Stop, a parent's `stop_agents` and a project Stop still set the session's status, and the compaction finishes. No turn follows, because the session is then paused.
 
-**Host shutdown.** A provider process is owned by its reader thread and stops only when that thread sees its cancel flag, so `stop` must reach compactions too: it sets the cancel flag of every entry in `compacting`, as it does for `active`, and settles each of those runs as `interrupted` with the same function startup uses (decision 10). `provider::run` already returns on the flag and its `Process` drop ends the process group.
+**Host shutdown.** A provider process is owned by its reader thread and stops only when that thread sees its cancel flag, so `stop` sets the cancel flag of every entry in `compacting`, as it does for `active`. The host does not wait for provider processes when it stops, for turns or for compactions, so the `/compact` process can outlive it for a moment. `stop` therefore cuts the compaction off exactly as startup does after a crash (decision 10), which leaves the session disconnected, as a quit already leaves a session whose turn it cut off.
 
 **Status.** The stored status does not change, so an agent that was Blocked is Blocked again afterwards. The desktop draws "Compacting" from `compaction.state` (decision 9). `send_message` to a compacting agent returns the plain `queued` receipt.
 
@@ -123,11 +123,15 @@ All of it matches `design/mockups/current/compact-context.html`.
   *Alternatives:* hold the next turn until the desktop has measured, rejected because the host would wait on a client that may not be open; accept the old figure until the turn ends, rejected because the card would show 81% beside "Context compacted".
 
 ### 10. Restart
-A `queued` request is untouched by a restart. A compaction that was running is settled as `interrupted` and never run again by the host: the request is cleared, `last_compaction` is `interrupted`, and the `Compaction interrupted` line is written. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged" and lets the measurement show the truth. What happens to the session depends on whether the process is known to be gone.
+A `queued` request is untouched by a restart.
 
-**Clean shutdown.** `stop` cancels the compaction and settles it (decision 4). The process is gone, so the session's status is left alone and it carries on after the restart.
+A compaction that was running when the host stopped is **cut off**, by one function, `cut_off_compaction`, called from `stop` on a quit and from `recover_unfinished_turns` at startup for a compaction run a crash left unfinished. There is one rule for both, because in neither case does the host know the process is gone: a quit does not wait for it (decision 4), and a crash cannot.
 
-**Crash.** At startup `recover_unfinished_turns` finds the compaction's run unfinished. It settles the compaction as above and then treats the session as it treats any session with an unfinished run: status `Disconnected`, with `last_error` set to a new shared constant, `COMPACTION_CUT_OFF`: "Wiffletree stopped unexpectedly while compacting this agent's context. Claude may still be finishing." Nothing starts for the session until someone resumes it. This is what the host already accepts for a turn cut off by a crash, where an orphaned provider may also still be running. There is no process-group logic: the host signals nothing, because a stored group number may belong to an unrelated program after a crash, and it polls nothing.
+- The compaction is settled as `interrupted` and never run again by the host: the run is finished, the request is cleared, `last_compaction` is `interrupted`, and the `Compaction interrupted` line is written. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged" and lets the measurement show the truth.
+- The session is marked `Disconnected`, like any session whose run the host's stopping cut off, with `last_error` set to a new shared constant, `COMPACTION_CUT_OFF`: "Wiffletree stopped while compacting this agent's context. Claude may still be finishing." Nothing starts for the session until someone resumes it, so no turn can resume the Claude session while a leftover `/compact` may still be writing it.
+- There is no process-group logic: the host signals nothing, because a stored group number may belong to an unrelated program, and it waits on and polls nothing.
+
+*Alternative:* a bounded wait in `stop` for each compaction's reader thread, keeping the status when the process is seen to exit. Rejected because it adds a second outcome and a timeout to shutdown, and the timeout's other branch is this rule anyway.
 
 Checked against the code on origin/main fb9b217:
 
@@ -136,20 +140,20 @@ Checked against the code on origin/main fb9b217:
 - **What the next turn is told: nothing.** A compaction that succeeds tells the agent nothing either; whatever Claude left in the session is its context. `IS_TURN_RUN` goes on both the outer query and the `MAX(started_at)` subquery of `resume_note`, so the compaction's `interrupted` row neither produces an "Interrupted turn" line nor hides one for a real turn. `interrupted_turn_note` matches runs by their input messages, and a compaction has none.
 - **The banner's words.** The banner today always says "The last input is held. Inspect the worktree before retrying…" with Skip and Retry, which would be false here. When `last_error` is `COMPACTION_CUT_OFF`, it says instead "Nothing runs for this agent until you resume it." with one **Resume** button, which sends `ReconcileSession` with retry. The badge reads "Interrupted", as for any disconnected session.
 
-The session's status before the crash, such as Blocked, is replaced by Disconnected and then Ready, as it is for a turn cut off by a crash.
+The session's status before the host stopped, such as Blocked, is replaced by Disconnected and then Ready, as it is for a turn the host's stopping cut off.
 
 ### Decided by Michael on October 13, 2026
 1. **A queued compaction stays queued.** When its turn fails, is stopped or paused, is interrupted by a restart, or the project is stopped, the request stays queued, visible and cancellable, and runs when the agent next runs, before its input (decision 3).
 2. **The second waiting text** is "Compacts when this agent runs again", shown when the agent is not in a turn (decision 9).
 3. **Pause or Stop while a compaction runs lets it finish.** The agent is paused afterwards; a parent's `stop_agents` and a project Stop behave the same way (decision 4).
-4. **A compaction cut off by a host restart is never run again.** It leaves the line "Compaction interrupted" and a notice saying the figure was measured again (decisions 8 and 10). After a crash the agent also waits, Interrupted, until someone resumes it (decided with the coordinator, October 13, 2026).
+4. **A compaction cut off by a host restart is never run again.** It leaves the line "Compaction interrupted" and a notice saying the figure was measured again (decisions 8 and 10). Whether the host quit or crashed, the agent then waits, Interrupted, until someone resumes it (decided with the coordinator, October 13, 2026).
 5. **The line prints Claude's own figures,** `pre_tokens` and `post_tokens`, as they are (decision 8).
 
 ### Files and functions to change
 | File | Functions / items |
 |---|---|
 | `crates/workspace-core/src/lib.rs` | `Compaction`, `CompactionState`, `CompactionOutcome`, `CompactionResult` (new); `SessionRuntime` (`compaction`, `last_compaction`); `Command` (`CompactContext`, `CancelCompaction`, `DismissCompaction`); `compact` token formatter (moved) |
-| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `stop` (cancel and settle compactions), `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (settle an unfinished compaction, `COMPACTION_CUT_OFF`) |
+| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `stop` (cancel and cut off compactions), new `cut_off_compaction`, `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (cut off an unfinished compaction) |
 | `crates/workspace-host/src/steps.rs`, `usage.rs` | `IS_TURN_RUN` in the latest-run and unreported-run queries |
 | `crates/workspace-host/src/provider.rs` | `Turn` (kind), `input`, `configure`, `run` (`status`, `compact_boundary`, `modelUsage`), `ProviderEvent::Compaction` |
 | `crates/workspace-host/src/usage.rs` | a `modelUsage` entry mapped to the fields `normalize` reads |

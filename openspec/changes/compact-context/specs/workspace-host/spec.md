@@ -85,7 +85,7 @@ The host SHALL run a compaction by resuming the agent's Claude session with a pr
 - **THEN** the compaction finishes, the agent is paused, and the message stays queued
 
 ### Requirement: Compaction outcome comes from the provider's status record
-The host SHALL decide a compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. The host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. When the host shuts down it SHALL stop every running compaction's provider process and settle that compaction as **interrupted**. After that clean shutdown the session's status SHALL be what it was. A compaction left unfinished by a host that did not shut down cleanly SHALL be settled as **interrupted** at startup, and its session SHALL then be disconnected like any session whose run a crash cut off, with a stored reason saying that the host stopped unexpectedly while compacting and that Claude may still be finishing. No turn and no compaction SHALL start for that session, and its waiting messages SHALL stay queued, until the human or its parent resumes it through the existing resume, which SHALL need no choice between retrying and skipping because nothing is held. The host SHALL NOT signal or terminate a process or process group it knows only from a stored identifier. An interrupted compaction SHALL NOT be run again by the host and SHALL NOT be reported as compacted or as unchanged, and the session's next turn SHALL NOT be told that a turn was interrupted.
+The host SHALL decide a compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. The host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. A compaction that is running when the host stops, by a shutdown or a crash, SHALL be settled as **interrupted**, at shutdown or at the next startup, and its session SHALL be disconnected like any session whose run the host's stopping cut off, with a stored reason saying that the host stopped while compacting and that Claude may still be finishing. On shutdown the host SHALL also tell the compaction's provider process to stop, and SHALL NOT rely on it having exited. No turn and no compaction SHALL start for that session, and its waiting messages SHALL stay queued, until the human or its parent resumes it through the existing resume, which SHALL need no choice between retrying and skipping because nothing is held. The host SHALL NOT signal or terminate a process or process group it knows only from a stored identifier. An interrupted compaction SHALL NOT be run again by the host and SHALL NOT be reported as compacted or as unchanged, and the session's next turn SHALL NOT be told that a turn was interrupted.
 
 #### Scenario: Success
 - **WHEN** the stream has `"compact_result":"success"` and a boundary record with `pre_tokens` 812000 and `post_tokens` 5000
@@ -103,20 +103,17 @@ The host SHALL decide a compaction's outcome from the status record Claude strea
 - **WHEN** the process exits without streaming a `compact_result`
 - **THEN** the outcome is failed
 
-#### Scenario: Shutdown while compacting
-- **WHEN** the host shuts down while an agent's compaction is running
-- **THEN** the compaction's provider process has exited before the host does, and the outcome is interrupted
+#### Scenario: Quit while compacting
+- **WHEN** the host shuts down while an agent's compaction is running and the agent has a message waiting, and the host starts again
+- **THEN** the outcome is interrupted, the request is cleared, and the agent is disconnected with the reason that the host stopped while compacting
+- **AND** no turn and no compaction starts for it at startup, whether or not the compaction's process has exited
 
-#### Scenario: Clean restart while compacting
-- **WHEN** the host shuts down cleanly while an agent's compaction is running and starts again
-- **THEN** the outcome is interrupted, the request is cleared, no compaction starts by itself, and the agent has the status it had before
-
-#### Scenario: Crash while compacting leaves the agent interrupted
+#### Scenario: Crash while compacting
 - **WHEN** the host starts after a crash that cut off an agent's compaction, and the agent has a message waiting
-- **THEN** the compaction is settled as interrupted, the agent is disconnected with the reason that the host stopped unexpectedly while compacting, and no turn or compaction starts for it
+- **THEN** the compaction is settled as interrupted, the agent is disconnected with the same reason, and no turn or compaction starts for it
 - **AND** the host signals no process
 
-#### Scenario: Resumed after that crash
+#### Scenario: Resumed afterwards
 - **WHEN** the agent's coordinator calls `resume_agent` for it without `held`, or the human resumes it
 - **THEN** the agent is ready, its next turn takes the waiting message, and that turn's prompt names no interrupted turn
 

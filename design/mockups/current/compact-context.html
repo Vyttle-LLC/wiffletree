@@ -385,7 +385,7 @@ svg.i{width:13px;height:13px;flex:none}
           <div class="compacted failed"><div class="line"><svg class="i"><use href="#fold"/></svg><b>Compaction failed</b> · context unchanged</div></div>
         </div>
         <div class="variant">
-          <p class="step">Cut off by a Wiffletree restart: the card notice and the work-stream line</p>
+          <p class="step">Wiffletree quit or crashed while compacting: the card notice and the work-stream line</p>
           <div class="notice" style="--c:var(--red)">
             <div class="row"><b>Compaction interrupted</b><span class="btn ghost">Dismiss</span></div>
             <div class="hint">Wiffletree stopped while Claude was compacting. The figure above was measured again.</div>
@@ -393,15 +393,15 @@ svg.i{width:13px;height:13px;flex:none}
           <div class="compacted failed" style="margin-top:8px"><div class="line"><svg class="i"><use href="#fold"/></svg><b>Compaction interrupted</b></div></div>
         </div>
         <div class="variant">
-          <p class="step">After a crash only: the agent is Interrupted, with this banner in its conversation</p>
+          <p class="step">The agent is then Interrupted, with this banner in its conversation</p>
           <div class="notice" style="--c:var(--red)">
-            <div class="row"><b>Wiffletree stopped unexpectedly while compacting this agent’s context. Claude may still be finishing.</b><span class="btn">Resume</span></div>
+            <div class="row"><b>Wiffletree stopped while compacting this agent’s context. Claude may still be finishing.</b><span class="btn">Resume</span></div>
             <div class="hint">Nothing runs for this agent until you resume it.</div>
           </div>
         </div>
       </div>
     </div>
-    <p class="caption"><b>No change.</b> Two cards, bar and legend folded away. <b>Top:</b> Claude had too little to summarize, said quietly with Claude’s own reason. <b>Bottom:</b> a real failure, in red. Both say the context is unchanged and both leave Compact available. A failure also leaves one line in the work stream, <b>Compaction failed · context unchanged</b>, so it is seen without opening the card; “nothing to compact” leaves no line. The card is measured again either way. A compaction that a Wiffletree restart cut off is never run again: it says <b>Compaction interrupted</b> on the card and in the work stream, without claiming the context is unchanged. If Wiffletree crashed, as opposed to being quit, the agent also shows as Interrupted and waits for <b>Resume</b>, because Claude may still be finishing; its waiting messages are delivered after that.</p>
+    <p class="caption"><b>No change.</b> Two cards, bar and legend folded away. <b>Top:</b> Claude had too little to summarize, said quietly with Claude’s own reason. <b>Bottom:</b> a real failure, in red. Both say the context is unchanged and both leave Compact available. A failure also leaves one line in the work stream, <b>Compaction failed · context unchanged</b>, so it is seen without opening the card; “nothing to compact” leaves no line. The card is measured again either way. A compaction cut off because Wiffletree quit or crashed is never run again: it says <b>Compaction interrupted</b> on the card and in the work stream, without claiming the context is unchanged. The agent also shows as Interrupted and waits for <b>Resume</b>, because Claude may still be finishing; its waiting messages are delivered after that.</p>
   </section>
 
   <!-- 7. Codex -->
