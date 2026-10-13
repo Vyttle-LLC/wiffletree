@@ -691,11 +691,16 @@ mod model_tests {
         let failed = git_push(folder.path(), &args).unwrap();
         assert!(!failed.status.success());
         assert!(failed.error.starts_with("fatal: "), "{}", failed.error);
-        // A pre-push hook that never returns is given up on.
+        // A pre-push hook that never returns is given up on. Git's kill does not reach the
+        // hook, so it waits only for as long as Git runs and cannot outlive the test.
         let remote = folder.path().join("remote.git");
         git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
         let hook = folder.path().join(".git/hooks/pre-push");
-        std::fs::write(&hook, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.1; done\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let args = ["push", remote.to_str().unwrap(), "HEAD:refs/heads/main"];
