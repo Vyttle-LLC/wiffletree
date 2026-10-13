@@ -765,6 +765,9 @@ pub struct PublishRequest {
     /// owner's repository.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked_review_approved: bool,
+    /// How many of this request's Inbox items the human approved.
+    #[serde(default)]
+    pub approvals: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -803,6 +806,12 @@ impl Ticket {
             .iter()
             .filter(|e| e.status != EntryStatus::Fixed && !e.status.is_settled())
             .collect()
+    }
+    /// The ticket's pull request while it is open; a publish then only pushes to it.
+    pub fn open_pull_request(&self) -> Option<&PullRequest> {
+        self.pull_request
+            .as_ref()
+            .filter(|pr| pr.state == PrState::Open)
     }
     /// The ticket's pull request once it was closed or merged; opening another needs the human.
     pub fn ended_pull_request(&self) -> Option<&PullRequest> {

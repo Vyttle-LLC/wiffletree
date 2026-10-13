@@ -457,6 +457,8 @@ impl Host {
         milestone: &str,
     ) -> Result<Ticket> {
         self.with_worktrees_removed(&[ticket.clone()], |host| {
+            // Before its caller is archived, so the caller still gets the request's one message.
+            host.withdraw_request(&mut ticket, &format!("the ticket was {state}"))?;
             for agent in host.ticket_agents(&ticket.id)? {
                 host.set_archived(&agent.id, true)?;
             }
