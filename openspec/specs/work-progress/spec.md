@@ -243,19 +243,27 @@ The selected conversation SHALL show one progress strip pinned directly under it
 - **THEN** the strip updates in place and the transcript's scroll position does not change
 
 ### Requirement: Progress in the sidebar tree
-Each project row, ticket row and unarchived agent row in the sidebar tree SHALL show a thin bar beneath its label and a short figure beside it: the percentage for a project; the percentage, or "blocked", for a ticket; and for an agent its checklist count such as "3 of 5", or "working", "done", "passed", "failed" or "blocked". A row with nothing to show SHALL keep an empty track and no figure, so a row's height never depends on its progress.
+The project row in the sidebar tree SHALL show a thin bar beneath its label and the project's percentage beside it, and an archived project's row SHALL show neither bar nor percentage. Ticket rows and agent rows SHALL show neither a bar nor a progress figure, and SHALL be single-line rows whose height does not depend on progress; a ticket row with a pull request keeps its second line for the pull request. A project with nothing to show SHALL keep an empty track and no figure, so the project row's height never depends on its progress. Notes that are not progress, such as an agent's "held" or "queued input" and its questions figure, SHALL stay on the agent row.
 
 #### Scenario: Rows under one project
 - **WHEN** a project at 56% has a ticket Verifying at 70% with a finished implementer, a tester at 3 of 5 and a reviewer working without a plan
-- **THEN** the project row shows "56%", the ticket row "70%", and the agent rows "done", "3 of 5" and "working", each with its bar
+- **THEN** the project row shows "56%" and its bar, and the ticket row and the three agent rows show no figure and no bar
 
 #### Scenario: Blocked ticket row
 - **WHEN** a ticket is blocked at 26%
-- **THEN** its row shows "blocked" and a red bar filled to 26%
+- **THEN** its sidebar row shows no "blocked" figure and no bar, and the strip and Crew panel still show its blocked state
+
+#### Scenario: Project with nothing to show
+- **WHEN** a project has no tickets and no progress to report
+- **THEN** its row keeps an empty track and no figure, at the same height as other projects' rows
 
 #### Scenario: Idle agent with no plan
 - **WHEN** an agent is ready and its latest run had no plan
-- **THEN** its row shows an empty track and no figure, at the same height as its neighbours
+- **THEN** its row shows no figure and no track, at the same height as every other agent's and ticket's row
+
+#### Scenario: Working agent and open ticket stay one line
+- **WHEN** an agent is working at 3 of 5, or a ticket without a pull request is at 70%
+- **THEN** its row has the same single-line height as an idle agent's, with no figure and no track line
 
 ### Requirement: Crew panel
 The coordinator's strip SHALL carry a crew button labelled with the number of agents the panel lists, such as "6 agents". Activating it SHALL open a crew panel beside the conversation, without replacing it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents and the verifiers of its latest cycle, each once, including a verifier the host archived after it passed. Verifiers of earlier cycles and other archived agents SHALL NOT be listed. Each agent row SHALL show its role and focus, its model, its figure, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and a listed agent is working. The crew button SHALL appear only on the coordinator's strip. Selecting an agent row SHALL select that agent's conversation and SHALL leave the panel open, still listing the whole project's crew, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.

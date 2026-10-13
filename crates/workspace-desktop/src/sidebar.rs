@@ -461,18 +461,14 @@ impl Workspace {
         }
     }
 
-    /// A tree row. Its children wrap, so a progress track added last takes its own line under
-    /// the label.
+    /// A single-line tree row.
     fn row(&self, id: SharedString, depth: usize, selected: bool, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
-            .min_h(px(36.))
-            .py(px(5.))
+            .min_h(px(30.))
             .flex()
-            .flex_wrap()
             .items_center()
-            .gap_x_2()
-            .gap_y(px(3.))
+            .gap_2()
             .pl(px(8. + depth as f32 * INDENT))
             .pr_2()
             .rounded_md()
@@ -525,6 +521,11 @@ impl Workspace {
         let rename_id = project_id.clone();
         let click_project = project_id.clone();
         self.row(SharedString::from(format!("tree-{id}")), 0, selected, p)
+            // Its children wrap, so the progress track added last takes its own line under the label.
+            .min_h(px(36.))
+            .py(px(5.))
+            .flex_wrap()
+            .gap_y(px(3.))
             .pl_1()
             .text_size(px(13.))
             .when(root.archived, |d| d.opacity(0.55))
@@ -687,7 +688,6 @@ impl Workspace {
         let id = session.id.clone();
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
         let status = self.shown_status(session);
-        let agent = self.progress.agent(&session.id);
         let questions = self
             .snapshot
             .as_ref()
@@ -737,15 +737,7 @@ impl Workspace {
                         .child(questions),
                 )
             })
-            .children(figure(
-                agent.and_then(tree::agent_figure),
-                agent.map(|agent| agent.state),
-                p,
-            ))
             .child(div().flex_none().child(status_glyph(status, 12., p)))
-            .when(!session.archived, |row| {
-                row.child(track(agent.map(|agent| (agent.position(), agent.state)), p))
-            })
     }
 
     fn ticket_row(
@@ -759,7 +751,6 @@ impl Workspace {
         let waiver = tree::waiver_note(ticket);
         let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
         let has_pr = ticket.pull_request.is_some();
-        let progress = self.progress.ticket(&ticket.id);
         let mut detail = format!("{label} · {state}");
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
@@ -812,16 +803,7 @@ impl Workspace {
                 .child(div().text_ellipsis().text_color(p.text).child(label))
                 .children(ticket.pull_request.as_ref().map(|pr| pr_line(pr, p))),
         )
-        .children(figure(
-            progress.and_then(tree::ticket_figure),
-            progress.map(|progress| progress.state),
-            p,
-        ))
         .child(div().flex_none().when(has_pr, |d| d.mt(px(5.))).child(mark))
-        .child(track(
-            progress.map(|progress| (Some(progress.position), progress.state)),
-            p,
-        ))
     }
 }
 
