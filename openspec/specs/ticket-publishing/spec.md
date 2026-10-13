@@ -135,7 +135,7 @@ When the ticket's latest verification cycle passed and its repository publishes 
 - **THEN** the host pushes the new commit without asking
 
 ### Requirement: Elsewhere the human approves each step
-When the ticket's repository does not publish without asking, the host SHALL NOT push or open a pull request until the human approves that step in the Inbox. Each push and each pull request SHALL be its own approval, including every later push to the same pull request. The host SHALL write the item: it SHALL name the repository and whether it is public, the branch, the commit and its size, and how the review ended, and for a pull request the base branch and the full title and description. Approving SHALL run exactly that step for exactly what the item showed: that repository, branch, base branch, commit, title and description. If any of them is no longer current when the human answers or when the step is about to run, such as a changed base, a changed `origin` or a moved HEAD, the host SHALL send nothing, SHALL withdraw the item and SHALL tell the caller what changed. Denying SHALL send nothing and SHALL tell the caller so. The item SHALL be an approval the human can only approve or deny: the human SHALL NOT be able to dismiss it and no agent SHALL be able to close or answer it. The request SHALL survive a host restart. While an item waits, the same publish requested again SHALL return the waiting status, and one requested with a newer commit or a different title or description SHALL withdraw the old item and raise a new one. After a request has ended, by denial, failure or interruption, a publish requested again SHALL raise a new item, also for the same step and commit.
+When the ticket's repository does not publish without asking, the host SHALL NOT push or open a pull request until the human approves that step in the Inbox. Each push and each pull request SHALL be its own approval, including every later push to the same pull request. The host SHALL write the item: it SHALL name the repository and whether it is public, the branch, the commit and its size, and how the review ended, and for a pull request the base branch and the full title and description. The item for a first push, of a branch the host has not pushed and that has had no pull request, SHALL say the branch is not on GitHub yet. The item for a push to an open pull request SHALL say in its title how many new commits it sends. A push item's card SHALL say what follows the push as the rules stand while it waits: that opening the pull request is a separate approval only while that step would ask, and otherwise, as once the repository's owner has been allowed, that the pull request is then opened without asking again. Approving SHALL run exactly that step for exactly what the item showed: that repository, branch, base branch, commit, title and description. If any of them is no longer current when the human answers or when the step is about to run, such as a changed base, a changed `origin` or a moved HEAD, the host SHALL send nothing, SHALL withdraw the item and SHALL tell the caller what changed. Denying SHALL send nothing and SHALL tell the caller so. The item SHALL be an approval the human can only approve or deny: the human SHALL NOT be able to dismiss it and no agent SHALL be able to close or answer it. The request SHALL survive a host restart. While an item waits, the same publish requested again SHALL return the waiting status, and one requested with a newer commit or a different title or description SHALL withdraw the old item and raise a new one. When the ticket is accepted or closed while an item waits, the host SHALL withdraw the item, SHALL send nothing and SHALL tell the caller the request was withdrawn and why. After a request has ended, by denial, failure or interruption, a publish requested again SHALL raise a new item, also for the same step and commit.
 
 #### Scenario: Push waits for approval
 - **WHEN** `publish_ticket` is called for a reviewed ticket in a repository whose owner is not allowed
@@ -176,6 +176,23 @@ When the ticket's repository does not publish without asking, the host SHALL NOT
 #### Scenario: Newer commit
 - **WHEN** a push for commit A waits for approval and `publish_ticket` is called after commit B passed review
 - **THEN** the item for A is withdrawn and a new one is raised for B
+
+#### Scenario: First push of a branch
+- **WHEN** a push approval is raised for a ticket whose branch the host has never pushed and that has no pull request
+- **THEN** the item's Branch row reads the branch followed by "not on GitHub yet"
+
+#### Scenario: A later push names its commits
+- **WHEN** a push approval is raised for one new commit to a ticket's open pull request in `celadon-theme/website`
+- **THEN** the item's title reads "Push 1 new commit to celadon-theme/website?"
+
+#### Scenario: The owner is allowed while the push waits
+- **WHEN** a push waits for approval after a passed review, and the human then allows the repository's owner
+- **THEN** the card no longer says that opening the pull request is a separate approval, and says the pull request is then opened without asking again
+- **AND** approving the push opens the pull request without a second item
+
+#### Scenario: The ticket is accepted or closed while a step waits
+- **WHEN** a push waits for approval and the ticket is accepted or closed
+- **THEN** the item is withdrawn, nothing is pushed, and the caller gets one message saying the request was withdrawn because the ticket was accepted or closed
 
 ### Requirement: Only the host creates publish approvals
 Only the host SHALL be able to create an Inbox item that is drawn or handled as a publish approval. An agent's request to raise an Inbox item under the identifier prefix the host uses for publish approvals SHALL be refused, and no item SHALL be created. The prefix the host uses for provider permission approvals SHALL be refused in the same way, since such an item is also drawn as an approval. The host SHALL push or open a pull request on an approval only when the answered item is the one recorded for a ticket's waiting publish request, and SHALL take the ticket, the step and the commit from that stored request, never from anything an agent supplied.
@@ -227,7 +244,7 @@ When the ticket's pull request, as the watcher last read it, was closed or merge
 - **THEN** no pull request is opened until the human approves an item that says the earlier one was merged
 
 ### Requirement: Results arrive as messages from Wiffletree
-`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. The human's answer to a publish approval SHALL NOT also be sent to the caller as an Inbox answer: the request's own message is the only one. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A push that was stopped because it did not finish in time SHALL be reported as one that may or may not have reached GitHub. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
+`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. The human's answer to a publish approval SHALL NOT also be sent to the caller as an Inbox answer: the request's own message is the only one. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. It SHALL begin by saying the human approved both steps when the human approved the push and the pull request each on its own item, and SHALL NOT say so otherwise. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A push that was stopped because it did not finish in time SHALL be reported as one that may or may not have reached GitHub, and a pull request step stopped the same way SHALL be reported as one that may or may not have opened the pull request, never as one that opened none. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
 
 #### Scenario: Success
 - **WHEN** the host has pushed a ticket's branch and opened PR #45
@@ -257,12 +274,28 @@ When the ticket's pull request, as the watcher last read it, was closed or merge
 - **WHEN** the host stops while a push is running and starts again
 - **THEN** the caller is told the publish was interrupted, and a second `publish_ticket` call neither pushes a different commit nor opens a second pull request
 
+#### Scenario: Success after both approvals
+- **WHEN** the human approved the push and then the pull request, and the host opened PR #45
+- **THEN** the caller's message begins "The human approved both steps."
+
+#### Scenario: Success after one approval
+- **WHEN** the human approved the push, the owner was allowed meanwhile, and the host opened the pull request without a second item
+- **THEN** the caller's message does not say the human approved both steps
+
+#### Scenario: Opening the pull request does not finish in time
+- **WHEN** `gh pr create` is stopped at its time limit
+- **THEN** the caller is told the branch was pushed and that the pull request may or may not have been opened, and that calling `publish_ticket` again is safe
+
 ### Requirement: A waiting step shows on the ticket
-While a publish step waits for the human, the ticket's sidebar row SHALL show a line saying which step waits for approval. The line SHALL go when the step is approved, denied or withdrawn.
+While a publish step waits for the human, the ticket's sidebar row SHALL show a line saying which step waits for approval. The line SHALL go when the step is approved, denied or withdrawn, including when the ticket is accepted or closed.
 
 #### Scenario: Waiting line
 - **WHEN** a ticket's push waits for the human's approval
 - **THEN** its row shows that the push waits for approval
+
+#### Scenario: The ticket is finished
+- **WHEN** a ticket whose push waits for approval is accepted or closed
+- **THEN** its row no longer shows that the push waits for approval
 
 ### Requirement: The host never approves, merges, closes or comments
 The host SHALL offer agents no operation that approves, merges, closes, reopens, comments on, labels or reviews a pull request, or that edits an open pull request's title or description. Merging SHALL remain the human's, including into a plan's feature branch.

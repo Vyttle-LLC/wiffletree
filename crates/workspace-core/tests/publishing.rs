@@ -77,6 +77,7 @@ fn a_ticket_stored_before_publishing_decodes_and_a_request_round_trips() {
         step: PublishStep::OpenPullRequest,
         waiting: Some("attention".into()),
         blocked_review_approved: false,
+        approvals: 1,
     };
     ticket.publishing = Some(request.clone());
     ticket.pushed = Some("9e03c1b".into());
@@ -278,7 +279,10 @@ fn the_push_card_names_the_repository_branch_commit_and_review() {
                 "Repository",
                 "celadon-theme/website · public · celadon-theme is not an allowed owner".to_owned()
             ),
-            ("Branch", "wiffletree/fix-palette-contrast".to_owned()),
+            (
+                "Branch",
+                "wiffletree/fix-palette-contrast · not on GitHub yet".to_owned()
+            ),
             (
                 "Commit",
                 "9e03c1b · 2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)"
@@ -296,6 +300,57 @@ fn the_push_card_names_the_repository_branch_commit_and_review() {
     );
     assert_eq!(card.approve, "Push once");
     assert!(card.description.is_none() && card.findings.is_empty() && card.would_send.is_none());
+    // A branch the host pushed before, as when its pull request was then denied, is on GitHub.
+    let (mut ticket, repository) = waiting_ticket("push", "passed");
+    ticket.pushed = Some("4c2a9f1000".into());
+    assert_eq!(
+        self::card(&ticket, &repository, &[]).rows[1],
+        ("Branch", "wiffletree/fix-palette-contrast".to_owned())
+    );
+}
+
+fn pull_request(number: u64, state: &str) -> PullRequest {
+    serde_json::from_value(
+        json!({"number": number, "url": "u", "state": state, "draft": false,
+            "base": "main", "head": "h", "merge_state": "clean", "checks": "success",
+            "unresolved_threads": 0, "comments": {}}),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_waiting_push_card_says_whether_the_pull_request_will_ask() {
+    let (mut ticket, repository) = waiting_ticket("push", "passed");
+    let note = |ticket: &Ticket, allowed: &[String]| {
+        waiting_card(
+            ticket,
+            ticket.publishing.as_ref().unwrap(),
+            &repository,
+            allowed,
+        )
+        .note
+    };
+    let allowed = ["celadon-theme".to_owned()];
+    assert!(note(&ticket, &[]).ends_with("Opening the pull request is a separate approval."));
+    // The owner was ticked while the item waited: the pull request no longer asks.
+    let ticked = waiting_card(
+        &ticket,
+        ticket.publishing.as_ref().unwrap(),
+        &repository,
+        &allowed,
+    );
+    assert_eq!(
+        ticked.note,
+        "Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed. Wiffletree then opens the pull request without asking again."
+    );
+    assert_eq!(
+        ticked.rows[0].1,
+        "celadon-theme/website · public · celadon-theme is an allowed owner"
+    );
+    assert_eq!(ticked.approve, "Push once");
+    // Another pull request after a closed one asks in every repository.
+    ticket.pull_request = Some(pull_request(45, "closed"));
+    assert!(note(&ticket, &allowed).ends_with("Opening the pull request is a separate approval."));
 }
 
 #[test]
@@ -329,18 +384,12 @@ fn the_pull_request_card_shows_the_title_and_description_in_full() {
 #[test]
 fn a_later_push_card_names_the_pull_request_it_updates() {
     let (mut ticket, repository) = waiting_ticket("push", "passed");
-    ticket.pull_request = Some(
-        serde_json::from_value(
-            json!({"number": 212, "url": "u", "state": "open", "draft": false,
-            "base": "main", "head": "h", "merge_state": "clean", "checks": "success",
-            "unresolved_threads": 0, "comments": {}}),
-        )
-        .unwrap(),
-    );
+    ticket.pull_request = Some(pull_request(212, "open"));
+    assert_eq!(ticket.open_pull_request().map(|pr| pr.number), Some(212));
     let request = ticket.publishing.as_mut().unwrap();
     (request.title, request.body) = (None, None);
     let card = card(&ticket, &repository, &[]);
-    assert_eq!(card.title, "Push new commits to celadon-theme/website?");
+    assert_eq!(card.title, "Push 2 new commits to celadon-theme/website?");
     assert_eq!(
         card.rows[1],
         (
@@ -348,7 +397,12 @@ fn a_later_push_card_names_the_pull_request_it_updates() {
             "PR #212 · wiffletree/fix-palette-contrast".to_owned()
         )
     );
-    assert!(!card.note.contains("separate approval"));
+    assert!(!card.note.contains("pull request"));
+    ticket.publishing.as_mut().unwrap().size = "1 commit · 1 file changed".into();
+    assert_eq!(
+        self::card(&ticket, &repository, &[]).title,
+        "Push 1 new commit to celadon-theme/website?"
+    );
 }
 
 #[test]
@@ -414,14 +468,8 @@ fn a_step_waits_only_where_the_rules_require() {
     assert_eq!(ask(&ticket, &[]), Some(PublishAsk::NotAllowed));
     // A closed or merged pull request asks before another is opened, and only then.
     let (mut ticket, _) = waiting_ticket("push", "passed");
-    ticket.pull_request = Some(
-        serde_json::from_value(
-            json!({"number": 45, "url": "u", "state": "closed", "draft": false,
-            "base": "main", "head": "h", "merge_state": "clean", "checks": "success",
-            "unresolved_threads": 0, "comments": {}}),
-        )
-        .unwrap(),
-    );
+    ticket.pull_request = Some(pull_request(45, "closed"));
+    assert_eq!(ticket.open_pull_request(), None);
     assert_eq!(ask(&ticket, &allowed), None);
     ticket.publishing.as_mut().unwrap().step = PublishStep::OpenPullRequest;
     assert_eq!(ask(&ticket, &allowed), Some(PublishAsk::EndedPullRequest));

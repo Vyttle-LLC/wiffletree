@@ -1,14 +1,18 @@
 //! Provider processes around a host stop, through the real Service with real processes: a
-//! quit stops running turns, and a session starts no turn beside a process an earlier host left
-//! running. Kept in its own test binary because it sets the provider environment for the process.
+//! quit stops running turns, startup stops a process an earlier host left running, and a session
+//! starts no turn beside one it could not confirm. Kept in its own test binary because it sets
+//! the provider environment for the process.
 use std::{
-    os::unix::{fs::PermissionsExt, process::CommandExt},
+    os::unix::{
+        fs::PermissionsExt,
+        process::{CommandExt, ExitStatusExt},
+    },
     path::Path,
     sync::Mutex,
     time::{Duration, Instant},
 };
 use workspace_core::*;
-use workspace_host::{Host, now, service::Service};
+use workspace_host::{Host, now, provider, service::Service};
 
 /// Records its process group, then finishes the turn (FINISH) or lingers with a child. Other
 /// invocations, such as the host's `auth status` check, exit at once.
@@ -91,6 +95,28 @@ fn group_runs(group: i32) -> bool {
     unsafe { libc::killpg(group, 0) == 0 }
 }
 
+/// A process in its own group, as a provider runs, standing in for one a stopped host left
+/// running. Dropping it kills only this process, so a failed assertion leaves nothing running.
+struct Leftover(std::process::Child);
+impl Leftover {
+    fn spawn() -> Self {
+        let sleep = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn();
+        Self(sleep.unwrap())
+    }
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
+impl Drop for Leftover {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// The run's outcome and error, read from the store.
 fn run_result(home: &Path, session: &str) -> (Option<String>, Option<String>) {
     let db = rusqlite::Connection::open(home.join("workspace.sqlite3")).unwrap();
@@ -152,6 +178,57 @@ fn a_quit_stops_running_turns_before_it_returns() {
 }
 
 #[test]
+fn startup_stops_a_confirmed_process_the_last_host_left_running() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    install_provider(scratch.path());
+    // The last host died mid-turn: its run is unfinished, and its provider still runs with the
+    // start time the run recorded.
+    let mut leftover = Leftover::spawn();
+    let main = {
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.set_workspaces_dir(scratch.path().to_str().unwrap())
+            .unwrap();
+        host.create_project("Confirmed").unwrap();
+        let main = host.sessions().unwrap().remove(0);
+        let work = host.send("work", None, &main.id, "FINISH").unwrap();
+        host.advance_receipt(&work.id, Receipt::Delivered).unwrap();
+        host.set_status(&main.id, Status::Working).unwrap();
+        main
+    };
+    let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO provider_runs(id,session_id,messages,started_at,detail,process_group,process_started) VALUES ('run-cut-off',?1,'[\"work\"]',?2,'{}',?3,?4)",
+        rusqlite::params![
+            main.id,
+            now(),
+            leftover.id(),
+            provider::process_start(leftover.id() as i32).unwrap()
+        ],
+    )
+    .unwrap();
+
+    let service = start(home.path());
+
+    // No waiting here: the start itself returned only once the group was stopped.
+    let stopped = leftover.0.try_wait().unwrap();
+    assert_eq!(stopped.and_then(|s| s.signal()), Some(libc::SIGTERM));
+    let started = snapshot(&service);
+    assert_eq!(status(&started, &main.id), Status::Disconnected);
+    assert!(started.attention.is_empty(), "{:?}", started.attention);
+    let (outcome, stopped_at): (String, Option<i64>) = db
+        .query_row(
+            "SELECT outcome,json_extract(detail,'$.process_stopped_at') FROM provider_runs WHERE id='run-cut-off'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(outcome, "interrupted");
+    assert!(stopped_at.is_some());
+}
+
+#[test]
 fn a_session_starts_no_turn_beside_a_process_the_last_host_left_running() {
     let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
@@ -159,11 +236,7 @@ fn a_session_starts_no_turn_beside_a_process_the_last_host_left_running() {
     let recorded = install_provider(scratch.path());
     // The last host died mid-turn: its run is unfinished and its provider still runs. The run
     // kept no start time, so the process cannot be confirmed and is never signalled.
-    let mut leftover = std::process::Command::new("sleep")
-        .arg("60")
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut leftover = Leftover::spawn();
     let main = {
         let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().to_str().unwrap())
@@ -208,11 +281,10 @@ fn a_session_starts_no_turn_beside_a_process_the_last_host_left_running() {
     assert!(reason.contains(&leftover.id().to_string()), "{reason}");
     assert!(held.held);
     assert!(groups(&recorded).is_empty(), "no provider was started");
-    assert_eq!(leftover.try_wait().unwrap(), None, "never signalled");
+    assert_eq!(leftover.0.try_wait().unwrap(), None, "never signalled");
 
     // Once the process has exited, the host settles its note and starts the turn.
-    leftover.kill().unwrap();
-    leftover.wait().unwrap();
+    drop(leftover);
     until(&service, "the turn after the process exited", |s| {
         status(s, &main.id) == Status::Ready && runtime(s, &main.id).last_finished_at.is_some()
     });
@@ -233,11 +305,7 @@ fn a_run_an_older_host_marked_interrupted_still_holds_its_session_beside_its_pro
     // A host before this change restarted mid-turn: it marked the run interrupted without
     // looking for its process, which still runs, and a later turn has finished since. Nothing
     // is unfinished, no note exists, and new input is queued for the session.
-    let mut leftover = std::process::Command::new("sleep")
-        .arg("60")
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut leftover = Leftover::spawn();
     let main = {
         let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().to_str().unwrap())
@@ -274,10 +342,9 @@ fn a_run_an_older_host_marked_interrupted_still_holds_its_session_beside_its_pro
         "leftover-process:run-cut-off"
     );
     assert!(groups(&recorded).is_empty(), "no provider was started");
-    assert_eq!(leftover.try_wait().unwrap(), None, "never signalled");
+    assert_eq!(leftover.0.try_wait().unwrap(), None, "never signalled");
 
-    leftover.kill().unwrap();
-    leftover.wait().unwrap();
+    drop(leftover);
     until(&service, "the turn after the process exited", |s| {
         status(s, &main.id) == Status::Ready && runtime(s, &main.id).last_finished_at.is_some()
     });

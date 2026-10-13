@@ -284,7 +284,7 @@ fn wait_while_running(group: i32) {
 /// A process's start time in microseconds since the epoch. Process ids are reused; an id and
 /// its start time together are not.
 #[cfg(target_os = "macos")]
-pub(crate) fn process_start(pid: i32) -> Option<i64> {
+pub fn process_start(pid: i32) -> Option<i64> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let read =
@@ -293,7 +293,7 @@ pub(crate) fn process_start(pid: i32) -> Option<i64> {
 }
 /// Without a start time to compare, a leftover group is never confirmed and never signalled.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn process_start(_pid: i32) -> Option<i64> {
+pub fn process_start(_pid: i32) -> Option<i64> {
     None
 }
 /// What became of a process group an earlier host left running.
@@ -303,8 +303,11 @@ pub(crate) enum Leftover {
     Gone,
     /// Its leader was the recorded provider, and the group has been stopped.
     Stopped,
+    /// Its leader was the recorded provider and the group was signalled, but members of it
+    /// still run: once the leader has exited on SIGTERM, nothing confirms a second signal.
+    Signalled,
     /// It still runs. Its leader could not be confirmed as the recorded provider, so the group
-    /// was not signalled, or not again after SIGTERM.
+    /// was not signalled.
     Running,
 }
 /// The group as a signal target, while it runs. Ids 0 and 1 never name a provider's group.
@@ -336,7 +339,7 @@ pub(crate) fn stop_leftover(group: i64, started: Option<i64>) -> Leftover {
         wait_while_running(group);
     }
     if group_runs(group) {
-        Leftover::Running
+        Leftover::Signalled
     } else {
         Leftover::Stopped
     }
@@ -613,7 +616,7 @@ fn without_terminal_codes(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -654,6 +657,7 @@ mod tests {
     fn leftover(script: &str) -> (Child, i64) {
         let mut child = ProcessCommand::new("/bin/sh")
             .args(["-c", script])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .process_group(0)
             .spawn()
@@ -668,6 +672,13 @@ mod tests {
         assert_eq!(&ready, b"ready\n");
         let started = process_start(child.id() as i32).unwrap();
         (child, started)
+    }
+
+    /// A provider that exits on SIGTERM beside a tool subprocess that ignores it, in one group.
+    /// The subprocess needs no signal to end: it lives until the child's input closes, as when
+    /// the child is dropped.
+    pub(crate) fn leftover_with_survivor() -> (Child, i64) {
+        leftover("exec 3<&0; (trap '' TERM; echo ready; exec cat <&3) & exec sleep 30")
     }
 
     #[test]
@@ -698,6 +709,25 @@ mod tests {
             Leftover::Stopped
         );
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    #[test]
+    fn a_leftover_whose_leader_exits_on_sigterm_is_signalled_once_and_reported_so() {
+        use std::os::unix::process::ExitStatusExt;
+        let (mut child, started) = leftover_with_survivor();
+        let group = i64::from(child.id());
+
+        // The provider exits on SIGTERM; after that nothing confirms the group for SIGKILL.
+        assert_eq!(stop_leftover(group, Some(started)), Leftover::Signalled);
+        assert!(leftover_runs(group));
+
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while leftover_runs(group) {
+            assert!(Instant::now() < deadline, "the survivor outlived its input");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
     }
 
     #[test]

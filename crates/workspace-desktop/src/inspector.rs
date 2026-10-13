@@ -757,11 +757,12 @@ impl Workspace {
             .repositories
             .iter()
             .find(|r| r.id == ticket.repository_id)?;
-        // An owner allowed since the item was raised no longer asks; the step still waits for
-        // this answer.
-        let ask = publish_ask(ticket, request, repository, &snapshot.allowed_owners)
-            .unwrap_or(PublishAsk::EndedPullRequest);
-        Some(publish_card(ticket, request, repository, ask))
+        Some(waiting_card(
+            ticket,
+            request,
+            repository,
+            &snapshot.allowed_owners,
+        ))
     }
 
     fn resolve_attention(

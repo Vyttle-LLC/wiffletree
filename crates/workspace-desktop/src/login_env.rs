@@ -50,6 +50,16 @@ pub unsafe fn adopt() {
 /// Runs `shell` as an interactive login shell and returns its environment without per-session
 /// variables. The reader thread has finished by the time this returns successfully.
 fn resolve(shell: &Path, timeout: Duration) -> anyhow::Result<Vec<(OsString, OsString)>> {
+    resolve_after(shell, timeout, || ())
+}
+
+/// `resolve`, with `started` run once the shell is running and before the timeout begins, so a
+/// test can wait for what the shell starts without racing the timeout.
+fn resolve_after(
+    shell: &Path,
+    timeout: Duration,
+    started: impl FnOnce(),
+) -> anyhow::Result<Vec<(OsString, OsString)>> {
     let marker = format!("__WIFFLETREE_ENV_{}__", uuid::Uuid::new_v4().simple());
     let script = format!("printf '%s' {marker}; /usr/bin/env -0; printf '%s' {marker}");
     let mut command = Command::new(shell);
@@ -76,6 +86,7 @@ fn resolve(shell: &Path, timeout: Duration) -> anyhow::Result<Vec<(OsString, OsS
         let mut output = Vec::new();
         let _ = sender.send(stdout.read_to_end(&mut output).map(|_| output));
     });
+    started();
     let output = match receiver.recv_timeout(timeout) {
         Ok(output) => output?,
         Err(_) => {
@@ -227,13 +238,20 @@ echo "rc file says goodbye""#,
             directory.path(),
             &format!("/bin/sleep 42 &\necho $! > '{}'\nwait", pid_file.display()),
         );
-        resolve(&shell, Duration::from_millis(200)).unwrap_err();
-        let grandchild: libc::pid_t = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // The timeout begins only once the shell has started its child and recorded it whole,
+        // however long a loaded machine takes to get there. The limit only ends a wait for a
+        // shell that never does; the timeout then still kills it, and the read below fails.
+        let recorded = || std::fs::read_to_string(&pid_file).unwrap_or_default();
+        let limit = Instant::now() + Duration::from_secs(60);
+        let error = resolve_after(&shell, Duration::from_millis(200), || {
+            while !recorded().ends_with('\n') && Instant::now() < limit {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        let grandchild: libc::pid_t = recorded().trim().parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
         // SAFETY: signal 0 only checks whether the process still exists.
         while unsafe { libc::kill(grandchild, 0) } == 0 {
             assert!(

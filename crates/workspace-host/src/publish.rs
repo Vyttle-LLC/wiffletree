@@ -44,7 +44,8 @@ pub(crate) enum StepResult {
     Moved(String),
     /// What no longer matched the request when the step was about to send: nothing was sent.
     Changed(String),
-    /// `git push` was stopped at its deadline, so whether it reached GitHub is not known.
+    /// The step's command was stopped at its deadline, so whether it reached GitHub is not
+    /// known.
     Unfinished,
     /// Why the step sent nothing.
     Failed(String),
@@ -344,7 +345,8 @@ fn open_pull_request(job: &Job, tools: &Tools) -> StepResult {
             }
         }
         Ok(answer) => StepResult::Failed(format!("gh pr create failed: {}", answer.error)),
-        Err(error) => StepResult::Failed(format!("{error:#}")),
+        // `gh` was started and gave no answer: it was stopped at its deadline.
+        Err(_) => StepResult::Unfinished,
     }
 }
 
@@ -375,14 +377,7 @@ impl Host {
                 .is_some_and(|r| r.waiting.is_none()),
             "A publish step for this ticket is running; its result will arrive as a message"
         );
-        match (
-            ticket
-                .pull_request
-                .as_ref()
-                .filter(|pr| pr.state == PrState::Open),
-            title,
-            body,
-        ) {
+        match (ticket.open_pull_request(), title, body) {
             (None, Some(title), Some(body)) => {
                 ensure!(
                     !title.trim().is_empty()
@@ -411,14 +406,10 @@ impl Host {
             {
                 return Ok((self.publish_status(&ticket, &checked.repository), None));
             }
-            let withdrawn = format!(
-                "The request to publish {} at {} to {} was withdrawn, because publish_ticket was called again with another commit, review, title or description. {}",
-                waiting.branch,
-                short_sha(&waiting.commit),
-                waiting.repository,
-                nothing_sent(&waiting)
-            );
-            self.end_request(&mut ticket, &withdrawn)?;
+            self.withdraw_request(
+                &mut ticket,
+                "publish_ticket was called again with another commit, review, title or description",
+            )?;
         }
         let worktree = Path::new(&ticket.worktree);
         let size = commit_size(
@@ -443,6 +434,7 @@ impl Host {
             step: PublishStep::Push,
             waiting: None,
             blocked_review_approved: false,
+            approvals: 0,
         });
         self.save_ticket(&ticket)?;
         let job = self.start_step(&mut ticket, &checked.repository)?;
@@ -695,11 +687,7 @@ impl Host {
                     true => format!("GitHub already had {sent}; nothing needed pushing."),
                     false => format!("Pushed {sent}."),
                 };
-                match ticket
-                    .pull_request
-                    .as_ref()
-                    .filter(|pr| pr.state == PrState::Open)
-                {
+                match ticket.open_pull_request() {
                     Some(pr) => format!("{pushed} PR #{} ({}) has this commit.", pr.number, pr.url),
                     None => pushed,
                 }
@@ -714,13 +702,29 @@ impl Host {
                     &detail,
                 )?;
                 let number = url.rsplit('/').next().unwrap_or_default();
-                format!("Pushed {sent} and opened PR #{number}: {url}")
+                let approved = match request.approvals {
+                    2 => "The human approved both steps. ",
+                    _ => "",
+                };
+                format!("{approved}Pushed {sent} and opened PR #{number}: {url}")
             }
             StepResult::Changed(changed) => changed_notice(&request, &changed),
-            StepResult::Unfinished => format!(
-                "Pushing {} to {} did not finish within 10 minutes and was stopped. The push may or may not have reached GitHub. Call publish_ticket again; repeating it is safe.",
-                request.branch, request.repository
-            ),
+            StepResult::Unfinished => {
+                let stopped = match request.step {
+                    PublishStep::Push => format!(
+                        "Pushing {} to {} did not finish within 10 minutes",
+                        request.branch, request.repository
+                    ),
+                    PublishStep::OpenPullRequest => format!(
+                        "Opening the pull request for {} in {} did not finish within 30 seconds",
+                        request.branch, request.repository
+                    ),
+                };
+                format!(
+                    "{stopped} and was stopped. {} Call publish_ticket again; repeating it is safe.",
+                    possibly_sent(&request)
+                )
+            }
             StepResult::Moved(moved) => format!(
                 "{moved}. {} Call publish_ticket again: it will be decided on where the repository is now.",
                 nothing_sent(&request)
@@ -781,6 +785,7 @@ impl Host {
         request.blocked_review_approved |= publish_ask(&ticket, &request, &repository, &allowed)
             == Some(PublishAsk::BlockedReview);
         request.waiting = None;
+        request.approvals += 1;
         ticket.publishing = Some(request.clone());
         self.save_ticket(&ticket)?;
         Ok(Some(self.job(&ticket, request, &repository)))
@@ -801,6 +806,22 @@ impl Host {
                 Ok(None)
             }
         }
+    }
+
+    /// Withdraws the ticket's waiting request, if it has one, with nothing more sent. A step
+    /// already running is left to report its own result.
+    pub(crate) fn withdraw_request(&mut self, ticket: &mut Ticket, because: &str) -> Result<()> {
+        let Some(waiting) = ticket.publishing.clone().filter(|r| r.waiting.is_some()) else {
+            return Ok(());
+        };
+        let withdrawn = format!(
+            "The request to publish {} at {} to {} was withdrawn, because {because}. {}",
+            waiting.branch,
+            short_sha(&waiting.commit),
+            waiting.repository,
+            nothing_sent(&waiting)
+        );
+        self.end_request(ticket, &withdrawn)
     }
 
     /// Ends the ticket's request: sends its caller the request's one message and withdraws its
@@ -860,16 +881,11 @@ impl Host {
             {
                 continue;
             }
-            let sent = match request.step {
-                PublishStep::Push => "The push may or may not have reached GitHub.".to_owned(),
-                PublishStep::OpenPullRequest => format!(
-                    "The branch was pushed at {}; the pull request may or may not have been opened.",
-                    short_sha(&request.commit)
-                ),
-            };
             let notice = format!(
-                "Publishing {} to {} was interrupted when Wiffletree stopped. {sent} Call publish_ticket again; repeating it is safe.",
-                request.branch, request.repository
+                "Publishing {} to {} was interrupted when Wiffletree stopped. {} Call publish_ticket again; repeating it is safe.",
+                request.branch,
+                request.repository,
+                possibly_sent(request)
             );
             self.end_request(&mut ticket, &notice)?;
         }
@@ -883,6 +899,17 @@ fn nothing_sent(request: &PublishRequest) -> String {
         PublishStep::Push => "Nothing was pushed.".into(),
         PublishStep::OpenPullRequest => format!(
             "The branch was pushed at {}; no pull request was opened.",
+            short_sha(&request.commit)
+        ),
+    }
+}
+
+/// What a request whose running step was cut short may have sent.
+fn possibly_sent(request: &PublishRequest) -> String {
+    match request.step {
+        PublishStep::Push => "The push may or may not have reached GitHub.".into(),
+        PublishStep::OpenPullRequest => format!(
+            "The branch was pushed at {}; the pull request may or may not have been opened.",
             short_sha(&request.commit)
         ),
     }
@@ -1554,7 +1581,7 @@ pub(crate) mod tests {
             format!(
                 "Push this branch to allowed-org/app?\n\
                  Repository: allowed-org/app · private · allowed-org is not an allowed owner\n\
-                 Branch: wiffletree/fix-contrast\n\
+                 Branch: wiffletree/fix-contrast · not on GitHub yet\n\
                  Commit: {short} · 2 commits · 2 files changed, 2 insertions(+)\n\
                  Review: Cycle 1 passed at this commit · Correctness"
             )
@@ -2421,6 +2448,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_pull_request_stopped_at_its_deadline_is_not_reported_as_not_opened() {
+        let mut f = fixture();
+        let mut remote = remote(&f);
+        f.allow("allowed-org");
+        let answers = remote.tools.gh.clone();
+        remote.tools.gh = Arc::new(move |path, args| match args[..2] {
+            // As `runtime::gh_answer` answers when it kills `gh` at its deadline.
+            ["pr", "create"] => bail!("gh could not run: Git query timed out"),
+            _ => answers(path, args),
+        });
+        let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        let head = f.head();
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "Opening the pull request for {BRANCH} in allowed-org/app did not finish within 30 seconds and was stopped. The branch was pushed at {}; the pull request may or may not have been opened. Call publish_ticket again; repeating it is safe.",
+                short_sha(&head)
+            )
+        );
+        let ticket = f.ticket();
+        assert_eq!((ticket.pushed, ticket.publishing), (Some(head), None));
+    }
+
+    #[test]
     fn a_step_interrupted_by_a_restart_is_reported_and_publishing_again_is_safe() {
         let mut f = fixture();
         let remote = remote(&f);
@@ -2575,8 +2627,16 @@ pub(crate) mod tests {
         );
         answer(&mut f, &remote, "approved");
         assert_eq!(remote.github.lock().unwrap().created.len(), 1);
-        assert_eq!(results(&f.host).len(), 1);
-        assert!(results(&f.host)[0].1.contains("opened PR #45"));
+        assert_eq!(
+            results(&f.host),
+            [(
+                caller.clone(),
+                format!(
+                    "The human approved both steps. Pushed {BRANCH} at {} to allowed-org/app and opened PR #45: https://github.com/allowed-org/app/pull/45",
+                    short_sha(&head)
+                )
+            )]
+        );
         assert!(f.open_items().is_empty() && f.ticket().publishing.is_none());
         // A later push to the same pull request asks again.
         watch_open_pr(&mut f, 45);
@@ -2587,10 +2647,12 @@ pub(crate) mod tests {
         assert!(step.is_none() && status["step"] == "push");
         let item = waiting_item(&f);
         assert!(
-            item.prompt.contains(&format!(
-                "Commit: {} · 1 commit · 1 file changed",
-                short_sha(&fix)
-            )),
+            item.prompt
+                .starts_with("Push 1 new commit to allowed-org/app?\n")
+                && item.prompt.contains(&format!(
+                    "Commit: {} · 1 commit · 1 file changed",
+                    short_sha(&fix)
+                )),
             "{}",
             item.prompt
         );
@@ -2598,6 +2660,63 @@ pub(crate) mod tests {
         answer(&mut f, &remote, "approved");
         assert_eq!(remote.branch(BRANCH), Some(fix));
         assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+    }
+
+    #[test]
+    fn an_owner_allowed_while_the_push_waits_opens_the_pull_request_without_a_second_item() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let caller = f.implementer.id.clone();
+        f.publish(&caller).unwrap();
+        f.allow("allowed-org");
+        answer(&mut f, &remote, "approved");
+        // One approval is not both steps, so the result does not say so.
+        assert_eq!(
+            results(&f.host),
+            [(
+                caller,
+                format!(
+                    "Pushed {BRANCH} at {} to allowed-org/app and opened PR #45: https://github.com/allowed-org/app/pull/45",
+                    short_sha(&f.head())
+                )
+            )]
+        );
+        assert!(f.open_items().is_empty());
+    }
+
+    #[test]
+    fn accepting_or_closing_a_ticket_withdraws_its_waiting_request() {
+        // Its caller is told also when the ticket's end archives it.
+        for (finish, by_implementer) in [("accepted", false), ("closed", true)] {
+            let mut f = fixture();
+            let remote = remote(&f);
+            let caller = match by_implementer {
+                true => f.implementer.id.clone(),
+                false => f.coordinator.id.clone(),
+            };
+            let head = f.head();
+            f.publish(&caller).unwrap();
+            waiting_item(&f);
+            let ticket = f.ticket.clone();
+            match finish {
+                "accepted" => f.host.accept_ticket(&ticket, None).unwrap(),
+                _ => f.host.close_ticket(&ticket).unwrap(),
+            };
+            assert!(f.open_items().is_empty());
+            let ticket = f.ticket();
+            assert_eq!((ticket.state.as_str(), ticket.publishing), (finish, None));
+            assert_eq!(
+                results(&f.host),
+                [(
+                    caller,
+                    format!(
+                        "The request to publish {BRANCH} at {} to allowed-org/app was withdrawn, because the ticket was {finish}. Nothing was pushed.",
+                        short_sha(&head)
+                    )
+                )]
+            );
+            assert!(remote.git_calls().is_empty());
+        }
     }
 
     #[test]
@@ -2923,7 +3042,7 @@ pub(crate) mod tests {
             format!(
                 "Publish this ticket although its review ended blocked?\n\
                  Repository: allowed-org/app · private · allowed-org is an allowed owner\n\
-                 Branch: wiffletree/fix-contrast\n\
+                 Branch: wiffletree/fix-contrast · not on GitHub yet\n\
                  Commit: {short} · 2 commits · 2 files changed, 2 insertions(+)\n\
                  Review: Cycle 2 ended blocked at {short}, after 1 of 3 rounds · Correctness failed\n\
                  Open findings:\n\
@@ -2937,7 +3056,11 @@ pub(crate) mod tests {
         assert_eq!(remote.branch(BRANCH), Some(head));
         assert_eq!(remote.github.lock().unwrap().created.len(), 1);
         assert!(f.open_items().is_empty() && f.ticket().publishing.is_none());
-        assert!(results(&f.host)[0].1.contains("opened PR #45"));
+        let result = &results(&f.host)[0].1;
+        assert!(
+            result.starts_with("Pushed ") && result.contains("opened PR #45"),
+            "{result}"
+        );
         // The approval covered that commit only: the next blocked commit asks again.
         watch_open_pr(&mut f, 45);
         let next = f.commit("c.txt", "three\n");
