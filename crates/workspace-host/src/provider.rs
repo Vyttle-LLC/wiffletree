@@ -35,6 +35,8 @@ pub enum ProviderEvent {
         complete: bool,
     },
     Quota(QuotaReading),
+    /// A Claude result record's `modelUsage`: the session's counts so far, by model.
+    ModelUsage(Value),
     /// What Claude said about the compaction this run is; a turn's run sends none.
     Compaction(CompactionRecord),
     Finished {
@@ -526,19 +528,11 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                 }
                 "result" => {
                     terminal = true;
+                    emit(ProviderEvent::ModelUsage(value["modelUsage"].clone()));
                     if compaction {
-                        // The record's `usage` is zero for a compaction; what it spent is here.
+                        // The record's `usage` is zero for a compaction. These are Claude's
+                        // totals for the session's whole life, kept as it reported them.
                         usage = json!({"modelUsage":value["modelUsage"],"total_cost_usd":value["total_cost_usd"]});
-                        for (request_id, model, usage) in
-                            crate::usage::compaction_requests(&turn.run_id, &value)
-                        {
-                            emit(ProviderEvent::Usage {
-                                request_id,
-                                model: Some(model),
-                                usage,
-                                complete: true,
-                            });
-                        }
                     } else {
                         usage = value["usage"].clone();
                         if value["is_error"] != true

@@ -139,7 +139,7 @@ impl Host {
         )
     }
     /// Settles a session's compaction: the request is cleared, the outcome stored for the
-    /// Context card and its one line written. The session's status, its messages' receipts
+    /// Context card and its one line written, once however often this runs for a run. The session's status, its messages' receipts
     /// and its parent are left alone. `line_id` is the run's id, or any unique id for a
     /// compaction that could not start.
     pub(crate) fn compaction_ended(
@@ -172,7 +172,7 @@ impl Host {
             host.save_runtime(&runtime)?;
             if let Some(body) = line {
                 host.db.execute(
-                    "INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5)",
+                    "INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO NOTHING",
                     params![format!("{COMPACTION_LINE_PREFIX}{line_id}"), session.project_id, session.id, body, now()],
                 )?;
             }

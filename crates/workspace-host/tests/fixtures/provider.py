@@ -60,6 +60,13 @@ def rpc(method,params):
         return json.loads(result['content'][0]['text'])
     return result
 def tool(name,**arguments):return rpc('tools/call',{'name':name,'arguments':arguments})
+def model_usage(sid,spent):
+    # Claude's modelUsage counts the session's whole life, so the double keeps a running total.
+    path=Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/f'{sid}.model-usage';total=json.loads(path.read_text()) if path.exists() else {}
+    for model,counts in spent.items():
+        kept=total.setdefault(model,{})
+        for key in ('inputTokens','outputTokens','cacheReadInputTokens','cacheCreationInputTokens'):kept[key]=kept.get(key,0)+counts.get(key,0)
+    path.write_text(json.dumps(total));return total
 def wait_for(gate):
     # Holds a turn or a compaction until the test creates the gate file.
     deadline=time.time()+30
@@ -85,6 +92,7 @@ try:
             record=json.loads(line)
             if 'NO_STATUS' in note and record.get('subtype')=='status':continue
             if 'session_id' in record:record['session_id']=sid
+            if record['type']=='result':record['modelUsage']=model_usage(sid,record['modelUsage'])
             emit(record)
         sys.exit(0)
     emit({'type':'system','subtype':'init','session_id':sid,'mcp_servers':[{'name':'agent_workspace','status':'connected'}]} if claude else {'type':'thread.started','thread_id':sid})
@@ -191,6 +199,6 @@ try:
         emit({'type':'stream_event','event':{'type':'message_stop'}})
     # A deliberately cumulative Claude result must not replace request-level counters.
     if not claude: counter_path.write_text(json.dumps(previous+1))
-    emit({'type':'result','is_error':False,'usage':{'input_tokens':50000,'output_tokens':50000}} if claude else {'type':'turn.completed','usage':{'input_tokens':100*(previous+1),'cached_input_tokens':20*(previous+1),'output_tokens':30*(previous+1)}})
+    emit({'type':'result','is_error':False,'usage':{'input_tokens':50000,'output_tokens':50000},'modelUsage':model_usage(sid,{'claude-opus-5-5':{'inputTokens':100,'cacheReadInputTokens':20,'cacheCreationInputTokens':5,'outputTokens':30}})} if claude else {'type':'turn.completed','usage':{'input_tokens':100*(previous+1),'cached_input_tokens':20*(previous+1),'output_tokens':30*(previous+1)}})
 finally:
     mcp.stdin.close();mcp.wait(timeout=5)

@@ -133,17 +133,6 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
             .collect::<Vec<_>>()
     });
     for ((run, session, group, _, turn), leftover) in unfinished.iter().zip(leftovers) {
-        if *turn {
-            let mut runtime = host.session_runtime(session)?;
-            runtime.last_error = Some(STOPPED_UNEXPECTEDLY.into());
-            host.save_runtime(&runtime)?;
-            host.set_status(session, Status::Disconnected)?;
-        } else {
-            let session = host.session(session)?;
-            host.compaction_ended(&session, run, CompactionResult::Interrupted, None, None)?;
-        }
-        // A restart never silently repeats a turn that may have had side effects: those
-        // sessions stay held for reconciliation, while the rest of a live project carries on.
         let stopped_at = (leftover == provider::Leftover::Stopped).then(now);
         let gone = (leftover != provider::Leftover::Running).then_some(true);
         let error = if *turn {
@@ -151,10 +140,26 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
         } else {
             "Host stopped unexpectedly during a compaction"
         };
-        host.db.execute(
-            "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4,'$.process_gone',?5) WHERE id=?1",
-            params![run, now(), error, stopped_at, gone],
-        )?;
+        // One unit per run, so a host that dies here finds the run as it was and starts over.
+        host.atomically(|host| {
+            if *turn {
+                // A restart never silently repeats a turn that may have had side effects: those
+                // sessions stay held for reconciliation, while the rest of a live project
+                // carries on.
+                let mut runtime = host.session_runtime(session)?;
+                runtime.last_error = Some(STOPPED_UNEXPECTEDLY.into());
+                host.save_runtime(&runtime)?;
+                host.set_status(session, Status::Disconnected)?;
+            } else {
+                let session = host.session(session)?;
+                host.compaction_ended(&session, run, CompactionResult::Interrupted, None, None)?;
+            }
+            host.db.execute(
+                "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4,'$.process_gone',?5) WHERE id=?1",
+                params![run, now(), error, stopped_at, gone],
+            )?;
+            Ok(())
+        })?;
         if let (provider::Leftover::Running, Some(group)) = (leftover, group) {
             note_leftover_process(host, session, run, *group)?;
         }
@@ -1146,6 +1151,9 @@ impl Actor {
                 )?;
             }
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
+            ProviderEvent::ModelUsage(usage) => {
+                self.host.record_model_usage(run, &usage, now())?;
+            }
             // Only a compaction's run sends these; see `compaction_event`.
             ProviderEvent::Compaction(_) => {}
             ProviderEvent::Finished {
@@ -1306,6 +1314,7 @@ impl Actor {
             } => self.compaction_finished(id, error, usage, cancelled),
             event @ (ProviderEvent::Spawned { .. }
             | ProviderEvent::Usage { .. }
+            | ProviderEvent::ModelUsage(_)
             | ProviderEvent::Quota(_)) => self.provider_event(id, run, event),
             ProviderEvent::Session(_) | ProviderEvent::Step(_) | ProviderEvent::Reply(_) => Ok(()),
         }
@@ -1327,18 +1336,17 @@ impl Actor {
         } else {
             compaction::outcome(compacting.status, error)
         };
-        // The provider thread stopped the process group before reporting this end.
-        self.host.db.execute(
-            "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.process_gone',1) WHERE id=?1",
-            params![
-                compacting.run,
-                now(),
-                tag(&result)?,
-                json!({"error":reason,"modelUsage":usage["modelUsage"],"total_cost_usd":usage["total_cost_usd"]}).to_string()
-            ],
-        )?;
-        self.host
-            .compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)?;
+        let detail = json!({"error":reason,"modelUsage":usage["modelUsage"],"total_cost_usd":usage["total_cost_usd"]});
+        // One unit: a host that dies here leaves the run unfinished with its request, which
+        // the next start settles, never a finished run beside a request that still runs. The
+        // provider thread stopped the process group before reporting this end.
+        self.host.atomically(|host| {
+            host.db.execute(
+                "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.process_gone',1) WHERE id=?1",
+                params![compacting.run, now(), tag(&result)?, detail.to_string()],
+            )?;
+            host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
+        })?;
         if !self.stopping {
             self.host.settle_pending_worktrees();
         }
@@ -6375,6 +6383,73 @@ mod tests {
         let later = now() + 1;
         let note = resume_note(&actor.host, &session.id, later, later, &[]).unwrap();
         assert_eq!(note, "");
+    }
+
+    #[test]
+    fn a_compaction_settles_its_run_and_its_request_together() {
+        let (_home, mut actor, _, child) = actor_with_child();
+        let run = compacting(&mut actor, &child, None);
+        let state = |actor: &Actor| -> (bool, Option<CompactionState>) {
+            let finished = actor.host.db.query_row(
+                "SELECT finished_at IS NOT NULL FROM provider_runs WHERE id=?1",
+                [&run],
+                |r| r.get(0),
+            );
+            let runtime = actor.host.session_runtime(&child).unwrap();
+            (finished.unwrap(), runtime.compaction.map(|c| c.state))
+        };
+        // The session's half fails after the run's half was written.
+        actor
+            .host
+            .db
+            .execute_batch(
+                "CREATE TRIGGER refuse_line BEFORE INSERT ON messages WHEN NEW.id LIKE 'compaction:%' BEGIN SELECT RAISE(ABORT,'refused'); END",
+            )
+            .unwrap();
+
+        let success = ProviderEvent::Compaction(CompactionRecord::Status(Ok(())));
+        compaction_events(
+            &mut actor,
+            &child,
+            &run,
+            vec![success, compaction_finished(false)],
+        );
+
+        // Neither half remains: an unfinished run with its request, which a start settles.
+        assert_eq!(state(&actor), (false, Some(CompactionState::Running)));
+        actor
+            .host
+            .db
+            .execute_batch("DROP TRIGGER refuse_line")
+            .unwrap();
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert_eq!(state(&actor), (true, None));
+        assert_eq!(compaction_lines(&actor, &child), ["Compaction interrupted"]);
+    }
+
+    #[test]
+    fn recovering_a_compaction_twice_settles_it_once() {
+        let process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) =
+            actor_with_leftover_compaction(&process, Some(process.started()));
+        // As after a host that died part-way through recovering it: the session is settled
+        // and its line written, and the run is still unfinished.
+        let interrupted = CompactionResult::Interrupted;
+        actor
+            .host
+            .compaction_ended(&session, &run, interrupted, None, None)
+            .unwrap();
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert!(process_stopped_at(&actor, &run).is_some());
+        assert_eq!(
+            compaction_lines(&actor, &session.id),
+            ["Compaction interrupted"]
+        );
+        let runtime = actor.host.session_runtime(&session.id).unwrap();
+        assert_eq!(runtime.compaction, None);
+        assert_eq!(runtime.last_compaction.map(|o| o.result), Some(interrupted));
     }
 
     #[test]

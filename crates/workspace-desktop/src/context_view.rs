@@ -325,9 +325,12 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(usage) = receive.recv().await {
-                let _ = this.update(cx, |view, cx| {
+                let _ = this.update_in(cx, |view, window, cx| {
                     view.context_pending.remove(&session.id);
                     view.context.insert(session.id, usage);
+                    // A turn or a compaction that ended while this probe ran is measured now;
+                    // no later snapshot may come to ask for it.
+                    view.sync_context(window, cx);
                     cx.notify();
                 });
             }
