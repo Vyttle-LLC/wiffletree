@@ -67,7 +67,8 @@ def model_usage(sid,spent):
     for model,counts in spent.items():
         kept=total.setdefault(model,{})
         for key in ('inputTokens','outputTokens','cacheReadInputTokens','cacheCreationInputTokens'):kept[key]=kept.get(key,0)+counts.get(key,0)
-    path.write_text(json.dumps(total));return total
+    # Replaced whole, so a turn stopped mid-write leaves the last total and not an empty file.
+    fresh=path.with_suffix('.writing');fresh.write_text(json.dumps(total));os.replace(fresh,path);return total
 def wait_for(gate):
     # Holds a turn or a compaction until the test creates the gate file.
     deadline=time.time()+30

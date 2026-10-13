@@ -17,11 +17,23 @@ fn inset(depth: usize, grouped: bool) -> Pixels {
     px(8. + (depth + usize::from(grouped)) as f32 * INDENT)
 }
 
+const MOUSE_BUTTONS: [MouseButton; 5] = [
+    MouseButton::Left,
+    MouseButton::Right,
+    MouseButton::Middle,
+    MouseButton::Navigate(NavigationDirection::Back),
+    MouseButton::Navigate(NavigationDirection::Forward),
+];
+
+const SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// A project or group being dragged in the tree, drawn beside the pointer, and where it would
 /// land. It lives only as long as the drag.
 pub(super) struct ProjectDrag {
     moving: tree::Movable,
     target: Option<tree::Drop>,
+    /// The pointer has been off the dragged row, so a release back on it is not a click.
+    left_row: bool,
     glyph: &'static str,
     label: SharedString,
     palette: Palette,
@@ -81,6 +93,18 @@ impl Reorder<'_> {
     fn under(&self, over: &tree::Movable) -> Option<Halves> {
         let halves = self.onto(over)?;
         Some(halves.map(|(_, below)| (below.clone(), below)))
+    }
+}
+
+/// Tells whatever a project or group is dragged over where the pointer is, as if it had moved.
+fn repeat_pointer(window: &mut Window, cx: &mut App) {
+    if cx.has_active_drag() {
+        let moved = MouseMoveEvent {
+            position: window.mouse_position(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: window.modifiers(),
+        };
+        window.dispatch_event(PlatformInput::MouseMove(moved), cx);
     }
 }
 
@@ -261,21 +285,26 @@ impl Workspace {
                             .pt(px(2.))
                             .pb_3()
                             .on_drag_move(cx.listener(
-                                |v, event: &DragMoveEvent<tree::Movable>, _, c| {
+                                |v, event: &DragMoveEvent<tree::Movable>, w, c| {
                                     if !event.bounds.contains(&event.event.position) {
                                         v.aim_project_drag(None, c);
                                     }
+                                    v.scroll_under_drag(w, c);
                                 },
                             ))
                             .on_drop(cx.listener(|v, moving: &tree::Movable, w, c| {
                                 v.drop_project(moving, w, c)
                             }))
-                            // Between them, these two hear every release of the left button.
+                            // With those for a release elsewhere, this hears every release.
                             .capture_any_mouse_up(cx.listener(|v, _, _, c| v.end_rename_press(c)))
-                            .on_mouse_up_out(
-                                MouseButton::Left,
-                                cx.listener(|v, _, _, c| v.end_rename_press(c)),
-                            )
+                            .map(|tree| {
+                                MOUSE_BUTTONS.into_iter().fold(tree, |tree, button| {
+                                    tree.on_mouse_up_out(
+                                        button,
+                                        cx.listener(|v, _, _, c| v.end_rename_press(c)),
+                                    )
+                                })
+                            })
                             .child(self.tree(p, cx)),
                     )
                     .vertical_scrollbar(&self.tree_scroll),
@@ -615,16 +644,22 @@ impl Workspace {
             tree::Movable::Group(_) => "folder",
         };
         let own = movable.clone();
+        let leaving = movable.clone();
         let dragged = reorder.moving.as_ref() == Some(&movable);
         let halves = reorder.onto(&movable);
         let workspace = cx.weak_entity();
         let label = SharedString::from(label.to_owned());
         let row = row
             .when(dragged, |row| row.opacity(0.4))
-            .on_drag(movable, move |moving, _, _, cx| {
+            .on_drag(movable, move |moving, _, window, cx| {
+                // GPUI tells no one of the movement that starts a drag, which may already have
+                // left the row or reached the list's edge.
+                window.defer(cx, repeat_pointer);
+
                 let drag = cx.new(|_| ProjectDrag {
                     moving: moving.clone(),
                     target: None,
+                    left_row: false,
                     glyph,
                     label: label.clone(),
                     palette: p,
@@ -636,29 +671,48 @@ impl Workspace {
                 });
                 drag
             })
-            // GPUI turns a click that moves a few pixels into a drag. One that ends on its own
-            // row moves nothing, so it does what the click would have done.
+            .on_drag_move(
+                cx.listener(move |v, event: &DragMoveEvent<tree::Movable>, _, c| {
+                    if *event.drag(c) == leaving && !event.bounds.contains(&event.event.position) {
+                        v.project_drag_left_row(c);
+                    }
+                }),
+            )
             .on_drop(cx.listener(move |v, moving: &tree::Movable, w, c| {
-                if *moving == own {
-                    v.activate(&own, w, c);
-                } else {
-                    v.drop_project(moving, w, c);
-                }
+                v.drop_on_row(moving, &own, false, w, c)
             }));
         aiming(row, halves, cx)
     }
 
-    fn end_rename_press(&mut self, cx: &mut Context<Self>) {
-        if self.rename_press {
-            self.rename_press = false;
-            cx.notify();
+    fn project_drag_left_row(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.project_drag.as_ref().and_then(|drag| drag.upgrade()) {
+            drag.update(cx, |drag, _| drag.left_row = true);
         }
     }
 
-    /// What a click on a project or group row does.
-    fn activate(&mut self, row: &tree::Movable, window: &mut Window, cx: &mut Context<Self>) {
-        match row {
-            tree::Movable::Project(project_id) => {
+    /// A row dropped on another moves. GPUI turns a click that moves a few pixels into a drag,
+    /// so one released on its own row without having left it does what the click would have.
+    fn drop_on_row(
+        &mut self,
+        moving: &tree::Movable,
+        row: &tree::Movable,
+        on_chevron: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if moving != row {
+            return self.drop_project(moving, window, cx);
+        }
+        let drag = self.project_drag.take().and_then(|drag| drag.upgrade());
+        let left_row = drag.is_none_or(|drag| drag.read(cx).left_row);
+        let release = tree::own_release(left_row, self.row_press, on_chevron);
+        match (row, release) {
+            (_, tree::OwnRelease::Nothing) => {}
+            (tree::Movable::Group(key), _) => self.toggle_group(key, cx),
+            (tree::Movable::Project(project_id), tree::OwnRelease::Toggle) => {
+                self.toggle_project(project_id, cx)
+            }
+            (tree::Movable::Project(project_id), release) => {
                 let root = self
                     .snapshot
                     .iter()
@@ -666,14 +720,84 @@ impl Workspace {
                     .find(|s| s.project_id == *project_id && s.parent_id.is_none());
                 if let Some(id) = root.map(|root| root.id.clone()) {
                     self.select(id, window, cx);
+                    if release == tree::OwnRelease::Rename {
+                        self.begin_project_rename(project_id.clone(), window, cx);
+                    }
                 }
             }
-            tree::Movable::Group(key) => {
-                if !self.collapsed_groups.remove(key) {
-                    self.collapsed_groups.insert(key.clone());
+        }
+    }
+
+    fn toggle_group(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_groups.remove(key) {
+            self.collapsed_groups.insert(key.to_owned());
+        }
+        cx.notify();
+    }
+
+    fn toggle_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_projects.remove(project_id) {
+            self.collapsed_projects.insert(project_id.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Scrolls the tree for as long as a dragged row is held near its top or bottom edge.
+    fn scroll_under_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_scrolling || self.drag_scroll_step(window) == 0. {
+            return;
+        }
+        self.drag_scrolling = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SCROLL_TICK).await;
+                let scrolled = cx.update(|window, cx| {
+                    // The pointer rests while rows move under it, so the insertion line follows
+                    // them only if they hear where it is.
+                    repeat_pointer(window, cx);
+                    this.update(cx, |view, cx| view.scroll_tree(window, cx))
+                });
+                if !matches!(scrolled, Ok(Ok(true))) {
+                    break;
                 }
-                cx.notify();
             }
+            let _ = this.update(cx, |view, _| view.drag_scrolling = false);
+        })
+        .detach();
+    }
+
+    fn drag_scroll_step(&self, window: &Window) -> f32 {
+        let (bounds, pointer) = (self.tree_scroll.bounds(), window.mouse_position());
+        if !bounds.contains(&pointer) {
+            return 0.;
+        }
+        tree::edge_scroll(
+            pointer.y.into(),
+            bounds.top().into(),
+            bounds.bottom().into(),
+        )
+    }
+
+    /// One tick of scrolling under a dragged row; false once the drag has ended or left the
+    /// edge.
+    fn scroll_tree(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let dragging = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
+        let step = self.drag_scroll_step(window);
+        if dragging.is_none() || step == 0. {
+            return false;
+        }
+        let mut offset = self.tree_scroll.offset();
+        let end = -self.tree_scroll.max_offset().y;
+        offset.y = (offset.y - px(step)).max(end).min(px(0.));
+        self.tree_scroll.set_offset(offset);
+        cx.notify();
+        true
+    }
+
+    fn end_rename_press(&mut self, cx: &mut Context<Self>) {
+        if self.rename_press {
+            self.rename_press = false;
+            cx.notify();
         }
     }
 
@@ -747,14 +871,14 @@ impl Workspace {
                 tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
                 tree::Rollup::Working => status_glyph(Status::Working, 12., p),
             });
-        let toggle = tree::Movable::Group(key.clone());
+        let toggle = key.clone();
         let row = self
             .row(SharedString::from(format!("group-{key}")), 0, false, p)
             .pl(inset(0, false) - px(4.))
             .text_size(px(12.))
             .text_color(p.subtle)
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
-            .on_click(cx.listener(move |v, _, w, c| v.activate(&toggle, w, c)))
+            .on_click(cx.listener(move |v, _, _, c| v.toggle_group(&toggle, c)))
             .child(
                 div()
                     .flex_none()
@@ -924,6 +1048,7 @@ impl Workspace {
         let rename_id = project_id.clone();
         let click_project = project_id.clone();
         let movable = tree::Movable::Project(project_id.clone());
+        let chevron_row = movable.clone();
         let row = self
             .row(SharedString::from(format!("tree-{id}")), 0, selected, p)
             // Its children wrap, so the progress track added last takes its own line under the label.
@@ -935,6 +1060,12 @@ impl Workspace {
             .text_size(px(13.))
             .when(root.archived, |d| d.opacity(0.55))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
+            .capture_any_mouse_down(cx.listener(|v, event: &MouseDownEvent, _, _| {
+                v.row_press = tree::RowPress {
+                    on_chevron: false,
+                    click_count: event.click_count,
+                };
+            }))
             .on_click(cx.listener(move |v, event: &ClickEvent, w, c| {
                 if !editing {
                     v.select(id.clone(), w, c);
@@ -954,12 +1085,16 @@ impl Workspace {
                     .rounded_sm()
                     .text_color(p.subtle)
                     .hover(move |d| d.bg(p.edge.opacity(0.5)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, _, _, _| v.row_press.on_chevron = true),
+                    )
                     .on_click(cx.listener(move |v, _, _, c| {
                         c.stop_propagation();
-                        if !v.collapsed_projects.remove(&toggle_id) {
-                            v.collapsed_projects.insert(toggle_id.clone());
-                        }
-                        c.notify();
+                        v.toggle_project(&toggle_id, c);
+                    }))
+                    .on_drop(cx.listener(move |v, moving: &tree::Movable, w, c| {
+                        v.drop_on_row(moving, &chevron_row, true, w, c)
                     }))
                     .child(
                         icon(if collapsed {

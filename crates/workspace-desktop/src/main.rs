@@ -132,6 +132,10 @@ struct Workspace {
     project_drag: Option<WeakEntity<sidebar::ProjectDrag>>,
     /// The press in progress ended a rename, so it does not also start a drag.
     rename_press: bool,
+    /// How the latest press on a project row began.
+    row_press: tree::RowPress,
+    /// The tree is scrolling under a row dragged to its edge.
+    drag_scrolling: bool,
     show_archived: bool,
     tree_scroll: ScrollHandle,
     quotas: Vec<QuotaReading>,
@@ -263,6 +267,8 @@ impl Workspace {
             collapsed_groups: BTreeSet::new(),
             project_drag: None,
             rename_press: false,
+            row_press: tree::RowPress::default(),
+            drag_scrolling: false,
             show_archived: false,
             tree_scroll: ScrollHandle::new(),
             quotas: vec![],
