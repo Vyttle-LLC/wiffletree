@@ -250,6 +250,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     assert!(!coordinator.contains("stop_turn"));
     for phrase in [
         "Never start a fresh cycle to chase them",
+        "verify again while a full review remains",
         "waived",
         "product, security or data-loss decision",
         "Treat each check-in as a decision",

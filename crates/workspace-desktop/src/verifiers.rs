@@ -86,6 +86,18 @@ fn with_level(
     Ok(settings)
 }
 
+/// Adds `verifier` and ticks it in every level marked full review, in the same save, so a new
+/// verifier runs as it did before levels. Re-checks stay as they are.
+fn add_verifier(settings: &mut VerificationSettings, verifier: VerifierConfig) {
+    let focus = verifier.focus.clone();
+    settings.verifiers.push(verifier);
+    for level in &mut settings.levels {
+        if level.kind == LevelKind::FullReview {
+            level.verifiers = focuses(&settings.verifiers, |f| level.runs(f) || f == focus);
+        }
+    }
+}
+
 /// Removes the verifier at `index` and takes it out of every level, in the same save.
 fn remove_verifier(settings: &mut VerificationSettings, index: usize) {
     settings.verifiers.remove(index);
@@ -214,7 +226,7 @@ impl VerifierEditor {
             instruction: (!instruction.is_empty()).then_some(instruction),
             ..self.draft.clone()
         };
-        self.save(|v| v.verifiers.push(verifier), cx);
+        self.save(|v| add_verifier(v, verifier), cx);
         for input in [&self.focus, &self.instruction] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
@@ -735,7 +747,7 @@ impl Render for VerifierEditor {
 
 #[cfg(test)]
 mod tests {
-    use super::{LevelForm, new_level, remove_verifier, toggle_verifier, with_level};
+    use super::{LevelForm, add_verifier, new_level, remove_verifier, toggle_verifier, with_level};
     use workspace_core::*;
     use workspace_host::Host;
 
@@ -952,6 +964,43 @@ mod tests {
             no_verifier
         );
         assert_eq!(host.settings().verification, saved);
+    }
+
+    #[test]
+    fn a_new_verifier_joins_every_full_review_and_no_re_check_in_one_save() {
+        let (_directory, mut host) = host();
+        save(&mut host, |v| {
+            v.levels.push(ReviewLevel {
+                name: "Docs".into(),
+                kind: LevelKind::FullReview,
+                verifiers: vec!["Style".into()],
+                use_when: "for documentation.".into(),
+            })
+        })
+        .unwrap();
+
+        save(&mut host, |v| {
+            add_verifier(v, verifier(Role::Reviewer, "Security"))
+        })
+        .unwrap();
+
+        let settings = host.settings().verification;
+        assert_eq!(settings.verifiers.last().unwrap().focus, "Security");
+        assert_eq!(
+            runs(&host, 0),
+            ["Tests", "Correctness", "Regressions", "Style", "Security"]
+        );
+        assert_eq!(runs(&host, 1), ["Correctness"], "Light is a re-check");
+        assert_eq!(runs(&host, 2), ["Style", "Security"]);
+        // A focus the host refuses adds nothing, to the list or to a level.
+        let refused = save(&mut host, |v| {
+            add_verifier(v, verifier(Role::Reviewer, "security"))
+        });
+        assert_eq!(
+            refused.unwrap_err(),
+            "Two verifiers share the focus \"security\""
+        );
+        assert_eq!(host.settings().verification, settings);
     }
 
     #[test]

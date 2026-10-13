@@ -48,6 +48,9 @@ See proposal.md for why. The code this builds on, at origin/main 4b29415:
 9. The cap (decision 9). Re-checks are not counted against it, and it becomes "Full reviews per ticket".
 10. The limit, which he was told and accepted: once a full review has passed, later changes of any size can pass on a re-check. The app does not measure how much changed, and in an allowed owner's repository that push goes out without a card.
 
+**Decided by the coordinator on October 13, 2026**, during implementation, and cheap to reverse:
+11. A newly added verifier is ticked in every level whose kind is Full review, and in no Re-check level, in the same save. Before levels, adding a verifier made it run; with a migrated single "Full" level, a new verifier that ran nowhere would be a silent trap. Reviewing too much is the safer default, and unticking is one click.
+
 **Not approved, and left out:** a one-line reason for the level choice.
 
 **Everything else here is a design decision made in this proposal.**
@@ -62,7 +65,7 @@ A level holds the focuses of the verifiers it runs, chosen from the one configur
 
 The cost: a level cannot give the same focus a different instruction. A person who wants that adds a second verifier, such as "Rebase check", and ticks it only where it belongs.
 
-A verifier may be in no level; it then never runs, and the page shows it with no tick anywhere. Removing a verifier takes it out of every level, and is refused when that would leave a level with none.
+A verifier may be in no level; it then never runs, and the page shows it with no tick anywhere. A newly added verifier starts ticked in every full-review level (item 11 above), so it reaches that state only when the human unticks it. Removing a verifier takes it out of every level, and is refused when that would leave a level with none.
 
 ### 2. Two kinds of level, checked when a review starts
 In an allowed owner's repository a passed review lets the app push and open a PR without asking, and it unlocks `accept_ticket`. If any level's pass counted, a coordinator could pick the lightest level and lower that bar by itself. Three ways to prevent it were weighed.
