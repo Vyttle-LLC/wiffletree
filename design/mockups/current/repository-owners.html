@@ -5,16 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
 <title>Wiffletree · Repository owners study</title>
-<!--
-  Static study for the repository-owners OpenSpec change. No script, no network.
-  (a) The Repositories page with the detected owners, a fork, a repository with no GitHub
-      remote, and the repository rows that follow from the ticks.
-  (b) What the human sees when an agent asks to push or to open a pull request in a repository
-      whose owner is not allowed, and what the agent gets back.
-  (c) The same request in an allowed owner's repository, a review that ended blocked, and what
-      the app refuses.
-  Sample data is simulated; nothing here is implemented host behavior.
--->
+<!-- Static study for the repository-owners OpenSpec change: no script, no network, simulated data. -->
 <style>
 :root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
 @media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
@@ -157,7 +148,7 @@ pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--
           <span class="box" role="checkbox" aria-checked="false" aria-label="Allow the fork MHohlios/gpui-component"></span>
           <svg class="i"><use href="#fork"/></svg>
           <div class="who"><b>MHohlios/gpui-component</b> <span class="pill subtle">Example</span><div class="small subtle">Fork of longbridge/gpui-component</div></div>
-          <div class="facts">public · pull requests into the parent always wait for you</div>
+          <div class="facts">public · pull requests stay inside the fork</div>
         </div>
         <div class="group">Not on GitHub · nothing to push to</div>
         <div class="owner">

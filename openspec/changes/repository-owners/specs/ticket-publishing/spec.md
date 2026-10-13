@@ -164,6 +164,17 @@ When the ticket's repository does not publish without asking, the host SHALL NOT
 - **WHEN** a push for commit A waits for approval and `publish_ticket` is called after commit B passed review
 - **THEN** the item for A is withdrawn and a new one is raised for B
 
+### Requirement: Only the host creates publish approvals
+Only the host SHALL be able to create an Inbox item that is drawn or handled as a publish approval. An agent's request to raise an Inbox item under the identifier prefix the host uses for publish approvals SHALL be refused, and no item SHALL be created. The host SHALL push or open a pull request on an approval only when the answered item is the one recorded for a ticket's waiting publish request, and SHALL take the ticket, the step and the commit from that stored request, never from anything an agent supplied.
+
+#### Scenario: A coordinator tries to create a publish approval
+- **WHEN** a coordinator calls `ask_user` with a request id beginning `publish:`
+- **THEN** the call is refused, no Inbox item appears, and nothing is pushed
+
+#### Scenario: An approval that no request names
+- **WHEN** an Inbox item with a `publish:` identifier exists that no ticket's waiting publish request names, and it is answered "approved"
+- **THEN** the host pushes nothing and opens nothing
+
 ### Requirement: A blocked review always needs the human's approval
 When the ticket's latest verification cycle ended blocked, the host SHALL NOT push or open a pull request without the human's approval in the Inbox, in every repository, including an allowed owner's. The item SHALL say that the review ended blocked, SHALL name any verifier that could not check, and SHALL list every open finding, which is every finding in the ticket's ledger that is neither fixed nor settled as follow-up or won't-fix, with its id, severity, verifier, location and summary. In an allowed owner's repository there SHALL be one such approval for the commit, naming everything that would be sent, and approving it SHALL run the commit's steps without a further item. Elsewhere the notice and the findings SHALL appear on each step's approval. The approval SHALL cover that commit only.
 

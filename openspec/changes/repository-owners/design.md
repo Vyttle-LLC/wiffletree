@@ -34,9 +34,9 @@ The human asked whether "automatic pull requests" meant Wiffletree could approve
 
 ## Decisions
 
-### Settled by the human (October 12, 2026)
+### Who decided what
 
-From the plan:
+**Decided by the human on October 12, 2026.** From the plan:
 1. Owners are detected and listed; the human ticks the ones allowed to have PRs opened without asking; nothing is allowed until ticked.
 2. In an allowed owner's repositories, agents may push a ticket's branch, open its PR once review has passed, and keep it updated, without asking. Merging is the human's alone.
 3. Everywhere else, nothing leaves the machine until the human approves each step.
@@ -44,15 +44,23 @@ From the plan:
 5. Opening a PR is not a Wiffletree skill; the contract stops naming one.
 6. The README is corrected.
 
-On this proposal:
+And on this proposal, the same day:
 7. A fork is its own entry; its owner's tick never covers it.
 8. Owners only, plus fork entries. No per-repository override.
 9. Merging is always the human's. The rule that let a plan's coordinator merge into the plan's feature branch is dropped.
 10. The ticket's coordinator or its implementer may call `publish_ticket`; never a verifier. The implementer writes the title and description.
 11. A ticket whose latest review ended blocked may be published, but only after the human approves it on an Inbox card, in every repository, allowed owners' included. The card says the review ended blocked and lists the open findings.
 12. Approval is per step, literally: the push, then the PR, then every later push.
-13. One `publish_ticket` tool, with results arriving as a Wiffletree message.
-14. The contract paragraph in decision 10 below, and the words above.
+13. One `publish_ticket` tool.
+14. The words: "allowed" for the owner list, "without asking" for the behavior, "approve" only for the human's Inbox answer.
+
+**Confirmed by the human on October 13, 2026**, in so many words:
+15. The contract paragraph in decision 10, exactly as written there.
+16. In an allowed owner's repository, a blocked review raises one card covering the push and the PR.
+17. "Open findings" on that card means every finding that is not fixed and was not settled as follow-up or won't-fix.
+18. The tool's result reaches the agent as a Wiffletree message.
+
+**Everything else in this document is a design decision made in review, not the human's.** That includes decisions 1 to 12 below wherever they go beyond the items above, and in particular the changes made after review round 1: `origin` must have one push URL (decision 1); partial GitHub answers are kept (decision 2); the request is frozen and compared before anything is sent (decision 6); the owner is confirmed with GitHub before sending, and the push sends a single ref whatever Git is configured to do (decision 7); and approval items and result messages carry a per-request id (decisions 8 and 9). The `publish:` prefix being reserved for the host (decision 8) was added after cycle 1.
 
 ### 1. The owner comes from `origin`, read on disk
 A repository's GitHub owner and name are parsed from `git remote get-url --push origin` with the existing `pr_watch::github_repository`. No network is needed, so owners are listed even when `gh` is missing. A repository with no `origin`, or one not on `github.com`, has no owner and cannot be allowed.
@@ -143,7 +151,7 @@ A new `workspace-host/src/publish.rs` holds `Host::publish_ticket(caller, ticket
 ### 7. How the host pushes and opens the PR
 Network work runs on its own thread, like the watcher's passes (`spawn_pull_request_check`, `service.rs:286`), and reports back with a new `Event::Published`.
 
-- **First, GitHub's current answer.** The stored facts can be a day old, and a repository transferred to another owner keeps answering, and accepting pushes, at its old URL. So before anything is sent, the thread asks GitHub about this one repository (`nameWithOwner`, `isFork`; one read-only call) and compares it with the frozen `repository` and the fork status the decision was made on.
+- **First, GitHub's current answer** (a design decision made in review, round 1). The stored facts can be a day old, and a repository transferred to another owner keeps answering, and accepting pushes, at its old URL. So before anything is sent, the thread asks GitHub about this one repository (`nameWithOwner`, `isFork`; one read-only call) and compares it with the frozen `repository` and the fork status the decision was made on.
   - Same: go on.
   - Different: nothing is sent. The new answer is recorded, the request is cleared, and the caller is told the repository is now `<owner>/<name>` and to call again. The new call decides on the new owner, and asks the human if that owner is not allowed.
   - No answer (GitHub unreachable, `gh` not signed in, repository not found): nothing is sent and the caller is told why. An unconfirmed destination is never pushed to, with or without the human's approval.
@@ -160,12 +168,13 @@ Network work runs on its own thread, like the watcher's passes (`spawn_pull_requ
 When check 6 says ask, the host raises an Inbox item with `Host::request_attention` (`lib.rs:876`) under the operation `publish:<request id>:<step>` and notes it on the request.
 
 - **Why the request id, and not the ticket and commit.** An operation can exist only once per session (`lib.rs:892-906`), and a second publish for the same step and commit is ordinary: after a denial and a corrected description, after a failed push, after a restart. Each accepted call is a new request with a new id, as provider permissions already use `permission:<new id>` (`service.rs:906`), so each gets its own card.
+- **The `publish:` prefix is the host's.** Anything whose operation starts with `publish:` is drawn as an approval, so no agent may create one. `ensure_unreserved` (`lib.rs:105-112`) gains `publish:` beside the check-in prefixes, so `ask_user` (`live.rs:834`) and the client's `Command::RequestAttention` (`lib.rs:1202`) refuse such an id. And the host never reads a ticket, step or commit out of an operation id: when an approval is answered, it acts only if the answered item's id is the one a ticket's stored request names in `publishing.waiting`. An item no stored request names starts nothing.
 - **It is an approval, not a question.** `Attention::is_permission` (`workspace-core/src/lib.rs:253`) becomes true for `publish:` operations too. The card then gets Deny and an approve button, the human cannot dismiss it, and the coordinator's `close_question` cannot close it. That is how "the human's approval is something the app records and checks" is met: the only thing that starts the step is the human's click on the host's own card, stored in the `attention` table.
 - **The host writes the card.** The desktop draws it from the frozen request, the ticket's verification record and ledger, and the repository's facts: repository and visibility, branch, commit and its size, how the review ended, and for the PR the base branch and the full title and description. The agent's only words on it are the PR's title and description, which are what the human is approving.
 - **Owner not allowed: each step asks.** The push and the PR are two cards of one request. Each later push to the same PR is a new request and asks again.
-- **Review ended blocked: always asks, and the card says so.** It states that the review ended blocked, names any verifier that could not check, and lists the open findings: every ledger entry that is neither fixed nor settled as follow-up or won't-fix, each with its id, severity, verifier, location and summary.
+- **Review ended blocked: always asks, and the card says so** (the human's items 11, 16 and 17). It states that the review ended blocked and lists the open findings: every ledger entry that is neither fixed nor settled as follow-up or won't-fix. Showing each finding's id, severity, verifier, location and summary, naming any verifier that could not check, and the first and third points below are design decisions made in review.
   - In a repository whose owner is not allowed, that notice and list appear on each step's card.
-  - In an allowed owner's repository there is one card for the commit. It names everything that would be sent (the push and, with no open PR, the PR and its title). Approving it sets `blocked_review_approved`, and the steps for that commit then run without a second card, because the owner is allowed and the review was the only reason to ask.
+  - In an allowed owner's repository there is one card for the commit (item 16). It names everything that would be sent (the push and, with no open PR, the PR and its title). Approving it sets `blocked_review_approved`, and the steps for that commit then run without a second card, because the owner is allowed and the review was the only reason to ask.
   - The approval covers one commit. A later push is a new commit with its own review.
 - **Approve runs it.** `service.rs` handles the answer beside parked permissions (`:857`): `approved` makes the comparison in decision 6 and starts the step; anything else clears the request and tells the caller nothing was sent. The request and the Inbox item are both stored, so an approval given after a restart still works; parked provider permissions (`service.rs:398`) are in memory only, which is why this does not reuse that map.
 - **Repeats.** While a card waits, the same call again (same commit, title and description) returns the waiting status. A call that differs in any of them withdraws the old card and starts a new request. Once a request has ended, by success, failure, denial or interruption, the next call is a new request.
@@ -182,7 +191,7 @@ A request whose step was running when the host stopped is ended at the next star
 
 > Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the review passed and the human allowed the repository's owner, which workspace_context shows, and otherwise only after the human approves each step in their inbox. A review that ended blocked always needs that approval. Write the pull request's title and description by the repository's and the human's own PR rules. Only the human merges.
 
-This is the paragraph the human approved, with two edits: "approved for automatic PRs" became "allowed", and the blocked-review rule (settled decision 11) was added.
+The human confirmed this exact text on October 13, 2026 (item 15). It differs from the paragraph he approved on October 12 in two places: "approved for automatic PRs" became "allowed", and the blocked-review rule (item 11) was added.
 
 `skills/main-coordinator.md` (v11) and `skills/implementer.md` (v5) gain one sentence each. The coordinator's: after a cycle ends, publish a ticket that ships as a PR with `publish_ticket`, or have the implementer do it; publish after a blocked cycle only where you would otherwise accept with a waiver, since the human sees the open findings and decides. The implementer's: when asked to publish, write the title and description by the repository's and the human's PR rules and call `publish_ticket`.
 
@@ -222,7 +231,7 @@ Closing these needs credentials the agents do not hold, or a sandbox. Neither is
 - [GitHub cannot be reached when a ticket is published] → nothing is sent and the caller is told; it calls again later. `gh pr create` would have failed anyway.
 - [A pre-push hook sends something itself] → hooks are the repository's own code and run as they do for the human's pushes; this change does not inspect them.
 - [The watcher has not yet seen a PR the host just opened, and `publish_ticket` is called again] → `gh pr create` refuses a second PR for the branch; the watcher is told to check at once.
-- [An allowed owner includes a repository where opening a PR itself has effects, such as CI with cloud credentials] → accepted; the human chose owners only (settled decision 8). The stored list already takes `owner/name` entries, so an "ask first" exception could be added later without a migration.
+- [An allowed owner includes a repository where opening a PR itself has effects, such as CI with cloud credentials] → accepted; the human chose owners only (item 8). The stored list already takes `owner/name` entries, so an "ask first" exception could be added later without a migration.
 - [A coordinator publishes blocked reviews routinely and the human approves by habit] → the card leads with the blocked result and the open findings, and the coordinator's instructions limit it to cases it would otherwise waive.
 - [`workspace_context` grows by a few fields per repository] → about 100 bytes each; 34 repositories add under 4 KB to a result that is already large.
 - [Two cards per first publish feels heavy in a repository the human trusts] → allowing its owner removes both.
