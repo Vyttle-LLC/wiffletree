@@ -58,8 +58,8 @@
 
 ## 9. Instructions
 
-- [ ] 9.1 Replace the open-pr sentences of `skills/communication.md` line 12 with the paragraph in design decision 10 and bump it to v7. Verify with a test over `provider::skill` for every role that the text contains `publish_ticket`, does not contain "open-pr", and gives no case in which a coordinator may merge.
-- [ ] 9.2 Add the publishing sentence to `skills/main-coordinator.md` (v11) and `skills/implementer.md` (v5). Verify the scenarios "No pull request skill" and "Merging".
+- [x] 9.1 Replace the open-pr sentences of `skills/communication.md` line 12 with the paragraph in design decision 10 and bump it to v7. Verify with a test over `provider::skill` for every role that the text contains `publish_ticket`, does not contain "open-pr", and gives no case in which a coordinator may merge.
+- [x] 9.2 Add the publishing sentence to `skills/main-coordinator.md` (v11) and `skills/implementer.md` (v5). Verify the scenarios "No pull request skill" and "Merging".
 
 ## 10. Docs and checks
 
