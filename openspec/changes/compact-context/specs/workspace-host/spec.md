@@ -28,7 +28,7 @@ The host SHALL accept a `CompactContext` command naming a session and optional i
 - **THEN** none of them requests, cancels or runs a compaction
 
 ### Requirement: A queued compaction runs before waiting input
-A session's queued compaction SHALL start as soon as a turn for that session could start: the session is not in a turn, not paused, not disconnected and not archived, it has no held input, its project is live, and its provider is enabled. It SHALL NOT need due input, and the ticket's worktree and verification round SHALL NOT delay it. While a session has a request, queued or running, the host SHALL NOT start a turn for it by any path, and its waiting messages SHALL stay queued; the first turn after the compaction settles SHALL take them. A verification round with such a verifier SHALL wait whole, as it does for a paused verifier, and SHALL be admitted once the compaction has settled. A request that cannot start SHALL stay queued and SHALL remain cancellable. A queued request SHALL survive a host restart unchanged.
+A session's queued compaction SHALL start as soon as a turn for that session could start: the session is not in a turn, not paused, not disconnected and not archived, it has no held input, its project is live, its provider is enabled, and no leftover provider process holds it. It SHALL NOT need due input, and the ticket's worktree and verification round SHALL NOT delay it. While a session has a request, queued or running, the host SHALL NOT start a turn for it by any path, and its waiting messages SHALL stay queued; the first turn after the compaction settles SHALL take them. A verification round with such a verifier SHALL wait whole, as it does for a paused verifier, and SHALL be admitted once the compaction has settled; a verifier whose turn is held anyway SHALL be held in its round as it is without a request. A request that cannot start SHALL stay queued and SHALL remain cancellable. A request SHALL NOT change how a turn that cannot start is held: a session whose turn is held, such as one whose provider is disabled, SHALL be blocked and reported to its parent as it is without a request. A queued request SHALL survive a host restart unchanged.
 
 #### Scenario: Idle agent
 - **WHEN** a person asks to compact an idle Claude agent with a provider session
@@ -52,6 +52,11 @@ A session's queued compaction SHALL start as soon as a turn for that session cou
 #### Scenario: Paused agent
 - **WHEN** a person asks to compact an agent that is paused
 - **THEN** the request is stored as queued and runs when the agent is resumed
+
+#### Scenario: Disabled provider with a request and a message waiting
+- **WHEN** an agent whose provider is disabled has a queued request and a message waiting
+- **THEN** no compaction and no turn starts, the agent is blocked with the reason, and its parent is told once
+- **AND** when the provider is enabled again the compaction runs first and the turn takes the message
 
 #### Scenario: Restart while queued
 - **WHEN** the host restarts while an agent has a queued request
@@ -85,7 +90,7 @@ The host SHALL run a compaction by resuming the agent's Claude session with a pr
 - **THEN** the compaction finishes, the agent is paused, and the message stays queued
 
 ### Requirement: Compaction outcome comes from the provider's status record
-The host SHALL decide a compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. The host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. A compaction that is running when the host stops, by a shutdown or a crash, SHALL be settled as **interrupted**, at shutdown or at the next startup, and its session SHALL be disconnected like any session whose run the host's stopping cut off, with a stored reason saying that the host stopped while compacting and that Claude may still be finishing. On shutdown the host SHALL also tell the compaction's provider process to stop, and SHALL NOT rely on it having exited. No turn and no compaction SHALL start for that session, and its waiting messages SHALL stay queued, until the human or its parent resumes it through the existing resume, which SHALL need no choice between retrying and skipping because nothing is held. The host SHALL NOT signal or terminate a process or process group it knows only from a stored identifier. An interrupted compaction SHALL NOT be run again by the host and SHALL NOT be reported as compacted or as unchanged, and the session's next turn SHALL NOT be told that a turn was interrupted.
+The host SHALL decide a compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. The host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. A compaction that is running when the host stops, by a shutdown or a crash, SHALL be settled as **interrupted**, at shutdown or at the next startup, through the handling every run gets. A shutdown SHALL cancel a running compaction and wait for its provider process group to be stopped as it does for a running turn, and SHALL record the run as finished only once the group is stopped; a compaction still running when the wait ends SHALL stay unfinished for the next start. At startup an unfinished compaction run SHALL be handled like any unfinished run: the host SHALL stop its process group only while the group's leader has the recorded process id and start time, and SHALL otherwise signal nothing and raise the leftover-process note, which holds the session's turns and compactions until the group exits or the note is dismissed. An interrupted compaction SHALL leave the session's stored status and its waiting messages as they were, SHALL hold no input and SHALL need no resume. It SHALL NOT be run again by the host and SHALL NOT be reported as compacted or as unchanged, and the session's next turn SHALL NOT be told that a turn was interrupted.
 
 #### Scenario: Success
 - **WHEN** the stream has `"compact_result":"success"` and a boundary record with `pre_tokens` 812000 and `post_tokens` 5000
@@ -104,18 +109,19 @@ The host SHALL decide a compaction's outcome from the status record Claude strea
 - **THEN** the outcome is failed
 
 #### Scenario: Quit while compacting
-- **WHEN** the host shuts down while an agent's compaction is running and the agent has a message waiting, and the host starts again
-- **THEN** the outcome is interrupted, the request is cleared, and the agent is disconnected with the reason that the host stopped while compacting
-- **AND** no turn and no compaction starts for it at startup, whether or not the compaction's process has exited
+- **WHEN** the host shuts down while an agent's compaction is running and the agent has a message waiting
+- **THEN** the compaction's process group no longer runs when the shutdown returns, the outcome is interrupted, the request is cleared, and the agent's status is what it was
+- **AND** when the host starts again no compaction runs, and the agent's next turn takes the waiting message with a prompt that names no interrupted turn
 
 #### Scenario: Crash while compacting
-- **WHEN** the host starts after a crash that cut off an agent's compaction, and the agent has a message waiting
-- **THEN** the compaction is settled as interrupted, the agent is disconnected with the same reason, and no turn or compaction starts for it
-- **AND** the host signals no process
+- **WHEN** the host starts with an unfinished compaction run whose provider process still runs with its recorded start time, and the agent has a message waiting
+- **THEN** the process group is stopped, the compaction is settled as interrupted and is not run again, and the agent's status is what it was
+- **AND** the agent's next turn takes the waiting message
 
-#### Scenario: Resumed afterwards
-- **WHEN** the agent's coordinator calls `resume_agent` for it without `held`, or the human resumes it
-- **THEN** the agent is ready, its next turn takes the waiting message, and that turn's prompt names no interrupted turn
+#### Scenario: Crash while compacting, process not confirmed
+- **WHEN** the host starts with an unfinished compaction run whose process id now belongs to a process with a different start time, and the agent has a message waiting
+- **THEN** that process receives no signal, the compaction is settled as interrupted, and one inbox note names the agent and the process id
+- **AND** no turn and no compaction starts for the agent while that process group runs, and its turn starts once the note is dismissed
 
 ### Requirement: Compaction usage is recorded in the ledger
 The host SHALL record a compaction's tokens in the usage ledger from the result record's `modelUsage`, because that record's `usage` is zero for a compaction: one request per model named there, attributed to the agent and its coordinator like any other request. `modelUsage` follows Claude's convention, in which `inputTokens` excludes tokens read from or written to the cache, so the recorded input SHALL be their sum, as for a turn's request. The reported total cost SHALL be kept with the run. A compaction with no `modelUsage` SHALL record no request. Usage reports SHALL count these requests in their existing totals and SHALL NOT report them separately. Turns SHALL keep recording usage as before.
