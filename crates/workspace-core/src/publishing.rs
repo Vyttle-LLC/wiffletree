@@ -153,7 +153,6 @@ pub fn publish_card(
         (PublishStep::Push, Some(pr)) => {
             rows.push(("Updates", format!("PR #{} · {}", pr.number, request.branch)));
         }
-        // The host has not pushed the branch and no pull request was ever read for it.
         (PublishStep::Push, None) if ticket.pushed.is_none() && ticket.pull_request.is_none() => {
             rows.push(("Branch", format!("{} · not on GitHub yet", request.branch)));
         }
@@ -169,6 +168,11 @@ pub fn publish_card(
     let mut findings = vec![];
     if let Some(verification) = &ticket.verification {
         rows.push(("Review", verification.review_line(&request.commit)));
+        if !verification.is_full_review()
+            && let Some(full_review) = ticket.last_full_review()
+        {
+            rows.push(("Last full review", full_review.passed_line()));
+        }
         if verification.outcome == VerificationOutcome::Blocked {
             let unchecked = verification.unchecked();
             if !unchecked.is_empty() {
@@ -213,8 +217,6 @@ pub fn publish_card(
             },
             format!(
                 "Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed.{}",
-                // The pull request asks where the owner is still not allowed, and always after
-                // an earlier one ended.
                 match (
                     request.opens_pull_request(),
                     ask == PublishAsk::NotAllowed || ticket.ended_pull_request().is_some(),

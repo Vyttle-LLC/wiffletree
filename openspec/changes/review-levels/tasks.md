@@ -25,9 +25,9 @@
 
 ## 4. Showing which level ran
 
-- [ ] 4.1 In `workspace-desktop/src/tree.rs::cycle_line` (`:31`), name the level after the cycle number, with "re-check" after a re-check's name, and nothing for a cycle without a level. Verify "The ticket's card names each level", "A level renamed later" and "A cycle from before levels" in `tree.rs`'s tests.
-- [ ] 4.2 In `Verification::review_line` (`workspace-core/src/lib.rs:1004`), name the level in the passed and the blocked line. In `publishing.rs::publish_card` (`:115`), add the "Last full review" row after Review when the latest cycle is a re-check, from `Ticket::last_full_review`. Verify the ticket-publishing scenarios "After a full review", "After a re-check", "A re-check that ended blocked" and "A cycle from before levels" in `tests/publishing.rs`.
-- [ ] 4.3 Verify, with no change to `publishing.rs::publish_ask` (`:24`) or `publish.rs`, the scenario "A passed re-check in an allowed owner's repository" beside the existing allowed-owner tests.
+- [x] 4.1 In `workspace-desktop/src/tree.rs::cycle_line` (`:31`), name the level after the cycle number, with "re-check" after a re-check's name, and nothing for a cycle without a level. Verify "The ticket's card names each level", "A level renamed later" and "A cycle from before levels" in `tree.rs`'s tests.
+- [x] 4.2 In `Verification::review_line` (`workspace-core/src/lib.rs:1004`), name the level in the passed and the blocked line. In `publishing.rs::publish_card` (`:115`), add the "Last full review" row after Review when the latest cycle is a re-check, from `Ticket::last_full_review`. Verify the ticket-publishing scenarios "After a full review", "After a re-check", "A re-check that ended blocked" and "A cycle from before levels" in `tests/publishing.rs`.
+- [x] 4.3 Verify, with no change to `publishing.rs::publish_ask` (`:24`) or `publish.rs`, the scenario "A passed re-check in an allowed owner's repository" beside the existing allowed-owner tests.
 
 ## 5. The Review card
 

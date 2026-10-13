@@ -1131,6 +1131,15 @@ pub struct CycleLevel {
     pub name: String,
     pub kind: LevelKind,
 }
+impl CycleLevel {
+    /// Such as "Full" or "Light re-check".
+    pub fn label(&self) -> String {
+        match self.kind {
+            LevelKind::FullReview => self.name.clone(),
+            LevelKind::Recheck => format!("{} re-check", self.name),
+        }
+    }
+}
 impl Verification {
     /// A cycle recorded before levels existed ran every configured verifier, so it counts as a
     /// full review.
@@ -1171,12 +1180,39 @@ impl Verification {
             .map(|run| run.focus.as_str())
             .collect()
     }
-    /// How the review ended for `commit`, such as "Cycle 2 passed at this commit · Tests,
-    /// Correctness" or "Cycle 2 ended blocked at c81f04d, after 3 of 3 rounds · Tests passed,
-    /// Correctness failed".
+    /// Such as "Cycle 2 · Light re-check", or "Cycle 1" for a cycle recorded without a level.
+    pub fn cycle_label(&self, noun: &str) -> String {
+        match &self.level {
+            Some(level) => format!("{noun} {} · {}", self.cycle, level.label()),
+            None => format!("{noun} {}", self.cycle),
+        }
+    }
+    /// The verifiers whose latest result stands, such as "Tests, Correctness".
+    fn focuses(&self) -> String {
+        let focuses: Vec<&str> = self
+            .latest_results()
+            .iter()
+            .map(|run| run.focus.as_str())
+            .collect();
+        focuses.join(", ")
+    }
+    /// A passed cycle with the commit it verified, such as "Cycle 1 · Full passed at 9e03c1b ·
+    /// Tests, Correctness, Regressions".
+    pub fn passed_line(&self) -> String {
+        format!(
+            "{} passed at {} · {}",
+            self.cycle_label("Cycle"),
+            short_sha(self.verified_commit().unwrap_or_default()),
+            self.focuses()
+        )
+    }
+    /// How the review ended for `commit`, such as "Cycle 2 · Light re-check passed at this
+    /// commit · Correctness" or "Cycle 2 · Full ended blocked at c81f04d, after 3 of 3 rounds ·
+    /// Tests passed, Correctness failed".
     pub fn review_line(&self, commit: &str) -> String {
         let verified = self.verified_commit().unwrap_or_default();
         let results = self.latest_results();
+        let cycle = self.cycle_label("Cycle");
         match self.outcome {
             VerificationOutcome::Passed => {
                 let at = if verified == commit {
@@ -1187,8 +1223,7 @@ impl Verification {
                         short_sha(verified)
                     )
                 };
-                let foci: Vec<&str> = results.iter().map(|run| run.focus.as_str()).collect();
-                format!("Cycle {} passed {at} · {}", self.cycle, foci.join(", "))
+                format!("{cycle} passed {at} · {}", self.focuses())
             }
             _ => {
                 let results: Vec<String> = results
@@ -1200,8 +1235,7 @@ impl Verification {
                     })
                     .collect();
                 format!(
-                    "Cycle {} ended blocked at {}, after {} of {} rounds · {}",
-                    self.cycle,
+                    "{cycle} ended blocked at {}, after {} of {} rounds · {}",
                     short_sha(verified),
                     self.rounds.len(),
                     self.max_rounds,

@@ -1762,6 +1762,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_passed_re_check_pushes_to_the_open_pull_request_without_asking() {
+        let (mut f, remote) = published();
+        let head = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        let mut ticket = f.ticket();
+        ticket.verification.as_mut().unwrap().level = Some(CycleLevel {
+            name: "Light".into(),
+            kind: LevelKind::Recheck,
+        });
+        f.host.save_ticket(&ticket).unwrap();
+
+        let result = update(&mut f, &remote);
+
+        assert!(result.starts_with("Pushed "), "{result}");
+        assert_eq!(remote.branch(BRANCH), Some(head));
+        assert!(f.open_items().is_empty());
+    }
+
+    #[test]
     fn a_rebased_branch_replaces_what_the_host_pushed() {
         let (mut f, remote) = published();
         let pushed = f.head();
