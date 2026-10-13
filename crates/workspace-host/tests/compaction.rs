@@ -1,6 +1,7 @@
-//! Compacting a Claude agent's context, through the real Service with the fake provider
-//! standing in for the CLI and answering `/compact` with recorded streams. Kept in its own
-//! test binary because it sets the provider environment for the process.
+//! Compacting an agent's context, through the real Service with the fake provider standing in
+//! for the CLI: it answers Claude's `/compact` with recorded streams and plays Codex's
+//! app-server from recorded exchanges. Kept in its own test binary because it sets the
+//! provider environment for the process.
 use serde_json::{Value, json};
 use std::{
     path::Path,
@@ -24,7 +25,22 @@ struct Run {
     group: Option<i32>,
 }
 
-/// A live project whose coordinator, a Claude agent, has run one turn.
+/// One request in the usage ledger, as stored.
+#[derive(Debug, PartialEq)]
+struct Request {
+    id: String,
+    model: String,
+    session: String,
+    coordinator: String,
+    input: i64,
+    cache_read: i64,
+    cache_write: i64,
+    output: i64,
+    reasoning: i64,
+    complete: bool,
+}
+
+/// A live project whose coordinator, a Claude agent unless made a Codex one, has run one turn.
 struct World {
     home: tempfile::TempDir,
     scratch: tempfile::TempDir,
@@ -51,6 +67,32 @@ fn claude() -> ModelProfile {
     }
 }
 
+fn codex() -> ModelProfile {
+    ModelProfile {
+        provider: Provider::Codex,
+        model: "gpt-6.1-sol".into(),
+        effort: "medium".into(),
+    }
+}
+
+/// Shortens how long a Codex compaction may run; see `provider::CODEX_COMPACTION_LIMIT`.
+const CODEX_LIMIT: &str = "WORKSPACE_CODEX_COMPACTION_LIMIT_MS";
+
+/// A recorded app-server exchange or session record, one JSON object per line.
+fn recording(name: &str) -> Vec<Value> {
+    let streams = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/streams");
+    let lines = std::fs::read_to_string(streams.join(format!("codex-compact-{name}.jsonl")));
+    let lines = lines.unwrap();
+    lines
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn group_runs(group: i32) -> bool {
+    unsafe { libc::killpg(group, 0) == 0 }
+}
+
 fn until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !done() {
@@ -74,6 +116,9 @@ impl World {
             std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
             std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
             std::env::set_var("WORKSPACE_TEST_PROMPT_DIR", &prompts);
+            // Codex's session records are read from here, never from the real home.
+            std::env::set_var("CODEX_HOME", scratch.path().join("codex"));
+            std::env::remove_var(CODEX_LIMIT);
         }
         let main = {
             let mut host = Host::open_set_up(home.path()).unwrap();
@@ -84,7 +129,7 @@ impl World {
             host.configure_session(&main.id, claude()).unwrap();
             host.set_live(&project.id, true).unwrap();
             prepare(&mut host, &project, &main, scratch.path());
-            main
+            host.session(&main.id).unwrap()
         };
         let mut world = Self {
             home,
@@ -103,6 +148,105 @@ impl World {
         world.send("JUST_REPLY first");
         world.until_replies(1);
         world
+    }
+
+    /// The coordinator is a Codex agent that has replied once, so it has a thread to compact.
+    fn codex() -> Self {
+        let world = Self::prepared(|host, _, main, _| {
+            host.configure_session(&main.id, codex()).unwrap();
+        });
+        world.send("JUST_REPLY first");
+        world.until_replies(1);
+        world
+    }
+
+    /// Tells the fake app-server which recorded exchange to play, and what to change in it.
+    fn plan(&self, plan: Value) {
+        std::fs::write(
+            self.scratch.path().join("codex-compact.json"),
+            plan.to_string(),
+        )
+        .unwrap();
+    }
+
+    fn thread(&self, session: &str) -> String {
+        self.runtime(session).provider_session_id.unwrap()
+    }
+
+    /// Gives `session`'s thread the session record Codex had written before the recorded
+    /// compaction: its last turn's usage entry and a context total of 29,532.
+    fn record_last_turn(&self, session: &str) {
+        let thread = self.thread(session);
+        let entries = recording("session-record-compacted");
+        let recorded = entries[1]["payload"]["thread_id"].as_str().unwrap();
+        let before: String = entries
+            .iter()
+            .take_while(|e| e["payload"]["type"] != "thread_settings_applied")
+            .map(|e| format!("{}\n", e.to_string().replace(recorded, &thread)))
+            .collect();
+        let folder = self.scratch.path().join("codex/sessions/2026/10/13");
+        std::fs::create_dir_all(&folder).unwrap();
+        let record = format!("rollout-2026-10-13T17-10-48-{thread}.jsonl");
+        std::fs::write(folder.join(record), before).unwrap();
+    }
+
+    /// What the fake app-server was started with and read, for each Codex compaction.
+    fn codex_compactions(&self) -> Vec<Value> {
+        let log = self.scratch.path().join("prompts/codex-compactions.txt");
+        let log = std::fs::read_to_string(log).unwrap_or_default();
+        log.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Whether the app-server was sent anything after its four requests.
+    fn wrote_to_codex_again(&self) -> bool {
+        self.scratch.path().join("codex-compact-extra.txt").exists()
+    }
+
+    /// A compaction run's stored result.
+    fn result(&self, run: &str) -> Value {
+        let result: String = self
+            .db()
+            .query_row(
+                "SELECT json_extract(detail,'$.result') FROM provider_runs WHERE id=?1",
+                [run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&result).unwrap()
+    }
+
+    /// The ledger's requests for one run.
+    fn requests(&self, run: &str) -> Vec<Request> {
+        let db = self.db();
+        let mut requests = db
+            .prepare(
+                "SELECT request_id,model,session_id,coordinator_id,input,cache_read,cache_write,output,reasoning,complete FROM usage_requests WHERE run_id=?1 ORDER BY rowid",
+            )
+            .unwrap();
+        let requests = requests.query_map([run], |r| {
+            Ok(Request {
+                id: r.get(0)?,
+                model: r.get(1)?,
+                session: r.get(2)?,
+                coordinator: r.get(3)?,
+                input: r.get(4)?,
+                cache_read: r.get(5)?,
+                cache_write: r.get(6)?,
+                output: r.get(7)?,
+                reasoning: r.get(8)?,
+                complete: r.get(9)?,
+            })
+        });
+        requests.unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    /// The run that took the latest reading of a Codex thread's running usage total.
+    fn counter_reading(&self, session: &str) -> String {
+        let scope = format!("codex:{}", self.thread(session));
+        let reading = "SELECT run_id FROM usage_counters WHERE scope=?1";
+        self.db().query_row(reading, [scope], |r| r.get(0)).unwrap()
     }
 
     fn start(&mut self) {
@@ -323,8 +467,9 @@ impl World {
         self.stop();
         {
             let mut host = self.host();
-            host.request_compaction(&self.main.id, Some("WAIT_FOR_GATE"))
-                .unwrap();
+            // A Codex compaction takes no note; its plan holds the fake app-server instead.
+            let note = (self.main.provider == Provider::Claude).then_some("WAIT_FOR_GATE");
+            host.request_compaction(&self.main.id, note).unwrap();
             host.send("waiting", None, &self.main.id, "JUST_REPLY waiting")
                 .unwrap();
         }
@@ -400,7 +545,7 @@ impl World {
 }
 
 #[test]
-fn only_a_claude_agent_with_a_session_and_no_request_can_be_asked_to_compact() {
+fn only_an_agent_with_a_session_and_no_request_can_be_asked_to_compact() {
     let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(home.path()).unwrap();
@@ -429,17 +574,29 @@ fn only_a_claude_agent_with_a_session_and_no_request_can_be_asked_to_compact() {
             Provider::Codex,
         )
         .unwrap();
+    let refused = compact(&mut host, &codex, None).unwrap_err();
+    assert_eq!(refused, "Available after this agent’s first turn.");
     for session in [&main, &codex] {
         let mut runtime = host.session_runtime(&session.id).unwrap();
         runtime.provider_session_id = Some("provider-session".into());
         host.save_runtime(&runtime).unwrap();
     }
-    let refused = compact(&mut host, &codex, None).unwrap_err();
+    // Codex's compact request has no field for a note, so one is refused, never dropped.
+    let refused = compact(&mut host, &codex, Some("the failing test names")).unwrap_err();
     assert_eq!(
         refused,
-        "Not available for Codex agents: the Codex CLI has no compact command."
+        "Codex chooses what the summary keeps; it takes no note."
     );
     assert_eq!(request(&host, &codex).compaction, None);
+    // Without one, or with only whitespace, a Codex agent has a request like any other.
+    compact(&mut host, &codex, Some(" \n ")).unwrap();
+    let stored = request(&host, &codex).compaction.unwrap();
+    assert_eq!(
+        (stored.state, stored.instructions),
+        (CompactionState::Queued, None)
+    );
+    let refused = compact(&mut host, &codex, None).unwrap_err();
+    assert!(refused.contains("already has a compaction"), "{refused}");
 
     let long = "x".repeat(1001);
     let refused = compact(&mut host, &main, Some(&long)).unwrap_err();
@@ -955,6 +1112,16 @@ fn ticket_with_a_reviewer(host: &mut Host, project: &Project, main: &Session, sc
 }
 
 fn assign_a_reviewer(host: &mut Host, project: &Project, main: &Session, scratch: &Path) {
+    assign_a_reviewer_on(Provider::Claude, host, project, main, scratch);
+}
+
+fn assign_a_reviewer_on(
+    provider: Provider,
+    host: &mut Host,
+    project: &Project,
+    main: &Session,
+    scratch: &Path,
+) {
     let repo = scratch.join("repo");
     std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q"]);
@@ -965,8 +1132,8 @@ fn assign_a_reviewer(host: &mut Host, project: &Project, main: &Session, scratch
     let ticket = host
         .create_ticket(&main.id, &repository.id, "Review", "Check")
         .unwrap();
-    let model = host.model_selection().unwrap().allowed(Provider::Claude)[0].clone();
-    let profile = json!({"provider":"claude","model":model.model,"effort":model.effort});
+    let model = host.model_selection().unwrap().allowed(provider)[0].clone();
+    let profile = json!({"provider":provider,"model":model.model,"effort":model.effort});
     let assignment = json!({"ticket_id":ticket.id,"role":"reviewer","instruction":"JUST_REPLY start","profile":profile,"reason":"Routine review"});
     host.agent_tool(&main.id, "assign_ticket", assignment)
         .unwrap();
@@ -1167,7 +1334,8 @@ fn a_compactions_stream_events_are_not_counted_as_requests() {
     assert_eq!(requests - compactions, 1, "only the turn's own request");
 }
 
-/// A world whose coordinator is paused and whose reviewer has finished its first turn.
+/// A world whose coordinator is paused and has one worker, a reviewer on its first turn.
+/// Callers wait for that turn to finish through `worker()`.
 fn world_with_a_worker() -> World {
     World::prepared(|host, project, main, scratch| {
         ticket_with_a_reviewer(host, project, main, scratch);
@@ -1287,4 +1455,563 @@ fn a_workers_compaction_raises_its_own_and_its_coordinators_totals() {
         (0, 0, 0),
         "not the coordinator's own"
     );
+}
+
+// Codex agents: the same request, pass and settlement, run through `codex app-server`.
+
+fn raised(before: &TokenTotals, after: &TokenTotals) -> (u64, u64, u64) {
+    (
+        after.requests - before.requests,
+        after.input - before.input,
+        after.output - before.output,
+    )
+}
+
+#[test]
+fn a_codex_agent_is_compacted_through_the_app_server_with_codexs_figures_and_one_request() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    let before = world.runtime(&main);
+    let spent_before = world.usage();
+    let turn = world.turns(&main).remove(0);
+
+    let outcome = world.compacted(None);
+
+    assert_eq!(
+        (outcome.result, outcome.reason),
+        (CompactionResult::Compacted, None)
+    );
+    assert_eq!(world.compaction(), None);
+    assert_eq!(world.status(&main), Status::Ready);
+    // The server would have stayed: the host stopped it once the outcome was read, having
+    // written to it only once.
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.outcome.as_deref(), Some("compacted"));
+    assert!(!group_runs(run.group.unwrap()));
+    assert!(!world.wrote_to_codex_again());
+    // It was started with a turn's overrides and a token no turn holds, and resumed the
+    // agent's own thread as a turn runs it.
+    let thread = before.provider_session_id.clone().unwrap();
+    let directory = before.directory.clone().unwrap();
+    let started = world.codex_compactions().remove(0);
+    let canonical = |path: &str| std::fs::canonicalize(path).unwrap();
+    assert_eq!(
+        canonical(started["cwd"].as_str().unwrap()),
+        canonical(&directory)
+    );
+    assert_eq!(started["effort"], "medium");
+    let role = workspace_host::provider::skill(Role::ProjectOrchestrator);
+    assert_eq!(started["instructions"], role);
+    assert_eq!(started["tools_refused"], true);
+    let requests = started["requests"].as_array().unwrap();
+    assert_eq!(requests[0]["params"]["clientInfo"]["name"], "wiffletree");
+    assert_eq!(requests[1], json!({"method":"initialized"}));
+    assert_eq!(
+        requests[2]["params"],
+        json!({
+            "threadId":thread,
+            "cwd":directory,
+            "model":"gpt-6.1-sol",
+            "sandbox":"danger-full-access",
+            "approvalPolicy":"never",
+            "excludeTurns":true,
+        })
+    );
+    assert_eq!(requests[3]["params"], json!({"threadId":thread}));
+    // One line with Codex's totals for the whole context, never a "Kept:" line, and no reply.
+    assert_eq!(world.lines(), ["Context compacted · 30k → 6.5k"]);
+    assert_eq!(world.replies(), 1);
+    let after = world.runtime(&main);
+    assert_eq!(after.last_finished_at, before.last_finished_at);
+    assert_eq!(after.provider_session_id, before.provider_session_id);
+    // Its one request is the usage entry Codex wrote for its turn, attributed like any other.
+    assert_eq!(
+        world.requests(&run.id),
+        [Request {
+            id: format!("compact:{}", run.id),
+            model: "gpt-6.1-sol".into(),
+            session: main.clone(),
+            coordinator: main.clone(),
+            input: 29_552,
+            cache_read: 29_312,
+            cache_write: 0,
+            output: 440,
+            reasoning: 0,
+            complete: true,
+        }]
+    );
+    assert_eq!(world.result(&run.id)["unrecorded"], Value::Null);
+    let spent = world.usage();
+    assert_eq!(
+        raised(&spent_before.totals, &spent.totals),
+        (1, 29_552, 440)
+    );
+    let own = |usage: &UsageReport| usage.coordinators[0].own.clone();
+    assert_eq!(raised(&own(&spent_before), &own(&spent)), (1, 29_552, 440));
+    // It is no reading of the thread's running total: that is still the first turn's.
+    assert_eq!(world.counter_reading(&main), turn.id);
+}
+
+#[test]
+fn the_turn_after_a_codex_compaction_is_counted_whole() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.compacted(None);
+
+    world.send("JUST_REPLY second");
+    world.until_replies(2);
+
+    // Codex's running total leaves the compaction out, so the turn's request is exactly what
+    // the total rose by since the first turn, and the compaction between them does not make
+    // it partial.
+    let turns = world.turns(&main);
+    let counted = |turn: &Run| {
+        let request = world.requests(&turn.id).remove(0);
+        (
+            request.input,
+            request.cache_read,
+            request.output,
+            request.complete,
+        )
+    };
+    assert_eq!(counted(&turns[0]), (100, 20, 30, true));
+    assert_eq!(counted(&turns[1]), (100, 20, 30, true));
+    assert_eq!(world.counter_reading(&main), turns[1].id);
+    assert_eq!(world.ledger(), (3, 100 + 29_552 + 100, 1));
+}
+
+/// Compacts a Codex coordinator whose fake app-server follows `plan`, and checks what every
+/// failure shares: one failed line, a stopped server that was written to once, nothing in the
+/// ledger and an agent that is ready as before. Returns the world, the reason, and Codex's
+/// own text as the run kept it.
+fn failed_codex_compaction(plan: Value) -> (World, String, Value) {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(plan);
+
+    let outcome = world.compacted(None);
+
+    assert_eq!(outcome.result, CompactionResult::Failed, "{outcome:?}");
+    assert_eq!(world.lines(), ["Compaction failed · context unchanged"]);
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.outcome.as_deref(), Some("failed"));
+    assert!(!group_runs(run.group.unwrap()), "the server is stopped");
+    assert!(!world.wrote_to_codex_again());
+    assert!(world.requests(&run.id).is_empty(), "nothing is recorded");
+    assert_eq!(world.status(&main), Status::Ready);
+    assert_eq!(world.compaction(), None);
+    let reported = world.result(&run.id)["reported"].clone();
+    (world, outcome.reason.unwrap(), reported)
+}
+
+#[test]
+fn a_failed_codex_turn_fails_the_compaction_with_codexs_message_cut_to_one_line() {
+    let completed = recording("failed").pop().unwrap();
+    let said = &completed["message"]["params"]["turn"]["error"]["message"];
+    let said = said.as_str().unwrap();
+    assert_eq!(said.chars().count(), 204, "longer than a reason may be");
+
+    let (_world, reason, reported) = failed_codex_compaction(json!({"stream":"failed"}));
+
+    assert_eq!(reason, format!("{}…", &said[..200]));
+    assert_eq!(reported, said, "the run keeps all of it");
+}
+
+#[test]
+fn an_interrupted_codex_turn_fails_the_compaction_naming_its_status() {
+    let plan = json!({"stream":"second-start-interrupts-first"});
+    let (_world, reason, reported) = failed_codex_compaction(plan);
+    assert_eq!(reason, "Codex ended the compaction as interrupted");
+    assert_eq!(reported, Value::Null);
+}
+
+#[test]
+fn a_codex_status_the_host_does_not_know_fails_the_compaction() {
+    let plan = json!({"turn":{"status":"superseded"}});
+    let (_world, reason, _) = failed_codex_compaction(plan);
+    assert_eq!(reason, "Codex ended the compaction as superseded");
+}
+
+#[test]
+fn a_thread_codex_has_no_record_of_fails_the_compaction_with_the_first_refusal() {
+    let (world, reason, _) = failed_codex_compaction(json!({"stream":"unknown-thread"}));
+    let thread = world.thread(&world.main.id);
+    assert_eq!(
+        reason,
+        format!("Codex refused thread/resume: no rollout found for thread id {thread}")
+    );
+}
+
+#[test]
+fn a_codex_reply_out_of_order_fails_the_compaction_with_the_request_it_refused() {
+    let plan = json!({"stream":"synthetic-out-of-order"});
+    let (world, reason, _) = failed_codex_compaction(plan);
+    let thread = world.thread(&world.main.id);
+    assert_eq!(
+        reason,
+        format!("Codex refused thread/compact/start: thread not found: {thread}")
+    );
+}
+
+/// How Codex 0.160 answers a method it does not have, as it would for `thread/compact/start`.
+fn no_compact_method() -> String {
+    let refused = &recording("refused-requests")[1]["message"]["error"]["message"];
+    let refused = refused.as_str().unwrap();
+    let listed = refused.replace(", `thread/compact/start`", "");
+    listed.replace("`thread/compact/bogus`", "`thread/compact/start`")
+}
+
+#[test]
+fn a_codex_without_the_compact_method_fails_the_compaction_with_a_short_reason() {
+    let said = no_compact_method();
+    assert!(said.starts_with("Invalid request: unknown variant `thread/compact/start`, expected"));
+    assert!(said.chars().count() > 3_900, "it lists every method it has");
+
+    let (_world, reason, reported) = failed_codex_compaction(json!({"refuse":{"3":said}}));
+
+    assert_eq!(
+        reason,
+        "Codex refused thread/compact/start: this Codex has no such method"
+    );
+    assert_eq!(reported, said, "the run keeps Codex's whole message");
+}
+
+#[test]
+fn a_parameter_value_codex_rejects_is_not_reported_as_a_missing_method() {
+    // The same opening as for a missing method, about a method Codex has; seen on Codex 0.160.
+    let said = "Invalid request: unknown variant `no-such-sandbox`, expected one of `read-only`, `workspace-write`, `danger-full-access`";
+    let (_world, reason, _) = failed_codex_compaction(json!({"refuse":{"2":said}}));
+    assert_eq!(reason, format!("Codex refused thread/resume: {said}"));
+}
+
+#[test]
+fn a_long_codex_refusal_is_cut_to_one_line_of_200_characters() {
+    let said = format!("{}\nsecond line\nthird line", "x".repeat(3_977));
+    assert_eq!(said.chars().count(), 4_000);
+
+    let (_world, reason, reported) = failed_codex_compaction(json!({"refuse":{"3":said}}));
+
+    let kept = "Codex refused thread/compact/start: ";
+    let cut = format!("{kept}{}…", "x".repeat(200 - kept.len()));
+    assert_eq!(reason, cut);
+    assert_eq!(reported, said);
+}
+
+#[test]
+fn a_request_from_codex_is_not_answered_and_fails_the_compaction() {
+    // The helper checks that nothing more was written to the server and that it is stopped.
+    let plan = json!({"stream":"synthetic-server-request"});
+    let (_world, reason, _) = failed_codex_compaction(plan);
+    assert_eq!(
+        reason,
+        "Codex asked for item/commandExecution/requestApproval, which a compaction cannot answer"
+    );
+}
+
+#[test]
+fn a_codex_server_that_exits_early_fails_the_compaction_with_its_exit_and_error_output() {
+    let plan = json!({"stop_before":"turn/completed","exit":3,"stderr":"app-server crashed\n"});
+    let (_world, reason, _) = failed_codex_compaction(plan);
+    assert!(
+        reason.starts_with("Provider exited without a successful terminal result (exit status: 3)"),
+        "{reason}"
+    );
+    assert!(reason.contains("app-server crashed"), "{reason}");
+}
+
+#[test]
+fn a_codex_compaction_that_never_completes_is_stopped_at_the_limit_and_the_next_turn_runs() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    // The server answers every request and then says nothing more.
+    world.plan(json!({"stop_before":"turn/completed"}));
+    // SAFETY: the world holds ENVIRONMENT, and its host reads this only as a compaction runs.
+    unsafe { std::env::set_var(CODEX_LIMIT, "1500") };
+
+    world.compact(&main, None).unwrap();
+    world.until_compacting(&main);
+    let waiting = world.send("JUST_REPLY waiting");
+    world.several_passes();
+    assert_eq!(world.receipt(&waiting), Receipt::Queued);
+    until("the limit", || world.outcome().is_some());
+
+    let outcome = world.outcome().unwrap();
+    assert_eq!(outcome.result, CompactionResult::Failed);
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("Codex did not finish compacting within 10 minutes.")
+    );
+    let run = world.compactions(&main).remove(0);
+    assert!(run.finished_at.unwrap() - run.started_at >= 1_500);
+    assert!(!group_runs(run.group.unwrap()));
+    assert!(world.requests(&run.id).is_empty());
+    assert_eq!(world.lines(), ["Compaction failed · context unchanged"]);
+    world.until_replies(2);
+    assert_eq!(world.receipt(&waiting), Receipt::Completed);
+}
+
+#[test]
+fn a_codex_line_has_no_figures_unless_the_record_and_the_turn_each_gave_one() {
+    let world = World::codex();
+
+    // The thread has no session record yet, so there is no figure before.
+    let outcome = world.compacted(None);
+    assert_eq!(outcome.result, CompactionResult::Compacted);
+    assert_eq!(world.lines(), ["Context compacted"]);
+
+    // Resuming reports the last turn's total, but the compaction's own turn reports none.
+    world.plan(json!({"no_figure":true}));
+    let outcome = world.compacted(None);
+    assert_eq!(outcome.result, CompactionResult::Compacted);
+    assert_eq!(world.lines(), ["Context compacted", "Context compacted"]);
+}
+
+/// Compacts a Codex coordinator whose session record gets `usage` in place of the one usage
+/// entry for the compaction's turn: it is compacted all the same, with its line, and nothing
+/// is recorded. Returns why, as the run kept it.
+fn compacted_without_a_request(usage: &str) -> String {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    // The record already holds the usage entry of the agent's earlier turn.
+    world.record_last_turn(&main);
+    world.plan(json!({"usage":usage}));
+
+    let outcome = world.compacted(None);
+
+    assert_eq!(
+        (outcome.result, outcome.reason),
+        (CompactionResult::Compacted, None)
+    );
+    assert_eq!(world.lines(), ["Context compacted · 30k → 6.5k"]);
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.outcome.as_deref(), Some("compacted"));
+    assert!(world.requests(&run.id).is_empty());
+    assert_eq!(world.ledger(), (1, 100, 0), "only the first turn's request");
+    let unrecorded = world.result(&run.id)["unrecorded"].clone();
+    unrecorded.as_str().unwrap().to_owned()
+}
+
+#[test]
+fn no_usage_entry_for_the_turn_records_nothing_and_another_turns_entry_is_never_taken() {
+    let why = compacted_without_a_request("none");
+    assert!(why.contains("0 usage entries"), "{why}");
+}
+
+#[test]
+fn two_usage_entries_for_the_turn_record_nothing() {
+    let why = compacted_without_a_request("two");
+    assert!(why.contains("2 usage entries"), "{why}");
+}
+
+#[test]
+fn a_usage_entry_that_cannot_be_read_records_nothing() {
+    for unreadable in ["no-input", "more-cached"] {
+        let why = compacted_without_a_request(unreadable);
+        assert!(why.contains("cannot be read"), "{why}");
+    }
+}
+
+#[test]
+fn a_codex_compactions_request_is_stored_with_its_settlement_or_not_at_all() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    let refuse_line = "CREATE TRIGGER refuse_line BEFORE INSERT ON messages WHEN NEW.id LIKE 'compaction:%' BEGIN SELECT RAISE(ABORT,'refused'); END";
+    world.db().execute_batch(refuse_line).unwrap();
+
+    world.compact(&main, None).unwrap();
+    let mut group = None;
+    until("the app-server to have run and been stopped", || {
+        group = world.compactions(&main).first().and_then(|c| c.group);
+        group.is_some_and(|group| !group_runs(group))
+    });
+    world.several_passes();
+
+    // The settlement could not be stored, so neither was the request: the run is unfinished.
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.finished_at, None);
+    assert!(world.requests(&run.id).is_empty());
+    assert_eq!(
+        world.compaction().map(|c| c.state),
+        Some(CompactionState::Running)
+    );
+
+    // The next start settles it as interrupted and records nothing, so the gap is visible.
+    world
+        .db()
+        .execute_batch("DROP TRIGGER refuse_line")
+        .unwrap();
+    world.stop();
+    world.start();
+    assert_eq!(
+        world.outcome().map(|o| o.result),
+        Some(CompactionResult::Interrupted)
+    );
+    assert!(world.requests(&run.id).is_empty());
+    assert_eq!(world.lines(), ["Compaction interrupted"]);
+}
+
+#[test]
+fn a_codex_compaction_requested_mid_turn_runs_between_turns_never_beside_one() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(json!({"gate":true}));
+    world.send("JUST_REPLY WAIT_FOR_GATE");
+    until("the turn to start", || {
+        world.status(&main) == Status::Working
+    });
+
+    world.compact(&main, None).unwrap();
+    let waiting = world.send("JUST_REPLY afterwards");
+    world.several_passes();
+    assert_eq!(
+        world.compaction().map(|c| c.state),
+        Some(CompactionState::Queued)
+    );
+    assert!(world.compactions(&main).is_empty(), "the turn still runs");
+
+    // The turn ends: the compaction runs alone on the thread and the message waits for it.
+    world.open("gate-turn");
+    world.until_compacting(&main);
+    world.several_passes();
+    assert_eq!(world.receipt(&waiting), Receipt::Queued);
+    assert_eq!(world.turns(&main).len(), 2);
+    assert!(world.compact(&main, None).is_err(), "one request at a time");
+
+    world.open("gate-compact");
+    world.until_replies(3);
+
+    assert_eq!(world.receipt(&waiting), Receipt::Completed);
+    let compactions = world.compactions(&main);
+    assert_eq!(compactions.len(), 1);
+    assert_eq!(compactions[0].outcome.as_deref(), Some("compacted"));
+    let turns = world.turns(&main);
+    assert!(turns[1].finished_at.unwrap() <= compactions[0].started_at);
+    assert!(compactions[0].finished_at.unwrap() <= turns[2].started_at);
+}
+
+#[test]
+fn a_quit_stops_a_codex_compaction_and_the_next_start_delivers_the_waiting_message() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(json!({"gate":true}));
+    world.compact(&main, None).unwrap();
+    world.until_compacting(&main);
+    let waiting = world.send("JUST_REPLY waiting");
+    let mut group = None;
+    until("the app-server's process group", || {
+        group = world.compactions(&main)[0].group;
+        group.is_some()
+    });
+    let group = group.unwrap();
+    assert!(group_runs(group));
+
+    world.stop();
+
+    // No waiting here: the shutdown itself returned only once the group was stopped.
+    assert!(!group_runs(group));
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.outcome.as_deref(), Some("interrupted"));
+    assert!(world.requests(&run.id).is_empty());
+
+    world.start();
+    world.until_replies(2);
+
+    let runtime = world.runtime(&main);
+    assert_eq!(runtime.compaction, None);
+    assert_eq!(
+        runtime.last_compaction.map(|o| o.result),
+        Some(CompactionResult::Interrupted)
+    );
+    assert_eq!(runtime.last_error, None);
+    assert_eq!(world.status(&main), Status::Ready);
+    assert_eq!(world.lines(), ["Compaction interrupted"]);
+    assert_eq!(world.compactions(&main).len(), 1, "never run again");
+    assert_eq!(world.receipt(&waiting), Receipt::Completed);
+    assert!(world.snapshot().attention.is_empty());
+}
+
+#[test]
+fn a_crash_while_a_codex_agent_compacts_stops_the_app_server_at_the_next_start() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(json!({"gate":true}));
+    let group = world.crash_while_compacting();
+
+    world.start();
+    world.until_replies(2);
+
+    // Startup confirmed the server by its id and start time and stopped it.
+    until("the leftover app-server to be gone", || !group_runs(group));
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.outcome.as_deref(), Some("interrupted"));
+    assert_eq!(world.compactions(&main).len(), 1, "never run again");
+    assert!(world.requests(&run.id).is_empty());
+    let runtime = world.runtime(&main);
+    assert_eq!(runtime.compaction, None);
+    assert_eq!(
+        runtime.last_compaction.map(|o| o.result),
+        Some(CompactionResult::Interrupted)
+    );
+    assert_eq!(world.lines(), ["Compaction interrupted"]);
+    assert!(world.snapshot().attention.is_empty());
+    assert_eq!(world.receipt("waiting"), Receipt::Completed);
+}
+
+/// As `ticket_with_a_reviewer`, with the reviewer on Codex.
+fn ticket_with_a_codex_reviewer(
+    host: &mut Host,
+    project: &Project,
+    main: &Session,
+    scratch: &Path,
+) {
+    assign_a_reviewer_on(Provider::Codex, host, project, main, scratch);
+    host.set_status(&main.id, Status::Paused).unwrap();
+}
+
+#[test]
+fn a_codex_workers_compaction_wakes_no_one_and_raises_its_coordinators_totals() {
+    let world = World::prepared(ticket_with_a_codex_reviewer);
+    let main = world.main.id.clone();
+    let worker = world.worker();
+    world.record_last_turn(&worker);
+    let told = world.messages(&main).len();
+    let said = world.messages(&worker);
+    let before = world.usage();
+
+    world.compact(&worker, None).unwrap();
+    until("the worker's compaction", || {
+        world.runtime(&worker).last_compaction.is_some()
+    });
+    world.several_passes();
+
+    // The parent hears nothing and runs no turn; the worker gains its line and no reply.
+    assert_eq!(world.messages(&main).len(), told);
+    assert!(world.turns(&main).is_empty());
+    let now = world.messages(&worker);
+    assert_eq!(now.len(), said.len() + 1);
+    let line = now.last().unwrap();
+    assert!(line.id.starts_with(COMPACTION_LINE_PREFIX), "{line:?}");
+    // The run is stored as a compaction, so no count of the worker's turns includes it.
+    assert_eq!(world.turns(&worker).len(), 1);
+    let run = world.compactions(&worker).remove(0);
+    let request = world.requests(&run.id).remove(0);
+    assert_eq!(
+        (request.session, request.coordinator),
+        (worker, main.clone())
+    );
+    let after = world.usage();
+    let coordinator = |usage: &UsageReport| {
+        let found = usage.coordinators.iter().find(|c| c.id == main);
+        found.unwrap().clone()
+    };
+    let (before, after) = (coordinator(&before), coordinator(&after));
+    assert_eq!(raised(&before.workers, &after.workers), (1, 29_552, 440));
+    assert_eq!(raised(&before.own, &after.own), (0, 0, 0));
 }

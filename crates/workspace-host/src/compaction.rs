@@ -1,4 +1,4 @@
-//! Compacting a Claude session's context: the person's request and how a run of it ends. The
+//! Compacting a session's context: the person's request and how a run of it ends. The
 //! scheduler in `service.rs` decides when it runs; it is never a turn.
 use crate::*;
 
@@ -6,14 +6,20 @@ use crate::*;
 const MAX_INSTRUCTIONS: usize = 1000;
 /// How Claude's error starts when the session has too little to summarize.
 const NOTHING_TO_COMPACT: &str = "Not enough messages to compact";
+/// The longest reason the host builds from a provider's own text, in characters. The Context
+/// card cuts every reason it shows at the same length.
+pub const REASON_LIMIT: usize = 200;
 
-/// What Claude streamed about a compaction, as `provider::run` reads it.
+/// What the provider said about a compaction, as `provider::run` reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompactionRecord {
-    /// The status record's `compact_result`: success, or its `compact_error`.
+    /// How it ended: Claude's `compact_result` with its `compact_error`, or the status of
+    /// Codex's compaction turn with the reason the host gives a failure.
     Status(std::result::Result<(), String>),
-    /// The boundary record's token counts before and after.
+    /// The token counts before and after.
     Boundary { before: u64, after: u64 },
+    /// The id Codex gave the compaction's turn; its usage entry in the session record has it.
+    Turn(String),
 }
 
 /// A note as the compact command takes it: one line, or none when it is empty.
@@ -30,21 +36,29 @@ fn instructions(note: Option<&str>) -> Result<Option<String>> {
 
 /// The outcome of a compaction whose process ended on its own, from the status record alone:
 /// the exit code and the result record's error flag never decide success. `error` is what the
-/// run ended with otherwise, and is the reason only when the status record gave none.
+/// run ended with otherwise, and is the reason only when the status record gave none. Only
+/// Claude finds nothing to compact; Codex compacts whenever it is asked.
 pub(crate) fn outcome(
+    provider: Provider,
     status: Option<std::result::Result<(), String>>,
     error: Option<String>,
 ) -> (CompactionResult, Option<String>) {
     match status {
         Some(Ok(())) => (CompactionResult::Compacted, None),
-        Some(Err(reason)) if reason.starts_with(NOTHING_TO_COMPACT) => {
+        Some(Err(reason))
+            if provider == Provider::Claude && reason.starts_with(NOTHING_TO_COMPACT) =>
+        {
             (CompactionResult::NothingToCompact, Some(reason))
         }
         Some(Err(reason)) => (CompactionResult::Failed, Some(reason)),
-        None => (
-            CompactionResult::Failed,
-            Some(error.unwrap_or_else(|| "Claude reported no compaction result.".into())),
-        ),
+        None => {
+            (
+                CompactionResult::Failed,
+                Some(error.unwrap_or_else(|| {
+                    format!("{} reported no compaction result.", provider.label())
+                })),
+            )
+        }
     }
 }
 
@@ -73,10 +87,6 @@ impl Host {
     pub fn request_compaction(&mut self, id: &str, note: Option<&str>) -> Result<()> {
         let session = self.session(id)?;
         ensure!(
-            session.provider == Provider::Claude,
-            "Not available for Codex agents: the Codex CLI has no compact command."
-        );
-        ensure!(
             !session.archived,
             "{} is archived; restore it before compacting",
             session.name
@@ -92,6 +102,12 @@ impl Host {
             session.name
         );
         let instructions = instructions(note)?;
+        // Codex's compact request has no field for a note; dropping one silently would show a
+        // compaction that kept nothing the person asked for.
+        ensure!(
+            session.provider == Provider::Claude || instructions.is_none(),
+            "Codex chooses what the summary keeps; it takes no note."
+        );
         runtime.compaction = Some(Compaction {
             instructions: instructions.clone(),
             requested_at: now(),
@@ -189,22 +205,34 @@ mod tests {
     fn the_status_record_alone_decides_the_outcome() {
         use CompactionResult::*;
         let exit = || Some("Provider exited without a successful terminal result".to_owned());
-        assert_eq!(outcome(Some(Ok(())), None), (Compacted, None));
-        // A success the provider reported stands even if the process then ended badly.
-        assert_eq!(outcome(Some(Ok(())), exit()), (Compacted, None));
         let nothing = "Not enough messages to compact.".to_owned();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let outcome = |status, error| outcome(provider, status, error);
+            assert_eq!(outcome(Some(Ok(())), None), (Compacted, None));
+            // A success the provider reported stands even if the process then ended badly.
+            assert_eq!(outcome(Some(Ok(())), exit()), (Compacted, None));
+            assert_eq!(
+                outcome(Some(Err("Conversation too long".into())), exit()),
+                (Failed, Some("Conversation too long".into()))
+            );
+            assert_eq!(outcome(None, exit()), (Failed, exit()));
+        }
         assert_eq!(
-            outcome(Some(Err(nothing.clone())), None),
-            (NothingToCompact, Some(nothing))
+            outcome(Provider::Claude, Some(Err(nothing.clone())), None),
+            (NothingToCompact, Some(nothing.clone()))
         );
         assert_eq!(
-            outcome(Some(Err("Conversation too long".into())), exit()),
-            (Failed, Some("Conversation too long".into()))
-        );
-        assert_eq!(outcome(None, exit()), (Failed, exit()));
-        assert_eq!(
-            outcome(None, None),
+            outcome(Provider::Claude, None, None),
             (Failed, Some("Claude reported no compaction result.".into()))
+        );
+        // Codex compacts whenever it is asked, so the same words from it are a failure.
+        assert_eq!(
+            outcome(Provider::Codex, Some(Err(nothing.clone())), None),
+            (Failed, Some(nothing))
+        );
+        assert_eq!(
+            outcome(Provider::Codex, None, None),
+            (Failed, Some("Codex reported no compaction result.".into()))
         );
     }
 

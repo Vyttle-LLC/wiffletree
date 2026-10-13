@@ -35,6 +35,66 @@ if '/context' in args:
 """
     print(json.dumps({'is_error':False,'num_turns':0,'result':report}))
     sys.exit(0)
+def wait_for(gate):
+    # Holds a turn or a compaction until the test creates the gate file.
+    deadline=time.time()+30
+    while not (Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/gate).exists() and time.time()<deadline:time.sleep(0.02)
+if args[:1]==['app-server']:
+    # Codex's app-server for one compaction, not a turn: it checks the four requests it reads
+    # and replays the server side of a recorded exchange. `codex-compact.json` in the test's
+    # scratch directory chooses the recording and what to change in it.
+    import tomllib
+    scratch=Path(os.environ['WORKSPACE_TEST_USAGE_DIR']);streams=Path(__file__).parent/'streams'
+    plan=json.loads((scratch/'codex-compact.json').read_text()) if (scratch/'codex-compact.json').exists() else {}
+    overrides=[tomllib.loads(o) for o in args[2::2]]
+    assert args[1::2]==['-c']*3 and [list(o)[0] for o in overrides]==['model_reasoning_effort','developer_instructions','mcp_servers'],args
+    requests=[json.loads(sys.stdin.readline()) for _ in range(4)]
+    assert [(r.get('method'),r.get('id')) for r in requests]==[('initialize',1),('initialized',None),('thread/resume',2),('thread/compact/start',3)],requests
+    # A turn's token lets the workspace's tools answer; a compaction's must not.
+    helper=overrides[2]['mcp_servers']['agent_workspace']['command']
+    call=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'workspace_context','arguments':{}}})
+    answer=json.loads(subprocess.run([helper,'agent-mcp'],input=call+'\n',capture_output=True,text=True,timeout=10).stdout)
+    with open(Path(os.environ['WORKSPACE_TEST_PROMPT_DIR'])/'codex-compactions.txt','a') as log:
+        log.write(json.dumps({'cwd':os.getcwd(),'effort':overrides[0]['model_reasoning_effort'],'instructions':overrides[1]['developer_instructions'],'tools_refused':'error' in answer or answer['result']['isError'],'requests':requests})+'\n')
+    exchange=[json.loads(line) for line in (streams/f"codex-compact-{plan.get('stream','success')}.jsonl").read_text().splitlines()]
+    recording=[entry['message'] for entry in exchange if entry['from']=='server']
+    # The recording's thread becomes the agent's, and its compaction turn gets an id of its own.
+    thread=requests[2]['params']['threadId'];turn=str(uuid.uuid4())
+    recorded_thread=next(e['message']['params']['threadId'] for e in exchange if e['message'].get('method')=='thread/resume')
+    recorded_turn=next((m['params']['turn']['id'] for m in recording if m.get('method')=='turn/started'),'no turn')
+    def own(text):return text.replace(recorded_thread,thread).replace(recorded_turn,turn)
+    def write_session_record():
+        # What Codex appends to the thread's session record for a compaction, with the usage
+        # entry of its one model request left out, repeated or made unreadable when asked.
+        entries=[json.loads(own(line)) for line in (streams/'codex-compact-session-record-compacted.jsonl').read_text().splitlines()]
+        entries=entries[next(i for i,e in enumerate(entries) if e['payload'].get('type')=='thread_settings_applied'):]
+        spent=next(e for e in entries if e['type']=='token_usage_record');at=entries.index(spent)
+        match plan.get('usage','one'):
+            case 'none':entries.remove(spent)
+            case 'two':entries.insert(at,spent)
+            case 'no-input':del spent['payload']['usage']['input_tokens']
+            case 'more-cached':spent['payload']['usage']['cached_input_tokens']=spent['payload']['usage']['input_tokens']+1
+        sessions=Path(os.environ['CODEX_HOME'])/'sessions'
+        record=next(sessions.rglob(f'*{thread}.jsonl'),sessions/'2026/10/13'/f'rollout-2026-10-13T17-10-48-{thread}.jsonl')
+        record.parent.mkdir(parents=True,exist_ok=True)
+        with open(record,'a') as file:file.write(''.join(json.dumps(e)+'\n' for e in entries))
+    for message in recording:
+        method=message.get('method')
+        if method and method==plan.get('stop_before'):break
+        if str(message.get('id')) in plan.get('refuse',{}) and not method:message={'error':{'code':-32600,'message':plan['refuse'][str(message['id'])]},'id':message['id']}
+        if plan.get('no_figure') and method=='thread/tokenUsage/updated' and message['params']['turnId']==recorded_turn:continue
+        if method=='turn/completed':
+            if plan.get('gate'):wait_for('gate-compact')
+            message['params']['turn'].update(plan.get('turn',{}))
+            if message['params']['turn']['status']=='completed':write_session_record()
+        print(own(json.dumps(message)),flush=True)
+    if 'exit' in plan:
+        sys.stderr.write(plan.get('stderr',''));sys.exit(plan['exit'])
+    # The real server runs until its input closes. The double logs anything more it is sent and
+    # then stays, so only the host's stopping its process group ends it.
+    for line in sys.stdin:
+        with open(scratch/'codex-compact-extra.txt','a') as log:log.write(line)
+    time.sleep(30);sys.exit(0)
 claude='--output-format' in args
 if claude:
     assert '--dangerously-skip-permissions' in args, args
@@ -68,10 +128,6 @@ def model_usage(sid,spent):
         kept=total.setdefault(model,{})
         for key in ('inputTokens','outputTokens','cacheReadInputTokens','cacheCreationInputTokens'):kept[key]=kept.get(key,0)+counts.get(key,0)
     path.write_text(json.dumps(total));return total
-def wait_for(gate):
-    # Holds a turn or a compaction until the test creates the gate file.
-    deadline=time.time()+30
-    while not (Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/gate).exists() and time.time()<deadline:time.sleep(0.02)
 def emit(value):print(json.dumps(value),flush=True)
 def pick(ctx,role,provider=None):
     # The first allowed model of the provider, or of the role's first provider.

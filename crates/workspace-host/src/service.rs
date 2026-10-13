@@ -521,10 +521,12 @@ struct Compacting {
     run: String,
     /// Set only when the host stops; a pause or a stop lets a compaction finish.
     cancel: Arc<AtomicBool>,
-    /// What Claude's status record said, once it has: success, or its error.
+    /// How the provider said it ended, once it has: success, or the reason it failed.
     status: Option<std::result::Result<(), String>>,
-    /// The token counts before and after, from the boundary record.
+    /// The token counts before and after, as the provider gave them.
     tokens: Option<(u64, u64)>,
+    /// The id Codex gave the compaction's turn; its usage entry carries it.
+    turn: Option<String>,
 }
 struct Permission {
     session: String,
@@ -1399,6 +1401,7 @@ impl Actor {
                     CompactionRecord::Boundary { before, after } => {
                         compacting.tokens = Some((before, after));
                     }
+                    CompactionRecord::Turn(turn) => compacting.turn = Some(turn),
                 }
                 Ok(())
             }
@@ -1415,8 +1418,8 @@ impl Actor {
         }
     }
     /// Settles a compaction whose process has ended. Only the host's stopping cancels one, so
-    /// a cancelled end is an interruption; any other outcome is what Claude's status record
-    /// said. It appends no reply and tells the parent nothing.
+    /// a cancelled end is an interruption; any other outcome is what the provider said. It
+    /// appends no reply and tells the parent nothing.
     fn compaction_finished(
         &mut self,
         id: &str,
@@ -1429,23 +1432,56 @@ impl Actor {
         let (result, reason) = if cancelled {
             (CompactionResult::Interrupted, None)
         } else {
-            compaction::outcome(compacting.status, error)
+            compaction::outcome(session.provider, compacting.status, error.clone())
         };
-        let detail = json!({"error":reason,"modelUsage":usage["modelUsage"],"total_cost_usd":usage["total_cost_usd"]});
+        // Codex reports a compaction's tokens nowhere but its session record, which is read
+        // now that the server is stopped and writes no more.
+        let spent = (session.provider == Provider::Codex && result == CompactionResult::Compacted)
+            .then(|| self.codex_compaction_usage(id, compacting.turn.as_deref()));
+        let detail = match session.provider {
+            Provider::Claude => {
+                json!({"error":reason,"modelUsage":usage["modelUsage"],"total_cost_usd":usage["total_cost_usd"]})
+            }
+            // `reported` is Codex's whole text for a failure; `unrecorded` says why a
+            // compacted run has no request in the ledger.
+            Provider::Codex => {
+                let unrecorded = spent.as_ref().and_then(|spent| spent.as_ref().err());
+                json!({"error":reason,"reported":error,"unrecorded":unrecorded.map(|why| format!("{why:#}"))})
+            }
+        };
         // One unit: a host that dies here leaves the run unfinished with its request, which
-        // the next start settles, never a finished run beside a request that still runs. The
-        // provider thread stopped the process group before reporting this end.
+        // the next start settles, never a finished run beside a request that still runs, and
+        // never a ledger request without its settled run. The provider thread stopped the
+        // process group before reporting this end.
         self.host.atomically(|host| {
             host.db.execute(
                 "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.process_gone',1) WHERE id=?1",
                 params![compacting.run, now(), tag(&result)?, detail.to_string()],
             )?;
+            if let Some(Ok(spent)) = &spent {
+                host.record_codex_compaction(&compacting.run, spent)?;
+            }
             host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
         })?;
         if !self.stopping {
             self.host.settle_pending_worktrees();
         }
         Ok(())
+    }
+    /// The usage of a Codex compaction's one model request: the entry of the thread's session
+    /// record that carries its turn's id, when there is exactly one and its counts can be
+    /// read. Otherwise the error says why nothing is recorded; no other entry, running sum or
+    /// difference of totals is ever taken in its place.
+    fn codex_compaction_usage(&self, id: &str, turn: Option<&str>) -> Result<Value> {
+        let turn = turn.context("Codex named no turn for the compaction")?;
+        let thread = self.host.session_runtime(id)?.provider_session_id;
+        let thread = thread.context("No Codex thread")?;
+        let spent = context::codex_turn_usage(&thread, turn, &context::codex_home()?)?;
+        ensure!(
+            usage::normalize(Provider::Codex, &spent).is_some(),
+            "Codex's usage entry for the compaction's turn cannot be read"
+        );
+        Ok(spent)
     }
     /// Cancels every active turn and every compaction, and waits for each provider thread to
     /// report its end, which it does once the provider's process group is stopped. A run that
@@ -2105,9 +2141,10 @@ impl Actor {
         }
         Ok(due)
     }
-    /// Runs a session's queued compaction: Claude's compact command on its session, with a
-    /// turn's arguments. It is not a turn: it takes no input and leaves the session's status,
-    /// its messages' receipts and every turn count alone. One that cannot start has failed.
+    /// Runs a session's queued compaction with a turn's arguments: Claude's compact command on
+    /// its session, or Codex's app-server on its thread. It is not a turn: it takes no input
+    /// and leaves the session's status, its messages' receipts and every turn count alone. One
+    /// that cannot start has failed.
     fn start_compaction(&mut self, session: Session) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
         let Some(request) = runtime.compaction.as_mut() else {
@@ -2149,12 +2186,28 @@ impl Actor {
                 cancel: cancel.clone(),
                 status: None,
                 tokens: None,
+                turn: None,
             },
         );
         self.state_changed();
+        let kind = match session.provider {
+            Provider::Claude => TurnKind::Compaction(instructions),
+            // Codex's own total for the whole context, as the card shows it.
+            Provider::Codex => TurnKind::CodexCompaction {
+                before: runtime.provider_session_id.as_deref().and_then(|thread| {
+                    let probe = context::Probe {
+                        role: session.role,
+                        profile: &profile,
+                        provider_session: thread,
+                        directory: &cwd,
+                    };
+                    context::usage(&probe).ok().map(|usage| usage.used)
+                }),
+            },
+        };
         let turn = Turn {
             run_id: run,
-            kind: TurnKind::Compaction(instructions),
+            kind,
             session,
             profile,
             provider_session: runtime.provider_session_id,
@@ -6492,6 +6545,7 @@ mod tests {
                 cancel: Arc::new(AtomicBool::new(false)),
                 status: None,
                 tokens: None,
+                turn: None,
             },
         );
         run

@@ -10,7 +10,7 @@ See proposal.md for why. `compact-context` (archived, PR #49) built compaction f
 
 ### Observed on throwaway threads
 
-codex-cli 0.160.0, `gpt-6.1-sol`, October 13, 2026. Three threads made with two `codex exec` turns each in a scratch directory, then driven over `codex app-server`'s stdio. No agent's thread was used. The exchanges are kept in this change's `recordings/`, one JSON object per line with who sent it, beside one exchange written by hand to show a request from the server (`synthetic-server-request.jsonl`) and three samples of session-record entries (`session-record-*.jsonl`, with the summary's encrypted content cut short).
+codex-cli 0.160.0, `gpt-6.1-sol`, October 13, 2026. Three threads made with two `codex exec` turns each in a scratch directory, then driven over `codex app-server`'s stdio. No agent's thread was used. The exchanges are kept in `crates/workspace-host/tests/fixtures/streams` as `codex-compact-*.jsonl` (in this change's `recordings/` until it was built), one JSON object per line with who sent it, beside one exchange written by hand to show a request from the server (`synthetic-server-request.jsonl`) and three samples of session-record entries (`session-record-*.jsonl`, with the summary's encrypted content cut short).
 
 **The exchange.** The client writes one JSON object per line: `initialize` with `clientInfo`; the `initialized` notification; `thread/resume`; `thread/compact/start` with `{"threadId": …}`. `initialize` was answered in 0.3 seconds and `thread/resume` in 0.8. `thread/compact/start` is answered at once with `{"result":{}}`; the compaction follows as notifications. All four lines can be written before any reply is read: three runs that did so were answered in order and compacted (`all-written-at-once.jsonl`).
 
@@ -24,7 +24,7 @@ codex-cli 0.160.0, `gpt-6.1-sol`, October 13, 2026. Three threads made with two 
 6. `thread/status/changed`, `status.type` `idle`
 7. `turn/completed`, `turn.status` `completed`, `turn.error` null, `turn.durationMs`
 
-Between them come notifications that say nothing about the compaction: `mcpServer/startupStatus/updated`, `account/updated`, `remoteControl/status/changed`, `thread/goal/cleared`, `warning`. Eight compactions completed, in 9.6 to 16.8 seconds, on requests of 14k to 30k tokens. The server keeps running afterwards; it does not exit on its own.
+Between them come notifications that say nothing about the compaction: `mcpServer/startupStatus/updated`, `account/updated`, `remoteControl/status/changed`, `thread/goal/cleared`, `warning`. Eight compactions completed, in 8.7 to 16.8 seconds, on requests of 14k to 30k tokens; the two of task 2.1, below, took 15.7 and 18.3 seconds. The server keeps running afterwards; it does not exit on its own.
 
 **A failure** (`failed.jsonl`), made by resuming with a model that does not exist: steps 1 to 3 as above, then `thread/status/changed` with `status.type` `systemError`; an `error` notification with `error.message` and `willRetry` false; and `turn/completed` with `turn.status` `failed` and the same text in `turn.error.message`. The session record gained no `compacted` entry.
 
@@ -56,6 +56,28 @@ Between them come notifications that say nothing about the compaction: `mcpServe
 **Configuration and the prompt cache.** Started with a turn's configuration, the compaction's request read 29,312 of 29,552 input tokens from the cache, and 26,624 of 27,305 on a second thread. Started with `-c 'mcp_servers={}' -c 'features.apps=false'`, it read 13,056 of 22,799. The tool list is part of what the request shares with the thread's turns.
 
 **Tool servers.** `thread/resume` starts the tool servers of the user's Codex configuration (`node_repl`, `cua_repl`, `codex_apps` here). Each ran in a process group of its own, not the server's. All had exited half a second after the server ended, whether by SIGTERM, by SIGKILL or because its input was closed. The server exits within 0.02 seconds when its input closes.
+
+### Confirmed with a turn's configuration (task 2.1)
+
+codex-cli 0.160.0, `gpt-6.1-sol`, October 13, 2026, before any code was written. Two more throwaway threads, each made by two `codex exec` turns run with exactly a turn's arguments: `--json --skip-git-repo-check --color never --dangerously-bypass-approvals-and-sandbox -m`, and the three `-c` overrides, with an implementer's role instructions and the `agent_workspace` tool server served by this branch's `workspace-host agent-mcp`. Each was then compacted through `codex app-server` started with the same three `-c` overrides, a token no host had registered and a socket nothing listened on, and given one more `codex exec … resume` turn. No agent's thread and no data directory of the app was used. All four points held on both threads.
+
+| | Thread 1 | Thread 2 |
+|---|---|---|
+| `agent_workspace` reported `ready` after | 0.18 s | 0.22 s |
+| Replies to `initialize`, `thread/resume`, `thread/compact/start`, all four lines written in one write | 0.05, 0.19, 0.19 s, in order | 0.03, 0.22, 0.23 s, in order |
+| `turn/completed` | `completed` after 18.3 s | `completed` after 15.7 s |
+| Context total in the record before, and `last.totalTokens` during the turn | 28,068 → 6,713 | 21,180 → 6,785 |
+| `token_usage_record` entries carrying the compaction turn's id | 1 | 1 |
+| That entry's `usage` | input 28,088, cached 27,904, output 488 | input 21,200, cached 20,992, output 507 |
+| Cumulative usage `codex exec` reported before and after the next turn | input 101,917 → 122,865, cached 86,528 → 99,712, output 184 → 192 | input 104,184 → 125,149, cached 95,488 → 108,672, output 253 → 259 |
+| The next turn's own request, from its `token_usage_record` | input 20,948, cached 13,184, output 8 | input 20,965, cached 13,184, output 6 |
+
+1. **The server starts with a turn's overrides and the required tool server.** `mcpServer/startupStatus/updated` named `agent_workspace` as `starting` and then `ready`, and `thread/resume` succeeded. The tool server answers `initialize` and `tools/list` itself and reaches the host only when a tool is called, so an unregistered token does not keep it from starting.
+2. **Written at once, answered in order.** The three replies came in the order of the requests and the compaction completed.
+3. **The compaction is not in Codex's running total.** The cumulative usage rose by exactly the next turn's own request on both threads, in input, cached and output tokens, and the session record's `total_token_usage` was the same before and after the compaction.
+4. **One usage entry, with the compaction turn's id.** Its request read 99.3% and 99.0% of its input from the cache.
+
+Two details the code depends on. `thread/resume` sent a `thread/tokenUsage/updated` of its own, carrying the last turn's id and the figure before; the one that carries the figure after came 18 seconds later with the compaction turn's id, so only a figure that arrives after `turn/started` is the figure after (decision 7). And a `thread/resume` with a `sandbox` value Codex does not have was refused with ``Invalid request: unknown variant `no-such-sandbox`, expected one of `read-only`, `workspace-write`, `danger-full-access` ``: the same opening as the reply to a method the server does not have, for a method it has (decision 6).
 
 ## Goals / Non-Goals
 
@@ -106,19 +128,23 @@ A compaction stopped by SIGTERM leaves Codex's own developer message in the thre
 
 1. A reply with `error` to any of the three requests → `Status(Err)`, reason `Codex refused ‹method›: ‹error.message›`. The first one decides; a refused `thread/resume` is followed by a refused `thread/compact/start` and only the first is kept.
 2. `turn/completed` with `turn.status` `completed` → `Status(Ok)`.
-3. `turn/completed` with `turn.status` `failed` → `Status(Err)` with `turn.error.message`.
+3. `turn/completed` with `turn.status` `failed` → `Status(Err)` with `turn.error.message`, bounded as below. A failed turn that gives no message is named by its status, as in rule 4.
 4. `turn/completed` with any other status, or none that can be read → `Status(Err)`, reason `Codex ended the compaction as ‹status›`. This covers `interrupted` and a shape this version does not know.
 5. A request from the server (a message with both `id` and `method`) → `Status(Err)`, reason `Codex asked for ‹method›, which a compaction cannot answer`. The host does not answer it: `run` writes its input once (decision 3), and a compaction has nothing to approve. The run ends there and the process is stopped as at any end. No such request was seen: the thread is resumed with approval policy `never`.
 6. Every other notification is ignored, the `error` notification included: the `turn/completed` that follows it carries the same text.
 
-**The reason is bounded and readable.** Codex's own text can be long: the reply to an unknown method lists every method the server has, about 4,000 characters, and a failed turn's message can be a block of JSON. The arm builds the reason of rules 1 and 3 from the first line of Codex's text, cut to 200 characters and ended with "…" when it was longer. One case has a form of its own: an error reply whose message starts "Invalid request: unknown variant" becomes `Codex refused ‹method›: this Codex has no such method`. Codex's full text is not lost: the run ends with it as its error, and `compaction_finished` keeps it in the run's `detail.result.reported`, beside the bounded reason the card shows.
+**The reason is bounded and readable.** Codex's own text can be long: the reply to an unknown method lists every method the server has, about 4,000 characters, and a failed turn's message can be a block of JSON; the one recorded is 204 characters. Every reason the arm builds is one line of at most 200 characters, the request's name included, ended with "…" when it was cut (`compaction::REASON_LIMIT`). The Context card cuts the reasons it shows at that same length, where it cut at 180 before, so a reason the host cut is shown whole and ends once, not mid-JSON a second time. The limit chosen for both is the host's 200.
+
+One case has a form of its own: an error reply whose message starts ``Invalid request: unknown variant `‹method›` ``, naming the refused request's own method, becomes `Codex refused ‹method›: this Codex has no such method`. The opening alone does not say that: Codex sends the same one when it rejects a parameter's value for a method it has, such as an unknown `sandbox` in `thread/resume` (seen in task 2.1), and that refusal keeps Codex's own words in the bounded form.
+
+Codex's full text is not lost: the run ends with it as its error, and `compaction_finished` keeps it in the run's `detail.result.reported`, beside the bounded reason the card shows.
 
 `compaction::outcome` then maps the status: `Ok` is **compacted**, `Err` is **failed** with the reason, and no status at all is **failed** with what the run ended with. It takes the agent's provider and has two edits. The rule that turns a reason starting "Not enough messages to compact" into **nothing to compact** applies to Claude only; today it applies to any provider, and for Codex such a text must be an ordinary failure. And the fallback reason names the agent's provider instead of always Claude. So **nothing to compact** does not arise for Codex.
 
 Two endings have no status:
 
 - **The process ends first,** or cannot start, such as a Codex without the `app-server` command. `run`'s existing ending reports "Provider exited without a successful terminal result" with the exit status and the end of stderr.
-- **Nothing terminal arrives.** A Codex compaction has a limit, `CODEX_COMPACTION_LIMIT`, counted from the process's start. When it passes with no outcome read, `run` stops the group and ends with "Codex did not finish compacting within 10 minutes." Compactions took 10 to 17 seconds on small contexts; the limit is a backstop, not a budget. Claude's compaction needs none, because the Claude CLI exits by itself.
+- **Nothing terminal arrives.** A Codex compaction has a limit, `CODEX_COMPACTION_LIMIT`, counted from the process's start. When it passes with no outcome read, `run` stops the group and ends with "Codex did not finish compacting within 10 minutes." Compactions took 9 to 18 seconds on small contexts; the limit is a backstop, not a budget. Claude's compaction needs none, because the Claude CLI exits by itself.
 
 Success needs `turn.status` to be exactly `completed`. A changed protocol therefore errs toward "Compaction failed" with a reason, and the measurement that follows every outcome shows what the context really is.
 
@@ -188,7 +214,7 @@ All of it matches state 7 of `design/mockups/current/compact-context.html`.
 
 ### Decided by Michael on October 13, 2026
 1. **A Codex compaction is recorded in the usage ledger,** read from the session record's `token_usage_record` entry for that compaction's turn. When the record does not hold exactly one such entry, no row is written and the compaction is still reported as compacted (decision 8).
-2. **A Codex compaction may take 10 minutes** before the host stops it and reports it failed (decision 6). Nothing longer than 17 seconds was seen, on contexts of at most 30k tokens; a full window was not tried.
+2. **A Codex compaction may take 10 minutes** before the host stops it and reports it failed (decision 6). Nothing longer than 18.3 seconds was seen, on contexts of at most 30k tokens; a full window was not tried.
 3. **A Codex request that carries instructions is refused,** not accepted with the note dropped (decision 2).
 4. **Codex's own "interrupted on purpose" message stays in the thread** after a compaction the host cut off (decision 5).
 5. **The figures are printed as Codex gives them,** though they read low until the agent's next turn (decision 7).
@@ -196,14 +222,25 @@ All of it matches state 7 of `design/mockups/current/compact-context.html`.
 ### Files and functions to change
 | File | Functions / items |
 |---|---|
-| `crates/workspace-host/src/compaction.rs` | `request_compaction` (accept Codex, refuse its instructions); `outcome` (two edits: the "Not enough messages to compact" rule applies to Claude only, and the fallback reason names the provider) |
-| `crates/workspace-host/src/provider.rs` | `input` (the four lines), `configure` (`app-server` and a turn's `-c` overrides), `run` (keep the input open, the Codex compaction arm of decision 6, `CODEX_COMPACTION_LIMIT`) |
+| `crates/workspace-host/src/compaction.rs` | `request_compaction` (accept Codex, refuse its instructions); `outcome` (two edits: the "Not enough messages to compact" rule applies to Claude only, and the fallback reason names the provider); `CompactionRecord::Turn`; `REASON_LIMIT` |
+| `crates/workspace-host/src/provider.rs`, `provider/codex_compaction.rs` (new) | `TurnKind::CodexCompaction`; `input` (the four lines), `configure` (`app-server` and a turn's `-c` overrides), `run` (keep the input open, stop at the outcome or the limit); in the new module the four lines, the reader of decision 6 (`Messages`), the bounded reason and `CODEX_COMPACTION_LIMIT` |
 | `crates/workspace-host/src/service.rs` | `start_compaction` (read the context total for a Codex agent and hand it to the run); `compaction_event` (keep the turn's id); `compaction_finished` (the ledger row, in the settling unit; Codex's full text kept in `detail.result.reported`) |
-| `crates/workspace-host/src/usage.rs` | `codex_delta` (`IS_TURN_RUN` in the preceding-run lookup); a new `record_codex_compaction` that writes one request without touching `usage_counters` |
-| `crates/workspace-host/src/context.rs` | `codex` (size a `compacted` entry's `replacement_history`), `codex_item` (the `compaction` item); a reader for the `token_usage_record` entries of one turn |
-| `crates/workspace-desktop/src/context_view.rs` | `compact_action`, `compact_form_text`, `compaction_notice`, the form in `compact_section`, `confirm_compact` |
+| `crates/workspace-host/src/usage.rs` | `codex_delta` (`IS_TURN_RUN` in the preceding-run lookup); a new `record_codex_compaction` that writes one request without touching `usage_counters`: `record_usage` takes a Codex compaction run's usage as the request's own counts, by the run's `kind`, and never as a reading |
+| `crates/workspace-host/src/context.rs` | `codex` (size a `compacted` entry's `replacement_history`), `codex_item` (the `compaction` item); `codex_turn_usage`, a reader for the `token_usage_record` entries of one turn |
+| `crates/workspace-desktop/src/context_view.rs` | `compact_action`, `compact_form_text`, `compact_instructions` (new), `compaction_notice` (also the 200-character cut), the form in `compact_section`, `open_compact_form`, `confirm_compact` |
 | Tests | `crates/workspace-host/tests/compaction.rs`; a `codex app-server` branch in `tests/fixtures/provider.py`; recorded exchanges in `tests/fixtures/streams`; unit tests in `provider.rs`, `compaction.rs`, `usage.rs`, `context.rs`, `context_view.rs` |
 | Docs | `docs/PRD.md` (context paragraph), `docs/DEVELOPMENT.md` (compaction and usage paragraphs) |
+
+### As built
+
+Nothing the design names had moved on `main` (`7d87061`) when this was built. Four things differ from the text above in detail, none in behaviour a person sees:
+
+- **The Codex part of `provider.rs` is a module of its own,** `provider/codex_compaction.rs`: the four lines, the reader of the server's messages, the reason and the limit. `run` keeps its one loop and asks the reader about each line.
+- **The figure before travels with the run** as `TurnKind::CodexCompaction { before }`, a third kind beside a turn and Claude's `/compact`, so the provider emits `Boundary` with both figures as it does for Claude.
+- **The limit is shortened in tests by `WORKSPACE_CODEX_COMPACTION_LIMIT_MS`,** read by the host only as a Codex compaction runs. The reason always says 10 minutes.
+- **Why no row was written** is kept as `detail.result.unrecorded`, a sentence such as "Codex's session record has 0 usage entries for the compaction's turn".
+
+A process that ends before an outcome is read keeps `run`'s existing reason, which carries up to 1,500 characters of the server's error output; the card shows its first line, cut at 200.
 
 ## Risks / Trade-offs
 

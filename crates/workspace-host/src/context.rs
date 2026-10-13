@@ -184,6 +184,8 @@ fn codex_item(item: &Value) -> Option<(&'static str, usize)> {
         }
         // Reasoning is carried forward encrypted; base64 inflates it by a third.
         "reasoning" => ("Reasoning", length(&item["encrypted_content"]) * 3 / 4),
+        // A compaction's summary is carried the same way, in place of the messages it replaced.
+        "compaction" => ("Messages", length(&item["encrypted_content"]) * 3 / 4),
         _ => return None,
     })
 }
@@ -203,7 +205,13 @@ fn codex(thread: &str, home: &Path) -> Result<ContextUsage> {
         bail!("Codex has no session record for this conversation yet");
     };
     let mut characters = [0usize; CODEX_CATEGORIES.len()];
-    let index = |name: &str| CODEX_CATEGORIES.iter().position(|c| *c == name);
+    let count = |characters: &mut [usize; CODEX_CATEGORIES.len()], item: &Value| {
+        if let Some((name, size)) = codex_item(item)
+            && let Some(index) = CODEX_CATEGORIES.iter().position(|c| *c == name)
+        {
+            characters[index] += size;
+        }
+    };
     let (mut used, mut window, mut model) = (0, 0, None);
     for line in BufReader::new(fs::File::open(path)?).lines() {
         let Ok(record) = serde_json::from_str::<Value>(&line?) else {
@@ -217,19 +225,18 @@ fn codex(thread: &str, home: &Path) -> Result<ContextUsage> {
                     .or(payload["base_instructions"].as_str())
                     .map_or(0, str::len)
             }
-            // Compaction replaces the conversation so far with a summary.
+            // Compaction replaces the conversation so far with what it kept: the messages it
+            // retained and a summary, which is an item of its own or the entry's `message`.
             "compacted" => {
                 characters[1..].fill(0);
                 characters[2] = payload["message"].as_str().map_or(0, str::len);
-            }
-            "turn_context" => model = payload["model"].as_str().map(str::to_owned).or(model),
-            "response_item" => {
-                if let Some((name, size)) = codex_item(payload)
-                    && let Some(index) = index(name)
-                {
-                    characters[index] += size;
+                let kept = payload["replacement_history"].as_array();
+                for item in kept.into_iter().flatten() {
+                    count(&mut characters, item);
                 }
             }
+            "turn_context" => model = payload["model"].as_str().map(str::to_owned).or(model),
+            "response_item" => count(&mut characters, payload),
             "event_msg" if payload["type"] == "token_count" => {
                 let info = &payload["info"];
                 used = info["last_token_usage"]["total_tokens"]
@@ -253,6 +260,32 @@ fn codex(thread: &str, home: &Path) -> Result<ContextUsage> {
         estimated: true,
         observed_at: crate::now(),
     })
+}
+
+/// The usage of the one model request Codex recorded for `turn` of `thread`. Codex's
+/// notifications and its running total leave a compaction's request out; this entry of its
+/// session record is the only place its tokens are. Only an entry's own `usage` is taken,
+/// never its running sums, and only when exactly one entry carries the turn's id: anything
+/// else is an error saying what the record held.
+pub(crate) fn codex_turn_usage(thread: &str, turn: &str, home: &Path) -> Result<Value> {
+    let Some(path) = session_file(&home.join("sessions"), thread) else {
+        bail!("Codex has no session record for this conversation");
+    };
+    let mut entries = vec![];
+    for line in BufReader::new(fs::File::open(path)?).lines() {
+        let Ok(record) = serde_json::from_str::<Value>(&line?) else {
+            continue;
+        };
+        if record["type"] == "token_usage_record" && record["payload"]["turn_id"] == turn {
+            entries.push(record["payload"]["usage"].clone());
+        }
+    }
+    ensure!(
+        entries.len() == 1,
+        "Codex's session record has {} usage entries for the compaction's turn",
+        entries.len()
+    );
+    Ok(entries.remove(0))
 }
 
 /// Splits the reported total across categories in proportion to their content. Whatever the
@@ -355,6 +388,89 @@ mod tests {
         assert_eq!(size("Tool results"), Some(200));
         assert_eq!(size("Tools and overhead"), Some(650));
         assert_eq!(usage.categories.iter().map(|c| c.tokens).sum::<u64>(), 1000);
+    }
+
+    /// A compaction's entry as Codex 0.160 writes it: an empty `message`, and what it kept
+    /// in `replacement_history`.
+    fn compacted(kept: Value) -> Value {
+        serde_json::json!({"type":"compacted","payload":{"message":"","replacement_history":kept}})
+    }
+
+    #[test]
+    fn codex_measures_what_a_compaction_kept_and_nothing_before_it() {
+        let home = tempfile::tempdir().unwrap();
+        let user = |text: String| serde_json::json!({"type":"message","role":"user","content":[{"type":"input_text","text":text}]});
+        record(
+            home.path(),
+            "thread-3",
+            &[
+                serde_json::json!({"type":"session_meta","payload":{"base_instructions":{"text":"x".repeat(400)}}}),
+                serde_json::json!({"type":"response_item","payload":user("y".repeat(4000))}),
+                serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","output":"z".repeat(8000)}}),
+                compacted(serde_json::json!([
+                    user("y".repeat(200)),
+                    user("y".repeat(120)),
+                    {"type":"compaction","encrypted_content":"e".repeat(640)},
+                ])),
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":6550},"model_context_window":475000}}}),
+            ],
+        );
+        let usage = codex("thread-3", home.path()).unwrap();
+        assert_eq!((usage.used, usage.window), (6550, 475_000));
+        let sizes: Vec<_> = usage
+            .categories
+            .iter()
+            .map(|c| (c.name.as_str(), c.tokens))
+            .collect();
+        // The two kept messages and the summary, whose base64 is three quarters content.
+        let messages = (200 + 120 + 640 * 3 / 4) / 4;
+        assert_eq!(
+            sizes,
+            [
+                ("System prompt", 100),
+                ("Messages", messages),
+                ("Tools and overhead", 6550 - 100 - messages)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turns_usage_is_its_one_entry_and_never_another_turns() {
+        let home = tempfile::tempdir().unwrap();
+        let entry = |turn: &str, input: u64| {
+            serde_json::json!({"type":"token_usage_record","payload":{
+                "turn_id":turn,
+                "usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":1},
+                "thread_token_usage":{"input_tokens":input + 1000,"output_tokens":1},
+            }})
+        };
+        record(
+            home.path(),
+            "thread-4",
+            &[
+                entry("turn", 7),
+                entry("compaction", 29_552),
+                entry("twice", 3),
+                entry("twice", 4),
+                // The compaction's own entry repeats its usage; only a usage entry counts.
+                serde_json::json!({"type":"compacted","payload":{"latest_token_usage_record":entry("compaction", 29_552)["payload"]}}),
+            ],
+        );
+        let usage = |turn: &str| codex_turn_usage("thread-4", turn, home.path());
+        // The entry's own usage, not a running sum beside it.
+        assert_eq!(
+            usage("compaction").unwrap(),
+            serde_json::json!({"input_tokens":29_552,"cached_input_tokens":0,"output_tokens":1})
+        );
+        let none = usage("another").unwrap_err().to_string();
+        assert!(none.contains("0 usage entries"), "{none}");
+        let two = usage("twice").unwrap_err().to_string();
+        assert!(two.contains("2 usage entries"), "{two}");
+        let missing = codex_turn_usage("no-thread", "turn", home.path()).unwrap_err();
+        assert!(
+            missing.to_string().contains("no session record"),
+            "{missing}"
+        );
     }
 
     #[test]
