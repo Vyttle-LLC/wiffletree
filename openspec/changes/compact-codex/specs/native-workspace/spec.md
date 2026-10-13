@@ -99,5 +99,5 @@ The context chip in the conversation header SHALL add "compact queued" after its
 - **THEN** its totals include the compaction's tokens and nothing on the page names compactions
 
 #### Scenario: Usage page after a Codex compaction
-- **WHEN** the human opens the Usage page after a Codex agent's compaction
-- **THEN** its totals are what they were before the compaction and nothing on the page names compactions
+- **WHEN** the human opens the Usage page after a Codex agent's compaction whose request was recorded
+- **THEN** its totals include the compaction's tokens and nothing on the page names compactions

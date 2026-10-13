@@ -9,7 +9,7 @@ The Compact action on the Context card works for Claude agents only (`compact-co
 - **The host runs `codex app-server` for one compaction.** It resumes the agent's thread with a turn's model and configuration, sends `thread/compact/start`, reads the notifications until the compaction's turn completes, and stops the process. It is one provider run in one process group, so a quit and a restart handle it as they handle any run.
 - **The outcome comes from the turn's completion notification.** `completed` is a success. A failed or interrupted turn, a refused request, a process that ends early and a compaction that never completes all end as "Compaction failed" with a reason a person can read. "Nothing to compact" does not arise: Codex compacts whenever it is asked.
 - **The line prints Codex's own figures:** the context total before and after. Right after a compaction Codex's figure leaves out its fixed system prompt and tools, so the line and the card read low until the agent's next turn. The figures are printed as Codex gives them.
-- **No usage ledger row.** Codex's notifications and its running total report no tokens for a compaction, so the host records none, and the agent's next turn is still counted whole.
+- **Its tokens are in the usage ledger.** Codex's notifications and its running total report no tokens for a compaction; they are in the thread's session record, in the usage entry Codex writes for the compaction's turn. The host records that entry as one request against the agent. When the record has no such entry, or more than one, no row is written and the compaction still counts as done. The agent's next turn is counted whole either way.
 - **The protocol is experimental.** A Codex version without the method, or with a changed shape, ends as a failed compaction that names what Codex refused. It never hangs: a compaction that does not complete within a fixed limit is stopped and failed.
 - **Not included.** Instructions for a Codex compaction, changing Codex's automatic compaction, moving Codex turns to the app-server, a coordinator or agent tool, and anything for Claude.
 
@@ -19,13 +19,13 @@ The Compact action on the Context card works for Claude agents only (`compact-co
 <!-- None. Compaction exists; this change adds a second provider to it. -->
 
 ### Modified Capabilities
-- `workspace-host`: a Codex agent's request is accepted without instructions; a Codex compaction runs through the app-server; its outcome is read from the turn's completion; it adds no ledger row; the Codex context estimate counts what a compaction kept.
+- `workspace-host`: a Codex agent's request is accepted without instructions; a Codex compaction runs through the app-server; its outcome is read from the turn's completion; it adds one ledger request read from the session record; the Codex context estimate counts what a compaction kept.
 - `work-stream`: the compaction line for a Codex agent, with whole-context figures and never a "Kept:" line.
 - `native-workspace`: the Compact row enabled for a Codex agent, the form without a field, and notices that name the agent's provider.
 
 ## Impact
 
-- `workspace-host`: `compaction.rs` (the request rule, the provider's name in a reason), `provider.rs` (the app-server's arguments and input, one arm that reads its messages, the limit), `usage.rs` (a compaction run does not break the Codex counter's continuity), `context.rs` (what a `compacted` entry kept), `service.rs` (the context total read as a Codex compaction starts).
+- `workspace-host`: `compaction.rs` (the request rule, the provider's name in a reason), `provider.rs` (the app-server's arguments and input, one arm that reads its messages, the limit), `usage.rs` (one request for a Codex compaction, outside the Codex counter; a compaction run does not break the counter's continuity), `context.rs` (what a `compacted` entry kept; the usage entry of one turn), `service.rs` (the context total read as a Codex compaction starts; the ledger row written as it settles).
 - `workspace-desktop`: `context_view.rs` (row, form and notice wording by provider).
 - `workspace-core`: no new type, field or command.
 - Tests: `crates/workspace-host/tests/compaction.rs`, a `codex app-server` branch in `tests/fixtures/provider.py`, and recorded exchanges moved from this change's `recordings/` into `tests/fixtures/streams`.

@@ -10,7 +10,7 @@ See proposal.md for why. `compact-context` (archived, PR #49) built compaction f
 
 ### Observed on throwaway threads
 
-codex-cli 0.160.0, `gpt-6.1-sol`, October 13, 2026. Three threads made with two `codex exec` turns each in a scratch directory, then driven over `codex app-server`'s stdio. No agent's thread was used. The exchanges are kept in this change's `recordings/`, one JSON object per line with who sent it.
+codex-cli 0.160.0, `gpt-6.1-sol`, October 13, 2026. Three threads made with two `codex exec` turns each in a scratch directory, then driven over `codex app-server`'s stdio. No agent's thread was used. The exchanges are kept in this change's `recordings/`, one JSON object per line with who sent it, beside three samples of session-record entries (`session-record-*.jsonl`, with the summary's encrypted content cut short).
 
 **The exchange.** The client writes one JSON object per line: `initialize` with `clientInfo`; the `initialized` notification; `thread/resume`; `thread/compact/start` with `{"threadId": …}`. `initialize` was answered in 0.3 seconds and `thread/resume` in 0.8. `thread/compact/start` is answered at once with `{"result":{}}`; the compaction follows as notifications. All four lines can be written before any reply is read: three runs that did so were answered in order and compacted (`all-written-at-once.jsonl`).
 
@@ -51,7 +51,7 @@ Between them come notifications that say nothing about the compaction: `mcpServe
 
 **Figures.** The `token_count` after a compaction has `last_token_usage.total_tokens` equal to the notification's `last.totalTokens` and the same `total_token_usage` as before it. On one thread: 29,532 before, 6,550 after. It leaves out Codex's fixed system prompt and tools: on another thread it read 6,822 after a compaction and 19,882 after the next turn. `thread/resume` sent a `thread/tokenUsage/updated` with the last turn's figure on the three threads whose last entry was a turn, and none on a thread whose last entry was a compaction.
 
-**Tokens.** No notification carries a compaction's own usage. The cumulative usage that `codex exec` reports at `turn.completed`, which is the session record's `total_token_usage`, does not include it: a thread at 124,978 was compacted and reported 144,860 after a turn of 19,882. The compaction's request is only in the session record's `token_usage_record` entry (for example input 29,552, of which 29,312 cached, and output 440), whose own `thread_token_usage` does count it.
+**Tokens** (`session-record-compacted.jsonl`). No notification carries a compaction's own usage. The cumulative usage that `codex exec` reports at `turn.completed`, which is the session record's `total_token_usage`, does not include it: a thread at 124,978 was compacted and reported 144,860 after a turn of 19,882. The compaction's request is only in the session record's `token_usage_record` entry (for example input 29,552, of which 29,312 cached, and output 440), whose own `thread_token_usage` does count it. That entry carries the `turn_id` of the compaction's turn, the id `turn/started` and `turn/completed` name. Each of the eight completed compactions wrote exactly one; the failed, the interrupted and the stopped compaction wrote none (`session-record-failed.jsonl`, `session-record-interrupted.jsonl`). The `compacted` entry repeats it as `latest_token_usage_record`.
 
 **Configuration and the prompt cache.** Started with a turn's configuration, the compaction's request read 29,312 of 29,552 input tokens from the cache, and 26,624 of 27,305 on a second thread. Started with `-c 'mcp_servers={}' -c 'features.apps=false'`, it read 13,056 of 22,799. The tool list is part of what the request shares with the thread's turns.
 
@@ -59,7 +59,7 @@ Between them come notifications that say nothing about the compaction: `mcpServe
 
 ## Goals / Non-Goals
 
-**Goals:** the Compact action on a Codex agent, behaving as it does on a Claude agent wherever the provider does not force a difference; an outcome read from what Codex reported; a compaction that cannot hang; no double counting and no invented row in the usage ledger.
+**Goals:** the Compact action on a Codex agent, behaving as it does on a Claude agent wherever the provider does not force a difference; an outcome read from what Codex reported; a compaction that cannot hang; the compaction's tokens in the usage ledger, counted once.
 
 **Non-Goals:** instructions for a Codex compaction; changing or recording Codex's automatic compaction; running Codex turns through the app-server; a coordinator or agent tool; correcting Codex's figures; any change for Claude agents.
 
@@ -99,10 +99,10 @@ The other refusals are unchanged: no provider session, archived, a request alrea
 - **Tool servers** run in process groups of their own, so stopping the server's group does not signal them. They were seen to exit when the server did, however it ended. A `codex exec` turn starts the same servers and the host relies on the same behaviour for turns today. This change adds no rule for them. A tool server that outlived the server would be a leftover no run names, the same gap `compact-context` decision 10 already records for a host that dies between spawn and record.
 
 ### 5. What Codex writes when a compaction is cut off
-A compaction stopped by SIGTERM leaves Codex's own developer message in the thread, "The previous turn was interrupted on purpose…". The agent's next turn reads it. The host adds nothing of its own, as for Claude: its prompt names no interrupted turn. The message is Codex's and is left as it is (open question 4).
+A compaction stopped by SIGTERM leaves Codex's own developer message in the thread, "The previous turn was interrupted on purpose…". The agent's next turn reads it. The host adds nothing of its own, as for Claude: its prompt names no interrupted turn. The message is Codex's and is left as it is.
 
 ### 6. The outcome is read from the turn's completion
-`run` gains one arm, for a Codex compaction, that reads each line as a JSON-RPC message and emits the `CompactionRecord`s the host already settles with:
+`run` gains one arm, for a Codex compaction, that reads each line as a JSON-RPC message and emits the `CompactionRecord`s the host already settles with, and the compaction turn's id for decision 8:
 
 1. A reply with `error` to any of the three requests → `Status(Err)`, reason `Codex refused ‹method›: ‹error.message›`. The first one decides; a refused `thread/resume` is followed by a refused `thread/compact/start` and only the first is kept.
 2. `turn/completed` with `turn.status` `completed` → `Status(Ok)`.
@@ -116,7 +116,7 @@ A compaction stopped by SIGTERM leaves Codex's own developer message in the thre
 Two endings have no status:
 
 - **The process ends first,** or cannot start, such as a Codex without the `app-server` command. `run`'s existing ending reports "Provider exited without a successful terminal result" with the exit status and the end of stderr.
-- **Nothing terminal arrives.** A Codex compaction has a limit, `CODEX_COMPACTION_LIMIT`, counted from the process's start. When it passes with no outcome read, `run` stops the group and ends with "Codex did not finish compacting within 10 minutes." Compactions took 10 to 17 seconds on small contexts; the limit is a backstop, not a budget, and its value is open question 2. Claude's compaction needs none, because the Claude CLI exits by itself.
+- **Nothing terminal arrives.** A Codex compaction has a limit, `CODEX_COMPACTION_LIMIT`, counted from the process's start. When it passes with no outcome read, `run` stops the group and ends with "Codex did not finish compacting within 10 minutes." Compactions took 10 to 17 seconds on small contexts; the limit is a backstop, not a budget. Claude's compaction needs none, because the Claude CLI exits by itself.
 
 Success needs `turn.status` to be exactly `completed`. A changed protocol therefore errs toward "Compaction failed" with a reason, and the measurement that follows every outcome shows what the context really is.
 
@@ -132,16 +132,43 @@ When either is missing the line reads "Context compacted" with no figures, as to
 
 Both are Codex's figures for the whole context, printed as they are. **They read low right after a compaction:** the figure Codex reports then leaves out its fixed system prompt and tools, about 13k tokens on the threads observed, and the card's measurement reads the same entry. The agent's next turn reports the full total again. Michael was told this on October 13, 2026 and decided the figures are not corrected. For Claude the second figure is the summary alone; `compact-context` decision 8 accepted the same kind of difference.
 
-### 8. No ledger row, and the next turn is still counted whole
-The host records nothing in the usage ledger for a Codex compaction:
+### 8. One ledger row, read from the session record
+A Codex compaction that ends as compacted is recorded in the usage ledger as one request. Michael decided this on October 13, 2026; the first draft of this design recorded nothing.
 
-- No notification reports its tokens.
-- Codex ledger rows are what the thread's cumulative usage rose by between turns (`usage.rs::codex_delta`). That total does not include the compaction, so the next turn's row holds exactly that turn's tokens. Nothing is counted twice and nothing has to be subtracted.
-- The compaction's request is in the session record's `token_usage_record` entry. Reading it is open question 1; the default is not to.
+**Where the tokens are.** No notification reports them, and the cumulative usage `codex exec` reports does not include them. They are in the thread's session record, in the `token_usage_record` entry Codex writes for the compaction's one model request. This is an entry of Codex's own file that no interface documents. It is the same file `context.rs` already reads for the card, and it is read the same way: by entry type, taking nothing for granted.
 
-One fix is needed so the compaction does not make the ledger worse. `codex_delta` marks a turn's row incomplete unless the session's run just before it took the counter's last reading. A compaction run would sit between two turns and take no reading, so the turn after it would be recorded as partial. The "run just before" lookup therefore skips compaction runs with `IS_TURN_RUN`.
+**Which entry.** Every `token_usage_record` carries the `turn_id` of the turn that made the request, and `turn/completed` carries that turn's `turn.id`. On the three throwaway threads, each of the eight completed compactions had exactly one `token_usage_record` with its turn's id; the failed one, the one a second request interrupted and the one stopped by SIGTERM had none; and no turn's entry carried a compaction's id. So the entry is identified by id, not by position:
 
-The mockup's "No ledger row" note stands, and the Usage page gains nothing.
+- The Codex arm of `run` (decision 6) also emits the compaction turn's id from `turn/completed`, as a third `CompactionRecord`.
+- When the compaction settles as compacted, the host reads the session record and takes the `token_usage_record` entries whose `turn_id` is that id.
+- **Exactly one,** whose `usage` has counts `usage::normalize` accepts → one ledger request.
+- **None, more than one, an unreadable `usage`, no turn id, or no session record** → no request. The compaction still settles as compacted, and the run's `detail.result` says why nothing was recorded. The host never falls back to another entry, to the newest entry, or to a difference of totals.
+
+Only the entry's `usage` is read. Its `turn_token_usage` and `thread_token_usage` are running sums and are never used.
+
+**When it is read.** In `compaction_finished`, after the provider thread has reported the end. By then `run` has stopped the app-server's process group, so the server is no longer writing the file. On the one compaction whose times were compared, the entry was written 18 milliseconds before `turn/completed` was sent.
+
+**The row.** `usage` uses the names `normalize` already reads for Codex, with Codex's convention that the input count includes cached tokens:
+
+| `token_usage_record.usage` | Ledger column |
+|---|---|
+| `input_tokens` | input |
+| `cached_input_tokens` | cache read |
+| `cache_write_input_tokens` | cache write |
+| `output_tokens` | output |
+| `reasoning_output_tokens` | reasoning |
+
+The request id is `compact:<run>`. A turn's is `turn:<run>` and Claude's compaction rows are `compact:<run>:<model>` under the other provider, so it cannot collide. The model is the run's profile model, the time is the run's start as for every Codex row, `complete` is true, and the entry's `usage` is kept as the row's native record. It is attributed to the agent and its coordinator like any request.
+
+**It is not a counter reading.** Every other Codex row is what the thread's cumulative usage rose by (`usage.rs::codex_delta`). This row is one request's own usage, so it is written by a function of its own that does not go through `codex_delta`: it neither reads nor moves `usage_counters`. The cumulative total does not include the compaction, so the next turn's row holds exactly that turn's tokens. Nothing is counted twice and nothing has to be subtracted.
+
+**The continuity check.** `codex_delta` marks a turn's row incomplete unless the session's run just before it took the counter's last reading. A compaction run sits between two turns and takes no reading, so the turn after it would be recorded as partial. The "run just before" lookup therefore skips compaction runs with `IS_TURN_RUN`.
+
+**Written once.** The row is inserted in the same store unit in which `compaction_finished` settles the run and `compaction_ended` clears the request. A host that dies before that unit leaves the run unfinished; the next start settles it as interrupted and records nothing, and the card says "Compaction interrupted", so the missing row is never silent. A host that dies after it finds the run finished and never settles it again. The request id is keyed by the run as well, so the ledger's unique key refuses a second row.
+
+**Failed and interrupted compactions record nothing.** Codex wrote no entry for the ones observed, and the host does not look.
+
+The Usage page gains nothing: the request counts in its existing totals, as Claude's does.
 
 ### 9. The context estimate after a compaction
 `context.rs` already resets the conversation categories at a `compacted` entry, but it sizes the summary from the entry's `message`, which Codex leaves empty. It now sizes what the entry's `replacement_history` holds, through the same `codex_item` as any other item: the kept user messages count as Messages, and the `compaction` item's `encrypted_content` counts as Messages too, sized the way an encrypted reasoning item is. Without this the card shows no Messages at all after a compaction, against the approved Done frame. The total is untouched: it is Codex's own.
@@ -155,20 +182,21 @@ All of it matches state 7 of `design/mockups/current/compact-context.html`.
 - **Notices** (`compaction_notice`): the interrupted notice names the agent's provider, "Wiffletree stopped while Codex was compacting. The figure above was measured again." The failed notice shows the reason of decision 6. The "Nothing to compact" notice is unchanged and is never produced for Codex.
 - **Line, chip, badge, measuring again:** unchanged.
 
-### Open questions, each with a default
-1. **Should the ledger record a Codex compaction from the session record?** The record's `token_usage_record` holds the compaction's own request. Default: no, as the approved mockup says. Reading it would add one row per compaction and make the agent's totals complete, but it depends on an entry of Codex's own file that no interface documents, and the row would not be a counter reading like every other Codex row. If Michael wants it, it is a small addition to task 3.2 and the mockup's note changes.
-2. **How long may a Codex compaction take before the host gives up?** Default: 10 minutes. Nothing longer than 17 seconds was seen, on contexts of at most 30k tokens; a full window was not tried.
-3. **A Codex request with instructions is refused** (decision 2), not accepted with the note dropped. Only a client other than the card could send one. Default: refuse.
-4. **Codex's own "interrupted on purpose" message stays in the thread** after a compaction the host cut off (decision 5). Default: leave it; the alternative is killing the process without warning, which the shared stop does not do for any run.
+### Decided by Michael on October 13, 2026
+1. **A Codex compaction is recorded in the usage ledger,** read from the session record's `token_usage_record` entry for that compaction's turn. When the record does not hold exactly one such entry, no row is written and the compaction is still reported as compacted (decision 8).
+2. **A Codex compaction may take 10 minutes** before the host stops it and reports it failed (decision 6). Nothing longer than 17 seconds was seen, on contexts of at most 30k tokens; a full window was not tried.
+3. **A Codex request that carries instructions is refused,** not accepted with the note dropped (decision 2).
+4. **Codex's own "interrupted on purpose" message stays in the thread** after a compaction the host cut off (decision 5).
+5. **The figures are printed as Codex gives them,** though they read low until the agent's next turn (decision 7).
 
 ### Files and functions to change
 | File | Functions / items |
 |---|---|
 | `crates/workspace-host/src/compaction.rs` | `request_compaction` (accept Codex, refuse its instructions); `outcome` (the fallback reason names the provider) |
 | `crates/workspace-host/src/provider.rs` | `input` (the four lines), `configure` (`app-server` and a turn's `-c` overrides), `run` (keep the input open, the Codex compaction arm of decision 6, `CODEX_COMPACTION_LIMIT`) |
-| `crates/workspace-host/src/service.rs` | `start_compaction` (read the context total for a Codex agent and hand it to the run) |
-| `crates/workspace-host/src/usage.rs` | `codex_delta` (`IS_TURN_RUN` in the preceding-run lookup) |
-| `crates/workspace-host/src/context.rs` | `codex` (size a `compacted` entry's `replacement_history`), `codex_item` (the `compaction` item) |
+| `crates/workspace-host/src/service.rs` | `start_compaction` (read the context total for a Codex agent and hand it to the run); `compaction_event` (keep the turn's id); `compaction_finished` (the ledger row, in the settling unit) |
+| `crates/workspace-host/src/usage.rs` | `codex_delta` (`IS_TURN_RUN` in the preceding-run lookup); a new `record_codex_compaction` that writes one request without touching `usage_counters` |
+| `crates/workspace-host/src/context.rs` | `codex` (size a `compacted` entry's `replacement_history`), `codex_item` (the `compaction` item); a reader for the `token_usage_record` entries of one turn |
 | `crates/workspace-desktop/src/context_view.rs` | `compact_action`, `compact_form_text`, `compaction_notice`, the form in `compact_section`, `confirm_compact` |
 | Tests | `crates/workspace-host/tests/compaction.rs`; a `codex app-server` branch in `tests/fixtures/provider.py`; recorded exchanges in `tests/fixtures/streams`; unit tests in `provider.rs`, `compaction.rs`, `usage.rs`, `context.rs`, `context_view.rs` |
 | Docs | `docs/PRD.md` (context paragraph), `docs/DEVELOPMENT.md` (compaction and usage paragraphs) |
@@ -178,7 +206,7 @@ All of it matches state 7 of `design/mockups/current/compact-context.html`.
 - [The app-server protocol is experimental and may change] → The host reads four things: a reply's `error.message`, `turn/completed`'s `turn.status` and `turn.error.message`, and `tokenUsage.last.totalTokens`. A missing method is a refused request, a changed status is "ended as ‹status›", a missing notification is the limit. Each ends as "Compaction failed" with a reason on the card and a line in the conversation; the test "A Codex without the compact method" pins the first and "No completion arrives" the last.
 - [Requests are written before their replies are read] → Decision 3; an out-of-order server is a failed compaction with Codex's reason. Task 2.1 checks it again.
 - [The figures read low until the next turn] → Decision 7; decided, and stated in the mockup's caption.
-- [A compaction's tokens are in no total of this app] → Decision 8 and open question 1. The form says a compaction uses one model call.
+- [The ledger row depends on an entry of Codex's session record that no interface documents] → Decision 8. The entry is matched by the turn's id and only when exactly one matches; anything else writes no row and the compaction is still reported as compacted. The test "No usage entry in the record" pins it. A Codex that stops writing the entry costs the row, never a wrong one.
 - [Tool servers are not in the process group the host stops] → Decision 4; the same as for turns today, and they were seen to exit with the server.
 - [`thread/resume` writes settings into the thread's record] → They are the turn's own settings (decision 3). The test "Resumed as a turn would be" pins the request's fields.
 - [A second client compacting the same thread interrupts the first] → The host starts at most one compaction per session and none beside a turn; `hold_reason` keeps both away from a leftover process.
@@ -186,4 +214,4 @@ All of it matches state 7 of `design/mockups/current/compact-context.html`.
 
 ## Migration Plan
 
-No data migration: no new field, table or command. Rollback: an older build refuses a Codex request again and shows the row disabled; a Codex compaction's line and run row are the ones it already draws and skips for Claude.
+No data migration: no new field, table or command. Rollback: an older build refuses a Codex request again and shows the row disabled; a Codex compaction's line and run row are the ones it already draws and skips for Claude, and its ledger row is an ordinary request.

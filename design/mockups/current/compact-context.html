@@ -96,7 +96,6 @@ svg.i{width:13px;height:13px;flex:none}
 .compacted .kept{margin-left:18px}
 .compacted.failed{margin-left:0}
 .variant{margin-top:12px}
-.card.absent{border-style:dashed;background:transparent}
 .compacted.failed .line,.compacted.failed .line b{color:var(--red)}
 /* Usage ledger row. */
 .tiles{display:flex;gap:8px}
@@ -497,19 +496,28 @@ svg.i{width:13px;height:13px;flex:none}
         </div>
       </div>
       <div>
-        <p class="step">Done: the usage ledger</p>
+        <p class="step">Done: its row in the usage ledger</p>
         <div class="panel">
           <div class="pad" style="display:grid;gap:10px">
             <div class="section"><span class="eyebrow">RECORDED IN THIS APP</span></div>
-            <div class="card absent">
-              <span class="eyebrow">No ledger row</span>
-              <div class="hint">Codex reports no tokens for a compaction, so nothing is recorded for it. This agent’s and its coordinator’s totals stay as they were.</div>
+            <div class="tiles">
+              <div class="tile"><span class="hint">Requests</span><b>1,284</b><span class="hint">0 partial</span></div>
+              <div class="tile"><span class="hint">Tokens</span><b>48.2M</b><span class="hint">2026-10-12</span></div>
+            </div>
+            <div class="card">
+              <span class="eyebrow">Ledger row · compaction</span>
+              <div class="prop"><span>Agent</span><span>Implementer · Ledger v4</span></div>
+              <div class="prop"><span>Model</span><span>gpt-6.1-sol</span></div>
+              <div class="prop"><span>Input</span><span>212,480</span></div>
+              <div class="prop"><span>Cache read</span><span>211,900</span></div>
+              <div class="prop"><span>Output</span><span>2,310</span></div>
+              <div class="hint">Read from Codex’s session record. No row is written when the record has no entry for this compaction.</div>
             </div>
           </div>
         </div>
       </div>
     </div>
-    <p class="caption"><b>Codex.</b> Compact is available on a measured Codex card, with the same row and button as for Claude. The Codex card has no “compacts at” figure and says its categories are estimated. <b>The form</b> has no “What to keep” field, because Codex’s compact request takes no instructions: one line says Codex chooses what the summary keeps and that it can’t be undone, then <b>Compact now</b> or <b>Cancel</b>. While the agent is working the line and the button read as in state 2. <b>Done</b> leaves one work-stream line, <b>Context compacted · 212k → 14k</b>, never with a “Kept:” line. Its figures are Codex’s own totals for the whole context before and after, so the second one matches the card measured again. Right after a compaction Codex’s figure leaves out its fixed system prompt and tools, so the line and the card read low until the agent’s next turn. For Claude the second figure is the summary alone. <b>Usage:</b> Codex reports no tokens for a compaction, so the usage ledger gains no row and no total changes; the model call it makes is not counted anywhere in this app. Queued, compacting, failed and interrupted look the same as for Claude in states 3, 4 and 6, with “Codex” where they name Claude and no “Keeping:” line. “Nothing to compact” does not arise: Codex compacts again whenever it is asked.</p>
+    <p class="caption"><b>Codex.</b> Compact is available on a measured Codex card, with the same row and button as for Claude. The Codex card has no “compacts at” figure and says its categories are estimated. <b>The form</b> has no “What to keep” field, because Codex’s compact request takes no instructions: one line says Codex chooses what the summary keeps and that it can’t be undone, then <b>Compact now</b> or <b>Cancel</b>. While the agent is working the line and the button read as in state 2. <b>Done</b> leaves one work-stream line, <b>Context compacted · 212k → 14k</b>, never with a “Kept:” line. Its figures are Codex’s own totals for the whole context before and after, so the second one matches the card measured again. Right after a compaction Codex’s figure leaves out its fixed system prompt and tools, so the line and the card read low until the agent’s next turn. For Claude the second figure is the summary alone. <b>Usage:</b> the compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. Codex does not report them while it compacts, so the figures are read from the entry Codex writes in the thread’s own session record for that compaction; here the input is the 212k context, nearly all of it read from the cache. When the record has no such entry, or more than one, no row is written and the compaction still shows as done. The Usage page gains nothing new, and the record is drawn here only to make the accounting visible. Queued, compacting, failed and interrupted look the same as for Claude in states 3, 4 and 6, with “Codex” where they name Claude and no “Keeping:” line. “Nothing to compact” does not arise: Codex compacts again whenever it is asked.</p>
   </section>
 
   <!-- 8. No provider session yet -->
