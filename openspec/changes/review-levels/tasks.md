@@ -18,10 +18,10 @@
 
 ## 3. What the coordinator reads and is told
 
-- [ ] 3.1 In `live.rs` (`:526`), add `review_levels` to `model_selection`, serialized from the stored levels. Verify the workspace-host scenarios "Review levels reach the coordinator", "A level edit reaches a running coordinator" and "Workers do not receive the levels", and the ticket-verification scenario "The coordinator reads the level".
-- [ ] 3.2 In `mcp.rs` (`:41`), add the required `level` string to `verify_ticket`'s schema and rewrite its description: name a level from `model_selection.review_levels`; one model choice for each verifier of that level; a re-check starts only on a ticket whose last review passed; no level may leave out a verifier with an open finding; only full reviews count against the cap. Verify "Tool description" with a test over `mcp::tools()`.
-- [ ] 3.3 In `skills/main-coordinator.md`, change the three sentences in design decision 12 and the heading to v12, and update the version assertion in `tests/contracts.rs` (`:227`). Verify "Bundled instructions": the text names `model_selection.review_levels` and `use_when`, states the three rules, and no longer contains "starts every configured verifier".
-- [ ] 3.4 Verify "The choice is the coordinator's": a full-review level whose note names documentation starts on any ticket.
+- [x] 3.1 In `live.rs` (`:526`), add `review_levels` to `model_selection`, serialized from the stored levels. Verify the workspace-host scenarios "Review levels reach the coordinator", "A level edit reaches a running coordinator" and "Workers do not receive the levels", and the ticket-verification scenario "The coordinator reads the level".
+- [x] 3.2 In `mcp.rs` (`:41`), add the required `level` string to `verify_ticket`'s schema and rewrite its description: name a level from `model_selection.review_levels`; one model choice for each verifier of that level; a re-check starts only on a ticket whose last review passed; no level may leave out a verifier with an open finding; only full reviews count against the cap. Verify "Tool description" with a test over `mcp::tools()`.
+- [x] 3.3 In `skills/main-coordinator.md`, change the three sentences in design decision 12 and the heading to v12, and update the version assertion in `tests/contracts.rs` (`:227`). Verify "Bundled instructions": the text names `model_selection.review_levels` and `use_when`, states the three rules, and no longer contains "starts every configured verifier".
+- [x] 3.4 Verify "The choice is the coordinator's": a full-review level whose note names documentation starts on any ticket.
 
 ## 4. Showing which level ran
 

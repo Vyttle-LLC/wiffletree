@@ -151,8 +151,9 @@ try:
         for ticket in ctx['tickets']:
             if ticket['state']=='ready_for_testing':
                 assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
-                verifiers=[{'focus':v['focus'],'profile':pick(ctx,v['role'],v.get('provider')),'reason':'Fixture verifier'} for v in ctx['model_selection']['verifiers']]
-                tool('verify_ticket',ticket_id=ticket['id'],level='Full',verifiers=verifiers)
+                level=ctx['model_selection']['review_levels'][0]
+                verifiers=[{'focus':v['focus'],'profile':pick(ctx,v['role'],v.get('provider')),'reason':'Fixture verifier'} for v in ctx['model_selection']['verifiers'] if v['focus'] in level['verifiers']]
+                tool('verify_ticket',ticket_id=ticket['id'],level=level['name'],verifiers=verifiers)
             elif ticket['state']=='passed':
                 tool('accept_ticket',ticket_id=ticket['id'])
         # Coordinator control: the tool results come back as the reply, for the test to read.

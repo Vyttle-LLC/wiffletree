@@ -527,7 +527,8 @@ impl Host {
             let verification = self.settings().verification;
             context["model_selection"] = json!({"revision": selection.revision,
                 "providers": providers, "role_providers": selection.role_providers,
-                "verifiers": verification.verifiers, "max_rounds": verification.max_rounds,
+                "verifiers": verification.verifiers, "review_levels": verification.levels,
+                "max_rounds": verification.max_rounds,
                 "max_cycles": verification.max_cycles, "guide": selection.guide});
         }
         let child_reports = self.child_reports(id)?;

@@ -2691,3 +2691,42 @@ fn a_running_cycle_keeps_its_verifiers_when_its_level_is_edited() {
         "two inputs in round 1 and one in round 2; Regressions and Style received none"
     );
 }
+
+#[test]
+fn the_coordinator_reads_each_cycles_level_in_workspace_context() {
+    let mut f = leveled(2);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    f.fix("rebased");
+    f.verify_at("Light", &["Correctness"]).unwrap();
+    let coordinator = f.coordinator.id.clone();
+
+    let context = f
+        .host
+        .agent_tool(&coordinator, "workspace_context", json!({}))
+        .unwrap();
+
+    let ticket = &context["tickets"][0];
+    assert_eq!(
+        ticket["verification"]["level"],
+        json!({"name":"Light","kind":"recheck"})
+    );
+    assert_eq!(
+        ticket["previous_cycles"][0]["level"],
+        json!({"name":"Full","kind":"full_review"})
+    );
+}
+
+#[test]
+fn the_host_does_not_judge_whether_a_level_suits_the_ticket() {
+    let mut f = leveled(2);
+    f.change_settings(|settings| {
+        settings.levels[2].use_when = "for a ticket that changes only documentation.".into()
+    });
+
+    // The ticket changes code; "Docs" is a full review, so the coordinator may name it.
+    let ticket = f.verify_at("Docs", &["Style"]).unwrap();
+
+    assert_eq!(ticket.state, "verifying");
+    assert_eq!(f.cycle_level(), ("Docs".into(), LevelKind::FullReview));
+}

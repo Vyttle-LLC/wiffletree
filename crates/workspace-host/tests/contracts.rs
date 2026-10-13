@@ -1,4 +1,5 @@
 //! The tools and role instructions agents see describe the two-level hierarchy only.
+use serde_json::json;
 use workspace_core::Role;
 use workspace_host::{mcp, provider};
 
@@ -224,7 +225,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator — v11"));
+    assert!(coordinator.contains("Project coordinator — v12"));
     for role in Role::ALL {
         let skill = provider::skill(role);
         assert!(skill.contains("Wiffletree communication contract — v7"));
@@ -257,6 +258,45 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         assert!(coordinator.contains(phrase), "{phrase}");
     }
     assert!(!coordinator.contains("for a fresh cycle with every verifier"));
+    // The level is the coordinator's choice, by each level's note; the workspace holds the rest.
+    for stated in LEVEL_RULES {
+        assert!(coordinator.contains(stated), "{stated}");
+    }
+    assert!(!coordinator.contains("every configured verifier"));
+}
+
+/// What the coordinator's instructions and `verify_ticket`'s description both say about levels.
+const LEVEL_RULES: [&str; 5] = [
+    "model_selection.review_levels",
+    "use_when",
+    "A re-check level starts only on a ticket whose last review passed",
+    "no level may leave out a verifier that still has an open finding",
+    "re-checks are not counted",
+];
+
+#[test]
+fn verify_ticket_requires_a_level_and_states_the_level_rules() {
+    let tools = mcp::tools();
+    let verify = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "verify_ticket")
+        .unwrap();
+    assert_eq!(
+        verify["inputSchema"]["required"],
+        json!(["ticket_id", "level", "verifiers"])
+    );
+    assert_eq!(
+        verify["inputSchema"]["properties"]["level"],
+        json!({"type":"string"})
+    );
+    let description = verify["description"].as_str().unwrap();
+    for stated in LEVEL_RULES {
+        assert!(description.contains(stated), "{stated}");
+    }
+    assert!(description.contains("all of them must pass"));
+    assert!(!description.contains("every configured verifier"));
 }
 
 #[test]
