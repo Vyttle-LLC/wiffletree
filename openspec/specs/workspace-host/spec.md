@@ -215,7 +215,7 @@ Each run SHALL record its provider's process group and that group leader's start
 - **THEN** the run is interrupted, nothing is signalled and no note is raised
 
 ### Requirement: No turn starts beside a leftover process
-While a session's leftover-process note is open and the process group it names still runs, the host SHALL start no turn for that session. It SHALL hold the turn as other held turns are, with the reason naming the process id, and SHALL check again without waiting for another event. When the group no longer runs, the host SHALL settle the note itself and start the turn. When the human dismisses the note, the hold SHALL end.
+While a session's leftover-process note is open and the process group it names still runs, the host SHALL start no turn for that session. It SHALL hold the turn as other held turns are, with the reason naming the process id, and SHALL check again without waiting for another event. When the group no longer runs, the host SHALL settle the note itself and start the turn. When the human dismisses the note, the hold SHALL end. The hold SHALL NOT depend on startup having raised the note: when a turn is due for a session, the host SHALL look once at each of its finished runs whose end no host saw, those marked interrupted or finished by a quit without the process having been stopped, such as an earlier version left them. For a run whose process group still runs it SHALL raise the note and hold the session; a run whose group no longer runs SHALL be settled and never looked at again, since process ids are reused. A run whose end its provider reported, and one whose process startup stopped or found gone, SHALL be settled at that point.
 
 #### Scenario: Retry while the process runs
 - **WHEN** an interrupted session is retried while the process group its note names still runs
@@ -224,6 +224,14 @@ While a session's leftover-process note is open and the process group it names s
 #### Scenario: The process exits
 - **WHEN** that process group exits
 - **THEN** the host settles the note and starts the session's turn
+
+#### Scenario: Run an earlier version marked interrupted
+- **WHEN** a session has a finished, interrupted run with no note whose process group still runs, and input is queued for it
+- **THEN** no turn starts, one inbox note names the session and the process id, and the turn starts once the group exits
+
+#### Scenario: Process id reused later
+- **WHEN** a settled run's process id is later given to another process
+- **THEN** the session is not held and no note is raised
 
 #### Scenario: The human dismisses the note
 - **WHEN** the human dismisses the note because the process is not the agent's

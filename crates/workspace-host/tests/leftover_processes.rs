@@ -223,3 +223,64 @@ fn a_session_starts_no_turn_beside_a_process_the_last_host_left_running() {
         Some("completed")
     );
 }
+
+#[test]
+fn a_run_an_older_host_marked_interrupted_still_holds_its_session_beside_its_process() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let recorded = install_provider(scratch.path());
+    // A host before this change restarted mid-turn: it marked the run interrupted without
+    // looking for its process, which still runs, and a later turn has finished since. Nothing
+    // is unfinished, no note exists, and new input is queued for the session.
+    let mut leftover = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let main = {
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.set_workspaces_dir(scratch.path().to_str().unwrap())
+            .unwrap();
+        let project = host.create_project("Upgrade").unwrap();
+        let main = host.sessions().unwrap().remove(0);
+        host.set_live(&project.id, true).unwrap();
+        host.send("next", None, &main.id, "FINISH").unwrap();
+        main
+    };
+    let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail,process_group) VALUES ('run-cut-off',?1,'[]',?2,?2,'interrupted','{}',?3)",
+        rusqlite::params![main.id, now() - 2, leftover.id()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES ('run-after',?1,'[]',?2,?2,'completed','{}')",
+        rusqlite::params![main.id, now() - 1],
+    )
+    .unwrap();
+    drop(db);
+
+    let service = start(home.path());
+    until(&service, "the held turn", |s| {
+        status(s, &main.id) == Status::Blocked
+    });
+    let held = snapshot(&service);
+    let reason = runtime(&held, &main.id).last_error.unwrap();
+    assert!(reason.contains(&leftover.id().to_string()), "{reason}");
+    assert_eq!(held.attention.len(), 1, "{:?}", held.attention);
+    assert_eq!(
+        held.attention[0].operation_id,
+        "leftover-process:run-cut-off"
+    );
+    assert!(groups(&recorded).is_empty(), "no provider was started");
+    assert_eq!(leftover.try_wait().unwrap(), None, "never signalled");
+
+    leftover.kill().unwrap();
+    leftover.wait().unwrap();
+    until(&service, "the turn after the process exited", |s| {
+        status(s, &main.id) == Status::Ready && runtime(s, &main.id).last_finished_at.is_some()
+    });
+    assert_eq!(groups(&recorded).len(), 1);
+    assert!(snapshot(&service).attention.is_empty());
+}

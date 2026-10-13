@@ -12,7 +12,9 @@ A provider runs as the leader of its own process group, and each run stores that
 
 **A run is finished only once its process is stopped.** Shutdown used to record every turn finished at once. It now waits, up to three seconds, for each provider thread to report the end of its turn, which the thread does after stopping and reaping its group. A turn still running then stays unfinished, so startup is the one place that deals with a process nobody stopped. This is what makes the hold complete: a finished run never has a live group, apart from the ones startup could not stop.
 
-**Other choices considered.** Scanning every earlier run of a session for a live group would hold sessions on reused ids from old history. Matching a leader by its command line or working directory is weaker than its start time and no simpler.
+**Runs an earlier version finished are looked at once.** A host before this change marked a run interrupted, or finished it at a quit, without stopping its process, so such a run can be finished and still have a live group with no note. When a turn is due, the scheduler looks at each such run of the session: a live group gets the note, and anything else is marked settled in the run's detail (`process_gone`) so a reused id never holds the session later. Runs this version finishes are settled as they finish.
+
+**Other choices considered.** Checking every earlier run of a session on every turn would hold sessions on reused ids from old history. Matching a leader by its command line or working directory is weaker than its start time and no simpler.
 
 ## Risks
 
