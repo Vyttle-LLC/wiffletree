@@ -126,6 +126,12 @@ struct Workspace {
     project_name: Entity<InputState>,
     project_edit: Option<project_name::NameEdit>,
     collapsed_projects: BTreeSet<String>,
+    /// Collapsed project groups, by their first word in lowercase.
+    collapsed_groups: BTreeSet<String>,
+    /// The project or group being dragged in the sidebar; gone once the drag ends.
+    project_drag: Option<WeakEntity<sidebar::ProjectDrag>>,
+    /// The press in progress ended a rename, so it does not also start a drag.
+    rename_press: bool,
     show_archived: bool,
     tree_scroll: ScrollHandle,
     quotas: Vec<QuotaReading>,
@@ -254,6 +260,9 @@ impl Workspace {
             project_name,
             project_edit: None,
             collapsed_projects: BTreeSet::new(),
+            collapsed_groups: BTreeSet::new(),
+            project_drag: None,
+            rename_press: false,
             show_archived: false,
             tree_scroll: ScrollHandle::new(),
             quotas: vec![],
@@ -655,6 +664,13 @@ impl Workspace {
                 }
                 self.request(Command::Snapshot, window, cx);
             }
+            Command::MoveProjects { .. } => {
+                if let (Some(snapshot), Ok(projects)) =
+                    (&mut self.snapshot, serde_json::from_value(value))
+                {
+                    snapshot.projects = projects;
+                }
+            }
             Command::SetArchived { archived, .. } => {
                 let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
                 let name = affected.first().map_or("Session", |s| s.name.as_str());
@@ -791,6 +807,10 @@ impl Workspace {
             let project_id = self.pending_project_selection.take().unwrap();
             self.creating_project = false;
             self.collapsed_projects.remove(&project_id);
+            // Naming it needs its row, which a collapsed group would hide.
+            if let Some(group) = self.session(&root).map(|s| tree::group_key(&s.name)) {
+                self.collapsed_groups.remove(&group);
+            }
             self.select(root, window, cx);
             self.tree_scroll.set_offset(point(px(0.), px(0.)));
             self.begin_project_rename(project_id, window, cx);
@@ -1457,6 +1477,15 @@ fn set_appearance(appearance: Appearance, cx: &mut App) {
         eprintln!("Saving preferences: {error}");
     }
     apply_theme(cx);
+}
+
+/// A view choice of this client, remembered for the next launch; the host's order is untouched.
+fn set_group_projects(grouped: bool, cx: &mut App) {
+    let preferences = cx.global_mut::<Preferences>();
+    preferences.group_projects = grouped;
+    if let Err(error) = preferences.save() {
+        eprintln!("Saving preferences: {error}");
+    }
 }
 
 fn apply_theme(cx: &mut App) {

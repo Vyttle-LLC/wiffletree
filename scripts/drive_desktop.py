@@ -7,6 +7,7 @@ Start the app with `--automation-socket <path>`, then:
     drive_desktop.py --socket <path> type "Ship the toolbar"
     drive_desktop.py --socket <path> key enter
     drive_desktop.py --socket <path> scroll 1100 500 -300
+    drive_desktop.py --socket <path> drag 120 180 120 320
     drive_desktop.py --socket <path> drop 640 400 ~/Desktop/shot.png notes.txt
     drive_desktop.py --socket <path> shot /tmp/window.png
 
@@ -42,6 +43,21 @@ def shot(path, output):
     subprocess.run(["sips", "-z", *size, output], check=True, capture_output=True)
 
 
+def drag(path, start, end, hold, settle):
+    """Press at `start`, move to `end` in a few steps, and release unless `hold`."""
+    (x1, y1), (x2, y2) = start, end
+    # The press hit-tests against the last drawn frame, so draw a current one first.
+    send(path, {"do": "move", "x": x1, "y": y1})
+    time.sleep(settle / 4)
+    send(path, {"do": "press", "x": x1, "y": y1})
+    for part in (0.1, 0.5, 0.9, 1.0):
+        time.sleep(settle / 4)
+        send(path, {"do": "drag", "x": x1 + (x2 - x1) * part, "y": y1 + (y2 - y1) * part})
+    time.sleep(settle)
+    if not hold:
+        send(path, {"do": "release", "x": x2, "y": y2})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--socket", required=True)
@@ -58,6 +74,13 @@ def main():
         scroll.add_argument(name, type=kind)
     commands.add_parser("key").add_argument("keystroke")
     commands.add_parser("type").add_argument("text")
+    dragging = commands.add_parser("drag")
+    for name in ("x1", "y1", "x2", "y2"):
+        dragging.add_argument(name, type=float)
+    dragging.add_argument("--hold", action="store_true", help="keep the button down, to capture mid-drag")
+    release = commands.add_parser("release")
+    release.add_argument("x", type=float)
+    release.add_argument("y", type=float)
     drop = commands.add_parser("drop")
     drop.add_argument("x", type=float)
     drop.add_argument("y", type=float)
@@ -66,6 +89,9 @@ def main():
     args = parser.parse_args()
     if args.command == "shot":
         return shot(args.socket, args.output)
+    if args.command == "drag":
+        drag(args.socket, (args.x1, args.y1), (args.x2, args.y2), args.hold, args.settle)
+        return time.sleep(args.settle)
     step = {key: value for key, value in vars(args).items() if key not in ("socket", "settle", "command")}
     send(args.socket, {"do": args.command, **step})
     time.sleep(args.settle)

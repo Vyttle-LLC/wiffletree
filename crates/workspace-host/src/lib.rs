@@ -8,6 +8,7 @@ mod flatten;
 pub mod live;
 pub mod mcp;
 mod memory;
+mod order;
 mod overlaps;
 mod policies;
 mod pr_watch;
@@ -179,7 +180,7 @@ impl Host {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 6, "Store schema is newer than this application");
+        ensure!(version <= 7, "Store schema is newer than this application");
         if version == 0 {
             db.execute_batch(&format!(
                 "BEGIN IMMEDIATE; {} COMMIT;",
@@ -195,6 +196,7 @@ impl Host {
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
+        order::migrate(&db)?;
         let mut host = Self {
             db,
             _lock: lock,
@@ -286,8 +288,9 @@ impl Host {
         db.execute("INSERT INTO activity(project_id,session_id,kind,detail,created_at) VALUES (?1,?2,?3,?4,?5)", params![project, session, kind, detail, now()])?;
         Ok(())
     }
+    /// In the order the human arranged them, topmost first.
     pub fn projects(&self) -> Result<Vec<Project>> {
-        self.list_data("SELECT data FROM projects ORDER BY rowid", [])
+        self.list_data("SELECT data FROM projects ORDER BY position", [])
     }
     pub fn sessions(&self) -> Result<Vec<Session>> {
         self.list_data("SELECT data FROM sessions ORDER BY rowid", [])
@@ -368,8 +371,8 @@ impl Host {
         };
         let tx = self.db.transaction()?;
         tx.execute(
-            "INSERT INTO projects VALUES (?1,?2)",
-            params![project.id, encode(&project)?],
+            "INSERT INTO projects(id,data,position) VALUES (?1,?2,?3)",
+            params![project.id, encode(&project)?, order::top(&tx)?],
         )?;
         Self::insert_session(&tx, &session)?;
         Self::event(
@@ -1156,6 +1159,10 @@ impl Host {
             Command::RenameProject { project_id, name } => {
                 serde_json::to_value(self.rename_project(&project_id, &name)?)?
             }
+            Command::MoveProjects {
+                project_ids,
+                before,
+            } => serde_json::to_value(self.move_projects(&project_ids, before.as_deref())?)?,
             Command::AttachRepository {
                 project_id,
                 path,

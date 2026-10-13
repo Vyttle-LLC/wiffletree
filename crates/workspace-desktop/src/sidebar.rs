@@ -1,7 +1,7 @@
 //! Project tree, account quota and client appearance.
 use super::*;
 use gpui_component::{
-    Disableable,
+    Disableable, Selectable,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
@@ -12,6 +12,102 @@ use ui::{
 };
 
 const INDENT: f32 = 14.;
+
+fn inset(depth: usize, grouped: bool) -> Pixels {
+    px(8. + (depth + usize::from(grouped)) as f32 * INDENT)
+}
+
+/// A project or group being dragged in the tree, drawn beside the pointer, and where it would
+/// land. It lives only as long as the drag.
+pub(super) struct ProjectDrag {
+    moving: tree::Movable,
+    target: Option<tree::Drop>,
+    glyph: &'static str,
+    label: SharedString,
+    palette: Palette,
+}
+
+impl Render for ProjectDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        div()
+            .h(px(30.))
+            .max_w(px(240.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(p.edge)
+            .bg(p.surface)
+            .shadow_md()
+            .text_size(px(13.))
+            .text_color(p.text)
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(p.subtle)
+                    .child(icon(self.glyph).size(px(14.))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.label.clone()),
+            )
+    }
+}
+
+/// What a row needs to know about the drag in progress, if any.
+struct Reorder<'a> {
+    entries: &'a [tree::Entry<'a>],
+    moving: Option<tree::Movable>,
+}
+
+/// Where the dragged row lands when released over the upper and the lower half of something in
+/// the tree; none where it may not land.
+type Halves = Option<(tree::Drop, tree::Drop)>;
+
+impl Reorder<'_> {
+    /// For the row of `over` itself; nothing while no row is dragged.
+    fn onto(&self, over: &tree::Movable) -> Option<Halves> {
+        let moving = self.moving.as_ref()?;
+        Some(tree::drops(self.entries, moving, over))
+    }
+    /// For what is listed under the row of `over`, such as a project's tickets and agents: it
+    /// all aims where the lower half of that row does.
+    fn under(&self, over: &tree::Movable) -> Option<Halves> {
+        let halves = self.onto(over)?;
+        Some(halves.map(|(_, below)| (below.clone(), below)))
+    }
+}
+
+/// While a project or group is dragged over `element`, aims the drop, or hides the insertion
+/// line where the dragged row may not land.
+fn aiming<E: InteractiveElement>(
+    element: E,
+    halves: Option<Halves>,
+    cx: &mut Context<Workspace>,
+) -> E {
+    let Some(halves) = halves else {
+        return element;
+    };
+    element.on_drag_move(
+        cx.listener(move |v, event: &DragMoveEvent<tree::Movable>, _, c| {
+            let pointer = event.event.position;
+            // A row scrolled out of sight still has bounds, so ask the tree too.
+            if event.bounds.contains(&pointer) && v.tree_scroll.bounds().contains(&pointer) {
+                let lower = pointer.y > event.bounds.center().y;
+                let target = halves
+                    .as_ref()
+                    .map(|(upper, below)| if lower { below } else { upper });
+                v.aim_project_drag(target.cloned(), c);
+            }
+        }),
+    )
+}
 
 impl Appearance {
     pub(super) fn label(self) -> &'static str {
@@ -41,6 +137,7 @@ impl Workspace {
         };
         let projects = roots().filter(|s| !s.archived).count();
         let offers_new_project = self.offers_new_project();
+        let grouped = cx.global::<Preferences>().group_projects;
         let archived = self
             .snapshot
             .iter()
@@ -111,24 +208,42 @@ impl Workspace {
                     .justify_between()
                     .items_center()
                     .child(eyebrow(format!("PROJECTS · {projects}"), p))
-                    .when(archived > 0, |d| {
-                        d.child(
-                            button("show-archived")
-                                .ghost()
-                                .xsmall()
-                                .icon(icon("archive").size(px(13.)))
-                                .label(if self.show_archived {
-                                    "Hide archived"
-                                } else {
-                                    "Archived"
-                                })
-                                .tooltip(format!("{archived} archived sessions"))
-                                .on_click(cx.listener(|v, _, _, c| {
-                                    v.show_archived = !v.show_archived;
-                                    c.notify();
-                                })),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.))
+                            .child(
+                                button("group-projects")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(icon("folder").size(px(13.)))
+                                    .label("Group")
+                                    .selected(grouped)
+                                    .tooltip("Group projects by first word")
+                                    .on_click(cx.listener(move |_, _, _, c| {
+                                        set_group_projects(!grouped, c);
+                                        c.notify();
+                                    })),
+                            )
+                            .when(archived > 0, |d| {
+                                d.child(
+                                    button("show-archived")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(icon("archive").size(px(13.)))
+                                        .label(if self.show_archived {
+                                            "Hide archived"
+                                        } else {
+                                            "Archived"
+                                        })
+                                        .tooltip(format!("{archived} archived sessions"))
+                                        .on_click(cx.listener(|v, _, _, c| {
+                                            v.show_archived = !v.show_archived;
+                                            c.notify();
+                                        })),
+                                )
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -142,7 +257,25 @@ impl Workspace {
                             .size_full()
                             .overflow_y_scroll()
                             .px_2()
+                            // Room for an insertion line above the first row.
+                            .pt(px(2.))
                             .pb_3()
+                            .on_drag_move(cx.listener(
+                                |v, event: &DragMoveEvent<tree::Movable>, _, c| {
+                                    if !event.bounds.contains(&event.event.position) {
+                                        v.aim_project_drag(None, c);
+                                    }
+                                },
+                            ))
+                            .on_drop(cx.listener(|v, moving: &tree::Movable, w, c| {
+                                v.drop_project(moving, w, c)
+                            }))
+                            // Between them, these two hear every release of the left button.
+                            .capture_any_mouse_up(cx.listener(|v, _, _, c| v.end_rename_press(c)))
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|v, _, _, c| v.end_rename_press(c)),
+                            )
                             .child(self.tree(p, cx)),
                     )
                     .vertical_scrollbar(&self.tree_scroll),
@@ -371,29 +504,292 @@ impl Workspace {
         for ticket in &snapshot.tickets {
             has_tickets.insert(ticket.coordinator_id.clone());
         }
+        let grouping = cx.global::<Preferences>().group_projects;
+        let entries = tree::entries(snapshot, self.show_archived, grouping);
+        let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
+        let (moving, target) = drag
+            .map(|drag| {
+                let drag = drag.read(cx);
+                (drag.moving.clone(), drag.target.clone())
+            })
+            .unzip();
+        let target = target.flatten();
+        let reorder = Reorder {
+            entries: &entries,
+            moving,
+        };
+        let line = |drop: tree::Drop, grouped: bool| {
+            (target.as_ref() == Some(&drop)).then(|| insertion_line(grouped, p))
+        };
         let mut project = None;
-        for row in tree::rows(snapshot, self.show_archived, &self.collapsed_projects) {
+        // Where a drag over what is listed under the last project row aims.
+        let mut under = None;
+        // The group whose projects are being listed, and whether the last project row is in it.
+        let mut group = None;
+        let mut in_group = false;
+        for row in tree::rows(
+            snapshot,
+            self.show_archived,
+            grouping,
+            &self.collapsed_projects,
+            &self.collapsed_groups,
+        ) {
+            // A project or group row completes the project above it, and a top-level row
+            // completes the group above it.
+            let top_level = match &row {
+                tree::Row::Group(_) => Some(true),
+                tree::Row::Project { grouped, .. } => Some(!grouped),
+                tree::Row::Ticket { .. } | tree::Row::Agent { .. } => None,
+            };
+            if let Some(top_level) = top_level {
+                if let Some(previous) = project.take() {
+                    let under = under.take();
+                    tree = self.close_project(tree, previous, in_group, under, &has_tickets, cx);
+                }
+                if let Some(key) = group.take_if(|_| top_level) {
+                    tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
+                }
+            }
             match row {
-                tree::Row::Project(root) => {
-                    if let Some(previous) = project.replace(root) {
-                        tree = self.close_project(tree, previous, &has_tickets, cx);
+                tree::Row::Group(listed) => {
+                    let movable = tree::Movable::Group(listed.key.clone());
+                    tree = tree
+                        .children(line(tree::Drop::Before(movable.clone()), false))
+                        .child(self.group_row(&listed, &reorder, p, cx));
+                    if self.collapsed_groups.contains(&listed.key) {
+                        tree = tree.child(aiming(div().h_2(), reorder.under(&movable), cx));
                     }
-                    tree = tree.child(self.project_row(root, p, cx));
+                    group = Some(listed.key);
+                }
+                tree::Row::Project {
+                    root,
+                    label,
+                    grouped,
+                } => {
+                    let movable = tree::Movable::Project(root.project_id.clone());
+                    under = reorder.under(&movable);
+                    tree = tree
+                        .children(line(tree::Drop::Before(movable), grouped))
+                        .child(self.project_row(root, label, grouped, &reorder, p, cx));
+                    project = Some(root);
+                    in_group = grouped;
                 }
                 tree::Row::Ticket { ticket, label } => {
-                    tree = tree.child(self.ticket_row(ticket, label, p, cx));
+                    let row = self.ticket_row(ticket, label, p, cx);
+                    tree = tree.child(aiming(row.pl(inset(1, in_group)), under.clone(), cx));
                 }
                 tree::Row::Agent {
                     session,
                     depth,
                     label,
-                } => tree = tree.child(self.session_row(session, depth, label, p, cx)),
+                } => {
+                    let row = self.session_row(session, depth, label, p, cx);
+                    tree = tree.child(aiming(row.pl(inset(depth, in_group)), under.clone(), cx));
+                }
             }
         }
         if let Some(last) = project {
-            tree = self.close_project(tree, last, &has_tickets, cx);
+            tree = self.close_project(tree, last, in_group, under, &has_tickets, cx);
         }
-        tree
+        if let Some(key) = group {
+            tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
+        }
+        tree.children(line(tree::Drop::End, false))
+    }
+
+    /// Makes a project or group row draggable, and a place other rows are dropped on.
+    fn reorderable(
+        &self,
+        row: Stateful<Div>,
+        movable: tree::Movable,
+        label: &str,
+        reorder: &Reorder,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        if self.rename_press {
+            return row;
+        }
+        let glyph = match movable {
+            tree::Movable::Project(_) => "project",
+            tree::Movable::Group(_) => "folder",
+        };
+        let own = movable.clone();
+        let dragged = reorder.moving.as_ref() == Some(&movable);
+        let halves = reorder.onto(&movable);
+        let workspace = cx.weak_entity();
+        let label = SharedString::from(label.to_owned());
+        let row = row
+            .when(dragged, |row| row.opacity(0.4))
+            .on_drag(movable, move |moving, _, _, cx| {
+                let drag = cx.new(|_| ProjectDrag {
+                    moving: moving.clone(),
+                    target: None,
+                    glyph,
+                    label: label.clone(),
+                    palette: p,
+                });
+                let started = drag.downgrade();
+                let _ = workspace.update(cx, |view, cx| {
+                    view.project_drag = Some(started);
+                    cx.notify();
+                });
+                drag
+            })
+            // GPUI turns a click that moves a few pixels into a drag. One that ends on its own
+            // row moves nothing, so it does what the click would have done.
+            .on_drop(cx.listener(move |v, moving: &tree::Movable, w, c| {
+                if *moving == own {
+                    v.activate(&own, w, c);
+                } else {
+                    v.drop_project(moving, w, c);
+                }
+            }));
+        aiming(row, halves, cx)
+    }
+
+    fn end_rename_press(&mut self, cx: &mut Context<Self>) {
+        if self.rename_press {
+            self.rename_press = false;
+            cx.notify();
+        }
+    }
+
+    /// What a click on a project or group row does.
+    fn activate(&mut self, row: &tree::Movable, window: &mut Window, cx: &mut Context<Self>) {
+        match row {
+            tree::Movable::Project(project_id) => {
+                let root = self
+                    .snapshot
+                    .iter()
+                    .flat_map(|s| &s.sessions)
+                    .find(|s| s.project_id == *project_id && s.parent_id.is_none());
+                if let Some(id) = root.map(|root| root.id.clone()) {
+                    self.select(id, window, cx);
+                }
+            }
+            tree::Movable::Group(key) => {
+                if !self.collapsed_groups.remove(key) {
+                    self.collapsed_groups.insert(key.clone());
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Moves the insertion line; `None` hides it, and a drop then moves nothing.
+    fn aim_project_drag(&mut self, target: Option<tree::Drop>, cx: &mut Context<Self>) {
+        let Some(drag) = self.project_drag.as_ref().and_then(|drag| drag.upgrade()) else {
+            return;
+        };
+        if drag.read(cx).target != target {
+            drag.update(cx, |drag, _| drag.target = target);
+            cx.notify();
+        }
+    }
+
+    /// Asks the host for the move the insertion line shows.
+    fn drop_project(
+        &mut self,
+        moving: &tree::Movable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = self.project_drag.take().and_then(|drag| drag.upgrade());
+        let Some(target) = drag.and_then(|drag| drag.read(cx).target.clone()) else {
+            return;
+        };
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let grouping = cx.global::<Preferences>().group_projects;
+        let entries = tree::entries(snapshot, self.show_archived, grouping);
+        if let Some(moved) = tree::project_move(&entries, moving, &target) {
+            let command = Command::MoveProjects {
+                project_ids: moved.project_ids,
+                before: moved.before,
+            };
+            self.request(command, window, cx);
+        }
+    }
+
+    /// A group's row: activating it collapses or expands the group. Collapsed, it shows the most
+    /// urgent state among its projects.
+    fn group_row(
+        &self,
+        group: &tree::Group,
+        reorder: &Reorder,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let key = group.key.clone();
+        let collapsed = self.collapsed_groups.contains(&key);
+        let count = group.members.len();
+        let detail = format!("{count} projects starting with “{}”", group.label);
+        let state = collapsed
+            .then(|| {
+                let needs_you = self
+                    .snapshot
+                    .iter()
+                    .flat_map(|s| &s.attention)
+                    .filter(|a| group.members.iter().any(|m| m.project_id == a.project_id))
+                    .count();
+                let shown: Vec<Status> = group
+                    .members
+                    .iter()
+                    .map(|root| self.shown_status(root))
+                    .collect();
+                tree::rollup(needs_you, &shown)
+            })
+            .flatten()
+            .map(|rollup| match rollup {
+                tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
+                tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
+                tree::Rollup::Working => status_glyph(Status::Working, 12., p),
+            });
+        let toggle = tree::Movable::Group(key.clone());
+        let row = self
+            .row(SharedString::from(format!("group-{key}")), 0, false, p)
+            .pl(inset(0, false) - px(4.))
+            .text_size(px(12.))
+            .text_color(p.subtle)
+            .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
+            .on_click(cx.listener(move |v, _, w, c| v.activate(&toggle, w, c)))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icon(if collapsed {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        })
+                        .size(px(12.)),
+                    ),
+            )
+            .child(div().flex_none().child(icon("folder").size(px(14.))))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(group.label.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(".SystemMonoFont")
+                    .text_size(px(10.5))
+                    .child(count.to_string()),
+            )
+            .children(state.map(|state| div().flex_none().child(state)));
+        let movable = tree::Movable::Group(key);
+        self.reorderable(row, movable, &group.label, reorder, p, cx)
     }
 
     /// Offers a first ticket under a selected coordinator that has none, then spaces projects.
@@ -401,6 +797,8 @@ impl Workspace {
         &self,
         mut tree: Div,
         root: &Session,
+        grouped: bool,
+        under: Option<Halves>,
         has_tickets: &std::collections::BTreeSet<String>,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -408,19 +806,15 @@ impl Workspace {
             && !self.collapsed_projects.contains(&root.project_id)
             && self.selected.as_ref() == Some(&root.id)
         {
-            tree = tree.child(
-                button(SharedString::from(format!("add-ticket-{}", root.id)))
-                    .ghost()
-                    .icon(icon("plus"))
-                    .label("New ticket")
-                    .ml(px(INDENT + 8.))
-                    .mr_auto()
-                    .on_click(
-                        cx.listener(|v, _, w, c| v.open_creation(Creation::Ticket, None, w, c)),
-                    ),
-            );
+            let add = button(SharedString::from(format!("add-ticket-{}", root.id)))
+                .ghost()
+                .icon(icon("plus"))
+                .label("New ticket")
+                .ml(inset(1, grouped))
+                .on_click(cx.listener(|v, _, w, c| v.open_creation(Creation::Ticket, None, w, c)));
+            tree = tree.child(aiming(div().flex().child(add), under.clone(), cx));
         }
-        tree.child(div().h_2())
+        tree.child(aiming(div().h_2(), under, cx))
     }
 
     pub(super) fn shown_status(&self, session: &Session) -> Status {
@@ -469,7 +863,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_2()
-            .pl(px(8. + depth as f32 * INDENT))
+            .pl(inset(depth, false))
             .pr_2()
             .rounded_md()
             .text_size(px(12.5))
@@ -483,7 +877,16 @@ impl Workspace {
             .hover(move |d| d.bg(p.overlay.opacity(if selected { 1. } else { 0.6 })))
     }
 
-    fn project_row(&self, root: &Session, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// `label` is the name the row shows; a grouped row's leaves out the group's word.
+    fn project_row(
+        &self,
+        root: &Session,
+        label: String,
+        grouped: bool,
+        reorder: &Reorder,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let id = root.id.clone();
         let project_id = root.project_id.clone();
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
@@ -520,13 +923,15 @@ impl Workspace {
         let toggle_id = project_id.clone();
         let rename_id = project_id.clone();
         let click_project = project_id.clone();
-        self.row(SharedString::from(format!("tree-{id}")), 0, selected, p)
+        let movable = tree::Movable::Project(project_id.clone());
+        let row = self
+            .row(SharedString::from(format!("tree-{id}")), 0, selected, p)
             // Its children wrap, so the progress track added last takes its own line under the label.
             .min_h(px(36.))
             .py(px(5.))
             .flex_wrap()
             .gap_y(px(3.))
-            .pl_1()
+            .pl(inset(0, grouped) - px(4.))
             .text_size(px(13.))
             .when(root.archived, |d| d.opacity(0.55))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
@@ -576,7 +981,9 @@ impl Workspace {
                     .w_full()
                     .py_1()
                     .on_mouse_down_out(cx.listener(|v, _, w, c| {
+                        v.rename_press = true;
                         v.save_project_name(w, c);
+                        c.notify();
                     }))
                     .on_action(cx.listener(|v, _: &gpui_component::input::Escape, w, c| {
                         v.cancel_project_name(w, c);
@@ -596,7 +1003,7 @@ impl Workspace {
                 div()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(root.name.clone())
+                    .child(label.clone())
                     .into_any_element()
             }))
             .when(selected && !editing, |d| {
@@ -674,7 +1081,12 @@ impl Workspace {
                     project.map(|project| (project.position, project.state)),
                     p,
                 ))
-            })
+            });
+        if editing {
+            row
+        } else {
+            self.reorderable(row, movable, &label, reorder, p, cx)
+        }
     }
 
     fn session_row(
@@ -823,6 +1235,20 @@ impl Workspace {
                 .child(mark),
         )
     }
+}
+
+/// Where the dragged row would land. It takes no room, so no row shifts under the pointer.
+fn insertion_line(grouped: bool, p: Palette) -> Div {
+    div().relative().h_0().mt(px(-1.)).child(
+        div()
+            .absolute()
+            .top(px(-1.))
+            .left(inset(0, grouped) + px(20.))
+            .right(px(6.))
+            .h(px(2.))
+            .rounded_full()
+            .bg(p.accent),
+    )
 }
 
 /// The short progress figure before a row's status glyph, red when blocked and green when

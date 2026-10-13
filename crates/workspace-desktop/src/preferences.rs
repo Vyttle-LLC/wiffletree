@@ -11,17 +11,34 @@ pub enum Appearance {
     Dark,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Preferences {
     /// Show a working agent's activity as one line instead of the full card.
     #[serde(default)]
     pub minimize_activity: bool,
     #[serde(default, deserialize_with = "appearance_or_system")]
     pub appearance: Appearance,
+    /// Show projects whose names share a first word under one group row.
+    #[serde(default = "on")]
+    pub group_projects: bool,
     #[serde(skip)]
     path: PathBuf,
 }
 impl gpui::Global for Preferences {}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            minimize_activity: false,
+            appearance: Appearance::default(),
+            group_projects: true,
+            path: PathBuf::new(),
+        }
+    }
+}
+
+fn on() -> bool {
+    true
+}
 
 /// A mode this version does not know, perhaps saved by a newer one, reads as System
 /// rather than discarding the rest of the file.
@@ -63,6 +80,32 @@ mod tests {
         assert!(Preferences::load(home.path()).minimize_activity);
         std::fs::write(home.path().join("desktop-preferences.json"), "not json").unwrap();
         assert!(!Preferences::load(home.path()).minimize_activity);
+    }
+
+    #[test]
+    fn grouping_starts_on_and_the_choice_survives_a_relaunch() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join("desktop-preferences.json");
+        assert!(Preferences::load(home.path()).group_projects);
+        // A file saved before the choice existed, and one that cannot be read.
+        std::fs::write(
+            &file,
+            r#"{ "minimize_activity": true, "appearance": "dark" }"#,
+        )
+        .unwrap();
+        let older = Preferences::load(home.path());
+        assert!(older.group_projects && older.minimize_activity);
+        assert_eq!(older.appearance, Appearance::Dark);
+        std::fs::write(&file, "not json").unwrap();
+        assert!(Preferences::load(home.path()).group_projects);
+
+        let mut preferences = Preferences::load(home.path());
+        preferences.group_projects = false;
+        preferences.save().unwrap();
+        assert!(!Preferences::load(home.path()).group_projects);
+        preferences.group_projects = true;
+        preferences.save().unwrap();
+        assert!(Preferences::load(home.path()).group_projects);
     }
 
     #[test]

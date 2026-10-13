@@ -1421,6 +1421,13 @@ pub enum Command {
         project_id: String,
         name: String,
     },
+    /// Moves the projects, kept in their relative order, to just before `before`, or to the end
+    /// of the order.
+    MoveProjects {
+        project_ids: Vec<String>,
+        #[serde(default)]
+        before: Option<String>,
+    },
     /// Adds one repository with an explicit base, updating the base if it is already known.
     AttachRepository {
         project_id: Option<String>,
