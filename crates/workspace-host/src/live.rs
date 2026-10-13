@@ -446,25 +446,9 @@ impl Host {
     /// HEAD is the verified commit, or has the same patch id against the repository's base, as
     /// after a squash or a clean rebase.
     pub(crate) fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
-        let head = verification::head(ticket)?;
-        if head == verified {
-            return Ok(());
-        }
-        let worktree = Path::new(&ticket.worktree);
-        let same_patch = || -> Result<bool> {
-            let base = self.ticket_repository(ticket)?.base;
-            Ok(worktrees::patch_id(worktree, &base, verified)?
-                == worktrees::patch_id(worktree, &base, &head)?)
-        };
-        match same_patch() {
-            Ok(true) => Ok(()),
-            Ok(false) => bail!(
-                "The worktree's changes differ from the verified commit: verified {verified}, current {head}; verify again"
-            ),
-            Err(error) => bail!(
-                "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#}); verify again"
-            ),
-        }
+        verified_head(ticket, verified, || {
+            Ok(self.ticket_repository(ticket)?.base)
+        })
     }
     fn finish_ticket(
         &mut self,
@@ -902,5 +886,33 @@ impl Host {
         let body = body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>();
         self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![format!("output:{run}"),session.project_id,session.id,body,now()])?;
         Ok(())
+    }
+}
+
+/// `Host::check_verified_head` for a caller that has the repository's base without the store,
+/// as a publish step has on its own thread.
+pub(crate) fn verified_head(
+    ticket: &Ticket,
+    verified: &str,
+    base: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    let head = verification::head(ticket)?;
+    if head == verified {
+        return Ok(());
+    }
+    let worktree = Path::new(&ticket.worktree);
+    let same_patch = || -> Result<bool> {
+        let base = base()?;
+        Ok(worktrees::patch_id(worktree, &base, verified)?
+            == worktrees::patch_id(worktree, &base, &head)?)
+    };
+    match same_patch() {
+        Ok(true) => Ok(()),
+        Ok(false) => bail!(
+            "The worktree's changes differ from the verified commit: verified {verified}, current {head}; verify again"
+        ),
+        Err(error) => bail!(
+            "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#}); verify again"
+        ),
     }
 }

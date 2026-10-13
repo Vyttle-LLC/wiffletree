@@ -580,7 +580,7 @@ impl Host {
         }
         Ok(unsent)
     }
-    fn message_exists(&self, id: &str) -> Result<bool> {
+    pub(crate) fn message_exists(&self, id: &str) -> Result<bool> {
         Ok(self
             .db
             .query_row("SELECT 1 FROM messages WHERE id=?1", [id], |_| Ok(()))

@@ -42,6 +42,8 @@ pub(crate) enum StepResult {
     /// GitHub reports the repository under another owner or name, or as a fork when it was
     /// not: nothing was sent.
     Moved(String),
+    /// What no longer matched the request when the step was about to send: nothing was sent.
+    Changed(String),
     /// Why the step sent nothing.
     Failed(String),
 }
@@ -55,6 +57,8 @@ pub(crate) struct Job {
     pub ticket_id: String,
     pub request: PublishRequest,
     pub worktree: PathBuf,
+    /// The store's database, read again on the step's own thread before it sends anything.
+    pub store: PathBuf,
     /// The repository as stored, to confirm with GitHub before anything is sent.
     pub repository: Repository,
     /// The commit the host last pushed to the ticket's branch.
@@ -150,10 +154,7 @@ pub(crate) fn run(job: &Job, tools: &Tools) -> Outcome {
         Some(facts) => match moved(job, facts) {
             Some(moved) => StepResult::Moved(moved),
             None => match job.request.step {
-                PublishStep::Push => match push(job, tools) {
-                    Ok(already) => StepResult::Pushed { already },
-                    Err(error) => StepResult::Failed(format!("{error:#}")),
-                },
+                PublishStep::Push => push(job, tools),
                 PublishStep::OpenPullRequest => open_pull_request(job, tools),
             },
         },
@@ -186,11 +187,20 @@ fn moved(job: &Job, facts: &GitHubFacts) -> Option<String> {
     })
 }
 
-/// Pushes the request's commit to its branch at the request's push URL, and returns whether
-/// GitHub already had it. One explicit refspec to one URL, so no remote's settings, tags or
-/// submodules ride along. GitHub's branch is replaced only when its head is the commit the host
-/// last pushed, or was once this branch's tip here.
-fn push(job: &Job, tools: &Tools) -> Result<bool> {
+/// GitHub's branch for the request, as a push must treat it.
+enum RemoteBranch {
+    /// Already at the request's commit.
+    Current,
+    /// Absent, or behind the commit: an ordinary push.
+    Behind,
+    /// At this commit, which the host may replace: the one it last pushed, or one that was once
+    /// this branch's tip here.
+    Replaceable(String),
+}
+
+/// Reads GitHub's branch from the request's push URL. A head the host did not push and this
+/// branch never had is an error: it is never overwritten.
+fn remote_branch(job: &Job, tools: &Tools) -> Result<RemoteBranch> {
     let request = &job.request;
     let reference = format!("refs/heads/{}", request.branch);
     let listed = (tools.git)(&job.worktree, &["ls-remote", &request.push_url, &reference])?;
@@ -206,32 +216,81 @@ fn push(job: &Job, tools: &Tools) -> Result<bool> {
         .filter_map(|line| line.split_once('\t'))
         .find(|(_, name)| *name == reference)
         .map(|(head, _)| head);
-    let lease = match head {
-        Some(head) if head == request.commit => return Ok(true),
-        Some(head) if is_ancestor(&job.worktree, head, &request.commit) => None,
+    Ok(match head {
+        Some(head) if head == request.commit => RemoteBranch::Current,
+        Some(head) if is_ancestor(&job.worktree, head, &request.commit) => RemoteBranch::Behind,
         Some(head)
             if job.pushed.as_deref() == Some(head)
                 || was_branch_tip(&job.worktree, &reference, head) =>
         {
-            Some(format!("--force-with-lease={reference}:{head}"))
+            RemoteBranch::Replaceable(head.to_owned())
         }
         Some(_) => bail!(
             "GitHub's {} has commits Wiffletree did not push; fetch them and verify again",
             request.branch
         ),
-        None => None,
+        None => RemoteBranch::Behind,
+    })
+}
+
+/// Pushes the request's commit to its branch at the request's push URL. One explicit refspec to
+/// one URL, so no remote's settings, tags or submodules ride along. The local checks are made
+/// once more just before Git sends.
+fn push(job: &Job, tools: &Tools) -> StepResult {
+    let request = &job.request;
+    let reference = format!("refs/heads/{}", request.branch);
+    let lease = match remote_branch(job, tools) {
+        Ok(RemoteBranch::Current) => return StepResult::Pushed { already: true },
+        Ok(RemoteBranch::Behind) => None,
+        Ok(RemoteBranch::Replaceable(head)) => {
+            Some(format!("--force-with-lease={reference}:{head}"))
+        }
+        Err(error) => return StepResult::Failed(format!("{error:#}")),
     };
+    if let Err(changed) = recheck_stored(job) {
+        return StepResult::Changed(format!("{changed:#}"));
+    }
     let refspec = format!("{}:{reference}", request.commit);
     let mut args = vec!["push", "--no-follow-tags", "--recurse-submodules=no"];
     args.extend(lease.as_deref());
     args.extend([request.push_url.as_str(), refspec.as_str()]);
-    let pushed = (tools.git)(&job.worktree, &args)?;
+    match (tools.git)(&job.worktree, &args) {
+        Ok(pushed) if pushed.status.success() => StepResult::Pushed { already: false },
+        Ok(pushed) => StepResult::Failed(format!("git push failed{}", pushed.reason())),
+        Err(error) => StepResult::Failed(format!("{error:#}")),
+    }
+}
+
+/// The checks of `check` once more, on the step's own thread and just before it sends: against
+/// the ticket and repository as the store has them now, and the worktree as it is now. GitHub's
+/// answer took time, and the ticket, its review or its worktree may have changed meanwhile.
+fn recheck_stored(job: &Job) -> Result<()> {
+    let store =
+        Connection::open_with_flags(&job.store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    store.busy_timeout(std::time::Duration::from_secs(2))?;
+    let ticket: Ticket = store
+        .query_row(
+            "SELECT data FROM tickets WHERE id=?1",
+            [&job.ticket_id],
+            |r| decode(r, 0),
+        )
+        .context("Ticket not found")?;
+    let running = ticket
+        .publishing
+        .as_ref()
+        .is_some_and(|request| request.id == job.request.id && request.waiting.is_none());
     ensure!(
-        pushed.status.success(),
-        "git push failed{}",
-        pushed.reason()
+        running,
+        "This publish request is no longer the ticket's running one"
     );
-    Ok(false)
+    let repository: Repository = store
+        .query_row(
+            "SELECT data FROM repositories WHERE id=?1",
+            [&ticket.repository_id],
+            |r| decode(r, 0),
+        )
+        .context("Repository not found")?;
+    recheck(&ticket, repository, &job.request).map(drop)
 }
 
 /// Whether `commit` was once the branch's tip in this repository, as its reflog records. A
@@ -244,13 +303,18 @@ fn was_branch_tip(worktree: &Path, reference: &str, commit: &str) -> bool {
 /// Opens the pull request with every value from the frozen request, as an argument list.
 fn open_pull_request(job: &Job, tools: &Tools) -> StepResult {
     let request = &job.request;
+    if let Err(changed) = recheck_stored(job) {
+        return StepResult::Changed(format!("{changed:#}"));
+    }
+    // The host is named, so `GH_HOST` cannot open the pull request on another GitHub.
+    let repository = format!("{}/{}", repositories::GITHUB_HOST, request.repository);
     let answer = (tools.gh)(
         &job.worktree,
         &[
             "pr",
             "create",
             "--repo",
-            &request.repository,
+            &repository,
             "--head",
             &request.branch,
             "--base",
@@ -331,7 +395,7 @@ impl Host {
                 open.number
             ),
         }
-        let checked = self.check(&ticket)?;
+        let checked = check(&ticket, self.ticket_repository(&ticket)?)?;
         if let Some(waiting) = ticket.publishing.clone() {
             // The same call again changes nothing; a different one replaces the request.
             if waiting.commit == checked.commit
@@ -376,85 +440,13 @@ impl Host {
         Ok((self.publish_status(&ticket, &checked.repository), job))
     }
 
-    /// The checks no answer from the human overrides: the ticket is open and reviewed with no
-    /// cycle running, the worktree is on the ticket's branch at the reviewed commit or a
-    /// patch-equivalent one, and `origin` is one checked place on GitHub that the base tracks.
-    fn check(&self, ticket: &Ticket) -> Result<Checked> {
-        ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
-        if let Some(cycle) = ticket.running_cycle() {
-            bail!(
-                "Verification cycle {} is still running. Publish the ticket once it ends.",
-                cycle.cycle
-            );
-        }
-        let verified = ticket
-            .verification
-            .as_ref()
-            .and_then(|v| v.verified_commit())
-            .context("This ticket has not been reviewed. Verify it before publishing it.")?;
-        self.check_verified_head(ticket, verified)?;
-        let worktree = Path::new(&ticket.worktree);
-        let on = runtime::git_answer(worktree, &["symbolic-ref", "--short", "HEAD"])?;
-        ensure!(
-            on.status.success() && on.output.trim() == ticket.branch,
-            "The worktree is on {}, not the ticket's branch {}. Nothing was pushed.",
-            match on.output.trim() {
-                "" => "a detached HEAD",
-                branch => branch,
-            },
-            ticket.branch
-        );
-        let repository = self.ticket_repository(ticket)?;
-        let (owner, name, push_url) = match repositories::read_origin(Path::new(&repository.path)) {
-            repositories::Origin::GitHub {
-                owner,
-                name,
-                push_url,
-            } => (owner, name, push_url),
-            repositories::Origin::NotOnGitHub => bail!(
-                "{} has no GitHub origin, so there is nowhere to push",
-                repository.name
-            ),
-            repositories::Origin::Unusable(reason) => {
-                bail!("{}: {reason}. Nothing was pushed.", repository.name)
-            }
-        };
-        let recorded = repository
-            .github
-            .as_ref()
-            .filter(|github| github.owner == owner && github.name == name)
-            .with_context(|| {
-                format!(
-                    "origin now names {owner}/{name}, which Wiffletree has not checked with GitHub yet. Call publish_ticket again in a moment."
-                )
-            })?;
-        ensure_not_rewritten(Path::new(&repository.path), &push_url)?;
-        let base = origin_branch(&repository.base).with_context(|| {
-            format!(
-                "The repository's base {} is not on origin, so the ticket's pull request would cross repositories",
-                repository.base
-            )
-        })?;
-        Ok(Checked {
-            name: match &recorded.facts {
-                Some(facts) => facts.name_with_owner.clone(),
-                None => format!("{owner}/{name}"),
-            },
-            push_url,
-            branch: ticket.branch.clone(),
-            base: base.to_owned(),
-            commit: verification::head(ticket)?,
-            repository,
-        })
-    }
-
     /// Returns the request's next step to run, or raises its Inbox item and returns nothing when
     /// the human must approve it first.
     fn start_step(&mut self, ticket: &mut Ticket, repository: &Repository) -> Result<Option<Job>> {
         let request = ticket.publishing.clone().context("No publish request")?;
         let allowed = self.settings().allowed_owners;
         let Some(ask) = publish_ask(ticket, &request, repository, &allowed) else {
-            return Ok(Some(job(ticket, request, repository)));
+            return Ok(Some(self.job(ticket, request, repository)));
         };
         let step = match request.step {
             PublishStep::Push => "push",
@@ -473,6 +465,17 @@ impl Host {
         });
         self.save_ticket(ticket)?;
         Ok(None)
+    }
+
+    fn job(&self, ticket: &Ticket, request: PublishRequest, repository: &Repository) -> Job {
+        Job {
+            ticket_id: ticket.id.clone(),
+            request,
+            worktree: ticket.worktree.clone().into(),
+            store: self.home.join(STORE_FILE),
+            repository: repository.clone(),
+            pushed: ticket.pushed.clone(),
+        }
     }
 
     /// The tool's result for the ticket's request: the steps the host is running, or the step
@@ -505,14 +508,109 @@ impl Host {
     }
 }
 
-fn job(ticket: &Ticket, request: PublishRequest, repository: &Repository) -> Job {
-    Job {
-        ticket_id: ticket.id.clone(),
-        request,
-        worktree: ticket.worktree.clone().into(),
-        repository: repository.clone(),
-        pushed: ticket.pushed.clone(),
+/// The checks no answer from the human overrides: the ticket is open and reviewed with no
+/// cycle running, the worktree is on the ticket's branch at the reviewed commit or a
+/// patch-equivalent one, and `origin` is one checked place on GitHub that the base tracks.
+fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
+    ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
+    if let Some(cycle) = ticket.running_cycle() {
+        bail!(
+            "Verification cycle {} is still running. Publish the ticket once it ends.",
+            cycle.cycle
+        );
     }
+    let verified = ticket
+        .verification
+        .as_ref()
+        .and_then(|v| v.verified_commit())
+        .context("This ticket has not been reviewed. Verify it before publishing it.")?;
+    live::verified_head(ticket, verified, || Ok(repository.base.clone()))?;
+    let worktree = Path::new(&ticket.worktree);
+    let on = runtime::git_answer(worktree, &["symbolic-ref", "--short", "HEAD"])?;
+    ensure!(
+        on.status.success() && on.output.trim() == ticket.branch,
+        "The worktree is on {}, not the ticket's branch {}. Nothing was pushed.",
+        match on.output.trim() {
+            "" => "a detached HEAD",
+            branch => branch,
+        },
+        ticket.branch
+    );
+    // Read where the push runs: a worktree can carry its own Git configuration.
+    let (owner, name, push_url) = match repositories::read_origin(worktree) {
+        repositories::Origin::GitHub {
+            owner,
+            name,
+            push_url,
+        } => (owner, name, push_url),
+        repositories::Origin::NotOnGitHub => bail!(
+            "{} has no GitHub origin, so there is nowhere to push",
+            repository.name
+        ),
+        repositories::Origin::Unusable(reason) => {
+            bail!("{}: {reason}. Nothing was pushed.", repository.name)
+        }
+    };
+    let recorded = repository
+        .github
+        .as_ref()
+        .filter(|github| github.owner == owner && github.name == name)
+        .with_context(|| {
+            format!(
+                "origin now names {owner}/{name}, which Wiffletree has not checked with GitHub yet. Call publish_ticket again in a moment."
+            )
+        })?;
+    ensure_not_rewritten(worktree, &push_url)?;
+    let base = origin_branch(&repository.base).with_context(|| {
+        format!(
+            "The repository's base {} is not on origin, so the ticket's pull request would cross repositories",
+            repository.base
+        )
+    })?;
+    Ok(Checked {
+        name: match &recorded.facts {
+            Some(facts) => facts.name_with_owner.clone(),
+            None => format!("{owner}/{name}"),
+        },
+        push_url,
+        branch: ticket.branch.clone(),
+        base: base.to_owned(),
+        commit: verification::head(ticket)?,
+        repository,
+    })
+}
+
+/// The repository, when the ticket still passes its checks and would send what the request
+/// froze; otherwise what changed.
+fn recheck(
+    ticket: &Ticket,
+    repository: Repository,
+    request: &PublishRequest,
+) -> Result<Repository> {
+    let now = check(ticket, repository)?;
+    for (what, frozen, current) in [
+        ("repository", &request.repository, &now.name),
+        ("push URL of origin", &request.push_url, &now.push_url),
+        ("ticket's branch", &request.branch, &now.branch),
+        ("repository's base branch", &request.base, &now.base),
+    ] {
+        ensure!(
+            frozen == current,
+            "The {what} changed from {frozen} to {current}"
+        );
+    }
+    if now.commit != request.commit {
+        live::verified_head(ticket, &request.commit, || Ok(now.repository.base.clone())).map_err(
+            |_| {
+                anyhow::anyhow!(
+                    "The worktree moved from {} to {}, which has different changes",
+                    short_sha(&request.commit),
+                    short_sha(&now.commit)
+                )
+            },
+        )?;
+    }
+    Ok(now.repository)
 }
 
 /// The Inbox item's text, written by the host from the frozen request. The agent's only words
@@ -599,6 +697,7 @@ impl Host {
                 let number = url.rsplit('/').next().unwrap_or_default();
                 format!("Pushed {sent} and opened PR #{number}: {url}")
             }
+            StepResult::Changed(changed) => changed_notice(&request, &changed),
             StepResult::Moved(moved) => format!(
                 "{moved}. {} Call publish_ticket again: it will be decided on where the repository is now.",
                 nothing_sent(&request)
@@ -642,10 +741,14 @@ impl Host {
             self.end_request(&mut ticket, &denied)?;
             return Ok(None);
         }
-        let repository = match self.recheck(&ticket, &request) {
+        let rechecked = self
+            .ticket_repository(&ticket)
+            .and_then(|repository| recheck(&ticket, repository, &request));
+        let repository = match rechecked {
             Ok(repository) => repository,
             Err(changed) => {
-                self.end_request(&mut ticket, &changed_notice(&request, &changed))?;
+                let notice = changed_notice(&request, &format!("{changed:#}"));
+                self.end_request(&mut ticket, &notice)?;
                 return Ok(None);
             }
         };
@@ -657,62 +760,49 @@ impl Host {
         request.waiting = None;
         ticket.publishing = Some(request.clone());
         self.save_ticket(&ticket)?;
-        Ok(Some(job(&ticket, request, &repository)))
+        Ok(Some(self.job(&ticket, request, &repository)))
     }
 
     /// Before a later step of a request runs: the checks again, and that nothing differs from
     /// what the request froze. Then the step, or its Inbox item.
     fn continue_request(&mut self, ticket: &mut Ticket) -> Result<Option<Job>> {
         let request = ticket.publishing.clone().context("No publish request")?;
-        match self.recheck(ticket, &request) {
+        let rechecked = self
+            .ticket_repository(ticket)
+            .and_then(|repository| recheck(ticket, repository, &request));
+        match rechecked {
             Ok(repository) => self.start_step(ticket, &repository),
             Err(changed) => {
-                self.end_request(ticket, &changed_notice(&request, &changed))?;
+                let notice = changed_notice(&request, &format!("{changed:#}"));
+                self.end_request(ticket, &notice)?;
                 Ok(None)
             }
         }
     }
 
-    /// The repository, when the ticket still passes its checks and would send what the request
-    /// froze; otherwise what changed.
-    fn recheck(&self, ticket: &Ticket, request: &PublishRequest) -> Result<Repository> {
-        let now = self.check(ticket)?;
-        for (what, frozen, current) in [
-            ("repository", &request.repository, &now.name),
-            ("push URL of origin", &request.push_url, &now.push_url),
-            ("ticket's branch", &request.branch, &now.branch),
-            ("repository's base branch", &request.base, &now.base),
-        ] {
-            ensure!(
-                frozen == current,
-                "The {what} changed from {frozen} to {current}"
-            );
-        }
-        if now.commit != request.commit {
-            self.check_verified_head(ticket, &request.commit)
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "The worktree moved from {} to {}, which has different changes",
-                        short_sha(&request.commit),
-                        short_sha(&now.commit)
-                    )
-                })?;
-        }
-        Ok(now.repository)
-    }
-
     /// Ends the ticket's request: sends its caller the request's one message and withdraws its
-    /// Inbox item if one still waits.
+    /// Inbox item if one still waits. A request whose message cannot be queued is kept; the
+    /// next start ends it and tells its caller.
     fn end_request(&mut self, ticket: &mut Ticket, result: &str) -> Result<()> {
-        let Some(request) = ticket.publishing.take() else {
+        let Some(request) = ticket.publishing.clone() else {
             return Ok(());
         };
         // Sent before the request is cleared: after a crash in between, the next start ends the
         // request again and the repeated id sends nothing more.
         let id = format!("{PUBLISH_PREFIX}{}", request.id);
-        if let Err(error) = self.send(&id, None, &request.caller, result) {
-            eprintln!("Workspace publish: {id}: {error:#}");
+        // A tool's error line is not bounded as a message is.
+        let result: String = result.chars().take(MAX_TEXT_BYTES / 4).collect();
+        if let Err(error) = self.send_publish_result(&id, &request.caller, &result) {
+            let told = self.message_exists(&id)?;
+            let nobody_to_tell = self.session(&request.caller).is_ok_and(|s| s.archived);
+            if !told && !nobody_to_tell {
+                return Err(error.context(format!(
+                    "The result of publish request {} could not be queued, so the request is kept",
+                    request.id
+                )));
+            }
         }
+        ticket.publishing = None;
         if let Some(item) = &request.waiting
             && self.is_unanswered(item)?
         {
@@ -776,9 +866,14 @@ fn nothing_sent(request: &PublishRequest) -> String {
 }
 
 /// The message for a request that ended because what it froze is no longer current.
-fn changed_notice(request: &PublishRequest, changed: &anyhow::Error) -> String {
+fn changed_notice(request: &PublishRequest, changed: &str) -> String {
+    // A check's own words may already end by saying so.
+    let changed = changed.trim_end_matches('.');
+    let changed = changed
+        .strip_suffix(". Nothing was pushed")
+        .unwrap_or(changed);
     format!(
-        "{changed:#}. {} Call publish_ticket again for what is current.",
+        "{changed}. {} Call publish_ticket again for what is current.",
         nothing_sent(request)
     )
 }
@@ -989,7 +1084,7 @@ pub(crate) mod tests {
                 None => answer(
                     0,
                     format!(
-                        "Creating pull request\nhttps://github.com/{}/pull/{}\n",
+                        "Creating pull request\nhttps://{}/pull/{}\n",
                         args[3],
                         44 + state.created.len()
                     ),
@@ -1514,7 +1609,7 @@ pub(crate) mod tests {
                 "pr",
                 "create",
                 "--repo",
-                "allowed-org/app",
+                "github.com/allowed-org/app",
                 "--head",
                 BRANCH,
                 "--base",
@@ -1701,11 +1796,10 @@ pub(crate) mod tests {
     #[test]
     fn the_push_goes_to_the_url_the_request_froze_when_origin_is_repointed() {
         let mut f = fixture();
-        let remote = remote(&f);
+        let mut remote = remote(&f);
         f.allow("allowed-org");
         let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
         let job = step.unwrap();
-        // After the check, `origin` is pointed at another repository.
         let other_url = "git@github.com:other-org/app.git";
         let other = f.home.path().join("other.git");
         git(
@@ -1718,21 +1812,308 @@ pub(crate) mod tests {
             .unwrap()
             .urls
             .push((other_url.into(), other.to_str().unwrap().into()));
-        git(&f.repository, &["remote", "set-url", "origin", other_url]);
-        // The push itself names the frozen URL, so it cannot follow `origin`.
-        assert!(!push(&job, &remote.tools).unwrap());
+        // `origin` is repointed after the last check, at the moment Git is started for the push.
+        let (send, repository) = (remote.tools.git.clone(), f.repository.clone());
+        remote.tools.git = Arc::new(move |path, args| {
+            if args[0] == "push" {
+                git(&repository, &["remote", "set-url", "origin", other_url]);
+            }
+            send(path, args)
+        });
+        // The push names the frozen URL, so it cannot follow `origin`.
+        assert!(matches!(
+            push(&job, &remote.tools),
+            StepResult::Pushed { already: false }
+        ));
         assert_eq!(remote.branch(BRANCH), Some(f.head()));
         assert!(refs(&other).is_empty());
-        // And a whole step notices that `origin` is no longer the repository it confirmed.
+        // A step that starts after the repointing sends nothing: its own check sees it.
         git(
             &remote.bare,
             &["update-ref", "-d", &format!("refs/heads/{BRANCH}")],
         );
-        remote.github.lock().unwrap().answer = Some(("other-org/app".into(), false));
         let outcome = run(&job, &remote.tools);
-        assert!(matches!(&outcome.result, StepResult::Moved(moved)
-            if moved == "GitHub now reports allowed-org/app as other-org/app"));
+        assert!(matches!(&outcome.result, StepResult::Changed(changed)
+                if changed.starts_with("origin now names other-org/app")),);
         assert!(remote.branch(BRANCH).is_none() && refs(&other).is_empty());
+    }
+
+    #[test]
+    fn git_configuration_is_read_in_the_worktree_where_the_push_runs() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        // A rule only the ticket's worktree has sends origin's URL somewhere else; the main
+        // checkout's origin and configuration are unchanged.
+        let unchecked = f.home.path().join("unchecked.git");
+        git(
+            f.home.path(),
+            &["init", "-q", "--bare", unchecked.to_str().unwrap()],
+        );
+        git(
+            &f.repository,
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        let rule = format!("url.{}.insteadOf", unchecked.display());
+        git(&f.worktree, &["config", "--worktree", &rule, ORIGIN]);
+        assert!(matches!(
+            repositories::read_origin(&f.repository),
+            repositories::Origin::GitHub { push_url, .. } if push_url == ORIGIN
+        ));
+        let result = f.publish(&f.coordinator.id.clone());
+        refused(&mut f, result, "has no GitHub origin");
+        assert!(refs(&unchecked).is_empty() && remote.git_calls().is_empty());
+        // The same rule added after a request was accepted is seen before anything is sent.
+        git(&f.worktree, &["config", "--worktree", "--unset", &rule]);
+        let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        git(&f.worktree, &["config", "--worktree", &rule, ORIGIN]);
+        let outcome = run(&step.unwrap(), &remote.tools);
+        assert!(matches!(&outcome.result, StepResult::Changed(changed)
+                if changed.contains("has no GitHub origin")),);
+        assert!(refs(&unchecked).is_empty() && remote.branch(BRANCH).is_none());
+    }
+
+    /// A fake `gh` that changes something each time GitHub is asked about the repository, as
+    /// happens while a step waits for that answer.
+    fn while_github_is_asked(remote: &mut Remote, change: impl Fn() + Send + Sync + 'static) {
+        let github = remote.tools.gh.clone();
+        remote.tools.gh = Arc::new(move |path, args| {
+            if args[..2] == ["api", "graphql"] {
+                change();
+            }
+            github(path, args)
+        });
+    }
+
+    #[test]
+    fn a_worktree_that_changes_while_github_is_asked_sends_nothing() {
+        let mut f = fixture();
+        let mut remote = remote(&f);
+        f.allow("allowed-org");
+        let caller = f.coordinator.id.clone();
+        let (_, step) = f.publish(&caller).unwrap();
+        let worktree = f.worktree.clone();
+        while_github_is_asked(&mut remote, move || {
+            git(&worktree, &["checkout", "-q", "-b", "other"]);
+        });
+        let outcome = run(&step.unwrap(), &remote.tools);
+        assert!(matches!(&outcome.result, StepResult::Changed(changed)
+                if changed.starts_with("The worktree is on other, not the ticket's branch")),);
+        assert!(remote.branch(BRANCH).is_none() && pushes(&remote) == 0);
+        assert!(f.host.record_published(outcome).unwrap().is_none());
+        assert!(f.ticket().publishing.is_none());
+        assert_eq!(
+            results(&f.host),
+            [(
+                caller,
+                format!(
+                    "The worktree is on other, not the ticket's branch {BRANCH}. Nothing was pushed. Call publish_ticket again for what is current."
+                )
+            )]
+        );
+    }
+
+    #[test]
+    fn a_review_that_starts_or_a_ticket_that_closes_before_the_send_sends_nothing() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        // A new verification cycle started after the host's own check.
+        let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        let job = step.unwrap();
+        let mut ticket = f.ticket();
+        let publishing = ticket.publishing.clone();
+        f.review(VerificationOutcome::Running);
+        let outcome = run(&job, &remote.tools);
+        assert!(matches!(&outcome.result, StepResult::Changed(changed)
+                if changed.starts_with("Verification cycle 2 is still running")),);
+        // The ticket's request was replaced by another.
+        f.review(VerificationOutcome::Passed);
+        ticket = f.ticket();
+        ticket.publishing = publishing.map(|request| PublishRequest {
+            id: "another".into(),
+            ..request
+        });
+        f.host.save_ticket(&ticket).unwrap();
+        let outcome = run(&job, &remote.tools);
+        assert!(matches!(&outcome.result, StepResult::Changed(changed)
+                if changed == "This publish request is no longer the ticket's running one"),);
+        assert!(remote.branch(BRANCH).is_none() && pushes(&remote) == 0);
+    }
+
+    #[test]
+    fn a_head_that_moves_before_the_pull_request_is_opened_opens_nothing() {
+        let mut f = fixture();
+        let mut remote = remote(&f);
+        f.allow("allowed-org");
+        let caller = f.coordinator.id.clone();
+        let (_, step) = f.publish(&caller).unwrap();
+        let pushed = f.head();
+        let open = f
+            .host
+            .record_published(run(&step.unwrap(), &remote.tools))
+            .unwrap()
+            .unwrap();
+        assert_eq!(open.request.step, PublishStep::OpenPullRequest);
+        // Changes the review never saw arrive while GitHub is asked.
+        let worktree = f.worktree.clone();
+        while_github_is_asked(&mut remote, move || {
+            fs::write(worktree.join("late.txt"), "late\n").unwrap();
+            git(&worktree, &["add", "."]);
+            git(&worktree, &["commit", "-q", "-m", "late"]);
+        });
+        let outcome = run(&open, &remote.tools);
+        assert!(matches!(&outcome.result, StepResult::Changed(_)));
+        assert!(remote.github.lock().unwrap().created.is_empty());
+        f.host.record_published(outcome).unwrap();
+        let told = results(&f.host).pop().unwrap().1;
+        assert!(
+            told.starts_with("The worktree's changes differ from the verified commit")
+                && told.ends_with(&format!(
+                    "The branch was pushed at {}; no pull request was opened. Call publish_ticket again for what is current.",
+                    short_sha(&pushed)
+                )),
+            "{told}"
+        );
+    }
+
+    /// Fills the session's queue to the cap every other message is refused at.
+    fn fill_queue(f: &mut Fixture, session: &str) {
+        f.host.db.execute_batch("BEGIN").unwrap();
+        for n in 0..1024 {
+            f.host
+                .db
+                .execute(
+                    "INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments,quiet) VALUES (?1,?2,NULL,?3,'waiting','queued',?4,'[]',0)",
+                    params![format!("filler-{n}"), f.coordinator.project_id, session, now()],
+                )
+                .unwrap();
+        }
+        f.host.db.execute_batch("COMMIT").unwrap();
+        let refused = f
+            .host
+            .send("one-more", None, session, "waiting")
+            .unwrap_err();
+        assert!(refused.to_string().contains("queue is full"), "{refused}");
+    }
+
+    #[test]
+    fn a_full_queue_does_not_lose_a_requests_result() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        let caller = f.coordinator.id.clone();
+        fill_queue(&mut f, &caller);
+        // GitHub cannot be reached, so the request ends with a failure to report.
+        remote.github.lock().unwrap().answer = None;
+        let (_, step) = f.publish(&caller).unwrap();
+        drive(&mut f, &remote, step);
+        let told = results(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0]
+                .1
+                .contains("GitHub could not confirm the repository")
+        );
+        assert!(f.ticket().publishing.is_none());
+        // A denial is delivered the same way.
+        f.host.set_owner_allowed("allowed-org", false).unwrap();
+        f.publish(&caller).unwrap();
+        answer(&mut f, &remote, "denied");
+        assert_eq!(results(&f.host).len(), 2);
+    }
+
+    #[test]
+    fn a_result_that_cannot_be_queued_keeps_the_request_for_the_next_start() {
+        let mut f = fixture();
+        f.allow("allowed-org");
+        let caller = f.coordinator.id.clone();
+        let (_, step) = f.publish(&caller).unwrap();
+        assert!(step.is_some());
+        // A message without text is refused whatever the queue holds.
+        let mut ticket = f.ticket();
+        let kept = f.host.end_request(&mut ticket, " ").unwrap_err();
+        assert!(
+            format!("{kept:#}").contains("so the request is kept"),
+            "{kept:#}"
+        );
+        assert!(ticket.publishing.is_some() && f.ticket().publishing.is_some());
+        assert!(results(&f.host).is_empty());
+        // The next start ends it and tells its caller.
+        let f = restart(f);
+        assert!(f.ticket().publishing.is_none());
+        let told = results(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0].0 == caller && told[0].1.contains("was interrupted"),
+            "{told:?}"
+        );
+    }
+
+    /// Makes the fake `gh` answer as under `GH_HOST=ghe.example.invalid`: a call that does not
+    /// name github.com reaches that host, which has a repository of the same name that is not a
+    /// fork and would take the pull request.
+    fn under_gh_host(remote: &mut Remote) {
+        let github = remote.tools.gh.clone();
+        remote.tools.gh = Arc::new(move |path, args| {
+            let api = args[..2] == ["api", "graphql"];
+            let names_github = match api {
+                true => args
+                    .windows(2)
+                    .any(|pair| pair == ["--hostname", "github.com"]),
+                false => args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--repo" && pair[1].starts_with("github.com/")),
+            };
+            if names_github {
+                return github(path, args);
+            }
+            let output = match api {
+                true => json!({"data": {"r0": {"nameWithOwner": "allowed-org/app",
+                    "isFork": false, "visibility": "PRIVATE", "parent": null,
+                    "owner": {"__typename": "Organization"}}}})
+                .to_string(),
+                false => "https://ghe.example.invalid/allowed-org/app/pull/9\n".to_owned(),
+            };
+            Ok(runtime::GhAnswer {
+                status: exit(0),
+                output,
+                error: String::new(),
+            })
+        });
+    }
+
+    #[test]
+    fn gh_host_cannot_change_the_github_that_is_asked_or_that_gets_the_pull_request() {
+        // github.com says the repository has become a fork; the other host says it is not.
+        let mut f = fixture();
+        let mut remote = remote(&f);
+        f.allow("allowed-org");
+        remote.github.lock().unwrap().answer = Some(("allowed-org/app".into(), true));
+        under_gh_host(&mut remote);
+        let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        assert!(remote.branch(BRANCH).is_none());
+        assert!(
+            results(&f.host)[0]
+                .1
+                .starts_with("GitHub now reports allowed-org/app as a fork.")
+        );
+        // The pull request is opened on github.com.
+        let mut f = fixture();
+        let mut remote = self::remote(&f);
+        f.allow("allowed-org");
+        under_gh_host(&mut remote);
+        let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        let created = remote.github.lock().unwrap().created.clone();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0][2..4], ["--repo", "github.com/allowed-org/app"]);
+        let told = results(&f.host).pop().unwrap().1;
+        assert!(
+            told.ends_with("opened PR #45: https://github.com/allowed-org/app/pull/45"),
+            "{told}"
+        );
     }
 
     #[test]

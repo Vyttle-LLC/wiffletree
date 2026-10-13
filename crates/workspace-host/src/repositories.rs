@@ -229,6 +229,8 @@ pub fn scan_roots(
 const GITHUB_FACTS_MS: i64 = 24 * 60 * 60_000;
 /// Repositories per GitHub request.
 const REPOSITORIES_PER_QUERY: usize = 50;
+/// The only host whose remotes name an owner; see `pr_watch::github_repository`.
+pub(crate) const GITHUB_HOST: &str = "github.com";
 
 /// Where `origin` says a repository lives, read on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -326,7 +328,8 @@ fn ask_github(
     for (i, (owner, name)) in asked.iter().enumerate() {
         fields.extend([format!("o{i}={owner}"), format!("n{i}={name}")]);
     }
-    let mut args = vec!["api", "graphql"];
+    // The host is named, so `GH_HOST` cannot point the question at another GitHub.
+    let mut args = vec!["api", "graphql", "--hostname", GITHUB_HOST];
     for field in &fields {
         args.extend(["-f", field]);
     }
@@ -997,10 +1000,11 @@ mod tests {
         assert_eq!(reading.error, None);
         assert_eq!(calls.borrow().len(), 1);
         let call = calls.borrow()[0].clone();
-        assert_eq!(&call[..2], ["api", "graphql"]);
+        // The question names github.com, whatever `GH_HOST` says.
+        assert_eq!(&call[..4], ["api", "graphql", "--hostname", "github.com"]);
         // Raw-string fields only, and a read-only query.
-        assert!(call[2..].chunks(2).all(|pair| pair[0] == "-f"));
-        assert!(call[3].starts_with("query=query(") && !call[3].contains("mutation"));
+        assert!(call[4..].chunks(2).all(|pair| pair[0] == "-f"));
+        assert!(call[5].starts_with("query=query(") && !call[5].contains("mutation"));
         assert!(
             call.contains(&"o32=Sage-Social".to_owned())
                 && !call.iter().any(|a| a.starts_with("o33="))
@@ -1059,6 +1063,32 @@ mod tests {
             origin_problem: None,
         };
         assert_eq!(owner_entry(&repository).as_deref(), Some("new-org"));
+    }
+
+    #[test]
+    fn a_fork_is_read_from_github_com_even_when_gh_host_names_another_github() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = inputs(
+            root.path(),
+            &["git@github.com:allowed-org/app.git".to_owned()],
+        );
+        // As under `GH_HOST`: a question that does not name github.com reaches another host,
+        // whose repository of the same name is not a fork.
+        let gh = |_: &Path, args: &[&str]| {
+            let names_github = args
+                .windows(2)
+                .any(|pair| pair == ["--hostname", "github.com"]);
+            Ok(runtime::GhAnswer {
+                status: exit(0),
+                output: json!({"data": {"r0": {"nameWithOwner": "allowed-org/app",
+                    "isFork": names_github, "visibility": "PRIVATE", "parent": null,
+                    "owner": {"__typename": "Organization"}}}})
+                .to_string(),
+                error: String::new(),
+            })
+        };
+        let reading = read_github(&inputs, 1, gh);
+        assert!(facts(&reading, "r0").unwrap().fork);
     }
 
     #[test]
