@@ -3241,7 +3241,7 @@ pub(crate) mod tests {
             .agent_tool(
                 &coordinator,
                 "verify_ticket",
-                json!({"ticket_id": f.ticket, "verifiers": verifiers}),
+                json!({"ticket_id": f.ticket, "level": "Full", "verifiers": verifiers}),
             )
             .unwrap();
         let sessions: Vec<String> = f.ticket().verification.unwrap().rounds[0]

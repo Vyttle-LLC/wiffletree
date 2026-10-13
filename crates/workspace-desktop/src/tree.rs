@@ -1084,7 +1084,7 @@ mod tests {
             profile: profile.clone(),
             reason: "Routine check".into(),
         });
-        let verifying = host.verify_ticket(&ticket.id, &choices).unwrap();
+        let verifying = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
         let round = &verifying.verification.as_ref().unwrap().rounds[0];
         // The verifier's turn takes its round input before it reports.
         host.advance_receipt(&round.verifiers[0].message_id, Receipt::Delivered)

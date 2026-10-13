@@ -3598,7 +3598,7 @@ mod tests {
                 reason: "Routine check".into(),
             })
             .collect();
-        let ticket = host.verify_ticket(&ticket.id, &choices).unwrap();
+        let ticket = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
         host.set_live(&coordinator.project_id, true).unwrap();
         let verifiers = ticket.verification.as_ref().unwrap().rounds[0]
             .verifiers

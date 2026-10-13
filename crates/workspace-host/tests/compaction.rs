@@ -1098,7 +1098,7 @@ fn round_with_a_paused_verifier(
             reason: "Routine check".into(),
         })
         .into();
-    let ticket = host.verify_ticket(&ticket.id, &choices).unwrap();
+    let ticket = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
     let verifiers = ticket.verification.unwrap().rounds[0].verifiers.clone();
     for session in [&main.id, &implementer.id, &verifiers[1].session_id] {
         host.set_status(session, Status::Paused).unwrap();

@@ -529,7 +529,7 @@ fn the_round_cap_blocks_the_ticket_and_wakes_the_coordinator_once() {
     let waking = f.waking(&f.coordinator.id);
     assert_eq!(waking.len(), 1, "{waking:?}");
     for expected in [
-        "cycle 1 of 2, 2 of 2 rounds",
+        "cycle 1, full review 1 of 2 (Full), 2 of 2 rounds",
         "round cap of 2",
         "Open findings:\n- F2 · src/calls.rs:42 · fail-2",
     ] {
@@ -726,7 +726,7 @@ fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
                 choices.remove(index);
             }
         }
-        json!({"ticket_id":f.ticket.id,"verifiers":choices})
+        json!({"ticket_id":f.ticket.id,"level":"Full","verifiers":choices})
     };
     let cases = [
         (
@@ -745,7 +745,7 @@ fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
         ),
         (
             with(2, None),
-            "Choose a profile and reason for Reviewer · Style",
+            "Choose a profile and reason for Reviewer · Style, which Full runs",
         ),
         (
             with(
@@ -755,7 +755,7 @@ fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
                     profile(Provider::Codex, "gpt-6.1-sol", "high"),
                 )),
             ),
-            "No verifier has the focus \"Security\"",
+            "Security is not part of Full. Choose a model only for Claude, Codex, Style.",
         ),
         (
             with(
@@ -798,7 +798,7 @@ fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
             .agent_tool(
                 &f.coordinator.id,
                 "verify_ticket",
-                json!({"ticket_id":f.ticket.id,"verifiers":valid()}),
+                json!({"ticket_id":f.ticket.id,"level":"Full","verifiers":valid()}),
             )
             .unwrap(),
     )
@@ -986,7 +986,7 @@ fn verify_review(f: &mut Fixture, chosen: ModelProfile) -> anyhow::Result<Value>
     f.host.agent_tool(
         &coordinator,
         "verify_ticket",
-        json!({"ticket_id":f.ticket.id,"verifiers":[{"focus":"Review","profile":chosen,"reason":"Review pass"}]}),
+        json!({"ticket_id":f.ticket.id,"level":"Full","verifiers":[{"focus":"Review","profile":chosen,"reason":"Review pass"}]}),
     )
 }
 
@@ -1714,7 +1714,7 @@ fn the_cycle_cap_refuses_a_third_cycle_until_the_human_raises_it() {
 
     let refused = f.verify().unwrap_err().to_string();
 
-    for expected in ["2 verification cycles", "waiver", "close", "ask the human"] {
+    for expected in ["2 full reviews", "waiver", "close", "ask the human"] {
         assert!(refused.contains(expected), "{expected}: {refused}");
     }
     assert_eq!(
@@ -1855,7 +1855,7 @@ fn a_pass_with_an_untriaged_finding_asks_for_triage_then_acceptance() {
     assert_eq!(waking.len(), 1);
     let body = &waking[0].body;
     for expected in [
-        "passed in cycle 1 of 2, 1 of 2 rounds".to_owned(),
+        "passed in cycle 1, full review 1 of 2 (Full), 1 of 2 rounds".to_owned(),
         format!("Tester · Codex: passed at {commit}"),
         "Untriaged findings:\n- F1 · src/calls.rs:7 · Naming".into(),
         "Triage the untriaged findings with triage_findings, then accept the ticket.".into(),
@@ -1874,7 +1874,10 @@ fn the_last_cycle_blocked_offers_no_further_verification() {
     f.fail(&f.verifier("Codex"), "Busy line").unwrap();
 
     let body = &f.waking(&f.coordinator.id)[0].body;
-    assert!(body.contains("cycle 2 of 2, 1 of 1 rounds"), "{body}");
+    assert!(
+        body.contains("cycle 2, full review 2 of 2 (Full), 1 of 1 rounds"),
+        "{body}"
+    );
     assert!(
         body.contains("waived")
             && body.contains("close the ticket")
@@ -2145,4 +2148,546 @@ fn a_closed_ticket_cannot_be_accepted() {
 
     assert!(refused.contains("already closed"), "{refused}");
     assert_eq!(f.current().state, "closed");
+}
+
+fn level(name: &str, kind: LevelKind, verifiers: &[&str]) -> ReviewLevel {
+    ReviewLevel {
+        name: name.into(),
+        kind,
+        verifiers: verifiers.iter().map(|&focus| focus.into()).collect(),
+        use_when: format!("when {name} fits."),
+    }
+}
+
+const FOUR: [&str; 4] = ["Tests", "Correctness", "Regressions", "Style"];
+
+/// A ready ticket with the verifiers Tests, Correctness, Regressions and Style and the levels
+/// Full, which runs all four, Light, a re-check that runs Correctness, and Docs, a full review
+/// that runs Style.
+fn leveled(max_rounds: u32) -> Fixture {
+    let mut f = Fixture::ready(
+        vec![
+            verifier(Role::Tester, "Tests", None),
+            verifier(Role::Reviewer, "Correctness", Some(Provider::Claude)),
+            verifier(Role::Reviewer, "Regressions", Some(Provider::Codex)),
+            verifier(Role::Reviewer, "Style", None),
+        ],
+        max_rounds,
+    );
+    f.change_settings(|settings| {
+        settings.levels.extend([
+            level("Light", LevelKind::Recheck, &["Correctness"]),
+            level("Docs", LevelKind::FullReview, &["Style"]),
+        ])
+    });
+    f
+}
+
+impl Fixture {
+    fn change_settings(&mut self, change: impl FnOnce(&mut VerificationSettings)) {
+        let mut settings = self.host.settings().verification;
+        change(&mut settings);
+        self.host.set_verification(settings).unwrap();
+    }
+    /// `verify_ticket` naming `level`, with a valid choice for each of `focuses`.
+    fn verify_at(&mut self, level: &str, focuses: &[&str]) -> anyhow::Result<Ticket> {
+        let choices: Vec<VerifierChoice> = common::verifier_choices(&self.host)
+            .into_iter()
+            .filter(|choice| focuses.contains(&choice.focus.as_str()))
+            .collect();
+        let (coordinator, ticket) = (self.coordinator.id.clone(), self.ticket.id.clone());
+        Ok(serde_json::from_value(self.host.agent_tool(
+            &coordinator,
+            "verify_ticket",
+            json!({"ticket_id":ticket,"level":level,"verifiers":choices}),
+        )?)?)
+    }
+    /// Every verifier of the current round passes.
+    fn pass_round(&mut self) {
+        let cycle = self.current().verification.unwrap().cycle;
+        for run in self.round().verifiers {
+            self.report(&run.session_id, &format!("pass-{cycle}"), "passed")
+                .unwrap();
+        }
+    }
+    /// Fails `focus` with a blocking finding and passes the round's other verifiers.
+    fn fail_one(&mut self, focus: &str) {
+        let cycle = self.current().verification.unwrap().cycle;
+        for run in self.round().verifiers {
+            if run.focus == focus {
+                self.fail(&run.session_id, &format!("fail-{cycle}"))
+                    .unwrap();
+            } else {
+                self.report(&run.session_id, &format!("pass-{cycle}"), "passed")
+                    .unwrap();
+            }
+        }
+    }
+    /// How many round inputs verifiers were sent in `cycle`.
+    fn cycle_inputs(&self, cycle: u32) -> usize {
+        let db = rusqlite::Connection::open(self.host.home.join("workspace.sqlite3")).unwrap();
+        let prefix = format!("verify:{}:{cycle}:", self.ticket.id);
+        db.query_row(
+            "SELECT count(*) FROM messages WHERE substr(id,1,length(?1))=?1",
+            [prefix],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+    fn cycle_level(&self) -> (String, LevelKind) {
+        let level = self.current().verification.unwrap().level.unwrap();
+        (level.name, level.kind)
+    }
+    /// What a refused `verify_ticket` leaves: no new session and the same latest cycle.
+    fn refused_at(&mut self, level: &str, focuses: &[&str]) -> String {
+        let (sessions, before) = (self.host.sessions().unwrap().len(), self.current());
+        let refused = self.verify_at(level, focuses).unwrap_err().to_string();
+        assert_eq!(self.host.sessions().unwrap().len(), sessions, "{refused}");
+        assert_eq!(self.current().verification, before.verification);
+        assert_eq!(self.current().state, before.state);
+        refused
+    }
+}
+
+#[test]
+fn verify_ticket_needs_the_name_of_a_configured_level() {
+    let mut f = leveled(2);
+    let coordinator = f.coordinator.id.clone();
+    let unnamed = json!({"ticket_id":f.ticket.id,"verifiers":common::verifier_choices(&f.host)});
+
+    let missing = f
+        .host
+        .agent_tool(&coordinator, "verify_ticket", unnamed)
+        .unwrap_err();
+    let unknown = f.refused_at("Quick", &FOUR);
+
+    assert_eq!(
+        missing.to_string(),
+        "Name a review level: Full, Light or Docs."
+    );
+    assert_eq!(
+        unknown,
+        "No review level is named \"Quick\". Name a review level: Full, Light or Docs."
+    );
+    assert!(f.current().verification.is_none());
+}
+
+#[test]
+fn a_re_check_after_a_passed_full_review_starts_only_its_verifiers() {
+    let mut f = leveled(2);
+    let first = f.verify_at("Full", &FOUR).unwrap().verification.unwrap();
+    assert_eq!(first.rounds[0].verifiers.len(), 4);
+    assert_eq!(f.cycle_level(), ("Full".into(), LevelKind::FullReview));
+    f.pass_round();
+    f.fix("rebased");
+
+    let ticket = f.verify_at(" light ", &["Correctness"]).unwrap();
+
+    let second = ticket.verification.unwrap();
+    assert_eq!((second.cycle, ticket.state.as_str()), (2, "verifying"));
+    assert_eq!(f.cycle_level(), ("Light".into(), LevelKind::Recheck));
+    let focuses: Vec<&str> = second.rounds[0]
+        .verifiers
+        .iter()
+        .map(|run| run.focus.as_str())
+        .collect();
+    assert_eq!(focuses, ["Correctness"]);
+    assert_eq!(f.cycle_inputs(2), 1, "the other three received no message");
+    let earlier = &ticket.previous_cycles[0];
+    assert_eq!(earlier.level.as_ref().unwrap().name, "Full");
+    assert!(earlier.is_full_review() && !second.is_full_review());
+}
+
+#[test]
+fn a_passed_re_check_wakes_the_coordinator_once_and_allows_acceptance() {
+    let mut f = leveled(3);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    f.fix("rebased");
+    f.verify_at("Light", &["Correctness"]).unwrap();
+    f.coordinator_reads();
+    let commit = f.round().commit;
+
+    f.pass_round();
+
+    let ticket = f.current();
+    assert_eq!(ticket.state, "passed");
+    assert_eq!(
+        ticket.verification.unwrap().outcome,
+        VerificationOutcome::Passed
+    );
+    let woke = f.waking(&f.coordinator.id);
+    assert_eq!(woke.len(), 1);
+    let body = &woke[0].body;
+    assert!(
+        body.contains("passed in cycle 2, a Light re-check, 1 of 3 rounds"),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("- Reviewer · Correctness: passed at {commit}")),
+        "{body}"
+    );
+    assert!(body.ends_with("Accept the ticket."), "{body}");
+
+    // A re-check may follow a passed re-check, and a ticket is accepted on one.
+    f.fix("rebased again");
+    assert_eq!(
+        f.verify_at("Light", &["Correctness"])
+            .unwrap()
+            .verification
+            .unwrap()
+            .cycle,
+        3
+    );
+    f.pass_round();
+    f.accept(None).unwrap();
+    assert_eq!(f.current().state, "accepted");
+}
+
+#[test]
+fn the_choices_must_be_exactly_the_levels_verifiers() {
+    let mut f = leveled(2);
+
+    let missing = f.refused_at("Full", &["Tests", "Correctness", "Style"]);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    f.fix("rebased");
+    let outside = f.refused_at("Light", &["Correctness", "Tests"]);
+
+    assert_eq!(
+        missing,
+        "Choose a profile and reason for Reviewer · Regressions, which Full runs"
+    );
+    assert_eq!(
+        outside,
+        "Tests is not part of Light. Choose a model only for Correctness."
+    );
+}
+
+#[test]
+fn a_level_whose_verifier_is_not_configured_is_refused() {
+    let mut f = leveled(2);
+    // Only a hand-edited settings file can hold this: the host refuses to save it.
+    let file = f.host.home.join("settings.json");
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    saved["verification"]["levels"][2]["verifiers"] = json!(["Prose"]);
+    std::fs::write(&file, saved.to_string()).unwrap();
+
+    let refused = f.refused_at("Docs", &["Style"]);
+
+    assert_eq!(
+        refused,
+        "Docs runs \"Prose\", which is not a configured verifier. Choose its verifiers again in Models → Review."
+    );
+}
+
+#[test]
+fn a_setting_saved_before_levels_and_the_default_both_verify_at_full() {
+    let mut f = Fixture::ready(three_verifiers(), 3);
+    let file = f.host.home.join("settings.json");
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    saved["verification"] = json!({"max_rounds":2,"verifiers":[
+        {"role":"reviewer","focus":"Claude","provider":"claude"},
+        {"role":"reviewer","focus":"Codex","provider":"codex"}]});
+    std::fs::write(&file, saved.to_string()).unwrap();
+
+    let cycle = f.verify().unwrap().verification.unwrap();
+
+    let focuses: Vec<&str> = cycle.rounds[0]
+        .verifiers
+        .iter()
+        .map(|run| run.focus.as_str())
+        .collect();
+    assert_eq!(focuses, ["Claude", "Codex"]);
+    assert_eq!(cycle.max_rounds, 2);
+    assert_eq!(f.host.settings().verification.max_cycles, 2);
+
+    // With no saved verification setting at all, Full is the three default verifiers.
+    let mut f = Fixture::ready(three_verifiers(), 3);
+    let file = f.host.home.join("settings.json");
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("verification");
+    std::fs::write(&file, saved.to_string()).unwrap();
+
+    let cycle = f.verify().unwrap().verification.unwrap();
+
+    let runs: Vec<(Role, &str)> = cycle.rounds[0]
+        .verifiers
+        .iter()
+        .map(|run| (run.role, run.focus.as_str()))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (Role::Tester, "Tests"),
+            (Role::Reviewer, "Correctness"),
+            (Role::Reviewer, "Regressions"),
+        ]
+    );
+    assert_eq!(cycle.max_rounds, 3);
+    let correctness = f.round_input(&f.verifier("Correctness"));
+    assert!(
+        correctness.contains("Instruction: Correctness against the ticket's acceptance criteria."),
+        "{correctness}"
+    );
+}
+
+#[test]
+fn a_re_check_cannot_be_the_first_review_or_follow_a_blocked_one() {
+    let mut f = leveled(1);
+
+    let first = f.refused_at("Light", &["Correctness"]);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.fail_one("Correctness");
+    assert_eq!(f.current().state, "blocked");
+    f.fix("fixed");
+    let after_blocked = f.refused_at("Light", &["Correctness"]);
+
+    assert_eq!(
+        first,
+        "Light is a re-check, and this ticket has not passed a review yet. Start with a full review: Full or Docs."
+    );
+    assert_eq!(
+        after_blocked,
+        "Light is a re-check, and this ticket's last review ended blocked. Run a full review (Full or Docs), accept with a waiver, close the ticket or ask the human."
+    );
+}
+
+#[test]
+fn after_a_blocked_re_check_only_a_full_review_starts() {
+    let mut f = leveled(1);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    f.fix("rebased");
+    f.verify_at("Light", &["Correctness"]).unwrap();
+    f.coordinator_reads();
+
+    f.fail_one("Correctness");
+
+    let body = f.waking(&f.coordinator.id)[0].body.clone();
+    assert!(
+        body.contains("is blocked after cycle 2, a Light re-check, 1 of 1 rounds"),
+        "{body}"
+    );
+    for offered in [
+        "send the implementer fixes and call verify_ticket again with a full-review level, not a re-check",
+        "waived",
+        "close the ticket",
+        "ask the human",
+    ] {
+        assert!(body.contains(offered), "{offered}: {body}");
+    }
+    f.fix("fixed");
+    let refused = f.refused_at("Light", &["Correctness"]);
+    assert!(refused.contains("last review ended blocked"), "{refused}");
+    let third = f.verify_at("Full", &FOUR).unwrap().verification.unwrap();
+    assert_eq!(third.cycle, 3);
+    assert!(third.is_full_review());
+}
+
+#[test]
+fn a_pass_recorded_before_levels_allows_a_re_check() {
+    let mut f = leveled(2);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    let db = rusqlite::Connection::open(f.host.home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE tickets SET data=json_remove(data,'$.verification.level') WHERE id=?1",
+        [&f.ticket.id],
+    )
+    .unwrap();
+    assert_eq!(f.current().verification.unwrap().level, None);
+    f.fix("rebased");
+
+    let ticket = f.verify_at("Light", &["Correctness"]).unwrap();
+
+    assert_eq!(ticket.verification.unwrap().cycle, 2);
+    assert!(ticket.previous_cycles[0].is_full_review());
+}
+
+#[test]
+fn a_finished_ticket_that_was_never_verified_starts_with_a_full_review() {
+    let mut f = leveled(2);
+    let db = rusqlite::Connection::open(f.host.home.join("workspace.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE tickets SET data=json_set(data,'$.state','passed') WHERE id=?1",
+        [&f.ticket.id],
+    )
+    .unwrap();
+
+    let refused = f.refused_at("Light", &["Correctness"]);
+    let first = f.verify_at("Full", &FOUR).unwrap().verification.unwrap();
+
+    assert!(refused.contains("has not passed a review yet"), "{refused}");
+    assert_eq!(first.cycle, 1);
+}
+
+#[test]
+fn a_level_re_marked_after_it_ran_keeps_its_record_and_then_counts_as_a_full_review() {
+    let mut f = leveled(1);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    f.fix("rebased");
+    f.verify_at("Light", &["Correctness"]).unwrap();
+    f.fail_one("Correctness");
+
+    f.change_settings(|settings| settings.levels[1].kind = LevelKind::FullReview);
+
+    assert_eq!(f.cycle_level(), ("Light".into(), LevelKind::Recheck));
+    f.fix("fixed");
+    let third = f
+        .verify_at("Light", &["Correctness"])
+        .unwrap()
+        .verification
+        .unwrap();
+    assert_eq!(third.cycle, 3);
+    assert!(third.is_full_review());
+    // Cycles 1 and 3 are the two full reviews the cap allows.
+    f.pass_round();
+    f.fix("again");
+    let capped = f.refused_at("Full", &FOUR);
+    assert!(capped.contains("has used its 2 full reviews"), "{capped}");
+}
+
+/// A full review that ended blocked with F1 open from the Regressions reviewer, and the ticket
+/// ready again.
+fn open_regression() -> Fixture {
+    let mut f = leveled(1);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.fail_one("Regressions");
+    assert_eq!(
+        (f.entry("F1").status, f.entry("F1").focus.as_str()),
+        (EntryStatus::Open, "Regressions")
+    );
+    f.fix("fixed");
+    f
+}
+
+#[test]
+fn a_level_cannot_leave_out_a_verifier_with_an_open_finding() {
+    let mut f = open_regression();
+
+    let refused = f.refused_at("Docs", &["Style"]);
+    f.verify_at("Full", &FOUR).unwrap();
+
+    assert_eq!(
+        refused,
+        "Regressions has the open finding F1, and Docs does not run Regressions. Use a level that runs it, or settle F1 with triage_findings."
+    );
+    let input = f.round_input(&f.verifier("Regressions"));
+    assert!(
+        input.contains("Your open findings") && input.contains("- F1 · src/calls.rs:42"),
+        "{input}"
+    );
+}
+
+#[test]
+fn an_overruled_finding_does_not_hold_a_level_back() {
+    let mut f = open_regression();
+
+    f.triage(json!([decision("F1", "wont_fix", "Not a regression")]))
+        .unwrap();
+
+    f.verify_at("Docs", &["Style"]).unwrap();
+    assert_eq!(f.cycle_level(), ("Docs".into(), LevelKind::FullReview));
+}
+
+#[test]
+fn an_open_finding_of_a_removed_verifier_awaits_triage_after_the_next_cycle() {
+    let mut f = open_regression();
+    f.change_settings(|settings| {
+        settings.verifiers.retain(|v| v.focus != "Regressions");
+        settings.levels[0].verifiers.retain(|f| f != "Regressions");
+    });
+
+    f.verify_at("Docs", &["Style"]).unwrap();
+    assert_eq!(f.entry("F1").status, EntryStatus::Open);
+    f.pass_round();
+
+    assert_eq!(f.entry("F1").status, EntryStatus::Untriaged);
+    assert_eq!(f.current().state, "passed");
+}
+
+/// Under a cap of two full reviews: cycle 1 a passed full review, cycles 2 and 3 passed
+/// re-checks, and the ticket ready again.
+fn two_re_checks() -> Fixture {
+    let mut f = leveled(2);
+    f.verify_at("Full", &FOUR).unwrap();
+    for content in ["rebased", "rebased again"] {
+        f.pass_round();
+        f.fix(content);
+        f.verify_at("Light", &["Correctness"]).unwrap();
+    }
+    f.pass_round();
+    f.fix("once more");
+    assert_eq!(f.current().verification.unwrap().cycle, 3);
+    f
+}
+
+#[test]
+fn re_checks_are_not_counted_against_the_cap() {
+    let mut f = two_re_checks();
+    let fourth = f.verify_at("Light", &["Correctness"]).unwrap();
+    assert_eq!(fourth.verification.unwrap().cycle, 4);
+
+    // Naming a full review instead starts cycle 4 as the ticket's second full review.
+    let mut f = two_re_checks();
+    let fourth = f.verify_at("Full", &FOUR).unwrap().verification.unwrap();
+    assert_eq!(fourth.cycle, 4);
+    f.coordinator_reads();
+    f.pass_round();
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    assert!(
+        body.contains("passed in cycle 4, full review 2 of 2 (Full), 1 of 2 rounds"),
+        "{body}"
+    );
+}
+
+#[test]
+fn at_the_cap_a_re_check_follows_a_pass_and_nothing_follows_a_blocked_re_check() {
+    let mut f = leveled(1);
+    f.verify_at("Full", &FOUR).unwrap();
+    f.fail_one("Correctness");
+    f.fix("fixed");
+    f.verify_at("Full", &FOUR).unwrap();
+    f.pass_round();
+    f.fix("rebased");
+
+    // Both full reviews are used and the second passed: the re-check still starts.
+    let third = f.verify_at("Light", &["Correctness"]).unwrap();
+    assert_eq!(third.verification.unwrap().cycle, 3);
+    f.coordinator_reads();
+    f.fail_one("Correctness");
+
+    let body = f.waking(&f.coordinator.id)[0].body.clone();
+    assert!(!body.contains("verify_ticket"), "{body}");
+    f.fix("fixed again");
+    let full = f.refused_at("Full", &FOUR);
+    let light = f.refused_at("Light", &["Correctness"]);
+    assert!(full.contains("has used its 2 full reviews"), "{full}");
+    assert!(light.contains("last review ended blocked"), "{light}");
+}
+
+#[test]
+fn a_running_cycle_keeps_its_verifiers_when_its_level_is_edited() {
+    let mut f = leveled(2);
+    // Full runs two of the four verifiers.
+    f.change_settings(|settings| {
+        settings.levels[0].verifiers = vec!["Tests".into(), "Correctness".into()]
+    });
+    f.verify_at("Full", &["Tests", "Correctness"]).unwrap();
+    f.fail_one("Correctness");
+
+    // The human unticks Correctness in Full before the implementer is ready again.
+    f.change_settings(|settings| settings.levels[0].verifiers = vec!["Tests".into()]);
+    f.fix("fixed");
+
+    let round = f.round();
+    let focuses: Vec<&str> = round.verifiers.iter().map(|v| v.focus.as_str()).collect();
+    assert_eq!((round.round, focuses), (2, vec!["Correctness"]));
+    assert_eq!(
+        f.cycle_inputs(1),
+        3,
+        "two inputs in round 1 and one in round 2; Regressions and Style received none"
+    );
 }
