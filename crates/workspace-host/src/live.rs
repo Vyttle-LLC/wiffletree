@@ -445,7 +445,7 @@ impl Host {
     }
     /// HEAD is the verified commit, or has the same patch id against the repository's base, as
     /// after a squash or a clean rebase.
-    fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
+    pub(crate) fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
         let head = verification::head(ticket)?;
         if head == verified {
             return Ok(());

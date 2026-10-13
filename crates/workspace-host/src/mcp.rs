@@ -105,6 +105,12 @@ pub fn tools() -> Value {
             vec!["ticket_id"]
         ),
         tool(
+            "publish_ticket",
+            "Coordinator or the ticket's implementer: push the ticket's branch to its repository's origin on GitHub and, when the ticket has no open pull request, open one into the repository's base branch with title and body, which are then required. When its pull request is open, this only pushes the new commits; leave out title and body. The workspace runs the push and opens the pull request itself; you never push or open one from your shell. It refuses unless the ticket's review has ended and the worktree is on the ticket's branch at the reviewed commit or one with the same changes. It runs without asking when the review passed and the human allowed the repository's owner, as publishes_without_asking in workspace_context shows; otherwise each step waits for the human's approval in their inbox, as does any publish after a review that ended blocked and any new pull request after an earlier one was closed or merged. Returns at once with the steps being run or the step that waits and why; the result arrives later as a message from Wiffletree, so finish your turn.",
+            json!({"ticket_id":string,"title":string,"body":string}),
+            vec!["ticket_id"]
+        ),
+        tool(
             "close_ticket",
             "Coordinator: close a ticket that needs no more work, such as a finished review, once its findings are recorded. Archives its agents and removes its worktree; conversations and branch are kept. Refuses while the worktree has uncommitted or untracked files or an agent has not reported; an agent that reported and is still finishing its turn delays only the removal.",
             json!({"ticket_id":string}),

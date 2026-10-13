@@ -774,6 +774,12 @@ impl PublishStep {
         }
     }
 }
+impl PublishRequest {
+    /// Whether this request opens a pull request after its push.
+    pub fn opens_pull_request(&self) -> bool {
+        self.title.is_some()
+    }
+}
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
     pub fn is_open(&self) -> bool {
@@ -784,6 +790,19 @@ impl Ticket {
         self.verification
             .as_ref()
             .filter(|v| v.outcome == VerificationOutcome::Running)
+    }
+    /// Every finding that is neither fixed nor settled as follow-up or won't-fix.
+    pub fn open_findings(&self) -> Vec<&LedgerEntry> {
+        self.ledger
+            .iter()
+            .filter(|e| e.status != EntryStatus::Fixed && !e.status.is_settled())
+            .collect()
+    }
+    /// The ticket's pull request once it was closed or merged; opening another needs the human.
+    pub fn ended_pull_request(&self) -> Option<&PullRequest> {
+        self.pull_request
+            .as_ref()
+            .filter(|pr| pr.state != PrState::Open)
     }
 }
 /// A ticket branch's GitHub PR, as the PR watcher last read it.
@@ -960,6 +979,58 @@ impl Verification {
     pub fn verified_commit(&self) -> Option<&str> {
         self.current_round().map(|r| r.commit.as_str())
     }
+    /// The verifiers that did not check: they reported they could not verify, or never reported.
+    pub fn unchecked(&self) -> Vec<&str> {
+        self.latest_results()
+            .into_iter()
+            .filter(|run| {
+                matches!(
+                    run.result,
+                    VerifierResult::Blocked | VerifierResult::Pending
+                )
+            })
+            .map(|run| run.focus.as_str())
+            .collect()
+    }
+    /// How the review ended for `commit`, such as "Cycle 2 passed at this commit · Tests,
+    /// Correctness" or "Cycle 2 ended blocked at c81f04d, after 3 of 3 rounds · Tests passed,
+    /// Correctness failed".
+    pub fn review_line(&self, commit: &str) -> String {
+        let verified = self.verified_commit().unwrap_or_default();
+        let results = self.latest_results();
+        match self.outcome {
+            VerificationOutcome::Passed => {
+                let at = if verified == commit {
+                    "at this commit".to_owned()
+                } else {
+                    format!(
+                        "at {}, which has the same changes as this commit",
+                        short_sha(verified)
+                    )
+                };
+                let foci: Vec<&str> = results.iter().map(|run| run.focus.as_str()).collect();
+                format!("Cycle {} passed {at} · {}", self.cycle, foci.join(", "))
+            }
+            _ => {
+                let results: Vec<String> = results
+                    .iter()
+                    .map(|run| match run.result {
+                        VerifierResult::Blocked => format!("{} could not check", run.focus),
+                        VerifierResult::Pending => format!("{} never reported", run.focus),
+                        result => format!("{} {}", run.focus, result.label()),
+                    })
+                    .collect();
+                format!(
+                    "Cycle {} ended blocked at {}, after {} of {} rounds · {}",
+                    self.cycle,
+                    short_sha(verified),
+                    self.rounds.len(),
+                    self.max_rounds,
+                    results.join(", ")
+                )
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1016,6 +1087,15 @@ pub enum Severity {
     NonBlocking,
     /// A bug that predates the change under review.
     PreExisting,
+}
+impl Severity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::NonBlocking => "non-blocking",
+            Self::PreExisting => "pre-existing",
+        }
+    }
 }
 /// One verifier finding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,6 +1175,19 @@ pub struct LedgerEntry {
     /// The coordinator's one-line reason for its decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+impl LedgerEntry {
+    /// The finding's id, severity, verifier and location, such as "F4 · blocking · Correctness
+    /// · src/sidebar.rs:412". Its summary follows on the card.
+    pub fn heading(&self) -> String {
+        format!(
+            "{} · {} · {} · {}",
+            self.id,
+            self.finding.severity.label(),
+            self.focus,
+            self.finding.location
+        )
+    }
 }
 /// Why a leftover worktree may or may not be removed; earlier classes take precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -35,6 +35,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
             "list_schedules",
             "triage_findings",
             "accept_ticket",
+            "publish_ticket",
             "close_ticket",
             "archive_agent",
             "ask_user",
@@ -97,6 +98,50 @@ fn no_agent_tool_requests_cancels_or_runs_a_compaction() {
     // Compacting an agent's context is the human's action, on the Context card only.
     let tools = mcp::tools().to_string().to_lowercase();
     assert!(!tools.contains("compact"), "{tools}");
+}
+
+#[test]
+fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
+    let tools = mcp::tools();
+    let tools = tools.as_array().unwrap();
+    // `close_ticket` and `close_question` close Wiffletree's own records, never a pull request.
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        for verb in [
+            "merge",
+            "approve",
+            "comment",
+            "review",
+            "label",
+            "reopen",
+            "pull_request",
+        ] {
+            assert!(!name.contains(verb), "{name}");
+        }
+    }
+    let publish = tools
+        .iter()
+        .find(|t| t["name"] == "publish_ticket")
+        .unwrap();
+    // No branch, remote or base: each would be a way to aim the push somewhere else.
+    let properties = publish["inputSchema"]["properties"].as_object().unwrap();
+    assert_eq!(
+        properties.keys().collect::<Vec<_>>(),
+        ["body", "ticket_id", "title"]
+    );
+    assert_eq!(
+        publish["inputSchema"]["required"],
+        serde_json::json!(["ticket_id"])
+    );
+    let description = publish["description"].as_str().unwrap();
+    for stated in [
+        "Coordinator or the ticket's implementer",
+        "The workspace runs the push and opens the pull request itself",
+        "waits for the human's approval",
+        "arrives later as a message from Wiffletree",
+    ] {
+        assert!(description.contains(stated), "{stated}");
+    }
 }
 
 #[test]

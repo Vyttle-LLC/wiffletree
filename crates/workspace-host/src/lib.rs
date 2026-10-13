@@ -13,6 +13,7 @@ mod policies;
 mod pr_watch;
 mod progress;
 pub mod provider;
+mod publish;
 mod repositories;
 pub mod runtime;
 pub(crate) mod schedules;
