@@ -1982,12 +1982,6 @@ impl Actor {
         }
         Ok(due)
     }
-    /// Whether a compaction comes before this session's next turn. A session whose turn is
-    /// held anyway is held as usual, not kept waiting for a compaction that cannot start.
-    fn awaits_compaction(&mut self, session: &Session) -> Result<bool> {
-        Ok(self.host.session_runtime(&session.id)?.compaction.is_some()
-            && self.hold_reason(session)?.is_none())
-    }
     /// Runs a session's queued compaction: Claude's compact command on its session, with a
     /// turn's arguments. It is not a turn: it takes no input and leaves the session's status,
     /// its messages' receipts and every turn count alone. One that cannot start has failed.
@@ -2045,7 +2039,8 @@ impl Actor {
             prompt: String::new(),
             attachments: vec![],
             socket: self.socket.clone(),
-            // Registered with no turn, so the workspace's tools refuse it; a compaction calls none.
+            // Never registered in `active`, so the workspace's tools refuse it; a compaction
+            // calls none.
             token: format!("{}{}", new_id(), new_id()),
             helper: self.helper.clone(),
         };
@@ -2119,28 +2114,39 @@ impl Actor {
         if !self.host.live_projects()?.contains(&members[0].project_id) {
             return Ok(());
         }
+        // Each member's hold is asked once: an answer that changed between two questions could
+        // send a member with a compaction on to `start_turn`.
+        let mut holds = vec![];
         for member in members {
             if member.archived
                 || matches!(member.status, Status::Paused | Status::Disconnected)
                 || self.host.held_input(&member.id)? > 0
                 || self.active.contains_key(&member.id)
                 || self.worktree_busy(&ticket.id, member)?
-                || self.awaits_compaction(member)?
             {
                 return Ok(());
             }
+            let hold = self.hold_reason(member)?;
+            // A compaction comes before the member's turn, so the round waits whole. A member
+            // whose turn is held anyway is held below instead of waiting for a compaction that
+            // cannot start either.
+            let compaction = self.host.session_runtime(&member.id)?.compaction;
+            if hold.is_none() && compaction.is_some() {
+                return Ok(());
+            }
+            holds.push(hold);
         }
         let mut inputs = vec![];
-        for member in members {
+        for (member, hold) in members.iter().zip(holds) {
             match self.due_input(&member.id)? {
-                Some(input) => inputs.push((member.clone(), input)),
+                Some(input) => inputs.push((member.clone(), input, hold)),
                 None => return Ok(()),
             }
         }
-        for (member, input) in inputs {
+        for (member, input, hold) in inputs {
             // A held verifier reports blocked and never runs on a substitute; the rest of the
             // round runs, so the round ends and its blocked outcome wakes the coordinator.
-            if let Some(reason) = self.hold_reason(&member)? {
+            if let Some(reason) = hold {
                 if let Err(error) = self.hold_turn(&member, &input, &reason) {
                     eprintln!("Holding {}: {error:#}", member.id);
                 }
@@ -2253,9 +2259,10 @@ impl Actor {
         message: &Message,
         error: &anyhow::Error,
     ) -> Result<()> {
-        // A turn that never launched must not look active to the worktree guard.
+        // A turn that never launched must not look active to the worktree guard. A compaction's
+        // run is not this turn's to close.
         self.host.db.execute(
-            "UPDATE provider_runs SET finished_at=?2,outcome='failed',detail=json_set(detail,'$.result',json(?3)) WHERE session_id=?1 AND finished_at IS NULL",
+            &format!("UPDATE provider_runs SET finished_at=?2,outcome='failed',detail=json_set(detail,'$.result',json(?3)) WHERE session_id=?1 AND finished_at IS NULL AND {IS_TURN_RUN}"),
             params![session.id, now(), json!({"error":format!("{error:#}")}).to_string()],
         )?;
         let mut runtime = self.host.session_runtime(&session.id)?;
@@ -6539,6 +6546,44 @@ mod tests {
         let refused = actor.start_turn(session, input).unwrap_err();
         assert!(refused.to_string().contains("compaction"), "{refused}");
         assert_eq!(queued(&actor, &ticket), 2);
+    }
+
+    #[test]
+    fn a_round_holds_a_verifier_whose_turn_is_held_whether_or_not_it_has_a_compaction() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        let mut runtime = actor.host.session_runtime(&verifiers[1]).unwrap();
+        runtime.compaction = Some(Compaction {
+            instructions: None,
+            requested_at: now(),
+            state: CompactionState::Queued,
+        });
+        actor.host.save_runtime(&runtime).unwrap();
+        // The coordinator chose both verifiers' models; their provider is then disabled.
+        let provider = actor.host.session(&verifiers[0]).unwrap().provider;
+        let other = PROVIDERS.into_iter().find(|p| *p != provider).unwrap();
+        let mut selection = actor.host.model_selection().unwrap();
+        selection.providers.get_mut(&provider).unwrap().enabled = false;
+        for providers in selection.role_providers.values_mut() {
+            *providers = [other].into();
+        }
+        actor.host.set_model_selection(&selection).unwrap();
+
+        actor.admit_rounds().unwrap();
+
+        // Neither waits for a compaction that cannot start: each is blocked and reported once.
+        assert!(actor.active.is_empty() && actor.compacting.is_empty());
+        for verifier in &verifiers {
+            let held = actor.host.session(verifier).unwrap();
+            assert_eq!(held.status, Status::Blocked);
+            assert_eq!(turn_held_reports(&actor.host, &held), 1);
+        }
+        assert_eq!(queued(&actor, &ticket), 2);
+        let request = actor
+            .host
+            .session_runtime(&verifiers[1])
+            .unwrap()
+            .compaction;
+        assert_eq!(request.map(|c| c.state), Some(CompactionState::Queued));
     }
 
     #[test]

@@ -61,7 +61,8 @@ def rpc(method,params):
     return result
 def tool(name,**arguments):return rpc('tools/call',{'name':name,'arguments':arguments})
 def model_usage(sid,spent):
-    # Claude's modelUsage counts the session's whole life, so the double keeps a running total.
+    # Claude's modelUsage counts the session's whole life, a cut-off turn's requests included,
+    # so the double keeps a running total and adds to it as each request is made.
     path=Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/f'{sid}.model-usage';total=json.loads(path.read_text()) if path.exists() else {}
     for model,counts in spent.items():
         kept=total.setdefault(model,{})
@@ -101,6 +102,7 @@ try:
     request_id=str(uuid.uuid4())
     if claude:
         emit({'type':'stream_event','event':{'type':'message_start','message':{'id':request_id,'model':'opus','usage':{'input_tokens':100,'cache_read_input_tokens':20,'cache_creation_input_tokens':5,'output_tokens':0}}}})
+        model_usage(sid,{'claude-opus-5-5':{'inputTokens':100,'cacheReadInputTokens':20,'cacheCreationInputTokens':5}})
         emit({'type':'rate_limit_event','rate_limit_info':{'rateLimitType':'five_hour','status':'allowed','utilization':0.25,'resetsAt':int(time.time())+300}})
     ctx=tool('workspace_context');me=ctx['self'];role=me['role']
     prompts=os.environ.get('WORKSPACE_TEST_PROMPT_DIR')
@@ -199,6 +201,6 @@ try:
         emit({'type':'stream_event','event':{'type':'message_stop'}})
     # A deliberately cumulative Claude result must not replace request-level counters.
     if not claude: counter_path.write_text(json.dumps(previous+1))
-    emit({'type':'result','is_error':False,'usage':{'input_tokens':50000,'output_tokens':50000},'modelUsage':model_usage(sid,{'claude-opus-5-5':{'inputTokens':100,'cacheReadInputTokens':20,'cacheCreationInputTokens':5,'outputTokens':30}})} if claude else {'type':'turn.completed','usage':{'input_tokens':100*(previous+1),'cached_input_tokens':20*(previous+1),'output_tokens':30*(previous+1)}})
+    emit({'type':'result','is_error':False,'usage':{'input_tokens':50000,'output_tokens':50000},'modelUsage':model_usage(sid,{'claude-opus-5-5':{'outputTokens':30}})} if claude else {'type':'turn.completed','usage':{'input_tokens':100*(previous+1),'cached_input_tokens':20*(previous+1),'output_tokens':30*(previous+1)}})
 finally:
     mcp.stdin.close();mcp.wait(timeout=5)

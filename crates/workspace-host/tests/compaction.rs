@@ -266,6 +266,73 @@ impl World {
         runs.filter(|r| !r.compaction).collect()
     }
 
+    /// The stopped store, to change what no client command can.
+    fn host(&self) -> Host {
+        assert!(self.service.is_none(), "stop the service first");
+        Host::open_set_up(self.home.path()).unwrap()
+    }
+
+    /// Stops the service, queues a compaction of the coordinator and a message behind it, and
+    /// runs the store under the headless host until the compaction's provider process is
+    /// recorded. Then the host is killed, as a crash would: its process outlives it. Returns
+    /// that process's group.
+    fn crash_while_compacting(&mut self) -> i32 {
+        self.stop();
+        {
+            let mut host = self.host();
+            host.request_compaction(&self.main.id, Some("WAIT_FOR_GATE"))
+                .unwrap();
+            host.send("waiting", None, &self.main.id, "JUST_REPLY waiting")
+                .unwrap();
+        }
+        let mut headless = std::process::Command::new(env!("CARGO_BIN_EXE_workspace-host"))
+            .arg("--data-dir")
+            .arg(self.home.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut group = None;
+        until("the compaction's provider process", || {
+            group = self
+                .compactions(&self.main.id)
+                .first()
+                .and_then(|c| c.group);
+            group.is_some()
+        });
+        headless.kill().unwrap();
+        headless.wait().unwrap();
+        let group = group.unwrap();
+        assert_eq!(unsafe { libc::killpg(group, 0) }, 0, "it outlived the host");
+        group
+    }
+
+    /// The ledger's requests, their input tokens, and how many of them are compactions'.
+    fn ledger(&self) -> (i64, i64, i64) {
+        let totals =
+            "SELECT COUNT(*),SUM(input),SUM(request_id LIKE 'compact:%') FROM usage_requests";
+        let db = self.db();
+        db.query_row(totals, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+    }
+
+    /// What the fake Claude itself counts for the session's whole life: its input tokens,
+    /// cache reads and writes included.
+    fn claude_input_total(&self, session: &str) -> i64 {
+        let claude_session = self.runtime(session).provider_session_id.unwrap();
+        let totals = format!("{claude_session}.model-usage");
+        let totals = std::fs::read_to_string(self.scratch.path().join(totals)).unwrap();
+        let totals: Value = serde_json::from_str(&totals).unwrap();
+        [
+            "inputTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+        ]
+        .iter()
+        .map(|count| totals["claude-opus-5-5"][count].as_i64().unwrap())
+        .sum()
+    }
+
     /// Lets the scheduler pass several times; every request is followed by a pass.
     fn several_passes(&self) {
         for _ in 0..10 {
@@ -610,6 +677,20 @@ fn a_request_outlives_a_failed_turn_and_runs_before_its_retry() {
     assert_eq!(turns.len(), 3);
     assert!(compaction.finished_at.unwrap() <= turns[2].started_at);
     assert_eq!(world.lines().len(), 1);
+
+    // The failed turn reported no totals, though Claude counted its request and the ledger
+    // has it from the stream. The compaction right after it therefore has no baseline and
+    // records nothing, rather than count that turn again: the ledger holds the three turns'
+    // requests once each, short of Claude's own total by that one compaction.
+    const TURN: i64 = 100 + 20 + 5;
+    const COMPACTION: i64 = 1_502 + 811_900;
+    assert_eq!(world.ledger(), (3, 3 * TURN, 0));
+    assert_eq!(world.claude_input_total(&main), 3 * TURN + COMPACTION);
+
+    // The next one follows a turn that finished, and records only its own tokens.
+    world.compacted(None);
+    assert_eq!(world.ledger(), (4, 3 * TURN + COMPACTION, 1));
+    assert_eq!(world.claude_input_total(&main), 3 * TURN + 2 * COMPACTION);
 }
 
 #[test]
@@ -723,6 +804,203 @@ fn a_quit_stops_a_running_compaction_and_the_next_start_delivers_the_waiting_mes
         !last.contains("Interrupted turn") && !last.contains("restarted"),
         "{last}"
     );
+}
+
+#[test]
+fn a_compaction_that_cannot_start_fails_with_its_reason_and_the_next_turn_runs() {
+    let mut world = World::new();
+    let main = world.main.id.clone();
+    world.stop();
+    {
+        // As for an agent whose last turn ran before its directory was recorded.
+        let mut host = world.host();
+        let mut runtime = host.session_runtime(&main).unwrap();
+        runtime.directory = None;
+        host.save_runtime(&runtime).unwrap();
+        host.request_compaction(&main, Some("the plan")).unwrap();
+        host.send("waiting", None, &main, "JUST_REPLY waiting")
+            .unwrap();
+    }
+
+    world.start();
+    world.until_replies(2);
+
+    let outcome = world.outcome().unwrap();
+    assert_eq!(outcome.result, CompactionResult::Failed);
+    let reason = outcome.reason.unwrap();
+    assert!(reason.contains("recorded by its next turn"), "{reason}");
+    assert_eq!(world.compaction(), None);
+    assert_eq!(world.lines(), ["Compaction failed · context unchanged"]);
+    assert!(world.compactions(&main).is_empty(), "no run was started");
+    assert_eq!(world.receipt("waiting"), Receipt::Completed);
+    assert_eq!(world.turns(&main).len(), 2);
+}
+
+#[test]
+fn a_crash_while_compacting_stops_its_process_and_the_next_turn_takes_the_waiting_message() {
+    let mut world = World::new();
+    let main = world.main.id.clone();
+    let group = world.crash_while_compacting();
+
+    world.start();
+    world.until_replies(2);
+
+    // Startup confirmed the process by its id and start time and stopped it.
+    until("the leftover process to be gone", || unsafe {
+        libc::killpg(group, 0) == -1
+    });
+    let run = world.compactions(&main).remove(0);
+    assert_eq!(run.outcome.as_deref(), Some("interrupted"));
+    assert_eq!(world.compactions(&main).len(), 1, "never run again");
+    let runtime = world.runtime(&main);
+    assert_eq!(runtime.compaction, None);
+    assert_eq!(
+        runtime.last_compaction.map(|o| o.result),
+        Some(CompactionResult::Interrupted)
+    );
+    assert_eq!(runtime.last_error, None);
+    assert_eq!(world.lines(), ["Compaction interrupted"]);
+    assert!(world.snapshot().attention.is_empty());
+    // Nothing was held and nothing needed resuming: the next turn took the message.
+    assert_eq!(world.receipt("waiting"), Receipt::Completed);
+    let prompts = world.prompts();
+    let last = prompts.rsplit("=====").nth(1).unwrap();
+    assert!(last.contains("JUST_REPLY waiting"), "{last}");
+    assert!(!last.contains("Interrupted turn"), "{last}");
+}
+
+#[test]
+fn a_compactions_process_the_start_cannot_confirm_holds_the_agent_until_its_note_is_dismissed() {
+    let mut world = World::new();
+    let main = world.main.id.clone();
+    let group = world.crash_while_compacting();
+    // As when the process id now belongs to a process started at another time.
+    world
+        .db()
+        .execute(
+            "UPDATE provider_runs SET process_started=process_started+1 WHERE process_group=?1",
+            [group],
+        )
+        .unwrap();
+
+    world.start();
+    world.several_passes();
+
+    // No signal, one note, and neither a turn nor a compaction beside the process.
+    assert_eq!(unsafe { libc::killpg(group, 0) }, 0);
+    let notes = world.snapshot().attention;
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].prompt.contains(&group.to_string()), "{notes:?}");
+    assert_eq!(
+        world.outcome().map(|o| o.result),
+        Some(CompactionResult::Interrupted)
+    );
+    assert_eq!(world.status(&main), Status::Blocked);
+    assert_eq!(world.receipt("waiting"), Receipt::Queued);
+    assert_eq!(world.turns(&main).len(), 1);
+    assert_eq!(world.compactions(&main).len(), 1);
+
+    world.request(Command::DismissAttention {
+        id: notes[0].id.clone(),
+    });
+    world.until_replies(2);
+
+    assert_eq!(world.receipt("waiting"), Receipt::Completed);
+    assert_eq!(world.compactions(&main).len(), 1, "never run again");
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+}
+
+/// The project's ticket has a Claude reviewer whose model the coordinator chose; its
+/// assignment is one quick turn. The coordinator itself is paused for good.
+fn ticket_with_a_reviewer(host: &mut Host, project: &Project, main: &Session, scratch: &Path) {
+    let repo = scratch.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
+    let repository = host
+        .attach_repository(&project.id, repo.to_str().unwrap(), "HEAD")
+        .unwrap();
+    let ticket = host
+        .create_ticket(&main.id, &repository.id, "Review", "Check")
+        .unwrap();
+    let model = host.model_selection().unwrap().allowed(Provider::Claude)[0].clone();
+    let profile = json!({"provider":"claude","model":model.model,"effort":model.effort});
+    let assignment = json!({"ticket_id":ticket.id,"role":"reviewer","instruction":"JUST_REPLY start","profile":profile,"reason":"Routine review"});
+    host.agent_tool(&main.id, "assign_ticket", assignment)
+        .unwrap();
+    host.set_status(&main.id, Status::Paused).unwrap();
+}
+
+#[test]
+fn a_disabled_provider_holds_an_agent_with_a_request_and_enabling_it_compacts_then_runs_the_turn() {
+    let mut world = World::prepared(ticket_with_a_reviewer);
+    let main = world.main.id.clone();
+    let sessions = world.snapshot().sessions;
+    let reviewer = sessions.iter().find(|s| s.role == Role::Reviewer).unwrap();
+    let reviewer = reviewer.id.clone();
+    let replies = |world: &World| {
+        let messages = world.messages(&reviewer);
+        let replies = messages.iter().filter(|m| m.id.starts_with("output:"));
+        replies.count()
+    };
+    until("the reviewer's first turn", || replies(&world) == 1);
+
+    // Claude is disabled in Models while the reviewer has a request and a message waiting.
+    world.stop();
+    let enabled = {
+        let mut host = world.host();
+        let enabled = host.model_selection().unwrap();
+        let mut disabled = enabled.clone();
+        disabled
+            .providers
+            .get_mut(&Provider::Claude)
+            .unwrap()
+            .enabled = false;
+        for providers in disabled.role_providers.values_mut() {
+            *providers = [Provider::Codex].into();
+        }
+        host.set_model_selection(&disabled).unwrap();
+        host.request_compaction(&reviewer, None).unwrap();
+        host.send("next", Some(&main), &reviewer, "JUST_REPLY next")
+            .unwrap();
+        enabled
+    };
+    world.start();
+    world.several_passes();
+
+    // Held as without a request: blocked with the reason, its parent told once, nothing run.
+    assert_eq!(world.status(&reviewer), Status::Blocked);
+    let held = world.runtime(&reviewer);
+    assert!(held.last_error.unwrap().starts_with("Claude is disabled"));
+    assert_eq!(
+        held.compaction.map(|c| c.state),
+        Some(CompactionState::Queued)
+    );
+    assert!(world.compactions(&reviewer).is_empty());
+    assert_eq!(world.turns(&reviewer).len(), 1);
+    let told = world.messages(&main);
+    let told = told.iter().filter(|m| m.id.contains(":turn-held:"));
+    assert_eq!(told.count(), 1);
+
+    // Enabled again, the compaction runs first and the turn then takes the message.
+    world.stop();
+    {
+        let mut host = world.host();
+        let mut selection = host.model_selection().unwrap();
+        selection.providers = enabled.providers;
+        selection.role_providers = enabled.role_providers;
+        host.set_model_selection(&selection).unwrap();
+    }
+    world.start();
+    until("the reviewer's next turn", || replies(&world) == 2);
+
+    let compaction = world.compactions(&reviewer).remove(0);
+    let turns = world.turns(&reviewer);
+    assert_eq!(compaction.outcome.as_deref(), Some("compacted"));
+    assert!(compaction.finished_at.unwrap() <= turns[1].started_at);
+    let next = world.messages(&reviewer);
+    let next = next.iter().find(|m| m.id == "next").unwrap();
+    assert_eq!(next.receipt, Receipt::Completed);
 }
 
 /// The repository's ticket has a verification round of two Claude testers waiting. The second

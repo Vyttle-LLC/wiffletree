@@ -372,7 +372,7 @@ The host SHALL decide a compaction's outcome from the status record Claude strea
 - **AND** no turn and no compaction starts for the agent while that process group runs, and its turn starts once the note is dismissed
 
 ### Requirement: Compaction usage is recorded in the ledger
-The host SHALL record a compaction's tokens in the usage ledger from the result record's `modelUsage`, because that record's `usage` is zero for a compaction. `modelUsage` counts the session's whole life, by model, so the host SHALL keep the latest reading from every Claude result record, a turn's included, and SHALL record for a compaction only what each model's counts rose by since the reading before it: one request per model whose counts rose, attributed to the agent and its coordinator like any other request. `modelUsage` follows Claude's convention, in which `inputTokens` excludes tokens read from or written to the cache, so the recorded input SHALL be their sum, as for a turn's request. When the session has no earlier reading, or a count went down, the host SHALL record no request rather than count the session's earlier turns again. The session totals the record reports, its cost included, SHALL be kept with the run as reported. A compaction with no `modelUsage` SHALL record no request. Usage reports SHALL count these requests in their existing totals and SHALL NOT report them separately. Turns SHALL keep recording usage as before, and a turn's reading SHALL add no request.
+The host SHALL record a compaction's tokens in the usage ledger from the result record's `modelUsage`, because that record's `usage` is zero for a compaction. `modelUsage` counts the session's whole life, by model, so the host SHALL keep the latest reading from every Claude result record, a turn's included, with the run that took it, and SHALL record for a compaction only what each model's counts rose by since the reading before it: one request per model whose counts rose, attributed to the agent and its coordinator like any other request. A reading SHALL be that baseline only when the session's run immediately before the compaction took it. A run that was stopped, interrupted or ended without a result record reports no totals, while the provider still counts its requests and the ledger already holds them, so a compaction that follows such a run SHALL record no request. `modelUsage` follows Claude's convention, in which `inputTokens` excludes tokens read from or written to the cache, so the recorded input SHALL be their sum, as for a turn's request. When the session has no such baseline, or a count went down, the host SHALL record no request rather than count the session's earlier turns again; the compaction's own reading SHALL still become the latest. A reading and the requests recorded from it SHALL be stored together or not at all. The session totals the record reports, its cost included, SHALL be kept with the run as reported. A compaction with no `modelUsage` SHALL record no request. Usage reports SHALL count these requests in their existing totals and SHALL NOT report them separately. Turns SHALL keep recording usage as before, and a turn's reading SHALL add no request.
 
 #### Scenario: Tokens from modelUsage
 - **WHEN** a compaction's result record has zero `usage` and a `modelUsage` entry that exceeds the session's last reading by `inputTokens` 1,502, `cacheReadInputTokens` 811,900, `cacheCreationInputTokens` 0 and `outputTokens` 2,960
@@ -386,6 +386,15 @@ The host SHALL record a compaction's tokens in the usage ledger from the result 
 #### Scenario: No earlier reading
 - **WHEN** a compaction's result record is the first reading the host has for the session
 - **THEN** the ledger gains no request, and the reading is kept for the next one
+
+#### Scenario: The run before it reported no totals
+- **WHEN** an agent's turn is cut off after its requests were recorded, and a compaction runs before its next turn
+- **THEN** the ledger gains no request for that compaction, so the cut-off turn is not counted twice
+- **AND** a compaction that follows the agent's next finished turn records only its own tokens
+
+#### Scenario: The request cannot be stored
+- **WHEN** storing a compaction's request fails
+- **THEN** the session's reading has not moved, and recording the same result record again stores both
 
 #### Scenario: Nothing spent
 - **WHEN** a compaction ends as nothing to compact with `modelUsage` empty or unchanged
