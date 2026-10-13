@@ -45,11 +45,23 @@ The `assign_ticket` MCP tool SHALL require a `profile` (provider, model, effort)
 - **THEN** the existing agent is returned with its original profile
 
 ### Requirement: The coordinator receives the model configuration
-`workspace_context` SHALL give the project coordinator the enabled providers with their allowed models, the providers per role, the configured verifiers and the guide, read fresh on each call. Workers SHALL NOT receive them.
+`workspace_context` SHALL give the project coordinator the enabled providers with their allowed models, the providers per role, the configured verifiers, the review levels, each with its name, its kind, the focuses of its verifiers and its note on when to use it, and the guide, read fresh on each call. Workers SHALL NOT receive them.
 
 #### Scenario: Configuration edit reaches a running coordinator
 - **WHEN** the human adds Codex to the Implementer role while the project coordinator is idle
 - **THEN** its next `workspace_context` call shows Implementer using Claude and Codex, with the new revision
+
+#### Scenario: Review levels reach the coordinator
+- **WHEN** the levels are "Full", a full review that runs Tests, Correctness and Regressions, and "Light", a re-check that runs Correctness, and the project coordinator calls `workspace_context`
+- **THEN** `model_selection.review_levels` lists both in that order, each with its name, kind, verifiers and note
+
+#### Scenario: A level edit reaches a running coordinator
+- **WHEN** the human adds the level "Docs" while the project coordinator is idle
+- **THEN** its next `workspace_context` call lists "Docs"
+
+#### Scenario: Workers do not receive the levels
+- **WHEN** an implementer calls `workspace_context`
+- **THEN** the result has no `model_selection`
 
 ### Requirement: No turn limits
 The host SHALL NOT limit how many turns run at once, in a project or across the host, and SHALL NOT pause a project or stop a turn because of how many turns it has run. A session with due input SHALL start a turn unless it is paused, disconnected, held, already in a turn, waiting for its ticket's worktree, or a verifier whose round has not been admitted. Sessions that cannot start SHALL NOT keep the scheduler from reaching those that can, however many messages they have queued. A stored project that still records a turn limit SHALL load, and the value SHALL be ignored and not reported.

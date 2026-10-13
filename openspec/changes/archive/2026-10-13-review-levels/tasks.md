@@ -39,6 +39,6 @@
 
 ## 6. Documents and checks
 
-- [ ] 6.1 Update `docs/PRD.md` (`:154`, `:157`, `:314`) and `docs/DEVELOPMENT.md` (`:63`, `:65`, `:81`): the Review card's levels and the two kinds, `verify_ticket`'s `level`, the two start rules, the cap counting full reviews only, and the levels in `settings.json` and in the suggested setup.
-- [ ] 6.2 When the change is archived, change the `ticket-verification` spec's Purpose line from "every configured verifier" to "every verifier of the level the coordinator names".
-- [ ] 6.3 Run `cargo fmt --check`, Clippy with warnings as errors, all workspace tests, the deterministic communication checks, `openspec validate review-levels --strict` and `openspec validate --all --strict`.
+- [x] 6.1 Update `docs/PRD.md` (`:154`, `:157`, `:314`) and `docs/DEVELOPMENT.md` (`:63`, `:65`, `:81`): the Review card's levels and the two kinds, `verify_ticket`'s `level`, the two start rules, the cap counting full reviews only, and the levels in `settings.json` and in the suggested setup.
+- [x] 6.2 When the change is archived, change the `ticket-verification` spec's Purpose line from "every configured verifier" to "every verifier of the level the coordinator names".
+- [x] 6.3 Run `cargo fmt --check`, Clippy with warnings as errors, all workspace tests, the deterministic communication checks, `openspec validate review-levels --strict` and `openspec validate --all --strict`.
