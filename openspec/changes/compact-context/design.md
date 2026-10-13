@@ -43,9 +43,9 @@ They are client commands only. `mcp.rs` gains no tool, so no agent or coordinato
 ### 3. One rule for when it runs
 A queued compaction starts when a turn for that session could start, and before any input is taken:
 
-- In `schedule`, before the message pass, each session with a `queued` request is started if it is not in a turn, not paused or disconnected, not archived, its project is live, and `hold_reason` is `None`. A request does not need due input, so an idle agent compacts at the next pass, which the command triggers.
-- The message pass skips every session that has a request, queued or running. That is the whole ordering rule: waiting messages stay `queued` and are delivered by the first turn after the compaction settles.
-- The worktree and verification-round gates do not apply. A compaction runs no tools and writes no files in the worktree.
+- In `schedule`, before `admit_rounds` and the message pass, each session with a `queued` request is started if it is not in a turn, not paused or disconnected, not archived, its project is live, and `hold_reason` is `None`. A request does not need due input, so an idle agent compacts at the next pass, which the command triggers.
+- No turn starts for a session that has a request, queued or running. Turns start in two places, and both check it: the message pass skips the session, and `admit_round` treats a member with a request like a paused member, so the round waits whole and is admitted on the pass after the compaction settles. `start_turn` also refuses such a session, so a path added later cannot run a turn and a compaction on one Claude session at once. Waiting messages, a round's message included, stay `queued` and are delivered by the first turn after the compaction settles.
+- The worktree gate and an unadmitted round do not delay the compaction itself. It runs no tools and writes no files in the worktree.
 
 What follows from the rule, with nothing extra to build:
 
@@ -65,10 +65,12 @@ A request therefore never disappears and never runs while the person cannot see 
 
 - It writes a `provider_runs` row with `messages` `[]` and `detail.kind` `"compaction"`, because `usage_requests.run_id` references a run and an open run already defers worktree removal.
 - It sets the request `running`, keeps the session's stored status as it is, and tracks the process in a new `compacting` map beside `active`. It does not touch `active`, `in_turn`, the human turn count or any message receipt.
-- `check_in_by_turns` counts only rows whose `detail.kind` is absent, so a compaction never counts toward a check-in. `check_in_long_turns` walks `active`, so it never reports one.
+- A compaction's row is not a turn's row. One shared SQL condition, `IS_TURN_RUN` (`detail.kind` absent), goes into every query that means "this session's turns": the count in `check_in_by_turns`; the `MAX(started_at)` in `stopped_by_parent_note` and in `resume_note`, so a compaction that ran after a stopped or interrupted turn does not hide that turn's note from the next prompt; the latest-run lookups in `steps.rs` (`steps` without a run id, and the plan read for progress); and the unreported-run count in `usage.rs`. `check_in_long_turns` walks `active`, so it never reports a compaction.
 - When it finishes, the host settles the run, records the outcome (decision 6), clears the request, writes the conversation line (decision 8) and sets `last_compaction`. It appends no reply and sends the parent nothing.
 
-**Stop and Pause while it runs.** A compaction that has started is not interrupted: a human Pause or Stop, a parent's `stop_agents` and a project Stop still set the session's status, and the compaction finishes. No turn follows, because the session is then paused. Only host shutdown ends the process, by the process group's existing drop.
+**Stop and Pause while it runs.** A compaction that has started is not interrupted: a human Pause or Stop, a parent's `stop_agents` and a project Stop still set the session's status, and the compaction finishes. No turn follows, because the session is then paused.
+
+**Host shutdown.** A provider process is owned by its reader thread and stops only when that thread sees its cancel flag, so `stop` must reach compactions too: it sets the cancel flag of every entry in `compacting`, as it does for `active`, and settles each of those runs as `interrupted` with the same function startup uses (decision 10). `provider::run` already returns on the flag and its `Process` drop ends the process group.
 
 **Status.** The stored status does not change, so an agent that was Blocked is Blocked again afterwards. The desktop draws "Compacting" from `compaction.state` (decision 9). `send_message` to a compacting agent returns the plain `queued` receipt.
 
@@ -117,10 +119,11 @@ All of it matches `design/mockups/current/compact-context.html`.
 - **Notices** from `last_compaction`, each with **Dismiss**: "Nothing to compact" in the subtle color with "Claude said: <reason> The context is unchanged."; "Compaction failed" in red with the reason and "The context is unchanged."; "Compaction interrupted" in red with "Wiffletree stopped while Claude was compacting. The figure above was measured again." A compacted outcome shows no notice; the lower figure is the result. A notice is also cleared by the next request.
 - **Chip** (`context_chip`): after the percentage, "compact queued" or "compacting".
 - **Badge** (`ui.rs::session_badge`): "Compacting" with the working glyph and color while `compaction.state` is `running`. The sidebar is unchanged.
-- **Measuring again:** `sync_context` treats `last_compaction.at` like `last_finished_at`, so every outcome triggers one `/context` measurement. It never measures while a compaction is running.
+- **Measuring again:** every outcome triggers one `/context` measurement, when `last_compaction.at` is newer than what the card shows. Unlike a finished turn's measurement, this one also runs while the agent is working. When a message was waiting, the scheduler starts the next turn in the same pass that settles the compaction, so the desktop first sees the outcome with the agent already working; waiting for that turn to end would leave the chip and card at the old figure, against the approved Done state. The probe is read-only (`--no-session-persistence`, no model call). It is the only measurement made during a turn, the refresh button stays disabled then as today, and it never runs while a compaction is running.
+  *Alternatives:* hold the next turn until the desktop has measured, rejected because the host would wait on a client that may not be open; accept the old figure until the turn ends, rejected because the card would show 81% beside "Context compacted".
 
 ### 10. Restart
-At startup, before `recover_unfinished_turns` marks sessions disconnected, each unfinished run whose `detail.kind` is `"compaction"` is settled as `interrupted`: the request is cleared, `last_compaction` is `interrupted`, the `Compaction interrupted` line is written, and the session's status is left alone. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged", never runs the compaction again by itself, and lets the measurement show the truth. A `queued` request is untouched by a restart.
+A clean shutdown settles running compactions itself (decision 4). After a crash, at startup, before `recover_unfinished_turns` marks sessions disconnected, each unfinished run whose `detail.kind` is `"compaction"` is settled as `interrupted`. If the run's recorded `process_group` still exists, the host first terminates it, with the grace period `Process::stop` uses, so an orphaned `claude` cannot keep rewriting the session while a new turn resumes it. Settling means: the request is cleared, `last_compaction` is `interrupted`, the `Compaction interrupted` line is written, and the session's status is left alone. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged", never runs the compaction again by itself, and lets the measurement show the truth. A `queued` request is untouched by a restart.
 
 ### Decided by Michael on October 13, 2026
 1. **A queued compaction stays queued.** When its turn fails, is stopped or paused, is interrupted by a restart, or the project is stopped, the request stays queued, visible and cancellable, and runs when the agent next runs, before its input (decision 3).
@@ -133,7 +136,8 @@ At startup, before `recover_unfinished_turns` marks sessions disconnected, each 
 | File | Functions / items |
 |---|---|
 | `crates/workspace-core/src/lib.rs` | `Compaction`, `CompactionState`, `CompactionOutcome`, `CompactionResult` (new); `SessionRuntime` (`compaction`, `last_compaction`); `Command` (`CompactContext`, `CancelCompaction`, `DismissCompaction`); `compact` token formatter (moved) |
-| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass, skip in the message pass), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `check_in_by_turns` (count), `recover_unfinished_turns` (interrupted compactions) |
+| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `stop` (cancel and settle compactions), `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (interrupted compactions, leftover process group) |
+| `crates/workspace-host/src/steps.rs`, `usage.rs` | `IS_TURN_RUN` in the latest-run and unreported-run queries |
 | `crates/workspace-host/src/provider.rs` | `Turn` (kind), `input`, `configure`, `run` (`status`, `compact_boundary`, `modelUsage`), `ProviderEvent::Compaction` |
 | `crates/workspace-host/src/usage.rs` | a `modelUsage` entry mapped to the fields `normalize` reads |
 | `crates/workspace-desktop/src/` | `context_view.rs` (`context_card`, `context_chip`, `sync_context`, form state), `ui.rs::session_badge`, `conversation.rs` (compaction line, Pause), `bridge.rs` |
@@ -147,7 +151,7 @@ At startup, before `recover_unfinished_turns` marks sessions disconnected, each 
 - [A request waits a long time on a paused agent] → It is on the chip and the card the whole time and can be cancelled.
 - [The line's figures and the card's can differ] → Accepted; decision 8 says why.
 - [A compaction on a very full session can itself fail for size] → It ends as "failed" with Claude's reason; Claude's automatic compaction is unchanged and still applies.
-- [`last_compaction.at` drives a measurement on every outcome] → One `/context` call with no model request, the same call a finished turn already triggers.
+- [`last_compaction.at` drives a measurement on every outcome, possibly during the next turn] → One `/context` call with no model request and no session write. Measuring during a turn is new, so task 4.3 checks on a real session that it returns a figure and leaves the turn undisturbed.
 
 ## Migration Plan
 

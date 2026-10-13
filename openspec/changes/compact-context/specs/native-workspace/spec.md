@@ -24,7 +24,7 @@ The Context card SHALL show, under its measurement, one row with a short hint an
 - **THEN** the card says its measurement appears after the next turn, and the Compact button is disabled beside "Available after this agent's first turn."
 
 ### Requirement: The Context card follows a compaction
-While an agent has a queued compaction, its Context card SHALL replace the Compact row with "Compacts when this turn ends", or "Compacts when this agent runs again" when the agent is not in a turn, the instructions after "Keeping:" when some were given, and a Cancel button that withdraws the request. While the compaction runs, the card SHALL show "Compacting…", an indeterminate bar and "Messages you send now are delivered when it finishes.", with no Cancel, and the card's refresh button and the conversation header's Pause button SHALL be disabled. After every outcome the card SHALL be measured again once, and SHALL NOT be measured while a compaction runs. An outcome of nothing to compact SHALL show a notice in the subtle color titled "Nothing to compact" with the provider's reason and "The context is unchanged." A failed outcome SHALL show a notice in the failure color titled "Compaction failed" with the reason and "The context is unchanged." An interrupted outcome SHALL show a notice in the failure color titled "Compaction interrupted" saying that Wiffletree stopped while Claude was compacting and that the figure was measured again. Each notice SHALL have a Dismiss button, SHALL survive a restart until dismissed or until the next request, and SHALL leave the Compact row available. A compacted outcome SHALL show no notice.
+While an agent has a queued compaction, its Context card SHALL replace the Compact row with "Compacts when this turn ends", or "Compacts when this agent runs again" when the agent is not in a turn, the instructions after "Keeping:" when some were given, and a Cancel button that withdraws the request. While the compaction runs, the card SHALL show "Compacting…", an indeterminate bar and "Messages you send now are delivered when it finishes.", with no Cancel, and the card's refresh button and the conversation header's Pause button SHALL be disabled. After every outcome the card SHALL be measured again once, also when the agent's next turn has already started, and SHALL NOT be measured while a compaction runs. That measurement SHALL be the only one made during a turn; the refresh button SHALL stay disabled while the agent is working. An outcome of nothing to compact SHALL show a notice in the subtle color titled "Nothing to compact" with the provider's reason and "The context is unchanged." A failed outcome SHALL show a notice in the failure color titled "Compaction failed" with the reason and "The context is unchanged." An interrupted outcome SHALL show a notice in the failure color titled "Compaction interrupted" saying that Wiffletree stopped while Claude was compacting and that the figure was measured again. Each notice SHALL have a Dismiss button, SHALL survive a restart until dismissed or until the next request, and SHALL leave the Compact row available. A compacted outcome SHALL show no notice.
 
 #### Scenario: Queued behind a turn
 - **WHEN** the human confirms "Compact after this turn" with a note
@@ -41,6 +41,10 @@ While an agent has a queued compaction, its Context card SHALL replace the Compa
 #### Scenario: Measured again
 - **WHEN** a compaction from 812k succeeds
 - **THEN** the card measures once more and shows the new figure and percentage without the human pressing refresh
+
+#### Scenario: Measured again with a message waiting
+- **WHEN** a compaction queued behind a turn succeeds while a message waits, so the agent's next turn starts at once
+- **THEN** the card and the chip show the new figure during that turn, and the badge reads "Working"
 
 #### Scenario: Nothing to compact
 - **WHEN** Claude reports "Not enough messages to compact."
