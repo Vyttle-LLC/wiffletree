@@ -51,7 +51,7 @@ fn report(body: &str) -> Option<(&str, &str)> {
         .then(|| (kind, rest.split_once('\n').map_or("", |(_, text)| text)))
 }
 
-fn first_line(text: &str, limit: usize) -> String {
+pub(super) fn first_line(text: &str, limit: usize) -> String {
     let line = text.lines().next().unwrap_or_default();
     if line.chars().count() > limit {
         format!("{}…", line.chars().take(limit).collect::<String>())
@@ -184,6 +184,58 @@ fn notice_message(message: &Message, p: Palette) -> Div {
         )
 }
 
+/// The line a compaction left in the conversation, split into its title, the rest of its first
+/// line and its "Kept:" line, and whether it failed. `None` for any other message: a reply is
+/// written under an `output:` id, never this one.
+fn compaction_line(message: &Message) -> Option<(&str, &str, Option<&str>, bool)> {
+    if !message.id.starts_with(COMPACTION_LINE_PREFIX) {
+        return None;
+    }
+    let (first, kept) = match message.body.split_once('\n') {
+        Some((first, kept)) => (first, Some(kept)),
+        None => (message.body.as_str(), None),
+    };
+    let (title, rest) = match first.find(" · ") {
+        Some(at) => first.split_at(at),
+        None => (first, ""),
+    };
+    Some((title, rest, kept, title != "Context compacted"))
+}
+
+/// One line where a finished turn's summary would be, never a bubble; red when it failed.
+fn compaction_message(line: (&str, &str, Option<&str>, bool), p: Palette) -> Div {
+    let (title, rest, kept, failed) = line;
+    let (color, strong) = if failed {
+        (p.red, p.red)
+    } else {
+        (p.subtle, p.text)
+    };
+    div()
+        .ml(px(38.))
+        .flex()
+        .flex_col()
+        .gap(px(1.))
+        .text_size(px(11.5))
+        .text_color(color)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(icon("fold").size(px(13.)))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(strong)
+                        .child(title.to_owned()),
+                )
+                .child(rest.trim_start().to_owned()),
+        )
+        .when_some(kept, |d, kept| {
+            d.child(div().ml(px(18.)).child(kept.to_owned()))
+        })
+}
+
 /// A message written by an agent: this session's own reply, or another agent's report.
 fn agent_message(message: &Message, sender: Option<&Session>, own: bool, p: Palette) -> Div {
     let (kind, body) = match report(&message.body) {
@@ -272,6 +324,7 @@ impl Workspace {
     fn conversation_header(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let live = self.live_enabled();
         let paused = session.status == Status::Paused;
+        let compacting = self.compacting(&session.id);
         let title = if session.role.is_worker() {
             self.ticket_of(&session.id)
                 .map_or(session.name.clone(), |t| t.title.clone())
@@ -316,7 +369,11 @@ impl Workspace {
                     button("pause-session")
                         .ghost()
                         .icon(icon(if paused { "play" } else { "pause" }))
-                        .tooltip(if paused {
+                        // A compaction that has started cannot be taken back.
+                        .disabled(compacting)
+                        .tooltip(if compacting {
+                            "Compacting · it cannot be interrupted"
+                        } else if paused {
                             "Resume this session"
                         } else {
                             "Pause this session · interrupts an active turn"
@@ -673,6 +730,9 @@ impl Workspace {
             let content = match messages.get(ix) {
                 Some(message) if from_human(message) => human_message(message, p),
                 Some(message) if message.sender.is_none() => notice_message(message, p),
+                Some(message) if compaction_line(message).is_some() => {
+                    compaction_line(message).map_or_else(div, |line| compaction_message(line, p))
+                }
                 Some(message) => {
                     let sender = sessions
                         .iter()
@@ -1150,7 +1210,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, from_human, report, transcript_overlap};
+    use super::{compaction_line, first_line, from_human, report, transcript_overlap};
     use workspace_core::{Message, Receipt};
 
     #[test]
@@ -1201,6 +1261,40 @@ mod tests {
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!from_human(&reply));
+    }
+
+    #[test]
+    fn a_compaction_line_is_its_own_kind_of_entry_never_a_reply() {
+        let own = |id: &str, body: &str| {
+            let mut own = message(id, body);
+            own.sender = Some("s".into());
+            own
+        };
+        let compacted = own(
+            "compaction:r",
+            "Context compacted · 812k → 5k\nKept: The failing test names",
+        );
+        assert_eq!(
+            compaction_line(&compacted),
+            Some((
+                "Context compacted",
+                " · 812k → 5k",
+                Some("Kept: The failing test names"),
+                false
+            ))
+        );
+        let failed = own("compaction:r", "Compaction failed · context unchanged");
+        assert_eq!(
+            compaction_line(&failed),
+            Some(("Compaction failed", " · context unchanged", None, true))
+        );
+        let interrupted = own("compaction:r", "Compaction interrupted");
+        assert_eq!(
+            compaction_line(&interrupted),
+            Some(("Compaction interrupted", "", None, true))
+        );
+        // A reply that merely says the same is still a reply, with its bubble and turn summary.
+        assert_eq!(compaction_line(&own("output:r", "Context compacted")), None);
     }
 
     #[test]

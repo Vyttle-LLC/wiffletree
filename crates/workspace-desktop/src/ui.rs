@@ -333,6 +333,17 @@ fn status_badge(status: Status, label: String, p: Palette) -> Div {
         .child(status_glyph(status, 12., p))
         .child(label)
 }
+/// What a session's badge shows. A running compaction reads as work, though the agent's own
+/// status is unchanged under it; an idle coordinator whose team is working says so.
+fn badge_state(own: Status, shown: Status, compacting: bool) -> (Status, &'static str) {
+    if compacting {
+        (Status::Working, "Compacting")
+    } else if shown == own {
+        (shown, status_label(shown))
+    } else {
+        (shown, "Team working")
+    }
+}
 pub(super) fn ticket_state_color(state: &str, p: Palette) -> Hsla {
     match state {
         "accepted" | "passed" => p.green,
@@ -346,12 +357,11 @@ impl Workspace {
     /// A session's status badge; an idle coordinator whose team is working says so. Questions
     /// it still waits on share the status color: they go to its coordinator, not to you.
     pub(super) fn session_badge(&self, session: &Session, p: Palette) -> Div {
-        let status = self.shown_status(session);
-        let label = if status == session.status {
-            status_label(status)
-        } else {
-            "Team working"
-        };
+        let (status, label) = badge_state(
+            session.status,
+            self.shown_status(session),
+            self.compacting(&session.id),
+        );
         let questions = self
             .snapshot
             .as_ref()
@@ -640,7 +650,32 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::humanize;
+    use super::{badge_state, humanize};
+    use workspace_core::Status;
+
+    #[test]
+    fn a_running_compaction_reads_as_compacting_over_the_agents_own_status() {
+        for own in [Status::Ready, Status::Blocked, Status::Paused] {
+            assert_eq!(badge_state(own, own, true), (Status::Working, "Compacting"));
+        }
+        // Before and after, the badge is the agent's own; a queued request changes nothing.
+        assert_eq!(
+            badge_state(Status::Working, Status::Working, false),
+            (Status::Working, "Working")
+        );
+        assert_eq!(
+            badge_state(Status::Blocked, Status::Blocked, false),
+            (Status::Blocked, "Blocked")
+        );
+        assert_eq!(
+            badge_state(Status::Disconnected, Status::Disconnected, false),
+            (Status::Disconnected, "Interrupted")
+        );
+        assert_eq!(
+            badge_state(Status::Ready, Status::Working, false),
+            (Status::Working, "Team working")
+        );
+    }
 
     #[test]
     fn host_identifiers_read_as_labels() {

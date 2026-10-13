@@ -47,6 +47,40 @@ pub fn normalize(provider: Provider, usage: &Value) -> Option<TokenTotals> {
         partial_requests: 0,
     })
 }
+/// What `current` adds to the earlier reading `prior` of the same cumulative counter, as one
+/// request. `None` when a count went down: the counter is not the one `prior` read.
+fn since(prior: &TokenTotals, current: &TokenTotals) -> Option<TokenTotals> {
+    Some(TokenTotals {
+        input: current.input.checked_sub(prior.input)?,
+        output: current.output.checked_sub(prior.output)?,
+        cache_read: current.cache_read.checked_sub(prior.cache_read)?,
+        cache_write: current.cache_write.checked_sub(prior.cache_write)?,
+        reasoning: current.reasoning.checked_sub(prior.reasoning)?,
+        requests: 1,
+        partial_requests: 0,
+    })
+}
+/// A Claude result record's `modelUsage` as counts by model. It follows Claude's convention
+/// that `inputTokens` excludes cache reads and writes, which `normalize` adds. `None` when
+/// it names no model or any model's counts cannot be read: a reading is whole or it is not
+/// one, since a model left out would later look new and be counted from nothing.
+fn model_totals(model_usage: &Value) -> Option<BTreeMap<String, TokenTotals>> {
+    let models = model_usage
+        .as_object()
+        .filter(|models| !models.is_empty())?;
+    models
+        .iter()
+        .map(|(model, counts)| {
+            let usage = json!({
+                "input_tokens": counts["inputTokens"],
+                "output_tokens": counts["outputTokens"],
+                "cache_read_input_tokens": counts["cacheReadInputTokens"],
+                "cache_creation_input_tokens": counts["cacheCreationInputTokens"],
+            });
+            Some((model.clone(), normalize(Provider::Claude, &usage)?))
+        })
+        .collect()
+}
 fn day_start(zone: Tz, date: NaiveDate) -> Result<i64> {
     let midnight = date
         .and_hms_opt(0, 0, 0)
@@ -112,7 +146,13 @@ impl Host {
             ),
             "Invalid usage ancestry"
         );
-        let tx = self.db.unchecked_transaction()?;
+        // Inside a caller's unit the writes belong to it; otherwise they are a unit of their own.
+        let own_unit = if self.db.is_autocommit() {
+            Some(self.db.unchecked_transaction()?)
+        } else {
+            None
+        };
+        let tx = &self.db;
         let mut complete = complete;
         if provider == Provider::Codex {
             let exists: bool = tx.query_row(
@@ -123,13 +163,13 @@ impl Host {
             if exists {
                 return Ok(());
             }
-            match self.codex_delta(&tx, &session, run, &profile, &counts)? {
+            match self.codex_delta(tx, &session, run, &profile, &counts)? {
                 Some((delta, continuous)) => {
                     counts = delta;
                     complete &= continuous;
                 }
                 None => {
-                    tx.commit()?;
+                    own_unit.map_or(Ok(()), |unit| unit.commit())?;
                     return Ok(());
                 }
             }
@@ -144,7 +184,7 @@ impl Host {
                 session.project_id, owner.id, model.or_else(||profile["profile"]["model"].as_str()).unwrap_or("unreported"),
                 timestamp, counts.input as i64, counts.output as i64, counts.cache_read as i64,
                 counts.cache_write as i64, counts.reasoning as i64, complete, encode(usage)?])?;
-        tx.commit()?;
+        own_unit.map_or(Ok(()), |unit| unit.commit())?;
         Ok(())
     }
     fn codex_delta(
@@ -173,18 +213,7 @@ impl Host {
         }
         tx.execute("INSERT INTO usage_counters VALUES(?1,?2,?3) ON CONFLICT(scope) DO UPDATE SET run_id=excluded.run_id,counts=excluded.counts",params![scope,run,encode(current)?])?;
         if let Some((prior_run, prior)) = previous {
-            let delta = (|| {
-                Some(TokenTotals {
-                    input: current.input.checked_sub(prior.input)?,
-                    output: current.output.checked_sub(prior.output)?,
-                    cache_read: current.cache_read.checked_sub(prior.cache_read)?,
-                    cache_write: current.cache_write.checked_sub(prior.cache_write)?,
-                    reasoning: current.reasoning.checked_sub(prior.reasoning)?,
-                    requests: 1,
-                    partial_requests: 0,
-                })
-            })();
-            let Some(delta) = delta.filter(|c| {
+            let Some(delta) = since(&prior, current).filter(|c| {
                 c.cache_read <= c.input && c.cache_write <= c.input && c.reasoning <= c.output
             }) else {
                 return Ok(None);
@@ -204,6 +233,70 @@ impl Host {
             // An unknown resumed baseline cannot be assigned to this turn's calendar day.
             Ok(fresh.then(|| (current.clone(), true)))
         }
+    }
+    /// Reads the `modelUsage` of a Claude result record. It counts the session's whole life by
+    /// model, so each record is a reading of a counter, kept per session with the run that
+    /// took it. A turn's requests are already in the ledger from its stream events, so a turn
+    /// only moves the reading. A compaction streams none: what it spent is what each model's
+    /// counts rose by since the reading before it, recorded as one request per model.
+    ///
+    /// That reading is a baseline only when the session's run just before this one took it. A
+    /// run that was cut off reports no totals, yet Claude counts its requests, which the
+    /// ledger already has; a compaction after it has no baseline and records nothing, as with
+    /// no reading at all, and so does a model whose count went down. Earlier turns never
+    /// become fresh tokens. The reading and its requests are stored as one unit.
+    pub fn record_model_usage(
+        &mut self,
+        run: &str,
+        model_usage: &Value,
+        timestamp: i64,
+    ) -> Result<()> {
+        let Some(current) = model_totals(model_usage) else {
+            return Ok(());
+        };
+        let (session, turn): (String, bool) = self.db.query_row(
+            &format!("SELECT session_id,{IS_TURN_RUN} FROM provider_runs WHERE id=?1"),
+            [run],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let Some(thread) = self.session_runtime(&session)?.provider_session_id else {
+            return Ok(());
+        };
+        let scope = format!("claude:{thread}");
+        let reading: Option<(String, BTreeMap<String, TokenTotals>)> = self
+            .db
+            .query_row(
+                "SELECT run_id,counts FROM usage_counters WHERE scope=?1",
+                [&scope],
+                |r| Ok((r.get(0)?, decode(r, 1)?)),
+            )
+            .optional()?;
+        let preceding: Option<String> = self.db.query_row("SELECT id FROM provider_runs WHERE session_id=?1 AND rowid<(SELECT rowid FROM provider_runs WHERE id=?2) ORDER BY rowid DESC LIMIT 1",params![session,run],|r|r.get(0)).optional()?;
+        let baseline = reading
+            .filter(|(taken_by, _)| !turn && preceding.as_ref() == Some(taken_by))
+            .map(|(_, counts)| counts);
+        self.atomically(|host| {
+            host.db.execute("INSERT INTO usage_counters VALUES(?1,?2,?3) ON CONFLICT(scope) DO UPDATE SET run_id=excluded.run_id,counts=excluded.counts",params![scope,run,encode(&current)?])?;
+            let Some(baseline) = &baseline else {
+                return Ok(());
+            };
+            for (model, counts) in &current {
+                // A reading names every model the session has used, so one the baseline lacks
+                // starts from nothing.
+                let before = baseline.get(model).cloned().unwrap_or_default();
+                let fresh = since(&before, counts).and_then(|spent| {
+                    let cached = spent.cache_read.checked_add(spent.cache_write)?;
+                    Some((spent.input.checked_sub(cached)?, spent))
+                });
+                let Some((input, spent)) = fresh.filter(|(_, spent)| spent.total() > 0) else {
+                    continue;
+                };
+                let usage = json!({"input_tokens":input,"output_tokens":spent.output,"cache_read_input_tokens":spent.cache_read,"cache_creation_input_tokens":spent.cache_write});
+                let request = format!("compact:{run}:{model}");
+                host.record_usage(run, &request, Some(model), &usage, true, timestamp)?;
+            }
+            Ok(())
+        })
     }
     fn run_provider(&self, run: &str) -> Result<Provider> {
         let (session, detail): (String, Option<String>) = self.db.query_row(
@@ -477,9 +570,10 @@ impl Host {
         }
         let mut coordinators: Vec<_> = coordinators.into_values().collect();
         coordinators.sort_by_key(|c| std::cmp::Reverse(c.own.total() + c.workers.total()));
-        let unreported_runs=self.db.query_row("SELECT COUNT(*) FROM provider_runs r JOIN sessions s ON s.id=r.session_id WHERE r.started_at>=?1 AND r.started_at<=?2
+        // A compaction that found nothing to compact made no request, so it reports none.
+        let unreported_runs=self.db.query_row(&format!("SELECT COUNT(*) FROM provider_runs r JOIN sessions s ON s.id=r.session_id WHERE r.started_at>=?1 AND r.started_at<=?2
             AND (?3 IS NULL OR s.project_id=?3) AND (?4 IS NULL OR COALESCE(CASE WHEN json_valid(r.detail) THEN json_extract(r.detail,'$.profile.provider') END,json_extract(s.data,'$.provider'))=?4)
-            AND NOT EXISTS(SELECT 1 FROM usage_requests u WHERE u.run_id=r.id)",params![start,timestamp,project,provider_tag],|r|r.get(0))?;
+            AND {IS_TURN_RUN} AND NOT EXISTS(SELECT 1 FROM usage_requests u WHERE u.run_id=r.id)"),params![start,timestamp,project,provider_tag],|r|r.get(0))?;
         let mut trends = Vec::new();
         for reading in self
             .quotas()?
@@ -648,6 +742,191 @@ mod tests {
         assert_eq!(report.totals.partial_requests, 1);
         assert_eq!(report.coordinators[0].own.total(), 370);
         assert_eq!(report.unreported_runs, 1);
+    }
+    /// A store whose root session has a Claude session to read `modelUsage` for.
+    fn claude_session() -> (tempfile::TempDir, Host, Session) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let session = root(&mut host, "Compact");
+        let mut runtime = host.session_runtime(&session.id).unwrap();
+        runtime.provider_session_id = Some("claude-session".into());
+        host.save_runtime(&runtime).unwrap();
+        (directory, host, session)
+    }
+    /// The session's next run: a turn, or a compaction.
+    fn next_run(host: &Host, session: &Session, id: &str, compaction: bool) {
+        let kind = compaction.then_some("compaction");
+        host.db.execute("INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES(?1,?2,'[]',?3,?3,'completed',?4)",
+            params![id,session.id,now(),json!({"kind":kind,"profile":{"provider":"claude","model":"fixture"}}).to_string()]).unwrap();
+    }
+    /// Claude's own counts for a session's whole life so far, on one model.
+    fn reading(input: u64, read: u64, written: u64, output: u64) -> Value {
+        json!({"claude-opus-5-5":{"inputTokens":input,"outputTokens":output,"cacheReadInputTokens":read,"cacheCreationInputTokens":written,"costUSD":0.48}})
+    }
+    /// The ledger's compaction requests, as (request, input, cache read, cache write, output).
+    fn compaction_requests(host: &Host) -> Vec<(String, i64, i64, i64, i64)> {
+        host.db
+            .prepare("SELECT request_id,input,cache_read,cache_write,output FROM usage_requests ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+    #[test]
+    fn a_compaction_is_counted_as_what_model_usage_rose_by_never_the_sessions_earlier_turns() {
+        let (_directory, mut host, session) = claude_session();
+        let time = now();
+        // Without an earlier reading the baseline is unknown, so nothing is counted.
+        next_run(&host, &session, "unknown", true);
+        host.record_model_usage("unknown", &reading(6, 55_939, 29_916, 293), time)
+            .unwrap();
+        assert!(compaction_requests(&host).is_empty());
+        // A turn's requests come from its stream events; its result only moves the reading.
+        next_run(&host, &session, "turn", false);
+        host.record_model_usage("turn", &reading(8, 84_484, 30_091, 432), time)
+            .unwrap();
+        assert!(compaction_requests(&host).is_empty());
+
+        // The compaction is what the counts rose by, with cached tokens added to the input.
+        next_run(&host, &session, "compaction", true);
+        let after = reading(8 + 1_502, 84_484 + 811_900, 30_091, 432 + 2_960);
+        host.record_model_usage("compaction", &after, time).unwrap();
+        let own = (813_402, 811_900, 0, 2_960);
+        assert_eq!(
+            compaction_requests(&host),
+            [(
+                "compact:compaction:claude-opus-5-5".into(),
+                own.0,
+                own.1,
+                own.2,
+                own.3
+            )]
+        );
+        // One that spent nothing, or reports no counts at all, records no request.
+        next_run(&host, &session, "nothing", true);
+        host.record_model_usage("nothing", &after, time).unwrap();
+        host.record_model_usage("nothing", &json!({}), time)
+            .unwrap();
+        host.record_model_usage("nothing", &Value::Null, time)
+            .unwrap();
+        // Counts that went down are another counter: not fresh tokens.
+        next_run(&host, &session, "reset", true);
+        host.record_model_usage("reset", &reading(1, 2, 3, 4), time)
+            .unwrap();
+        assert_eq!(compaction_requests(&host).len(), 1);
+
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.totals.requests, 1);
+        assert_eq!(report.totals.input, 813_402);
+        assert_eq!(report.coordinators[0].own.output, 2_960);
+        // A compaction with no request is not an unreported turn.
+        assert_eq!(
+            report.unreported_runs, 1,
+            "only the turn, which streamed none"
+        );
+    }
+    #[test]
+    fn a_reading_is_a_baseline_only_for_the_run_right_after_the_one_that_took_it() {
+        let (_directory, mut host, session) = claude_session();
+        let time = now();
+        next_run(&host, &session, "turn", false);
+        host.record_model_usage("turn", &reading(2, 10_000, 5_000, 300), time)
+            .unwrap();
+        // A turn that was cut off reports no totals, but Claude counted its requests, and the
+        // ledger has them from its stream events.
+        next_run(&host, &session, "cut-off", false);
+        next_run(&host, &session, "compaction", true);
+        let compacted = reading(2 + 2 + 1_502, 10_000 + 15_000 + 811_900, 5_000, 300 + 2_960);
+        host.record_model_usage("compaction", &compacted, time)
+            .unwrap();
+        assert!(
+            compaction_requests(&host).is_empty(),
+            "the cut-off turn is never counted again"
+        );
+
+        // Its own reading is the new one, so the run right after it is counted exactly.
+        next_run(&host, &session, "again", true);
+        let again = reading(
+            2 + 2 + 1_502 + 7,
+            10_000 + 15_000 + 811_900 + 40,
+            5_000,
+            3_260 + 9,
+        );
+        host.record_model_usage("again", &again, time).unwrap();
+        assert_eq!(
+            compaction_requests(&host),
+            [("compact:again:claude-opus-5-5".into(), 47, 40, 0, 9)]
+        );
+        // A record with a model it cannot read is no reading: it moves nothing, and the run
+        // after it has no baseline.
+        next_run(&host, &session, "unreadable", true);
+        let mut unreadable = again.clone();
+        unreadable["claude-haiku-5-5"] = json!({"inputTokens":"many"});
+        host.record_model_usage("unreadable", &unreadable, time)
+            .unwrap();
+        next_run(&host, &session, "after-unreadable", true);
+        host.record_model_usage("after-unreadable", &again, time)
+            .unwrap();
+        assert_eq!(compaction_requests(&host).len(), 1);
+        // A second model the session starts to use is counted from nothing; the first stays.
+        next_run(&host, &session, "other-model", true);
+        let mut both = again.clone();
+        both["claude-haiku-5-5"] = reading(5, 20, 0, 3)["claude-opus-5-5"].clone();
+        host.record_model_usage("other-model", &both, time).unwrap();
+        let requests = compaction_requests(&host);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1],
+            ("compact:other-model:claude-haiku-5-5".into(), 25, 20, 0, 3)
+        );
+    }
+    #[test]
+    fn a_reading_and_its_requests_are_stored_together_or_not_at_all() {
+        let (_directory, mut host, session) = claude_session();
+        let time = now();
+        next_run(&host, &session, "turn", false);
+        host.record_model_usage("turn", &reading(2, 10_000, 5_000, 300), time)
+            .unwrap();
+        next_run(&host, &session, "compaction", true);
+        let compacted = reading(2 + 1_502, 10_000 + 811_900, 5_000, 300 + 2_960);
+        let taken_by = |host: &Host| -> String {
+            host.db
+                .query_row(
+                    "SELECT run_id FROM usage_counters WHERE scope='claude:claude-session'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        host.db
+            .execute_batch("CREATE TRIGGER refuse_request BEFORE INSERT ON usage_requests BEGIN SELECT RAISE(ABORT,'refused'); END")
+            .unwrap();
+
+        let refused = host.record_model_usage("compaction", &compacted, time);
+
+        // The reading did not move without its request, so nothing is lost.
+        assert!(refused.is_err());
+        assert_eq!(taken_by(&host), "turn");
+        assert!(compaction_requests(&host).is_empty());
+        host.db
+            .execute_batch("DROP TRIGGER refuse_request")
+            .unwrap();
+        host.record_model_usage("compaction", &compacted, time)
+            .unwrap();
+        assert_eq!(taken_by(&host), "compaction");
+        assert_eq!(
+            compaction_requests(&host),
+            [(
+                "compact:compaction:claude-opus-5-5".into(),
+                813_402,
+                811_900,
+                0,
+                2_960
+            )]
+        );
     }
     #[test]
     fn codex_resume_subtracts_persisted_counters_and_rolls_back_failed_writes() {

@@ -1,5 +1,6 @@
 //! Event-driven host actor: all SQLite access stays on one thread; provider I/O never blocks it.
-use crate::provider::{ProviderEvent, Turn};
+use crate::compaction::CompactionRecord;
+use crate::provider::{ProviderEvent, Turn, TurnKind};
 use crate::stream::StepUpdate;
 use crate::*;
 use async_channel::{Receiver, Sender};
@@ -100,21 +101,25 @@ const STOPPED_UNEXPECTEDLY: &str =
 /// Marks turns the last host left unfinished as interrupted, after stopping the provider
 /// processes it left running. Projects keep their live state, so queued work and timer fires
 /// run on their own after a restart; only the interrupted sessions wait, Disconnected with
-/// their input held, until the human retries or skips it.
+/// their input held, until the human retries or skips it. An unfinished compaction's process
+/// is dealt with the same way, but it held no input: its request is settled as interrupted and
+/// its session is otherwise left as it was.
 fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
-    type Unfinished = (String, String, Option<i64>, Option<i64>);
+    type Unfinished = (String, String, Option<i64>, Option<i64>, bool);
     let unfinished = host
         .db
-        .prepare(
-            "SELECT id,session_id,process_group,process_started FROM provider_runs WHERE finished_at IS NULL",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .prepare(&format!(
+            "SELECT id,session_id,process_group,process_started,{IS_TURN_RUN} FROM provider_runs WHERE finished_at IS NULL"
+        ))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<rusqlite::Result<Vec<Unfinished>>>()?;
     // Each stop can take the grace period, so the groups are stopped together.
     let leftovers = std::thread::scope(|scope| {
         let stops = unfinished
             .iter()
-            .map(|(_, _, group, started)| {
+            .map(|(_, _, group, started, _)| {
                 scope.spawn(move || {
                     group.map_or(provider::Leftover::Gone, |group| {
                         provider::stop_leftover(group, *started)
@@ -127,19 +132,34 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
             .map(|stop| stop.join().unwrap_or(provider::Leftover::Running))
             .collect::<Vec<_>>()
     });
-    for ((run, session, group, _), leftover) in unfinished.iter().zip(leftovers) {
-        let mut runtime = host.session_runtime(session)?;
-        runtime.last_error = Some(STOPPED_UNEXPECTEDLY.into());
-        host.save_runtime(&runtime)?;
-        host.set_status(session, Status::Disconnected)?;
-        // A restart never silently repeats a turn that may have had side effects: those
-        // sessions stay held for reconciliation, while the rest of a live project carries on.
+    for ((run, session, group, _, turn), leftover) in unfinished.iter().zip(leftovers) {
         let stopped_at = (leftover == provider::Leftover::Stopped).then(now);
         let gone = (leftover != provider::Leftover::Running).then_some(true);
-        host.db.execute(
-            "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4,'$.process_gone',?5) WHERE id=?1",
-            params![run, now(), STOPPED_UNEXPECTEDLY, stopped_at, gone],
-        )?;
+        let error = if *turn {
+            STOPPED_UNEXPECTEDLY
+        } else {
+            "Host stopped unexpectedly during a compaction"
+        };
+        // One unit per run, so a host that dies here finds the run as it was and starts over.
+        host.atomically(|host| {
+            if *turn {
+                // A restart never silently repeats a turn that may have had side effects: those
+                // sessions stay held for reconciliation, while the rest of a live project
+                // carries on.
+                let mut runtime = host.session_runtime(session)?;
+                runtime.last_error = Some(STOPPED_UNEXPECTEDLY.into());
+                host.save_runtime(&runtime)?;
+                host.set_status(session, Status::Disconnected)?;
+            } else {
+                let session = host.session(session)?;
+                host.compaction_ended(&session, run, CompactionResult::Interrupted, None, None)?;
+            }
+            host.db.execute(
+                "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4,'$.process_gone',?5) WHERE id=?1",
+                params![run, now(), error, stopped_at, gone],
+            )?;
+            Ok(())
+        })?;
         if let (provider::Leftover::Running, Some(group)) = (leftover, group) {
             note_leftover_process(host, session, run, *group)?;
         }
@@ -209,7 +229,7 @@ fn resume_note(
 ) -> Result<String> {
     let mut lines = Vec::new();
     let interrupted = host.db.query_row(
-        "SELECT id,started_at,json_extract(detail,'$.process_stopped_at') FROM provider_runs WHERE session_id=?1 AND started_at<?2 AND (outcome='interrupted' OR json_extract(detail,'$.result.error') IN (?3,?4)) AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1 AND started_at<?2)",
+        &format!("SELECT id,started_at,json_extract(detail,'$.process_stopped_at') FROM provider_runs WHERE session_id=?1 AND started_at<?2 AND {IS_TURN_RUN} AND (outcome='interrupted' OR json_extract(detail,'$.result.error') IN (?3,?4)) AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1 AND started_at<?2 AND {IS_TURN_RUN})"),
         params![session, started_at, QUIT_DURING_TURN, STOPPED_UNEXPECTEDLY],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get(2)?)),
     ).optional()?;
@@ -258,7 +278,7 @@ fn resume_note(
 /// finished. The stopped input is not retried: the parent chose to stop it and sends what next.
 fn stopped_by_parent_note(host: &Host, session: &str) -> Result<String> {
     let run = host.db.query_row(
-        "SELECT id,started_at,json_extract(detail,'$.stop_reason') FROM provider_runs WHERE session_id=?1 AND outcome='stopped_by_parent' AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1)",
+        &format!("SELECT id,started_at,json_extract(detail,'$.stop_reason') FROM provider_runs WHERE session_id=?1 AND outcome='stopped_by_parent' AND started_at=(SELECT MAX(started_at) FROM provider_runs WHERE session_id=?1 AND {IS_TURN_RUN})"),
         [session],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
     ).optional()?;
@@ -466,6 +486,16 @@ impl Active {
         }
     }
 }
+/// A compaction's provider process. Beside `active`, never in it: a compaction is not a turn.
+struct Compacting {
+    run: String,
+    /// Set only when the host stops; a pause or a stop lets a compaction finish.
+    cancel: Arc<AtomicBool>,
+    /// What Claude's status record said, once it has: success, or its error.
+    status: Option<std::result::Result<(), String>>,
+    /// The token counts before and after, from the boundary record.
+    tokens: Option<(u64, u64)>,
+}
 struct Permission {
     session: String,
     input: Value,
@@ -487,6 +517,7 @@ struct Actor {
     /// Each session's latest step revision, seeded from the store on first use.
     revisions: HashMap<String, u64>,
     active: HashMap<String, Active>,
+    compacting: HashMap<String, Compacting>,
     permissions: HashMap<String, Permission>,
     socket: PathBuf,
     helper: PathBuf,
@@ -602,6 +633,7 @@ impl Service {
                     progress_dirty: false,
                     revisions: HashMap::new(),
                     active: HashMap::new(),
+                    compacting: HashMap::new(),
                     permissions: HashMap::new(),
                     socket: socket.clone(),
                     helper,
@@ -1025,6 +1057,13 @@ impl Actor {
                 run,
                 event,
             } => {
+                if self.compacting.get(&session).is_some_and(|c| c.run == run) {
+                    let changes_state = matches!(event, ProviderEvent::Finished { .. });
+                    if let Err(e) = self.compaction_event(&session, &run, event) {
+                        eprintln!("Workspace compaction event: {e:#}");
+                    }
+                    return changes_state;
+                }
                 let Some(active) = self.active.get_mut(&session).filter(|a| a.run == run) else {
                     return false;
                 };
@@ -1112,6 +1151,11 @@ impl Actor {
                 )?;
             }
             ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
+            ProviderEvent::ModelUsage(usage) => {
+                self.host.record_model_usage(run, &usage, now())?;
+            }
+            // Only a compaction's run sends these; see `compaction_event`.
+            ProviderEvent::Compaction(_) => {}
             ProviderEvent::Finished {
                 error,
                 usage,
@@ -1249,17 +1293,76 @@ impl Actor {
         }
         Ok(())
     }
-    /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
-    /// Cancels every active turn and waits for each provider thread to report its end, which it
-    /// does once the provider's process group is stopped. A turn that outlasts the wait stays
-    /// unfinished, so the next start stops its process.
+    /// Handles an event of a compaction's run. Its process and its usage are recorded like a
+    /// turn's; it keeps its session id and has no steps and no reply.
+    fn compaction_event(&mut self, id: &str, run: &str, event: ProviderEvent) -> Result<()> {
+        match event {
+            ProviderEvent::Compaction(record) => {
+                let compacting = self.compacting.get_mut(id).context("No compaction")?;
+                match record {
+                    CompactionRecord::Status(status) => compacting.status = Some(status),
+                    CompactionRecord::Boundary { before, after } => {
+                        compacting.tokens = Some((before, after));
+                    }
+                }
+                Ok(())
+            }
+            ProviderEvent::Finished {
+                error,
+                usage,
+                cancelled,
+            } => self.compaction_finished(id, error, usage, cancelled),
+            event @ (ProviderEvent::Spawned { .. }
+            | ProviderEvent::Usage { .. }
+            | ProviderEvent::ModelUsage(_)
+            | ProviderEvent::Quota(_)) => self.provider_event(id, run, event),
+            ProviderEvent::Session(_) | ProviderEvent::Step(_) | ProviderEvent::Reply(_) => Ok(()),
+        }
+    }
+    /// Settles a compaction whose process has ended. Only the host's stopping cancels one, so
+    /// a cancelled end is an interruption; any other outcome is what Claude's status record
+    /// said. It appends no reply and tells the parent nothing.
+    fn compaction_finished(
+        &mut self,
+        id: &str,
+        error: Option<String>,
+        usage: Value,
+        cancelled: bool,
+    ) -> Result<()> {
+        let compacting = self.compacting.remove(id).context("No compaction")?;
+        let session = self.host.session(id)?;
+        let (result, reason) = if cancelled {
+            (CompactionResult::Interrupted, None)
+        } else {
+            compaction::outcome(compacting.status, error)
+        };
+        let detail = json!({"error":reason,"modelUsage":usage["modelUsage"],"total_cost_usd":usage["total_cost_usd"]});
+        // One unit: a host that dies here leaves the run unfinished with its request, which
+        // the next start settles, never a finished run beside a request that still runs. The
+        // provider thread stopped the process group before reporting this end.
+        self.host.atomically(|host| {
+            host.db.execute(
+                "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.process_gone',1) WHERE id=?1",
+                params![compacting.run, now(), tag(&result)?, detail.to_string()],
+            )?;
+            host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
+        })?;
+        if !self.stopping {
+            self.host.settle_pending_worktrees();
+        }
+        Ok(())
+    }
+    /// Cancels every active turn and every compaction, and waits for each provider thread to
+    /// report its end, which it does once the provider's process group is stopped. A run that
+    /// outlasts the wait stays unfinished, so the next start stops its process.
     fn stop(&mut self, events: &Receiver<Event>) {
         self.stopping = true;
-        for active in self.active.values() {
-            active.cancel.store(true, Ordering::Relaxed);
+        let turns = self.active.values().map(|a| &a.cancel);
+        for cancel in turns.chain(self.compacting.values().map(|c| &c.cancel)) {
+            cancel.store(true, Ordering::Relaxed);
         }
         let deadline = Instant::now() + QUIT_WAIT;
-        while !self.active.is_empty() && Instant::now() < deadline {
+        while !(self.active.is_empty() && self.compacting.is_empty()) && Instant::now() < deadline {
             match events.try_recv() {
                 Ok(event @ Event::Provider { .. }) => {
                     self.handle(event);
@@ -1270,6 +1373,7 @@ impl Actor {
             }
         }
     }
+    /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
     fn signal(&mut self, state_changed: bool) {
         if state_changed {
             let _ = self.changed.try_send(());
@@ -1748,7 +1852,7 @@ impl Actor {
             return Ok(());
         };
         let (turns, since): (u32, Option<i64>) = self.host.db.query_row(
-            "WITH last AS (SELECT MAX(created_at) AS at FROM messages WHERE recipient=?1 AND sender=?2) SELECT (SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND started_at>=COALESCE(last.at,0)), last.at FROM last",
+            &format!("WITH last AS (SELECT MAX(created_at) AS at FROM messages WHERE recipient=?1 AND sender=?2) SELECT (SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND started_at>=COALESCE(last.at,0) AND {IS_TURN_RUN}), last.at FROM last"),
             params![session.id, parent],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -1812,6 +1916,13 @@ impl Actor {
             }
             Err(e) => eprintln!("Workspace timers: {e:#}"),
         }
+        // A queued compaction runs before any input is taken.
+        for session in self.due_compactions()? {
+            // One session's compaction must never stop the others from being scheduled.
+            if let Err(error) = self.start_compaction(session) {
+                eprintln!("Workspace compaction: {error:#}");
+            }
+        }
         let in_rounds = self.admit_rounds()?;
         // Quiet messages ride along with the next turn but never start one. Each recipient's
         // oldest due message stands for it, so a long queue cannot hide other sessions.
@@ -1842,10 +1953,98 @@ impl Actor {
                 }
                 continue;
             }
+            // The input stays queued for the first turn after the compaction settles.
+            if runtime.compaction.is_some() {
+                continue;
+            }
             if let Err(error) = self.start_turn(session.clone(), input) {
                 self.start_failed(&session, &message, &error)?;
             }
         }
+        Ok(())
+    }
+    /// Sessions whose queued compaction starts now: whenever a turn of theirs could, except
+    /// that it needs no input, no free worktree and no admitted round.
+    fn due_compactions(&mut self) -> Result<Vec<Session>> {
+        let live = self.host.live_projects()?;
+        let mut due = vec![];
+        for session in self.host.queued_compactions()? {
+            if !self.active.contains_key(&session.id)
+                && !self.compacting.contains_key(&session.id)
+                && !session.archived
+                && !matches!(session.status, Status::Paused | Status::Disconnected)
+                && live.contains(&session.project_id)
+                && self.host.held_input(&session.id)? == 0
+                && self.hold_reason(&session)?.is_none()
+            {
+                due.push(session);
+            }
+        }
+        Ok(due)
+    }
+    /// Runs a session's queued compaction: Claude's compact command on its session, with a
+    /// turn's arguments. It is not a turn: it takes no input and leaves the session's status,
+    /// its messages' receipts and every turn count alone. One that cannot start has failed.
+    fn start_compaction(&mut self, session: Session) -> Result<()> {
+        let mut runtime = self.host.session_runtime(&session.id)?;
+        let Some(request) = runtime.compaction.as_mut() else {
+            return Ok(());
+        };
+        let run = new_id();
+        let ready = (|| -> Result<_> {
+            provider::executable(session.provider)?;
+            let cwd = runtime.directory.clone();
+            let cwd =
+                cwd.context("Where this agent's session runs is recorded by its next turn")?;
+            Ok((self.host.turn_profile(&session)?, PathBuf::from(cwd)))
+        })();
+        let (profile, cwd) = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                let reason = Some(format!("{error:#}"));
+                let failed = CompactionResult::Failed;
+                return self
+                    .host
+                    .compaction_ended(&session, &run, failed, reason, None);
+            }
+        };
+        request.state = CompactionState::Running;
+        let instructions = request.instructions.clone();
+        let detail = json!({"kind":"compaction","profile":profile,"provider_session_id":runtime.provider_session_id,"instructions":instructions});
+        self.host.atomically(|host| {
+            host.db.execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,?4)",
+                params![run, session.id, now(), detail.to_string()],
+            )?;
+            host.save_runtime(&runtime)
+        })?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.compacting.insert(
+            session.id.clone(),
+            Compacting {
+                run: run.clone(),
+                cancel: cancel.clone(),
+                status: None,
+                tokens: None,
+            },
+        );
+        self.state_changed();
+        let turn = Turn {
+            run_id: run,
+            kind: TurnKind::Compaction(instructions),
+            session,
+            profile,
+            provider_session: runtime.provider_session_id,
+            cwd,
+            prompt: String::new(),
+            attachments: vec![],
+            socket: self.socket.clone(),
+            // Never registered in `active`, so the workspace's tools refuse it; a compaction
+            // calls none.
+            token: format!("{}{}", new_id(), new_id()),
+            helper: self.helper.clone(),
+        };
+        self.run_provider(turn, cancel);
         Ok(())
     }
     /// A ticket's worktree has one writer at a time. Readers run together: reviewers, and the
@@ -1912,37 +2111,42 @@ impl Actor {
     }
     /// Starts every member of a round, or none of them.
     fn admit_round(&mut self, ticket: &Ticket, members: &[Session]) -> Result<()> {
-        let held = |id: &str| -> Result<bool> {
-            Ok(self.host.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='held')",
-                [id],
-                |r| r.get(0),
-            )?)
-        };
         if !self.host.live_projects()?.contains(&members[0].project_id) {
             return Ok(());
         }
+        // Each member's hold is asked once: an answer that changed between two questions could
+        // send a member with a compaction on to `start_turn`.
+        let mut holds = vec![];
         for member in members {
             if member.archived
                 || matches!(member.status, Status::Paused | Status::Disconnected)
-                || held(&member.id)?
+                || self.host.held_input(&member.id)? > 0
                 || self.active.contains_key(&member.id)
                 || self.worktree_busy(&ticket.id, member)?
             {
                 return Ok(());
             }
+            let hold = self.hold_reason(member)?;
+            // A compaction comes before the member's turn, so the round waits whole. A member
+            // whose turn is held anyway is held below instead of waiting for a compaction that
+            // cannot start either.
+            let compaction = self.host.session_runtime(&member.id)?.compaction;
+            if hold.is_none() && compaction.is_some() {
+                return Ok(());
+            }
+            holds.push(hold);
         }
         let mut inputs = vec![];
-        for member in members {
+        for (member, hold) in members.iter().zip(holds) {
             match self.due_input(&member.id)? {
-                Some(input) => inputs.push((member.clone(), input)),
+                Some(input) => inputs.push((member.clone(), input, hold)),
                 None => return Ok(()),
             }
         }
-        for (member, input) in inputs {
+        for (member, input, hold) in inputs {
             // A held verifier reports blocked and never runs on a substitute; the rest of the
             // round runs, so the round ends and its blocked outcome wakes the coordinator.
-            if let Some(reason) = self.hold_reason(&member)? {
+            if let Some(reason) = hold {
                 if let Err(error) = self.hold_turn(&member, &input, &reason) {
                     eprintln!("Holding {}: {error:#}", member.id);
                 }
@@ -2055,9 +2259,10 @@ impl Actor {
         message: &Message,
         error: &anyhow::Error,
     ) -> Result<()> {
-        // A turn that never launched must not look active to the worktree guard.
+        // A turn that never launched must not look active to the worktree guard. A compaction's
+        // run is not this turn's to close.
         self.host.db.execute(
-            "UPDATE provider_runs SET finished_at=?2,outcome='failed',detail=json_set(detail,'$.result',json(?3)) WHERE session_id=?1 AND finished_at IS NULL",
+            &format!("UPDATE provider_runs SET finished_at=?2,outcome='failed',detail=json_set(detail,'$.result',json(?3)) WHERE session_id=?1 AND finished_at IS NULL AND {IS_TURN_RUN}"),
             params![session.id, now(), json!({"error":format!("{error:#}")}).to_string()],
         )?;
         let mut runtime = self.host.session_runtime(&session.id)?;
@@ -2170,6 +2375,12 @@ impl Actor {
     }
     fn start_turn(&mut self, session: Session, input: Vec<Message>) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
+        // One Claude session never runs a turn and a compaction at once.
+        ensure!(
+            runtime.compaction.is_none(),
+            "{} has a compaction waiting or running",
+            session.name
+        );
         let profile = self.host.turn_profile(&session)?;
         if runtime.profile.is_none() {
             runtime.selection = Some(Selection {
@@ -2210,6 +2421,7 @@ impl Actor {
         // Nothing fallible may follow: the input is delivered and only Active can settle it.
         let turn = Turn {
             run_id: run.clone(),
+            kind: TurnKind::Prompt,
             session: session.clone(),
             profile,
             provider_session: runtime.provider_session_id,
@@ -2236,8 +2448,13 @@ impl Actor {
         if let Err(e) = self.check_in_by_turns(&session, &run) {
             eprintln!("Workspace check-in: {e:#}");
         }
+        self.run_provider(turn, cancel);
+        Ok(())
+    }
+    /// Runs the provider on its own thread, which sends the host every event and always an end.
+    fn run_provider(&self, turn: Turn, cancel: Arc<AtomicBool>) {
         let sender = self.sender.clone();
-        let id = session.id;
+        let (id, run) = (turn.session.id.clone(), turn.run_id.clone());
         std::thread::spawn(move || {
             let result = provider::run(turn, cancel, |event| {
                 let _ = sender.send_blocking(Event::Provider {
@@ -2258,7 +2475,6 @@ impl Actor {
                 });
             }
         });
-        Ok(())
     }
 }
 
@@ -2323,6 +2539,7 @@ mod tests {
             progress_dirty: false,
             revisions: HashMap::new(),
             active: HashMap::new(),
+            compacting: HashMap::new(),
             permissions: HashMap::new(),
             socket: PathBuf::new(),
             helper: PathBuf::new(),
@@ -5910,6 +6127,533 @@ mod tests {
         let page = crew.actor.steps(&crew.implementer.id, None, 0).unwrap();
         assert_eq!((page.steps.len(), page.omitted_steps), (MAX_RUN_STEPS, 1));
         assert_eq!(crew.plan_steps().len(), 1);
+    }
+
+    /// Gives `session` a compaction that is running, with no provider process behind it, and
+    /// returns its run.
+    fn compacting(actor: &mut Actor, session: &str, instructions: Option<&str>) -> String {
+        let run = new_id();
+        let mut runtime = actor.host.session_runtime(session).unwrap();
+        runtime.compaction = Some(Compaction {
+            instructions: instructions.map(str::to_owned),
+            requested_at: now(),
+            state: CompactionState::Running,
+        });
+        actor.host.save_runtime(&runtime).unwrap();
+        actor
+            .host
+            .db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,'{\"kind\":\"compaction\"}')",
+                params![run, session, now()],
+            )
+            .unwrap();
+        actor.compacting.insert(
+            session.into(),
+            Compacting {
+                run: run.clone(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                status: None,
+                tokens: None,
+            },
+        );
+        run
+    }
+
+    fn compaction_events(actor: &mut Actor, session: &str, run: &str, events: Vec<ProviderEvent>) {
+        for event in events {
+            actor.handle(Event::Provider {
+                session: session.into(),
+                run: run.into(),
+                event,
+            });
+        }
+    }
+
+    fn compaction_finished(cancelled: bool) -> ProviderEvent {
+        ProviderEvent::Finished {
+            error: cancelled.then(|| provider::Cancelled.to_string()),
+            usage: Value::Null,
+            cancelled,
+        }
+    }
+
+    fn compaction_lines(actor: &Actor, session: &str) -> Vec<String> {
+        let messages = actor.host.messages(session, None, 100).unwrap();
+        messages
+            .into_iter()
+            .filter(|m| m.id.starts_with(COMPACTION_LINE_PREFIX))
+            .map(|m| m.body)
+            .collect()
+    }
+
+    /// A compaction run of `session` that started at `started_at` and has ended.
+    fn finished_compaction(actor: &Actor, session: &str, started_at: i64, outcome: &str) {
+        actor
+            .host
+            .db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES (?1,?2,'[]',?3,?3,?4,'{\"kind\":\"compaction\"}')",
+                params![new_id(), session, started_at, outcome],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_compaction_wakes_no_one_and_leaves_a_blocked_agent_blocked() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        report(&mut actor, &child, "blocked", "Which API?");
+        let to_parent = |actor: &Actor| actor.host.messages(&parent, None, 100).unwrap().len();
+        let (told, waiting) = (to_parent(&actor), actor.host.questions_waiting().unwrap());
+        assert_eq!(waiting.len(), 1);
+        let run = compacting(&mut actor, &child, Some("the API question"));
+
+        let figures = CompactionRecord::Boundary {
+            before: 812_000,
+            after: 5_000,
+        };
+        compaction_events(
+            &mut actor,
+            &child,
+            &run,
+            vec![
+                ProviderEvent::Compaction(CompactionRecord::Status(Ok(()))),
+                ProviderEvent::Compaction(figures),
+                compaction_finished(false),
+            ],
+        );
+
+        assert!(actor.compacting.is_empty());
+        let runtime = actor.host.session_runtime(&child).unwrap();
+        assert_eq!(runtime.compaction, None);
+        let outcome = runtime.last_compaction.unwrap();
+        assert_eq!(
+            (outcome.result, outcome.reason),
+            (CompactionResult::Compacted, None)
+        );
+        assert_eq!(
+            compaction_lines(&actor, &child),
+            ["Context compacted · 812k → 5k\nKept: the API question"]
+        );
+        // Not a turn: no reply, nothing to the parent, and the agent is as blocked as before.
+        let own = actor.host.messages(&child, None, 100).unwrap();
+        assert!(!own.iter().any(|m| m.id.starts_with("output:")), "{own:?}");
+        assert_eq!(to_parent(&actor), told);
+        assert_eq!(actor.host.session(&child).unwrap().status, Status::Blocked);
+        assert_eq!(actor.host.questions_waiting().unwrap().len(), 1);
+        assert_eq!(runtime.last_finished_at, None);
+        let outcome: String = actor
+            .host
+            .db
+            .query_row(
+                "SELECT outcome FROM provider_runs WHERE id=?1 AND finished_at IS NOT NULL",
+                [&run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome, "compacted");
+    }
+
+    #[test]
+    fn a_compaction_is_not_a_turn_toward_a_check_in() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        let base = now() + 10_000;
+        run_turns(&mut actor, &child, base, 24);
+        finished_compaction(&actor, &child, base + 24, "compacted");
+        assert!(turn_check_ins(&actor, &parent).is_empty());
+
+        run_turns(&mut actor, &child, base + 25, 1);
+
+        let check_ins = turn_check_ins(&actor, &parent);
+        assert_eq!(check_ins.len(), 1);
+        assert!(
+            check_ins[0].body.contains("has run 25 turns"),
+            "{}",
+            check_ins[0].body
+        );
+    }
+
+    #[test]
+    fn a_long_compaction_raises_no_time_check_in() {
+        let (_home, mut actor, parent, child) = actor_with_child();
+        compacting(&mut actor, &child, None);
+
+        actor.check_in_long_turns(now() + 2 * CHECK_IN_MS);
+
+        let parent = actor.host.session(&parent).unwrap();
+        assert!(check_ins(&actor, &parent).is_empty());
+        assert!(
+            actor
+                .host
+                .open_attention(&parent.project_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(actor.wake_at, None);
+    }
+
+    #[test]
+    fn a_compaction_hides_neither_a_stopped_nor_an_interrupted_turn_from_the_next_prompt() {
+        let (_home, actor, parent, child) = actor_with_child();
+        let before = now() - 10_000;
+        let turn = |session: &str, run: &str, outcome: &str, detail: Value| {
+            actor
+                .host
+                .db
+                .execute(
+                    "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES (?1,?2,'[]',?3,?3,?4,?5)",
+                    params![run, session, before, outcome, detail.to_string()],
+                )
+                .unwrap();
+        };
+        // The parent stopped the child's turn, and a queued compaction ran before the next one.
+        turn(
+            &child,
+            "stopped",
+            "stopped_by_parent",
+            json!({"stop_reason":"Wrong approach"}),
+        );
+        finished_compaction(&actor, &child, before + 1, "compacted");
+        let note = stopped_by_parent_note(&actor.host, &child).unwrap();
+        assert!(
+            note.contains("stopped") && note.contains("Reason: Wrong approach"),
+            "{note}"
+        );
+
+        // A restart cut off the parent's turn; its input was skipped and a compaction ran.
+        turn(&parent, "cut-off", "interrupted", json!({}));
+        finished_compaction(&actor, &parent, before + 1, "compacted");
+        let note = resume_note(&actor.host, &parent, now(), now(), &[]).unwrap();
+        assert!(note.contains("Interrupted turn cut-off"), "{note}");
+    }
+
+    /// An actor whose root session was compacting, as run `run` with `process` recorded as its
+    /// provider, when the last host stopped. The session is blocked and has a message waiting.
+    fn actor_with_leftover_compaction(
+        process: &LeftoverProcess,
+        kept: Option<i64>,
+    ) -> (tempfile::TempDir, Actor, Session, String) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let project = host.create_project("Compact").unwrap();
+        host.set_live(&project.id, true).unwrap();
+        let session = host.sessions().unwrap().remove(0);
+        let (mut actor, _, _) = idle_actor(host);
+        let run = compacting(&mut actor, &session.id, None);
+        actor.compacting.clear();
+        actor
+            .host
+            .db
+            .execute(
+                "UPDATE provider_runs SET process_group=?2,process_started=?3 WHERE id=?1",
+                params![run, process.group(), kept],
+            )
+            .unwrap();
+        actor.host.set_status(&session.id, Status::Blocked).unwrap();
+        actor.host.send("next", None, &session.id, "Next").unwrap();
+        let session = actor.host.session(&session.id).unwrap();
+        (home, actor, session, run)
+    }
+
+    #[test]
+    fn startup_stops_a_compaction_the_last_host_left_running_and_never_runs_it_again() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) =
+            actor_with_leftover_compaction(&process, Some(process.started()));
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert_eq!(process.0.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(process_stopped_at(&actor, &run).is_some());
+        let runtime = actor.host.session_runtime(&session.id).unwrap();
+        assert_eq!(runtime.compaction, None, "never run again");
+        assert_eq!(
+            runtime.last_compaction.map(|o| o.result),
+            Some(CompactionResult::Interrupted)
+        );
+        assert_eq!(
+            compaction_lines(&actor, &session.id),
+            ["Compaction interrupted"]
+        );
+        // The session is as it was: nothing is held, and nothing needs a resume.
+        assert_eq!(runtime.last_error, None);
+        assert_eq!(
+            actor.host.session(&session.id).unwrap().status,
+            Status::Blocked
+        );
+        assert_eq!(actor.host.message("next").unwrap().receipt, Receipt::Queued);
+        let open = actor.host.open_attention(&session.project_id).unwrap();
+        assert!(open.is_empty(), "{open:?}");
+        assert_eq!(actor.hold_reason(&session).unwrap(), None);
+        // The next turn is told of no interrupted turn.
+        let later = now() + 1;
+        let note = resume_note(&actor.host, &session.id, later, later, &[]).unwrap();
+        assert_eq!(note, "");
+    }
+
+    #[test]
+    fn a_compaction_settles_its_run_and_its_request_together() {
+        let (_home, mut actor, _, child) = actor_with_child();
+        let run = compacting(&mut actor, &child, None);
+        let state = |actor: &Actor| -> (bool, Option<CompactionState>) {
+            let finished = actor.host.db.query_row(
+                "SELECT finished_at IS NOT NULL FROM provider_runs WHERE id=?1",
+                [&run],
+                |r| r.get(0),
+            );
+            let runtime = actor.host.session_runtime(&child).unwrap();
+            (finished.unwrap(), runtime.compaction.map(|c| c.state))
+        };
+        // The session's half fails after the run's half was written.
+        actor
+            .host
+            .db
+            .execute_batch(
+                "CREATE TRIGGER refuse_line BEFORE INSERT ON messages WHEN NEW.id LIKE 'compaction:%' BEGIN SELECT RAISE(ABORT,'refused'); END",
+            )
+            .unwrap();
+
+        let success = ProviderEvent::Compaction(CompactionRecord::Status(Ok(())));
+        compaction_events(
+            &mut actor,
+            &child,
+            &run,
+            vec![success, compaction_finished(false)],
+        );
+
+        // Neither half remains: an unfinished run with its request, which a start settles.
+        assert_eq!(state(&actor), (false, Some(CompactionState::Running)));
+        actor
+            .host
+            .db
+            .execute_batch("DROP TRIGGER refuse_line")
+            .unwrap();
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert_eq!(state(&actor), (true, None));
+        assert_eq!(compaction_lines(&actor, &child), ["Compaction interrupted"]);
+    }
+
+    #[test]
+    fn recovering_a_compaction_twice_settles_it_once() {
+        let process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) =
+            actor_with_leftover_compaction(&process, Some(process.started()));
+        // As after a host that died part-way through recovering it: the session is settled
+        // and its line written, and the run is still unfinished.
+        let interrupted = CompactionResult::Interrupted;
+        actor
+            .host
+            .compaction_ended(&session, &run, interrupted, None, None)
+            .unwrap();
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert!(process_stopped_at(&actor, &run).is_some());
+        assert_eq!(
+            compaction_lines(&actor, &session.id),
+            ["Compaction interrupted"]
+        );
+        let runtime = actor.host.session_runtime(&session.id).unwrap();
+        assert_eq!(runtime.compaction, None);
+        assert_eq!(runtime.last_compaction.map(|o| o.result), Some(interrupted));
+    }
+
+    #[test]
+    fn a_compactions_process_startup_cannot_confirm_holds_its_session_like_a_turns() {
+        let mut process = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) = actor_with_leftover_compaction(&process, None);
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert_eq!(process.0.try_wait().unwrap(), None, "never signalled");
+        assert_eq!(process_stopped_at(&actor, &run), None);
+        let runtime = actor.host.session_runtime(&session.id).unwrap();
+        assert_eq!(
+            runtime.last_compaction.map(|o| o.result),
+            Some(CompactionResult::Interrupted)
+        );
+        let notes = actor.host.open_attention(&session.project_id).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0].operation_id, format!("{LEFTOVER_PROCESS}{run}"));
+        let group = process.group().to_string();
+        assert!(notes[0].prompt.contains(&group), "{notes:?}");
+
+        // Neither a turn nor a new compaction starts beside the process.
+        let mut runtime = actor.host.session_runtime(&session.id).unwrap();
+        runtime.provider_session_id = Some("claude-session".into());
+        actor.host.save_runtime(&runtime).unwrap();
+        actor.host.request_compaction(&session.id, None).unwrap();
+        actor.schedule().unwrap();
+        assert!(actor.active.is_empty() && actor.compacting.is_empty());
+        assert!(actor.due_compactions().unwrap().is_empty());
+        let held = actor.host.session_runtime(&session.id).unwrap();
+        assert!(held.last_error.unwrap().contains(&group));
+        assert_eq!(actor.host.message("next").unwrap().receipt, Receipt::Queued);
+
+        actor.host.dismiss_attention(&notes[0].id).unwrap();
+        let due = actor.due_compactions().unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, session.id);
+    }
+
+    #[test]
+    fn a_quit_settles_a_cancelled_compaction_as_interrupted() {
+        let (_home, mut actor, _, child) = actor_with_child();
+        let run = compacting(&mut actor, &child, None);
+        actor.stopping = true;
+
+        compaction_events(&mut actor, &child, &run, vec![compaction_finished(true)]);
+
+        let runtime = actor.host.session_runtime(&child).unwrap();
+        assert_eq!(runtime.compaction, None);
+        assert_eq!(
+            runtime.last_compaction.map(|o| (o.result, o.reason)),
+            Some((CompactionResult::Interrupted, None))
+        );
+        assert_eq!(compaction_lines(&actor, &child), ["Compaction interrupted"]);
+        // Settled with its process stopped, so no later start looks for it.
+        let (outcome, gone): (String, bool) = actor
+            .host
+            .db
+            .query_row(
+                "SELECT outcome,json_extract(detail,'$.process_gone') FROM provider_runs WHERE id=?1",
+                [&run],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((outcome.as_str(), gone), ("interrupted", true));
+    }
+
+    #[test]
+    fn no_turn_starts_for_a_session_with_a_compaction_and_its_round_waits_whole() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        let mut runtime = actor.host.session_runtime(&verifiers[1]).unwrap();
+        runtime.compaction = Some(Compaction {
+            instructions: None,
+            requested_at: now(),
+            state: CompactionState::Queued,
+        });
+        actor.host.save_runtime(&runtime).unwrap();
+
+        actor.admit_rounds().unwrap();
+
+        assert!(actor.active.is_empty(), "no verifier started alone");
+        assert_eq!(queued(&actor, &ticket), 2);
+        // Whatever path asks, the turn itself is refused.
+        let session = actor.host.session(&verifiers[1]).unwrap();
+        let input = actor.due_input(&session.id).unwrap().unwrap();
+        let refused = actor.start_turn(session, input).unwrap_err();
+        assert!(refused.to_string().contains("compaction"), "{refused}");
+        assert_eq!(queued(&actor, &ticket), 2);
+    }
+
+    #[test]
+    fn a_round_holds_a_verifier_whose_turn_is_held_whether_or_not_it_has_a_compaction() {
+        let (_home, mut actor, ticket, verifiers) = waiting_round(2);
+        let mut runtime = actor.host.session_runtime(&verifiers[1]).unwrap();
+        runtime.compaction = Some(Compaction {
+            instructions: None,
+            requested_at: now(),
+            state: CompactionState::Queued,
+        });
+        actor.host.save_runtime(&runtime).unwrap();
+        // The coordinator chose both verifiers' models; their provider is then disabled.
+        let provider = actor.host.session(&verifiers[0]).unwrap().provider;
+        let other = PROVIDERS.into_iter().find(|p| *p != provider).unwrap();
+        let mut selection = actor.host.model_selection().unwrap();
+        selection.providers.get_mut(&provider).unwrap().enabled = false;
+        for providers in selection.role_providers.values_mut() {
+            *providers = [other].into();
+        }
+        actor.host.set_model_selection(&selection).unwrap();
+
+        actor.admit_rounds().unwrap();
+
+        // Neither waits for a compaction that cannot start: each is blocked and reported once.
+        assert!(actor.active.is_empty() && actor.compacting.is_empty());
+        for verifier in &verifiers {
+            let held = actor.host.session(verifier).unwrap();
+            assert_eq!(held.status, Status::Blocked);
+            assert_eq!(turn_held_reports(&actor.host, &held), 1);
+        }
+        assert_eq!(queued(&actor, &ticket), 2);
+        let request = actor
+            .host
+            .session_runtime(&verifiers[1])
+            .unwrap()
+            .compaction;
+        assert_eq!(request.map(|c| c.state), Some(CompactionState::Queued));
+    }
+
+    #[test]
+    fn a_disabled_provider_still_holds_and_reports_an_agent_with_a_queued_compaction() {
+        let (_home, mut actor, first, tester, coordinator) = ticket_in_turn();
+        let host = &mut actor.host;
+        let ticket = host
+            .create_ticket(&coordinator.id, &first.repository_id, "Review", "Do")
+            .unwrap();
+        let reviewer = host
+            .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Review", None)
+            .unwrap();
+        let opus = ModelProfile {
+            provider: Provider::Claude,
+            model: "opus".into(),
+            effort: "medium".into(),
+        };
+        let chooser = Chooser::Coordinator {
+            session_id: coordinator.id.clone(),
+        };
+        host.pin(&reviewer.id, opus, chooser, "Routine review")
+            .unwrap();
+        let mut runtime = host.session_runtime(&reviewer.id).unwrap();
+        runtime.provider_session_id = Some("claude-session".into());
+        host.save_runtime(&runtime).unwrap();
+        host.request_compaction(&reviewer.id, None).unwrap();
+        // Only the reviewer may be scheduled; nothing here may launch a real provider.
+        for id in [&tester.id, &coordinator.id] {
+            host.set_status(id, Status::Paused).unwrap();
+        }
+        let set_claude = |host: &mut Host, enabled: bool| {
+            let mut selection = host.model_selection().unwrap();
+            let claude = selection.providers.get_mut(&Provider::Claude).unwrap();
+            claude.enabled = enabled;
+            for providers in selection.role_providers.values_mut() {
+                *providers = [Provider::Codex].into();
+            }
+            host.set_model_selection(&selection).unwrap();
+        };
+        set_claude(host, false);
+        host.set_live(&reviewer.project_id, true).unwrap();
+
+        for _ in 0..2 {
+            actor.schedule().unwrap();
+        }
+
+        assert!(actor.active.is_empty() && actor.compacting.is_empty());
+        let held = actor.host.session(&reviewer.id).unwrap();
+        assert_eq!(held.status, Status::Blocked);
+        let runtime = actor.host.session_runtime(&reviewer.id).unwrap();
+        assert_eq!(
+            runtime.last_error.as_deref(),
+            Some(
+                "Claude is disabled on this machine. Enable it in Models, or choose another model for this agent."
+            )
+        );
+        assert_eq!(
+            runtime.compaction.map(|c| c.state),
+            Some(CompactionState::Queued)
+        );
+        assert_eq!(
+            turn_held_reports(&actor.host, &reviewer),
+            1,
+            "the parent is told once"
+        );
+        // Enabled again, the compaction is what runs first.
+        set_claude(&mut actor.host, true);
+        let due = actor.due_compactions().unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, reviewer.id);
     }
 
     #[test]

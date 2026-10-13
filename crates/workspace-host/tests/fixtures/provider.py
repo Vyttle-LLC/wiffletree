@@ -60,6 +60,18 @@ def rpc(method,params):
         return json.loads(result['content'][0]['text'])
     return result
 def tool(name,**arguments):return rpc('tools/call',{'name':name,'arguments':arguments})
+def model_usage(sid,spent):
+    # Claude's modelUsage counts the session's whole life, a cut-off turn's requests included,
+    # so the double keeps a running total and adds to it as each request is made.
+    path=Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/f'{sid}.model-usage';total=json.loads(path.read_text()) if path.exists() else {}
+    for model,counts in spent.items():
+        kept=total.setdefault(model,{})
+        for key in ('inputTokens','outputTokens','cacheReadInputTokens','cacheCreationInputTokens'):kept[key]=kept.get(key,0)+counts.get(key,0)
+    path.write_text(json.dumps(total));return total
+def wait_for(gate):
+    # Holds a turn or a compaction until the test creates the gate file.
+    deadline=time.time()+30
+    while not (Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/gate).exists() and time.time()<deadline:time.sleep(0.02)
 def emit(value):print(json.dumps(value),flush=True)
 def pick(ctx,role,provider=None):
     # The first allowed model of the provider, or of the role's first provider.
@@ -69,14 +81,29 @@ def pick(ctx,role,provider=None):
 try:
     rpc('initialize',{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'test','version':'1'}})
     sid=resumed or str(uuid.uuid4())
+    prompt=sys.stdin.read()
+    if claude and (prompt=='/compact' or prompt.startswith('/compact ')):
+        # Claude's compact command, not a turn: a recorded stream chosen by a word in the note.
+        note=prompt[len('/compact '):]
+        if os.environ.get('WORKSPACE_TEST_PROMPT_DIR'):
+            with open(Path(os.environ['WORKSPACE_TEST_PROMPT_DIR'])/'compactions.txt','a') as log:log.write(json.dumps({'input':prompt,'resumed':resumed})+'\n')
+        if 'WAIT_FOR_GATE' in note:wait_for('gate-compact')
+        stream='compact-nothing' if 'NOTHING' in note else 'compact-failed' if 'FAIL' in note else 'compact-success'
+        for line in (Path(__file__).parent/'streams'/f'{stream}.jsonl').read_text().splitlines():
+            record=json.loads(line)
+            if 'NO_STATUS' in note and record.get('subtype')=='status':continue
+            if 'session_id' in record:record['session_id']=sid
+            if record['type']=='result':record['modelUsage']=model_usage(sid,record['modelUsage'])
+            emit(record)
+        sys.exit(0)
     emit({'type':'system','subtype':'init','session_id':sid,'mcp_servers':[{'name':'agent_workspace','status':'connected'}]} if claude else {'type':'thread.started','thread_id':sid})
     counter_path=Path(os.environ['WORKSPACE_TEST_USAGE_DIR']) / sid
     previous=json.loads(counter_path.read_text()) if counter_path.exists() else 0
     request_id=str(uuid.uuid4())
     if claude:
         emit({'type':'stream_event','event':{'type':'message_start','message':{'id':request_id,'model':'opus','usage':{'input_tokens':100,'cache_read_input_tokens':20,'cache_creation_input_tokens':5,'output_tokens':0}}}})
+        model_usage(sid,{'claude-opus-5-5':{'inputTokens':100,'cacheReadInputTokens':20,'cacheCreationInputTokens':5}})
         emit({'type':'rate_limit_event','rate_limit_info':{'rateLimitType':'five_hour','status':'allowed','utilization':0.25,'resetsAt':int(time.time())+300}})
-    prompt=sys.stdin.read()
     ctx=tool('workspace_context');me=ctx['self'];role=me['role']
     prompts=os.environ.get('WORKSPACE_TEST_PROMPT_DIR')
     if prompts:
@@ -96,6 +123,8 @@ try:
         assert tool('set_plan',items=[{'text':f'Step {n}','done':n<=3} for n in range(1,7)])=={'done':3,'total':6}
     # A retried turn finishes, so a test can see the redelivered input run.
     if 'HANG_UNTIL_CANCELLED' in prompt and 'Retry of interrupted turn' not in prompt:time.sleep(30)
+    if 'WAIT_FOR_GATE' in prompt:wait_for('gate-turn')
+    if 'EXIT_WITH_ERROR' in prompt and 'Retry of interrupted turn' not in prompt:sys.exit(3)
     if claude: emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'fixture-ls','content':'result.txt'}]}})
     else: emit({'type':'item.completed','item':{'id':'fixture-ls','type':'command_execution','command':'/bin/zsh -lc ls','aggregated_output':'result.txt\n','exit_code':0,'status':'completed'}})
     if 'JUST_REPLY' in prompt:
@@ -172,6 +201,6 @@ try:
         emit({'type':'stream_event','event':{'type':'message_stop'}})
     # A deliberately cumulative Claude result must not replace request-level counters.
     if not claude: counter_path.write_text(json.dumps(previous+1))
-    emit({'type':'result','is_error':False,'usage':{'input_tokens':50000,'output_tokens':50000}} if claude else {'type':'turn.completed','usage':{'input_tokens':100*(previous+1),'cached_input_tokens':20*(previous+1),'output_tokens':30*(previous+1)}})
+    emit({'type':'result','is_error':False,'usage':{'input_tokens':50000,'output_tokens':50000},'modelUsage':model_usage(sid,{'claude-opus-5-5':{'outputTokens':30}})} if claude else {'type':'turn.completed','usage':{'input_tokens':100*(previous+1),'cached_input_tokens':20*(previous+1),'output_tokens':30*(previous+1)}})
 finally:
     mcp.stdin.close();mcp.wait(timeout=5)

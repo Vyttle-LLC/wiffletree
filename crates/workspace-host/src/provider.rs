@@ -1,5 +1,6 @@
 //! Noninteractive provider turns with the user's YOLO execution policy.
 mod output;
+use crate::compaction::CompactionRecord;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
@@ -34,6 +35,10 @@ pub enum ProviderEvent {
         complete: bool,
     },
     Quota(QuotaReading),
+    /// A Claude result record's `modelUsage`: the session's counts so far, by model.
+    ModelUsage(Value),
+    /// What Claude said about the compaction this run is; a turn's run sends none.
+    Compaction(CompactionRecord),
     Finished {
         error: Option<String>,
         usage: Value,
@@ -42,8 +47,16 @@ pub enum ProviderEvent {
         cancelled: bool,
     },
 }
+/// What a run asks of the provider.
+pub enum TurnKind {
+    /// A turn: `prompt` and the delivered messages' attachments.
+    Prompt,
+    /// Claude's compact command with what to keep, sent bare. Not a turn: `prompt` is unused.
+    Compaction(Option<String>),
+}
 pub struct Turn {
     pub run_id: String,
+    pub kind: TurnKind,
     pub session: Session,
     pub profile: ModelProfile,
     pub provider_session: Option<String>,
@@ -129,8 +142,16 @@ fn codex_images(turn: &Turn) -> impl Iterator<Item = PathBuf> {
         })
 }
 /// What the provider reads on stdin. Claude takes images only as content blocks of a
-/// stream-json user message; otherwise the prompt is plain text.
+/// stream-json user message; otherwise the prompt is plain text. A compaction is the bare
+/// command, which Claude runs only when nothing wraps it.
 fn input(turn: &Turn) -> Result<Vec<u8>> {
+    if let TurnKind::Compaction(instructions) = &turn.kind {
+        let command = match instructions {
+            Some(instructions) => format!("/compact {instructions}"),
+            None => "/compact".into(),
+        };
+        return Ok(command.into_bytes());
+    }
     if turn.session.provider == Provider::Codex || images(turn).next().is_none() {
         return Ok(turn.prompt.clone().into_bytes());
     }
@@ -383,6 +404,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let stdout = process.child.stdout.take().context("No provider stdout")?;
     let output = Output::spawn(stdout)?;
     let _stop_reading = StopReading(output.clone());
+    let compaction = matches!(turn.kind, TurnKind::Compaction(_));
     let mut terminal = false;
     let mut failure = None;
     let mut usage = Value::Null;
@@ -443,7 +465,8 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                 _ => {}
             },
             Provider::Claude => match value["type"].as_str().unwrap_or_default() {
-                "stream_event" => {
+                // A compaction's requests are counted from its result record instead.
+                "stream_event" if !compaction => {
                     if let Some(event) = requests.event(&value) {
                         emit(event);
                     }
@@ -474,7 +497,30 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                         value["mcp_server_errors"]
                     );
                 }
-                "assistant" | "user" => {
+                "system" if compaction && value["subtype"] == "status" => {
+                    if let Some(result) = value["compact_result"].as_str() {
+                        let status = if result == "success" {
+                            Ok(())
+                        } else {
+                            Err(value["compact_error"].as_str().unwrap_or(result).to_owned())
+                        };
+                        emit(ProviderEvent::Compaction(CompactionRecord::Status(status)));
+                    }
+                }
+                "system" if compaction && value["subtype"] == "compact_boundary" => {
+                    let metadata = &value["compact_metadata"];
+                    if let (Some(before), Some(after)) = (
+                        metadata["pre_tokens"].as_u64(),
+                        metadata["post_tokens"].as_u64(),
+                    ) {
+                        emit(ProviderEvent::Compaction(CompactionRecord::Boundary {
+                            before,
+                            after,
+                        }));
+                    }
+                }
+                // A compaction replays the summary as user records; they are not work steps.
+                "assistant" | "user" if !compaction => {
                     claude
                         .event(&value)
                         .into_iter()
@@ -482,11 +528,18 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                 }
                 "result" => {
                     terminal = true;
-                    usage = value["usage"].clone();
-                    if value["is_error"] != true
-                        && let Some(reply) = claude.reply(&value)
-                    {
-                        emit(ProviderEvent::Reply(reply));
+                    emit(ProviderEvent::ModelUsage(value["modelUsage"].clone()));
+                    if compaction {
+                        // The record's `usage` is zero for a compaction. These are Claude's
+                        // totals for the session's whole life, kept as it reported them.
+                        usage = json!({"modelUsage":value["modelUsage"],"total_cost_usd":value["total_cost_usd"]});
+                    } else {
+                        usage = value["usage"].clone();
+                        if value["is_error"] != true
+                            && let Some(reply) = claude.reply(&value)
+                        {
+                            emit(ProviderEvent::Reply(reply));
+                        }
                     }
                     if value["is_error"] == true {
                         failure = Some(
@@ -651,6 +704,7 @@ mod tests {
     fn claude_cannot_open_its_own_worktrees() {
         let turn = Turn {
             run_id: new_id(),
+            kind: TurnKind::Prompt,
             session: Session {
                 id: new_id(),
                 project_id: new_id(),
@@ -686,6 +740,7 @@ mod tests {
     fn turn(provider: Provider, resume: Option<&str>, attachments: Vec<Attachment>) -> Turn {
         Turn {
             run_id: "run".into(),
+            kind: TurnKind::Prompt,
             session: Session {
                 id: "s".into(),
                 project_id: "p".into(),
@@ -787,6 +842,29 @@ mod tests {
                 {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgppbWFnZQ=="}}
             ]}})
         );
+    }
+
+    #[test]
+    fn a_compaction_sends_the_bare_command_with_a_turns_arguments() {
+        let mut compaction = turn(Provider::Claude, Some("session"), vec![]);
+        compaction.kind = TurnKind::Compaction(None);
+        assert_eq!(input(&compaction).unwrap(), b"/compact");
+        compaction.kind = TurnKind::Compaction(Some("the failing test names".into()));
+        assert_eq!(
+            input(&compaction).unwrap(),
+            b"/compact the failing test names"
+        );
+        // Everything but the input is a turn's, so the summary request shares its prefix.
+        let args = arguments(&compaction);
+        assert_eq!(
+            args,
+            arguments(&turn(Provider::Claude, Some("session"), vec![]))
+        );
+        let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
+        assert_eq!(after("--resume"), "session");
+        assert_eq!(after("--model"), "m");
+        assert!(after("--mcp-config").contains("agent_workspace"));
+        assert!(!args.iter().any(|a| a == "--input-format"));
     }
 
     #[test]
