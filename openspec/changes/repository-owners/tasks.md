@@ -63,7 +63,7 @@
 
 ## 10. Docs and checks
 
-- [ ] 10.1 Correct `README.md` lines 51, 81 and 87 as the ticket-publishing "The limit is documented" requirement says. Verify that the README no longer says Wiffletree never pushes or opens pull requests, and still warns that agents can run any command.
-- [ ] 10.2 Update `docs/DEVELOPMENT.md` ("Current limits" and a section on owners and publishing, including the `gh` and Git credential requirements and what is not prevented) and add a short paragraph to `docs/PRD.md`. Verify that the text matches the specs and uses "allowed" and "without asking".
+- [x] 10.1 Correct `README.md` lines 51, 81 and 87 as the ticket-publishing "The limit is documented" requirement says. Verify that the README no longer says Wiffletree never pushes or opens pull requests, and still warns that agents can run any command.
+- [x] 10.2 Update `docs/DEVELOPMENT.md` ("Current limits" and a section on owners and publishing, including the `gh` and Git credential requirements and what is not prevented) and add a short paragraph to `docs/PRD.md`. Verify that the text matches the specs and uses "allowed" and "without asking".
 - [ ] 10.3 Run `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo test --locked --workspace`, `python3 scripts/test_communications.py` and `openspec validate --all --strict`, and paste the output in the report.
 - [ ] 10.4 With the human's go-ahead for that one run, publish a throwaway ticket in a repository the human names: once with its owner not allowed (both cards), once allowed. Report what was pushed and the PR's URL, and leave closing the PR to the human. Verify nothing else was written to GitHub.

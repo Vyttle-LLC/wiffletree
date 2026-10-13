@@ -190,6 +190,32 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
 }
 
 #[test]
+fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
+    let readme = include_str!("../../../README.md");
+    for gone in [
+        "never pushes",
+        "does not push, open pull requests",
+        "Integration is manual",
+    ] {
+        assert!(!readme.contains(gone), "{gone}");
+    }
+    for stated in [
+        "pushes a ticket's branch and opens its pull request only through its own checked operation",
+        "It never approves, merges, closes or comments on a pull request.",
+        "Agents can still run any command on your Mac, including a push",
+        "**Humans own integration.**",
+    ] {
+        assert!(readme.contains(stated), "{stated}");
+    }
+    let notes = include_str!("../../../docs/DEVELOPMENT.md");
+    assert!(notes.contains("an agent's shell can still run `git push` or `gh pr create`"));
+    for text in [readme, notes] {
+        let lower = text.to_lowercase();
+        assert!(!lower.contains("approved owner") && !lower.contains("automatic pr"));
+    }
+}
+
+#[test]
 fn bundled_instructions_describe_the_flat_hierarchy() {
     for role in Role::ALL {
         let skill = provider::skill(role).to_lowercase();

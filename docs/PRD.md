@@ -385,6 +385,8 @@ The branch graph supports commit selection, ref labels, merge commits, and ances
 
 One coordinator owns integration into each feature branch. Integrate worker PRs in dependency order. Run combined tests and a fresh review on the integrated feature head before preparing the final PR.
 
+Publishing is the host's own operation, not an agent's shell command. The human allows GitHub owners on each machine; in an allowed owner's repositories a ticket whose review passed is pushed and its PR opened or updated without asking, and everywhere else each push and each PR waits for the human's approval in the Inbox. Forks are allowed one at a time. A review that ended blocked, and another PR after one was closed or merged, always ask. The host checks the review, the branch and the repository's current owner before anything leaves the machine, pushes exactly one ref, and never approves, merges, closes or comments on a PR. Agents' shells are not sandboxed, so this governs the path agents are told to use rather than what their credentials can do.
+
 PR checks and review evidence are bound to a commit SHA. A rebase, squash, or new commit invalidates readiness for the previous head. Confirm current head and base before executing a head-sensitive action.
 
 Track operational states such as planned, working, review pending, ready, integrating and complete. Idle and process exit are runtime states, not proof of successful work.
