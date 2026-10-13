@@ -12,7 +12,7 @@ Every review of a ticket starts every configured verifier, whatever changed. A r
 - **Re-checks are not counted against the review cap.** "Reviews per ticket" becomes "Full reviews per ticket". "Rounds per review" is unchanged and applies at every level.
 - **The ticket shows which level ran.** Each cycle records its level's name and kind. The ticket's card names it on every cycle's line, the coordinator's outcome message names it, and the publish approval card's Review row names it. After a re-check, that card gains a "Last full review" row with the level, the commit it saw and its verifiers.
 - **An existing setup is kept exactly.** Saved verifiers, their order, instructions, providers and both caps are unchanged. They are read as one level named "Full", a full review that runs all of them, so every review behaves as before. No second level is added on update. A new install's suggested setup has two: Full, with every suggested verifier, and Light, a re-check with the first suggested reviewer.
-- **Not included:** the PR keeper, the Skills page, the settings repository, per-level model choices beyond what `verify_ticket` already takes, per-level round caps, narrowing a re-check's diff to what changed since the last full review, and any measure of how much changed since then.
+- **Not included:** the PR keeper, the Skills page, the settings repository, per-level model choices beyond what `verify_ticket` already takes, per-level round caps, a reason for the level choice, narrowing a re-check's diff to what changed since the last full review, and any measure of how much changed since then.
 
 ## Capabilities
 
@@ -34,4 +34,5 @@ None.
 - `workspace-desktop`: `verifiers.rs` (the Levels block, the cap's label), `models_view.rs` (the card's subtitle), `tree.rs` (the cycle line).
 - Stored data: one new optional field in `settings.json` and one on each ticket's verification record. No table and no migration; an older build ignores both and runs every verifier.
 - `accept_ticket`, `publish_ticket` and the allowed-owners rule are not changed.
+- Docs: the Review card and `verify_ticket` paragraphs in `docs/PRD.md` and `docs/DEVELOPMENT.md`.
 - Mockup: `design/mockups/current/review-levels.html`.

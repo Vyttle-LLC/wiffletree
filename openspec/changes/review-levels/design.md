@@ -41,7 +41,14 @@ See proposal.md for why. The code this builds on, at origin/main 4b29415:
 4. The PR keeper will run a Light review before it pushes a fix.
 5. Supervision is preferred to hard limits, and thresholds are settings, not constants.
 
-**Open, shown below as recommended and awaiting the human's answer:** (a) the two kinds and the start rule, decision 2; (b) what a new install and an updated install get, decisions 4 and 5; (c) the level is required on every call, decision 6; (d) re-checks are not counted against the cycle cap, decision 9, and no level may leave out a verifier with an open finding, decision 2.
+**Decided by the human on October 13, 2026**, on this proposal and its mockup, in his words "Approve with the recommended answers":
+6. Authority (decision 2). There are two kinds of level, Full review and Re-check. The app refuses a re-check unless the ticket's latest review passed, and refuses any level that leaves out a verifier with an open blocking finding. `accept_ticket` and `publish_ticket` keep today's rule.
+7. Starting levels (decisions 4 and 5). An existing setup becomes one level named Full and runs exactly as now. No Light is added on update; the Add level form is filled in as Light. A new install starts with Full and Light.
+8. Naming a level (decision 6). `level` is required on every `verify_ticket`; there is no default.
+9. The cap (decision 9). Re-checks are not counted against it, and it becomes "Full reviews per ticket".
+10. The limit, which he was told and accepted: once a full review has passed, later changes of any size can pass on a re-check. The app does not measure how much changed, and in an allowed owner's repository that push goes out without a card.
+
+**Not approved, and left out:** a one-line reason for the level choice.
 
 **Everything else here is a design decision made in this proposal.**
 
@@ -57,12 +64,12 @@ The cost: a level cannot give the same focus a different instruction. A person w
 
 A verifier may be in no level; it then never runs, and the page shows it with no tick anywhere. Removing a verifier takes it out of every level, and is refused when that would leave a level with none.
 
-### 2. Two kinds of level, checked when a review starts (open decision a)
+### 2. Two kinds of level, checked when a review starts
 In an allowed owner's repository a passed review lets the app push and open a PR without asking, and it unlocks `accept_ticket`. If any level's pass counted, a coordinator could pick the lightest level and lower that bar by itself. Three ways to prevent it were weighed.
 
 - **A. Any level counts.** Nothing is enforced. The bar is the lightest level, and only instruction text keeps a coordinator from using it for a first review. Rejected: the plan says authority is enforced by the app, never by text.
 - **B. Mark the levels that are enough, and check at the gates.** `accept_ticket` and the first publish would need a pass at a marked level somewhere in the ticket's history; a later push would take any level. This changes `accept_ticket`, `publish_ask` and the approval card, adds a new reason to ask the human, and tells the coordinator only after a light review has already run and passed that it unlocked nothing.
-- **C. Mark each level's kind, and check when the review starts.** Recommended. A level is a full review or a re-check, and `verify_ticket` refuses a re-check unless the ticket's latest cycle passed.
+- **C. Mark each level's kind, and check when the review starts.** Chosen. A level is a full review or a re-check, and `verify_ticket` refuses a re-check unless the ticket's latest cycle passed.
 
 Under C every passed cycle is either a full review, or a re-check that could start only because the cycle before it passed. So every pass rests on a passed full review with only passed re-checks since, and "the latest cycle passed" keeps meaning what `accept_ticket` and `publish_ask` need. Neither is changed. The coordinator learns at once, before any verifier runs, and the rule lives in one function.
 
@@ -102,7 +109,7 @@ pub struct CycleLevel { pub name: String, pub kind: LevelKind }
 - `Verification::is_full_review(&self) -> bool`: true when `level` is `None` or its kind is a full review.
 - `Ticket::last_full_review(&self) -> Option<&Verification>`: the most recent passed full review among the latest and earlier cycles, for the publish card.
 
-### 4. What an existing setup becomes (open decision b)
+### 4. What an existing setup becomes
 A setting saved before this change has no `levels`. It is read as:
 
 - `verifiers`, `max_rounds` and `max_cycles`: exactly as saved, in the same order, with every instruction and provider.
@@ -114,7 +121,7 @@ No second level is added on update. *Why not add Light too:* it would change wha
 
 `max_cycles` keeps its saved number. Its meaning narrows from "cycles" to "full reviews", which never refuses a review the old meaning allowed.
 
-### 5. What a new install starts with (open decision b)
+### 5. What a new install starts with
 `suggestion.rs::suggest` (`:69`) builds, from the verifiers it keeps for the usable providers:
 
 - **Full**, a full review, with every suggested verifier (Tests, Correctness and Regressions with both providers). "Use it": "for a ticket's first review, and after any change to what the code does."
@@ -122,7 +129,7 @@ No second level is added on update. *Why not add Light too:* it would change wha
 
 The suggested verifiers do not change. The human's example names a Style verifier; none is suggested, because it needs the person's own style tool. The card keeps "Run reviso:style with Codex" as example text.
 
-### 6. `verify_ticket` names the level (open decision c)
+### 6. `verify_ticket` names the level
 `verify_ticket { ticket_id, level, verifiers: [{focus, profile, reason}] }`.
 
 - **`level` is required.** Omitting it is refused with the level names. *Why no default level:* the human decided the coordinator names the level; the `verifiers` list must match the level anyway, so the coordinator has to know which it is using; a default would be one more setting to explain; and the record then always states a choice the coordinator made. The cost is one refused call for a coordinator acting from habit, and the refusal tells it what to send.
@@ -158,7 +165,7 @@ In two small places:
 
 *Why not the Guide:* a saved guide is the human's own text about models, and an update must not write into it. *For change 4:* the sentence moves into the Reviewing skill unchanged. The "Use it" lines can stay as each level's description, which travels with the levels into the settings repository (change 5), or the Reviewing skill can absorb them and the field be dropped. Either is a small step.
 
-### 9. The caps (open decision d)
+### 9. The caps
 - **Rounds per review stays one global setting.** It bounds every cycle at every level. Nothing argues for a different number per level.
 - **The cycle cap stays one global setting but counts full reviews only.** This departs from "keep it global and unchanged", for a reason. Counted against the default of 2, one full review and one re-check would exhaust a ticket, and the cap's maximum of 5 would stop every later rebase check on a PR that stays open for days, which is the case the human named. What the cap exists for is to end a review that does not converge, and re-checks cannot be used for that: a re-check starts only after a pass, and a blocked one must be followed by a full review, which is counted. A chain of re-checks is therefore a chain of passes, each caused by a new commit. Nothing caps its length; the coordinator's and the human's check-ins supervise it, as the plan chose for the keeper.
 - The card's label becomes "Full reviews per ticket" and its caption says re-checks are not counted. The setting's name in data stays `max_cycles`.
@@ -173,7 +180,7 @@ In two small places:
 ### 11. The Review card
 See `design/mockups/current/review-levels.html`.
 
-`verifiers.rs` gains a Levels block above the verifier list. Each level is one row group: its name, a two-option kind control built with the `segment` helper the role and provider pickers use, one tick chip per configured verifier, and its "Use it" line. Ticks and the kind save at once through `save` (`:108`), as everything on the card does. A pencil opens the name and the "Use it" line as two inputs with Done and Cancel; Add level opens the same form empty, or filled in as Light when no re-check exists (decision 4). The host's refusals appear in the card's existing error line: the last full review cannot be removed or re-marked, a verifier cannot be removed while it is a level's only one, and names must differ.
+`verifiers.rs` gains a Levels block above the verifier list. Each level is one row group: its name, a two-option kind control built with the `segment` helper the role and provider pickers use, one tick chip per configured verifier, and its "Use it" line. Ticks and the kind save at once through `save` (`:108`), as everything on the card does. A pencil opens the name and the "Use it" line as two inputs with Done and Cancel; Add level opens the same form empty, or filled in as Light when no re-check exists (decision 4). The host's refusals appear in the card's existing error line, in `validate`'s words: "Keep at least one level marked Full review.", "Light would run no verifier. Tick another verifier for Light, or remove Light." and "Two levels are named \"Light\".".
 
 The second `cap_selector` is labelled "Full reviews per ticket". `models_view.rs::review_card` (`:370`) changes its subtitle to "who reviews a ticket, and how thoroughly". The card's closing hint says `verify_ticket` starts every verifier of the level the coordinator names.
 
@@ -200,6 +207,7 @@ The `verify_ticket` description in `mcp.rs` (`:41`) says the same, and its schem
 | `crates/workspace-desktop/src/verifiers.rs` | `VerifierEditor` (the Levels block, the level form, removing a verifier from its levels); the cap's label and caption |
 | `crates/workspace-desktop/src/models_view.rs` | `review_card`'s subtitle |
 | `crates/workspace-desktop/src/tree.rs` | `cycle_line` |
+| `docs/PRD.md`, `docs/DEVELOPMENT.md` | the Review card and `verify_ticket` paragraphs (`PRD.md:154`, `:157`, `:314`; `DEVELOPMENT.md:63`, `:65`, `:81`) |
 
 Not changed: `live.rs::accept_ticket`, `publishing.rs::publish_ask`, `publish.rs`, `settings.rs::set_verification`, `next_round`, `start_round`, `record_verdict`, `untriage_orphans`, `progress.rs` (a ticket's progress already counts the latest cycle's own verifiers).
 
@@ -221,7 +229,7 @@ Not changed: `live.rs::accept_ticket`, `publishing.rs::publish_ask`, `publish.rs
 
 - [A coordinator omits `level` out of habit] → one refused call that lists the levels; nothing starts.
 - [The human marks every level as a full review] → their choice; the page says the lightest full review is the bar.
-- [A re-check passes a large change] → accepted (decision 2). The ticket's card and the publish card show the re-check, the last full review and both commits. A size threshold would be a hard limit the human has said he does not want.
+- [A re-check passes a large change] → accepted by the human (item 10). The ticket's card and the publish card show the re-check, the last full review and both commits. A size threshold would be a hard limit the human has said he does not want.
 - [Many re-checks on one ticket] → each follows a pass and a new commit; check-ins supervise. If it proves a problem, a setting can cap them later without a migration.
 - [The first-run change is not archived yet, so its "Suggested setup on first run" requirement is not in the main `model-routing` spec] → the suggested levels are specified under `ticket-verification`, beside the default verifiers, so this change does not depend on that archive.
 - [`model_selection` grows] → a few hundred bytes per level.
@@ -233,10 +241,4 @@ No store migration. `levels` is filled in on read for a setting saved without it
 
 ## Open Questions
 
-For the human, each with the recommendation the text above already follows:
-
-- **(a) Authority.** Recommended: two kinds of level, with the app refusing a re-check unless the ticket's latest review passed, and refusing any level that leaves out a verifier with an open finding (decision 2, option C). `accept_ticket` and `publish_ticket` then need no new rule.
-- **(b) Starting levels.** Recommended: a new install gets Full (every suggested verifier, full review) and Light (the first suggested reviewer, re-check). An updated install gets its own verifiers as one level named Full and nothing else. No Style verifier is suggested.
-- **(c) Naming a level.** Recommended: required on every `verify_ticket`; no default.
-- **(d) What the code forces.** Recommended: re-checks are not counted against the cycle cap, which becomes "Full reviews per ticket" (decision 9). Accepted limit: after a full review passes, the app does not measure how much a later re-check covers (decision 2).
-- **Not included, offered:** a one-line reason for the level, required from the coordinator and shown on the ticket's line, as model choices already carry. It would add one field and one argument.
+None. The human settled every open decision on October 13, 2026; see "Who decided what".
