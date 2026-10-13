@@ -193,6 +193,8 @@ impl Host {
             ledger: vec![],
             waiver: None,
             pull_request: None,
+            publishing: None,
+            pushed: None,
         };
         self.db.execute(
             "INSERT INTO tickets VALUES (?1,?2,?3)",

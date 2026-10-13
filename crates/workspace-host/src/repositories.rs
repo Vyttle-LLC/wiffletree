@@ -279,6 +279,8 @@ impl Host {
                     .into(),
                 path,
                 base: base.into(),
+                github: None,
+                origin_problem: None,
             },
         };
         self.db.execute(

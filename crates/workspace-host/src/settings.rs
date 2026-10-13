@@ -168,6 +168,35 @@ impl Host {
         self.save_settings(&settings)?;
         Ok(settings)
     }
+    /// Allows an owner, or a single fork as `owner/name`, to have PRs opened without asking, or
+    /// stops allowing it. Entries compare without regard to case.
+    pub fn set_owner_allowed(&mut self, entry: &str, allowed: bool) -> Result<HostSettings> {
+        let entry = entry.trim();
+        let mut parts = entry.split('/');
+        let named = |part: Option<&str>| {
+            part.is_some_and(|p| {
+                !p.is_empty()
+                    && p.len() <= 100
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            })
+        };
+        ensure!(
+            named(parts.next())
+                && parts.next().is_none_or(|name| named(Some(name)))
+                && parts.next().is_none(),
+            "Name a GitHub owner, or a fork as owner/name"
+        );
+        let mut settings = self.settings();
+        settings
+            .allowed_owners
+            .retain(|e| !e.eq_ignore_ascii_case(entry));
+        if allowed {
+            settings.allowed_owners.push(entry.into());
+        }
+        self.save_settings(&settings)?;
+        Ok(settings)
+    }
     /// Writes atomically and keeps fields this version does not know.
     fn save_settings(&self, settings: &HostSettings) -> Result<()> {
         let path = self.home.join(FILE);

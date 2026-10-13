@@ -48,6 +48,8 @@ pub struct Host {
     base_fetched_at: std::collections::HashMap<String, i64>,
     /// Each watched repository's latest PR check; see `pr_watch`.
     pull_request_checks: std::collections::HashMap<String, PullRequestCheck>,
+    /// Why the latest read of the repositories' GitHub facts failed; see `repositories`.
+    github_error: Option<String>,
     /// Each session's latest checklist; `None` until first read from stored steps.
     plans: Option<std::collections::HashMap<String, PlanCounts>>,
     progress: progress::Progress,
@@ -189,6 +191,7 @@ impl Host {
             branch_warnings: Default::default(),
             base_fetched_at: Default::default(),
             pull_request_checks: Default::default(),
+            github_error: None,
             plans: None,
             progress: Default::default(),
             in_turn: Default::default(),
@@ -312,7 +315,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone() })
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
@@ -1281,6 +1284,9 @@ impl Host {
                 child_turns,
                 human_turns,
             } => serde_json::to_value(self.set_check_ins(child_turns, human_turns)?)?,
+            Command::SetOwnerAllowed { entry, allowed } => {
+                serde_json::to_value(self.set_owner_allowed(&entry, allowed)?)?
+            }
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?
