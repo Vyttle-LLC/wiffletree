@@ -516,8 +516,16 @@ impl Host {
                 team.push(entry);
             }
         }
+        // Each repository says whether a ticket there publishes without asking the human.
+        let allowed = self.settings().allowed_owners;
+        let mut repositories = vec![];
+        for repository in self.project_repositories(&session.project_id)? {
+            let mut entry = serde_json::to_value(&repository)?;
+            entry["publishes_without_asking"] = json!(is_allowed(&repository, &allowed));
+            repositories.push(entry);
+        }
         let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,
-            "repositories":self.project_repositories(&session.project_id)?,
+            "repositories":repositories,
             "team":team,
             "tickets":self.ticket_overview(&session.project_id)?,
             "runtime":self.session_runtime(id)?,

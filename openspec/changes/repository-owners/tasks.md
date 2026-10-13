@@ -15,8 +15,8 @@
 
 ## 3. The allowed-owners setting
 
-- [ ] 3.1 Add `settings.rs::set_owner_allowed(entry, allowed)`, saved through `save_settings`, and dispatch `Command::SetOwnerAllowed` in `lib.rs`. Fill `Snapshot.allowed_owners` and `Snapshot.github_error` in `Host::snapshot`. Verify the scenarios "Nothing is allowed at first", "The human allows an owner" (survives reopening the host) and "The human removes an owner".
-- [ ] 3.2 In `live.rs::agent_context`, add each repository's `github` entry and `publishes_without_asking`. Verify the scenario "An agent reads the rule", and with a test over `mcp::tools()` and `agent_tool` that no tool changes the list ("An agent cannot allow an owner").
+- [x] 3.1 Add `settings.rs::set_owner_allowed(entry, allowed)`, saved through `save_settings`, and dispatch `Command::SetOwnerAllowed` in `lib.rs`. Fill `Snapshot.allowed_owners` and `Snapshot.github_error` in `Host::snapshot`. Verify the scenarios "Nothing is allowed at first", "The human allows an owner" (survives reopening the host) and "The human removes an owner".
+- [x] 3.2 In `live.rs::agent_context`, add each repository's `github` entry and `publishes_without_asking`. Verify the scenario "An agent reads the rule", and with a test over `mcp::tools()` and `agent_tool` that no tool changes the list ("An agent cannot allow an owner").
 
 ## 4. `publish_ticket`: the tool and its checks
 

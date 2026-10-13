@@ -310,6 +310,39 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_allowed_until_the_human_allows_it_and_the_list_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        assert!(host.settings().allowed_owners.is_empty());
+        assert!(host.snapshot().unwrap().allowed_owners.is_empty());
+        let allow = |host: &mut Host, entry: &str, allowed| {
+            host.execute(Command::SetOwnerAllowed {
+                entry: entry.into(),
+                allowed,
+            })
+        };
+        allow(&mut host, "Sage-Social", true).unwrap();
+        allow(&mut host, "MHohlios/gpui-component", true).unwrap();
+        // Allowing again, in any letter case, keeps one entry.
+        allow(&mut host, "sage-social", true).unwrap();
+        drop(host);
+        let mut host = Host::open(home.path()).unwrap();
+        assert_eq!(
+            host.snapshot().unwrap().allowed_owners,
+            ["MHohlios/gpui-component", "sage-social"]
+        );
+        allow(&mut host, "SAGE-SOCIAL", false).unwrap();
+        assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
+        // Saving another setting keeps the list.
+        host.set_check_ins(30, 100).unwrap();
+        assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
+        for entry in ["", "a/b/c", "owner/", "has space", "--flag=x y"] {
+            assert!(allow(&mut host, entry, true).is_err(), "{entry}");
+        }
+        assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
+    }
+
+    #[test]
     fn unused_suffixes_after_the_base() {
         let taken = ["notes", "notes-2"];
         assert_eq!(unused("notes", |c| taken.contains(&c)), "notes-3");

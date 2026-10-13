@@ -1231,6 +1231,71 @@ mod tests {
         );
     }
 
+    /// A project using a GitHub repository GitHub has answered for, with its coordinator.
+    fn project_on_github() -> (tempfile::TempDir, Host, Session) {
+        let (home, mut host) = host_with(&["git@github.com:celadon-theme/website.git"]);
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(&host.github_inputs().unwrap(), 5, fake_gh(&calls, private));
+        host.record_github(reading).unwrap();
+        let repository = host.repositories().unwrap().remove(0);
+        host.db
+            .execute(
+                "UPDATE repositories SET data=?2 WHERE id=?1",
+                params![
+                    repository.id,
+                    encode(&Repository {
+                        base: "origin/main".into(),
+                        ..repository.clone()
+                    })
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        host.create_project("Site").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0);
+        (home, host, coordinator)
+    }
+
+    #[test]
+    fn an_agent_reads_each_repositorys_owner_and_rule_in_workspace_context() {
+        let (_home, mut host, coordinator) = project_on_github();
+        let repository =
+            |host: &Host| host.agent_context(&coordinator.id).unwrap()["repositories"][0].clone();
+        let entry = repository(&host);
+        assert_eq!(entry["github"]["owner"], "celadon-theme");
+        assert_eq!(entry["github"]["name"], "website");
+        assert_eq!(entry["github"]["facts"]["fork"], false);
+        assert_eq!(entry["github"]["facts"]["public"], false);
+        assert_eq!(entry["publishes_without_asking"], false);
+        host.set_owner_allowed("celadon-theme", true).unwrap();
+        assert_eq!(repository(&host)["publishes_without_asking"], true);
+        host.set_owner_allowed("celadon-theme", false).unwrap();
+        assert_eq!(repository(&host)["publishes_without_asking"], false);
+    }
+
+    #[test]
+    fn no_agent_tool_changes_the_allowed_list() {
+        let (_home, mut host, coordinator) = project_on_github();
+        host.set_owner_allowed("Sage-Social", true).unwrap();
+        let tools = mcp::tools();
+        for tool in tools.as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            // No tool takes an owner to allow, and none changes the list whatever it is sent.
+            let schema = tool["inputSchema"]["properties"].to_string();
+            assert!(
+                !schema.contains("allowed") && !schema.contains("owner"),
+                "{name}"
+            );
+            let _ = host.agent_tool(
+                &coordinator.id,
+                name,
+                json!({"entry": "celadon-theme", "allowed": true, "owner": "celadon-theme",
+                    "allowed_owners": ["celadon-theme"]}),
+            );
+        }
+        assert_eq!(host.settings().allowed_owners, ["Sage-Social"]);
+    }
+
     #[test]
     fn when_github_cannot_be_read_nothing_is_treated_as_answered() {
         let (_home, mut host) = host_with(&["git@github.com:Sage-Social/app.git"]);
