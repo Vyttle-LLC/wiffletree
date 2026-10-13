@@ -806,7 +806,7 @@ pub struct ReviewLevel {
     pub use_when: String,
 }
 impl ReviewLevel {
-    /// Whether the level runs the verifier with this focus.
+    /// Focuses match as level names do: trimmed and ignoring ASCII case.
     pub fn runs(&self, focus: &str) -> bool {
         self.verifiers.iter().any(|f| same_name(f, focus))
     }

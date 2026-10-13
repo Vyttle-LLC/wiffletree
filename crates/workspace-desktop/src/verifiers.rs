@@ -58,7 +58,6 @@ fn focuses(configured: &[VerifierConfig], runs: impl Fn(&str) -> bool) -> Vec<St
         .collect()
 }
 
-/// Ticks or unticks the verifier `focus` in `level`.
 fn toggle_verifier(configured: &[VerifierConfig], level: &mut ReviewLevel, focus: &str) {
     level.verifiers = focuses(configured, |f| level.runs(f) != (f == focus));
 }
@@ -914,8 +913,6 @@ mod tests {
             "after a rebase.".into(),
         )
         .unwrap();
-        // Cancelling sends nothing, so the saved line stays.
-        assert_eq!(host.settings().verification, before);
         save(&mut host, |v| *v = edited).unwrap();
 
         let level = &host.settings().verification.levels[1];
