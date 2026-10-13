@@ -333,7 +333,7 @@
 #celadon-chat .wp-agent .wp-bar{grid-column:1/-1}
 #celadon-chat .wp-agent small{font-size:11px;color:var(--subtle);margin-left:5px}
 #celadon-chat .wp-agent .wp-fig{justify-self:end}
-@media(max-width:540px){#celadon-chat .wp-strip{padding:8px 16px}#celadon-chat .wp-label{max-width:100%}#celadon-chat .tree .task-row.wp-row{height:auto!important}}
+@media(max-width:540px){#celadon-chat .wp-strip{padding:8px 16px}#celadon-chat .wp-label{max-width:100%}}
 </style>
 <script>
 (()=>{
@@ -650,11 +650,7 @@ function projectProgress(){
  return {tickets,phase:tickets.some(t=>t.stage==='Implementing')?'Implementing':'Verifying',fraction:tickets.reduce((sum,t)=>sum+t.fraction,0)/tickets.length};
 }
 function ticketOf(key){const owner=taskOwner(key);return owner!==key&&isTicket(owner)?ticketProgress(owner):null;}
-function rowProgress(key){
- if(key==='project'){const p=projectProgress();return {state:'active',fraction:p.fraction,figure:percent(p.fraction)+'%'};}
- if(!isTicket(key))return agentProgress(key);
- const t=ticketProgress(key);return {...t,figure:t.state==='unknown'?'':ticketFigure(t)};
-}
+function projectRowProgress(){const p=projectProgress();return {state:'active',fraction:p.fraction,figure:percent(p.fraction)+'%'};}
 const tone=p=>p.state==='done'||p.state==='blocked'?p.state:'';
 function barFill(p){return p.state==='unknown'?'<i class="unknown"></i>':`<i class="${tone(p)}" style="width:${percent(p.fraction||0)}%"></i>`;}
 function progressBar(p,thin){return `<div class="wp-bar ${thin?'thin':''}" aria-hidden="true">${barFill(p)}</div>`;}
@@ -689,8 +685,8 @@ function crewPanel(){
 }
 tree=function(){
  function node(key,depth){
-  const e=entities[key],phase=agentPhase(key),p=rowProgress(key),detail=esc(e.name+' — '+phase.detail+(p.figure?' · '+p.figure:''));
-  return button(`<span class="tree-leading">${icon(key==='project'?'orbit':isTicket(key)?'layers-2':'corner-down-right')}</span><span class="tree-name">${esc(e.name)}${isTicket(key)?`<small>${esc(e.repo)}</small>`:''}</span><span class="wp-fig ${tone(p)}">${p.figure}</span><span class="agent-state ${phase.kind}">${icon(phase.symbol)}</span>${progressBar(p,true)}`,`data-agent="${key}" aria-label="${detail}" data-tooltip="${detail}" aria-pressed="${state.entity===key}"`,`depth${depth} agent-row wp-row ${isTicket(key)?'task-row':''} ${phase.kind==='input'?'needs-input':''} ${state.entity===key?'tree-selected':''}`)+childKeys(key).map(k=>node(k,depth+1)).join('');
+  const e=entities[key],phase=agentPhase(key),p=key==='project'?projectRowProgress():null,detail=esc(e.name+' — '+phase.detail+(p?' · '+p.figure:''));
+  return button(`<span class="tree-leading">${icon(key==='project'?'orbit':isTicket(key)?'layers-2':'corner-down-right')}</span><span class="tree-name">${esc(e.name)}${isTicket(key)?`<small>${esc(e.repo)}</small>`:''}</span>${p?`<span class="wp-fig ${tone(p)}">${p.figure}</span>`:''}<span class="agent-state ${phase.kind}">${icon(phase.symbol)}</span>${p?progressBar(p,true):''}`,`data-agent="${key}" aria-label="${detail}" data-tooltip="${detail}" aria-pressed="${state.entity===key}"`,`depth${depth} agent-row ${p?'wp-row':''} ${isTicket(key)?'task-row':''} ${phase.kind==='input'?'needs-input':''} ${state.entity===key?'tree-selected':''}`)+childKeys(key).map(k=>node(k,depth+1)).join('');
  }
  return node('project',0);
 };

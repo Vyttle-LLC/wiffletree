@@ -1872,7 +1872,7 @@ html&gt;body{padding:0}&lt;/style&gt;
 #celadon-chat .wp-agent .wp-bar{grid-column:1/-1}
 #celadon-chat .wp-agent small{font-size:11px;color:var(--subtle);margin-left:5px}
 #celadon-chat .wp-agent .wp-fig{justify-self:end}
-@media(max-width:540px){#celadon-chat .wp-strip{padding:8px 16px}#celadon-chat .wp-label{max-width:100%}#celadon-chat .tree .task-row.wp-row{height:auto!important}}
+@media(max-width:540px){#celadon-chat .wp-strip{padding:8px 16px}#celadon-chat .wp-label{max-width:100%}}
 &lt;/style&gt;
 &lt;script&gt;
 (()=&gt;{
@@ -2189,11 +2189,7 @@ function projectProgress(){
  return {tickets,phase:tickets.some(t=&gt;t.stage===&#x27;Implementing&#x27;)?&#x27;Implementing&#x27;:&#x27;Verifying&#x27;,fraction:tickets.reduce((sum,t)=&gt;sum+t.fraction,0)/tickets.length};
 }
 function ticketOf(key){const owner=taskOwner(key);return owner!==key&amp;&amp;isTicket(owner)?ticketProgress(owner):null;}
-function rowProgress(key){
- if(key===&#x27;project&#x27;){const p=projectProgress();return {state:&#x27;active&#x27;,fraction:p.fraction,figure:percent(p.fraction)+&#x27;%&#x27;};}
- if(!isTicket(key))return agentProgress(key);
- const t=ticketProgress(key);return {...t,figure:t.state===&#x27;unknown&#x27;?&#x27;&#x27;:ticketFigure(t)};
-}
+function projectRowProgress(){const p=projectProgress();return {state:&#x27;active&#x27;,fraction:p.fraction,figure:percent(p.fraction)+&#x27;%&#x27;};}
 const tone=p=&gt;p.state===&#x27;done&#x27;||p.state===&#x27;blocked&#x27;?p.state:&#x27;&#x27;;
 function barFill(p){return p.state===&#x27;unknown&#x27;?&#x27;&lt;i class=&quot;unknown&quot;&gt;&lt;/i&gt;&#x27;:`&lt;i class=&quot;${tone(p)}&quot; style=&quot;width:${percent(p.fraction||0)}%&quot;&gt;&lt;/i&gt;`;}
 function progressBar(p,thin){return `&lt;div class=&quot;wp-bar ${thin?&#x27;thin&#x27;:&#x27;&#x27;}&quot; aria-hidden=&quot;true&quot;&gt;${barFill(p)}&lt;/div&gt;`;}
@@ -2228,8 +2224,8 @@ function crewPanel(){
 }
 tree=function(){
  function node(key,depth){
-  const e=entities[key],phase=agentPhase(key),p=rowProgress(key),detail=esc(e.name+&#x27; — &#x27;+phase.detail+(p.figure?&#x27; · &#x27;+p.figure:&#x27;&#x27;));
-  return button(`&lt;span class=&quot;tree-leading&quot;&gt;${icon(key===&#x27;project&#x27;?&#x27;orbit&#x27;:isTicket(key)?&#x27;layers-2&#x27;:&#x27;corner-down-right&#x27;)}&lt;/span&gt;&lt;span class=&quot;tree-name&quot;&gt;${esc(e.name)}${isTicket(key)?`&lt;small&gt;${esc(e.repo)}&lt;/small&gt;`:&#x27;&#x27;}&lt;/span&gt;&lt;span class=&quot;wp-fig ${tone(p)}&quot;&gt;${p.figure}&lt;/span&gt;&lt;span class=&quot;agent-state ${phase.kind}&quot;&gt;${icon(phase.symbol)}&lt;/span&gt;${progressBar(p,true)}`,`data-agent=&quot;${key}&quot; aria-label=&quot;${detail}&quot; data-tooltip=&quot;${detail}&quot; aria-pressed=&quot;${state.entity===key}&quot;`,`depth${depth} agent-row wp-row ${isTicket(key)?&#x27;task-row&#x27;:&#x27;&#x27;} ${phase.kind===&#x27;input&#x27;?&#x27;needs-input&#x27;:&#x27;&#x27;} ${state.entity===key?&#x27;tree-selected&#x27;:&#x27;&#x27;}`)+childKeys(key).map(k=&gt;node(k,depth+1)).join(&#x27;&#x27;);
+  const e=entities[key],phase=agentPhase(key),p=key===&#x27;project&#x27;?projectRowProgress():null,detail=esc(e.name+&#x27; — &#x27;+phase.detail+(p?&#x27; · &#x27;+p.figure:&#x27;&#x27;));
+  return button(`&lt;span class=&quot;tree-leading&quot;&gt;${icon(key===&#x27;project&#x27;?&#x27;orbit&#x27;:isTicket(key)?&#x27;layers-2&#x27;:&#x27;corner-down-right&#x27;)}&lt;/span&gt;&lt;span class=&quot;tree-name&quot;&gt;${esc(e.name)}${isTicket(key)?`&lt;small&gt;${esc(e.repo)}&lt;/small&gt;`:&#x27;&#x27;}&lt;/span&gt;${p?`&lt;span class=&quot;wp-fig ${tone(p)}&quot;&gt;${p.figure}&lt;/span&gt;`:&#x27;&#x27;}&lt;span class=&quot;agent-state ${phase.kind}&quot;&gt;${icon(phase.symbol)}&lt;/span&gt;${p?progressBar(p,true):&#x27;&#x27;}`,`data-agent=&quot;${key}&quot; aria-label=&quot;${detail}&quot; data-tooltip=&quot;${detail}&quot; aria-pressed=&quot;${state.entity===key}&quot;`,`depth${depth} agent-row ${p?&#x27;wp-row&#x27;:&#x27;&#x27;} ${isTicket(key)?&#x27;task-row&#x27;:&#x27;&#x27;} ${phase.kind===&#x27;input&#x27;?&#x27;needs-input&#x27;:&#x27;&#x27;} ${state.entity===key?&#x27;tree-selected&#x27;:&#x27;&#x27;}`)+childKeys(key).map(k=&gt;node(k,depth+1)).join(&#x27;&#x27;);
  }
  return node(&#x27;project&#x27;,0);
 };
