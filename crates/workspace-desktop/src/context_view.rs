@@ -530,10 +530,12 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap_2()
-                    // In a narrow panel the button wraps under the hint instead of squeezing it.
+                    // In a narrow panel the button wraps under the hint instead of squeezing it,
+                    // and stays right-aligned with the card's other actions.
                     .child(hint(reason, p).flex_1().min_w(px(120.)))
                     .child(
                         button("compact")
+                            .ml_auto()
                             .outline()
                             .label(label)
                             .disabled(!enabled)

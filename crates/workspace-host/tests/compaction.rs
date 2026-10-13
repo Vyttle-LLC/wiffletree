@@ -176,11 +176,15 @@ impl World {
 
     /// Sends the coordinator a message from the human and returns its id.
     fn send(&self, body: &str) -> String {
+        self.send_to(&self.main.id, body)
+    }
+
+    fn send_to(&self, session: &str, body: &str) -> String {
         let id = new_id();
         self.request(Command::Send {
             id: id.clone(),
             sender: None,
-            recipient: self.main.id.clone(),
+            recipient: session.into(),
             body: body.into(),
             attachments: vec![],
         });
@@ -188,8 +192,47 @@ impl World {
     }
 
     fn receipt(&self, message: &str) -> Receipt {
-        let messages = self.messages(&self.main.id);
+        self.receipt_in(&self.main.id, message)
+    }
+
+    fn receipt_in(&self, session: &str, message: &str) -> Receipt {
+        let messages = self.messages(session);
         messages.iter().find(|m| m.id == message).unwrap().receipt
+    }
+
+    /// The coordinator's one worker, once its first turn is over and it has a session.
+    fn worker(&self) -> String {
+        let mut worker = None;
+        until("the worker's first turn", || {
+            let sessions = self.snapshot().sessions;
+            let found = sessions
+                .into_iter()
+                .find(|s| s.parent_id.as_deref() == Some(&self.main.id));
+            worker = found.map(|s| s.id);
+            worker.as_ref().is_some_and(|id| {
+                let turns = self.turns(id);
+                turns.first().is_some_and(|t| t.finished_at.is_some())
+            })
+        });
+        worker.unwrap()
+    }
+
+    /// The worker, with a compaction of its own running and held until `gate-compact`.
+    fn compacting_worker(&self) -> String {
+        let worker = self.worker();
+        self.compact(&worker, Some("WAIT_FOR_GATE")).unwrap();
+        self.until_compacting(&worker);
+        worker
+    }
+
+    fn usage(&self) -> UsageReport {
+        serde_json::from_value(self.request(Command::Usage {
+            days: 7,
+            project_id: None,
+            provider: None,
+            timezone: "UTC".into(),
+        }))
+        .unwrap()
     }
 
     fn compact(&self, session: &str, note: Option<&str>) -> Result<Value, String> {
@@ -482,13 +525,7 @@ fn an_idle_agent_is_compacted_at_once_with_claudes_figures_in_its_line_and_the_l
             0.48
         )
     );
-    let usage: UsageReport = serde_json::from_value(world.request(Command::Usage {
-        days: 7,
-        project_id: None,
-        provider: None,
-        timezone: "UTC".into(),
-    }))
-    .unwrap();
+    let usage = world.usage();
     assert_eq!(usage.totals.requests, 2, "the turn's request and this one");
     assert_eq!(usage.unreported_runs, 0);
 
@@ -913,6 +950,11 @@ fn a_compactions_process_the_start_cannot_confirm_holds_the_agent_until_its_note
 /// The project's ticket has a Claude reviewer whose model the coordinator chose; its
 /// assignment is one quick turn. The coordinator itself is paused for good.
 fn ticket_with_a_reviewer(host: &mut Host, project: &Project, main: &Session, scratch: &Path) {
+    assign_a_reviewer(host, project, main, scratch);
+    host.set_status(&main.id, Status::Paused).unwrap();
+}
+
+fn assign_a_reviewer(host: &mut Host, project: &Project, main: &Session, scratch: &Path) {
     let repo = scratch.join("repo");
     std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q"]);
@@ -928,7 +970,6 @@ fn ticket_with_a_reviewer(host: &mut Host, project: &Project, main: &Session, sc
     let assignment = json!({"ticket_id":ticket.id,"role":"reviewer","instruction":"JUST_REPLY start","profile":profile,"reason":"Routine review"});
     host.agent_tool(&main.id, "assign_ticket", assignment)
         .unwrap();
-    host.set_status(&main.id, Status::Paused).unwrap();
 }
 
 #[test]
@@ -1114,4 +1155,136 @@ fn a_verifiers_compaction_runs_before_its_round_and_the_round_is_admitted_after_
     let message = round.iter().find(|m| m.id == verifiers[1].message_id);
     assert_eq!(message.unwrap().receipt, Receipt::Completed);
     assert_eq!(world.turns(first).len(), 1);
+}
+
+#[test]
+fn a_compactions_stream_events_are_not_counted_as_requests() {
+    let world = World::new();
+    world.compacted(Some("STREAM_EVENTS"));
+
+    let (requests, _, compactions) = world.ledger();
+    assert_eq!(compactions, 1);
+    assert_eq!(requests - compactions, 1, "only the turn's own request");
+}
+
+/// A world whose coordinator is paused and whose reviewer has finished its first turn.
+fn world_with_a_worker() -> World {
+    World::prepared(|host, project, main, scratch| {
+        ticket_with_a_reviewer(host, project, main, scratch);
+    })
+}
+
+/// Holds a message for the worker, which is compacting, and does `stop`. The compaction is not
+/// interrupted and ends compacted; the stop then still holds the message back.
+fn stop_during_a_compaction(world: &World, stop: impl FnOnce(&World, &str)) -> (String, String) {
+    let worker = world.compacting_worker();
+    let waiting = world.send_to(&worker, "JUST_REPLY later");
+
+    stop(world, &worker);
+    world.several_passes();
+    assert_eq!(
+        world.runtime(&worker).compaction.map(|c| c.state),
+        Some(CompactionState::Running),
+        "a compaction that has started is not interrupted"
+    );
+
+    world.open("gate-compact");
+    until("the compaction to settle", || {
+        world.runtime(&worker).last_compaction.is_some()
+    });
+    world.several_passes();
+    let outcome = world.runtime(&worker).last_compaction.unwrap();
+    assert_eq!(outcome.result, CompactionResult::Compacted);
+    assert_eq!(world.turns(&worker).len(), 1, "no turn follows");
+    assert_eq!(world.receipt_in(&worker, &waiting), Receipt::Queued);
+    (worker, waiting)
+}
+
+#[test]
+fn a_parents_stop_while_a_child_compacts_lets_it_finish_and_leaves_the_child_stopped() {
+    let world = world_with_a_worker();
+    let (worker, _) = stop_during_a_compaction(&world, |world, worker| {
+        world.set_status(&world.main.id, Status::Ready);
+        world.send("STOP_CHILDREN");
+        until("the parent's stop", || {
+            world.status(worker) == Status::Paused
+        });
+    });
+    assert_eq!(world.status(&worker), Status::Paused);
+}
+
+#[test]
+fn stopping_the_project_while_a_worker_compacts_lets_it_finish_and_holds_its_messages() {
+    let world = world_with_a_worker();
+    let project = world.main.project_id.clone();
+    let (worker, waiting) = stop_during_a_compaction(&world, |world, _| {
+        world.request(Command::SetLive {
+            project_id: world.main.project_id.clone(),
+            enabled: false,
+        });
+    });
+
+    world.request(Command::SetLive {
+        project_id: project,
+        enabled: true,
+    });
+    until("the live project's turn", || {
+        world.receipt_in(&worker, &waiting) == Receipt::Completed
+    });
+}
+
+#[test]
+fn archiving_a_worker_while_it_compacts_lets_it_finish_and_runs_no_turn_after() {
+    let world = world_with_a_worker();
+    let (worker, _) = stop_during_a_compaction(&world, |world, worker| {
+        world.request(Command::SetArchived {
+            session_id: worker.into(),
+            archived: true,
+        });
+    });
+    let sessions = world.snapshot().sessions;
+    assert!(sessions.iter().find(|s| s.id == worker).unwrap().archived);
+}
+
+#[test]
+fn a_workers_compaction_raises_its_own_and_its_coordinators_totals() {
+    let world = world_with_a_worker();
+    let worker = world.worker();
+    let coordinator = |usage: &UsageReport| {
+        let found = usage.coordinators.iter().find(|c| c.id == world.main.id);
+        found.unwrap().clone()
+    };
+    let before = world.usage();
+
+    world.compact(&worker, None).unwrap();
+    until("the worker's compaction", || {
+        world.runtime(&worker).last_compaction.is_some()
+    });
+    let after = world.usage();
+
+    let session: String = world
+        .db()
+        .query_row(
+            "SELECT r.session_id FROM usage_requests u JOIN provider_runs r ON r.id=u.run_id WHERE u.request_id LIKE 'compact:%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(session, worker, "the worker's own request");
+    let (input, output) = (813_402, 2_960);
+    let raised = |before: &TokenTotals, after: &TokenTotals| {
+        (
+            after.requests - before.requests,
+            after.input - before.input,
+            after.output - before.output,
+        )
+    };
+    assert_eq!(raised(&before.totals, &after.totals), (1, input, output));
+    let (before, after) = (coordinator(&before), coordinator(&after));
+    assert_eq!(raised(&before.workers, &after.workers), (1, input, output));
+    assert_eq!(
+        raised(&before.own, &after.own),
+        (0, 0, 0),
+        "not the coordinator's own"
+    );
 }

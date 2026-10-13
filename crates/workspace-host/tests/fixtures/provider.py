@@ -88,6 +88,9 @@ try:
         if os.environ.get('WORKSPACE_TEST_PROMPT_DIR'):
             with open(Path(os.environ['WORKSPACE_TEST_PROMPT_DIR'])/'compactions.txt','a') as log:log.write(json.dumps({'input':prompt,'resumed':resumed})+'\n')
         if 'WAIT_FOR_GATE' in note:wait_for('gate-compact')
+        if 'STREAM_EVENTS' in note:
+            # Claude streams no request events for a compaction; a stream that did must not be counted.
+            for event in ({'type':'message_start','message':{'id':str(uuid.uuid4()),'model':'opus','usage':{'input_tokens':7,'cache_read_input_tokens':0,'cache_creation_input_tokens':0,'output_tokens':0}}},{'type':'message_delta','usage':{'output_tokens':3}},{'type':'message_stop'}):emit({'type':'stream_event','event':event})
         stream='compact-nothing' if 'NOTHING' in note else 'compact-failed' if 'FAIL' in note else 'compact-success'
         for line in (Path(__file__).parent/'streams'/f'{stream}.jsonl').read_text().splitlines():
             record=json.loads(line)

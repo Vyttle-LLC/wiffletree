@@ -270,7 +270,7 @@ impl Workspace {
             compact_note: cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(2, 6)
-                    .placeholder("For example: the failing test names and the migration plan")
+                    .placeholder("For example: the failing test names")
             }),
             last_repository_refresh: None,
             update: None,
