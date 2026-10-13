@@ -94,6 +94,7 @@ svg.i{width:13px;height:13px;flex:none}
 .compacted .line b{font-weight:500;color:var(--text)}
 .compacted .kept{margin-left:18px}
 .compacted.failed{margin-left:0}
+.variant{margin-top:12px}
 .compacted.failed .line,.compacted.failed .line b{color:var(--red)}
 /* Usage ledger row. */
 .tiles{display:flex;gap:8px}
@@ -238,9 +239,16 @@ svg.i{width:13px;height:13px;flex:none}
             <div class="hint">Keeping: The failing test names and the migration plan</div>
           </div>
         </div>
+        <div class="variant">
+          <p class="step">When the agent is not in a turn: paused, stopped or interrupted</p>
+          <div class="notice" style="--c:var(--focus)">
+            <div class="row"><svg class="i"><use href="#clock"/></svg><b>Compacts when this agent runs again</b><span class="btn">Cancel</span></div>
+            <div class="hint">Keeping: The failing test names and the migration plan</div>
+          </div>
+        </div>
       </div>
     </div>
-    <p class="caption"><b>Queued.</b> The form is replaced by one line, <b>Compacts when this turn ends</b>, with the note that was given and a <b>Cancel</b> that works until the compaction starts. The header chip adds “compact queued”, so it shows without opening the card. The agent’s status stays Working.</p>
+    <p class="caption"><b>Queued.</b> The form is replaced by one line, <b>Compacts when this turn ends</b>, with the note that was given and a <b>Cancel</b> that works until the compaction starts. The header chip adds “compact queued”, so it shows without opening the card. The agent’s status stays Working. If the turn fails or the agent is paused or stopped first, the request is kept and the line reads <b>Compacts when this agent runs again</b>, still with Cancel.</p>
   </section>
 
   <!-- 4. Compacting -->
@@ -376,9 +384,17 @@ svg.i{width:13px;height:13px;flex:none}
           <p class="step">The failure’s line in the work stream</p>
           <div class="compacted failed"><div class="line"><svg class="i"><use href="#fold"/></svg><b>Compaction failed</b> · context unchanged</div></div>
         </div>
+        <div class="variant">
+          <p class="step">Cut off by a Wiffletree restart: the card notice and the work-stream line</p>
+          <div class="notice" style="--c:var(--red)">
+            <div class="row"><b>Compaction interrupted</b><span class="btn ghost">Dismiss</span></div>
+            <div class="hint">Wiffletree stopped while Claude was compacting. The figure above was measured again.</div>
+          </div>
+          <div class="compacted failed" style="margin-top:8px"><div class="line"><svg class="i"><use href="#fold"/></svg><b>Compaction interrupted</b></div></div>
+        </div>
       </div>
     </div>
-    <p class="caption"><b>No change.</b> Two cards, bar and legend folded away. <b>Top:</b> Claude had too little to summarize, said quietly with Claude’s own reason. <b>Bottom:</b> a real failure, in red. Both say the context is unchanged and both leave Compact available. A failure also leaves one line in the work stream, <b>Compaction failed · context unchanged</b>, so it is seen without opening the card; “nothing to compact” leaves no line. The card is measured again either way.</p>
+    <p class="caption"><b>No change.</b> Two cards, bar and legend folded away. <b>Top:</b> Claude had too little to summarize, said quietly with Claude’s own reason. <b>Bottom:</b> a real failure, in red. Both say the context is unchanged and both leave Compact available. A failure also leaves one line in the work stream, <b>Compaction failed · context unchanged</b>, so it is seen without opening the card; “nothing to compact” leaves no line. The card is measured again either way. A compaction that a Wiffletree restart cut off is never run again: it says <b>Compaction interrupted</b> on the card and in the work stream, without claiming the context is unchanged.</p>
   </section>
 
   <!-- 7. Codex -->

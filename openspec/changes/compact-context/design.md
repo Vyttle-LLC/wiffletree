@@ -58,7 +58,7 @@ What follows from the rule, with nothing extra to build:
 | Claude is disabled in Models | It waits, like the agent's turns. |
 
 A request therefore never disappears and never runs while the person cannot see it: the chip and the card show it for as long as it waits.
-*Alternative:* cancel the request when the turn it waited on does not end normally. Rejected as the default because it loses a request the person made; it is listed under open questions.
+*Alternative:* cancel the request when the turn it waited on does not end normally. Rejected because it loses a request the person made.
 
 ### 4. A compaction run is not a turn
 `start_compaction` in `service.rs` is separate from `start_turn`:
@@ -105,7 +105,7 @@ The host writes one message from the session to itself with id `compaction:<run>
 | interrupted (decision 10) | `Compaction interrupted` |
 | nothing to compact | no message |
 
-`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter `compact` moves from `context_view.rs` to `workspace-core`, so the line and the card print figures the same way.
+`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter `compact` moves from `context_view.rs` to `workspace-core`, so the line and the card print figures the same way. The figures are Claude's `pre_tokens` and `post_tokens`. The second counts only the summary, not the system prompt and tools the card also counts, so it reads lower than the card's new total.
 
 ### 9. Desktop
 All of it matches `design/mockups/current/compact-context.html`.
@@ -122,14 +122,12 @@ All of it matches `design/mockups/current/compact-context.html`.
 ### 10. Restart
 At startup, before `recover_unfinished_turns` marks sessions disconnected, each unfinished run whose `detail.kind` is `"compaction"` is settled as `interrupted`: the request is cleared, `last_compaction` is `interrupted`, the `Compaction interrupted` line is written, and the session's status is left alone. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged", never runs the compaction again by itself, and lets the measurement show the truth. A `queued` request is untouched by a restart.
 
-### Open questions for the human
-Each has a default above, so the build is not blocked. They are product calls, not technical ones.
-
-1. **A queued compaction whose turn did not end normally** (failed, stopped, paused, interrupted by a restart, or the project was stopped). Default: it stays queued, visible and cancellable, and runs when the agent next runs, before its input. The other choice is to cancel it and say so on the card. Keeping it never loses a request; cancelling never surprises someone who resumes an agent days later.
-2. **The waiting wording.** The approved mockup has only "Compacts when this turn ends". Default 1 needs a second text for an agent that is not in a turn: "Compacts when this agent runs again".
-3. **Pause or Stop while a compaction runs.** Default: the compaction finishes and the agent is then paused. The mockup already shows Pause disabled in this state; a parent's `stop_agents` and a project Stop behave the same way.
-4. **A compaction cut off by a host restart.** Default: a third line, "Compaction interrupted", and a notice saying the figure was measured again, because "context unchanged" could be false. The approved wording covers only "failed".
-5. **The figures in the line.** They are Claude's `pre_tokens` and `post_tokens`. In the verified run those were 28k and 2k for a session whose card would also count the system prompt and tools, so the line's second figure can be lower than the card's. Default: print Claude's figures as they are.
+### Decided by Michael on October 13, 2026
+1. **A queued compaction stays queued.** When its turn fails, is stopped or paused, is interrupted by a restart, or the project is stopped, the request stays queued, visible and cancellable, and runs when the agent next runs, before its input (decision 3).
+2. **The second waiting text** is "Compacts when this agent runs again", shown when the agent is not in a turn (decision 9).
+3. **Pause or Stop while a compaction runs lets it finish.** The agent is paused afterwards; a parent's `stop_agents` and a project Stop behave the same way (decision 4).
+4. **A compaction cut off by a host restart is never run again.** It leaves the line "Compaction interrupted" and a notice saying the figure was measured again (decisions 8 and 10).
+5. **The line prints Claude's own figures,** `pre_tokens` and `post_tokens`, as they are (decision 8).
 
 ### Files and functions to change
 | File | Functions / items |
@@ -146,8 +144,8 @@ Each has a default above, so the build is not blocked. They are product calls, n
 
 - [The summary request may miss the prompt cache] → Decision 5 keeps a turn's arguments so the request has the same prefix, and task 2.1 measures `cacheReadInputTokens` before the argument list is final. The form already says a compaction costs a model call.
 - [The CLI's records are not a documented contract] → Only three fields are read (`compact_result`, `compact_error`, the boundary's token counts). An unrecognized stream ends as "failed" with the CLI's own text, and the measurement that follows shows the real context.
-- [A request waits a long time on a paused agent] → It is on the chip and the card the whole time and can be cancelled. Open question 1.
-- [The line's figures and the card's can differ] → Open question 5.
+- [A request waits a long time on a paused agent] → It is on the chip and the card the whole time and can be cancelled.
+- [The line's figures and the card's can differ] → Accepted; decision 8 says why.
 - [A compaction on a very full session can itself fail for size] → It ends as "failed" with Claude's reason; Claude's automatic compaction is unchanged and still applies.
 - [`last_compaction.at` drives a measurement on every outcome] → One `/context` call with no model request, the same call a finished turn already triggers.
 
