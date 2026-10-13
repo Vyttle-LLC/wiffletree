@@ -2,6 +2,7 @@
 mod codex_compaction;
 mod output;
 use crate::compaction::CompactionRecord;
+use crate::runtime::OwnDescriptors as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use codex_compaction::CODEX_COMPACTION_LIMIT;
@@ -185,7 +186,8 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0);
+        .process_group(0)
+        .own_descriptors_only();
     // Credentials go to the MCP subprocess environment, never in the prompt.
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
         .env("WORKSPACE_TOKEN", &turn.token);
@@ -1081,6 +1083,78 @@ pub(crate) mod tests {
             );
             assert_eq!(input(&turn).unwrap(), b"Look");
         }
+    }
+
+    /// A stand-in provider that prints the descriptors it holds, one per line. `ls` lists its
+    /// own table: everything the provider passed on, plus the two it opens to read `/dev/fd`.
+    fn descriptor_lister(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("provider");
+        fs::write(&script, "#!/bin/sh\nexec /bin/ls /dev/fd\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    fn providers_started_together_hold_only_their_own_descriptors() {
+        const PROVIDERS: usize = 8;
+        const ROUNDS: usize = 25;
+        let dir = tempfile::tempdir().unwrap();
+        let script = descriptor_lister(dir.path());
+        let turn = turn(Provider::Claude, None, vec![]);
+        // Every round starts all of them at once. Nothing may panic between two waits, or the
+        // others would wait for it forever.
+        let together = std::sync::Barrier::new(PROVIDERS + 1);
+        let (outputs, git) = std::thread::scope(|scope| {
+            let providers: Vec<_> = (0..PROVIDERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut outputs = vec![];
+                        for _ in 0..ROUNDS {
+                            let mut cmd = ProcessCommand::new(&script);
+                            configure(&mut cmd, &turn);
+                            together.wait();
+                            // Waiting for the output reaps the child, which exits on its own.
+                            outputs.push(cmd.spawn().and_then(|child| child.wait_with_output()));
+                        }
+                        outputs
+                    })
+                })
+                .collect();
+            // Git queries make and close pipes of their own at the same moments.
+            let git = scope.spawn(|| {
+                let mut answers = vec![];
+                for _ in 0..ROUNDS {
+                    let mut git = ProcessCommand::new("git");
+                    git.arg("--version");
+                    together.wait();
+                    let timeout = Duration::from_secs(30);
+                    answers.push(crate::runtime::bounded_output(git, timeout, None));
+                }
+                answers
+            });
+            let outputs: Vec<_> = providers
+                .into_iter()
+                .flat_map(|provider| provider.join().unwrap())
+                .collect();
+            (outputs, git.join().unwrap())
+        });
+        for answer in git {
+            assert!(answer.unwrap().0.success());
+        }
+        let held: Vec<_> = outputs
+            .into_iter()
+            .map(|output| String::from_utf8(output.unwrap().stdout).unwrap())
+            .collect();
+        assert_eq!(held.len(), PROVIDERS * ROUNDS);
+        let own = "0\n1\n2\n3\n4\n";
+        let leaked: Vec<_> = held.iter().filter(|held| *held != own).collect();
+        assert!(
+            leaked.is_empty(),
+            "{} of {} providers held descriptors they were not given: {leaked:?}",
+            leaked.len(),
+            held.len()
+        );
     }
 
     #[test]
