@@ -56,15 +56,30 @@ pub fn git_answer_with_input(path: &Path, args: &[&str], input: &str) -> Result<
 }
 
 fn git_query(path: &Path, args: &[&str], input: Option<Vec<u8>>) -> Result<GitAnswer> {
+    let mut command = git_command(path, args);
+    // Queries must not take index.lock in checkouts people and agents are working in.
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    git_run(command, GIT_TIMEOUT, input)
+}
+
+/// Runs `git push` without prompts. A push runs the repository's pre-push hooks, so it gets
+/// minutes where a query gets seconds.
+pub fn git_push(path: &Path, args: &[&str]) -> Result<GitAnswer> {
+    git_run(git_command(path, args), PUSH_TIMEOUT, None)
+}
+
+fn git_command(path: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(path)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        // Queries must not take index.lock in checkouts people and agents are working in.
-        .env("GIT_OPTIONAL_LOCKS", "0");
-    let (status, output, error) = bounded_output(command, GIT_TIMEOUT, input)?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+
+fn git_run(command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<GitAnswer> {
+    let (status, output, error) = bounded_output(command, timeout, input)?;
     let error = String::from_utf8_lossy(&error);
     let lines = || error.lines().map(str::trim).filter(|l| !l.is_empty());
     let error = lines()
@@ -131,6 +146,7 @@ fn tool_answer(program: &str, path: &Path, args: &[&str]) -> Result<GhAnswer> {
 
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_TIMEOUT: Duration = Duration::from_secs(15);
+const PUSH_TIMEOUT: Duration = Duration::from_secs(600);
 const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
 
 /// Runs the command with one deadline for its output and its exit; a command still running
@@ -595,6 +611,50 @@ mod model_tests {
         assert!(!answer.status.success());
         assert_eq!(answer.output.trim(), r#"{"data":{}}"#);
         assert_eq!(answer.error, "gh: Could not resolve");
+    }
+
+    #[test]
+    fn a_failing_push_gives_gits_error_and_a_hanging_one_is_killed_at_its_deadline() {
+        let folder = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let answer = git_answer(folder.path(), args).unwrap();
+            assert!(answer.status.success(), "{}", answer.error);
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=F",
+            "-c",
+            "user.email=f@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "start",
+        ]);
+        let missing = folder.path().join("no-such-remote.git");
+        let args = ["push", missing.to_str().unwrap(), "HEAD:refs/heads/main"];
+        let failed = git_push(folder.path(), &args).unwrap();
+        assert!(!failed.status.success());
+        assert!(failed.error.starts_with("fatal: "), "{}", failed.error);
+        // A pre-push hook that never returns is given up on.
+        let remote = folder.path().join("remote.git");
+        git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+        let hook = folder.path().join(".git/hooks/pre-push");
+        std::fs::write(&hook, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let args = ["push", remote.to_str().unwrap(), "HEAD:refs/heads/main"];
+        let started = Instant::now();
+        let hung = git_run(
+            git_command(folder.path(), &args),
+            Duration::from_millis(500),
+            None,
+        );
+        assert_eq!(hung.err().unwrap().to_string(), "Git query timed out");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let refs = git_output(&remote, &["for-each-ref"]).unwrap();
+        assert_eq!(refs, "", "the killed push sent nothing");
     }
 
     #[test]

@@ -199,6 +199,7 @@ impl Host {
             mid_turn_reports: Default::default(),
         };
         host.recover()?;
+        host.end_interrupted_publishes()?;
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
         host.backfill_usage()?;

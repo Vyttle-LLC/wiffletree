@@ -390,6 +390,20 @@ fn spawn_github_read(
         let _ = sender.send_blocking(Event::GitHub(reading));
     });
 }
+/// Runs one publish step on its own thread and always reports back, even if it panics, so a
+/// request is never left running.
+fn spawn_publish_step(sender: Sender<Event>, job: publish::Job, tools: publish::Tools) {
+    std::thread::spawn(move || {
+        let step = std::panic::AssertUnwindSafe(|| publish::run(&job, &tools));
+        let outcome = std::panic::catch_unwind(step).unwrap_or_else(|_| publish::Outcome {
+            ticket_id: job.ticket_id.clone(),
+            request_id: job.request.id.clone(),
+            github: None,
+            result: publish::StepResult::Failed("The publish step stopped unexpectedly".into()),
+        });
+        let _ = sender.send_blocking(Event::Published(outcome));
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -425,6 +439,8 @@ enum Event {
     /// A read of the repositories' GitHub facts finished on its own thread; `None` when it
     /// panicked, and what is stored then stands.
     GitHub(Option<repositories::GitHubReading>),
+    /// A publish step finished on its own thread.
+    Published(publish::Outcome),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
     Shutdown,
@@ -558,6 +574,8 @@ struct Actor {
     pr_tickets_due_at: i64,
     /// A read of the repositories' GitHub facts has not reported yet.
     github_reading: bool,
+    /// `gh` as every GitHub read runs it, and Git as publish steps run it.
+    publish_tools: publish::Tools,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -665,6 +683,7 @@ impl Service {
                     pr_tickets_stale: true,
                     pr_tickets_due_at: 0,
                     github_reading: false,
+                    publish_tools: publish::Tools::default(),
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -824,8 +843,9 @@ impl Actor {
         match self.host.github_inputs() {
             Ok(inputs) if !inputs.is_empty() => {
                 self.github_reading = true;
+                let gh = self.publish_tools.gh.clone();
                 spawn_github_read(self.sender.clone(), move || {
-                    repositories::read_github(&inputs, now(), runtime::gh_answer)
+                    repositories::read_github(&inputs, now(), |path, args| gh(path, args))
                 });
             }
             Ok(_) => {}
@@ -1050,6 +1070,7 @@ impl Actor {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
                         "set_plan" => return self.set_plan(&id, &args).map(Some),
+                        "publish_ticket" => return self.publish_ticket(&id, &args).map(Some),
                         _ => {}
                     }
                     if name == "request_permission" {
@@ -1157,6 +1178,13 @@ impl Actor {
                         false
                     })
                 })
+            }
+            Event::Published(outcome) => {
+                match self.host.record_published(outcome) {
+                    Ok(next) => self.run_publish_step(next),
+                    Err(e) => eprintln!("Workspace publish: {e:#}"),
+                }
+                true
             }
             Event::Wake(at) => {
                 if self.wake_at == Some(at) {
@@ -1463,6 +1491,34 @@ impl Actor {
         let counts = update.plan.clone().context("A plan has counts")?;
         self.record_step(caller, &run, update)?;
         Ok(json!({"done":counts.done,"total":counts.total}))
+    }
+    /// Publishes a ticket for its coordinator or implementer; see `publish`. The steps run off
+    /// this thread and their result reaches the caller as a message.
+    fn publish_ticket(&mut self, caller: &str, args: &Value) -> Result<Value> {
+        only_arguments("publish_ticket", args, &["ticket_id", "title", "body"])?;
+        let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
+        let published = self.host.publish_ticket(
+            caller,
+            ticket,
+            args["title"].as_str(),
+            args["body"].as_str(),
+        );
+        match published {
+            Ok((status, step)) => {
+                self.run_publish_step(step);
+                Ok(status)
+            }
+            Err(refusal) => {
+                // An `origin` GitHub was never asked about is read now, for the next call.
+                self.refresh_github();
+                Err(refusal)
+            }
+        }
+    }
+    fn run_publish_step(&mut self, step: Option<publish::Job>) {
+        if let Some(job) = step {
+            spawn_publish_step(self.sender.clone(), job, self.publish_tools.clone());
+        }
     }
     fn next_revision(&mut self, session_id: &str) -> Result<u64> {
         let latest = match self.revisions.get(session_id) {
@@ -2607,6 +2663,7 @@ mod tests {
             pr_tickets_stale: true,
             pr_tickets_due_at: 0,
             github_reading: false,
+            publish_tools: publish::Tools::default(),
         };
         (actor, changes, step_changes)
     }
@@ -2885,6 +2942,121 @@ mod tests {
         assert!(matches!(&event, Event::GitHub(Some(reading)) if reading.error.is_none()));
         assert!(!actor.handle(event));
         assert!(!actor.github_reading && events.try_recv().is_err());
+    }
+
+    /// An actor over a reviewed ticket in `allowed-org/app`, which is allowed, with a local bare
+    /// repository and a fake `gh` standing in for GitHub. Its events arrive on the receiver.
+    fn publishing_actor() -> (
+        publish::tests::Fixture,
+        publish::tests::Remote,
+        Actor,
+        Receiver<Event>,
+    ) {
+        let mut f = publish::tests::fixture();
+        let remote = publish::tests::remote(&f);
+        f.allow("allowed-org");
+        let home = tempfile::tempdir().unwrap();
+        let host = std::mem::replace(&mut f.host, Host::open(home.path()).unwrap());
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        actor.publish_tools = remote.tools.clone();
+        for session in [&f.implementer, &f.coordinator] {
+            let mut turn = active_turn("run", vec![]);
+            turn.token = session.id.clone();
+            actor.active.insert(session.id.clone(), turn);
+        }
+        // The placeholder host's folder goes with the fixture's.
+        std::mem::forget(home);
+        (f, remote, actor, events)
+    }
+    /// Calls a tool as the session whose turn carries `token`, and returns its reply.
+    fn call_tool(
+        actor: &mut Actor,
+        token: &str,
+        name: &str,
+        args: Value,
+    ) -> std::result::Result<Value, String> {
+        let (reply, replies) = async_channel::bounded(1);
+        actor.handle(Event::Tool {
+            token: token.into(),
+            name: name.into(),
+            args,
+            reply,
+        });
+        replies.try_recv().unwrap()
+    }
+
+    #[test]
+    fn publish_ticket_runs_its_steps_off_the_host_thread_and_the_result_starts_the_callers_turn() {
+        let (f, remote, mut actor, events) = publishing_actor();
+        let caller = f.implementer.id.clone();
+        // The tool takes no branch, remote or base.
+        let aimed = call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why", "branch": "main"}),
+        );
+        assert_eq!(
+            aimed.unwrap_err(),
+            "publish_ticket takes ticket_id, title, body, not branch"
+        );
+        let status = call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+        )
+        .unwrap();
+        assert_eq!(status["status"], "publishing");
+        // It returned at once; the push and then the pull request report back as events.
+        assert!(publish::tests::results(&actor.host).is_empty());
+        let waiting_before = actor.host.queued_input(&caller).unwrap();
+        for _ in 0..2 {
+            assert!(actor.handle(events.recv_blocking().unwrap()));
+        }
+        assert_eq!(remote.branch("wiffletree/fix-contrast"), Some(f.head()));
+        let results = publish::tests::results(&actor.host);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, caller);
+        assert!(results[0].1.contains("opened PR #45"), "{}", results[0].1);
+        assert_eq!(
+            actor.host.queued_input(&caller).unwrap(),
+            waiting_before + 1
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_publish_step_that_panics_ends_the_request_and_tells_the_caller() {
+        let (f, remote, mut actor, events) = publishing_actor();
+        actor.publish_tools.gh = Arc::new(|_, _| panic!("injected"));
+        let caller = f.coordinator.id.clone();
+        call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+        )
+        .unwrap();
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert!(actor.host.ticket(&f.ticket).unwrap().publishing.is_none());
+        let results = publish::tests::results(&actor.host);
+        assert_eq!(
+            results[0].1,
+            "Publishing wiffletree/fix-contrast to allowed-org/app failed: The publish step stopped unexpectedly. Nothing was pushed."
+        );
+        assert!(remote.branch("wiffletree/fix-contrast").is_none());
+        // The next call is a new request.
+        actor.publish_tools = remote.tools.clone();
+        let status = call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+        );
+        assert_eq!(status.unwrap()["status"], "publishing");
     }
 
     #[test]

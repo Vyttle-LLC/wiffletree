@@ -470,23 +470,27 @@ impl Host {
         let mut changed = self.github_error != reading.error;
         self.github_error = reading.error;
         for read in reading.repositories {
-            // Removed while the read ran.
-            let Ok(mut repository) = self.repository(&read.id) else {
-                continue;
-            };
-            if repository.github == read.github && repository.origin_problem == read.origin_problem
-            {
-                continue;
-            }
-            repository.github = read.github;
-            repository.origin_problem = read.origin_problem;
-            self.db.execute(
-                "UPDATE repositories SET data=?2 WHERE id=?1",
-                params![repository.id, encode(&repository)?],
-            )?;
-            changed = true;
+            changed |= self.save_github(read)?;
         }
         Ok(changed)
+    }
+
+    /// Saves one repository's `origin` and GitHub facts, and returns whether they changed.
+    pub(crate) fn save_github(&mut self, read: GitHubRead) -> Result<bool> {
+        // Removed while the read ran.
+        let Ok(mut repository) = self.repository(&read.id) else {
+            return Ok(false);
+        };
+        if repository.github == read.github && repository.origin_problem == read.origin_problem {
+            return Ok(false);
+        }
+        repository.github = read.github;
+        repository.origin_problem = read.origin_problem;
+        self.db.execute(
+            "UPDATE repositories SET data=?2 WHERE id=?1",
+            params![repository.id, encode(&repository)?],
+        )?;
+        Ok(true)
     }
 
     /// Adds a repository to the workspace, or updates the base of one it already knows.
