@@ -379,6 +379,17 @@ fn spawn_pull_request_check(
         });
     });
 }
+/// Reads the repositories' GitHub facts on its own thread and always reports back, even if it
+/// panics, so the next read is never held off.
+fn spawn_github_read(
+    sender: Sender<Event>,
+    read: impl FnOnce() -> repositories::GitHubReading + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let reading = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).ok();
+        let _ = sender.send_blocking(Event::GitHub(reading));
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -411,6 +422,9 @@ enum Event {
         repository: String,
         outcome: pr_watch::Outcome,
     },
+    /// A read of the repositories' GitHub facts finished on its own thread; `None` when it
+    /// panicked, and what is stored then stands.
+    GitHub(Option<repositories::GitHubReading>),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
     Shutdown,
@@ -542,6 +556,8 @@ struct Actor {
     pr_tickets_stale: bool,
     /// A change cannot make the PR watcher read its tickets before this.
     pr_tickets_due_at: i64,
+    /// A read of the repositories' GitHub facts has not reported yet.
+    github_reading: bool,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -648,6 +664,7 @@ impl Service {
                     pr_watch: pr_watch::Watch::default(),
                     pr_tickets_stale: true,
                     pr_tickets_due_at: 0,
+                    github_reading: false,
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -655,6 +672,7 @@ impl Service {
                 }
                 actor.refresh_overlaps(now());
                 actor.refresh_pull_requests(now(), true);
+                actor.refresh_github();
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
@@ -797,6 +815,24 @@ impl Actor {
         }
     }
 
+    /// Reads each repository's `origin` and, for those whose facts are missing, a day old or
+    /// for another `origin`, GitHub's answer: off the host thread, one read at a time.
+    fn refresh_github(&mut self) {
+        if self.github_reading {
+            return;
+        }
+        match self.host.github_inputs() {
+            Ok(inputs) if !inputs.is_empty() => {
+                self.github_reading = true;
+                spawn_github_read(self.sender.clone(), move || {
+                    repositories::read_github(&inputs, now(), runtime::gh_answer)
+                });
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("Workspace GitHub read: {e:#}"),
+        }
+    }
+
     /// Checks each repository with open tickets at most every five minutes, after any event,
     /// so reading `workspace_context` refreshes a stale cache. Fetching and comparing branches
     /// can take seconds, so Git runs on its own thread, one check per repository at a time, and
@@ -843,6 +879,7 @@ impl Actor {
             } => {
                 let result = self.host.add_discovered(found, warnings);
                 let added = result.as_ref().is_ok_and(|r| !r.added.is_empty());
+                self.refresh_github();
                 let _ = reply.try_send(
                     result
                         .and_then(|r| Ok(serde_json::to_value(r)?))
@@ -965,6 +1002,12 @@ impl Actor {
                         if !self.host.live_projects()?.contains(&project) {
                             self.host.set_live(&project, true)?;
                         }
+                    }
+                    if matches!(
+                        command,
+                        Command::ImportRepositories { .. } | Command::AttachRepository { .. }
+                    ) {
+                        self.refresh_github();
                     }
                     if let Command::ResolveAttention { id, answer } = &command {
                         if let Some(permission) = self.permissions.remove(id) {
@@ -1105,6 +1148,15 @@ impl Actor {
                         eprintln!("Workspace PR watch: {e:#}");
                         false
                     })
+            }
+            Event::GitHub(reading) => {
+                self.github_reading = false;
+                reading.is_some_and(|reading| {
+                    self.host.record_github(reading).unwrap_or_else(|e| {
+                        eprintln!("Workspace GitHub read: {e:#}");
+                        false
+                    })
+                })
             }
             Event::Wake(at) => {
                 if self.wake_at == Some(at) {
@@ -2554,6 +2606,7 @@ mod tests {
             pr_watch: pr_watch::Watch::default(),
             pr_tickets_stale: true,
             pr_tickets_due_at: 0,
+            github_reading: false,
         };
         (actor, changes, step_changes)
     }
@@ -2811,6 +2864,27 @@ mod tests {
             });
             assert_eq!(changes.try_recv().is_ok(), signalled);
         }
+    }
+
+    #[test]
+    fn github_is_read_once_at_a_time_and_a_read_that_panics_frees_the_next() {
+        let (_home, host, _, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(4);
+        actor.sender = sender.clone();
+        actor.github_reading = true;
+        spawn_github_read(sender, || panic!("injected"));
+        assert!(!actor.handle(events.recv_blocking().unwrap()));
+        assert!(!actor.github_reading);
+        actor.refresh_github();
+        assert!(actor.github_reading);
+        // A refresh while one runs starts no second read.
+        actor.refresh_github();
+        // The fixture's repository is not on GitHub, so nothing is stale and `gh` is not run.
+        let event = events.recv_blocking().unwrap();
+        assert!(matches!(&event, Event::GitHub(Some(reading)) if reading.error.is_none()));
+        assert!(!actor.handle(event));
+        assert!(!actor.github_reading && events.try_recv().is_err());
     }
 
     #[test]

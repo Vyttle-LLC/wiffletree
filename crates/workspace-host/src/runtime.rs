@@ -84,7 +84,34 @@ pub fn gh_output(path: &Path, args: &[&str]) -> Result<String> {
     tool_output("gh", path, args)
 }
 
+/// A finished `gh` call. Its output can matter although it failed: `gh api graphql` exits
+/// non-zero when one alias cannot be resolved and still prints the others' data.
+pub struct GhAnswer {
+    pub status: ExitStatus,
+    pub output: String,
+    /// The last line of its error output.
+    pub error: String,
+}
+
+/// `gh_output` that also answers for a call that exited non-zero.
+pub fn gh_answer(path: &Path, args: &[&str]) -> Result<GhAnswer> {
+    tool_answer("gh", path, args)
+}
+
 fn tool_output(program: &str, path: &Path, args: &[&str]) -> Result<String> {
+    let answer = tool_answer(program, path, args)?;
+    ensure!(
+        answer.status.success(),
+        "{program} failed: {}",
+        match answer.error.as_str() {
+            "" => "no error output",
+            error => error,
+        }
+    );
+    Ok(answer.output)
+}
+
+fn tool_answer(program: &str, path: &Path, args: &[&str]) -> Result<GhAnswer> {
     let mut command = Command::new(program);
     command
         .current_dir(path)
@@ -95,12 +122,11 @@ fn tool_output(program: &str, path: &Path, args: &[&str]) -> Result<String> {
         .with_context(|| format!("{program} could not run"))?;
     let error = String::from_utf8_lossy(&error);
     let last = error.lines().map(str::trim).rfind(|l| !l.is_empty());
-    ensure!(
-        status.success(),
-        "{program} failed: {}",
-        last.unwrap_or("no error output")
-    );
-    Ok(String::from_utf8(output)?)
+    Ok(GhAnswer {
+        status,
+        output: String::from_utf8(output)?,
+        error: last.unwrap_or_default().to_owned(),
+    })
 }
 
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -552,6 +578,23 @@ mod model_tests {
             failed.to_string(),
             "sh failed: To get started, run: gh auth login"
         );
+    }
+
+    #[test]
+    fn a_failed_call_still_answers_with_its_output() {
+        let folder = tempfile::tempdir().unwrap();
+        let answer = tool_answer(
+            "sh",
+            folder.path(),
+            &[
+                "-c",
+                "echo '{\"data\":{}}'; echo 'gh: Could not resolve' >&2; exit 1",
+            ],
+        )
+        .unwrap();
+        assert!(!answer.status.success());
+        assert_eq!(answer.output.trim(), r#"{"data":{}}"#);
+        assert_eq!(answer.error, "gh: Could not resolve");
     }
 
     #[test]

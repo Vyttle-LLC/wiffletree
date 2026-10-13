@@ -95,7 +95,8 @@ All on JSON that is already stored; nothing new in SQL.
 
 ```rust
 // workspace-core/src/lib.rs
-pub struct Repository { …, pub github: Option<GitHubRepository> }      // `origin` on github.com
+pub struct Repository { …, pub github: Option<GitHubRepository>,       // `origin` on github.com
+    pub origin_problem: Option<String> }                                 // why `origin` names no owner
 pub struct GitHubRepository { pub owner: String, pub name: String,      // as `origin`'s URL names it
     pub facts: Option<GitHubFacts>,                                      // None until GitHub answered
     pub problem: Option<String> }                                        // why GitHub gave no answer
@@ -108,6 +109,7 @@ pub struct Ticket { …, pub publishing: Option<PublishRequest>,          // ste
 pub struct PublishRequest { pub id: String, pub caller: String,        // one per accepted call
     pub repository: String, pub push_url: String,                        // what the card shows and
     pub branch: String, pub base: String, pub commit: String,            // what will be sent,
+    pub size: String,                                                    // the commit's size, for the card
     pub title: Option<String>, pub body: Option<String>,                 // frozen at the request
     pub step: PublishStep,
     pub waiting: Option<String>,                                         // the Inbox item, when asking
@@ -115,6 +117,7 @@ pub struct PublishRequest { pub id: String, pub caller: String,        // one pe
 pub enum PublishStep { Push, OpenPullRequest }
 ```
 
+- `origin_problem` and `size` were added while building, because the specs need them and nothing else stored them: a repository whose `origin` has two push URLs has no `github` entry, yet its row must say why; and the card must name the commit's size, which only the host can read from Git.
 - `allowed_owners` holds entries: an owner's login, or `owner/name` for a fork. Logins cannot contain `/`, so the two never collide. Entries compare case-insensitively, as GitHub does.
 - It goes in `settings.json` beside `workspaces_dir`, the other per-machine value, rather than in a new table. Change 5 (settings repository) must leave both out of what it syncs; the plan already lists them as per machine.
 - Only the human's client can change it, through a new `Command::SetOwnerAllowed { entry, allowed }` handled by `settings.rs::set_owner_allowed`. No agent tool reads or writes the list.
