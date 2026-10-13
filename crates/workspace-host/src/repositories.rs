@@ -225,6 +225,223 @@ pub fn scan_roots(
     (found, warnings)
 }
 
+/// GitHub's facts about a repository are read again once they are this old.
+const GITHUB_FACTS_MS: i64 = 24 * 60 * 60_000;
+/// Repositories per GitHub request.
+const REPOSITORIES_PER_QUERY: usize = 50;
+/// The only host whose remotes name an owner; see `pr_watch::github_repository`.
+pub(crate) const GITHUB_HOST: &str = "github.com";
+
+/// Where `origin` says a repository lives, read on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// Its one push URL, on github.com.
+    GitHub {
+        owner: String,
+        name: String,
+        push_url: String,
+    },
+    /// No `origin`, or one on another host.
+    NotOnGitHub,
+    /// On github.com, but not one place a push can be checked against; the reason is shown.
+    Unusable(String),
+}
+
+/// Reads `origin` without the network. Git pushes to every push URL of a remote, so a second
+/// one would be a destination nobody checked; and the fetch URL must name the same repository.
+pub(crate) fn read_origin(repository: &Path) -> Origin {
+    let urls = |args: &[&str]| -> Vec<String> {
+        runtime::git_output(repository, args)
+            .map(|output| output.lines().map(|l| l.trim().to_owned()).collect())
+            .unwrap_or_default()
+    };
+    let push = urls(&["remote", "get-url", "--push", "--all", "origin"]);
+    let Some(push_url) = push.first() else {
+        return Origin::NotOnGitHub;
+    };
+    if push.len() > 1 {
+        return Origin::Unusable("origin pushes to more than one place".into());
+    }
+    let Some((owner, name)) = pr_watch::github_repository(push_url) else {
+        return Origin::NotOnGitHub;
+    };
+    let fetched = urls(&["remote", "get-url", "origin"])
+        .first()
+        .and_then(|url| pr_watch::github_repository(url));
+    if fetched.as_ref() != Some(&(owner.clone(), name.clone())) {
+        return Origin::Unusable(
+            "origin fetches from a different repository than it pushes to".into(),
+        );
+    }
+    Origin::GitHub {
+        owner,
+        name,
+        push_url: push_url.clone(),
+    }
+}
+
+/// A repository as stored, for a read off the host thread.
+pub(crate) struct GitHubInput {
+    pub id: String,
+    pub path: PathBuf,
+    pub github: Option<GitHubRepository>,
+}
+/// What a read found for one repository: its `origin` on disk and GitHub's facts about it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct GitHubRead {
+    pub id: String,
+    pub github: Option<GitHubRepository>,
+    pub origin_problem: Option<String>,
+}
+#[derive(Debug, Default)]
+pub(crate) struct GitHubReading {
+    pub repositories: Vec<GitHubRead>,
+    /// Why GitHub gave no answer at all; earlier answers are kept.
+    pub error: Option<String>,
+}
+
+fn github_query(repositories: usize) -> String {
+    let variables: Vec<String> = (0..repositories)
+        .map(|i| format!("$o{i}: String!, $n{i}: String!"))
+        .collect();
+    let aliases: String = (0..repositories)
+        .map(|i| {
+            format!(
+                " r{i}: repository(owner: $o{i}, name: $n{i}) {{ nameWithOwner isFork visibility \
+                 parent {{ nameWithOwner }} owner {{ __typename }} }}"
+            )
+        })
+        .collect();
+    format!("query({}) {{{aliases} }}", variables.join(", "))
+}
+
+/// GitHub's answers for `(owner, name)` pairs from one read-only request: its facts, or why it
+/// had none for that repository. Fails only when the answer has no data at all.
+fn ask_github(
+    path: &Path,
+    asked: &[(String, String)],
+    at: i64,
+    gh: &impl Fn(&Path, &[&str]) -> Result<runtime::GhAnswer>,
+) -> Result<Vec<std::result::Result<GitHubFacts, String>>> {
+    // Raw-string fields only: `-F` would let gh coerce values or read files.
+    let mut fields = vec![format!("query={}", github_query(asked.len()))];
+    for (i, (owner, name)) in asked.iter().enumerate() {
+        fields.extend([format!("o{i}={owner}"), format!("n{i}={name}")]);
+    }
+    // The host is named, so `GH_HOST` cannot point the question at another GitHub.
+    let mut args = vec!["api", "graphql", "--hostname", GITHUB_HOST];
+    for field in &fields {
+        args.extend(["-f", field]);
+    }
+    let answer = gh(path, &args)?;
+    let json: Value = serde_json::from_str(&answer.output).unwrap_or_default();
+    let data = json["data"].as_object().with_context(|| {
+        match (json["errors"][0]["message"].as_str(), answer.error.as_str()) {
+            (Some(message), _) => message.to_owned(),
+            (None, "") => "gh gave no answer".to_owned(),
+            (None, error) => error.to_owned(),
+        }
+    })?;
+    Ok((0..asked.len())
+        .map(|i| {
+            let alias = format!("r{i}");
+            let node = data.get(&alias).filter(|node| node.is_object());
+            let name_with_owner = node.and_then(|n| n["nameWithOwner"].as_str());
+            match (node, name_with_owner) {
+                (Some(node), Some(name_with_owner)) => Ok(GitHubFacts {
+                    name_with_owner: name_with_owner.to_owned(),
+                    organization: node["owner"]["__typename"] == "Organization",
+                    fork: node["isFork"] == true,
+                    parent: node["parent"]["nameWithOwner"].as_str().map(str::to_owned),
+                    public: node["visibility"] == "PUBLIC",
+                    checked_at: at,
+                }),
+                _ => Err(json["errors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|error| error["path"][0] == alias.as_str())
+                    .and_then(|error| error["message"].as_str())
+                    .unwrap_or("GitHub returned no repository")
+                    .to_owned()),
+            }
+        })
+        .collect())
+}
+
+/// Reads every repository's `origin` on disk, then asks GitHub, read-only, about those whose
+/// facts are missing, older than a day or for another `origin`: the distinct ones in one
+/// request per 50. Runs off the host thread.
+pub(crate) fn read_github(
+    inputs: &[GitHubInput],
+    at: i64,
+    gh: impl Fn(&Path, &[&str]) -> Result<runtime::GhAnswer>,
+) -> GitHubReading {
+    let mut reading = GitHubReading::default();
+    // The distinct repositories to ask about, and a folder to run `gh` in.
+    let mut stale: Vec<(String, String)> = vec![];
+    let mut folder = None;
+    for input in inputs {
+        let (github, origin_problem) = match read_origin(&input.path) {
+            Origin::GitHub { owner, name, .. } => {
+                let known = input
+                    .github
+                    .clone()
+                    .filter(|known| known.owner == owner && known.name == name)
+                    .unwrap_or(GitHubRepository {
+                        owner,
+                        name,
+                        facts: None,
+                        problem: None,
+                    });
+                let fresh = known
+                    .facts
+                    .as_ref()
+                    .is_some_and(|facts| at - facts.checked_at < GITHUB_FACTS_MS);
+                let pair = (known.owner.clone(), known.name.clone());
+                if !fresh && !stale.contains(&pair) {
+                    stale.push(pair);
+                    folder.get_or_insert(input.path.as_path());
+                }
+                (Some(known), None)
+            }
+            Origin::NotOnGitHub => (None, None),
+            Origin::Unusable(reason) => (None, Some(reason)),
+        };
+        reading.repositories.push(GitHubRead {
+            id: input.id.clone(),
+            github,
+            origin_problem,
+        });
+    }
+    let Some(folder) = folder else {
+        return reading;
+    };
+    for asked in stale.chunks(REPOSITORIES_PER_QUERY) {
+        let answers = match ask_github(folder, asked, at, &gh) {
+            Ok(answers) => answers,
+            Err(error) => {
+                reading.error = Some(format!("{error:#}"));
+                continue;
+            }
+        };
+        for ((owner, name), answer) in asked.iter().zip(answers) {
+            let repositories = reading
+                .repositories
+                .iter_mut()
+                .filter_map(|read| read.github.as_mut())
+                .filter(|github| github.owner == *owner && github.name == *name);
+            for github in repositories {
+                (github.facts, github.problem) = match &answer {
+                    Ok(facts) => (Some(facts.clone()), None),
+                    Err(reason) => (None, Some(reason.clone())),
+                };
+            }
+        }
+    }
+    reading
+}
+
 impl Host {
     /// The workspace repositories this project uses.
     pub fn project_repositories(&self, project: &str) -> Result<Vec<Repository>> {
@@ -234,6 +451,49 @@ impl Host {
             .into_iter()
             .filter(|r| project.uses(&r.id))
             .collect())
+    }
+
+    /// Every repository as stored, for `read_github`, which decides off the host thread which
+    /// of them GitHub must be asked about.
+    pub(crate) fn github_inputs(&self) -> Result<Vec<GitHubInput>> {
+        Ok(self
+            .repositories()?
+            .into_iter()
+            .map(|r| GitHubInput {
+                id: r.id,
+                path: r.path.into(),
+                github: r.github,
+            })
+            .collect())
+    }
+
+    /// Saves what a read found, for the repositories it changed, and keeps why GitHub could
+    /// not be read. Returns whether anything shown changed.
+    pub(crate) fn record_github(&mut self, reading: GitHubReading) -> Result<bool> {
+        let mut changed = self.github_error != reading.error;
+        self.github_error = reading.error;
+        for read in reading.repositories {
+            changed |= self.save_github(read)?;
+        }
+        Ok(changed)
+    }
+
+    /// Saves one repository's `origin` and GitHub facts, and returns whether they changed.
+    pub(crate) fn save_github(&mut self, read: GitHubRead) -> Result<bool> {
+        // Removed while the read ran.
+        let Ok(mut repository) = self.repository(&read.id) else {
+            return Ok(false);
+        };
+        if repository.github == read.github && repository.origin_problem == read.origin_problem {
+            return Ok(false);
+        }
+        repository.github = read.github;
+        repository.origin_problem = read.origin_problem;
+        self.db.execute(
+            "UPDATE repositories SET data=?2 WHERE id=?1",
+            params![repository.id, encode(&repository)?],
+        )?;
+        Ok(true)
     }
 
     /// Adds a repository to the workspace, or updates the base of one it already knows.
@@ -279,6 +539,8 @@ impl Host {
                     .into(),
                 path,
                 base: base.into(),
+                github: None,
+                origin_problem: None,
             },
         };
         self.db.execute(
@@ -538,5 +800,555 @@ impl Host {
             self.dismiss(path)?;
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn git(path: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    /// A scratch repository under `root` whose `origin` is `url`, if any.
+    fn scratch(root: &Path, name: &str, url: Option<&str>) -> PathBuf {
+        let path = root.join(name);
+        fs::create_dir_all(&path).unwrap();
+        git(&path, &["init", "-q", "-b", "main"]);
+        if let Some(url) = url {
+            git(&path, &["remote", "add", "origin", url]);
+        }
+        path
+    }
+    fn inputs(root: &Path, urls: &[String]) -> Vec<GitHubInput> {
+        urls.iter()
+            .enumerate()
+            .map(|(i, url)| GitHubInput {
+                id: format!("r{i}"),
+                path: scratch(root, &format!("r{i}"), Some(url)),
+                github: None,
+            })
+            .collect()
+    }
+    fn exit(code: i32) -> std::process::ExitStatus {
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+    /// GitHub's node for a repository, or `None` when it cannot be resolved.
+    type Answers = fn(&str, &str) -> Option<Value>;
+    fn private(owner: &str, name: &str) -> Option<Value> {
+        Some(
+            json!({"nameWithOwner": format!("{owner}/{name}"), "isFork": false,
+            "visibility": "PRIVATE", "parent": null, "owner": {"__typename": "Organization"}}),
+        )
+    }
+    /// A `gh` that answers each asked repository from `answers` as GitHub does, exiting 1 when
+    /// one cannot be resolved, and records its calls' arguments.
+    fn fake_gh<'a>(
+        calls: &'a RefCell<Vec<Vec<String>>>,
+        answers: Answers,
+    ) -> impl Fn(&Path, &[&str]) -> Result<runtime::GhAnswer> + 'a {
+        move |_, args| {
+            calls
+                .borrow_mut()
+                .push(args.iter().map(|a| (*a).to_owned()).collect());
+            let field = |key: String| {
+                args.iter()
+                    .find_map(|a| a.strip_prefix(&format!("{key}=")))
+                    .map(str::to_owned)
+            };
+            let (mut data, mut errors) = (json!({}), vec![]);
+            for i in 0.. {
+                let (Some(owner), Some(name)) = (field(format!("o{i}")), field(format!("n{i}")))
+                else {
+                    break;
+                };
+                let node = answers(&owner, &name);
+                if node.is_none() {
+                    errors.push(json!({"type": "NOT_FOUND", "path": [format!("r{i}")],
+                        "message": format!("Could not resolve to a Repository with the name '{owner}/{name}'.")}));
+                }
+                data[format!("r{i}")] = json!(node);
+            }
+            let failed = !errors.is_empty();
+            Ok(runtime::GhAnswer {
+                status: exit(i32::from(failed)),
+                output: json!({"data": data, "errors": errors}).to_string(),
+                error: if failed {
+                    "gh: Could not resolve".into()
+                } else {
+                    String::new()
+                },
+            })
+        }
+    }
+    fn facts(reading: &GitHubReading, id: &str) -> Option<GitHubFacts> {
+        let read = reading.repositories.iter().find(|r| r.id == id).unwrap();
+        read.github.as_ref().and_then(|g| g.facts.clone())
+    }
+
+    #[test]
+    fn an_ssh_or_https_origin_names_its_owner_and_repository() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, url) in [
+            ("ssh", "git@github.com:Vyttle-LLC/wiffletree.git"),
+            ("https", "https://github.com/Vyttle-LLC/wiffletree"),
+        ] {
+            assert_eq!(
+                read_origin(&scratch(root.path(), name, Some(url))),
+                Origin::GitHub {
+                    owner: "Vyttle-LLC".into(),
+                    name: "wiffletree".into(),
+                    push_url: url.into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn no_origin_or_one_on_another_host_is_not_on_github() {
+        let root = tempfile::tempdir().unwrap();
+        let none = scratch(root.path(), "none", None);
+        assert_eq!(read_origin(&none), Origin::NotOnGitHub);
+        let elsewhere = scratch(root.path(), "elsewhere", Some("git@gitlab.com:o/r.git"));
+        assert_eq!(read_origin(&elsewhere), Origin::NotOnGitHub);
+        // A remote under another name is not `origin`.
+        git(
+            &none,
+            &["remote", "add", "upstream", "git@github.com:o/r.git"],
+        );
+        assert_eq!(read_origin(&none), Origin::NotOnGitHub);
+    }
+
+    #[test]
+    fn an_origin_with_two_push_urls_or_another_fetch_url_names_no_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let allowed = "git@github.com:allowed-org/app.git";
+        let two = scratch(root.path(), "two", Some(allowed));
+        git(
+            &two,
+            &["remote", "set-url", "--add", "--push", "origin", allowed],
+        );
+        git(
+            &two,
+            &[
+                "remote",
+                "set-url",
+                "--add",
+                "--push",
+                "origin",
+                "git@github.com:other/app.git",
+            ],
+        );
+        assert_eq!(
+            read_origin(&two),
+            Origin::Unusable("origin pushes to more than one place".into())
+        );
+        let split = scratch(root.path(), "split", Some(allowed));
+        git(
+            &split,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "git@github.com:other/app.git",
+            ],
+        );
+        assert!(
+            matches!(read_origin(&split), Origin::Unusable(reason) if reason.contains("fetches"))
+        );
+        // The page shows why, and such a repository has no owner to allow.
+        let input = |id: &str, path: PathBuf| GitHubInput {
+            id: id.into(),
+            path,
+            github: None,
+        };
+        let reading = read_github(&[input("two", two), input("split", split)], 0, |_, _| {
+            panic!("a repository without an owner is not asked about")
+        });
+        assert!(reading.repositories.iter().all(|r| r.github.is_none()));
+        assert_eq!(
+            reading.repositories[0].origin_problem.as_deref(),
+            Some("origin pushes to more than one place")
+        );
+    }
+
+    #[test]
+    fn the_workspace_is_read_with_one_request_per_fifty_distinct_repositories() {
+        let root = tempfile::tempdir().unwrap();
+        let urls = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|i| format!("git@github.com:Sage-Social/r{i}.git"))
+                .collect()
+        };
+        // 34 repositories, two of them clones of the same one: one request, 33 asked about.
+        let mut workspace = urls(33);
+        workspace.push(workspace[0].clone());
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(
+            &inputs(&root.path().join("a"), &workspace),
+            9,
+            fake_gh(&calls, private),
+        );
+        assert_eq!(reading.error, None);
+        assert_eq!(calls.borrow().len(), 1);
+        let call = calls.borrow()[0].clone();
+        // The question names github.com, whatever `GH_HOST` says.
+        assert_eq!(&call[..4], ["api", "graphql", "--hostname", "github.com"]);
+        // Raw-string fields only, and a read-only query.
+        assert!(call[4..].chunks(2).all(|pair| pair[0] == "-f"));
+        assert!(call[5].starts_with("query=query(") && !call[5].contains("mutation"));
+        assert!(
+            call.contains(&"o32=Sage-Social".to_owned())
+                && !call.iter().any(|a| a.starts_with("o33="))
+        );
+        for id in ["r0", "r33"] {
+            let facts = facts(&reading, id).unwrap();
+            assert_eq!(facts.name_with_owner, "Sage-Social/r0");
+            assert!(facts.organization && !facts.fork && !facts.public);
+            assert_eq!(facts.checked_at, 9);
+        }
+        // 51 distinct repositories take two.
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(
+            &inputs(&root.path().join("b"), &urls(51)),
+            9,
+            fake_gh(&calls, private),
+        );
+        assert_eq!(calls.borrow().len(), 2);
+        assert!(facts(&reading, "r50").is_some());
+    }
+
+    #[test]
+    fn a_fork_its_parent_and_a_transferred_repository_are_read_as_github_reports_them() {
+        let root = tempfile::tempdir().unwrap();
+        let urls = [
+            "git@github.com:MHohlios/gpui-component.git".to_owned(),
+            "https://github.com/old-org/app.git".to_owned(),
+        ];
+        let answers: Answers = |owner, name| {
+            Some(match name {
+                "gpui-component" => json!({"nameWithOwner": format!("{owner}/{name}"),
+                    "isFork": true, "visibility": "PUBLIC",
+                    "parent": {"nameWithOwner": "longbridge/gpui-component"},
+                    "owner": {"__typename": "User"}}),
+                _ => private("new-org", name).unwrap(),
+            })
+        };
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(&inputs(root.path(), &urls), 1, fake_gh(&calls, answers));
+        let fork = facts(&reading, "r0").unwrap();
+        assert!(fork.fork && fork.public && !fork.organization);
+        assert_eq!(fork.parent.as_deref(), Some("longbridge/gpui-component"));
+        // The URL's owner is kept beside the owner GitHub reports, which is the one that counts.
+        let moved = reading.repositories[1].github.clone().unwrap();
+        assert_eq!(
+            (moved.owner.as_str(), moved.name.as_str()),
+            ("old-org", "app")
+        );
+        assert_eq!(moved.facts.unwrap().name_with_owner, "new-org/app");
+        let repository = Repository {
+            id: "r1".into(),
+            name: "app".into(),
+            path: String::new(),
+            base: "origin/main".into(),
+            github: reading.repositories[1].github.clone(),
+            origin_problem: None,
+        };
+        assert_eq!(owner_entry(&repository).as_deref(), Some("new-org"));
+    }
+
+    #[test]
+    fn a_fork_is_read_from_github_com_even_when_gh_host_names_another_github() {
+        let root = tempfile::tempdir().unwrap();
+        let inputs = inputs(
+            root.path(),
+            &["git@github.com:allowed-org/app.git".to_owned()],
+        );
+        // As under `GH_HOST`: a question that does not name github.com reaches another host,
+        // whose repository of the same name is not a fork.
+        let gh = |_: &Path, args: &[&str]| {
+            let names_github = args
+                .windows(2)
+                .any(|pair| pair == ["--hostname", "github.com"]);
+            Ok(runtime::GhAnswer {
+                status: exit(0),
+                output: json!({"data": {"r0": {"nameWithOwner": "allowed-org/app",
+                    "isFork": names_github, "visibility": "PRIVATE", "parent": null,
+                    "owner": {"__typename": "Organization"}}}})
+                .to_string(),
+                error: String::new(),
+            })
+        };
+        let reading = read_github(&inputs, 1, gh);
+        assert!(facts(&reading, "r0").unwrap().fork);
+    }
+
+    #[test]
+    fn one_repository_github_cannot_resolve_is_marked_alone_and_the_rest_are_recorded() {
+        let root = tempfile::tempdir().unwrap();
+        let urls: Vec<String> = (0..34)
+            .map(|i| format!("git@github.com:Sage-Social/r{i}.git"))
+            .collect();
+        let answers: Answers = |owner, name| private(owner, name).filter(|_| name != "r33");
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(&inputs(root.path(), &urls), 1, fake_gh(&calls, answers));
+        // gh exited 1 and still printed the others' data.
+        assert_eq!(reading.error, None);
+        assert!((0..33).all(|i| facts(&reading, &format!("r{i}")).is_some()));
+        let missing = reading.repositories[33].github.clone().unwrap();
+        assert_eq!(missing.facts, None);
+        assert_eq!(
+            missing.problem.as_deref(),
+            Some("Could not resolve to a Repository with the name 'Sage-Social/r33'.")
+        );
+    }
+
+    #[test]
+    fn only_missing_day_old_or_repointed_facts_are_asked_for() {
+        let root = tempfile::tempdir().unwrap();
+        let day = GITHUB_FACTS_MS;
+        let mut inputs = inputs(
+            root.path(),
+            &["git@github.com:Sage-Social/app.git".to_owned()],
+        );
+        let calls = RefCell::new(vec![]);
+        let first = read_github(&inputs, 1_000, fake_gh(&calls, private));
+        inputs[0].github = first.repositories[0].github.clone();
+        // Nothing stale: no `gh` call, and what was stored stands.
+        let fresh = read_github(&inputs, day, |_, _| panic!("nothing is stale"));
+        assert_eq!(fresh.repositories, first.repositories);
+        // A day later it is read again.
+        let later = read_github(&inputs, 1_000 + day, fake_gh(&calls, private));
+        assert_eq!(facts(&later, "r0").unwrap().checked_at, 1_000 + day);
+        // A repointed `origin` drops the facts read for the old one and asks again.
+        git(
+            &inputs[0].path,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:Sage-Social/web.git",
+            ],
+        );
+        let repointed = read_github(&inputs, day, fake_gh(&calls, private));
+        assert_eq!(
+            facts(&repointed, "r0").unwrap().name_with_owner,
+            "Sage-Social/web"
+        );
+        assert_eq!(calls.borrow().len(), 3);
+    }
+
+    #[test]
+    fn a_read_that_fails_altogether_keeps_owners_and_earlier_answers() {
+        let root = tempfile::tempdir().unwrap();
+        let mut inputs = inputs(
+            root.path(),
+            &[
+                "git@github.com:Sage-Social/app.git".to_owned(),
+                "git@github.com:Sage-Social/web.git".to_owned(),
+            ],
+        );
+        let calls = RefCell::new(vec![]);
+        let first = read_github(&inputs[..1], 1_000, fake_gh(&calls, private));
+        inputs[0].github = first.repositories[0].github.clone();
+        let signed_out = |_: &Path, _: &[&str]| {
+            Ok(runtime::GhAnswer {
+                status: exit(4),
+                output: String::new(),
+                error: "To get started with GitHub CLI, please run:  gh auth login".into(),
+            })
+        };
+        let reading = read_github(&inputs, 1_000 + GITHUB_FACTS_MS, signed_out);
+        assert_eq!(
+            reading.error.as_deref(),
+            Some("To get started with GitHub CLI, please run:  gh auth login")
+        );
+        // The earlier answer is kept, and the owner read on disk is listed without one.
+        assert_eq!(facts(&reading, "r0").unwrap().checked_at, 1_000);
+        let unanswered = reading.repositories[1].github.clone().unwrap();
+        assert_eq!(
+            (unanswered.owner.as_str(), unanswered.facts),
+            ("Sage-Social", None)
+        );
+        // A `gh` that cannot run at all reads the same way.
+        let missing = read_github(&inputs[1..], 0, |_, _| {
+            bail!("gh could not run: No such file")
+        });
+        assert_eq!(
+            missing.error.as_deref(),
+            Some("gh could not run: No such file")
+        );
+    }
+
+    fn host_with(urls: &[&str]) -> (tempfile::TempDir, Host) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
+        for (i, url) in urls.iter().enumerate() {
+            let path = scratch(home.path(), &format!("r{i}"), Some(url));
+            git(
+                &path,
+                &[
+                    "-c",
+                    "user.name=F",
+                    "-c",
+                    "user.email=f@example.invalid",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "start",
+                ],
+            );
+            host.add_repository(path.to_str().unwrap(), "HEAD").unwrap();
+        }
+        (home, host)
+    }
+
+    #[test]
+    fn a_reading_is_saved_and_shown_and_a_failed_one_keeps_what_was_stored() {
+        let (_home, mut host) =
+            host_with(&["git@github.com:old-org/app.git", "git@gitlab.com:o/r.git"]);
+        let calls = RefCell::new(vec![]);
+        let moved: Answers = |_, name| private("new-org", name);
+        let reading = read_github(&host.github_inputs().unwrap(), 5, fake_gh(&calls, moved));
+        assert!(host.record_github(reading).unwrap());
+        let snapshot = host.snapshot().unwrap();
+        assert_eq!(snapshot.github_error, None);
+        // A transferred repository is listed and checked under the owner GitHub reports.
+        assert_eq!(
+            owner_entries(&snapshot.repositories).owners[0].login,
+            "new-org"
+        );
+        assert!(is_allowed(
+            &Repository {
+                base: "origin/main".into(),
+                ..snapshot.repositories[0].clone()
+            },
+            &["new-org".to_owned()]
+        ));
+        assert_eq!(snapshot.repositories[1].github, None);
+        // An unchanged reading saves nothing and is no news.
+        let same = read_github(&host.github_inputs().unwrap(), 6, |_, _| {
+            panic!("nothing is stale")
+        });
+        assert!(!host.record_github(same).unwrap());
+        // A failed read a day later keeps the answer and says why.
+        let failed = read_github(
+            &host.github_inputs().unwrap(),
+            5 + GITHUB_FACTS_MS,
+            |_, _| bail!("gh failed: not logged in"),
+        );
+        assert!(host.record_github(failed).unwrap());
+        let snapshot = host.snapshot().unwrap();
+        assert_eq!(
+            snapshot.github_error.as_deref(),
+            Some("gh failed: not logged in")
+        );
+        assert_eq!(
+            snapshot.repositories[0]
+                .github
+                .as_ref()
+                .unwrap()
+                .facts
+                .as_ref()
+                .unwrap()
+                .checked_at,
+            5
+        );
+    }
+
+    /// A project using a GitHub repository GitHub has answered for, with its coordinator.
+    fn project_on_github() -> (tempfile::TempDir, Host, Session) {
+        let (home, mut host) = host_with(&["git@github.com:celadon-theme/website.git"]);
+        let calls = RefCell::new(vec![]);
+        let reading = read_github(&host.github_inputs().unwrap(), 5, fake_gh(&calls, private));
+        host.record_github(reading).unwrap();
+        let repository = host.repositories().unwrap().remove(0);
+        host.db
+            .execute(
+                "UPDATE repositories SET data=?2 WHERE id=?1",
+                params![
+                    repository.id,
+                    encode(&Repository {
+                        base: "origin/main".into(),
+                        ..repository.clone()
+                    })
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        host.create_project("Site").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0);
+        (home, host, coordinator)
+    }
+
+    #[test]
+    fn an_agent_reads_each_repositorys_owner_and_rule_in_workspace_context() {
+        let (_home, mut host, coordinator) = project_on_github();
+        let repository =
+            |host: &Host| host.agent_context(&coordinator.id).unwrap()["repositories"][0].clone();
+        let entry = repository(&host);
+        assert_eq!(entry["github"]["owner"], "celadon-theme");
+        assert_eq!(entry["github"]["name"], "website");
+        assert_eq!(entry["github"]["facts"]["fork"], false);
+        assert_eq!(entry["github"]["facts"]["public"], false);
+        assert_eq!(entry["publishes_without_asking"], false);
+        host.set_owner_allowed("celadon-theme", true).unwrap();
+        assert_eq!(repository(&host)["publishes_without_asking"], true);
+        host.set_owner_allowed("celadon-theme", false).unwrap();
+        assert_eq!(repository(&host)["publishes_without_asking"], false);
+    }
+
+    #[test]
+    fn no_agent_tool_changes_the_allowed_list() {
+        let (_home, mut host, coordinator) = project_on_github();
+        host.set_owner_allowed("Sage-Social", true).unwrap();
+        let tools = mcp::tools();
+        for tool in tools.as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            // No tool takes an owner to allow, and none changes the list whatever it is sent.
+            let schema = tool["inputSchema"]["properties"].to_string();
+            assert!(
+                !schema.contains("allowed") && !schema.contains("owner"),
+                "{name}"
+            );
+            let _ = host.agent_tool(
+                &coordinator.id,
+                name,
+                json!({"entry": "celadon-theme", "allowed": true, "owner": "celadon-theme",
+                    "allowed_owners": ["celadon-theme"]}),
+            );
+        }
+        assert_eq!(host.settings().allowed_owners, ["Sage-Social"]);
+    }
+
+    #[test]
+    fn when_github_cannot_be_read_nothing_is_treated_as_answered() {
+        let (_home, mut host) = host_with(&["git@github.com:Sage-Social/app.git"]);
+        let reading = read_github(&host.github_inputs().unwrap(), 5, |_, _| {
+            bail!("gh failed: not logged in")
+        });
+        host.record_github(reading).unwrap();
+        let snapshot = host.snapshot().unwrap();
+        assert_eq!(
+            snapshot.github_error.as_deref(),
+            Some("gh failed: not logged in")
+        );
+        let repository = &snapshot.repositories[0];
+        // The owner is still listed, from the remote on disk; it asks first whatever is allowed.
+        assert_eq!(repository.github.as_ref().unwrap().owner, "Sage-Social");
+        assert!(!is_allowed(repository, &["Sage-Social".to_owned()]));
+        assert_eq!(
+            owner_entries(&snapshot.repositories).owners[0].summary(),
+            "1 repository · asking first until GitHub answers"
+        );
     }
 }

@@ -379,6 +379,31 @@ fn spawn_pull_request_check(
         });
     });
 }
+/// Reads the repositories' GitHub facts on its own thread and always reports back, even if it
+/// panics, so the next read is never held off.
+fn spawn_github_read(
+    sender: Sender<Event>,
+    read: impl FnOnce() -> repositories::GitHubReading + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let reading = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).ok();
+        let _ = sender.send_blocking(Event::GitHub(reading));
+    });
+}
+/// Runs one publish step on its own thread and always reports back, even if it panics, so a
+/// request is never left running.
+fn spawn_publish_step(sender: Sender<Event>, job: publish::Job, tools: publish::Tools) {
+    std::thread::spawn(move || {
+        let step = std::panic::AssertUnwindSafe(|| publish::run(&job, &tools));
+        let outcome = std::panic::catch_unwind(step).unwrap_or_else(|_| publish::Outcome {
+            ticket_id: job.ticket_id.clone(),
+            request_id: job.request.id.clone(),
+            github: None,
+            result: publish::StepResult::Failed("The publish step stopped unexpectedly".into()),
+        });
+        let _ = sender.send_blocking(Event::Published(outcome));
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -411,6 +436,11 @@ enum Event {
         repository: String,
         outcome: pr_watch::Outcome,
     },
+    /// A read of the repositories' GitHub facts finished on its own thread; `None` when it
+    /// panicked, and what is stored then stands.
+    GitHub(Option<repositories::GitHubReading>),
+    /// A publish step finished on its own thread.
+    Published(publish::Outcome),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
     Shutdown,
@@ -542,6 +572,10 @@ struct Actor {
     pr_tickets_stale: bool,
     /// A change cannot make the PR watcher read its tickets before this.
     pr_tickets_due_at: i64,
+    /// A read of the repositories' GitHub facts has not reported yet.
+    github_reading: bool,
+    /// `gh` as every GitHub read runs it, and Git as publish steps run it.
+    publish_tools: publish::Tools,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -648,6 +682,8 @@ impl Service {
                     pr_watch: pr_watch::Watch::default(),
                     pr_tickets_stale: true,
                     pr_tickets_due_at: 0,
+                    github_reading: false,
+                    publish_tools: publish::Tools::default(),
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -655,6 +691,7 @@ impl Service {
                 }
                 actor.refresh_overlaps(now());
                 actor.refresh_pull_requests(now(), true);
+                actor.refresh_github();
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
@@ -797,6 +834,25 @@ impl Actor {
         }
     }
 
+    /// Reads each repository's `origin` and, for those whose facts are missing, a day old or
+    /// for another `origin`, GitHub's answer: off the host thread, one read at a time.
+    fn refresh_github(&mut self) {
+        if self.github_reading {
+            return;
+        }
+        match self.host.github_inputs() {
+            Ok(inputs) if !inputs.is_empty() => {
+                self.github_reading = true;
+                let gh = self.publish_tools.gh.clone();
+                spawn_github_read(self.sender.clone(), move || {
+                    repositories::read_github(&inputs, now(), |path, args| gh(path, args))
+                });
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("Workspace GitHub read: {e:#}"),
+        }
+    }
+
     /// Checks each repository with open tickets at most every five minutes, after any event,
     /// so reading `workspace_context` refreshes a stale cache. Fetching and comparing branches
     /// can take seconds, so Git runs on its own thread, one check per repository at a time, and
@@ -843,6 +899,7 @@ impl Actor {
             } => {
                 let result = self.host.add_discovered(found, warnings);
                 let added = result.as_ref().is_ok_and(|r| !r.added.is_empty());
+                self.refresh_github();
                 let _ = reply.try_send(
                     result
                         .and_then(|r| Ok(serde_json::to_value(r)?))
@@ -966,7 +1023,14 @@ impl Actor {
                             self.host.set_live(&project, true)?;
                         }
                     }
+                    if matches!(
+                        command,
+                        Command::ImportRepositories { .. } | Command::AttachRepository { .. }
+                    ) {
+                        self.refresh_github();
+                    }
                     if let Command::ResolveAttention { id, answer } = &command {
+                        let attention: Attention = serde_json::from_value(response.clone())?;
                         if let Some(permission) = self.permissions.remove(id) {
                             let decision = if answer == "approved" {
                                 json!({"behavior":"allow","updatedInput":permission.input})
@@ -974,8 +1038,12 @@ impl Actor {
                                 json!({"behavior":"deny","message":answer})
                             };
                             let _ = permission.reply.try_send(Ok(decision));
+                        } else if attention.is_publish() {
+                            // The request's own result is its caller's one message, so the
+                            // answer is not sent on as other Inbox answers are.
+                            let step = self.host.answer_publish(id, answer == "approved")?;
+                            self.run_publish_step(step);
                         } else {
-                            let attention: Attention = serde_json::from_value(response.clone())?;
                             self.host.send(
                                 &format!("answer:{id}"),
                                 None,
@@ -1007,6 +1075,7 @@ impl Actor {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
                         "set_plan" => return self.set_plan(&id, &args).map(Some),
+                        "publish_ticket" => return self.publish_ticket(&id, &args).map(Some),
                         _ => {}
                     }
                     if name == "request_permission" {
@@ -1015,7 +1084,7 @@ impl Actor {
                         let request = self.host.request_attention(
                             &id,
                             "local",
-                            &format!("permission:{}", new_id()),
+                            &format!("{PERMISSION_PREFIX}{}", new_id()),
                             &format!(
                                 "{} requests {tool}\n{}",
                                 self.host.session(&id)?.name,
@@ -1105,6 +1174,32 @@ impl Actor {
                         eprintln!("Workspace PR watch: {e:#}");
                         false
                     })
+            }
+            Event::GitHub(reading) => {
+                self.github_reading = false;
+                reading.is_some_and(|reading| {
+                    self.host.record_github(reading).unwrap_or_else(|e| {
+                        eprintln!("Workspace GitHub read: {e:#}");
+                        false
+                    })
+                })
+            }
+            Event::Published(outcome) => {
+                // What the step sent shows on the ticket's row once the watcher reads it.
+                let sent = matches!(
+                    outcome.result,
+                    publish::StepResult::Pushed { already: false } | publish::StepResult::Opened(_)
+                );
+                if let Ok(ticket) = self.host.ticket(&outcome.ticket_id)
+                    && sent
+                {
+                    self.pr_watch.check_now(&ticket.repository_id);
+                }
+                match self.host.record_published(outcome) {
+                    Ok(next) => self.run_publish_step(next),
+                    Err(e) => eprintln!("Workspace publish: {e:#}"),
+                }
+                true
             }
             Event::Wake(at) => {
                 if self.wake_at == Some(at) {
@@ -1411,6 +1506,34 @@ impl Actor {
         let counts = update.plan.clone().context("A plan has counts")?;
         self.record_step(caller, &run, update)?;
         Ok(json!({"done":counts.done,"total":counts.total}))
+    }
+    /// Publishes a ticket for its coordinator or implementer; see `publish`. The steps run off
+    /// this thread and their result reaches the caller as a message.
+    fn publish_ticket(&mut self, caller: &str, args: &Value) -> Result<Value> {
+        only_arguments("publish_ticket", args, &["ticket_id", "title", "body"])?;
+        let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
+        let published = self.host.publish_ticket(
+            caller,
+            ticket,
+            args["title"].as_str(),
+            args["body"].as_str(),
+        );
+        match published {
+            Ok((status, step)) => {
+                self.run_publish_step(step);
+                Ok(status)
+            }
+            Err(refusal) => {
+                // An `origin` GitHub was never asked about is read now, for the next call.
+                self.refresh_github();
+                Err(refusal)
+            }
+        }
+    }
+    fn run_publish_step(&mut self, step: Option<publish::Job>) {
+        if let Some(job) = step {
+            spawn_publish_step(self.sender.clone(), job, self.publish_tools.clone());
+        }
     }
     fn next_revision(&mut self, session_id: &str) -> Result<u64> {
         let latest = match self.revisions.get(session_id) {
@@ -2554,6 +2677,8 @@ mod tests {
             pr_watch: pr_watch::Watch::default(),
             pr_tickets_stale: true,
             pr_tickets_due_at: 0,
+            github_reading: false,
+            publish_tools: publish::Tools::default(),
         };
         (actor, changes, step_changes)
     }
@@ -2811,6 +2936,218 @@ mod tests {
             });
             assert_eq!(changes.try_recv().is_ok(), signalled);
         }
+    }
+
+    #[test]
+    fn github_is_read_once_at_a_time_and_a_read_that_panics_frees_the_next() {
+        let (_home, host, _, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(4);
+        actor.sender = sender.clone();
+        actor.github_reading = true;
+        spawn_github_read(sender, || panic!("injected"));
+        assert!(!actor.handle(events.recv_blocking().unwrap()));
+        assert!(!actor.github_reading);
+        actor.refresh_github();
+        assert!(actor.github_reading);
+        // A refresh while one runs starts no second read.
+        actor.refresh_github();
+        // The fixture's repository is not on GitHub, so nothing is stale and `gh` is not run.
+        let event = events.recv_blocking().unwrap();
+        assert!(matches!(&event, Event::GitHub(Some(reading)) if reading.error.is_none()));
+        assert!(!actor.handle(event));
+        assert!(!actor.github_reading && events.try_recv().is_err());
+    }
+
+    /// An actor over a reviewed ticket in `allowed-org/app`, which is allowed, with a local bare
+    /// repository and a fake `gh` standing in for GitHub. Its events arrive on the receiver.
+    fn publishing_actor() -> (
+        publish::tests::Fixture,
+        publish::tests::Remote,
+        Actor,
+        Receiver<Event>,
+    ) {
+        let mut f = publish::tests::fixture();
+        let remote = publish::tests::remote(&f);
+        f.allow("allowed-org");
+        let home = tempfile::tempdir().unwrap();
+        let host = std::mem::replace(&mut f.host, Host::open(home.path()).unwrap());
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        actor.publish_tools = remote.tools.clone();
+        for session in [&f.implementer, &f.coordinator] {
+            let mut turn = active_turn("run", vec![]);
+            turn.token = session.id.clone();
+            actor.active.insert(session.id.clone(), turn);
+        }
+        // The placeholder host's folder goes with the fixture's.
+        std::mem::forget(home);
+        (f, remote, actor, events)
+    }
+    /// Calls a tool as the session whose turn carries `token`, and returns its reply.
+    fn call_tool(
+        actor: &mut Actor,
+        token: &str,
+        name: &str,
+        args: Value,
+    ) -> std::result::Result<Value, String> {
+        let (reply, replies) = async_channel::bounded(1);
+        actor.handle(Event::Tool {
+            token: token.into(),
+            name: name.into(),
+            args,
+            reply,
+        });
+        replies.try_recv().unwrap()
+    }
+
+    #[test]
+    fn publish_ticket_runs_its_steps_off_the_host_thread_and_the_result_starts_the_callers_turn() {
+        let (f, remote, mut actor, events) = publishing_actor();
+        let caller = f.implementer.id.clone();
+        // The tool takes no branch, remote or base.
+        let aimed = call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why", "branch": "main"}),
+        );
+        assert_eq!(
+            aimed.unwrap_err(),
+            "publish_ticket takes ticket_id, title, body, not branch"
+        );
+        let status = call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+        )
+        .unwrap();
+        assert_eq!(status["status"], "publishing");
+        // It returned at once; the push and then the pull request report back as events.
+        assert!(publish::tests::results(&actor.host).is_empty());
+        // The watcher last checked the repository a moment ago.
+        let repository = actor.host.ticket(&f.ticket).unwrap().repository_id;
+        actor.pr_watch.keep([repository.as_str()]);
+        actor.pr_watch.start_due(0);
+        let checked = now();
+        actor
+            .pr_watch
+            .finish(&repository, checked, &pr_watch::Outcome::NotOnGitHub);
+        assert!(actor.pr_watch.start_due(checked).is_empty());
+        let waiting_before = actor.host.queued_input(&caller).unwrap();
+        for _ in 0..2 {
+            assert!(actor.handle(events.recv_blocking().unwrap()));
+        }
+        assert_eq!(remote.branch("wiffletree/fix-contrast"), Some(f.head()));
+        let results = publish::tests::results(&actor.host);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, caller);
+        assert!(results[0].1.contains("opened PR #45"), "{}", results[0].1);
+        assert_eq!(
+            actor.host.queued_input(&caller).unwrap(),
+            waiting_before + 1
+        );
+        assert!(events.try_recv().is_err());
+        // The repository is due at once, so the ticket's row shows the pull request.
+        assert_eq!(actor.pr_watch.start_due(checked), [repository]);
+    }
+
+    #[test]
+    fn a_publish_step_that_panics_ends_the_request_and_tells_the_caller() {
+        let (f, remote, mut actor, events) = publishing_actor();
+        actor.publish_tools.gh = Arc::new(|_, _| panic!("injected"));
+        let caller = f.coordinator.id.clone();
+        call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+        )
+        .unwrap();
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert!(actor.host.ticket(&f.ticket).unwrap().publishing.is_none());
+        let results = publish::tests::results(&actor.host);
+        assert_eq!(
+            results[0].1,
+            "Publishing wiffletree/fix-contrast to allowed-org/app failed: The publish step stopped unexpectedly. Nothing was pushed."
+        );
+        assert!(remote.branch("wiffletree/fix-contrast").is_none());
+        // The next call is a new request.
+        actor.publish_tools = remote.tools.clone();
+        let status = call_tool(
+            &mut actor,
+            &caller,
+            "publish_ticket",
+            json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+        );
+        assert_eq!(status.unwrap()["status"], "publishing");
+    }
+
+    /// Every message to `session` whose id starts with `prefix`.
+    fn messages_to(actor: &Actor, session: &str, prefix: &str) -> Vec<String> {
+        actor
+            .host
+            .messages(session, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.id.starts_with(prefix))
+            .map(|m| m.body)
+            .collect()
+    }
+
+    #[test]
+    fn the_humans_answer_to_a_publish_item_runs_or_ends_the_request_with_one_message() {
+        let (f, remote, mut actor, events) = publishing_actor();
+        let caller = f.implementer.id.clone();
+        actor.host.set_owner_allowed("allowed-org", false).unwrap();
+        let publish = |actor: &mut Actor| {
+            call_tool(
+                actor,
+                &caller,
+                "publish_ticket",
+                json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+            )
+            .unwrap()
+        };
+        let waiting = |actor: &Actor| {
+            let ticket = actor.host.ticket(&f.ticket).unwrap();
+            ticket.publishing.unwrap().waiting.unwrap()
+        };
+        let resolve = |actor: &mut Actor, id: String, answer: &str| {
+            let answer = answer.to_owned();
+            command(actor, Command::ResolveAttention { id, answer }).unwrap()
+        };
+        assert_eq!(publish(&mut actor)["status"], "waiting_for_human");
+        // Denied: the caller gets the request's one message, and no "Human answer" beside it.
+        let item = waiting(&actor);
+        resolve(&mut actor, item, "denied");
+        assert_eq!(messages_to(&actor, &caller, "publish:").len(), 1);
+        assert!(messages_to(&actor, &caller, "answer:").is_empty());
+        assert!(events.try_recv().is_err());
+        // Approved: the push runs off the host thread, and its pull request then asks.
+        publish(&mut actor);
+        let item = waiting(&actor);
+        resolve(&mut actor, item, "approved");
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert_eq!(remote.branch("wiffletree/fix-contrast"), Some(f.head()));
+        let item = waiting(&actor);
+        resolve(&mut actor, item, "approved");
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        let results = messages_to(&actor, &caller, "publish:");
+        assert_eq!(results.len(), 2);
+        assert!(results[1].contains("opened PR #45"), "{}", results[1]);
+        assert!(messages_to(&actor, &caller, "answer:").is_empty());
+        // An item under the prefix that no request names starts nothing and sends nothing.
+        let stray = actor
+            .host
+            .request_attention(&caller, "local", "publish:forged:push", "Push?", &[])
+            .unwrap();
+        resolve(&mut actor, stray.id, "approved");
+        assert!(events.try_recv().is_err());
+        assert_eq!(messages_to(&actor, &caller, "publish:").len(), 2);
+        assert!(messages_to(&actor, &caller, "answer:").is_empty());
     }
 
     #[test]

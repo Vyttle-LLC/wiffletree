@@ -13,6 +13,7 @@ mod policies;
 mod pr_watch;
 mod progress;
 pub mod provider;
+mod publish;
 mod repositories;
 pub mod runtime;
 pub(crate) mod schedules;
@@ -48,6 +49,8 @@ pub struct Host {
     base_fetched_at: std::collections::HashMap<String, i64>,
     /// Each watched repository's latest PR check; see `pr_watch`.
     pull_request_checks: std::collections::HashMap<String, PullRequestCheck>,
+    /// Why the latest read of the repositories' GitHub facts failed; see `repositories`.
+    github_error: Option<String>,
     /// Each session's latest checklist; `None` until first read from stored steps.
     plans: Option<std::collections::HashMap<String, PlanCounts>>,
     progress: progress::Progress,
@@ -92,6 +95,8 @@ fn tag<T: Serialize>(value: &T) -> Result<String> {
         .context("Expected enum tag")?
         .to_owned())
 }
+/// The store's database, inside the host's home folder.
+pub(crate) const STORE_FILE: &str = "workspace.sqlite3";
 /// Prefix of the inbox items the host raises for a long turn; agents and clients cannot use it.
 pub(crate) const CHECK_IN: &str = "check-in:";
 /// Prefix of the inbox item raised when the project coordinator has run many turns without the
@@ -111,11 +116,19 @@ pub(crate) fn is_check_in(operation: &str) -> bool {
         .iter()
         .any(|prefix| operation.starts_with(prefix))
 }
+/// Refuses an Inbox id only the host may use: its check-ins, and the approvals it draws with
+/// Approve and Deny, which an agent could otherwise raise in its own words.
 fn ensure_unreserved(operation: &str) -> Result<()> {
-    for prefix in [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS] {
+    for prefix in [
+        CHECK_IN,
+        TURN_COUNT,
+        LEFTOVER_PROCESS,
+        PUBLISH_PREFIX,
+        PERMISSION_PREFIX,
+    ] {
         ensure!(
             !operation.starts_with(prefix),
-            "IDs starting with \"{prefix}\" are reserved for workspace check-ins"
+            "IDs starting with \"{prefix}\" are reserved for the workspace"
         );
     }
     Ok(())
@@ -127,8 +140,9 @@ enum Delivery {
     Turn,
     /// Rides along with the next turn without starting one.
     Quiet,
-    /// Starts a turn and is never refused for a full queue; see `send_human_notice`.
-    HumanNotice,
+    /// Starts a turn and is never refused for a full queue; see `send_human_notice` and
+    /// `send_publish_result`.
+    PastCap,
 }
 pub(crate) fn text(value: &str, maximum: usize) -> Result<()> {
     ensure!(
@@ -159,7 +173,7 @@ impl Host {
         lock.try_lock()
             .context("Another host already owns this store")?;
         let lock = StoreLock(lock);
-        let db = Connection::open(home.join("workspace.sqlite3"))?;
+        let db = Connection::open(home.join(STORE_FILE))?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         db.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
@@ -189,12 +203,14 @@ impl Host {
             branch_warnings: Default::default(),
             base_fetched_at: Default::default(),
             pull_request_checks: Default::default(),
+            github_error: None,
             plans: None,
             progress: Default::default(),
             in_turn: Default::default(),
             mid_turn_reports: Default::default(),
         };
         host.recover()?;
+        host.end_interrupted_publishes()?;
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
         host.backfill_usage()?;
@@ -312,7 +328,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone() })
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
@@ -674,7 +690,18 @@ impl Host {
         recipient: &str,
         body: &str,
     ) -> Result<Message> {
-        self.queue(id, sender, recipient, body, &[], Delivery::HumanNotice)
+        self.queue(id, sender, recipient, body, &[], Delivery::PastCap)
+    }
+    /// Queues the one result of an accepted publish request past the recipient cap: each
+    /// request sends exactly one, and a refused one would leave its caller waiting for a result
+    /// that never comes.
+    pub(crate) fn send_publish_result(
+        &mut self,
+        id: &str,
+        recipient: &str,
+        body: &str,
+    ) -> Result<Message> {
+        self.queue(id, None, recipient, body, &[], Delivery::PastCap)
     }
     fn queue(
         &mut self,
@@ -737,7 +764,7 @@ impl Host {
             |r| r.get(0),
         )?;
         ensure!(
-            queued < 1024 || delivery == Delivery::HumanNotice,
+            queued < 1024 || delivery == Delivery::PastCap,
             "Recipient queue is full; accepted messages are preserved"
         );
         if files.is_empty() {
@@ -1281,6 +1308,9 @@ impl Host {
                 child_turns,
                 human_turns,
             } => serde_json::to_value(self.set_check_ins(child_turns, human_turns)?)?,
+            Command::SetOwnerAllowed { entry, allowed } => {
+                serde_json::to_value(self.set_owner_allowed(&entry, allowed)?)?
+            }
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?

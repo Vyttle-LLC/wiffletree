@@ -750,8 +750,14 @@ impl Workspace {
         let coordinator = ticket.coordinator_id.clone();
         let waiver = tree::waiver_note(ticket);
         let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
-        let has_pr = ticket.pull_request.is_some();
+        let waiting = tree::publish_waiting(ticket);
+        // A PR or a waiting publish step adds a second line.
+        let two_lines = ticket.pull_request.is_some() || waiting.is_some();
         let mut detail = format!("{label} · {state}");
+        if let Some(waiting) = &waiting {
+            detail.push('\n');
+            detail.push_str(waiting);
+        }
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
             detail.push_str(&tree::pr_sentence(pr));
@@ -788,12 +794,12 @@ impl Workspace {
             v.select(coordinator.clone(), w, c);
             v.show_panel(Panel::Team, w, c);
         }))
-        // A PR adds a second line; the icon and mark stay beside the first.
-        .when(has_pr, |row| row.items_start().pt(px(6.)).pb(px(5.)))
+        // The icon and mark stay beside the first line.
+        .when(two_lines, |row| row.items_start().pt(px(6.)).pb(px(5.)))
         .child(
             div()
                 .flex_none()
-                .when(has_pr, |d| d.mt(px(1.)))
+                .when(two_lines, |d| d.mt(px(1.)))
                 .child(icon("task").size(px(14.))),
         )
         .child(
@@ -801,9 +807,21 @@ impl Workspace {
                 .flex_1()
                 .min_w_0()
                 .child(div().text_ellipsis().text_color(p.text).child(label))
-                .children(ticket.pull_request.as_ref().map(|pr| pr_line(pr, p))),
+                .children(ticket.pull_request.as_ref().map(|pr| pr_line(pr, p)))
+                .children(waiting.map(|waiting| {
+                    div()
+                        .text_size(px(11.))
+                        .text_color(p.yellow)
+                        .text_ellipsis()
+                        .child(waiting)
+                })),
         )
-        .child(div().flex_none().when(has_pr, |d| d.mt(px(5.))).child(mark))
+        .child(
+            div()
+                .flex_none()
+                .when(two_lines, |d| d.mt(px(5.)))
+                .child(mark),
+        )
     }
 }
 

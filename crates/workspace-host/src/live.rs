@@ -193,6 +193,8 @@ impl Host {
             ledger: vec![],
             waiver: None,
             pull_request: None,
+            publishing: None,
+            pushed: None,
         };
         self.db.execute(
             "INSERT INTO tickets VALUES (?1,?2,?3)",
@@ -443,26 +445,10 @@ impl Host {
     }
     /// HEAD is the verified commit, or has the same patch id against the repository's base, as
     /// after a squash or a clean rebase.
-    fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
-        let head = verification::head(ticket)?;
-        if head == verified {
-            return Ok(());
-        }
-        let worktree = Path::new(&ticket.worktree);
-        let same_patch = || -> Result<bool> {
-            let base = self.ticket_repository(ticket)?.base;
-            Ok(worktrees::patch_id(worktree, &base, verified)?
-                == worktrees::patch_id(worktree, &base, &head)?)
-        };
-        match same_patch() {
-            Ok(true) => Ok(()),
-            Ok(false) => bail!(
-                "The worktree's changes differ from the verified commit: verified {verified}, current {head}; verify again"
-            ),
-            Err(error) => bail!(
-                "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#}); verify again"
-            ),
-        }
+    pub(crate) fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
+        verified_head(ticket, verified, || {
+            Ok(self.ticket_repository(ticket)?.base)
+        })
     }
     fn finish_ticket(
         &mut self,
@@ -514,8 +500,16 @@ impl Host {
                 team.push(entry);
             }
         }
+        // Each repository says whether a ticket there publishes without asking the human.
+        let allowed = self.settings().allowed_owners;
+        let mut repositories = vec![];
+        for repository in self.project_repositories(&session.project_id)? {
+            let mut entry = serde_json::to_value(&repository)?;
+            entry["publishes_without_asking"] = json!(is_allowed(&repository, &allowed));
+            repositories.push(entry);
+        }
         let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,
-            "repositories":self.project_repositories(&session.project_id)?,
+            "repositories":repositories,
             "team":team,
             "tickets":self.ticket_overview(&session.project_id)?,
             "runtime":self.session_runtime(id)?,
@@ -892,5 +886,33 @@ impl Host {
         let body = body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>();
         self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![format!("output:{run}"),session.project_id,session.id,body,now()])?;
         Ok(())
+    }
+}
+
+/// `Host::check_verified_head` for a caller that has the repository's base without the store,
+/// as a publish step has on its own thread.
+pub(crate) fn verified_head(
+    ticket: &Ticket,
+    verified: &str,
+    base: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    let head = verification::head(ticket)?;
+    if head == verified {
+        return Ok(());
+    }
+    let worktree = Path::new(&ticket.worktree);
+    let same_patch = || -> Result<bool> {
+        let base = base()?;
+        Ok(worktrees::patch_id(worktree, &base, verified)?
+            == worktrees::patch_id(worktree, &base, &head)?)
+    };
+    match same_patch() {
+        Ok(true) => Ok(()),
+        Ok(false) => bail!(
+            "The worktree's changes differ from the verified commit: verified {verified}, current {head}; verify again"
+        ),
+        Err(error) => bail!(
+            "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#}); verify again"
+        ),
     }
 }

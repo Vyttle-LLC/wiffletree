@@ -43,6 +43,8 @@ fn main() -> Result<()> {
                 name: format!("fixture-{i}-{j}"),
                 path: format!("/benchmark/repo-{i}-{j}"),
                 base: "fixture-base".into(),
+                github: None,
+                origin_problem: None,
             };
             tx.execute(
                 "INSERT INTO repositories VALUES (?1,?2,?3)",

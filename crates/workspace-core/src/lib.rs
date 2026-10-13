@@ -1,13 +1,17 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 mod files;
+mod owners;
 mod progress;
+mod publishing;
 mod selection;
 mod steps;
 mod suggestion;
 mod usage;
 use anyhow::{Result, ensure};
 pub use files::*;
+pub use owners::*;
 pub use progress::*;
+pub use publishing::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
@@ -134,6 +138,40 @@ pub struct Repository {
     pub name: String,
     pub path: String,
     pub base: String,
+    /// The GitHub repository `origin` names, when it names exactly one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GitHubRepository>,
+    /// Why `origin` exists and still names no GitHub repository to publish to, such as a second
+    /// push URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_problem: Option<String>,
+}
+/// The GitHub repository a workspace repository's `origin` names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubRepository {
+    /// As `origin`'s URL names it; GitHub's own answer is in `facts`.
+    pub owner: String,
+    pub name: String,
+    /// `None` until GitHub has answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<GitHubFacts>,
+    /// Why GitHub gave no answer for this repository, such as that it could not be found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+/// What GitHub last said about a repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubFacts {
+    /// Where GitHub says the repository is now, as `owner/name`; a push lands there.
+    pub name_with_owner: String,
+    /// Its owner is an organization rather than a user.
+    pub organization: bool,
+    pub fork: bool,
+    /// What a fork is a fork of, as `owner/name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub public: bool,
+    pub checked_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,8 +288,13 @@ pub struct Attention {
 }
 impl Attention {
     /// A parked provider operation waiting for Approve or Deny, rather than a question.
+    /// Or a publish step waiting for the human, which is approved or denied in the same way.
     pub fn is_permission(&self) -> bool {
-        self.operation_id.starts_with("permission:")
+        self.operation_id.starts_with(PERMISSION_PREFIX) || self.is_publish()
+    }
+    /// A step of a ticket's publish request waiting for the human's approval.
+    pub fn is_publish(&self) -> bool {
+        self.operation_id.starts_with(PUBLISH_PREFIX)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -347,6 +390,12 @@ pub struct Snapshot {
     /// Sessions with a `blocked` report their parent has not answered.
     #[serde(default)]
     pub questions_waiting: Vec<QuestionsWaiting>,
+    /// The owners, and single forks as `owner/name`, allowed to have PRs opened without asking.
+    #[serde(default)]
+    pub allowed_owners: Vec<String>,
+    /// Why GitHub could not be read for the repositories' fork status and visibility.
+    #[serde(default)]
+    pub github_error: Option<String>,
 }
 /// How many of a session's `blocked` reports wait for its parent's answer to reach it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +543,10 @@ pub struct HostSettings {
     /// Turns the project coordinator runs without the human before the human gets a check-in.
     #[serde(default = "default_checkin_human_turns")]
     pub checkin_human_turns: u32,
+    /// The owners, and single forks as `owner/name`, allowed to have PRs opened without asking.
+    /// Kept on this machine only.
+    #[serde(default)]
+    pub allowed_owners: Vec<String>,
 }
 fn default_checkin_child_turns() -> u32 {
     25
@@ -513,6 +566,7 @@ impl HostSettings {
             verification: VerificationSettings::default(),
             checkin_child_turns: default_checkin_child_turns(),
             checkin_human_turns: default_checkin_human_turns(),
+            allowed_owners: vec![],
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -670,6 +724,67 @@ pub struct Ticket {
     /// The ticket branch's GitHub PR, as the PR watcher last read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<PullRequest>,
+    /// The publish request whose step is running or waiting for the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publishing: Option<PublishRequest>,
+    /// The commit the host last pushed to the ticket's branch on GitHub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<String>,
+}
+/// One accepted `publish_ticket` call: everything the Inbox item shows and the host will send,
+/// frozen when the call passed its checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishRequest {
+    pub id: String,
+    /// The session that called `publish_ticket` and gets the result.
+    pub caller: String,
+    /// GitHub's `owner/name` for the repository.
+    pub repository: String,
+    pub push_url: String,
+    pub branch: String,
+    /// The branch a pull request merges into.
+    pub base: String,
+    pub commit: String,
+    /// The verification cycle the request was decided on, and how it ended. A request does not
+    /// outlive it: once the ticket has a later cycle, nothing more is sent.
+    pub cycle: u32,
+    pub outcome: VerificationOutcome,
+    /// The commit's size, such as "2 commits · 3 files changed, 41 insertions(+)".
+    pub size: String,
+    /// Set when the request opens a pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// The step that runs or waits next.
+    pub step: PublishStep,
+    /// The Inbox item the step waits on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+    /// The human approved this commit's steps on one item after a blocked review in an allowed
+    /// owner's repository.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked_review_approved: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishStep {
+    Push,
+    OpenPullRequest,
+}
+impl PublishStep {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::OpenPullRequest => "pull request",
+        }
+    }
+}
+impl PublishRequest {
+    /// Whether this request opens a pull request after its push.
+    pub fn opens_pull_request(&self) -> bool {
+        self.title.is_some()
+    }
 }
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
@@ -681,6 +796,19 @@ impl Ticket {
         self.verification
             .as_ref()
             .filter(|v| v.outcome == VerificationOutcome::Running)
+    }
+    /// Every finding that is neither fixed nor settled as follow-up or won't-fix.
+    pub fn open_findings(&self) -> Vec<&LedgerEntry> {
+        self.ledger
+            .iter()
+            .filter(|e| e.status != EntryStatus::Fixed && !e.status.is_settled())
+            .collect()
+    }
+    /// The ticket's pull request once it was closed or merged; opening another needs the human.
+    pub fn ended_pull_request(&self) -> Option<&PullRequest> {
+        self.pull_request
+            .as_ref()
+            .filter(|pr| pr.state != PrState::Open)
     }
 }
 /// A ticket branch's GitHub PR, as the PR watcher last read it.
@@ -815,9 +943,20 @@ pub const PR_NOTICE_PREFIX: &str = "pr:";
 /// The id prefix of the line a compaction leaves in its session's conversation; the rest is
 /// the run's id. A session's other messages to itself are replies, under `output:` ids.
 pub const COMPACTION_LINE_PREFIX: &str = "compaction:";
+/// The id prefix of a publish request's result message and of its Inbox items. Only the host
+/// creates either.
+pub const PUBLISH_PREFIX: &str = "publish:";
+/// The id prefix of the Inbox item for a parked provider permission.
+pub const PERMISSION_PREFIX: &str = "permission:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees and migration notices. Inbox answers (`answer:`) carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 3] = ["verification:", "worktree-kept:", "migration:"];
+/// worktrees, migration notices and publish results. Inbox answers (`answer:`) carry the human's
+/// words.
+const HOST_NOTICE_PREFIXES: [&str; 4] = [
+    "verification:",
+    "worktree-kept:",
+    "migration:",
+    PUBLISH_PREFIX,
+];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verification {
@@ -845,6 +984,58 @@ impl Verification {
     /// patch-equivalent to it.
     pub fn verified_commit(&self) -> Option<&str> {
         self.current_round().map(|r| r.commit.as_str())
+    }
+    /// The verifiers that did not check: they reported they could not verify, or never reported.
+    pub fn unchecked(&self) -> Vec<&str> {
+        self.latest_results()
+            .into_iter()
+            .filter(|run| {
+                matches!(
+                    run.result,
+                    VerifierResult::Blocked | VerifierResult::Pending
+                )
+            })
+            .map(|run| run.focus.as_str())
+            .collect()
+    }
+    /// How the review ended for `commit`, such as "Cycle 2 passed at this commit · Tests,
+    /// Correctness" or "Cycle 2 ended blocked at c81f04d, after 3 of 3 rounds · Tests passed,
+    /// Correctness failed".
+    pub fn review_line(&self, commit: &str) -> String {
+        let verified = self.verified_commit().unwrap_or_default();
+        let results = self.latest_results();
+        match self.outcome {
+            VerificationOutcome::Passed => {
+                let at = if verified == commit {
+                    "at this commit".to_owned()
+                } else {
+                    format!(
+                        "at {}, which has the same changes as this commit",
+                        short_sha(verified)
+                    )
+                };
+                let foci: Vec<&str> = results.iter().map(|run| run.focus.as_str()).collect();
+                format!("Cycle {} passed {at} · {}", self.cycle, foci.join(", "))
+            }
+            _ => {
+                let results: Vec<String> = results
+                    .iter()
+                    .map(|run| match run.result {
+                        VerifierResult::Blocked => format!("{} could not check", run.focus),
+                        VerifierResult::Pending => format!("{} never reported", run.focus),
+                        result => format!("{} {}", run.focus, result.label()),
+                    })
+                    .collect();
+                format!(
+                    "Cycle {} ended blocked at {}, after {} of {} rounds · {}",
+                    self.cycle,
+                    short_sha(verified),
+                    self.rounds.len(),
+                    self.max_rounds,
+                    results.join(", ")
+                )
+            }
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -902,6 +1093,15 @@ pub enum Severity {
     NonBlocking,
     /// A bug that predates the change under review.
     PreExisting,
+}
+impl Severity {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::NonBlocking => "non-blocking",
+            Self::PreExisting => "pre-existing",
+        }
+    }
 }
 /// One verifier finding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -981,6 +1181,19 @@ pub struct LedgerEntry {
     /// The coordinator's one-line reason for its decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+impl LedgerEntry {
+    /// The finding's id, severity, verifier and location, such as "F4 · blocking · Correctness
+    /// · src/sidebar.rs:412". Its summary follows on the card.
+    pub fn heading(&self) -> String {
+        format!(
+            "{} · {} · {} · {}",
+            self.id,
+            self.finding.severity.label(),
+            self.focus,
+            self.finding.location
+        )
+    }
 }
 /// Why a leftover worktree may or may not be removed; earlier classes take precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1337,6 +1550,12 @@ pub enum Command {
     SetCheckIns {
         child_turns: u32,
         human_turns: u32,
+    },
+    /// Allows an owner, or a single fork as `owner/name`, to have PRs opened without asking, or
+    /// stops allowing it; answers with `HostSettings`. Only the human's client sends it.
+    SetOwnerAllowed {
+        entry: String,
+        allowed: bool,
     },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,

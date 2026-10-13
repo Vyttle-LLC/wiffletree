@@ -82,7 +82,8 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
                 .enumerate()
                 .map(|(i, t)| format!("h{i}={}", t.branch)),
         );
-        let mut args = vec!["api", "graphql"];
+        // The host is named, so `GH_HOST` cannot point the question at another GitHub.
+        let mut args = vec!["api", "graphql", "--hostname", repositories::GITHUB_HOST];
         for field in &fields {
             args.extend(["-f", field]);
         }
@@ -292,6 +293,8 @@ struct Pace {
     due_at: i64,
     running: bool,
     failures: u32,
+    /// `check_now` was called during the running pass, which may have read too early.
+    again: bool,
 }
 impl Watch {
     /// Watches exactly these repositories; one not watched before is due at once.
@@ -301,6 +304,15 @@ impl Watch {
         for id in kept {
             self.repositories.entry(id.to_owned()).or_default();
         }
+    }
+    /// Makes a repository due at once, as after the host pushed a ticket's branch there or
+    /// opened its PR, so the ticket's row shows the PR without waiting for the interval. One
+    /// whose ticket is newer than the last listing joins the watch here; `keep` drops it again
+    /// if it has no open ticket.
+    pub(crate) fn check_now(&mut self, repository: &str) {
+        let pace = self.repositories.entry(repository.to_owned()).or_default();
+        pace.due_at = 0;
+        pace.again = pace.running;
     }
     /// Marks the repositories due at `at` with no pass running as running, and returns them.
     pub(crate) fn start_due(&mut self, at: i64) -> Vec<String> {
@@ -342,6 +354,9 @@ impl Watch {
                 }
             }
         };
+        if std::mem::take(&mut pace.again) {
+            pace.due_at = at;
+        }
         Some(pace.due_at)
     }
     /// The earliest due pass of a repository with none running.
@@ -566,7 +581,7 @@ impl Host {
         }
         Ok(unsent)
     }
-    fn message_exists(&self, id: &str) -> Result<bool> {
+    pub(crate) fn message_exists(&self, id: &str) -> Result<bool> {
         Ok(self
             .db
             .query_row("SELECT 1 FROM messages WHERE id=?1", [id], |_| Ok(()))
@@ -839,12 +854,16 @@ mod tests {
         let worktree_head = git(folder.path(), &["rev-parse", "HEAD"]);
         let fake_gh = |path: &Path, args: &[&str]| -> Result<String> {
             assert_eq!(path, folder.path());
-            assert_eq!(args[..3], ["api", "graphql", "-f"]);
+            // The question names github.com, whatever `GH_HOST` says.
+            assert_eq!(
+                args[..5],
+                ["api", "graphql", "--hostname", "github.com", "-f"]
+            );
             assert!(
-                args[3].starts_with("query=query($owner: String!, $name: String!, $h0: String!)")
+                args[5].starts_with("query=query($owner: String!, $name: String!, $h0: String!)")
             );
             assert_eq!(
-                args[4..],
+                args[6..],
                 [
                     "-f",
                     "owner=Vyttle-LLC",
@@ -987,6 +1006,46 @@ mod tests {
             watch.finish("web", at + MINUTE, &pass(true, 200, at + 30 * MINUTE)),
             Some(at + 2 * MINUTE)
         );
+    }
+
+    #[test]
+    fn a_repository_is_checked_at_once_after_the_host_pushes_or_opens_a_pr_there() {
+        const MINUTE: i64 = 60_000;
+        let mut watch = Watch::default();
+        watch.keep(["r"]);
+        watch.start_due(0);
+        // Checked two minutes ago and next due in three.
+        assert_eq!(
+            watch.finish("r", 0, &pass(false, 5000, 0)),
+            Some(5 * MINUTE)
+        );
+        assert!(watch.start_due(2 * MINUTE).is_empty());
+        watch.check_now("r");
+        assert_eq!(watch.start_due(2 * MINUTE), ["r"]);
+        // The pass then finds the open PR and returns to the active interval.
+        assert_eq!(
+            watch.finish("r", 2 * MINUTE, &pass(true, 5000, 0)),
+            Some(2 * MINUTE + ACTIVE_MS)
+        );
+        // A pass already running may have read too early, so another follows it at once.
+        watch.start_due(3 * MINUTE);
+        watch.check_now("r");
+        assert!(watch.start_due(3 * MINUTE).is_empty());
+        assert_eq!(
+            watch.finish("r", 3 * MINUTE, &pass(false, 5000, 0)),
+            Some(3 * MINUTE)
+        );
+        assert_eq!(watch.start_due(3 * MINUTE), ["r"]);
+        assert_eq!(
+            watch.finish("r", 3 * MINUTE, &pass(true, 5000, 0)),
+            Some(3 * MINUTE + ACTIVE_MS)
+        );
+        // A repository whose ticket is newer than the last listing is due at once too, and
+        // leaves again when the listing shows no open ticket there.
+        watch.check_now("new");
+        assert_eq!(watch.next_due(), Some(0));
+        watch.keep(["r"]);
+        assert_eq!(watch.next_due(), Some(3 * MINUTE + ACTIVE_MS));
     }
 
     #[test]

@@ -69,6 +69,16 @@ pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
     lines
 }
 
+/// The line under a ticket while a step of its publish request waits for the human, such as
+/// "push waits for your approval".
+pub fn publish_waiting(ticket: &Ticket) -> Option<String> {
+    let request = ticket.publishing.as_ref()?;
+    request
+        .waiting
+        .as_ref()
+        .map(|_| format!("{} waits for your approval", request.step.label()))
+}
+
 /// A ticket accepted with a waiver: its row's waived ring says this beside the label.
 pub fn waiver_note(ticket: &Ticket) -> Option<String> {
     ticket
@@ -909,6 +919,34 @@ mod tests {
         );
         assert_eq!(rows[2].note, "Blocking");
         assert_eq!(rows[3].note, "Pre-existing · Ticket later");
+    }
+
+    #[test]
+    fn a_ticket_says_which_publish_step_waits_for_approval() {
+        let (_directory, _host, _root, mut ticket) = store();
+        assert_eq!(publish_waiting(&ticket), None);
+        let mut request: PublishRequest = serde_json::from_value(serde_json::json!({
+            "id": "r1", "caller": "c", "repository": "celadon-theme/website",
+            "push_url": "git@github.com:celadon-theme/website.git", "branch": "wiffletree/t",
+            "base": "main", "commit": "9e03c1b", "cycle": 1, "outcome": "passed",
+            "size": "1 commit", "step": "push"
+        }))
+        .unwrap();
+        // A step that is running without asking adds no line.
+        ticket.publishing = Some(request.clone());
+        assert_eq!(publish_waiting(&ticket), None);
+        request.waiting = Some("item".into());
+        ticket.publishing = Some(request.clone());
+        assert_eq!(
+            publish_waiting(&ticket).as_deref(),
+            Some("push waits for your approval")
+        );
+        request.step = PublishStep::OpenPullRequest;
+        ticket.publishing = Some(request);
+        assert_eq!(
+            publish_waiting(&ticket).as_deref(),
+            Some("pull request waits for your approval")
+        );
     }
 
     #[test]

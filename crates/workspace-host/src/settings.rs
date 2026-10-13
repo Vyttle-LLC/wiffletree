@@ -168,6 +168,35 @@ impl Host {
         self.save_settings(&settings)?;
         Ok(settings)
     }
+    /// Allows an owner, or a single fork as `owner/name`, to have PRs opened without asking, or
+    /// stops allowing it. Entries compare without regard to case.
+    pub fn set_owner_allowed(&mut self, entry: &str, allowed: bool) -> Result<HostSettings> {
+        let entry = entry.trim();
+        let mut parts = entry.split('/');
+        let named = |part: Option<&str>| {
+            part.is_some_and(|p| {
+                !p.is_empty()
+                    && p.len() <= 100
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            })
+        };
+        ensure!(
+            named(parts.next())
+                && parts.next().is_none_or(|name| named(Some(name)))
+                && parts.next().is_none(),
+            "Name a GitHub owner, or a fork as owner/name"
+        );
+        let mut settings = self.settings();
+        settings
+            .allowed_owners
+            .retain(|e| !e.eq_ignore_ascii_case(entry));
+        if allowed {
+            settings.allowed_owners.push(entry.into());
+        }
+        self.save_settings(&settings)?;
+        Ok(settings)
+    }
     /// Writes atomically and keeps fields this version does not know.
     fn save_settings(&self, settings: &HostSettings) -> Result<()> {
         let path = self.home.join(FILE);
@@ -278,6 +307,39 @@ mod tests {
         assert_eq!(slug("", "project"), "project");
         let long = slug(&"word ".repeat(40), "ticket");
         assert!(long.len() <= SLUG_LIMIT && !long.ends_with('-'), "{long}");
+    }
+
+    #[test]
+    fn nothing_is_allowed_until_the_human_allows_it_and_the_list_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        assert!(host.settings().allowed_owners.is_empty());
+        assert!(host.snapshot().unwrap().allowed_owners.is_empty());
+        let allow = |host: &mut Host, entry: &str, allowed| {
+            host.execute(Command::SetOwnerAllowed {
+                entry: entry.into(),
+                allowed,
+            })
+        };
+        allow(&mut host, "Sage-Social", true).unwrap();
+        allow(&mut host, "MHohlios/gpui-component", true).unwrap();
+        // Allowing again, in any letter case, keeps one entry.
+        allow(&mut host, "sage-social", true).unwrap();
+        drop(host);
+        let mut host = Host::open(home.path()).unwrap();
+        assert_eq!(
+            host.snapshot().unwrap().allowed_owners,
+            ["MHohlios/gpui-component", "sage-social"]
+        );
+        allow(&mut host, "SAGE-SOCIAL", false).unwrap();
+        assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
+        // Saving another setting keeps the list.
+        host.set_check_ins(30, 100).unwrap();
+        assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
+        for entry in ["", "a/b/c", "owner/", "has space", "--flag=x y"] {
+            assert!(allow(&mut host, entry, true).is_err(), "{entry}");
+        }
+        assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
     }
 
     #[test]

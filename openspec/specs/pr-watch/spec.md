@@ -21,7 +21,7 @@ The host SHALL watch the PRs of open tickets whose coordinator is not archived, 
 - **THEN** the host records the new status without commenting, labelling or pushing, and the ticket's state is unchanged
 
 ### Requirement: Polling cadence and backoff
-A repository SHALL be checked as soon as the host starts, and within about a minute after it first has an open ticket there. After a successful pass, it SHALL be checked again after about 60 seconds if any of its open tickets has an open PR, and after about 5 minutes otherwise. After consecutive failures, the next check SHALL wait 5, 10, 20 and then at most 30 minutes, and a success SHALL restore the normal interval. When GitHub reports fewer than 200 remaining API points, the next check SHALL wait at least until GitHub's reported reset time. The host SHALL wake itself for the next due check even when no other event arrives. Checks SHALL continue while a project is paused. Between due checks, the host SHALL read the store for the watched tickets only after something changed, and at most about once a minute, so that ordinary events cost no store read.
+A repository SHALL be checked as soon as the host starts, and within about a minute after it first has an open ticket there. It SHALL also be checked at once after the host pushes a ticket's branch there or opens a ticket's PR there. After a successful pass, it SHALL be checked again after about 60 seconds if any of its open tickets has an open PR, and after about 5 minutes otherwise. After consecutive failures, the next check SHALL wait 5, 10, 20 and then at most 30 minutes, and a success SHALL restore the normal interval. When GitHub reports fewer than 200 remaining API points, the next check SHALL wait at least until GitHub's reported reset time. The host SHALL wake itself for the next due check even when no other event arrives. Checks SHALL continue while a project is paused. Between due checks, the host SHALL read the store for the watched tickets only after something changed, and at most about once a minute, so that ordinary events cost no store read.
 
 #### Scenario: Active and idle repositories
 - **WHEN** one repository has a ticket with an open PR and another has open tickets without PRs
@@ -46,6 +46,10 @@ A repository SHALL be checked as soon as the host starts, and within about a min
 #### Scenario: Busy host
 - **WHEN** agents produce many changes within a minute and no check is due
 - **THEN** the watcher reads the store for its tickets at most once in that minute
+
+#### Scenario: After the host opens a PR
+- **WHEN** the host opens a ticket's PR in a repository that was checked two minutes ago and is next due in three
+- **THEN** the repository is checked at once, and the ticket's row shows the PR without waiting for the interval
 
 ### Requirement: A ticket's PR is found by its branch
 A ticket's PR SHALL be a PR in the ticket's repository whose head branch is the ticket's branch. PRs from other repositories, such as forks, SHALL be ignored. When several match, an open PR among the two most recently created SHALL be chosen, and otherwise the most recently created one.
