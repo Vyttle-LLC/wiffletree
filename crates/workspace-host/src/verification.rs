@@ -362,6 +362,7 @@ impl Host {
             ticket.previous_cycles.extend(ticket.verification.take());
             ticket.verification = Some(Verification {
                 cycle,
+                level: None,
                 max_rounds: settings.max_rounds,
                 outcome: VerificationOutcome::Running,
                 rounds: vec![VerificationRound {

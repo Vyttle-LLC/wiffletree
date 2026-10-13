@@ -980,6 +980,7 @@ pub(crate) mod tests {
             let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
             ticket.verification = Some(Verification {
                 cycle,
+                level: None,
                 max_rounds: 3,
                 outcome,
                 rounds: vec![VerificationRound {

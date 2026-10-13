@@ -122,12 +122,8 @@ impl Fixture {
         host.set_workspaces_dir(directory.path().join("workspaces").to_str().unwrap())
             .unwrap();
         both_providers(&mut host);
-        host.set_verification(VerificationSettings {
-            verifiers,
-            max_rounds: cap,
-            max_cycles: 2,
-        })
-        .unwrap();
+        host.set_verification(VerificationSettings::one_level(verifiers, cap, 2))
+            .unwrap();
         let project = host.create_project("Calls").unwrap();
         let coordinator = host.sessions().unwrap().remove(0);
         let repository = host
@@ -838,16 +834,8 @@ fn an_invalid_verification_setting_keeps_the_saved_one() {
     let mut duplicate = three_verifiers();
     duplicate.push(verifier(Role::Reviewer, "Codex", None));
     for invalid in [
-        VerificationSettings {
-            verifiers: duplicate,
-            max_rounds: 2,
-            max_cycles: 2,
-        },
-        VerificationSettings {
-            verifiers: three_verifiers(),
-            max_rounds: 0,
-            max_cycles: 2,
-        },
+        VerificationSettings::one_level(duplicate, 2, 2),
+        VerificationSettings::one_level(three_verifiers(), 0, 2),
     ] {
         assert!(f.host.set_verification(invalid).is_err());
         assert_eq!(f.host.settings(), saved);
@@ -955,11 +943,11 @@ fn a_verifier_dropped_from_the_settings_stays_quiet_when_it_reports_late() {
     f.report(&f.implementer.id.clone(), "stuck", "blocked")
         .unwrap();
     f.host
-        .set_verification(VerificationSettings {
-            verifiers: vec![verifier(Role::Tester, "New", None)],
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+        .set_verification(VerificationSettings::one_level(
+            vec![verifier(Role::Tester, "New", None)],
+            2,
+            2,
+        ))
         .unwrap();
     f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
         .unwrap();
@@ -1029,11 +1017,11 @@ fn a_verifier_whose_provider_changed_starts_a_fresh_session_and_retires_the_old_
     let old = current_review(&f);
     ready_for_cycle_two(&mut f);
     f.host
-        .set_verification(VerificationSettings {
-            verifiers: vec![verifier(Role::Reviewer, "Review", Some(Provider::Codex))],
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+        .set_verification(VerificationSettings::one_level(
+            vec![verifier(Role::Reviewer, "Review", Some(Provider::Codex))],
+            2,
+            2,
+        ))
         .unwrap();
     let sol = profile(Provider::Codex, "gpt-6.1-sol", "high");
     verify_review(&mut f, sol.clone()).unwrap();
@@ -1536,11 +1524,11 @@ fn an_open_entry_whose_verifier_left_the_settings_awaits_triage_when_the_next_cy
         "its verifier was in the cycle that ended"
     );
     f.host
-        .set_verification(VerificationSettings {
-            verifiers: vec![verifier(Role::Tester, "New", None)],
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+        .set_verification(VerificationSettings::one_level(
+            vec![verifier(Role::Tester, "New", None)],
+            2,
+            2,
+        ))
         .unwrap();
     f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
         .unwrap();

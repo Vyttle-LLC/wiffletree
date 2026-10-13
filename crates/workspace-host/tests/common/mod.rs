@@ -39,5 +39,6 @@ pub fn verify_args(host: &Host, ticket_id: &str) -> Value {
 pub fn one_tester(host: &mut Host) {
     let mut verification = VerificationSettings::default();
     verification.verifiers.truncate(1);
+    verification.levels[0].verifiers.truncate(1);
     host.set_verification(verification).unwrap();
 }

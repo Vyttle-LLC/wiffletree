@@ -187,6 +187,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
     };
     let passed = Verification {
         cycle: 1,
+        level: None,
         max_rounds: 3,
         outcome: VerificationOutcome::Passed,
         rounds: vec![round(
@@ -209,6 +210,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
     assert!(passed.unchecked().is_empty());
     let blocked = Verification {
         cycle: 2,
+        level: None,
         max_rounds: 3,
         outcome: VerificationOutcome::Blocked,
         rounds: vec![

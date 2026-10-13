@@ -88,7 +88,7 @@ All on JSON that is already stored.
 // workspace-core/src/lib.rs
 pub struct VerificationSettings {
     pub verifiers: Vec<VerifierConfig>,   // unchanged: the one list
-    pub levels: Vec<ReviewLevel>,         // never empty once read (decision 4)
+    pub levels: Vec<ReviewLevel>,         // one level "Full" when saved without levels (decision 4)
     pub max_rounds: u32,                  // unchanged
     pub max_cycles: u32,                  // now counts full reviews only (decision 9)
 }
@@ -115,7 +115,7 @@ A setting saved before this change has no `levels`. It is read as:
 - `verifiers`, `max_rounds` and `max_cycles`: exactly as saved, in the same order, with every instruction and provider.
 - `levels`: one level named **Full**, kind full review, running every saved verifier in order, with the "Use it" line "for every review."
 
-So every review starts the same verifiers as before and unlocks the same things. Nothing is rewritten on disk until the human next changes the card; the level is filled in on read, by deserializing through a private `SavedVerification` struct (`#[serde(from = …)]`) whose `From` adds the level when `levels` is empty. That conversion cannot fail, which matters because `Host::settings` drops to every default on a parse error. A settings file with no `verification` key at all uses `VerificationSettings::default()`, which is today's three verifiers and the same single Full level.
+So every review starts the same verifiers as before and unlocks the same things. Nothing is rewritten on disk until the human next changes the card; the level is filled in on read, by deserializing through a private `SavedVerification` struct (`#[serde(from = …)]`) whose `From` adds the level when the saved setting has no `levels`. A setting sent with an empty list is not filled in; `validate` refuses it, so removing the last level on the card cannot quietly bring back "Full". That conversion cannot fail, which matters because `Host::settings` drops to every default on a parse error. A settings file with no `verification` key at all uses `VerificationSettings::default()`, which is today's three verifiers and the same single Full level.
 
 No second level is added on update. *Why not add Light too:* it would change what runs after a rebase without the human having seen the page. The first time Add level is pressed while no level is a re-check, the form is filled in as Light with the first reviewer ticked and the stock "Use it" line, so adding it is two clicks.
 

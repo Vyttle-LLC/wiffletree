@@ -1051,8 +1051,8 @@ mod tests {
     #[test]
     fn the_tickets_view_lists_each_round_with_its_commit_and_results() {
         let (_directory, mut host, _root, ticket) = store();
-        host.set_verification(VerificationSettings {
-            verifiers: ["Claude", "Codex"]
+        host.set_verification(VerificationSettings::one_level(
+            ["Claude", "Codex"]
                 .map(|focus| VerifierConfig {
                     role: Role::Tester,
                     focus: focus.into(),
@@ -1060,9 +1060,9 @@ mod tests {
                     provider: None,
                 })
                 .to_vec(),
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+            2,
+            2,
+        ))
         .unwrap();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
@@ -1134,6 +1134,7 @@ mod tests {
     fn verification(cycle: u32, outcome: VerificationOutcome, rounds: u32) -> Verification {
         Verification {
             cycle,
+            level: None,
             max_rounds: 3,
             outcome,
             rounds: (1..=rounds)

@@ -26,6 +26,21 @@ fn verifiers(setup: &Setup) -> Vec<(Role, &str, Option<Provider>)> {
         .map(|v| (v.role, v.focus.as_str(), v.provider))
         .collect()
 }
+fn levels(setup: &Setup) -> Vec<(&str, LevelKind, Vec<&str>, &str)> {
+    setup
+        .verification
+        .levels
+        .iter()
+        .map(|level| {
+            (
+                level.name.as_str(),
+                level.kind,
+                level.verifiers.iter().map(String::as_str).collect(),
+                level.use_when.as_str(),
+            )
+        })
+        .collect()
+}
 fn roles(setup: &Setup) -> Vec<(Role, Vec<Provider>)> {
     setup
         .selection
@@ -57,7 +72,30 @@ fn both_signed_in_splits_the_roles_and_keeps_the_default_verifiers() {
             (Role::Tester, vec![Provider::Codex]),
         ]
     );
-    assert_eq!(setup.verification, VerificationSettings::default());
+    let default = VerificationSettings::default();
+    assert_eq!(setup.verification.verifiers, default.verifiers);
+    assert_eq!(
+        (setup.verification.max_rounds, setup.verification.max_cycles),
+        (default.max_rounds, default.max_cycles)
+    );
+    setup.verification.validate().unwrap();
+    assert_eq!(
+        levels(&setup),
+        [
+            (
+                "Full",
+                LevelKind::FullReview,
+                vec!["Tests", "Correctness", "Regressions"],
+                "for a ticket's first review, and after any change to what the code does."
+            ),
+            (
+                "Light",
+                LevelKind::Recheck,
+                vec!["Correctness"],
+                "after a rebase, a resolved merge conflict or a small fix, on a ticket whose last review passed."
+            ),
+        ]
+    );
     assert_eq!(
         setup.selection.guide,
         "Pick the model by the size and risk of the work. Claude: small, contained change → Sonnet; large or cross-cutting → Opus. Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high. Raise effort for migrations, data or security changes.\n"
@@ -102,6 +140,18 @@ fn one_signed_in_provider_takes_every_role_and_the_only_review() {
                 [
                     (Role::Tester, "Tests", None),
                     (Role::Reviewer, review, Some(provider)),
+                ]
+            );
+            // Full runs the tester and the one reviewer; Light, a re-check, runs that reviewer.
+            let levels: Vec<_> = levels(&setup)
+                .into_iter()
+                .map(|(name, kind, verifiers, _)| (name, kind, verifiers))
+                .collect();
+            assert_eq!(
+                levels,
+                [
+                    ("Full", LevelKind::FullReview, vec!["Tests", review]),
+                    ("Light", LevelKind::Recheck, vec![review]),
                 ]
             );
             assert!(setup.selection.guide.contains(provider.label()));
