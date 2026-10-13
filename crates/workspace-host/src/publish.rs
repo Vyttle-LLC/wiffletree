@@ -1914,6 +1914,22 @@ pub(crate) mod tests {
         assert_eq!(owner_entry(&repository).as_deref(), Some("allowed-org"));
     }
 
+    #[test]
+    fn an_approved_step_sends_nothing_either_when_github_cannot_confirm_the_repository() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.publish(&f.implementer.id.clone()).unwrap();
+        remote.github.lock().unwrap().answer = None;
+        answer(&mut f, &remote, "approved");
+        assert!(remote.git_calls().is_empty() && f.ticket().publishing.is_none());
+        let told = results(&f.host).pop().unwrap().1;
+        assert!(
+            told.contains("GitHub could not confirm the repository"),
+            "{told}"
+        );
+        assert!(told.ends_with("Nothing was pushed."), "{told}");
+    }
+
     /// Makes the remote reject every push, as GitHub does without credentials.
     fn reject_pushes(remote: &Remote, reject: bool) {
         let hook = remote.bare.join("hooks/pre-receive");
