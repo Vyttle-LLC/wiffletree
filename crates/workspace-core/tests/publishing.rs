@@ -228,3 +228,202 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
     );
     assert_eq!(blocked.unchecked(), ["Regressions", "Style"]);
 }
+
+/// A reviewed ticket with a waiting request, in `celadon-theme/website`.
+fn waiting_ticket(step: &str, outcome: &str) -> (Ticket, Repository) {
+    let ticket: Ticket = serde_json::from_value(json!({
+        "id":"t","coordinator_id":"c","repository_id":"r","title":"Fix palette contrast",
+        "brief":"B","worktree":"/w","branch":"wiffletree/fix-palette-contrast","state":"passed",
+        "verification": {"cycle": 1, "max_rounds": 3, "outcome": outcome, "rounds": [
+            {"round": 1, "commit": "9e03c1b000", "verifiers": [
+                {"session_id":"a","role":"tester","focus":"Tests","message_id":"m","result":"passed"},
+                {"session_id":"b","role":"reviewer","focus":"Correctness","message_id":"m",
+                 "result": if outcome == "passed" { "passed" } else { "failed" }}]}]},
+        "publishing": {"id":"r1","caller":"i","repository":"celadon-theme/website",
+            "push_url":"git@github.com:celadon-theme/website.git",
+            "branch":"wiffletree/fix-palette-contrast","base":"main","commit":"9e03c1b000",
+            "size":"2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)",
+            "title":"Fix palette contrast in dark mode","body":"Muted text fell below 4.5:1.\n- Darken the overlay",
+            "step": step, "waiting":"item"}
+    }))
+    .unwrap();
+    let repository: Repository = serde_json::from_value(json!({
+        "id":"r","name":"celadon-website","path":"/code/celadon-website","base":"origin/main",
+        "github": {"owner":"celadon-theme","name":"website","facts": {
+            "name_with_owner":"celadon-theme/website","organization":true,"fork":false,
+            "public":true,"checked_at":1}}
+    }))
+    .unwrap();
+    (ticket, repository)
+}
+fn card(ticket: &Ticket, repository: &Repository, allowed: &[&str]) -> PublishCard {
+    let allowed: Vec<String> = allowed.iter().map(|a| (*a).to_owned()).collect();
+    let request = ticket.publishing.as_ref().unwrap();
+    let ask = publish_ask(ticket, request, repository, &allowed).unwrap();
+    publish_card(ticket, request, repository, ask)
+}
+
+#[test]
+fn the_push_card_names_the_repository_branch_commit_and_review() {
+    let (ticket, repository) = waiting_ticket("push", "passed");
+    let card = card(&ticket, &repository, &[]);
+    assert_eq!(card.title, "Push this branch to celadon-theme/website?");
+    assert_eq!(
+        card.rows,
+        [
+            (
+                "Repository",
+                "celadon-theme/website · public · celadon-theme is not an allowed owner".to_owned()
+            ),
+            ("Branch", "wiffletree/fix-palette-contrast".to_owned()),
+            (
+                "Commit",
+                "9e03c1b · 2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)"
+                    .to_owned()
+            ),
+            (
+                "Review",
+                "Cycle 1 passed at this commit · Tests, Correctness".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        card.note,
+        "Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed. Opening the pull request is a separate approval."
+    );
+    assert_eq!(card.approve, "Push once");
+    assert!(card.description.is_none() && card.findings.is_empty() && card.would_send.is_none());
+}
+
+#[test]
+fn the_pull_request_card_shows_the_title_and_description_in_full() {
+    let (ticket, repository) = waiting_ticket("open_pull_request", "passed");
+    let card = card(&ticket, &repository, &[]);
+    assert_eq!(
+        card.title,
+        "Open this pull request in celadon-theme/website?"
+    );
+    assert_eq!(
+        card.rows[1],
+        (
+            "Branches",
+            "wiffletree/fix-palette-contrast → main".to_owned()
+        )
+    );
+    assert_eq!(
+        card.rows[3],
+        ("Title", "Fix palette contrast in dark mode".to_owned())
+    );
+    assert_eq!(
+        card.description.as_deref(),
+        Some("Muted text fell below 4.5:1.\n- Darken the overlay")
+    );
+    assert_eq!(card.approve, "Open pull request");
+    // The Inbox item's own text leaves the description to the card.
+    assert!(!card.text().contains("Darken the overlay"));
+}
+
+#[test]
+fn a_later_push_card_names_the_pull_request_it_updates() {
+    let (mut ticket, repository) = waiting_ticket("push", "passed");
+    ticket.pull_request = Some(
+        serde_json::from_value(
+            json!({"number": 212, "url": "u", "state": "open", "draft": false,
+            "base": "main", "head": "h", "merge_state": "clean", "checks": "success",
+            "unresolved_threads": 0, "comments": {}}),
+        )
+        .unwrap(),
+    );
+    let request = ticket.publishing.as_mut().unwrap();
+    (request.title, request.body) = (None, None);
+    let card = card(&ticket, &repository, &[]);
+    assert_eq!(card.title, "Push new commits to celadon-theme/website?");
+    assert_eq!(
+        card.rows[1],
+        (
+            "Updates",
+            "PR #212 · wiffletree/fix-palette-contrast".to_owned()
+        )
+    );
+    assert!(!card.note.contains("separate approval"));
+}
+
+#[test]
+fn the_blocked_review_card_lists_the_open_findings_and_what_one_approval_would_send() {
+    let (mut ticket, repository) = waiting_ticket("push", "blocked");
+    let mut untriaged = entry("F6", EntryStatus::Untriaged);
+    untriaged.finding.location = "crates/workspace-desktop/src/tree.rs:88".into();
+    ticket.ledger = vec![entry("F2", EntryStatus::Fixed), untriaged];
+    let card = card(&ticket, &repository, &["celadon-theme"]);
+    assert_eq!(
+        card.title,
+        "Publish this ticket although its review ended blocked?"
+    );
+    assert_eq!(
+        card.rows[0].1,
+        "celadon-theme/website · public · celadon-theme is an allowed owner"
+    );
+    assert_eq!(
+        card.rows.last().unwrap(),
+        &("Review", "Cycle 1 ended blocked at 9e03c1b, after 1 of 3 rounds · Tests passed, Correctness failed".to_owned())
+    );
+    assert_eq!(
+        card.findings,
+        [(
+            "F6 · non-blocking · Correctness · crates/workspace-desktop/src/tree.rs:88".to_owned(),
+            "Matching is case-sensitive. Not triaged yet.".to_owned()
+        )]
+    );
+    assert_eq!(
+        card.would_send.as_deref(),
+        Some(
+            "Push wiffletree/fix-palette-contrast at 9e03c1b and open its pull request, “Fix palette contrast in dark mode”"
+        )
+    );
+    assert_eq!(card.approve, "Publish anyway");
+    assert!(card.description.is_some());
+    // Where the owner is not allowed, the same notice and findings are on each step's card.
+    let step = self::card(&ticket, &repository, &[]);
+    assert_eq!(step.title, "Push this branch to celadon-theme/website?");
+    assert_eq!(step.findings, card.findings);
+    assert!(step.would_send.is_none());
+}
+
+#[test]
+fn a_step_waits_only_where_the_rules_require() {
+    let (mut ticket, repository) = waiting_ticket("push", "passed");
+    let allowed = vec!["celadon-theme".to_owned()];
+    let ask = |ticket: &Ticket, allowed: &[String]| {
+        publish_ask(
+            ticket,
+            ticket.publishing.as_ref().unwrap(),
+            &repository,
+            allowed,
+        )
+    };
+    assert_eq!(ask(&ticket, &[]), Some(PublishAsk::NotAllowed));
+    assert_eq!(ask(&ticket, &allowed), None);
+    // A blocked review asks even where the owner is allowed, until the human approved the commit.
+    ticket.verification.as_mut().unwrap().outcome = VerificationOutcome::Blocked;
+    assert_eq!(ask(&ticket, &allowed), Some(PublishAsk::BlockedReview));
+    ticket.publishing.as_mut().unwrap().blocked_review_approved = true;
+    assert_eq!(ask(&ticket, &allowed), None);
+    assert_eq!(ask(&ticket, &[]), Some(PublishAsk::NotAllowed));
+    // A closed or merged pull request asks before another is opened, and only then.
+    let (mut ticket, _) = waiting_ticket("push", "passed");
+    ticket.pull_request = Some(
+        serde_json::from_value(
+            json!({"number": 45, "url": "u", "state": "closed", "draft": false,
+            "base": "main", "head": "h", "merge_state": "clean", "checks": "success",
+            "unresolved_threads": 0, "comments": {}}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(ask(&ticket, &allowed), None);
+    ticket.publishing.as_mut().unwrap().step = PublishStep::OpenPullRequest;
+    assert_eq!(ask(&ticket, &allowed), Some(PublishAsk::EndedPullRequest));
+    assert_eq!(
+        ended_pull_request_notice(&ticket).as_deref(),
+        Some("PR #45 was closed without merging")
+    );
+}

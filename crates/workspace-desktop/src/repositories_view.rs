@@ -1,14 +1,24 @@
 //! The workspace's repositories. Projects use all of them unless they choose their own set.
 use super::*;
-use gpui_component::{Disableable, Sizable, button::ButtonVariants};
-use ui::{age, empty_state, from_now, hint, icon, mono, pill, section};
+use gpui_component::{Disableable, Sizable, button::ButtonVariants, checkbox::Checkbox};
+use ui::{age, banner, empty_state, from_now, hint, icon, mono, pill, section};
+
+const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
+const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
+const UNTIL_GITHUB_ANSWERS: &str = "Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has answered for a repository, it asks first, whatever is ticked. Wiffletree asks GitHub again the next time you come back.";
+const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TICK";
+const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
 
 impl Workspace {
     pub(super) fn repositories_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let Some(snapshot) = &self.snapshot else {
             return div();
         };
-        let mut body = div().flex().flex_col().gap_3().child(
+        let mut body = div().flex().flex_col().gap_3();
+        if !snapshot.repositories.is_empty() {
+            body = body.child(self.owners_block(snapshot, p, cx));
+        }
+        body = body.child(
             section(
                 format!("IN THE WORKSPACE · {}", snapshot.repositories.len()),
                 p,
@@ -95,6 +105,14 @@ impl Workspace {
                             )),
                     )
                     .when(missing, |d| d.child(pill("Missing", p.red)))
+                    .child(pill(
+                        rule_label(repository, &snapshot.allowed_owners),
+                        if is_allowed(repository, &snapshot.allowed_owners) {
+                            p.green
+                        } else {
+                            p.subtle
+                        },
+                    ))
                     .child(pill(repository.base.clone(), p.subtle))
                     .child(
                         button(SharedString::from(format!("remove-repository-{id}")))
@@ -121,6 +139,118 @@ impl Workspace {
         }
         body.child(list)
             .child(self.repository_roots(snapshot, p, cx))
+    }
+
+    /// The owners the human allows to have pull requests opened without asking: one tick box per
+    /// organization or user and per fork, and the repositories with nowhere to push.
+    fn owners_block(&self, snapshot: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Div {
+        let entries = owner_entries(&snapshot.repositories);
+        let allowed = &snapshot.allowed_owners;
+        let mut block = div()
+            .mb_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                section(owners_heading(&entries, allowed), p)
+                    .child(pill("This Mac only", p.subtle)),
+            )
+            .child(hint(WITHOUT_ASKING, p))
+            .child(div().text_size(px(12.)).child(NEVER));
+        if let Some(error) = &snapshot.github_error {
+            block = block.child(
+                banner(p.yellow).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(format!("Couldn’t check GitHub: {error}"))
+                        .child(hint(UNTIL_GITHUB_ANSWERS, p)),
+                ),
+            );
+        }
+        let mut rows = div().flex().flex_col();
+        for owner in &entries.owners {
+            rows = rows.child(self.owner_row(
+                Some(&owner.login),
+                &owner.login,
+                owner.kind(),
+                owner.summary(),
+                allowed,
+                p,
+                cx,
+            ));
+        }
+        if !entries.forks.is_empty() {
+            rows = rows.child(section(FORKS, p).mt_2());
+        }
+        for fork in &entries.forks {
+            let detail = format!("{} · {}", fork.summary(), fork.detail());
+            rows = rows.child(self.owner_row(
+                Some(&fork.entry),
+                &fork.entry,
+                None,
+                detail,
+                allowed,
+                p,
+                cx,
+            ));
+        }
+        if !entries.not_on_github.is_empty() {
+            rows = rows.child(section(NOT_ON_GITHUB, p).mt_2());
+        }
+        for local in &entries.not_on_github {
+            let detail = format!("{} · cannot be allowed", local.reason);
+            rows = rows.child(self.owner_row(None, &local.name, None, detail, allowed, p, cx));
+        }
+        block.child(rows)
+    }
+
+    /// One row of the owners block. `entry` is what its tick box allows; a repository that is
+    /// not on GitHub has none.
+    #[allow(clippy::too_many_arguments)]
+    fn owner_row(
+        &self,
+        entry: Option<&str>,
+        name: &str,
+        kind: Option<&'static str>,
+        detail: String,
+        allowed: &[String],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let tick = entry.map(|entry| {
+            let entry = entry.to_owned();
+            Checkbox::new(SharedString::from(format!("allow-owner-{entry}")))
+                .checked(is_entry_allowed(&entry, allowed))
+                .on_click(cx.listener(move |v, checked: &bool, w, c| {
+                    v.request(
+                        Command::SetOwnerAllowed {
+                            entry: entry.clone(),
+                            allowed: *checked,
+                        },
+                        w,
+                        c,
+                    )
+                }))
+        });
+        div()
+            .py_1p5()
+            .flex()
+            .items_center()
+            .gap_3()
+            .border_b_1()
+            .border_color(p.edge.opacity(0.25))
+            // A row without a box keeps its text in line with the others.
+            .child(div().w(px(16.)).flex_none().children(tick))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(name.to_owned()),
+            )
+            .children(kind.map(|kind| pill(kind, p.subtle)))
+            .child(div().flex_1().min_w_0().text_right().child(hint(detail, p)))
     }
 
     /// Lists leftover worktrees in a sheet; removal happens there only after confirmation.
@@ -182,6 +312,23 @@ impl Workspace {
         }
         roots
     }
+}
+
+/// "OPEN PULL REQUESTS WITHOUT ASKING · 3 of 4 owners allowed", counting forks as owners to
+/// allow.
+fn owners_heading(entries: &OwnerEntries, allowed: &[String]) -> String {
+    let all = entries
+        .owners
+        .iter()
+        .map(|owner| &owner.login)
+        .chain(entries.forks.iter().map(|fork| &fork.entry));
+    let (mut total, mut ticked) = (0, 0);
+    for entry in all {
+        total += 1;
+        ticked += usize::from(is_entry_allowed(entry, allowed));
+    }
+    let owners = if total == 1 { "owner" } else { "owners" };
+    format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {total} {owners} allowed")
 }
 
 fn open_tickets<'a>(
@@ -247,7 +394,10 @@ fn pr_check_status(snapshot: &Snapshot, repository: &Repository) -> Option<(Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{pr_check_status, repository_counts};
+    use super::{
+        FORKS, NEVER, NOT_ON_GITHUB, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, owners_heading,
+        pr_check_status, repository_counts,
+    };
     use crate::ui;
     use workspace_core::*;
 
@@ -370,5 +520,122 @@ mod tests {
             "1 project · 0 open tickets"
         );
         assert_eq!(pr_check_status(&snapshot, &repository), None);
+    }
+
+    fn on_github(name_with_owner: &str, fork: bool, public: bool) -> Repository {
+        let (owner, name) = name_with_owner.split_once('/').unwrap();
+        serde_json::from_value(serde_json::json!({
+            "id": name, "name": name, "path": format!("/code/{name}"), "base": "origin/main",
+            "github": {"owner": owner, "name": name, "facts": {
+                "name_with_owner": name_with_owner, "organization": owner != "MHohlios",
+                "fork": fork, "parent": fork.then_some("longbridge/gpui-component"),
+                "public": public, "checked_at": 1}}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_owners_block_lists_owners_with_counts_and_a_fork_on_its_own() {
+        let mut repositories: Vec<_> = (0..29)
+            .map(|i| on_github(&format!("Sage-Social/r{i}"), false, false))
+            .collect();
+        repositories.push(on_github("Vyttle-LLC/wiffletree", false, true));
+        repositories.push(on_github("MHohlios/dotfiles", false, false));
+        repositories.push(on_github("MHohlios/gpui-component", true, true));
+        repositories.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "s", "name": "scratch-prototypes", "path": "/s", "base": "main"
+            }))
+            .unwrap(),
+        );
+        let entries = owner_entries(&repositories);
+        let allowed = vec![
+            "sage-social".to_owned(),
+            "MHohlios/gpui-component".to_owned(),
+        ];
+        assert_eq!(
+            owners_heading(&entries, &allowed),
+            "OPEN PULL REQUESTS WITHOUT ASKING · 2 of 4 owners allowed"
+        );
+        assert_eq!(
+            owners_heading(&owner_entries(&repositories[..1]), &[]),
+            "OPEN PULL REQUESTS WITHOUT ASKING · 0 of 1 owner allowed"
+        );
+        let owners: Vec<_> = entries
+            .owners
+            .iter()
+            .map(|o| format!("{} · {} · {}", o.login, o.kind().unwrap(), o.summary()))
+            .collect();
+        assert_eq!(
+            owners,
+            [
+                "Sage-Social · Organization · 29 repositories · all private",
+                "Vyttle-LLC · Organization · 1 repository · public",
+                "MHohlios · User · 1 repository · private",
+            ]
+        );
+        // The fork has its own entry and is not counted under MHohlios.
+        let fork = &entries.forks[0];
+        assert_eq!(
+            format!("{} · {} · {}", fork.entry, fork.summary(), fork.detail()),
+            "MHohlios/gpui-component · Fork of longbridge/gpui-component · public · pull requests stay inside the fork"
+        );
+        assert_eq!(entries.not_on_github[0].reason, "No GitHub remote");
+    }
+
+    #[test]
+    fn each_repository_row_says_which_rule_applies() {
+        let allowed = vec!["Vyttle-LLC".to_owned()];
+        let label = |repository: &Repository| rule_label(repository, &allowed);
+        assert_eq!(
+            label(&on_github("Vyttle-LLC/wiffletree", false, true)),
+            "Vyttle-LLC · without asking"
+        );
+        assert_eq!(
+            label(&on_github("celadon-theme/celadon-website", false, true)),
+            "celadon-theme · asks first"
+        );
+        assert_eq!(
+            label(&on_github("Vyttle-LLC/gpui-component", true, true)),
+            "Fork · asks first"
+        );
+        let local: Repository = serde_json::from_value(serde_json::json!({
+            "id": "s", "name": "scratch", "path": "/s", "base": "main"
+        }))
+        .unwrap();
+        assert_eq!(label(&local), "Not on GitHub");
+    }
+
+    #[test]
+    fn the_page_says_allowed_and_without_asking_and_never_approved_or_automatic() {
+        let fork = on_github("MHohlios/gpui-component", true, true);
+        let entries = owner_entries(std::slice::from_ref(&fork));
+        let mut copy = vec![
+            WITHOUT_ASKING.to_owned(),
+            NEVER.to_owned(),
+            UNTIL_GITHUB_ANSWERS.to_owned(),
+            FORKS.to_owned(),
+            NOT_ON_GITHUB.to_owned(),
+            owners_heading(&entries, &[]),
+            rule_label(&fork, &["MHohlios/gpui-component".to_owned()]),
+            rule_label(&fork, &[]),
+            entries.forks[0].detail(),
+        ];
+        copy.push(rule_label(
+            &on_github("Vyttle-LLC/wiffletree", false, true),
+            &[],
+        ));
+        for text in copy {
+            let text = text.to_lowercase();
+            assert!(
+                !text.contains("approved") && !text.contains("automatic"),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            NEVER,
+            "Wiffletree never approves, merges, closes or comments on a pull request."
+        );
+        assert!(WITHOUT_ASKING.contains("stays on this Mac"));
     }
 }

@@ -629,6 +629,9 @@ impl Workspace {
                     pill("Question", p.focus)
                 }),
         );
+        if let Some(publish) = self.publish_card(item) {
+            return publish_approval(entry, id, publish, p, cx);
+        }
         if item.is_permission() {
             let approve = id.clone();
             return entry
@@ -742,6 +745,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The card for a publish step waiting on this item, drawn from the ticket's frozen request,
+    /// its review and ledger, and the repository's facts. `None` for any other item.
+    fn publish_card(&self, item: &Attention) -> Option<PublishCard> {
+        let snapshot = self.snapshot.as_ref()?;
+        let (ticket, request) = snapshot.tickets.iter().find_map(|ticket| {
+            let request = ticket.publishing.as_ref()?;
+            (request.waiting.as_deref() == Some(item.id.as_str())).then_some((ticket, request))
+        })?;
+        let repository = snapshot
+            .repositories
+            .iter()
+            .find(|r| r.id == ticket.repository_id)?;
+        // An owner allowed since the item was raised no longer asks; the step still waits for
+        // this answer.
+        let ask = publish_ask(ticket, request, repository, &snapshot.allowed_owners)
+            .unwrap_or(PublishAsk::EndedPullRequest);
+        Some(publish_card(ticket, request, repository, ask))
+    }
+
     fn resolve_attention(
         &mut self,
         id: &str,
@@ -815,6 +837,81 @@ impl Workspace {
         }
         body.child(history)
     }
+}
+
+/// A publish approval: what would leave the machine, then Deny and the step's own approve button.
+fn publish_approval(
+    entry: Div,
+    id: String,
+    card: PublishCard,
+    p: Palette,
+    cx: &mut Context<Workspace>,
+) -> Div {
+    let row = |label: &'static str, value: AnyElement| {
+        div()
+            .flex()
+            .gap_3()
+            .text_size(px(12.))
+            .line_height(relative(1.5))
+            .child(
+                div()
+                    .w(px(104.))
+                    .flex_none()
+                    .text_color(p.subtle)
+                    .child(label),
+            )
+            .child(div().flex_1().min_w_0().child(value))
+    };
+    let mut rows = div().flex().flex_col().gap_1();
+    for (label, value) in card.rows {
+        rows = rows.child(row(label, value.into_any_element()));
+    }
+    if !card.findings.is_empty() {
+        let mut findings = div().flex().flex_col().gap_1p5();
+        for (heading, summary) in card.findings {
+            findings = findings.child(div().child(mono(heading, p)).child(summary));
+        }
+        rows = rows.child(row("Open findings", findings.into_any_element()));
+    }
+    if let Some(sent) = card.would_send {
+        rows = rows.child(row("Would send", sent.into_any_element()));
+    }
+    if let Some(description) = card.description {
+        let block = div().p_2().rounded_md().bg(p.overlay).child(description);
+        rows = rows.child(row("Description", block.into_any_element()));
+    }
+    let approve = id.clone();
+    entry
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .child(card.title),
+        )
+        .child(rows)
+        .child(hint(card.note, p))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    button(SharedString::from(format!("deny-{id}")))
+                        .ghost()
+                        .label("Deny")
+                        .on_click(
+                            cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c)),
+                        ),
+                )
+                .child(
+                    button(SharedString::from(format!("approve-{approve}")))
+                        .primary()
+                        .label(card.approve)
+                        .on_click(cx.listener(move |v, _, w, c| {
+                            v.resolve_attention(&approve, "approved", w, c)
+                        })),
+                ),
+        )
 }
 
 #[cfg(test)]

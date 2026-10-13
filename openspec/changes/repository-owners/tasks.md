@@ -51,10 +51,10 @@
 
 ## 8. Desktop
 
-- [ ] 8.1 In `repositories_view.rs::repositories_page`, add the "Open pull requests without asking" block above the list from `owners::owner_entries`: a tick box per owner and per fork that sends `Command::SetOwnerAllowed`, repositories not on GitHub without a box, the line "Wiffletree never approves, merges, closes or comments on a pull request.", the note that the list stays on this Mac, and the reason when GitHub could not be read. Verify with a unit-tested helper for the row text ("Owners with counts", "A fork is listed on its own") and against `design/mockups/current/repository-owners.html`, and that the page never says "approved" or "automatic".
-- [ ] 8.2 Add the rule label to each repository row: without asking, asks first, or not on GitHub. Verify the scenario "Repository row" with a unit-tested helper.
+- [x] 8.1 In `repositories_view.rs::repositories_page`, add the "Open pull requests without asking" block above the list from `owners::owner_entries`: a tick box per owner and per fork that sends `Command::SetOwnerAllowed`, repositories not on GitHub without a box, the line "Wiffletree never approves, merges, closes or comments on a pull request.", the note that the list stays on this Mac, and the reason when GitHub could not be read. Verify with a unit-tested helper for the row text ("Owners with counts", "A fork is listed on its own") and against `design/mockups/current/repository-owners.html`, and that the page never says "approved" or "automatic".
+- [x] 8.2 Add the rule label to each repository row: without asking, asks first, or not on GitHub. Verify the scenario "Repository row" with a unit-tested helper.
 - [ ] 8.3 In `inspector.rs::attention_card`, draw `publish:` items from the ticket's `publishing`, its verification record and ledger, and the repository's facts: the push card, the pull request card with the full title and description, and the blocked-review notice with its findings. Buttons use the existing `resolve_attention` with `approved` and `denied`. Verify against the mockup's four cards by driving a seeded store with `scripts/drive_desktop.py`.
-- [ ] 8.4 In `tree.rs` and `sidebar.rs::ticket_row`, add the line shown while a step waits for the human. Verify the scenario "Waiting line" with a unit test of the text helper, and that a ticket with no waiting step keeps its row.
+- [x] 8.4 In `tree.rs` and `sidebar.rs::ticket_row`, add the line shown while a step waits for the human. Verify the scenario "Waiting line" with a unit test of the text helper, and that a ticket with no waiting step keeps its row.
 
 ## 9. Instructions
 

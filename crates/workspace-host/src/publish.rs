@@ -493,7 +493,9 @@ impl Host {
         let allowed = self.settings().allowed_owners;
         let reason = match publish_ask(ticket, request, repository, &allowed) {
             Some(PublishAsk::BlockedReview) => "the review ended blocked".to_owned(),
-            Some(PublishAsk::EndedPullRequest) => ended_pull_request_notice(ticket),
+            Some(PublishAsk::EndedPullRequest) => {
+                ended_pull_request_notice(ticket).unwrap_or_default()
+            }
             _ => not_allowed_reason(repository),
         };
         json!({"status": "waiting_for_human", "step": request.step.label(),
@@ -512,15 +514,6 @@ fn job(ticket: &Ticket, request: PublishRequest, repository: &Repository) -> Job
     }
 }
 
-/// Such as "PR #45 was closed without merging".
-fn ended_pull_request_notice(ticket: &Ticket) -> String {
-    match ticket.ended_pull_request() {
-        Some(pr) if pr.state == PrState::Merged => format!("PR #{} was merged", pr.number),
-        Some(pr) => format!("PR #{} was closed without merging", pr.number),
-        None => String::new(),
-    }
-}
-
 /// The Inbox item's text, written by the host from the frozen request. The agent's only words
 /// in it are the pull request's title and description; the card shows both in full.
 fn approval_prompt(
@@ -529,82 +522,8 @@ fn approval_prompt(
     repository: &Repository,
     ask: PublishAsk,
 ) -> String {
-    let commit = short_sha(&request.commit);
-    let facts = repository.github.as_ref().and_then(|g| g.facts.as_ref());
-    let visibility = match facts {
-        Some(facts) if facts.public => "public",
-        Some(_) => "private",
-        None => "visibility unknown",
-    };
-    let rule = match (ask, owner_entry(repository)) {
-        (PublishAsk::NotAllowed, _) | (_, None) => not_allowed_reason(repository),
-        (_, Some(fork)) if fork.contains('/') => format!("{fork} is an allowed fork"),
-        (_, Some(owner)) => format!("{owner} is an allowed owner"),
-    };
-    let would_send = match (request.step, &request.title) {
-        (PublishStep::Push, Some(title)) if ask == PublishAsk::BlockedReview => format!(
-            "Push {} at {commit} and open its pull request, \"{title}\"",
-            request.branch
-        ),
-        _ => format!("Push {} at {commit}", request.branch),
-    };
-    let mut lines = vec![match (ask, request.step) {
-        (PublishAsk::BlockedReview, _) => {
-            "Publish this ticket although its review ended blocked?".to_owned()
-        }
-        (_, PublishStep::Push) => format!("Push this branch to {}?", request.repository),
-        (_, PublishStep::OpenPullRequest) => {
-            format!("Open this pull request in {}?", request.repository)
-        }
-    }];
-    lines.push(format!(
-        "Repository: {} · {visibility} · {rule}",
-        request.repository
-    ));
-    match request.step {
-        PublishStep::Push => {
-            lines.push(format!("Branch: {}", request.branch));
-            lines.push(format!("Commit: {commit} · {}", request.size));
-        }
-        PublishStep::OpenPullRequest => {
-            lines.push(format!("Branches: {} → {}", request.branch, request.base));
-            lines.push(format!(
-                "Title: {}",
-                request.title.as_deref().unwrap_or_default()
-            ));
-        }
-    }
-    if let Some(verification) = &ticket.verification {
-        lines.push(format!(
-            "Review: {}",
-            verification.review_line(&request.commit)
-        ));
-        if verification.outcome == VerificationOutcome::Blocked {
-            let unchecked = verification.unchecked();
-            if !unchecked.is_empty() {
-                lines.push(format!("Did not check: {}", unchecked.join(", ")));
-            }
-            lines.push("Open findings:".into());
-            let open = ticket.open_findings();
-            if open.is_empty() {
-                lines.push("None".into());
-            }
-            for entry in open {
-                lines.push(format!("{} · {}", entry.heading(), entry.finding.summary));
-            }
-        }
-    }
-    if ticket.ended_pull_request().is_some() {
-        lines.push(format!(
-            "Earlier pull request: {}",
-            ended_pull_request_notice(ticket)
-        ));
-    }
-    if ask == PublishAsk::BlockedReview {
-        lines.push(format!("Would send: {would_send}"));
-    }
     // The Inbox bounds an item's text; the card draws the full request.
-    let mut prompt = lines.join("\n");
+    let mut prompt = publish_card(ticket, request, repository, ask).text();
     if prompt.len() > 4000 {
         let end = (0..=4000).rev().find(|&i| prompt.is_char_boundary(i));
         prompt.truncate(end.unwrap_or_default());
@@ -2208,11 +2127,15 @@ pub(crate) mod tests {
         );
         assert_eq!(
             item.prompt,
-            "Open this pull request in allowed-org/app?\n\
-             Repository: allowed-org/app · private · allowed-org is not an allowed owner\n\
-             Branches: wiffletree/fix-contrast → main\n\
-             Title: Fix it\n\
-             Review: Cycle 1 passed at this commit · Correctness"
+            format!(
+                "Open this pull request in allowed-org/app?\n\
+                 Repository: allowed-org/app · private · allowed-org is not an allowed owner\n\
+                 Branches: wiffletree/fix-contrast → main\n\
+                 Commit: {} · 2 commits · 2 files changed, 2 insertions(+)\n\
+                 Title: Fix it\n\
+                 Review: Cycle 1 passed at this commit · Correctness",
+                short_sha(&head)
+            )
         );
         answer(&mut f, &remote, "approved");
         assert_eq!(remote.github.lock().unwrap().created.len(), 1);
@@ -2572,8 +2495,8 @@ pub(crate) mod tests {
                  Review: Cycle 2 ended blocked at {short}, after 1 of 3 rounds · Correctness failed\n\
                  Open findings:\n\
                  F4 · blocking · Correctness · src/f4.rs:412 · F4 is still wrong.\n\
-                 F6 · non-blocking · Correctness · src/f6.rs:412 · F6 is still wrong.\n\
-                 Would send: Push wiffletree/fix-contrast at {short} and open its pull request, \"Fix it\""
+                 F6 · non-blocking · Correctness · src/f6.rs:412 · F6 is still wrong. Not triaged yet.\n\
+                 Would send: Push wiffletree/fix-contrast at {short} and open its pull request, “Fix it”"
             )
         );
         // Approving it runs the push and the pull request without a second item.

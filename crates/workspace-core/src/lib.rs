@@ -2,6 +2,7 @@
 mod files;
 mod owners;
 mod progress;
+mod publishing;
 mod selection;
 mod steps;
 mod suggestion;
@@ -10,6 +11,7 @@ use anyhow::{Result, ensure};
 pub use files::*;
 pub use owners::*;
 pub use progress::*;
+pub use publishing::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};

@@ -1,6 +1,6 @@
 //! Which repositories publish a ticket without asking the human. One rule, shared by the host
 //! that enforces it and the Repositories page that shows it.
-use crate::{PublishRequest, PublishStep, Repository, Serialize, Ticket, VerificationOutcome};
+use crate::{Repository, Serialize};
 
 /// The branch `base` names on `origin`, such as `main` for `origin/main`. `None` for a local
 /// base or one on another remote, which a pull request from `origin` cannot merge into.
@@ -30,58 +30,6 @@ pub fn is_entry_allowed(entry: &str, allowed: &[String]) -> bool {
 pub fn is_allowed(repository: &Repository, allowed: &[String]) -> bool {
     origin_branch(&repository.base).is_some()
         && owner_entry(repository).is_some_and(|entry| is_entry_allowed(&entry, allowed))
-}
-
-/// Why a step of a publish request waits for the human.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PublishAsk {
-    /// The repository does not publish without asking, so each step asks.
-    NotAllowed,
-    /// The review ended blocked in an allowed owner's repository: one approval covers the
-    /// commit's push and pull request.
-    BlockedReview,
-    /// The ticket's earlier pull request was closed or merged, so opening another asks.
-    EndedPullRequest,
-}
-
-/// Whether the request's next step must wait for the human, and why. `None` runs it without
-/// asking: the repository publishes without asking and the review passed, or the human already
-/// approved this commit's steps after a blocked review.
-pub fn publish_ask(
-    ticket: &Ticket,
-    request: &PublishRequest,
-    repository: &Repository,
-    allowed: &[String],
-) -> Option<PublishAsk> {
-    let passed = ticket
-        .verification
-        .as_ref()
-        .is_some_and(|v| v.outcome == VerificationOutcome::Passed);
-    if !is_allowed(repository, allowed) {
-        Some(PublishAsk::NotAllowed)
-    } else if request.blocked_review_approved {
-        None
-    } else if !passed {
-        Some(PublishAsk::BlockedReview)
-    } else if request.step == PublishStep::OpenPullRequest && ticket.ended_pull_request().is_some()
-    {
-        Some(PublishAsk::EndedPullRequest)
-    } else {
-        None
-    }
-}
-
-/// Why a repository does not publish without asking, such as "celadon-theme is not an allowed
-/// owner".
-pub fn not_allowed_reason(repository: &Repository) -> String {
-    match owner_entry(repository) {
-        None => "GitHub has not answered for this repository".into(),
-        Some(_) if origin_branch(&repository.base).is_none() => {
-            format!("its base {} is not on origin", repository.base)
-        }
-        Some(entry) if entry.contains('/') => format!("{entry} is a fork that is not allowed"),
-        Some(entry) => format!("{entry} is not an allowed owner"),
-    }
 }
 
 /// The rule a repository's row states, such as "Vyttle-LLC · without asking".
