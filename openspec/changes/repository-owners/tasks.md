@@ -47,7 +47,7 @@
 
 ## 7. Watcher
 
-- [ ] 7.1 Add `pr_watch::Watch::check_now(repository)` and call it from `record_published`. Verify the pr-watch scenario "After the host opens a PR" with explicit times, and that the other cadence tests still pass.
+- [x] 7.1 Add `pr_watch::Watch::check_now(repository)` and call it from `record_published`. Verify the pr-watch scenario "After the host opens a PR" with explicit times, and that the other cadence tests still pass.
 
 ## 8. Desktop
 

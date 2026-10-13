@@ -1185,6 +1185,16 @@ impl Actor {
                 })
             }
             Event::Published(outcome) => {
+                // What the step sent shows on the ticket's row once the watcher reads it.
+                let sent = matches!(
+                    outcome.result,
+                    publish::StepResult::Pushed { already: false } | publish::StepResult::Opened(_)
+                );
+                if let Ok(ticket) = self.host.ticket(&outcome.ticket_id)
+                    && sent
+                {
+                    self.pr_watch.check_now(&ticket.repository_id);
+                }
                 match self.host.record_published(outcome) {
                     Ok(next) => self.run_publish_step(next),
                     Err(e) => eprintln!("Workspace publish: {e:#}"),
@@ -3017,6 +3027,15 @@ mod tests {
         assert_eq!(status["status"], "publishing");
         // It returned at once; the push and then the pull request report back as events.
         assert!(publish::tests::results(&actor.host).is_empty());
+        // The watcher last checked the repository a moment ago.
+        let repository = actor.host.ticket(&f.ticket).unwrap().repository_id;
+        actor.pr_watch.keep([repository.as_str()]);
+        actor.pr_watch.start_due(0);
+        let checked = now();
+        actor
+            .pr_watch
+            .finish(&repository, checked, &pr_watch::Outcome::NotOnGitHub);
+        assert!(actor.pr_watch.start_due(checked).is_empty());
         let waiting_before = actor.host.queued_input(&caller).unwrap();
         for _ in 0..2 {
             assert!(actor.handle(events.recv_blocking().unwrap()));
@@ -3031,6 +3050,8 @@ mod tests {
             waiting_before + 1
         );
         assert!(events.try_recv().is_err());
+        // The repository is due at once, so the ticket's row shows the pull request.
+        assert_eq!(actor.pr_watch.start_due(checked), [repository]);
     }
 
     #[test]

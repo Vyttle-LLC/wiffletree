@@ -292,6 +292,8 @@ struct Pace {
     due_at: i64,
     running: bool,
     failures: u32,
+    /// `check_now` was called during the running pass, which may have read too early.
+    again: bool,
 }
 impl Watch {
     /// Watches exactly these repositories; one not watched before is due at once.
@@ -300,6 +302,14 @@ impl Watch {
         self.repositories.retain(|id, _| kept.contains(id.as_str()));
         for id in kept {
             self.repositories.entry(id.to_owned()).or_default();
+        }
+    }
+    /// Makes a watched repository due at once, as after the host pushed a ticket's branch there
+    /// or opened its PR, so the ticket's row shows the PR without waiting for the interval.
+    pub(crate) fn check_now(&mut self, repository: &str) {
+        if let Some(pace) = self.repositories.get_mut(repository) {
+            pace.due_at = 0;
+            pace.again = pace.running;
         }
     }
     /// Marks the repositories due at `at` with no pass running as running, and returns them.
@@ -342,6 +352,9 @@ impl Watch {
                 }
             }
         };
+        if std::mem::take(&mut pace.again) {
+            pace.due_at = at;
+        }
         Some(pace.due_at)
     }
     /// The earliest due pass of a repository with none running.
@@ -987,6 +1000,43 @@ mod tests {
             watch.finish("web", at + MINUTE, &pass(true, 200, at + 30 * MINUTE)),
             Some(at + 2 * MINUTE)
         );
+    }
+
+    #[test]
+    fn a_repository_is_checked_at_once_after_the_host_pushes_or_opens_a_pr_there() {
+        const MINUTE: i64 = 60_000;
+        let mut watch = Watch::default();
+        watch.keep(["r"]);
+        watch.start_due(0);
+        // Checked two minutes ago and next due in three.
+        assert_eq!(
+            watch.finish("r", 0, &pass(false, 5000, 0)),
+            Some(5 * MINUTE)
+        );
+        assert!(watch.start_due(2 * MINUTE).is_empty());
+        watch.check_now("r");
+        assert_eq!(watch.start_due(2 * MINUTE), ["r"]);
+        // The pass then finds the open PR and returns to the active interval.
+        assert_eq!(
+            watch.finish("r", 2 * MINUTE, &pass(true, 5000, 0)),
+            Some(2 * MINUTE + ACTIVE_MS)
+        );
+        // A pass already running may have read too early, so another follows it at once.
+        watch.start_due(3 * MINUTE);
+        watch.check_now("r");
+        assert!(watch.start_due(3 * MINUTE).is_empty());
+        assert_eq!(
+            watch.finish("r", 3 * MINUTE, &pass(false, 5000, 0)),
+            Some(3 * MINUTE)
+        );
+        assert_eq!(watch.start_due(3 * MINUTE), ["r"]);
+        assert_eq!(
+            watch.finish("r", 3 * MINUTE, &pass(true, 5000, 0)),
+            Some(3 * MINUTE + ACTIVE_MS)
+        );
+        // A repository that is not watched is left alone.
+        watch.check_now("other");
+        assert_eq!(watch.next_due(), Some(3 * MINUTE + ACTIVE_MS));
     }
 
     #[test]

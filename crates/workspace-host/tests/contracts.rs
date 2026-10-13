@@ -125,10 +125,9 @@ fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
         .unwrap();
     // No branch, remote or base: each would be a way to aim the push somewhere else.
     let properties = publish["inputSchema"]["properties"].as_object().unwrap();
-    assert_eq!(
-        properties.keys().collect::<Vec<_>>(),
-        ["body", "ticket_id", "title"]
-    );
+    let mut arguments: Vec<&str> = properties.keys().map(String::as_str).collect();
+    arguments.sort_unstable();
+    assert_eq!(arguments, ["body", "ticket_id", "title"]);
     assert_eq!(
         publish["inputSchema"]["required"],
         serde_json::json!(["ticket_id"])
