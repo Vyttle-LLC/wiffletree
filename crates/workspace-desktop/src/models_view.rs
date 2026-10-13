@@ -372,7 +372,7 @@ impl Workspace {
             .gap_3()
             .child(Self::card_title(
                 "Review",
-                "who verifies each ticket when the coordinator calls verify_ticket",
+                "who reviews a ticket, and how thoroughly",
                 p,
             ))
             .child(if !self.models_editable() {

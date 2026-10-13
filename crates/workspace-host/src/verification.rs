@@ -116,7 +116,6 @@ fn level_may_start(
     ticket: &Ticket,
     settings: &VerificationSettings,
     level: &ReviewLevel,
-    verifiers: &[&VerifierConfig],
 ) -> Result<()> {
     if level.kind == LevelKind::Recheck {
         let full_reviews: Vec<&str> = settings
@@ -138,11 +137,7 @@ fn level_may_start(
             ),
         }
     }
-    for outside in settings
-        .verifiers
-        .iter()
-        .filter(|v| !verifiers.iter().any(|l| l.focus == v.focus))
-    {
+    for outside in settings.verifiers.iter().filter(|v| !level.runs(&v.focus)) {
         let open: Vec<&str> = ticket
             .ledger
             .iter()
@@ -384,7 +379,7 @@ impl Host {
         );
         let settings = self.settings().verification;
         let (level, level_verifiers) = settings.level(level)?;
-        level_may_start(&ticket, &settings, level, &level_verifiers)?;
+        level_may_start(&ticket, &settings, level)?;
         let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
         let coordinator = self.session(&ticket.coordinator_id)?;
         let chosen = self.verifier_choices(&coordinator, level, &level_verifiers, choices)?;

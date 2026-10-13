@@ -784,7 +784,7 @@ impl VerificationSettings {
         let verifiers = self
             .verifiers
             .iter()
-            .filter(|v| level.verifiers.iter().any(|f| same_name(f, &v.focus)))
+            .filter(|v| level.runs(&v.focus))
             .collect();
         Ok((level, verifiers))
     }
@@ -804,6 +804,12 @@ pub struct ReviewLevel {
     pub verifiers: Vec<String>,
     /// One line telling the coordinator when to pick this level.
     pub use_when: String,
+}
+impl ReviewLevel {
+    /// Whether the level runs the verifier with this focus.
+    pub fn runs(&self, focus: &str) -> bool {
+        self.verifiers.iter().any(|f| same_name(f, focus))
+    }
 }
 /// Whether a level can be a ticket's only review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
