@@ -98,16 +98,16 @@ The exit code and `is_error` never decide success. If a later CLI rewords "Not e
 For a compaction, the `result` arm reads `modelUsage` instead of `usage`. Each model entry becomes one `ProviderEvent::Usage` with request id `compact:<run>:<model>`, that model's name, `complete` true, and its `inputTokens`, `outputTokens`, `cacheReadInputTokens` and `cacheCreationInputTokens` mapped to the field names `usage::normalize` already reads. `record_usage` then attributes the row to the agent and its coordinator as for any request. `total_cost_usd` is kept in the run's `detail.result`; the ledger has no cost column and gains none. An empty or missing `modelUsage` records no row, as missing usage does today. Turns keep reading `usage`.
 
 ### 8. The conversation line
-The host writes one message from the session to itself with id `compaction:<run>`, receipt `completed`, the same shape as `output:`, `stopped:` and `error:` entries. A message a session sends itself is not turn input and wakes nobody.
+The host writes one message from the session to itself with id `compaction:<run>` and receipt `completed`. The prefix is new. Replies, stop notices and errors are all written by `append_output` under `output:…` ids, which the conversation draws as the agent's reply; the compaction line is not written through `append_output`, so it is never taken for a reply, by the conversation or by the check-in's "Last reply" lookup. A message a session sends itself is not turn input and wakes nobody.
 
 | Outcome | Body |
 |---|---|
-| compacted | `Context compacted · 812k → 41k`, plus a second line `Kept: <instructions>` when some were given |
+| compacted | `Context compacted · 812k → 5k`, plus a second line `Kept: <instructions>` when some were given |
 | failed | `Compaction failed · context unchanged` |
 | interrupted (decision 10) | `Compaction interrupted` |
 | nothing to compact | no message |
 
-`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter `compact` moves from `context_view.rs` to `workspace-core`, so the line and the card print figures the same way. The figures are Claude's `pre_tokens` and `post_tokens`. The second counts only the summary, not the system prompt and tools the card also counts, so it reads lower than the card's new total.
+`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter `compact` moves from `context_view.rs` to `workspace-core`, so the line and the card print figures the same way. The figures are Claude's `pre_tokens` and `post_tokens`. The second counts only the summary, not the system prompt and tools the card also counts, so it reads lower than the card's new total: the mockup's line says 5k beside a card at 41k.
 
 ### 9. Desktop
 All of it matches `design/mockups/current/compact-context.html`.
@@ -123,7 +123,9 @@ All of it matches `design/mockups/current/compact-context.html`.
   *Alternatives:* hold the next turn until the desktop has measured, rejected because the host would wait on a client that may not be open; accept the old figure until the turn ends, rejected because the card would show 81% beside "Context compacted".
 
 ### 10. Restart
-A clean shutdown settles running compactions itself (decision 4). After a crash, at startup, before `recover_unfinished_turns` marks sessions disconnected, each unfinished run whose `detail.kind` is `"compaction"` is settled as `interrupted`. If the run's recorded `process_group` still exists, the host first terminates it, with the grace period `Process::stop` uses, so an orphaned `claude` cannot keep rewriting the session while a new turn resumes it. Settling means: the request is cleared, `last_compaction` is `interrupted`, the `Compaction interrupted` line is written, and the session's status is left alone. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged", never runs the compaction again by itself, and lets the measurement show the truth. A `queued` request is untouched by a restart.
+A clean shutdown settles running compactions itself (decision 4). After a crash, at startup, before `recover_unfinished_turns` marks sessions disconnected, each unfinished run whose `detail.kind` is `"compaction"` is settled as `interrupted`. Settling means: the request is cleared, `last_compaction` is `interrupted`, the `Compaction interrupted` line is written, and the session's status is left alone. The host cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged", never runs the compaction again by itself, and lets the measurement show the truth. A `queued` request is untouched by a restart.
+
+**A process the crash left running.** The host never signals a process group it knows only from a stored number: after a crash that number may belong to an unrelated program. It follows `agent_in_turn` in `worktrees.rs`, which only asks `process_group_exists` and waits. While an interrupted compaction run's recorded `process_group` still exists, no turn and no compaction starts for that session: the guards of decision 3 (the compaction pass, `admit_round` and `start_turn`) hold on this condition too, through one shared check. When the group is gone the session proceeds normally. A recycled id can therefore only delay the agent, never kill anything. The wait needs no new UI: the session's input stays queued, and the host records one `compaction_process_waiting` event naming the run, which the Events panel already lists. It ends when the group exits.
 
 ### Decided by Michael on October 13, 2026
 1. **A queued compaction stays queued.** When its turn fails, is stopped or paused, is interrupted by a restart, or the project is stopped, the request stays queued, visible and cancellable, and runs when the agent next runs, before its input (decision 3).
@@ -136,7 +138,7 @@ A clean shutdown settles running compactions itself (decision 4). After a crash,
 | File | Functions / items |
 |---|---|
 | `crates/workspace-core/src/lib.rs` | `Compaction`, `CompactionState`, `CompactionOutcome`, `CompactionResult` (new); `SessionRuntime` (`compaction`, `last_compaction`); `Command` (`CompactContext`, `CancelCompaction`, `DismissCompaction`); `compact` token formatter (moved) |
-| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `stop` (cancel and settle compactions), `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (interrupted compactions, leftover process group) |
+| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `stop` (cancel and settle compactions), `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (interrupted compactions), the shared guard (request, or an interrupted compaction's process group still existing) |
 | `crates/workspace-host/src/steps.rs`, `usage.rs` | `IS_TURN_RUN` in the latest-run and unreported-run queries |
 | `crates/workspace-host/src/provider.rs` | `Turn` (kind), `input`, `configure`, `run` (`status`, `compact_boundary`, `modelUsage`), `ProviderEvent::Compaction` |
 | `crates/workspace-host/src/usage.rs` | a `modelUsage` entry mapped to the fields `normalize` reads |

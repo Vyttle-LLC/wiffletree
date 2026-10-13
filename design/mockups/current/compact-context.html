@@ -294,7 +294,7 @@ svg.i{width:13px;height:13px;flex:none}
             <div class="summary"><svg class="i"><use href="#chevron"/></svg>Worked 21m 40s · 64 steps</div>
             <div class="bubble"><span class="who"><svg class="i"><use href="#bot"/></svg></span><p>The v4 migration passes locally. Two tests still fail: <span class="mono">ledger_backfill_skips_partial</span> and <span class="mono">counters_survive_restart</span>.</p></div>
             <div class="compacted">
-              <div class="line"><svg class="i"><use href="#fold"/></svg><b>Context compacted</b> · 812k → 41k</div>
+              <div class="line"><svg class="i"><use href="#fold"/></svg><b>Context compacted</b> · 812k → 5k</div>
               <div class="kept">Kept: The failing test names and the migration plan</div>
             </div>
             <div class="bubble mine"><p>Start with counters_survive_restart.</p></div>
@@ -346,7 +346,7 @@ svg.i{width:13px;height:13px;flex:none}
         </div>
       </div>
     </div>
-    <p class="caption"><b>Done.</b> The work stream gets one line, <b>Context compacted · 812k → 41k</b>, with a “Kept:” line only when a note was given. It has no reply and is not a turn; the message that was waiting is delivered right after it and starts the next turn. The card is measured again and shows the lower figure in green, and the header chip follows. The compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. The Usage page gains nothing new: the row simply counts in its existing totals. The record is drawn here only to make the accounting visible.</p>
+    <p class="caption"><b>Done.</b> The work stream gets one line, <b>Context compacted · 812k → 5k</b>, with a “Kept:” line only when a note was given. Its figures are Claude’s own: 5k is the size of the summary alone, while the card’s 41k also counts the system prompt, tools and memory files. It has no reply and is not a turn; the message that was waiting is delivered right after it and starts the next turn. The card is measured again and shows the lower figure in green, and the header chip follows. The compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. The Usage page gains nothing new: the row simply counts in its existing totals. The record is drawn here only to make the accounting visible.</p>
   </section>
 
   <!-- 6. Nothing to compact, or failed -->

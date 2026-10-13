@@ -85,10 +85,10 @@ The host SHALL run a compaction by resuming the agent's Claude session with a pr
 - **THEN** the compaction finishes, the agent is paused, and the message stays queued
 
 ### Requirement: Compaction outcome comes from the provider's status record
-The host SHALL decide a compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. The host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. When the host shuts down it SHALL stop every running compaction's provider process and settle that compaction as **interrupted**. A compaction left unfinished by a host that did not shut down cleanly SHALL be settled as **interrupted** at startup, after the host has terminated its provider process if that is still alive. For an interrupted compaction the host SHALL NOT run it again, SHALL NOT report the context as compacted or as unchanged, and SHALL leave the session's status alone. No turn SHALL start for the session while that process is alive.
+The host SHALL decide a compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. The host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. When the host shuts down it SHALL stop every running compaction's provider process and settle that compaction as **interrupted**. A compaction left unfinished by a host that did not shut down cleanly SHALL be settled as **interrupted** at startup. The host SHALL NOT signal or terminate a process or process group it knows only from a stored identifier. For an interrupted compaction the host SHALL NOT run it again, SHALL NOT report the context as compacted or as unchanged, and SHALL leave the session's status alone. While the process group recorded for an interrupted compaction still exists, no turn and no compaction SHALL start for that session; once it is gone the session SHALL proceed normally. The host SHALL record one event when it starts to wait.
 
 #### Scenario: Success
-- **WHEN** the stream has `"compact_result":"success"` and a boundary record with `pre_tokens` 812000 and `post_tokens` 41000
+- **WHEN** the stream has `"compact_result":"success"` and a boundary record with `pre_tokens` 812000 and `post_tokens` 5000
 - **THEN** the outcome is compacted with those two figures and the request is cleared
 
 #### Scenario: Nothing to compact
@@ -112,15 +112,16 @@ The host SHALL decide a compaction's outcome from the status record Claude strea
 - **THEN** the outcome is interrupted, the request is cleared, no compaction starts by itself, and the agent is not marked interrupted
 
 #### Scenario: Crash leaves the process running
-- **WHEN** the host starts after a crash and the unfinished compaction's provider process is still alive
-- **THEN** the host terminates it before settling the compaction and before any turn starts for that agent
+- **WHEN** the host starts after a crash, the unfinished compaction's recorded process group still exists, and the agent has a message waiting
+- **THEN** the compaction is settled as interrupted, the host sends that process group no signal, and no turn starts for the agent while the group exists
+- **AND** once the group is gone, the agent's next turn starts and takes the message
 
 ### Requirement: Compaction usage is recorded in the ledger
-The host SHALL record a compaction's tokens in the usage ledger from the result record's `modelUsage`, because that record's `usage` is zero for a compaction: one request per model named there, with its input, output, cache-read and cache-write counts, attributed to the agent and its coordinator like any other request. The reported total cost SHALL be kept with the run. A compaction with no `modelUsage` SHALL record no request. Usage reports SHALL count these requests in their existing totals and SHALL NOT report them separately. Turns SHALL keep recording usage as before.
+The host SHALL record a compaction's tokens in the usage ledger from the result record's `modelUsage`, because that record's `usage` is zero for a compaction: one request per model named there, attributed to the agent and its coordinator like any other request. `modelUsage` follows Claude's convention, in which `inputTokens` excludes tokens read from or written to the cache, so the recorded input SHALL be their sum, as for a turn's request. The reported total cost SHALL be kept with the run. A compaction with no `modelUsage` SHALL record no request. Usage reports SHALL count these requests in their existing totals and SHALL NOT report them separately. Turns SHALL keep recording usage as before.
 
 #### Scenario: Tokens from modelUsage
-- **WHEN** a compaction's result record has zero `usage` and a `modelUsage` entry with 813,402 input tokens, of which 811,900 read from cache, and 2,960 output tokens
-- **THEN** the ledger gains one request for that agent and model with those counts
+- **WHEN** a compaction's result record has zero `usage` and a `modelUsage` entry with `inputTokens` 1,502, `cacheReadInputTokens` 811,900, `cacheCreationInputTokens` 0 and `outputTokens` 2,960
+- **THEN** the ledger gains one request for that agent and model with input 813,402, cache read 811,900, cache write 0 and output 2,960
 - **AND** the agent's and its coordinator's totals in the usage report rise by them
 
 #### Scenario: Nothing spent
