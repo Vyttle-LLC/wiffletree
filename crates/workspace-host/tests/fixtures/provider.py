@@ -90,6 +90,8 @@ if args[:1]==['app-server']:
         print(own(json.dumps(message)),flush=True)
     if 'exit' in plan:
         sys.stderr.write(plan.get('stderr',''));sys.exit(plan['exit'])
+    # A server that stops talking for good but stays alive.
+    if plan.get('close_output'):os.close(1)
     # The real server runs until its input closes. The double logs anything more it is sent and
     # then stays, so only the host's stopping its process group ends it.
     for line in sys.stdin:

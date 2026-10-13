@@ -403,11 +403,16 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         group: process.child.id(),
         started: process_start(process.child.id() as i32),
     });
-    let (started, limit) = (Instant::now(), codex_compaction::limit());
     let mut codex_compaction = match turn.kind {
         TurnKind::CodexCompaction { before } => Some(codex_compaction::Messages::new(before)),
         _ => None,
     };
+    // When a Codex compaction is out of time, counted from its process's start. It holds for
+    // as long as the server runs, also once the server has closed its output.
+    let deadline = codex_compaction
+        .as_ref()
+        .map(|_| Instant::now() + codex_compaction::limit());
+    let out_of_time = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let mut stdin = process.child.stdin.take().context("No provider stdin")?;
     // Images can make the input large; writing it alongside reading output cannot deadlock.
     // A provider that exits before reading it all is reported by its exit status. The writer
@@ -455,7 +460,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let mut exited = false;
     loop {
         check_running(&cancel)?;
-        if codex_compaction.is_some() && !ended && started.elapsed() >= limit {
+        if !ended && out_of_time() {
             failure = Some(codex_compaction::out_of_time());
             ended = true;
         }
@@ -609,9 +614,15 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         }
     }
     // A provider can close stdout and keep running; returning early drops `process`, which
-    // stops its whole process group.
+    // stops its whole process group. A Codex server that does so can report no outcome any
+    // more, and is stopped below when its time is up.
     while !process.exited()? {
         check_running(&cancel)?;
+        if !ended && out_of_time() {
+            failure = Some(codex_compaction::out_of_time());
+            ended = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     // Stops tool subprocesses that outlived the provider.

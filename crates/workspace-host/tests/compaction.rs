@@ -1754,6 +1754,30 @@ fn a_codex_compaction_that_never_completes_is_stopped_at_the_limit_and_the_next_
 }
 
 #[test]
+fn a_codex_server_that_closes_its_output_and_stays_is_stopped_at_the_limit() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    // The server answers every request, closes its output and keeps running.
+    world.plan(json!({"stop_before":"turn/completed","close_output":true}));
+    // SAFETY: the world holds ENVIRONMENT, and its host reads this only as a compaction runs.
+    unsafe { std::env::set_var(CODEX_LIMIT, "600") };
+
+    let outcome = world.compacted(None);
+
+    assert_eq!(outcome.result, CompactionResult::Failed);
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("Codex did not finish compacting within 10 minutes.")
+    );
+    let run = world.compactions(&main).remove(0);
+    assert!(run.finished_at.unwrap() - run.started_at >= 600);
+    assert!(!group_runs(run.group.unwrap()));
+    assert_eq!(world.lines(), ["Compaction failed · context unchanged"]);
+    world.send("JUST_REPLY afterwards");
+    world.until_replies(2);
+}
+
+#[test]
 fn a_codex_line_has_no_figures_unless_the_record_and_the_turn_each_gave_one() {
     let world = World::codex();
 
