@@ -1,0 +1,13 @@
+{"from":"client","message":{"method":"initialize","params":{"clientInfo":{"name":"wiffletree-lab","title":"lab","version":"0"}},"id":1}}
+{"from":"server","message":{"id":1,"result":{"userAgent":"wiffletree-lab/0.160.0 (Mac OS 27.0.1; arm64) unknown (wiffletree-lab; 0)","codexHome":"/Users/someone/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"from":"client","message":{"method":"initialized"}}
+{"from":"client","message":{"method":"thread/resume","params":{"threadId":"3d05f392-e4f9-416c-918f-f39cd045a145","cwd":"/tmp/cx-lab/work","model":"gpt-6.1-sol","sandbox":"danger-full-access","approvalPolicy":"never","excludeTurns":true,"config":{"model_reasoning_effort":"low"}},"id":2}}
+{"from":"server","message":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"host","installationId":"00000000-0000-0000-0000-000000000000","environmentId":null},"emittedAtMs":1791911587600}}
+{"from":"server","message":{"error":{"code":-32600,"message":"no rollout found for thread id 3d05f392-e4f9-416c-918f-f39cd045a145"},"id":2}}
+{"from":"client","message":{"method":"thread/compact/start","params":{"threadId":"3d05f392-e4f9-416c-918f-f39cd045a145"},"id":3}}
+{"from":"server","message":{"error":{"code":-32600,"message":"thread not found: 3d05f392-e4f9-416c-918f-f39cd045a145"},"id":3}}
+{"from":"client","message":{"method":"thread/compact/start","params":{"threadId":"not-a-uuid"},"id":4}}
+{"from":"server","message":{"error":{"code":-32600,"message":"invalid thread id: invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `n` at 1"},"id":4}}
+{"from":"client","message":{"method":"thread/compact/start","params":{"threadId":"01a1363e-c319-7143-90b9-c2cff422d53e"},"id":5}}
+{"from":"server","message":{"error":{"code":-32600,"message":"thread not found: 01a1363e-c319-7143-90b9-c2cff422d53e"},"id":5}}
+{"from":"server","message":{"method":"account/updated","params":{"authMode":"chatgpt","planType":"prolite"},"emittedAtMs":1791911587882}}

@@ -1,0 +1,2 @@
+{"from":"client","message":{"method":"thread/resume","params":{"threadId":"01a1363e-c319-7143-90b9-c2cff422d53e","cwd":"/tmp/cx-lab/work","model":"gpt-6.1-sol","sandbox":"danger-full-access","approvalPolicy":"never","excludeTurns":true,"config":{"model_reasoning_effort":"low"}},"id":1}}
+{"from":"server","message":{"error":{"code":-32600,"message":"Not initialized"},"id":1}}

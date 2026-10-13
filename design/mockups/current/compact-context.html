@@ -8,7 +8,8 @@
 <!--
   Static study for the proposed Compact action on an agent's Context card. No script, no network.
   Eight states: idle (Ready), mid-turn, queued, compacting, done, nothing to compact or failed,
-  a Codex agent, and an agent with no provider session yet.
+  a Codex agent (resting row, form and done), and an agent with no provider session yet.
+  States 1 to 6 mirror the Compact action as built for Claude; state 7 is the proposal for Codex.
   Each frame pairs the conversation header (context chip, status badge) with the Context card
   from context_view.rs. Sample data is simulated; nothing here is implemented host behavior.
 -->
@@ -31,6 +32,7 @@ p{margin:0}
 .pad{padding:14px}
 .caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
 .caption b{color:var(--text);font-weight:500}
+.caption+.caption{margin-top:5px}
 .pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
 .three{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
 .step{font-size:11px;color:var(--subtle);margin:0 0 6px 2px}
@@ -123,7 +125,7 @@ svg.i{width:13px;height:13px;flex:none}
 <header class="intro">
   <div class="eyebrow">Design study · compact context</div>
   <h1>Compacting an agent’s context by hand</h1>
-  <p>Static study for a proposed <b>Compact</b> action on the Context card that the header’s context chip opens. Only a person triggers it, it takes one optional note on what to keep, and it works for Claude agents only. Each frame shows the conversation header above the Context card. Everything outside the Compact action mirrors the app as it is today. Sample data is simulated.</p>
+  <p>Static study for the <b>Compact</b> action on the Context card that the header’s context chip opens. Only a person triggers it. For a Claude agent it takes one optional note on what to keep; states 1 to 6 show that. State 7 proposes the same action for a Codex agent, where the app shows the row disabled today. Each frame shows the conversation header above the Context card. Sample data is simulated.</p>
 </header>
 
 <div class="states">
@@ -178,7 +180,7 @@ svg.i{width:13px;height:13px;flex:none}
               <div class="hint">Reported by Claude · claude-opus-5-5 · 2m ago</div>
               <div class="form">
                 <label>What to keep <span>· optional</span></label>
-                <div class="field focused">For example: the failing test names and the migration plan</div>
+                <div class="field focused">For example: the failing test names</div>
                 <div class="hint">Claude replaces this agent’s conversation with a summary. This can’t be undone and uses one model call.</div>
                 <div class="buttons"><span class="btn ghost">Cancel</span><span class="btn primary">Compact now</span></div>
               </div>
@@ -398,31 +400,129 @@ svg.i{width:13px;height:13px;flex:none}
   </section>
 
   <!-- 7. Codex -->
-  <section>
+  <section class="wide">
     <h2>7 · Codex agent</h2>
-    <div class="panel">
-      <div class="head">
-        <div class="names"><div class="crumb">wiffletree-improvements  ›  Ledger v4  ›  Implementer</div><div class="title">Ledger v4</div></div>
-        <span class="chip" style="--c:var(--yellow)"><span class="meter"><i style="width:78%"></i></span>78%</span>
-        <span class="badge" style="--c:var(--subtle)"><svg class="i"><use href="#ready"/></svg>Ready</span>
-        <span class="icon-btn"><svg class="i"><use href="#pause"/></svg></span>
-      </div>
-      <div class="pad">
-        <div class="card">
-          <div class="section"><span class="eyebrow">CONTEXT</span><span class="icon-btn"><svg class="i"><use href="#refresh"/></svg></span></div>
-          <div class="figure"><span class="used">212k</span><span class="hint">of 272k</span><span class="pct" style="--c:var(--yellow)">78%</span></div>
-          <div class="bar"><i style="width:4%;background:var(--blue)"></i><i style="width:74%;background:var(--yellow)"></i></div>
-          <div class="legend">
-            <span><i style="background:var(--blue)"></i><em>instructions</em><b>11k</b><em>4%</em></span>
-            <span><i style="background:var(--yellow)"></i><em>conversation</em><b>201k</b><em>74%</em></span>
-            <span><i class="free"></i><em>free</em><b>60k</b><em>22%</em></span>
+    <div class="pair">
+      <div>
+        <p class="step">At rest</p>
+        <div class="panel">
+          <div class="head">
+            <div class="names"><div class="crumb">wiffletree-improvements  ›  Ledger v4  ›  Implementer</div><div class="title">Ledger v4</div></div>
+            <span class="chip" style="--c:var(--yellow)"><span class="meter"><i style="width:78%"></i></span>78%</span>
+            <span class="badge" style="--c:var(--subtle)"><svg class="i"><use href="#ready"/></svg>Ready</span>
+            <span class="icon-btn"><svg class="i"><use href="#pause"/></svg></span>
           </div>
-          <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-6.1-sol · 2m ago</div>
-          <div class="action"><span class="hint">Not available for Codex agents: the Codex CLI has no compact command.</span><span class="btn off">Compact…</span></div>
+          <div class="pad">
+            <div class="card">
+              <div class="section"><span class="eyebrow">CONTEXT</span><span class="icon-btn"><svg class="i"><use href="#refresh"/></svg></span></div>
+              <div class="figure"><span class="used">212k</span><span class="hint">of 272k</span><span class="pct" style="--c:var(--yellow)">78%</span></div>
+              <div class="bar"><i style="width:2.2%;background:var(--blue)"></i><i style="width:1.8%;background:var(--yellow)"></i><i style="width:14%;background:var(--magenta)"></i><i style="width:7.7%;background:var(--green)"></i><i style="width:35.3%;background:var(--accent)"></i><i style="width:11.4%;background:var(--focus)"></i><i style="width:5.5%;background:var(--red)"></i></div>
+              <div class="legend">
+                <span><i style="background:var(--blue)"></i><em>system prompt</em><b>6k</b><em>2%</em></span>
+                <span><i style="background:var(--yellow)"></i><em>instructions</em><b>5k</b><em>2%</em></span>
+                <span><i style="background:var(--magenta)"></i><em>messages</em><b>38k</b><em>14%</em></span>
+                <span><i style="background:var(--green)"></i><em>tool calls</em><b>21k</b><em>8%</em></span>
+                <span><i style="background:var(--accent)"></i><em>tool results</em><b>96k</b><em>35%</em></span>
+                <span><i style="background:var(--focus)"></i><em>reasoning</em><b>31k</b><em>11%</em></span>
+                <span><i style="background:var(--red)"></i><em>tools and overhead</em><b>15k</b><em>6%</em></span>
+                <span><i class="free"></i><em>free</em><b>60k</b><em>22%</em></span>
+              </div>
+              <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-6.1-sol · 2m ago</div>
+              <div class="action"><span class="hint">Replace the conversation with a summary.</span><span class="btn">Compact…</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="step">After pressing Compact…</p>
+        <div class="panel">
+          <div class="head">
+            <div class="names"><div class="crumb">wiffletree-improvements  ›  Ledger v4  ›  Implementer</div><div class="title">Ledger v4</div></div>
+            <span class="chip" style="--c:var(--yellow)"><span class="meter"><i style="width:78%"></i></span>78%</span>
+            <span class="badge" style="--c:var(--subtle)"><svg class="i"><use href="#ready"/></svg>Ready</span>
+            <span class="icon-btn"><svg class="i"><use href="#pause"/></svg></span>
+          </div>
+          <div class="pad">
+            <div class="card">
+              <div class="section"><span class="eyebrow">CONTEXT</span><span class="icon-btn"><svg class="i"><use href="#refresh"/></svg></span></div>
+              <div class="figure"><span class="used">212k</span><span class="hint">of 272k</span><span class="pct" style="--c:var(--yellow)">78%</span></div>
+              <div class="bar"><i style="width:2.2%;background:var(--blue)"></i><i style="width:1.8%;background:var(--yellow)"></i><i style="width:14%;background:var(--magenta)"></i><i style="width:7.7%;background:var(--green)"></i><i style="width:35.3%;background:var(--accent)"></i><i style="width:11.4%;background:var(--focus)"></i><i style="width:5.5%;background:var(--red)"></i></div>
+              <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-6.1-sol · 2m ago</div>
+              <div class="form">
+                <div class="hint">Codex replaces this agent’s conversation with a summary and chooses what the summary keeps. This can’t be undone and uses one model call.</div>
+                <div class="buttons"><span class="btn ghost">Cancel</span><span class="btn primary">Compact now</span></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
-    <p class="caption"><b>Codex.</b> The row is still there, so the action is discoverable, but the button is off and the reason sits beside it. Nothing else on the card changes.</p>
+    <div class="three" style="margin-top:14px">
+      <div>
+        <p class="step">Done: the agent’s work stream</p>
+        <div class="panel">
+          <div class="head">
+            <div class="names"><div class="crumb">wiffletree-improvements  ›  Ledger v4  ›  Implementer</div><div class="title">Ledger v4</div></div>
+            <span class="chip" style="--c:var(--green)"><span class="meter"><i style="width:5%"></i></span>5%</span>
+            <span class="badge" style="--c:var(--subtle)"><svg class="i"><use href="#ready"/></svg>Ready</span>
+            <span class="icon-btn"><svg class="i"><use href="#pause"/></svg></span>
+          </div>
+          <div class="stream">
+            <div class="summary"><svg class="i"><use href="#chevron"/></svg>Worked 18m 05s · 52 steps</div>
+            <div class="bubble"><span class="who"><svg class="i"><use href="#bot"/></svg></span><p>The v4 migration passes locally. Two tests still fail: <span class="mono">ledger_backfill_skips_partial</span> and <span class="mono">counters_survive_restart</span>.</p></div>
+            <div class="compacted">
+              <div class="line"><svg class="i"><use href="#fold"/></svg><b>Context compacted</b> · 212k → 14k</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="step">Done: the Context card, measured again</p>
+        <div class="panel">
+          <div class="pad">
+            <div class="card">
+              <div class="section"><span class="eyebrow">CONTEXT</span><span class="icon-btn"><svg class="i"><use href="#refresh"/></svg></span></div>
+              <div class="figure"><span class="used">14k</span><span class="hint">of 272k</span><span class="pct" style="--c:var(--green)">5%</span></div>
+              <div class="bar"><i style="width:1.9%;background:var(--blue)"></i><i style="width:3.2%;background:var(--yellow)"></i></div>
+              <div class="legend">
+                <span><i style="background:var(--blue)"></i><em>system prompt</em><b>5k</b><em>2%</em></span>
+                <span><i style="background:var(--yellow)"></i><em>messages</em><b>9k</b><em>3%</em></span>
+                <span><i class="free"></i><em>free</em><b>258k</b><em>95%</em></span>
+              </div>
+              <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-6.1-sol · just now</div>
+              <div class="action"><span class="hint">Replace the conversation with a summary.</span><span class="btn">Compact…</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="step">Done: its row in the usage ledger</p>
+        <div class="panel">
+          <div class="pad" style="display:grid;gap:10px">
+            <div class="section"><span class="eyebrow">RECORDED IN THIS APP</span></div>
+            <div class="tiles">
+              <div class="tile"><span class="hint">Requests</span><b>1,284</b><span class="hint">0 partial</span></div>
+              <div class="tile"><span class="hint">Tokens</span><b>48.2M</b><span class="hint">2026-10-12</span></div>
+            </div>
+            <div class="card">
+              <span class="eyebrow">Ledger row · compaction</span>
+              <div class="prop"><span>Agent</span><span>Implementer · Ledger v4</span></div>
+              <div class="prop"><span>Model</span><span>gpt-6.1-sol</span></div>
+              <div class="prop"><span>Input</span><span>212,480</span></div>
+              <div class="prop"><span>Cache read</span><span>211,900</span></div>
+              <div class="prop"><span>Output</span><span>2,310</span></div>
+              <div class="hint">Read from Codex’s session record. No row is written when the record has no entry for this compaction.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>Codex.</b> Compact is available on a measured Codex card, with the same row and button as for Claude. The Codex card has no “compacts at” figure and says its categories are estimated.</p>
+    <p class="caption"><b>The form</b> has no “What to keep” field, because Codex’s compact request takes no instructions: one line says Codex chooses what the summary keeps and that it can’t be undone, then <b>Compact now</b> or <b>Cancel</b>. While the agent is working the line and the button read as in state 2.</p>
+    <p class="caption"><b>Done</b> leaves one work-stream line, <b>Context compacted · 212k → 14k</b>, never with a “Kept:” line. Its figures are Codex’s own totals for the whole context before and after, so the second one matches the card measured again. For Claude the second figure is the summary alone.</p>
+    <p class="caption"><b>Reads low.</b> Right after a compaction Codex’s figure leaves out its fixed system prompt and tools, so the line and the card read low until the agent’s next turn. The card’s categories are estimates fitted to that figure: they shrink to add up to 14k and no “tools and overhead” is left over.</p>
+    <p class="caption"><b>Usage.</b> The compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. Codex does not report them while it compacts, so the figures are read from the entry Codex writes in the thread’s own session record for that compaction; here the input is the 212k context, nearly all of it read from the cache. When the record has no such entry, or more than one, no row is written and the compaction still shows as done. The Usage page gains nothing new, and the record is drawn here only to make the accounting visible.</p>
+    <p class="caption"><b>Other states.</b> Queued, compacting, failed and interrupted look the same as for Claude in states 3, 4 and 6, with “Codex” where they name Claude and no “Keeping:” line. “Nothing to compact” does not arise: Codex compacts again whenever it is asked.</p>
   </section>
 
   <!-- 8. No provider session yet -->
@@ -450,7 +550,7 @@ svg.i{width:13px;height:13px;flex:none}
 <ul class="notes">
   <li>Only a person can compact, from this card. There is no coordinator tool and agents cannot compact themselves.</li>
   <li>A compaction is not a turn: it has no reply, does not wake the agent’s coordinator and does not count toward check-ins.</li>
-  <li>“compacts at 967k” is Claude’s own automatic threshold and is unchanged by this proposal.</li>
+  <li>“compacts at 967k” is Claude’s own automatic threshold and is unchanged by this proposal. Codex’s automatic compaction is unchanged too.</li>
   <li>This is a static design study, not the GPUI implementation. Token figures, model names and ledger numbers are sample data.</li>
 </ul>
 </body>
