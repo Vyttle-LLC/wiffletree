@@ -69,6 +69,8 @@ fn a_ticket_stored_before_publishing_decodes_and_a_request_round_trips() {
         branch: "wiffletree/t".into(),
         base: "main".into(),
         commit: "9e03c1b".into(),
+        cycle: 1,
+        outcome: VerificationOutcome::Passed,
         size: "2 commits · 3 files changed".into(),
         title: Some("Fix".into()),
         body: Some("Why".into()),
@@ -242,6 +244,7 @@ fn waiting_ticket(step: &str, outcome: &str) -> (Ticket, Repository) {
         "publishing": {"id":"r1","caller":"i","repository":"celadon-theme/website",
             "push_url":"git@github.com:celadon-theme/website.git",
             "branch":"wiffletree/fix-palette-contrast","base":"main","commit":"9e03c1b000",
+            "cycle": 1, "outcome": outcome,
             "size":"2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)",
             "title":"Fix palette contrast in dark mode","body":"Muted text fell below 4.5:1.\n- Darken the overlay",
             "step": step, "waiting":"item"}

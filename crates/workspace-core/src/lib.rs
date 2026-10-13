@@ -745,6 +745,10 @@ pub struct PublishRequest {
     /// The branch a pull request merges into.
     pub base: String,
     pub commit: String,
+    /// The verification cycle the request was decided on, and how it ended. A request does not
+    /// outlive it: once the ticket has a later cycle, nothing more is sent.
+    pub cycle: u32,
+    pub outcome: VerificationOutcome,
     /// The commit's size, such as "2 commits · 3 files changed, 41 insertions(+)".
     pub size: String,
     /// Set when the request opens a pull request.

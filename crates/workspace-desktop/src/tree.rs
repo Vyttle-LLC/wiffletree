@@ -928,7 +928,8 @@ mod tests {
         let mut request: PublishRequest = serde_json::from_value(serde_json::json!({
             "id": "r1", "caller": "c", "repository": "celadon-theme/website",
             "push_url": "git@github.com:celadon-theme/website.git", "branch": "wiffletree/t",
-            "base": "main", "commit": "9e03c1b", "size": "1 commit", "step": "push"
+            "base": "main", "commit": "9e03c1b", "cycle": 1, "outcome": "passed",
+            "size": "1 commit", "step": "push"
         }))
         .unwrap();
         // A step that is running without asking adds no line.

@@ -109,6 +109,7 @@ pub struct Ticket { …, pub publishing: Option<PublishRequest>,          // ste
 pub struct PublishRequest { pub id: String, pub caller: String,        // one per accepted call
     pub repository: String, pub push_url: String,                        // what the card shows and
     pub branch: String, pub base: String, pub commit: String,            // what will be sent,
+    pub cycle: u32, pub outcome: VerificationOutcome,                    // the review it was decided on
     pub size: String,                                                    // the commit's size, for the card
     pub title: Option<String>, pub body: Option<String>,                 // frozen at the request
     pub step: PublishStep,
@@ -151,7 +152,7 @@ A new `workspace-host/src/publish.rs` holds `Host::publish_ticket(caller, ticket
 
 **The request is frozen.** When the checks pass, the host saves a `PublishRequest` on the ticket with a new id and everything that will be sent: GitHub's `owner/name`, the push URL, the branch, the base branch, the commit, and the title and description. The card is drawn from that record, and the steps are run from it. Nothing is read from the repository's current configuration at the moment of sending except to compare it with the record.
 
-**Every later moment compares with the record.** When the human approves a card, and again at the start of every run on the publishing thread, the host makes checks 2 to 5 again and compares the current push URL, recorded repository, ticket branch and repository base with the frozen ones. If anything differs, or HEAD is no longer the frozen commit or patch-equivalent to it, or a new cycle has started, nothing is sent: the request is cleared, any waiting card is withdrawn, and the caller is told what changed and to call again. A new call is a new request with its own card, showing the new values. So an approval given for "into `main`" can never open a PR into `release`.
+**Every later moment compares with the record.** When the human approves a card, and again at the start of every run on the publishing thread, the host makes checks 2 to 5 again and compares the current push URL, recorded repository, ticket branch and repository base with the frozen ones. If anything differs, or HEAD is no longer the frozen commit or patch-equivalent to it, or the ticket's latest cycle is no longer the one the request recorded, whether that later cycle is running or has ended, nothing is sent: the request is cleared, any waiting card is withdrawn, and the caller is told what changed and to call again. A new call is a new request with its own card, showing the new values. So an approval given for "into `main`" can never open a PR into `release`.
 
 ### 7. How the host pushes and opens the PR
 Network work runs on its own thread, like the watcher's passes (`spawn_pull_request_check`, `service.rs:286`), and reports back with a new `Event::Published`.

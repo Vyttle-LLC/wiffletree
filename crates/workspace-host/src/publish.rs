@@ -44,6 +44,8 @@ pub(crate) enum StepResult {
     Moved(String),
     /// What no longer matched the request when the step was about to send: nothing was sent.
     Changed(String),
+    /// `git push` was stopped at its deadline, so whether it reached GitHub is not known.
+    Unfinished,
     /// Why the step sent nothing.
     Failed(String),
 }
@@ -74,6 +76,9 @@ struct Checked {
     branch: String,
     base: String,
     commit: String,
+    /// The latest verification cycle and how it ended.
+    cycle: u32,
+    outcome: VerificationOutcome,
 }
 
 /// Whether `commit` contains `older`. A commit this repository does not have is not contained.
@@ -257,7 +262,8 @@ fn push(job: &Job, tools: &Tools) -> StepResult {
     match (tools.git)(&job.worktree, &args) {
         Ok(pushed) if pushed.status.success() => StepResult::Pushed { already: false },
         Ok(pushed) => StepResult::Failed(format!("git push failed{}", pushed.reason())),
-        Err(error) => StepResult::Failed(format!("{error:#}")),
+        // Git was started and gave no answer: it was stopped at the push's deadline.
+        Err(_) => StepResult::Unfinished,
     }
 }
 
@@ -399,13 +405,14 @@ impl Host {
         if let Some(waiting) = ticket.publishing.clone() {
             // The same call again changes nothing; a different one replaces the request.
             if waiting.commit == checked.commit
+                && (waiting.cycle, waiting.outcome) == (checked.cycle, checked.outcome)
                 && waiting.title.as_deref() == title
                 && waiting.body.as_deref() == body
             {
                 return Ok((self.publish_status(&ticket, &checked.repository), None));
             }
             let withdrawn = format!(
-                "The request to publish {} at {} to {} was withdrawn, because publish_ticket was called again with another commit, title or description. {}",
+                "The request to publish {} at {} to {} was withdrawn, because publish_ticket was called again with another commit, review, title or description. {}",
                 waiting.branch,
                 short_sha(&waiting.commit),
                 waiting.repository,
@@ -428,6 +435,8 @@ impl Host {
             branch: checked.branch,
             base: checked.base,
             commit: checked.commit,
+            cycle: checked.cycle,
+            outcome: checked.outcome,
             size,
             title: title.map(Into::into),
             body: body.map(Into::into),
@@ -519,11 +528,11 @@ fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
             cycle.cycle
         );
     }
-    let verified = ticket
-        .verification
-        .as_ref()
-        .and_then(|v| v.verified_commit())
-        .context("This ticket has not been reviewed. Verify it before publishing it.")?;
+    let review = ticket.verification.as_ref();
+    let verified = review
+        .and_then(|v| v.verified_commit().map(|commit| (v, commit)))
+        .context("This ticket has not been reviewed. Verify it before publishing it.");
+    let (review, verified) = verified?;
     live::verified_head(ticket, verified, || Ok(repository.base.clone()))?;
     let worktree = Path::new(&ticket.worktree);
     let on = runtime::git_answer(worktree, &["symbolic-ref", "--short", "HEAD"])?;
@@ -576,20 +585,41 @@ fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
         branch: ticket.branch.clone(),
         base: base.to_owned(),
         commit: verification::head(ticket)?,
+        cycle: review.cycle,
+        outcome: review.outcome,
         repository,
     })
 }
 
 /// The repository, when the ticket still passes its checks and would send what the request
-/// froze; otherwise what changed.
+/// froze; otherwise what changed. The request's commit needs no comparison of its own: within
+/// one review, the checked HEAD and the frozen commit both carry the reviewed changes.
 fn recheck(
     ticket: &Ticket,
     repository: Repository,
     request: &PublishRequest,
 ) -> Result<Repository> {
     let now = check(ticket, repository)?;
+    // The request was decided on one review. A later one decides anew: whether it passed, and
+    // so whether the human must be asked, is the next call's question.
+    ensure!(
+        (now.cycle, now.outcome) == (request.cycle, request.outcome),
+        "This publish was requested after review cycle {}; the ticket's latest review is now cycle {}, which {}",
+        request.cycle,
+        now.cycle,
+        match now.outcome {
+            VerificationOutcome::Passed => "passed",
+            _ => "ended blocked",
+        }
+    );
+    // GitHub reports a repository in its own letter case, whatever case `origin` uses.
+    ensure!(
+        request.repository.eq_ignore_ascii_case(&now.name),
+        "The repository changed from {} to {}",
+        request.repository,
+        now.name
+    );
     for (what, frozen, current) in [
-        ("repository", &request.repository, &now.name),
         ("push URL of origin", &request.push_url, &now.push_url),
         ("ticket's branch", &request.branch, &now.branch),
         ("repository's base branch", &request.base, &now.base),
@@ -598,17 +628,6 @@ fn recheck(
             frozen == current,
             "The {what} changed from {frozen} to {current}"
         );
-    }
-    if now.commit != request.commit {
-        live::verified_head(ticket, &request.commit, || Ok(now.repository.base.clone())).map_err(
-            |_| {
-                anyhow::anyhow!(
-                    "The worktree moved from {} to {}, which has different changes",
-                    short_sha(&request.commit),
-                    short_sha(&now.commit)
-                )
-            },
-        )?;
     }
     Ok(now.repository)
 }
@@ -698,6 +717,10 @@ impl Host {
                 format!("Pushed {sent} and opened PR #{number}: {url}")
             }
             StepResult::Changed(changed) => changed_notice(&request, &changed),
+            StepResult::Unfinished => format!(
+                "Pushing {} to {} did not finish within 10 minutes and was stopped. The push may or may not have reached GitHub. Call publish_ticket again; repeating it is safe.",
+                request.branch, request.repository
+            ),
             StepResult::Moved(moved) => format!(
                 "{moved}. {} Call publish_ticket again: it will be decided on where the repository is now.",
                 nothing_sent(&request)
@@ -2733,24 +2756,20 @@ pub(crate) mod tests {
                 "The worktree's changes differ from the verified commit: verified {frozen}, current {moved}; verify again. Nothing was pushed. Call publish_ticket again for what is current."
             )
         );
-        // Changes a later review passed are still not the ones the item showed.
+        // Changes a later review passed are for that review's own request, not this item.
         let mut ticket = f.ticket();
         ticket.verification = None;
         f.host.save_ticket(&ticket).unwrap();
         git(&f.worktree, &["reset", "-q", "--hard", &frozen]);
         f.review(VerificationOutcome::Passed);
         f.publish(&caller).unwrap();
-        let moved = f.commit("c.txt", "three\n");
+        f.commit("c.txt", "three\n");
         f.review(VerificationOutcome::Passed);
         answer(&mut f, &remote, "approved");
         assert!(remote.git_calls().is_empty());
         assert_eq!(
             results(&f.host).pop().unwrap().1,
-            format!(
-                "The worktree moved from {} to {}, which has different changes. Nothing was pushed. Call publish_ticket again for what is current.",
-                short_sha(&frozen),
-                short_sha(&moved)
-            )
+            "This publish was requested after review cycle 1; the ticket's latest review is now cycle 2, which passed. Nothing was pushed. Call publish_ticket again for what is current."
         );
     }
 
@@ -2821,10 +2840,11 @@ pub(crate) mod tests {
         assert_eq!(waiting_item(&f).id, item.id);
         answer(&mut f, &remote, "approved");
         assert_eq!(remote.branch(BRANCH), Some(f.head()));
-        // The host stops while the approved pull request step runs; asking again raises a new
-        // item for it.
+        // Approving the pull request item opens it and ends the request.
         answer(&mut f, &remote, "approved");
         assert!(f.ticket().publishing.is_none());
+        // The host stops while an approved push runs: the caller is told, and asking again
+        // raises a new item for that push.
         let mut f = fixture();
         let remote = self::remote(&f);
         let caller = f.implementer.id.clone();
@@ -3036,5 +3056,202 @@ pub(crate) mod tests {
         answer(&mut f, &remote, "approved");
         assert!(f.open_items().is_empty());
         assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+    }
+
+    /// What a turn does first: takes every queued message as its input.
+    fn take_input(host: &mut Host, session: &str) {
+        for message in host.messages(session, None, 100).unwrap() {
+            if message.receipt == Receipt::Queued {
+                host.advance_receipt(&message.id, Receipt::Delivered)
+                    .unwrap();
+            }
+        }
+    }
+    /// Reports `kind` from within `session`'s turn.
+    fn report(host: &mut Host, session: &str, kind: &str) {
+        take_input(host, session);
+        let report = json!({"message_id": format!("{kind}-{session}"), "kind": kind, "body": kind});
+        host.agent_tool(session, "report", report).unwrap();
+    }
+
+    #[test]
+    fn a_later_review_that_ends_blocked_stops_a_push_that_was_queued_without_asking() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        let (coordinator, implementer) = (f.coordinator.id.clone(), f.implementer.id.clone());
+        // The first review passed and the owner is allowed, so the push is queued with no item.
+        let (status, step) = f.publish(&coordinator).unwrap();
+        let job = step.unwrap();
+        assert_eq!(status["status"], "publishing");
+        assert_eq!(
+            (job.request.cycle, job.request.outcome),
+            (1, VerificationOutcome::Passed)
+        );
+        // Before it sends: the implementer reports ready again, the coordinator starts a second
+        // review of the same commit, and a verifier reports that it could not verify.
+        report(&mut f.host, &implementer, "ready_for_testing");
+        let selection = f.host.model_selection().unwrap();
+        let verifiers: Vec<VerifierChoice> = f
+            .host
+            .settings()
+            .verification
+            .verifiers
+            .iter()
+            .map(|verifier| {
+                let provider = verifier
+                    .provider
+                    .unwrap_or_else(|| selection.providers_for(verifier.role)[0]);
+                VerifierChoice {
+                    focus: verifier.focus.clone(),
+                    profile: ModelProfile {
+                        provider,
+                        model: selection.allowed(provider)[0].model.clone(),
+                        effort: selection.allowed(provider)[0].effort.clone(),
+                    },
+                    reason: "Test verifier".into(),
+                }
+            })
+            .collect();
+        f.host
+            .agent_tool(
+                &coordinator,
+                "verify_ticket",
+                json!({"ticket_id": f.ticket, "verifiers": verifiers}),
+            )
+            .unwrap();
+        let sessions: Vec<String> = f.ticket().verification.unwrap().rounds[0]
+            .verifiers
+            .iter()
+            .map(|run| run.session_id.clone())
+            .collect();
+        for (n, session) in sessions.iter().enumerate() {
+            let verdict = if n == 0 { "blocked" } else { "passed" };
+            report(&mut f.host, session, verdict);
+        }
+        let review = f.ticket().verification.unwrap();
+        assert_eq!(
+            (review.cycle, review.outcome),
+            (2, VerificationOutcome::Blocked)
+        );
+        assert_eq!(review.verified_commit(), Some(f.head().as_str()));
+        // The queued step sends nothing: its request was decided on the first review.
+        let outcome = run(&job, &remote.tools);
+        assert!(
+            matches!(&outcome.result, StepResult::Changed(changed) if changed
+                == "This publish was requested after review cycle 1; the ticket's latest review is now cycle 2, which ended blocked"),
+        );
+        assert!(remote.branch(BRANCH).is_none() && pushes(&remote) == 0);
+        assert_eq!(refs(&remote.bare).len(), 1, "only main is on the remote");
+        assert!(f.host.record_published(outcome).unwrap().is_none());
+        assert!(f.ticket().publishing.is_none());
+        let told = results(&f.host).pop().unwrap();
+        assert_eq!(told.0, coordinator);
+        assert!(
+            told.1.ends_with("which ended blocked. Nothing was pushed. Call publish_ticket again for what is current."),
+            "{}",
+            told.1
+        );
+        // The new call is decided on the blocked review, so the human is asked.
+        let (status, step) = f.publish(&coordinator).unwrap();
+        assert!(step.is_none());
+        assert_eq!(status["reason"], "the review ended blocked");
+        assert!(
+            waiting_item(&f)
+                .prompt
+                .starts_with("Publish this ticket although its review ended blocked?")
+        );
+        assert!(remote.branch(BRANCH).is_none() && pushes(&remote) == 0);
+    }
+
+    #[test]
+    fn a_waiting_item_does_not_outlive_the_review_it_was_raised_on() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let caller = f.implementer.id.clone();
+        f.publish(&caller).unwrap();
+        let first = waiting_item(&f);
+        // A second review of the same commit ends blocked while the push item waits.
+        f.review(VerificationOutcome::Blocked);
+        answer(&mut f, &remote, "approved");
+        assert!(remote.git_calls().is_empty() && f.ticket().publishing.is_none());
+        assert!(results(&f.host).pop().unwrap().1.starts_with(
+            "This publish was requested after review cycle 1; the ticket's latest review is now cycle 2, which ended blocked. Nothing was pushed."
+        ));
+        // Called again while an item waits, a later review replaces the item rather than
+        // returning its status.
+        f.publish(&caller).unwrap();
+        let second = waiting_item(&f);
+        assert_ne!(second.id, first.id);
+        f.review(VerificationOutcome::Passed);
+        f.publish(&caller).unwrap();
+        let third = waiting_item(&f);
+        assert_ne!(third.id, second.id);
+        assert!(
+            third
+                .prompt
+                .contains("Review: Cycle 3 passed at this commit"),
+            "{}",
+            third.prompt
+        );
+        assert_eq!(f.ticket().publishing.unwrap().cycle, 3);
+    }
+
+    #[test]
+    fn a_request_made_before_github_answered_survives_githubs_letter_case() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        // `origin` spells the repository in another letter case, and GitHub has not answered.
+        let url = "git@github.com:Allowed-Org/App.git";
+        git(&f.repository, &["remote", "set-url", "origin", url]);
+        let bare = remote.bare.to_str().unwrap().to_owned();
+        remote.github.lock().unwrap().urls.push((url.into(), bare));
+        let repository = f.host.ticket_repository(&f.ticket()).unwrap();
+        f.host
+            .save_github(repositories::GitHubRead {
+                id: repository.id,
+                github: Some(GitHubRepository {
+                    owner: "Allowed-Org".into(),
+                    name: "App".into(),
+                    facts: None,
+                    problem: None,
+                }),
+                origin_problem: None,
+            })
+            .unwrap();
+        f.publish(&f.implementer.id.clone()).unwrap();
+        assert_eq!(f.ticket().publishing.unwrap().repository, "Allowed-Org/App");
+        // The push is approved; GitHub then answers as allowed-org/app, which is the same
+        // repository, and the request goes on to its pull request.
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.branch(BRANCH), Some(f.head()));
+        let repository = f.host.ticket_repository(&f.ticket()).unwrap();
+        assert_eq!(owner_entry(&repository).as_deref(), Some("allowed-org"));
+        assert!(results(&f.host).is_empty(), "{:?}", results(&f.host));
+        let item = waiting_item(&f);
+        assert!(item.operation_id.ends_with(":pull_request"));
+    }
+
+    #[test]
+    fn a_push_stopped_at_its_deadline_is_not_reported_as_not_pushed() {
+        let mut f = fixture();
+        let mut remote = remote(&f);
+        f.allow("allowed-org");
+        let reads = remote.tools.git.clone();
+        remote.tools.git = Arc::new(move |path, args| match args[0] {
+            // As `runtime::git_push` answers when it kills a push at its deadline.
+            "push" => bail!("Git query timed out"),
+            _ => reads(path, args),
+        });
+        let (_, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "Pushing {BRANCH} to allowed-org/app did not finish within 10 minutes and was stopped. The push may or may not have reached GitHub. Call publish_ticket again; repeating it is safe."
+            )
+        );
+        let ticket = f.ticket();
+        assert!(ticket.publishing.is_none() && ticket.pushed.is_none());
     }
 }

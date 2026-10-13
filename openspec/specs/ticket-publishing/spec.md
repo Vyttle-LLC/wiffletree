@@ -32,7 +32,7 @@ The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id and a
 - **THEN** it is refused and nothing is sent
 
 ### Requirement: Checks before anything leaves the machine
-Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. The host SHALL make the same checks again, for the same commit, when the human approves a step and immediately before it sends anything.
+Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. The host SHALL make the same checks again, for the same commit, when the human approves a step and immediately before it sends anything. A request SHALL record the verification cycle it was decided on and how that cycle ended. If the ticket's latest cycle is no longer that one at either of those moments, the host SHALL send nothing, SHALL end the request and SHALL tell the caller to publish again, so that the later cycle decides whether the human is asked.
 
 #### Scenario: Never reviewed
 - **WHEN** `publish_ticket` is called for a ticket that has had no verification cycle
@@ -61,6 +61,10 @@ Before pushing or asking the human, the host SHALL refuse a publish unless all o
 #### Scenario: A second push URL
 - **WHEN** the repository's `origin` has two push URLs, the first under an allowed owner and the second under another owner
 - **THEN** `publish_ticket` is refused and nothing is pushed to either
+
+#### Scenario: A later review ends blocked before a queued push sends
+- **WHEN** a push was queued without asking after cycle 1 passed, and before it sends a second cycle of the same commit ends blocked
+- **THEN** nothing is pushed, the caller is told the review changed, and publishing again waits for the human's approval
 
 #### Scenario: HEAD moves while a card waits
 - **WHEN** the human approves a push after the worktree's HEAD has moved to different changes
@@ -223,7 +227,7 @@ When the ticket's pull request, as the watcher last read it, was closed or merge
 - **THEN** no pull request is opened until the human approves an item that says the earlier one was merged
 
 ### Requirement: Results arrive as messages from Wiffletree
-`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. The human's answer to a publish approval SHALL NOT also be sent to the caller as an Inbox answer: the request's own message is the only one. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
+`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. The human's answer to a publish approval SHALL NOT also be sent to the caller as an Inbox answer: the request's own message is the only one. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A push that was stopped because it did not finish in time SHALL be reported as one that may or may not have reached GitHub. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
 
 #### Scenario: Success
 - **WHEN** the host has pushed a ticket's branch and opened PR #45

@@ -82,7 +82,8 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
                 .enumerate()
                 .map(|(i, t)| format!("h{i}={}", t.branch)),
         );
-        let mut args = vec!["api", "graphql"];
+        // The host is named, so `GH_HOST` cannot point the question at another GitHub.
+        let mut args = vec!["api", "graphql", "--hostname", repositories::GITHUB_HOST];
         for field in &fields {
             args.extend(["-f", field]);
         }
@@ -853,12 +854,16 @@ mod tests {
         let worktree_head = git(folder.path(), &["rev-parse", "HEAD"]);
         let fake_gh = |path: &Path, args: &[&str]| -> Result<String> {
             assert_eq!(path, folder.path());
-            assert_eq!(args[..3], ["api", "graphql", "-f"]);
+            // The question names github.com, whatever `GH_HOST` says.
+            assert_eq!(
+                args[..5],
+                ["api", "graphql", "--hostname", "github.com", "-f"]
+            );
             assert!(
-                args[3].starts_with("query=query($owner: String!, $name: String!, $h0: String!)")
+                args[5].starts_with("query=query($owner: String!, $name: String!, $h0: String!)")
             );
             assert_eq!(
-                args[4..],
+                args[6..],
                 [
                     "-f",
                     "owner=Vyttle-LLC",
