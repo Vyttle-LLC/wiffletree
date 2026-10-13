@@ -304,13 +304,14 @@ impl Watch {
             self.repositories.entry(id.to_owned()).or_default();
         }
     }
-    /// Makes a watched repository due at once, as after the host pushed a ticket's branch there
-    /// or opened its PR, so the ticket's row shows the PR without waiting for the interval.
+    /// Makes a repository due at once, as after the host pushed a ticket's branch there or
+    /// opened its PR, so the ticket's row shows the PR without waiting for the interval. One
+    /// whose ticket is newer than the last listing joins the watch here; `keep` drops it again
+    /// if it has no open ticket.
     pub(crate) fn check_now(&mut self, repository: &str) {
-        if let Some(pace) = self.repositories.get_mut(repository) {
-            pace.due_at = 0;
-            pace.again = pace.running;
-        }
+        let pace = self.repositories.entry(repository.to_owned()).or_default();
+        pace.due_at = 0;
+        pace.again = pace.running;
     }
     /// Marks the repositories due at `at` with no pass running as running, and returns them.
     pub(crate) fn start_due(&mut self, at: i64) -> Vec<String> {
@@ -1034,8 +1035,11 @@ mod tests {
             watch.finish("r", 3 * MINUTE, &pass(true, 5000, 0)),
             Some(3 * MINUTE + ACTIVE_MS)
         );
-        // A repository that is not watched is left alone.
-        watch.check_now("other");
+        // A repository whose ticket is newer than the last listing is due at once too, and
+        // leaves again when the listing shows no open ticket there.
+        watch.check_now("new");
+        assert_eq!(watch.next_due(), Some(0));
+        watch.keep(["r"]);
         assert_eq!(watch.next_due(), Some(3 * MINUTE + ACTIVE_MS));
     }
 

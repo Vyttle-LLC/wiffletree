@@ -78,10 +78,11 @@ fn is_ancestor(worktree: &Path, older: &str, commit: &str) -> bool {
         .is_ok_and(|answer| answer.status.success())
 }
 
-/// The commit's size against what GitHub already has from the host, or else against the base:
-/// such as "2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)".
+/// The commit's size against the older commit GitHub already has from the host, or else against
+/// the base: such as "2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)".
 fn commit_size(worktree: &Path, base: &str, pushed: Option<&str>, commit: &str) -> Result<String> {
-    let from = match pushed.filter(|pushed| is_ancestor(worktree, pushed, commit)) {
+    let earlier = |pushed: &&str| *pushed != commit && is_ancestor(worktree, pushed, commit);
+    let from = match pushed.filter(earlier) {
         Some(pushed) => pushed.to_owned(),
         None => worktrees::merge_base(worktree, base, commit)?,
     };
@@ -1372,6 +1373,21 @@ pub(crate) mod tests {
         // While its step runs, a second call is refused rather than started beside it.
         let again = f.publish(&f.coordinator.id.clone()).unwrap_err();
         assert!(again.to_string().contains("is running"), "{again}");
+    }
+
+    #[test]
+    fn a_commit_the_host_already_pushed_is_sized_against_the_base() {
+        let mut f = fixture();
+        f.allow("allowed-org");
+        // As when the ticket is published again after its pull request was closed.
+        let mut ticket = f.ticket();
+        ticket.pushed = Some(f.head());
+        f.host.save_ticket(&ticket).unwrap();
+        f.publish(&f.coordinator.id.clone()).unwrap();
+        assert_eq!(
+            f.ticket().publishing.unwrap().size,
+            "2 commits · 2 files changed, 2 insertions(+)"
+        );
     }
 
     #[test]
