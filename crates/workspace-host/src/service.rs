@@ -1030,6 +1030,7 @@ impl Actor {
                         self.refresh_github();
                     }
                     if let Command::ResolveAttention { id, answer } = &command {
+                        let attention: Attention = serde_json::from_value(response.clone())?;
                         if let Some(permission) = self.permissions.remove(id) {
                             let decision = if answer == "approved" {
                                 json!({"behavior":"allow","updatedInput":permission.input})
@@ -1037,8 +1038,12 @@ impl Actor {
                                 json!({"behavior":"deny","message":answer})
                             };
                             let _ = permission.reply.try_send(Ok(decision));
+                        } else if attention.is_publish() {
+                            // The request's own result is its caller's one message, so the
+                            // answer is not sent on as other Inbox answers are.
+                            let step = self.host.answer_publish(id, answer == "approved")?;
+                            self.run_publish_step(step);
                         } else {
-                            let attention: Attention = serde_json::from_value(response.clone())?;
                             self.host.send(
                                 &format!("answer:{id}"),
                                 None,
@@ -1079,7 +1084,7 @@ impl Actor {
                         let request = self.host.request_attention(
                             &id,
                             "local",
-                            &format!("permission:{}", new_id()),
+                            &format!("{PERMISSION_PREFIX}{}", new_id()),
                             &format!(
                                 "{} requests {tool}\n{}",
                                 self.host.session(&id)?.name,
@@ -3057,6 +3062,71 @@ mod tests {
             json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
         );
         assert_eq!(status.unwrap()["status"], "publishing");
+    }
+
+    /// Every message to `session` whose id starts with `prefix`.
+    fn messages_to(actor: &Actor, session: &str, prefix: &str) -> Vec<String> {
+        actor
+            .host
+            .messages(session, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.id.starts_with(prefix))
+            .map(|m| m.body)
+            .collect()
+    }
+
+    #[test]
+    fn the_humans_answer_to_a_publish_item_runs_or_ends_the_request_with_one_message() {
+        let (f, remote, mut actor, events) = publishing_actor();
+        let caller = f.implementer.id.clone();
+        actor.host.set_owner_allowed("allowed-org", false).unwrap();
+        let publish = |actor: &mut Actor| {
+            call_tool(
+                actor,
+                &caller,
+                "publish_ticket",
+                json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
+            )
+            .unwrap()
+        };
+        let waiting = |actor: &Actor| {
+            let ticket = actor.host.ticket(&f.ticket).unwrap();
+            ticket.publishing.unwrap().waiting.unwrap()
+        };
+        let resolve = |actor: &mut Actor, id: String, answer: &str| {
+            let answer = answer.to_owned();
+            command(actor, Command::ResolveAttention { id, answer }).unwrap()
+        };
+        assert_eq!(publish(&mut actor)["status"], "waiting_for_human");
+        // Denied: the caller gets the request's one message, and no "Human answer" beside it.
+        let item = waiting(&actor);
+        resolve(&mut actor, item, "denied");
+        assert_eq!(messages_to(&actor, &caller, "publish:").len(), 1);
+        assert!(messages_to(&actor, &caller, "answer:").is_empty());
+        assert!(events.try_recv().is_err());
+        // Approved: the push runs off the host thread, and its pull request then asks.
+        publish(&mut actor);
+        let item = waiting(&actor);
+        resolve(&mut actor, item, "approved");
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert_eq!(remote.branch("wiffletree/fix-contrast"), Some(f.head()));
+        let item = waiting(&actor);
+        resolve(&mut actor, item, "approved");
+        assert!(actor.handle(events.recv_blocking().unwrap()));
+        let results = messages_to(&actor, &caller, "publish:");
+        assert_eq!(results.len(), 2);
+        assert!(results[1].contains("opened PR #45"), "{}", results[1]);
+        assert!(messages_to(&actor, &caller, "answer:").is_empty());
+        // An item under the prefix that no request names starts nothing and sends nothing.
+        let stray = actor
+            .host
+            .request_attention(&caller, "local", "publish:forged:push", "Push?", &[])
+            .unwrap();
+        resolve(&mut actor, stray.id, "approved");
+        assert!(events.try_recv().is_err());
+        assert_eq!(messages_to(&actor, &caller, "publish:").len(), 2);
+        assert!(messages_to(&actor, &caller, "answer:").is_empty());
     }
 
     #[test]

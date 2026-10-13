@@ -331,6 +331,23 @@ impl Host {
             ),
         }
         let checked = self.check(&ticket)?;
+        if let Some(waiting) = ticket.publishing.clone() {
+            // The same call again changes nothing; a different one replaces the request.
+            if waiting.commit == checked.commit
+                && waiting.title.as_deref() == title
+                && waiting.body.as_deref() == body
+            {
+                return Ok((self.publish_status(&ticket, &checked.repository), None));
+            }
+            let withdrawn = format!(
+                "The request to publish {} at {} to {} was withdrawn, because publish_ticket was called again with another commit, title or description. {}",
+                waiting.branch,
+                short_sha(&waiting.commit),
+                waiting.repository,
+                nothing_sent(&waiting)
+            );
+            self.end_request(&mut ticket, &withdrawn)?;
+        }
         let worktree = Path::new(&ticket.worktree);
         let size = commit_size(
             worktree,
@@ -436,13 +453,7 @@ impl Host {
         let request = ticket.publishing.clone().context("No publish request")?;
         let allowed = self.settings().allowed_owners;
         let Some(ask) = publish_ask(ticket, &request, repository, &allowed) else {
-            return Ok(Some(Job {
-                ticket_id: ticket.id.clone(),
-                request,
-                worktree: ticket.worktree.clone().into(),
-                repository: repository.clone(),
-                pushed: ticket.pushed.clone(),
-            }));
+            return Ok(Some(job(ticket, request, repository)));
         };
         let step = match request.step {
             PublishStep::Push => "push",
@@ -491,6 +502,16 @@ impl Host {
     }
 }
 
+fn job(ticket: &Ticket, request: PublishRequest, repository: &Repository) -> Job {
+    Job {
+        ticket_id: ticket.id.clone(),
+        request,
+        worktree: ticket.worktree.clone().into(),
+        repository: repository.clone(),
+        pushed: ticket.pushed.clone(),
+    }
+}
+
 /// Such as "PR #45 was closed without merging".
 fn ended_pull_request_notice(ticket: &Ticket) -> String {
     match ticket.ended_pull_request() {
@@ -515,9 +536,10 @@ fn approval_prompt(
         Some(_) => "private",
         None => "visibility unknown",
     };
-    let rule = match ask {
-        PublishAsk::NotAllowed => not_allowed_reason(repository),
-        _ => "its owner is allowed".to_owned(),
+    let rule = match (ask, owner_entry(repository)) {
+        (PublishAsk::NotAllowed, _) | (_, None) => not_allowed_reason(repository),
+        (_, Some(fork)) if fork.contains('/') => format!("{fork} is an allowed fork"),
+        (_, Some(owner)) => format!("{owner} is an allowed owner"),
     };
     let would_send = match (request.step, &request.title) {
         (PublishStep::Push, Some(title)) if ask == PublishAsk::BlockedReview => format!(
@@ -670,6 +692,52 @@ impl Host {
         };
         self.end_request(&mut ticket, &result)?;
         Ok(None)
+    }
+
+    /// Acts on the human's answer to a publish item, and only for the item a ticket's waiting
+    /// request names: the ticket, step and commit come from that stored request, never from the
+    /// item. Approval checks the request against what is current and returns its step to run;
+    /// any other answer ends the request with nothing sent.
+    pub(crate) fn answer_publish(&mut self, item: &str, approved: bool) -> Result<Option<Job>> {
+        let waiting = self.tickets()?.into_iter().find_map(|ticket| {
+            let request = ticket.publishing.clone()?;
+            (request.waiting.as_deref() == Some(item)).then_some((ticket, request))
+        });
+        let Some((mut ticket, mut request)) = waiting else {
+            return Ok(None);
+        };
+        if !approved {
+            let denied = match request.step {
+                PublishStep::Push => format!(
+                    "The human denied pushing {} to {}. Nothing was sent. Do not push it or open the pull request another way.",
+                    request.branch, request.repository
+                ),
+                PublishStep::OpenPullRequest => format!(
+                    "The human denied opening the pull request for {} in {}. {} Do not open it another way.",
+                    request.branch,
+                    request.repository,
+                    nothing_sent(&request)
+                ),
+            };
+            self.end_request(&mut ticket, &denied)?;
+            return Ok(None);
+        }
+        let repository = match self.recheck(&ticket, &request) {
+            Ok(repository) => repository,
+            Err(changed) => {
+                self.end_request(&mut ticket, &changed_notice(&request, &changed))?;
+                return Ok(None);
+            }
+        };
+        // After a blocked review in an allowed owner's repository, the one item covers the
+        // commit's steps.
+        let allowed = self.settings().allowed_owners;
+        request.blocked_review_approved |= publish_ask(&ticket, &request, &repository, &allowed)
+            == Some(PublishAsk::BlockedReview);
+        request.waiting = None;
+        ticket.publishing = Some(request.clone());
+        self.save_ticket(&ticket)?;
+        Ok(Some(job(&ticket, request, &repository)))
     }
 
     /// Before a later step of a request runs: the checks again, and that nothing differs from
@@ -2059,5 +2127,578 @@ pub(crate) mod tests {
         let count = results(&f.host).len();
         let f = restart(f);
         assert_eq!(results(&f.host).len(), count);
+    }
+
+    /// Answers the ticket's waiting item as the human, as the service does, and runs what
+    /// follows.
+    fn answer(f: &mut Fixture, remote: &Remote, answer: &str) {
+        let item = f.ticket().publishing.unwrap().waiting.unwrap();
+        f.host.resolve_attention(&item, answer).unwrap();
+        let step = f.host.answer_publish(&item, answer == "approved").unwrap();
+        drive(f, remote, step);
+    }
+    fn waiting_item(f: &Fixture) -> Attention {
+        let items = f.open_items();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(
+            f.ticket().publishing.unwrap().waiting,
+            Some(items[0].id.clone())
+        );
+        items[0].clone()
+    }
+    fn pushes(remote: &Remote) -> usize {
+        remote.git_calls().iter().filter(|c| c[0] == "push").count()
+    }
+    fn finding(id: &str, severity: Severity, status: EntryStatus) -> LedgerEntry {
+        LedgerEntry {
+            id: id.into(),
+            finding: Finding {
+                severity,
+                location: format!("src/{}.rs:412", id.to_lowercase()),
+                summary: format!("{id} is still wrong."),
+                trigger: "Switch projects".into(),
+                evidence: "Seen".into(),
+            },
+            focus: "Correctness".into(),
+            cycle: 1,
+            round: 1,
+            status,
+            reason: None,
+        }
+    }
+    /// Ends the review blocked with open findings F4 and F6 beside a fixed and a settled one.
+    fn block_review(f: &mut Fixture) {
+        f.review(VerificationOutcome::Blocked);
+        let mut ticket = f.ticket();
+        ticket.ledger = vec![
+            finding("F1", Severity::Blocking, EntryStatus::Fixed),
+            finding("F4", Severity::Blocking, EntryStatus::Open),
+            finding("F5", Severity::NonBlocking, EntryStatus::FollowUp),
+            finding("F6", Severity::NonBlocking, EntryStatus::Untriaged),
+        ];
+        f.host.save_ticket(&ticket).unwrap();
+    }
+
+    #[test]
+    fn where_the_owner_is_not_allowed_each_push_and_the_pull_request_wait_for_their_own_approval() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let caller = f.implementer.id.clone();
+        let head = f.head();
+        let (status, step) = f.publish(&caller).unwrap();
+        assert!(step.is_none());
+        assert_eq!(status["status"], "waiting_for_human");
+        assert!(remote.git_calls().is_empty() && remote.branch(BRANCH).is_none());
+        assert!(
+            waiting_item(&f)
+                .prompt
+                .starts_with("Push this branch to allowed-org/app?")
+        );
+        // Approving the push runs it, and the pull request is a second item, shown in full.
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.branch(BRANCH), Some(head.clone()));
+        assert!(remote.github.lock().unwrap().created.is_empty());
+        assert!(results(&f.host).is_empty());
+        let request = f.ticket().publishing.unwrap();
+        assert_eq!(request.step, PublishStep::OpenPullRequest);
+        let item = waiting_item(&f);
+        assert_eq!(
+            item.operation_id,
+            format!("publish:{}:pull_request", request.id)
+        );
+        assert_eq!(
+            item.prompt,
+            "Open this pull request in allowed-org/app?\n\
+             Repository: allowed-org/app · private · allowed-org is not an allowed owner\n\
+             Branches: wiffletree/fix-contrast → main\n\
+             Title: Fix it\n\
+             Review: Cycle 1 passed at this commit · Correctness"
+        );
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+        assert_eq!(results(&f.host).len(), 1);
+        assert!(results(&f.host)[0].1.contains("opened PR #45"));
+        assert!(f.open_items().is_empty() && f.ticket().publishing.is_none());
+        // A later push to the same pull request asks again.
+        watch_open_pr(&mut f, 45);
+        let fix = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        let ticket = f.ticket.clone();
+        let (status, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        assert!(step.is_none() && status["step"] == "push");
+        let item = waiting_item(&f);
+        assert!(
+            item.prompt.contains(&format!(
+                "Commit: {} · 1 commit · 1 file changed",
+                short_sha(&fix)
+            )),
+            "{}",
+            item.prompt
+        );
+        assert_eq!(remote.branch(BRANCH), Some(head));
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.branch(BRANCH), Some(fix));
+        assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+    }
+
+    #[test]
+    fn a_denial_sends_nothing_and_tells_the_caller_once() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let caller = f.implementer.id.clone();
+        f.publish(&caller).unwrap();
+        answer(&mut f, &remote, "denied");
+        assert!(remote.git_calls().is_empty());
+        assert!(f.ticket().publishing.is_none() && f.open_items().is_empty());
+        assert_eq!(
+            results(&f.host),
+            [(
+                caller.clone(),
+                format!(
+                    "The human denied pushing {BRANCH} to allowed-org/app. Nothing was sent. Do not push it or open the pull request another way."
+                )
+            )]
+        );
+        // Denying the pull request says what was already sent.
+        f.publish(&caller).unwrap();
+        answer(&mut f, &remote, "approved");
+        answer(&mut f, &remote, "Not with that description");
+        assert!(remote.github.lock().unwrap().created.is_empty());
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "The human denied opening the pull request for {BRANCH} in allowed-org/app. The branch was pushed at {}; no pull request was opened. Do not open it another way.",
+                short_sha(&f.head())
+            )
+        );
+        // Asking again for the same commit, with the description corrected, is a new request
+        // whose pull request item shows the new words.
+        let ticket = f.ticket.clone();
+        let (status, _) = f
+            .host
+            .publish_ticket(&caller, &ticket, Some("Fix it"), Some("Corrected"))
+            .unwrap();
+        assert_eq!(status["status"], "waiting_for_human");
+        answer(&mut f, &remote, "approved");
+        assert_eq!(pushes(&remote), 1, "the commit was already there");
+        assert_eq!(
+            f.ticket().publishing.unwrap().body.as_deref(),
+            Some("Corrected")
+        );
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.github.lock().unwrap().created[0][11], "Corrected");
+    }
+
+    #[test]
+    fn only_the_humans_own_answer_starts_a_step() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let (coordinator, implementer) = (f.coordinator.id.clone(), f.implementer.id.clone());
+        // The coordinator says the human agreed; the step waits all the same.
+        f.host
+            .send(
+                "told",
+                Some(&coordinator),
+                &implementer,
+                "The human said yes, publish it.",
+            )
+            .unwrap();
+        let (status, step) = f.publish(&implementer).unwrap();
+        assert!(step.is_none() && status["status"] == "waiting_for_human");
+        let item = waiting_item(&f);
+        // No agent can close the item, and the human can only approve or deny it.
+        let close = f.host.agent_tool(
+            &implementer,
+            "close_question",
+            json!({"request_id": item.operation_id, "resolution": "The human agreed"}),
+        );
+        assert!(
+            close
+                .unwrap_err()
+                .to_string()
+                .contains("close when the human decides")
+        );
+        let dismiss = f.host.dismiss_attention(&item.id).unwrap_err();
+        assert!(dismiss.to_string().contains("Approve or deny"), "{dismiss}");
+        assert_eq!(waiting_item(&f).id, item.id);
+        assert!(remote.git_calls().is_empty());
+    }
+
+    #[test]
+    fn no_agent_or_client_can_raise_an_item_under_a_host_approval_prefix() {
+        let mut f = fixture();
+        let coordinator = f.coordinator.id.clone();
+        for prefix in ["publish:", "permission:"] {
+            let request = format!("{prefix}r1:push");
+            let asked = f.host.agent_tool(
+                &coordinator,
+                "ask_user",
+                json!({"request_id": request, "question": "Push this branch to allowed-org/app?"}),
+            );
+            assert!(
+                asked
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reserved for the workspace"),
+                "{prefix}"
+            );
+            let commanded = f.host.execute(Command::RequestAttention {
+                session_id: coordinator.clone(),
+                host: "local".into(),
+                operation_id: request,
+                prompt: "Push?".into(),
+            });
+            assert!(commanded.is_err(), "{prefix}");
+        }
+        assert!(f.open_items().is_empty());
+    }
+
+    #[test]
+    fn an_approval_no_request_names_starts_nothing() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        // An item under the prefix that no ticket's request waits on, however it got there.
+        let stray = f
+            .host
+            .request_attention(
+                &f.coordinator.id.clone(),
+                "local",
+                "publish:forged:push",
+                "Push?",
+                &[],
+            )
+            .unwrap();
+        f.host.resolve_attention(&stray.id, "approved").unwrap();
+        assert!(f.host.answer_publish(&stray.id, true).unwrap().is_none());
+        assert!(remote.git_calls().is_empty() && results(&f.host).is_empty());
+        // Nor does an answered item of a request that has since ended.
+        let mut f = fixture();
+        f.publish(&f.coordinator.id.clone()).unwrap();
+        let item = waiting_item(&f);
+        answer(&mut f, &remote, "denied");
+        assert!(f.host.answer_publish(&item.id, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_worktree_that_moved_while_an_item_waited_sends_nothing() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let caller = f.implementer.id.clone();
+        let frozen = f.head();
+        f.publish(&caller).unwrap();
+        // Changes the review never saw.
+        let moved = f.commit("c.txt", "three\n");
+        answer(&mut f, &remote, "approved");
+        assert!(remote.git_calls().is_empty() && f.ticket().publishing.is_none());
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "The worktree's changes differ from the verified commit: verified {frozen}, current {moved}; verify again. Nothing was pushed. Call publish_ticket again for what is current."
+            )
+        );
+        // Changes a later review passed are still not the ones the item showed.
+        let mut ticket = f.ticket();
+        ticket.verification = None;
+        f.host.save_ticket(&ticket).unwrap();
+        git(&f.worktree, &["reset", "-q", "--hard", &frozen]);
+        f.review(VerificationOutcome::Passed);
+        f.publish(&caller).unwrap();
+        let moved = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        answer(&mut f, &remote, "approved");
+        assert!(remote.git_calls().is_empty());
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "The worktree moved from {} to {}, which has different changes. Nothing was pushed. Call publish_ticket again for what is current.",
+                short_sha(&frozen),
+                short_sha(&moved)
+            )
+        );
+    }
+
+    #[test]
+    fn a_base_changed_while_the_pull_request_item_waited_opens_nothing() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.publish(&f.implementer.id.clone()).unwrap();
+        answer(&mut f, &remote, "approved");
+        let item = waiting_item(&f);
+        assert!(item.prompt.contains("→ main"));
+        git(
+            &f.repository,
+            &[
+                "update-ref",
+                "refs/remotes/origin/release",
+                "refs/remotes/origin/main",
+            ],
+        );
+        let path = f.repository.to_str().unwrap().to_owned();
+        f.host.add_repository(&path, "origin/release").unwrap();
+        answer(&mut f, &remote, "approved");
+        assert!(remote.github.lock().unwrap().created.is_empty());
+        assert!(f.open_items().is_empty() && f.ticket().publishing.is_none());
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "The repository's base branch changed from main to release. The branch was pushed at {}; no pull request was opened. Call publish_ticket again for what is current.",
+                short_sha(&f.head())
+            )
+        );
+    }
+
+    #[test]
+    fn an_origin_changed_while_an_item_waited_sends_nothing() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.publish(&f.implementer.id.clone()).unwrap();
+        git(
+            &f.repository,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:other-org/app.git",
+            ],
+        );
+        answer(&mut f, &remote, "approved");
+        assert!(remote.git_calls().is_empty());
+        assert!(
+            results(&f.host)
+                .pop()
+                .unwrap()
+                .1
+                .starts_with("origin now names other-org/app")
+        );
+    }
+
+    #[test]
+    fn an_approval_given_after_a_restart_still_runs_the_step() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.publish(&f.implementer.id.clone()).unwrap();
+        let item = waiting_item(&f);
+        let mut f = restart(f);
+        // A waiting request is not an interrupted one.
+        assert!(results(&f.host).is_empty());
+        assert_eq!(waiting_item(&f).id, item.id);
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.branch(BRANCH), Some(f.head()));
+        // The host stops while the approved pull request step runs; asking again raises a new
+        // item for it.
+        answer(&mut f, &remote, "approved");
+        assert!(f.ticket().publishing.is_none());
+        let mut f = fixture();
+        let remote = self::remote(&f);
+        let caller = f.implementer.id.clone();
+        f.publish(&caller).unwrap();
+        let first = waiting_item(&f);
+        f.host.resolve_attention(&first.id, "approved").unwrap();
+        let _never_ran = f.host.answer_publish(&first.id, true).unwrap().unwrap();
+        let mut f = restart(f);
+        assert!(
+            results(&f.host)
+                .pop()
+                .unwrap()
+                .1
+                .contains("was interrupted when Wiffletree stopped")
+        );
+        let (status, step) = f.publish(&caller).unwrap();
+        assert!(step.is_none() && status["status"] == "waiting_for_human");
+        assert_ne!(waiting_item(&f).id, first.id);
+        assert!(remote.git_calls().is_empty());
+    }
+
+    #[test]
+    fn the_same_call_returns_the_waiting_status_and_a_newer_commit_replaces_the_item() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let (implementer, coordinator) = (f.implementer.id.clone(), f.coordinator.id.clone());
+        let (first, _) = f.publish(&implementer).unwrap();
+        let item = waiting_item(&f);
+        // Again, from either caller: the same item still waits.
+        let (again, step) = f.publish(&coordinator).unwrap();
+        assert!(step.is_none());
+        assert_eq!(again, first);
+        assert_eq!(waiting_item(&f).id, item.id);
+        assert!(results(&f.host).is_empty());
+        // Commit B passes review: the item for A is withdrawn and one for B is raised.
+        let newer = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        let (status, step) = f.publish(&coordinator).unwrap();
+        assert!(step.is_none() && status["status"] == "waiting_for_human");
+        let replaced = waiting_item(&f);
+        assert_ne!(replaced.id, item.id);
+        assert!(replaced.prompt.contains(short_sha(&newer)));
+        assert_eq!(f.ticket().publishing.unwrap().caller, coordinator);
+        let withdrawn = results(&f.host);
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(withdrawn[0].0, implementer);
+        assert!(
+            withdrawn[0].1.contains("was withdrawn")
+                && withdrawn[0].1.ends_with("Nothing was pushed."),
+            "{}",
+            withdrawn[0].1
+        );
+        // A different description replaces it too.
+        let ticket = f.ticket.clone();
+        f.host
+            .publish_ticket(&coordinator, &ticket, Some("Fix it"), Some("Other words"))
+            .unwrap();
+        assert_ne!(waiting_item(&f).id, replaced.id);
+        assert!(remote.git_calls().is_empty());
+    }
+
+    #[test]
+    fn a_blocked_review_in_an_allowed_owners_repository_is_one_approval_for_the_commit() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        block_review(&mut f);
+        let head = f.head();
+        let (status, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+        assert!(step.is_none());
+        assert_eq!(status["reason"], "the review ended blocked");
+        assert!(remote.git_calls().is_empty());
+        let short = short_sha(&head).to_owned();
+        assert_eq!(
+            waiting_item(&f).prompt,
+            format!(
+                "Publish this ticket although its review ended blocked?\n\
+                 Repository: allowed-org/app · private · allowed-org is an allowed owner\n\
+                 Branch: wiffletree/fix-contrast\n\
+                 Commit: {short} · 2 commits · 2 files changed, 2 insertions(+)\n\
+                 Review: Cycle 2 ended blocked at {short}, after 1 of 3 rounds · Correctness failed\n\
+                 Open findings:\n\
+                 F4 · blocking · Correctness · src/f4.rs:412 · F4 is still wrong.\n\
+                 F6 · non-blocking · Correctness · src/f6.rs:412 · F6 is still wrong.\n\
+                 Would send: Push wiffletree/fix-contrast at {short} and open its pull request, \"Fix it\""
+            )
+        );
+        // Approving it runs the push and the pull request without a second item.
+        answer(&mut f, &remote, "approved");
+        assert_eq!(remote.branch(BRANCH), Some(head));
+        assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+        assert!(f.open_items().is_empty() && f.ticket().publishing.is_none());
+        assert!(results(&f.host)[0].1.contains("opened PR #45"));
+        // The approval covered that commit only: the next blocked commit asks again.
+        watch_open_pr(&mut f, 45);
+        let next = f.commit("c.txt", "three\n");
+        block_review(&mut f);
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let (status, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        assert!(step.is_none() && status["reason"] == "the review ended blocked");
+        let item = waiting_item(&f);
+        assert!(
+            item.prompt.ends_with(&format!(
+                "Would send: Push wiffletree/fix-contrast at {}",
+                short_sha(&next)
+            )),
+            "{}",
+            item.prompt
+        );
+    }
+
+    #[test]
+    fn a_blocked_review_where_the_owner_is_not_allowed_is_said_on_each_steps_item() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        block_review(&mut f);
+        let mut ticket = f.ticket();
+        // One verifier reported that it could not verify.
+        let verification = ticket.verification.as_mut().unwrap();
+        let mut tests = verification.rounds[0].verifiers[0].clone();
+        tests.session_id = "tester".into();
+        tests.focus = "Tests".into();
+        tests.result = VerifierResult::Blocked;
+        verification.rounds[0].verifiers.push(tests);
+        f.host.save_ticket(&ticket).unwrap();
+        let (status, _) = f.publish(&f.implementer.id.clone()).unwrap();
+        assert_eq!(status["reason"], "allowed-org is not an allowed owner");
+        for step in ["Push this branch to", "Open this pull request in"] {
+            let prompt = waiting_item(&f).prompt;
+            assert!(prompt.starts_with(step), "{prompt}");
+            assert!(
+                prompt.contains("Review: Cycle 2 ended blocked at"),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains("Correctness failed, Tests could not check"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("Did not check: Tests"), "{prompt}");
+            assert!(
+                prompt.contains("F4 · blocking") && prompt.contains("F6 · non-blocking"),
+                "{prompt}"
+            );
+            assert!(
+                !prompt.contains("F1 ") && !prompt.contains("F5 "),
+                "{prompt}"
+            );
+            assert!(!f.ticket().publishing.unwrap().blocked_review_approved);
+            answer(&mut f, &remote, "approved");
+        }
+        assert!(results(&f.host)[0].1.contains("opened PR #45"));
+    }
+
+    /// Marks the ticket's earlier PR #45 closed or merged, as the watcher would.
+    fn end_earlier_pr(f: &mut Fixture, state: PrState) {
+        watch_open_pr(f, 45);
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().state = state;
+        f.host.save_ticket(&ticket).unwrap();
+    }
+
+    #[test]
+    fn another_pull_request_after_a_closed_or_merged_one_always_asks() {
+        for (state, notice) in [
+            (
+                PrState::Closed,
+                "Earlier pull request: PR #45 was closed without merging",
+            ),
+            (PrState::Merged, "Earlier pull request: PR #45 was merged"),
+        ] {
+            let mut f = fixture();
+            let remote = remote(&f);
+            f.allow("allowed-org");
+            end_earlier_pr(&mut f, state);
+            // In an allowed owner's repository after a passed review, the push still runs
+            // without asking.
+            let (status, step) = f.publish(&f.coordinator.id.clone()).unwrap();
+            assert_eq!(status["status"], "publishing");
+            drive(&mut f, &remote, step);
+            assert_eq!(remote.branch(BRANCH), Some(f.head()));
+            assert!(remote.github.lock().unwrap().created.is_empty());
+            let item = waiting_item(&f);
+            assert!(
+                item.prompt
+                    .starts_with("Open this pull request in allowed-org/app?"),
+                "{}",
+                item.prompt
+            );
+            assert!(item.prompt.ends_with(notice), "{}", item.prompt);
+            assert!(item.prompt.contains("allowed-org is an allowed owner"));
+            answer(&mut f, &remote, "approved");
+            assert_eq!(remote.github.lock().unwrap().created.len(), 1);
+        }
+    }
+
+    #[test]
+    fn the_one_item_after_a_blocked_review_carries_the_earlier_pull_request() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        end_earlier_pr(&mut f, PrState::Closed);
+        block_review(&mut f);
+        f.publish(&f.coordinator.id.clone()).unwrap();
+        let prompt = waiting_item(&f).prompt;
+        assert!(
+            prompt.contains("Earlier pull request: PR #45 was closed without merging"),
+            "{prompt}"
+        );
+        answer(&mut f, &remote, "approved");
+        assert!(f.open_items().is_empty());
+        assert_eq!(remote.github.lock().unwrap().created.len(), 1);
     }
 }

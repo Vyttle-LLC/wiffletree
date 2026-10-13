@@ -114,11 +114,19 @@ pub(crate) fn is_check_in(operation: &str) -> bool {
         .iter()
         .any(|prefix| operation.starts_with(prefix))
 }
+/// Refuses an Inbox id only the host may use: its check-ins, and the approvals it draws with
+/// Approve and Deny, which an agent could otherwise raise in its own words.
 fn ensure_unreserved(operation: &str) -> Result<()> {
-    for prefix in [CHECK_IN, TURN_COUNT, LEFTOVER_PROCESS] {
+    for prefix in [
+        CHECK_IN,
+        TURN_COUNT,
+        LEFTOVER_PROCESS,
+        PUBLISH_PREFIX,
+        PERMISSION_PREFIX,
+    ] {
         ensure!(
             !operation.starts_with(prefix),
-            "IDs starting with \"{prefix}\" are reserved for workspace check-ins"
+            "IDs starting with \"{prefix}\" are reserved for the workspace"
         );
     }
     Ok(())

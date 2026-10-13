@@ -117,3 +117,114 @@ fn allowing_an_owner_is_a_client_command() {
         json!({"type":"set_owner_allowed","entry":"Sage-Social","allowed":true})
     );
 }
+
+fn entry(id: &str, status: EntryStatus) -> LedgerEntry {
+    LedgerEntry {
+        id: id.into(),
+        finding: Finding {
+            severity: Severity::NonBlocking,
+            location: "src/tree.rs:88".into(),
+            summary: "Matching is case-sensitive.".into(),
+            trigger: String::new(),
+            evidence: String::new(),
+        },
+        focus: "Correctness".into(),
+        cycle: 2,
+        round: 1,
+        status,
+        reason: None,
+    }
+}
+
+fn run(focus: &str, result: VerifierResult) -> VerifierRun {
+    VerifierRun {
+        session_id: focus.into(),
+        role: Role::Reviewer,
+        focus: focus.into(),
+        message_id: "m".into(),
+        result,
+        report_id: None,
+        reason: None,
+    }
+}
+
+#[test]
+fn open_findings_are_those_neither_fixed_nor_settled() {
+    let mut ticket: Ticket = serde_json::from_value(json!({
+        "id":"t","coordinator_id":"c","repository_id":"r","title":"T","brief":"B",
+        "worktree":"/w","branch":"wiffletree/t","state":"planned"
+    }))
+    .unwrap();
+    ticket.ledger = vec![
+        entry("F1", EntryStatus::Open),
+        entry("F2", EntryStatus::Untriaged),
+        entry("F3", EntryStatus::FixNow),
+        entry("F4", EntryStatus::Fixed),
+        entry("F5", EntryStatus::FollowUp),
+        entry("F6", EntryStatus::WontFix),
+    ];
+    let open: Vec<&str> = ticket
+        .open_findings()
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(open, ["F1", "F2", "F3"]);
+    assert_eq!(
+        ticket.ledger[0].heading(),
+        "F1 · non-blocking · Correctness · src/tree.rs:88"
+    );
+}
+
+#[test]
+fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
+    let round = |round, commit: &str, verifiers| VerificationRound {
+        round,
+        commit: commit.into(),
+        verifiers,
+    };
+    let passed = Verification {
+        cycle: 1,
+        max_rounds: 3,
+        outcome: VerificationOutcome::Passed,
+        rounds: vec![round(
+            1,
+            "9e03c1b7aa",
+            vec![
+                run("Tests", VerifierResult::Passed),
+                run("Correctness", VerifierResult::Passed),
+            ],
+        )],
+    };
+    assert_eq!(
+        passed.review_line("9e03c1b7aa"),
+        "Cycle 1 passed at this commit · Tests, Correctness"
+    );
+    assert_eq!(
+        passed.review_line("4c2a9f1000"),
+        "Cycle 1 passed at 9e03c1b, which has the same changes as this commit · Tests, Correctness"
+    );
+    assert!(passed.unchecked().is_empty());
+    let blocked = Verification {
+        cycle: 2,
+        max_rounds: 3,
+        outcome: VerificationOutcome::Blocked,
+        rounds: vec![
+            round(1, "aaaaaaa1", vec![run("Tests", VerifierResult::Failed)]),
+            round(
+                2,
+                "c81f04d9",
+                vec![
+                    run("Tests", VerifierResult::Passed),
+                    run("Correctness", VerifierResult::Failed),
+                    run("Regressions", VerifierResult::Blocked),
+                    run("Style", VerifierResult::Pending),
+                ],
+            ),
+        ],
+    };
+    assert_eq!(
+        blocked.review_line("c81f04d9"),
+        "Cycle 2 ended blocked at c81f04d, after 2 of 3 rounds · Tests passed, Correctness failed, Regressions could not check, Style never reported"
+    );
+    assert_eq!(blocked.unchecked(), ["Regressions", "Style"]);
+}
