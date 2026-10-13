@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Reordering and grouping projects study</title>
+<!--
+  Static study for ordering and grouping projects in the sidebar. No script, no network.
+  (1) Today's flat list. (2) Projects grouped by the first word of their names. (3) Dragging to reorder,
+  and the Group button above the list that turns grouping on and off.
+  Project names, figures and states are sample data; nothing here is implemented behavior.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--on-accent:#FFFDF7;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--on-accent:#1A262D;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font:500 14px/1.3 inherit;margin:0}
+p{margin:0}
+svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:780px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.studies{display:grid;grid-template-columns:repeat(3,minmax(0,300px));gap:28px;align-items:start}
+.study-head{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+.tag{font-size:10.5px;padding:1px 7px;border-radius:999px;background:var(--focus);color:var(--base)}
+.caption{margin:10px 2px 0;font-size:11.5px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:500}
+/* Sidebar, mirroring sidebar.rs: surface background, 52px brand bar, eyebrow, 13px rows. */
+.sidebar{background:var(--surface);border:1px solid var(--edge);border-radius:12px;overflow:hidden;box-shadow:0 12px 32px color-mix(in srgb,var(--text) 10%,transparent);padding-bottom:10px}
+.brand{height:52px;padding:0 12px 0 16px;display:flex;align-items:center;justify-content:space-between}
+.wordmark{font:400 19px/1 Georgia,"Times New Roman",serif;letter-spacing:-.03em}
+.wordmark i{font-style:normal;color:var(--accent)}
+.section{padding:10px 12px 4px 16px;display:flex;align-items:center;justify-content:space-between}
+.ghost{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--subtle);padding:2px 6px;border-radius:6px}
+.row{position:relative;display:flex;align-items:center;gap:6px;min-height:30px;margin:0 6px;padding:0 8px 0 4px;border-radius:7px}
+.row.selected{background:var(--overlay)}
+.row .chevron{width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:var(--subtle)}
+.row .chevron svg{width:12px;height:12px}
+.row .icon{color:var(--subtle);display:flex}
+.row.selected .icon{color:var(--text)}
+.name{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.figure{font:10.5px/1 ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.track{position:absolute;left:28px;right:8px;bottom:1px;height:2px;border-radius:2px;background:color-mix(in srgb,var(--edge) 55%,transparent)}
+.track b{display:block;height:100%;border-radius:2px;background:var(--focus)}
+.track b.done{background:var(--green)}.track b.blocked{background:var(--red)}
+.in-group{padding-left:18px}
+.stack{display:flex;flex-direction:column;gap:14px}
+.label{margin:0 2px 6px}
+.ghost.pressed{background:var(--overlay);color:var(--text)}
+.ticket{padding-left:44px;min-height:26px;font-size:12px;color:var(--subtle)}
+.ticket .name{font-weight:400}
+.group{min-height:28px;margin-top:6px;color:var(--subtle);font-size:12px}
+.group .name{font-weight:500;letter-spacing:.01em}
+.group .count{font:10.5px/1 ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+.dim{opacity:.55}
+/* Status glyphs, 12px, matching the sidebar's working, done, blocked and paused marks. */
+.glyph{width:12px;height:12px;border-radius:50%;flex:none;display:inline-block}
+.glyph.working{border:2px solid var(--focus);border-right-color:transparent}
+.glyph.done{background:var(--green)}
+.glyph.blocked{background:var(--red);border-radius:3px}
+.glyph.paused{border:2px solid var(--muted)}
+.needs-you{font-size:10px;line-height:1;padding:3px 6px;border-radius:999px;background:var(--accent);color:var(--on-accent);flex:none}
+/* Drag states. */
+.dragging{opacity:.4}
+.insertion{height:2px;margin:1px 14px 1px 28px;border-radius:2px;background:var(--accent)}
+.ghost-row{margin:6px 22px 2px 40px;background:var(--surface);border:1px solid var(--edge);box-shadow:0 6px 16px color-mix(in srgb,var(--text) 18%,transparent);transform:rotate(-1.2deg)}
+/* Popup menus, mirroring the project actions menu. */
+.menus{display:flex;flex-direction:column;gap:14px}
+.menu-pair{display:flex;gap:6px;align-items:flex-start}
+.menu{background:var(--surface);border:1px solid var(--edge);border-radius:9px;padding:4px;min-width:150px;box-shadow:0 8px 22px color-mix(in srgb,var(--text) 12%,transparent);font-size:12.5px}
+.item{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:6px;white-space:nowrap}
+.item.hover{background:var(--overlay)}
+.item .end{margin-left:auto;color:var(--muted);font-size:11px;display:flex}
+.item svg{color:var(--subtle)}
+.rule{height:1px;margin:4px 0;background:color-mix(in srgb,var(--edge) 60%,transparent)}
+.new{outline:2px dashed color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:2px}
+.menu-label{margin:0 2px 6px}
+.notes{max-width:780px;margin-top:30px;font-size:12px;color:var(--subtle)}
+.notes b{color:var(--text);font-weight:500}
+.notes li{margin:5px 0}
+@media(max-width:1020px){.studies{grid-template-columns:minmax(0,320px)}body{padding:16px}}
+</style>
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+  <symbol id="down" viewBox="0 0 14 14"><path d="M3 5l4 4 4-4"/></symbol>
+  <symbol id="right" viewBox="0 0 14 14"><path d="M5 3l4 4-4 4"/></symbol>
+  <symbol id="project" viewBox="0 0 14 14"><rect x="2" y="2.5" width="10" height="9" rx="2"/><path d="M2 5.5h10"/></symbol>
+  <symbol id="folder" viewBox="0 0 14 14"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.2 1.5h4.8a1 1 0 0 1 1 1V10.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="plus" viewBox="0 0 14 14"><path d="M7 2.5v9M2.5 7h9"/></symbol>
+  <symbol id="archive" viewBox="0 0 14 14"><rect x="1.5" y="2.5" width="11" height="3" rx="1"/><path d="M2.5 5.5v5a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-5M5.5 8h3"/></symbol>
+  <symbol id="rename" viewBox="0 0 14 14"><path d="M2.5 11.5l.6-2.6 6-6 2 2-6 6zM8 4l2 2"/></symbol>
+  <symbol id="up" viewBox="0 0 14 14"><path d="M7 11.5v-9M3.5 6L7 2.5 10.5 6"/></symbol>
+  <symbol id="move-down" viewBox="0 0 14 14"><path d="M7 2.5v9M3.5 8L7 11.5 10.5 8"/></symbol>
+  <symbol id="check" viewBox="0 0 14 14"><path d="M3 7.5l2.6 2.6L11 4.5"/></symbol>
+  <symbol id="trash" viewBox="0 0 14 14"><path d="M2.5 4h9M5.5 4V2.5h3V4M3.5 4l.6 7.5h5.8L10.5 4"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · project order and groups</div>
+  <h1>Grouped by first word, in the order you choose</h1>
+  <p>Today the sidebar lists every project newest first and nothing can be moved. In this study you drag projects into the order you want, and a Group button above the list shows projects whose names start with the same first word together under that word. <b style="color:var(--text);font-weight:500">1</b> is today. <b style="color:var(--text);font-weight:500">2</b> is the same nine projects with grouping on. <b style="color:var(--text);font-weight:500">3</b> shows dragging and the button. New pieces carry a dashed outline. All data is simulated.</p>
+</header>
+
+<main class="studies">
+  <section>
+    <div class="study-head"><h2>1 · Today</h2></div>
+    <div class="sidebar"><div class="brand"><span class="wordmark">wiffle<i>tree</i></span><span class="ghost"><svg><use href="#plus"/></svg></span></div><div class="section"><span class="eyebrow">Projects · 9</span><span class="ghost"><svg style="width:13px;height:13px"><use href="#archive"/></svg>Archived</span></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Trial reminder copy</span><span class="figure">0/1</span><span class="glyph paused"></span><i class="track"><b style="width:0%"></b></i></div>
+      <div class="row selected"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">wiffletree: Need to reorder projects</span><span class="figure">1/4</span><span class="glyph working"></span><i class="track"><b style="width:25%"></b></i></div>
+      <div class="row ticket" style="padding-left:30px"><span class="name">wiffletree · Sidebar groups</span><span class="glyph working" style="width:10px;height:10px"></span></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">infra: Terraform state split</span><span class="figure">0/3</span><span class="glyph blocked"></span><i class="track"><b class="blocked" style="width:12%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">watch: Call relay reconnect</span><span class="figure">3/6</span><span class="glyph working"></span><i class="track"><b style="width:50%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">wiffletree: Repository owners</span><span class="figure">2/5</span><span class="needs-you">1</span><i class="track"><b style="width:40%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">ci-runners: Autoscaling</span><span class="figure">4/4</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Watch complications refresh</span><span class="figure">1/2</span><span class="glyph paused"></span><i class="track"><b style="width:50%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">infra: Neptune upgrade</span><span class="figure">2/2</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">wiffletree: Compact context</span><span class="figure">3/3</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+    </div>
+    <p class="caption"><b>Newest first, nothing moves.</b> Related projects are scattered, and the repeated “wiffletree” at the start of each name pushes the part that differs out of view.</p>
+  </section>
+
+  <section>
+    <div class="study-head"><h2>2 · Grouping on</h2><span class="tag">Proposed</span></div>
+    <div class="sidebar"><div class="brand"><span class="wordmark">wiffle<i>tree</i></span><span class="ghost"><svg><use href="#plus"/></svg></span></div><div class="section"><span class="eyebrow">Projects · 9</span><span style="display:flex;gap:2px"><span class="ghost pressed new"><svg style="width:13px;height:13px"><use href="#folder"/></svg>Group</span><span class="ghost"><svg style="width:13px;height:13px"><use href="#archive"/></svg>Archived</span></span></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Trial reminder copy</span><span class="figure">0/1</span><span class="glyph paused"></span><i class="track"><b style="width:0%"></b></i></div>
+      <div class="row group new"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">wiffletree</span><span class="count">3</span></div>
+      <div class="row in-group selected"><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Need to reorder projects</span><span class="figure">1/4</span><span class="glyph working"></span><i class="track" style="left:46px"><b style="width:25%"></b></i></div>
+      <div class="row ticket"><span class="name">wiffletree · Sidebar groups</span><span class="glyph working" style="width:10px;height:10px"></span></div>
+      <div class="row in-group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Repository owners</span><span class="figure">2/5</span><span class="needs-you">1</span><i class="track" style="left:46px"><b style="width:40%"></b></i></div>
+      <div class="row in-group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Compact context</span><span class="figure">3/3</span><span class="glyph done"></span><i class="track" style="left:46px"><b class="done" style="width:100%"></b></i></div>
+      <div class="row group "><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">watch</span><span class="count">2</span></div>
+      <div class="row in-group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Call relay reconnect</span><span class="figure">3/6</span><span class="glyph working"></span><i class="track" style="left:46px"><b style="width:50%"></b></i></div>
+      <div class="row in-group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">complications refresh</span><span class="figure">1/2</span><span class="glyph paused"></span><i class="track" style="left:46px"><b style="width:50%"></b></i></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">ci-runners: Autoscaling</span><span class="figure">4/4</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+      <div class="row group new"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">infra</span><span class="count">2</span><span class="glyph blocked"></span></div>
+    </div>
+    <p class="caption"><b>The first word decides the group.</b> “watch: Call relay reconnect” and “Watch complications refresh” both start with “watch”, colon or not, so they sit together. “ci-runners: Autoscaling” shares its first word with nothing, so it stays an ordinary row. A collapsed group, like “infra”, still shows the most urgent state inside it.</p>
+  </section>
+
+  <section>
+    <div class="study-head"><h2>3 · Dragging and the button</h2></div>
+    <div class="stack">
+      <div>
+        <p class="eyebrow label">A project, inside its group</p>
+        <div class="sidebar" style="padding:6px 0 8px">
+      <div class="row group "><span class="chevron"><svg><use href="#down"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">wiffletree</span><span class="count">3</span></div>
+      <div class="insertion" style="margin-left:46px"></div>
+      <div class="row ghost-row"><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Compact context</span></div>
+      <div class="row in-group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Need to reorder projects</span><span class="figure">1/4</span><span class="glyph working"></span><i class="track" style="left:46px"><b style="width:25%"></b></i></div>
+      <div class="row in-group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Repository owners</span><span class="figure">2/5</span><span class="needs-you">1</span><i class="track" style="left:46px"><b style="width:40%"></b></i></div>
+      <div class="row in-group dragging"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Compact context</span><span class="figure">3/3</span><span class="glyph done"></span><i class="track" style="left:46px"><b class="done" style="width:100%"></b></i></div>
+    </div>
+      </div>
+      <div>
+        <p class="eyebrow label">A whole group</p>
+        <div class="sidebar" style="padding:6px 0 8px">
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Trial reminder copy</span><span class="figure">0/1</span><span class="glyph paused"></span><i class="track"><b style="width:0%"></b></i></div>
+      <div class="insertion"></div>
+      <div class="row ghost-row" style="margin-left:22px"><span class="icon"><svg><use href="#folder"/></svg></span><span class="name" style="font-weight:500">watch</span><span class="count" style="font:10.5px/1 ui-monospace,monospace;color:var(--muted)">2</span></div>
+      <div class="row group "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">wiffletree</span><span class="count">3</span><span class="needs-you">1</span></div>
+      <div class="row group dragging"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#folder"/></svg></span><span class="name">watch</span><span class="count">2</span><span class="glyph working"></span></div>
+      <div class="row "><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">ci-runners: Autoscaling</span><span class="figure">4/4</span><span class="glyph done"></span><i class="track"><b class="done" style="width:100%"></b></i></div>
+    </div>
+      </div>
+      <div>
+        <p class="eyebrow label">Grouping off</p>
+        <div class="sidebar" style="padding:0 0 8px">
+          <div class="section"><span class="eyebrow">Projects · 9</span><span style="display:flex;gap:2px"><span class="ghost"><svg style="width:13px;height:13px"><use href="#folder"/></svg>Group</span><span class="ghost"><svg style="width:13px;height:13px"><use href="#archive"/></svg>Archived</span></span></div>
+          <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">Trial reminder copy</span><span class="figure">0/1</span><span class="glyph paused"></span><i class="track"><b style="width:0%"></b></i></div>
+          <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">wiffletree: Need to reorder projects</span><span class="figure">1/4</span><span class="glyph working"></span><i class="track"><b style="width:25%"></b></i></div>
+          <div class="row"><span class="chevron"><svg><use href="#right"/></svg></span><span class="icon"><svg><use href="#project"/></svg></span><span class="name">wiffletree: Repository owners</span><span class="figure">2/5</span><span class="needs-you">1</span><i class="track"><b style="width:40%"></b></i></div>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>Drag to reorder.</b> The rust line shows where the row lands: “Compact context” moves to the top of its group, and “watch” moves above “wiffletree”. <b>Group starts on.</b> Click it to see one flat list with full names, in the same order, where you can still drag every project.</p>
+  </section>
+</main>
+
+<section class="notes">
+  <div class="eyebrow">How it behaves</div>
+  <ul>
+    <li><b>Dragging always works.</b> With grouping off, you drag projects in one flat list. With it on, you drag projects inside their group, and drag groups and ungrouped projects among each other.</li>
+    <li><b>Grouping is the Group button above the project list, on to begin with.</b> Turning it on or off changes only how the list is drawn; your order is kept either way.</li>
+    <li><b>The group is the first word of a project's name.</b> Capitals and a colon or other punctuation after the word do not matter, so “Wiffletree: a” and “wiffletree b” share a group.</li>
+    <li><b>A group appears only when two or more projects share a first word.</b> Every other project stays an ordinary row with its full name.</li>
+    <li><b>Inside a group, a row drops the repeated word.</b> The full name still shows on hover and as the conversation's title.</li>
+    <li><b>Groups look after themselves.</b> You never create, rename or delete one. To move a project to another group, rename the project. A project cannot be dragged out of its group, because its name decides where it belongs.</li>
+    <li><b>New projects</b> land at the top, as today. Once a project's name puts it in a group, it joins the top of that group.</li>
+    <li><b>Existing projects</b> keep today's newest-first order until you move them; a group sits where its topmost project is.</li>
+    <li><b>A collapsed group</b> shows how many projects it holds and the most urgent state inside: needs you, then blocked, then working.</li>
+    <li><b>Archiving is unchanged.</b> Archived projects reappear in their group, dimmed, when Archived is on.</li>
+    <li><b>The order is saved with the workspace</b>, so it survives a relaunch. The Group button's state is saved with this app's other view choices, such as appearance.</li>
+  </ul>
+</section>
+</body>
+</html>

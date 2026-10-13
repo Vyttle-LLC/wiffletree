@@ -1,5 +1,6 @@
 //! Store schema 6 retires repository coordinators. The fixture is a schema-5 store, as the
-//! previous release left it, with an active team and an archived one.
+//! previous release left it, with an active team and an archived one. Schema 7 adds the manual
+//! order of projects.
 mod common;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -269,7 +270,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
 
     let mut host = Host::open_set_up(&f.home).unwrap();
 
-    assert_eq!(version(&f.home), 6);
+    assert_eq!(version(&f.home), 7);
     assert!(f.home.join("workspace.sqlite3.pre-flatten").exists());
     // Ticket ids, titles, briefs, states, worktrees, branches, sessions, runtimes, runs and
     // message bodies are as they were; only re-sent copies and the notice are new.
@@ -408,7 +409,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
         std::fs::read(f.home.join("workspace.sqlite3.pre-flatten")).unwrap(),
         backup
     );
-    assert_eq!(version(&f.home), 6);
+    assert_eq!(version(&f.home), 7);
     assert_eq!(
         host.activity(&f.main.project_id, None, 100)
             .unwrap()
@@ -457,7 +458,7 @@ fn a_failure_mid_migration_leaves_schema_5_for_a_full_retry() {
     db.execute_batch("DROP TRIGGER fail_second").unwrap();
     drop(db);
     let host = Host::open_set_up(&f.home).unwrap();
-    assert_eq!(version(&f.home), 6);
+    assert_eq!(version(&f.home), 7);
     assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
     assert_eq!(host.ticket(&f.closed.id).unwrap().coordinator_id, f.main.id);
 }
@@ -600,7 +601,7 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
     drop(db);
 
     let host = Host::open_set_up(&f.home).unwrap();
-    assert_eq!(version(&f.home), 6);
+    assert_eq!(version(&f.home), 7);
     // Schema 6 ran first: the team is retired and its ticket belongs to the coordinator.
     assert!(host.session(f.team).unwrap().archived);
     assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
@@ -660,4 +661,70 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
             .unwrap(),
         before
     );
+}
+
+/// A schema-6 store, as the previous release left it: three projects and no stored order.
+fn unordered_store() -> (tempfile::TempDir, [Project; 3]) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path()).unwrap();
+    let projects = ["Calls", "Billing", "Alerts"].map(|name| host.create_project(name).unwrap());
+    host.send("kept", None, &host.sessions().unwrap()[0].id, "Keep this")
+        .unwrap();
+    drop(host);
+    raw(directory.path())
+        .execute_batch("ALTER TABLE projects DROP COLUMN position; PRAGMA user_version = 6;")
+        .unwrap();
+    (directory, projects)
+}
+
+#[test]
+fn an_existing_store_opens_newest_first_and_loses_nothing() {
+    let (directory, [calls, billing, alerts]) = unordered_store();
+    let home = directory.path();
+    let rows = |sql: &str| -> Vec<String> {
+        let db = raw(home);
+        let mut statement = db.prepare(sql).unwrap();
+        let rows = statement.query_map([], |r| r.get(0)).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    };
+    let stored = || {
+        (
+            rows("SELECT data FROM projects ORDER BY rowid"),
+            rows("SELECT data FROM sessions ORDER BY rowid"),
+            rows("SELECT id||':'||body FROM messages ORDER BY sequence"),
+        )
+    };
+    let before = stored();
+
+    let mut host = Host::open_set_up(home).unwrap();
+
+    assert_eq!(version(home), 7);
+    assert_eq!(stored(), before);
+    let order = |host: &Host| -> Vec<String> {
+        let projects = host.projects().unwrap();
+        projects.into_iter().map(|p| p.name).collect()
+    };
+    assert_eq!(order(&host), ["Alerts", "Billing", "Calls"]);
+    // The migrated order takes new projects and moves like any other.
+    host.create_project("Dialer").unwrap();
+    host.move_projects(std::slice::from_ref(&calls.id), Some(&alerts.id))
+        .unwrap();
+    assert_eq!(order(&host), ["Dialer", "Calls", "Alerts", "Billing"]);
+    drop(host);
+
+    // Reopening migrates nothing again.
+    let host = Host::open_set_up(home).unwrap();
+    assert_eq!(version(home), 7);
+    assert_eq!(order(&host), ["Dialer", "Calls", "Alerts", "Billing"]);
+    assert_eq!(host.project(&billing.id).unwrap().name, "Billing");
+}
+
+#[test]
+fn a_store_from_a_newer_application_is_refused() {
+    let (directory, _projects) = unordered_store();
+    raw(directory.path())
+        .execute_batch("PRAGMA user_version = 8;")
+        .unwrap();
+    assert!(Host::open_set_up(directory.path()).is_err());
+    assert_eq!(version(directory.path()), 8);
 }
