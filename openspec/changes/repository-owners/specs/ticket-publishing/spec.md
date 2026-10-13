@@ -66,7 +66,7 @@ Before pushing or asking the human, the host SHALL refuse a publish unless all o
 - **THEN** nothing is pushed and the caller is told
 
 ### Requirement: The host never overwrites commits it did not push
-The host SHALL record the commit it last pushed for each ticket. It SHALL push a ticket's branch only when GitHub's branch is absent, is behind the commit being pushed, or is at the commit the host last pushed, in which case it MAY replace it, as after a squash or a clean rebase. Otherwise it SHALL refuse and push nothing.
+The host SHALL record the commit it last pushed for each ticket. It SHALL push a ticket's branch only when GitHub's branch is absent, is behind the commit being pushed, or is at a commit the host may replace, as after a squash or a clean rebase. The host MAY replace GitHub's branch head only when it is the commit the host last pushed, or a commit that was once the tip of this ticket's branch in this repository on this machine, as the branch's reflog records, such as one an agent's shell pushed before the host published tickets. Otherwise it SHALL refuse and push nothing.
 
 #### Scenario: New branch
 - **WHEN** GitHub has no branch for the ticket
@@ -76,12 +76,16 @@ The host SHALL record the commit it last pushed for each ticket. It SHALL push a
 - **WHEN** GitHub's branch is at the commit the host last pushed and the worktree was cleanly rebased
 - **THEN** the host replaces GitHub's branch with the rebased commit
 
+#### Scenario: Pushed from a shell before the host published tickets
+- **WHEN** an agent's shell pushed the ticket's branch earlier, the host has recorded no push for the ticket, and the worktree was then cleanly rebased
+- **THEN** the host replaces GitHub's branch with the rebased commit, because GitHub's head was once this branch's tip here
+
 #### Scenario: Someone else's commits
 - **WHEN** GitHub's branch has a commit the host did not push and the worktree does not contain
 - **THEN** the host refuses, pushes nothing, and says the branch has commits Wiffletree did not push
 
 ### Requirement: Only the ticket's branch is pushed
-A push by the host SHALL create or update exactly one ref at the destination, the ticket's branch, whatever the repository's or the user's Git configuration says. It SHALL NOT send tags, other branches or submodule commits, and SHALL NOT push to any destination other than the one push URL it checked.
+A push by the host SHALL create or update exactly one ref at the destination, the ticket's branch, whatever the repository's or the user's Git configuration says. It SHALL NOT send tags, other branches or submodule commits, and SHALL NOT push to any destination other than the one push URL it checked. The host SHALL read GitHub's branch from, and push to, the push URL recorded in the request itself, never to a remote by name, so the destination cannot change between the check and the send.
 
 #### Scenario: Tags are configured to follow
 - **WHEN** Git is configured to push annotated tags along with commits and the reviewed commit has a tag GitHub does not have
@@ -94,6 +98,10 @@ A push by the host SHALL create or update exactly one ref at the destination, th
 #### Scenario: Other refspecs are configured
 - **WHEN** the remote is configured to push all branches by default
 - **THEN** the destination gains only the ticket's branch
+
+#### Scenario: Origin is repointed after the check
+- **WHEN** `origin`'s URL is changed to another repository after the host has checked the request and before Git sends anything
+- **THEN** whatever is pushed goes to the URL the request recorded, and nothing reaches the new URL
 
 ### Requirement: The owner is confirmed with GitHub before anything is sent
 Immediately before the host pushes or opens a pull request, it SHALL ask GitHub which owner and name the repository currently has and whether it is a fork, read-only, and SHALL compare the answer with the repository the request named. If they differ, the host SHALL send nothing, SHALL record the new answer, and SHALL tell the caller where the repository now lives; a publish requested after that SHALL be decided on the new owner. If GitHub gives no answer, the host SHALL send nothing and SHALL tell the caller why, whether or not the human approved the step.
@@ -111,7 +119,7 @@ Immediately before the host pushes or opens a pull request, it SHALL ask GitHub 
 - **THEN** nothing is pushed and the caller is told GitHub could not confirm the repository
 
 ### Requirement: An allowed owner's repository publishes without asking after a passed review
-When the ticket's latest verification cycle passed and its repository publishes without asking (see repository-owners), the host SHALL run every step of the publish without asking the human.
+When the ticket's latest verification cycle passed and its repository publishes without asking (see repository-owners), the host SHALL run every step of the publish without asking the human, except opening another pull request for a ticket whose earlier one was closed or merged (see below).
 
 #### Scenario: Allowed owner, passed review
 - **WHEN** `publish_ticket` is called for a ticket in an allowed owner's repository whose latest cycle passed
@@ -165,11 +173,15 @@ When the ticket's repository does not publish without asking, the host SHALL NOT
 - **THEN** the item for A is withdrawn and a new one is raised for B
 
 ### Requirement: Only the host creates publish approvals
-Only the host SHALL be able to create an Inbox item that is drawn or handled as a publish approval. An agent's request to raise an Inbox item under the identifier prefix the host uses for publish approvals SHALL be refused, and no item SHALL be created. The host SHALL push or open a pull request on an approval only when the answered item is the one recorded for a ticket's waiting publish request, and SHALL take the ticket, the step and the commit from that stored request, never from anything an agent supplied.
+Only the host SHALL be able to create an Inbox item that is drawn or handled as a publish approval. An agent's request to raise an Inbox item under the identifier prefix the host uses for publish approvals SHALL be refused, and no item SHALL be created. The prefix the host uses for provider permission approvals SHALL be refused in the same way, since such an item is also drawn as an approval. The host SHALL push or open a pull request on an approval only when the answered item is the one recorded for a ticket's waiting publish request, and SHALL take the ticket, the step and the commit from that stored request, never from anything an agent supplied.
 
 #### Scenario: A coordinator tries to create a publish approval
 - **WHEN** a coordinator calls `ask_user` with a request id beginning `publish:`
 - **THEN** the call is refused, no Inbox item appears, and nothing is pushed
+
+#### Scenario: A coordinator tries to create a permission approval
+- **WHEN** a coordinator calls `ask_user` with a request id beginning `permission:`
+- **THEN** the call is refused and no Inbox item appears
 
 #### Scenario: An approval that no request names
 - **WHEN** an Inbox item with a `publish:` identifier exists that no ticket's waiting publish request names, and it is answered "approved"
@@ -198,12 +210,27 @@ When the ticket's latest verification cycle ended blocked, the host SHALL NOT pu
 - **WHEN** a later commit's cycle also ends blocked and `publish_ticket` is called
 - **THEN** the human is asked again for that commit
 
+### Requirement: Another pull request after a closed or merged one needs the human's approval
+When the ticket's pull request, as the watcher last read it, was closed or merged, the host SHALL NOT open another pull request for the ticket without the human's approval in the Inbox, in every repository, including an allowed owner's after a passed review. The item SHALL name the earlier pull request and say whether it was closed or merged. The push before it SHALL follow the repository's ordinary rule. Where one approval already covers the commit's push and pull request, as after a blocked review in an allowed owner's repository, that item SHALL carry the same notice and no further item SHALL be raised.
+
+#### Scenario: Closed pull request in an allowed owner's repository
+- **WHEN** PR #45 of a ticket in an allowed owner's repository was closed without merging, a fix passes review and `publish_ticket` is called with a title and description
+- **THEN** the host pushes the branch without asking, and opening the new pull request waits for an approval that says PR #45 was closed
+
+#### Scenario: Merged pull request
+- **WHEN** a ticket's pull request was merged and `publish_ticket` is called for further work on the ticket
+- **THEN** no pull request is opened until the human approves an item that says the earlier one was merged
+
 ### Requirement: Results arrive as messages from Wiffletree
-`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
+`publish_ticket` SHALL return at once with a refusal, the steps the host is running, or the step that waits for the human and why. Every accepted request SHALL end with exactly one message to its caller, labelled as coming from Wiffletree, that starts the caller's next turn: when its steps have finished or failed, or it was denied, withdrawn or interrupted. The human's answer to a publish approval SHALL NOT also be sent to the caller as an Inbox answer: the request's own message is the only one. A later request SHALL get its own message, also when it is for the same ticket and commit or comes from the ticket's other permitted caller. A success SHALL name the branch, the commit, the repository and the pull request's number and URL. A failure SHALL carry the reason and SHALL say what, if anything, was sent. A step interrupted by a host restart SHALL be reported to the caller as interrupted, and calling `publish_ticket` again SHALL be safe.
 
 #### Scenario: Success
 - **WHEN** the host has pushed a ticket's branch and opened PR #45
 - **THEN** the caller gets one message from Wiffletree naming the branch, the commit, the repository and PR #45 with its URL
+
+#### Scenario: Denial is one message
+- **WHEN** the human denies a push approval
+- **THEN** the caller gets the request's one message from Wiffletree and no separate "Human answer" message
 
 #### Scenario: Push fails
 - **WHEN** `git push` fails because the host has no credentials for the remote
