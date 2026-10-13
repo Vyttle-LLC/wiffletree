@@ -617,6 +617,60 @@ pub fn project_move(entries: &[Entry], dragged: &Movable, drop: &Drop) -> Option
     })
 }
 
+/// How near an edge of the list a dragged row starts scrolling it, and the most one tick scrolls.
+const SCROLL_ZONE: f32 = 32.;
+const SCROLL_STEP: f32 = 12.;
+
+/// How far one tick scrolls the list while a row is dragged with the pointer at `pointer`
+/// between the list's `top` and `bottom` edges: up when negative, down when positive, and
+/// further the nearer the edge. Zero away from both edges and outside the list.
+pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
+    if pointer < top || pointer > bottom {
+        return 0.;
+    }
+    let step = |from_edge: f32| ((SCROLL_ZONE - from_edge) / SCROLL_ZONE * SCROLL_STEP).ceil();
+    if pointer - top < SCROLL_ZONE {
+        -step(pointer - top)
+    } else if bottom - pointer < SCROLL_ZONE {
+        step(bottom - pointer)
+    } else {
+        0.
+    }
+}
+
+/// How the press that may become a drag began on its row.
+#[derive(Clone, Copy, Default)]
+pub struct RowPress {
+    pub on_chevron: bool,
+    pub click_count: usize,
+}
+
+/// What releasing a dragged row over itself does.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OwnRelease {
+    /// The drag left its row and came back: it is cancelled.
+    Nothing,
+    Click,
+    /// The second click of a double-click.
+    Rename,
+    /// Collapses or expands, as a click on the chevron does.
+    Toggle,
+}
+
+/// A drag that never left its row is a click that moved, so it does what that click would have
+/// done still; `on_chevron` is whether it was released over the row's chevron.
+pub fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRelease {
+    if left_row {
+        OwnRelease::Nothing
+    } else if press.on_chevron && on_chevron {
+        OwnRelease::Toggle
+    } else if press.click_count == 2 {
+        OwnRelease::Rename
+    } else {
+        OwnRelease::Click
+    }
+}
+
 /// Projects in the host's order, under their group's row while `grouped`; a collapsed group
 /// hides its projects. Archived sessions appear only when `show_archived`; a ticket whose
 /// agents are all archived, such as a closed one, goes with them.
@@ -1683,5 +1737,53 @@ mod tests {
         let closed = pr(S::Closed, C::Failure, M::Dirty);
         assert_eq!(line(&closed), "#142 · closed");
         assert_eq!(pr_sentence(&closed), "PR #142 closed without merging");
+    }
+
+    #[test]
+    fn a_dragged_row_scrolls_the_list_only_near_its_edges_and_faster_nearer_them() {
+        let (top, bottom) = (100., 500.);
+        assert_eq!(edge_scroll(300., top, bottom), 0.);
+        assert_eq!(edge_scroll(100. + SCROLL_ZONE, top, bottom), 0.);
+        assert_eq!(edge_scroll(500. - SCROLL_ZONE, top, bottom), 0.);
+        // Just inside a zone still moves, so a resting pointer reaches the end.
+        assert_eq!(edge_scroll(131., top, bottom), -1.);
+        assert_eq!(edge_scroll(469., top, bottom), 1.);
+        assert_eq!(edge_scroll(116., top, bottom), -SCROLL_STEP / 2.);
+        assert_eq!(edge_scroll(100., top, bottom), -SCROLL_STEP);
+        assert_eq!(edge_scroll(500., top, bottom), SCROLL_STEP);
+        // Past either edge the pointer has left the list.
+        assert_eq!(edge_scroll(99., top, bottom), 0.);
+        assert_eq!(edge_scroll(501., top, bottom), 0.);
+    }
+
+    #[test]
+    fn a_release_on_the_drags_own_row_is_the_click_it_would_have_been_or_a_cancel() {
+        let press = |on_chevron, click_count| RowPress {
+            on_chevron,
+            click_count,
+        };
+        assert_eq!(
+            own_release(false, press(false, 1), false),
+            OwnRelease::Click
+        );
+        assert_eq!(
+            own_release(false, press(false, 2), false),
+            OwnRelease::Rename
+        );
+        assert_eq!(own_release(false, press(true, 1), true), OwnRelease::Toggle);
+        // The chevron takes a double-click as two clicks.
+        assert_eq!(own_release(false, press(true, 2), true), OwnRelease::Toggle);
+        // Pressed on the chevron and released beside it, or the reverse, is a click on the row.
+        assert_eq!(own_release(false, press(true, 1), false), OwnRelease::Click);
+        assert_eq!(own_release(false, press(false, 1), true), OwnRelease::Click);
+        // A third click is not another rename.
+        assert_eq!(
+            own_release(false, press(false, 3), false),
+            OwnRelease::Click
+        );
+        for (on_chevron, click_count) in [(false, 1), (false, 2), (true, 1)] {
+            let press = press(on_chevron, click_count);
+            assert_eq!(own_release(true, press, on_chevron), OwnRelease::Nothing);
+        }
     }
 }

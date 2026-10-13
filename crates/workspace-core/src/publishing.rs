@@ -111,6 +111,19 @@ pub fn ended_pull_request_notice(ticket: &Ticket) -> Option<String> {
     })
 }
 
+/// The card for the step that waits on its Inbox item, as the rules stand now. An owner allowed
+/// since the item was raised no longer asks; the step still waits for this answer.
+pub fn waiting_card(
+    ticket: &Ticket,
+    request: &PublishRequest,
+    repository: &Repository,
+    allowed: &[String],
+) -> PublishCard {
+    let ask =
+        publish_ask(ticket, request, repository, allowed).unwrap_or(PublishAsk::EndedPullRequest);
+    publish_card(ticket, request, repository, ask)
+}
+
 /// The card for the request's next step, which waits for `ask`.
 pub fn publish_card(
     ticket: &Ticket,
@@ -130,10 +143,7 @@ pub fn publish_card(
         (_, Some(fork)) if fork.contains('/') => format!("{fork} is an allowed fork"),
         (_, Some(owner)) => format!("{owner} is an allowed owner"),
     };
-    let open_pr = ticket
-        .pull_request
-        .as_ref()
-        .filter(|pr| pr.state == PrState::Open);
+    let open_pr = ticket.open_pull_request();
     let covers_commit = ask == PublishAsk::BlockedReview;
     let mut rows = vec![(
         "Repository",
@@ -142,6 +152,10 @@ pub fn publish_card(
     match (request.step, open_pr) {
         (PublishStep::Push, Some(pr)) => {
             rows.push(("Updates", format!("PR #{} · {}", pr.number, request.branch)));
+        }
+        // The host has not pushed the branch and no pull request was ever read for it.
+        (PublishStep::Push, None) if ticket.pushed.is_none() && ticket.pull_request.is_none() => {
+            rows.push(("Branch", format!("{} · not on GitHub yet", request.branch)));
         }
         (PublishStep::Push, None) => rows.push(("Branch", request.branch.clone())),
         (PublishStep::OpenPullRequest, _) => {
@@ -190,15 +204,24 @@ pub fn publish_card(
             "Publish anyway",
         ),
         (_, PublishStep::Push) => (
-            match open_pr {
-                Some(_) => format!("Push new commits to {}?", request.repository),
-                None => format!("Push this branch to {}?", request.repository),
+            match (open_pr, request.size.split_once(' ')) {
+                (Some(_), Some(("1", _))) => format!("Push 1 new commit to {}?", request.repository),
+                (Some(_), Some((count, _))) => {
+                    format!("Push {count} new commits to {}?", request.repository)
+                }
+                _ => format!("Push this branch to {}?", request.repository),
             },
             format!(
                 "Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed.{}",
-                match request.opens_pull_request() {
-                    true => " Opening the pull request is a separate approval.",
-                    false => "",
+                // The pull request asks where the owner is still not allowed, and always after
+                // an earlier one ended.
+                match (
+                    request.opens_pull_request(),
+                    ask == PublishAsk::NotAllowed || ticket.ended_pull_request().is_some(),
+                ) {
+                    (false, _) => "",
+                    (true, true) => " Opening the pull request is a separate approval.",
+                    (true, false) => " Wiffletree then opens the pull request without asking again.",
                 }
             ),
             "Push once",

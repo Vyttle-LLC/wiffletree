@@ -986,7 +986,8 @@ impl Host {
             "Request already resolved; stale answer rejected"
         );
         attention.answer = Some(answer.into());
-        let tx = self.db.transaction()?;
+        // A savepoint, so a ticket close or accept can include this in its own change.
+        let tx = self.db.savepoint()?;
         tx.execute(
             "UPDATE attention SET data=?2 WHERE id=?1",
             params![id, encode(&attention)?],

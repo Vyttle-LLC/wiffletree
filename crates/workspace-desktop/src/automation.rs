@@ -36,10 +36,15 @@ pub enum Step {
         y: f64,
     },
     /// One part of a drag: `press`, any number of `drag` moves, then `release`. Each is its own
-    /// step so the app draws a frame between them, as it does under a person's hand.
+    /// step so the app draws a frame between them, as it does under a person's hand. `count`
+    /// makes the press the second click of a double-click.
     Press {
         x: f64,
         y: f64,
+        #[serde(default = "single")]
+        count: isize,
+        #[serde(default)]
+        button: Button,
     },
     Drag {
         x: f64,
@@ -48,6 +53,8 @@ pub enum Step {
     Release {
         x: f64,
         y: f64,
+        #[serde(default)]
+        button: Button,
     },
     Scroll {
         x: f64,
@@ -69,6 +76,29 @@ pub enum Step {
     },
     /// Reports the window's number and size so a caller can capture it.
     Window,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Button {
+    #[default]
+    Left,
+    Right,
+}
+
+impl Button {
+    fn down(self) -> usize {
+        match self {
+            Self::Left => LEFT_MOUSE_DOWN,
+            Self::Right => RIGHT_MOUSE_DOWN,
+        }
+    }
+    fn up(self) -> usize {
+        match self {
+            Self::Left => LEFT_MOUSE_UP,
+            Self::Right => RIGHT_MOUSE_UP,
+        }
+    }
 }
 
 fn single() -> isize {
@@ -153,6 +183,8 @@ extern "C" fn deliver(context: *mut std::ffi::c_void) {
 
 const LEFT_MOUSE_DOWN: usize = 1;
 const LEFT_MOUSE_UP: usize = 2;
+const RIGHT_MOUSE_DOWN: usize = 3;
+const RIGHT_MOUSE_UP: usize = 4;
 const MOUSE_MOVED: usize = 5;
 const LEFT_MOUSE_DRAGGED: usize = 6;
 const SCROLL_UNIT_PIXEL: u32 = 0;
@@ -295,13 +327,20 @@ impl Step {
         let height = f64::from(f32::from(size.height));
         match self {
             Self::Move { x, y } => NativeWindow::find()?.mouse(MOUSE_MOVED, x, y, height, 0),
-            Self::Press { x, y } => {
+            Self::Press {
+                x,
+                y,
+                count,
+                button,
+            } => {
                 let native = NativeWindow::find()?;
                 native.mouse(MOUSE_MOVED, x, y, height, 0);
-                native.mouse(LEFT_MOUSE_DOWN, x, y, height, 1);
+                native.mouse(button.down(), x, y, height, count);
             }
             Self::Drag { x, y } => NativeWindow::find()?.mouse(LEFT_MOUSE_DRAGGED, x, y, height, 1),
-            Self::Release { x, y } => NativeWindow::find()?.mouse(LEFT_MOUSE_UP, x, y, height, 1),
+            Self::Release { x, y, button } => {
+                NativeWindow::find()?.mouse(button.up(), x, y, height, 1)
+            }
             Self::Click { x, y, count } => {
                 let native = NativeWindow::find()?;
                 native.mouse(MOUSE_MOVED, x, y, height, 0);

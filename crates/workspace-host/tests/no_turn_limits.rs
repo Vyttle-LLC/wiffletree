@@ -2,7 +2,10 @@
 //! CLIs: no project or host-wide turn limit holds workers back. Kept in its own test binary
 //! because it sets the provider environment for the process.
 use serde_json::Value;
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 use workspace_core::*;
 use workspace_host::{Host, service::Service};
 
@@ -15,9 +18,14 @@ fn request(service: &Service, command: Command) -> Value {
         .unwrap()
 }
 
-/// Waits for `done` on the host's change signal, which every turn start and finish sends, so
-/// no deadline or polling interval depends on the machine's load.
-fn until(service: &Service, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
+/// Far longer than ten turns take to start and stop on a loaded machine. It decides nothing
+/// about a passing run; it only makes a regression that never gets there fail instead of hang.
+const OVERALL: Duration = Duration::from_secs(300);
+
+/// Waits for `done`, looking again on the host's change signal, which every turn start and
+/// finish sends, so the result does not depend on the machine's load. Fails at `deadline`;
+/// the panic drops the service, which stops the turns still running.
+fn until(service: &Service, deadline: Instant, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
     let changes = service.changes();
     loop {
         let snapshot: Snapshot =
@@ -25,7 +33,13 @@ fn until(service: &Service, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
         if done(&snapshot) {
             return snapshot;
         }
-        changes.recv_blocking().unwrap();
+        while changes.try_recv().is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "the turns did not get there within {OVERALL:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -111,10 +125,11 @@ fn ten_workers_in_two_projects_run_at_once() {
         env!("CARGO_BIN_EXE_workspace-host").into(),
     )
     .unwrap();
+    let deadline = Instant::now() + OVERALL;
 
     // Every turn started before any of them finished, so all ten ran at once. A limit would
     // start some only after others finished, however long that took.
-    let started = until(&service, |s| {
+    let started = until(&service, deadline, |s| {
         runtimes(s, &workers)
             .filter(|r| r.last_started_at.is_some())
             .count()
@@ -140,7 +155,7 @@ fn ten_workers_in_two_projects_run_at_once() {
             },
         );
     }
-    until(&service, |s| {
+    until(&service, deadline, |s| {
         runtimes(s, &workers).all(|r| r.last_finished_at.is_some())
     });
 }

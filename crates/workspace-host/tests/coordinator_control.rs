@@ -158,9 +158,12 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
     let stopped = control(&service, &main.id, "STOP_CHILDREN");
     assert_eq!(stopped["agents"][0]["session_id"], child.id.as_str());
     assert_eq!(stopped["agents"][0]["result"], "stopped");
-    until("the stopped turn to finish", || !working(&service));
     assert_eq!(status(&service, &child.id), Status::Paused);
-    let started = runtime(&service, &child.id).last_started_at;
+    // The child is paused at once, but resume_agent refuses it until its provider has gone.
+    until("the stopped turn to finish", || {
+        runtime(&service, &child.id).last_finished_at.is_some()
+    });
+    let stopped = runtime(&service, &child.id);
 
     // A message to the stopped child queues with a hint, and starts no turn.
     let sent = control(&service, &main.id, "MESSAGE_CHILD");
@@ -175,19 +178,23 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
         .find(|u| u.session_id == child.id)
         .unwrap();
     assert_eq!((queued.held, queued.queued), (0, 1));
-    std::thread::sleep(Duration::from_millis(500));
     assert_eq!(status(&service, &child.id), Status::Paused);
-    assert_eq!(runtime(&service, &child.id).last_started_at, started);
+    assert_eq!(
+        runtime(&service, &child.id).last_started_at,
+        stopped.last_started_at
+    );
 
-    // Resuming with a message starts a turn with both inputs.
+    // Resuming with a message starts a turn with both inputs, so the first was still queued.
     let resumed = control(&service, &main.id, "RESUME_CHILD WITH_MESSAGE");
     assert_eq!(resumed["queued"], 2);
     until("the resumed turn", || {
-        runtime(&service, &child.id).last_finished_at > started
+        runtime(&service, &child.id).last_finished_at > stopped.last_finished_at
             && status(&service, &child.id) == Status::Ready
     });
     let log = std::fs::read_to_string(prompts.join(format!("{}.txt", child.id))).unwrap();
-    let resumed_turn = log.split("=====").nth(1).unwrap();
+    // The stopped turn's provider logs its prompt only once it is running, and the stop may
+    // come first, so read the latest prompt.
+    let resumed_turn = log.rsplit("=====").nth(1).unwrap();
     for expected in [
         "Your parent stopped your previous turn",
         "queued while stopped",
@@ -200,6 +207,7 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
     }
 
     // A human Pause holds the input and tells the parent, naming the child.
+    let resumed_at = runtime(&service, &child.id).last_finished_at;
     request(
         &service,
         Command::Send {
@@ -225,6 +233,10 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
         })
     });
     assert_eq!(status(&service, &child.id), Status::Paused);
+    // The parent hears at once, before the paused turn's provider has gone.
+    until("the paused turn to finish", || {
+        runtime(&service, &child.id).last_finished_at > resumed_at
+    });
 
     // Retrying redelivers the held input with a note that its turn was interrupted.
     let paused_at = runtime(&service, &child.id).last_finished_at;
@@ -235,7 +247,6 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
             && status(&service, &child.id) == Status::Ready
     });
     let log = std::fs::read_to_string(prompts.join(format!("{}.txt", child.id))).unwrap();
-    // The paused turn may have stopped before its provider launched, so read the latest prompt.
     let retried_turn = log.rsplit("=====").nth(1).unwrap();
     assert!(
         retried_turn.contains("Retry of interrupted turn"),

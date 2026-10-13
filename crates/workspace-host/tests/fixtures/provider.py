@@ -129,7 +129,8 @@ def model_usage(sid,spent):
     for model,counts in spent.items():
         kept=total.setdefault(model,{})
         for key in ('inputTokens','outputTokens','cacheReadInputTokens','cacheCreationInputTokens'):kept[key]=kept.get(key,0)+counts.get(key,0)
-    path.write_text(json.dumps(total));return total
+    # Replaced whole, so a turn stopped mid-write leaves the last total and not an empty file.
+    fresh=path.with_suffix('.writing');fresh.write_text(json.dumps(total));os.replace(fresh,path);return total
 def emit(value):print(json.dumps(value),flush=True)
 def pick(ctx,role,provider=None):
     # The first allowed model of the provider, or of the role's first provider.
