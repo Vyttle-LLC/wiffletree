@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Review levels study</title>
+<!-- Static study for the review-levels OpenSpec change: no script, no network, simulated data. -->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:800px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:500}
+.stack{display:grid;gap:26px}
+.two{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;align-items:start}
+.col{display:grid;gap:10px}
+.hint{font-size:12px;color:var(--subtle)}
+.section{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.section .eyebrow{flex:1}
+.title{display:flex;align-items:baseline;gap:8px;margin-bottom:12px}
+.title b{font-size:14px;font-weight:500}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+svg.i{width:14px;height:14px;flex:none;color:var(--subtle)}
+/* (a) Levels, the new block at the top of verifiers.rs's Review card. */
+.levels{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:10px;background:var(--base);margin:8px 0 18px}
+.level{padding:10px 12px;border-bottom:1px solid color-mix(in srgb,var(--edge) 35%,transparent);display:grid;gap:7px}
+.level:last-child{border-bottom:0}
+.level-head{display:flex;align-items:center;gap:10px}
+.level-head .name{flex:1;min-width:0}
+.level-head b{font-size:13.5px;font-weight:500}
+.seg{display:inline-flex;gap:3px}
+.seg span{padding:2px 9px;border-radius:6px;font-size:11.5px;border:1px solid var(--edge);color:var(--subtle)}
+.seg span.on{background:var(--focus);border-color:var(--focus);color:var(--surface);font-weight:500}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.chips .lead{font-size:11.5px;color:var(--subtle);width:54px;flex:none}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:2px 9px 2px 6px;border-radius:20px;font-size:11.5px;border:1px dashed var(--edge);color:var(--muted)}
+.chip i{width:11px;height:11px;border:1.5px solid var(--muted);border-radius:3px;display:grid;place-items:center}
+.chip.on{border:1px solid color-mix(in srgb,var(--focus) 45%,transparent);background:color-mix(in srgb,var(--focus) 10%,transparent);color:var(--text)}
+.chip.on i{background:var(--focus);border-color:var(--focus)}
+.chip.on i svg{width:8px;height:8px;color:var(--surface)}
+.when{display:flex;gap:6px;font-size:12px}
+.when .lead{font-size:11.5px;color:var(--subtle);width:54px;flex:none}
+.icon-btn{width:22px;height:22px;display:grid;place-items:center;border-radius:6px;color:var(--subtle)}
+.icon-btn svg{width:12px;height:12px}
+.field{border:1px solid var(--edge);border-radius:7px;padding:4px 8px;background:var(--surface);font-size:12px;min-height:27px}
+.field.grow{flex:1;min-width:0}
+.field.ph{color:var(--muted)}
+.verifier{display:flex;align-items:center;gap:12px;padding:4px 0;font-size:12.5px}
+.verifier .who{width:170px;flex:none}
+.verifier .prov{width:130px;flex:none;font-size:12px;color:var(--subtle)}
+.verifier .inst{flex:1;min-width:0;font-size:12px;color:var(--subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.addrow{display:flex;align-items:center;gap:8px;margin:8px 0 16px;flex-wrap:wrap}
+.setting{display:grid;grid-template-columns:170px auto;gap:2px 12px;align-items:center;margin-top:10px}
+.setting .cap{grid-column:1/-1;font-size:11.5px;color:var(--subtle)}
+.btn{padding:5px 12px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.actions{display:flex;justify-content:flex-end;gap:8px}
+.refused{border-left:2px solid var(--red);padding:6px 10px;background:color-mix(in srgb,var(--red) 6%,transparent);border-radius:0 6px 6px 0;font-size:12px}
+.bad{color:var(--red)}
+/* (c) Tickets panel card, mirroring team_view.rs; (d) Inbox card, mirroring inspector.rs. */
+.card{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);background:var(--base);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:9px}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.card-head b{font-weight:500}
+.ask{font-size:13.5px;font-weight:500}
+.lines{display:grid;gap:3px;font-size:12px;color:var(--subtle)}
+.lines b{color:var(--text);font-weight:500}
+.facts-grid{display:grid;grid-template-columns:104px minmax(0,1fr);gap:4px 10px;font-size:12px;margin:0}
+.facts-grid dt{color:var(--subtle)}
+.facts-grid dd{margin:0}
+.new{box-shadow:inset 2px 0 0 var(--accent);padding-left:8px}
+.message{border:1px solid var(--edge);border-radius:12px;padding:12px 14px;background:var(--base);font-size:12.5px}
+.message .from{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:var(--subtle)}
+.message .from b{color:var(--text);font-weight:500}
+code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.notes{max-width:840px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+.notes b{color:var(--text);font-weight:500}
+@media(max-width:900px){.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}.verifier .prov{display:none}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></symbol>
+  <symbol id="close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Review levels</div>
+  <h1>How thoroughly a ticket is reviewed</h1>
+  <p>Static study for the <span class="mono">review-levels</span> OpenSpec change. Today every review starts every verifier you configured. With this change you define named levels, such as Full and Light, each a set of your verifiers. The coordinator names a level each time it starts a review, guided by a line of text you can rewrite, and Wiffletree requires every verifier in that level to pass. It shows (a) the Review card in Models, (b) editing and adding a level, and what an existing setup becomes, (c) what the coordinator sees and what the app refuses, and (d) the ticket and the publish approval card naming the level that ran. Sample data is simulated.</p>
+</header>
+
+<div class="stack">
+  <!-- (a) Models → Review -->
+  <section>
+    <div class="panel" aria-label="Models page, Review card">
+      <div class="title"><b>Review</b><span class="hint">who reviews a ticket, and how thoroughly</span></div>
+
+      <div class="section"><div class="eyebrow">Levels · the coordinator names one each time it starts a review</div></div>
+      <p class="hint">A level is a set of the verifiers below. Every verifier in it must pass. The “Use it” line tells the coordinator when to pick the level; write it in your own words.</p>
+      <div class="levels">
+        <div class="level">
+          <div class="level-head"><span class="name"><b>Full</b></span>
+            <span class="seg" role="radiogroup" aria-label="Kind of level"><span class="on">Full review</span><span>Re-check</span></span>
+            <span class="icon-btn" title="Rename, or rewrite when to use it"><svg><use href="#pencil"/></svg></span>
+            <span class="icon-btn" title="Remove this level"><svg><use href="#close"/></svg></span></div>
+          <div class="chips"><span class="lead">Runs</span>
+            <span class="chip on"><i><svg><use href="#check"/></svg></i>Tests</span>
+            <span class="chip on"><i><svg><use href="#check"/></svg></i>Correctness</span>
+            <span class="chip on"><i><svg><use href="#check"/></svg></i>Regressions</span>
+            <span class="chip on"><i><svg><use href="#check"/></svg></i>Style</span></div>
+          <div class="when"><span class="lead">Use it</span><span>for a ticket’s first review, and after any change to what the code does.</span></div>
+        </div>
+        <div class="level">
+          <div class="level-head"><span class="name"><b>Light</b></span>
+            <span class="seg" role="radiogroup" aria-label="Kind of level"><span>Full review</span><span class="on">Re-check</span></span>
+            <span class="icon-btn" title="Rename, or rewrite when to use it"><svg><use href="#pencil"/></svg></span>
+            <span class="icon-btn" title="Remove this level"><svg><use href="#close"/></svg></span></div>
+          <div class="chips"><span class="lead">Runs</span>
+            <span class="chip"><i></i>Tests</span>
+            <span class="chip on"><i><svg><use href="#check"/></svg></i>Correctness</span>
+            <span class="chip"><i></i>Regressions</span>
+            <span class="chip"><i></i>Style</span></div>
+          <div class="when"><span class="lead">Use it</span><span>after a rebase, a resolved merge conflict or a small fix, on a ticket whose last review passed.</span></div>
+        </div>
+        <div class="level">
+          <div class="level-head"><span class="name"><b>Docs</b> <span class="pill subtle">Example</span></span>
+            <span class="seg" role="radiogroup" aria-label="Kind of level"><span class="on">Full review</span><span>Re-check</span></span>
+            <span class="icon-btn" title="Rename, or rewrite when to use it"><svg><use href="#pencil"/></svg></span>
+            <span class="icon-btn" title="Remove this level"><svg><use href="#close"/></svg></span></div>
+          <div class="chips"><span class="lead">Runs</span>
+            <span class="chip"><i></i>Tests</span>
+            <span class="chip"><i></i>Correctness</span>
+            <span class="chip"><i></i>Regressions</span>
+            <span class="chip on"><i><svg><use href="#check"/></svg></i>Style</span></div>
+          <div class="when"><span class="lead">Use it</span><span>for a ticket that changes only documentation.</span></div>
+        </div>
+        <div class="level"><div><span class="btn ghost">+ Add level</span></div></div>
+      </div>
+      <p class="hint" style="margin:-10px 0 16px"><b style="color:var(--text);font-weight:500">Full review</b> can be a ticket’s only review. <b style="color:var(--text);font-weight:500">Re-check</b> starts only on a ticket whose last review passed. Wiffletree enforces this; the coordinator cannot choose otherwise.</p>
+
+      <div class="section"><div class="eyebrow">Verifiers · 4</div></div>
+      <div class="verifier"><span class="who">Tester · Tests</span><span class="prov">Tester’s providers</span><span class="inst"></span><span class="icon-btn" title="Remove this verifier"><svg><use href="#close"/></svg></span></div>
+      <div class="verifier"><span class="who">Reviewer · Correctness</span><span class="prov">Claude</span><span class="inst">Correctness against the ticket’s acceptance criteria.</span><span class="icon-btn" title="Remove this verifier"><svg><use href="#close"/></svg></span></div>
+      <div class="verifier"><span class="who">Reviewer · Regressions</span><span class="prov">Codex</span><span class="inst">Regressions and test coverage.</span><span class="icon-btn" title="Remove this verifier"><svg><use href="#close"/></svg></span></div>
+      <div class="verifier"><span class="who">Reviewer · Style</span><span class="prov">Any enabled provider</span><span class="inst">Run reviso:style with Codex</span><span class="icon-btn" title="Remove this verifier"><svg><use href="#close"/></svg></span></div>
+      <div class="addrow">
+        <span class="seg"><span>Tester</span><span class="on">Reviewer</span></span>
+        <span class="seg"><span class="on">Any</span><span>Claude</span><span>Codex</span></span>
+        <span class="field ph" style="width:150px">Focus, e.g. Style</span>
+        <span class="field ph grow">Optional instruction, e.g. Run reviso:style with Codex</span>
+        <span class="btn ghost">+ Add</span>
+      </div>
+
+      <div class="setting"><span>Rounds per review</span><span class="seg"><span>1</span><span>2</span><span class="on">3</span><span>4</span><span>5</span></span>
+        <span class="cap">The first review plus re-checks after the implementer’s fixes. If the last round still finds blocking problems, the review stops and the coordinator decides. The same at every level.</span></div>
+      <div class="setting"><span>Full reviews per ticket</span><span class="seg"><span>1</span><span class="on">2</span><span>3</span><span>4</span><span>5</span></span>
+        <span class="cap">Reviews at a level marked Full review, with fresh reviewers. After the last one, the coordinator accepts, accepts with a waiver, closes the ticket or asks you. Re-checks are not counted.</span></div>
+      <p class="hint" style="margin-top:12px">verify_ticket starts every verifier of the level the coordinator names, at once, on the ticket’s current commit, each on the model the coordinator picks by the guide within its provider. Changes here save at once.</p>
+    </div>
+    <p class="caption"><b>(a)</b> The Review card gains one block, Levels, above the verifier list you have today. <b>There is still one list of verifiers.</b> A level is a name, a tick for each verifier it runs, one line saying when to use it, and whether it is a full review or a re-check. Ticking a verifier or switching the kind saves at once, like everything else on this card. The verifier list and “Rounds per review” are unchanged. “Reviews per ticket” becomes “Full reviews per ticket”, because re-checks are not counted. <b>The lightest level you mark Full review is the real bar.</b> Here that is Docs: the coordinator could name Docs for any ticket, and only the “Use it” line says it is for documentation. Mark a level Full review only if you would accept any ticket on it.</p>
+  </section>
+
+  <!-- (b) Editing, adding, and what an existing setup becomes -->
+  <section>
+    <div class="two">
+      <div class="col">
+        <div class="panel" aria-label="Editing a level">
+          <div class="eyebrow" style="margin-bottom:8px">After pressing the pencil on Light</div>
+          <div class="levels" style="margin:0">
+            <div class="level">
+              <div class="level-head"><span class="field" style="width:150px">Light</span><span style="flex:1"></span>
+                <span class="seg"><span>Full review</span><span class="on">Re-check</span></span></div>
+              <div class="chips"><span class="lead">Runs</span>
+                <span class="chip"><i></i>Tests</span>
+                <span class="chip on"><i><svg><use href="#check"/></svg></i>Correctness</span>
+                <span class="chip"><i></i>Regressions</span>
+                <span class="chip"><i></i>Style</span></div>
+              <div class="when" style="align-items:center"><span class="lead">Use it</span><span class="field grow">after a rebase, a resolved merge conflict or a small fix, on a ticket whose last review passed.</span></div>
+              <div class="actions"><span class="btn ghost">Cancel</span><span class="btn primary">Done</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel" aria-label="Adding a level">
+          <div class="eyebrow" style="margin-bottom:8px">After pressing + Add level</div>
+          <div class="levels" style="margin:0">
+            <div class="level">
+              <div class="level-head"><span class="field ph" style="width:150px">Name, e.g. Light</span><span style="flex:1"></span>
+                <span class="seg"><span>Full review</span><span class="on">Re-check</span></span></div>
+              <div class="chips"><span class="lead">Runs</span>
+                <span class="chip"><i></i>Tests</span>
+                <span class="chip"><i></i>Correctness</span>
+                <span class="chip"><i></i>Regressions</span>
+                <span class="chip"><i></i>Style</span></div>
+              <div class="when" style="align-items:center"><span class="lead">Use it</span><span class="field ph grow">When should the coordinator pick this level?</span></div>
+              <div class="actions"><span class="btn ghost">Cancel</span><span class="btn primary">Add level</span></div>
+            </div>
+          </div>
+          <p class="hint" style="margin-top:8px">A new level starts as a re-check, the kind that cannot pass a ticket by itself.</p>
+        </div>
+        <div class="panel" aria-label="What the card refuses">
+          <div class="eyebrow" style="margin-bottom:8px">The card refuses, and keeps what was saved</div>
+          <div class="col">
+            <div class="refused">Keep at least one level marked Full review.</div>
+            <div class="refused">Light would run no verifier. Tick another verifier for Light, or remove Light.</div>
+            <div class="refused">Two levels are named “Light”.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="panel" aria-label="An existing setup after updating">
+          <div class="eyebrow" style="margin-bottom:8px">An existing setup, the first time you open the card after updating</div>
+          <div class="levels" style="margin:0 0 12px">
+            <div class="level">
+              <div class="level-head"><span class="name"><b>Full</b></span>
+                <span class="seg"><span class="on">Full review</span><span>Re-check</span></span>
+                <span class="icon-btn"><svg><use href="#pencil"/></svg></span>
+                <span class="icon-btn"><svg><use href="#close"/></svg></span></div>
+              <div class="chips"><span class="lead">Runs</span>
+                <span class="chip on"><i><svg><use href="#check"/></svg></i>Tests</span>
+                <span class="chip on"><i><svg><use href="#check"/></svg></i>Claude</span>
+                <span class="chip on"><i><svg><use href="#check"/></svg></i>Codex</span>
+                <span class="chip on"><i><svg><use href="#check"/></svg></i>Style</span></div>
+              <div class="when"><span class="lead">Use it</span><span>for every review.</span></div>
+            </div>
+            <div class="level"><div><span class="btn ghost">+ Add level</span></div></div>
+          </div>
+          <div class="verifier"><span class="who">Tester · Tests</span><span class="inst"></span></div>
+          <div class="verifier"><span class="who">Reviewer · Claude</span><span class="inst">Correctness against the acceptance criteria.</span></div>
+          <div class="verifier"><span class="who">Reviewer · Codex</span><span class="inst">Regressions and missing tests.</span></div>
+          <div class="verifier"><span class="who">Reviewer · Style</span><span class="inst">Run reviso:style with Codex</span></div>
+          <div class="setting"><span>Rounds per review</span><span class="seg"><span>1</span><span class="on">2</span><span>3</span><span>4</span><span>5</span></span></div>
+          <div class="setting"><span>Full reviews per ticket</span><span class="seg"><span>1</span><span>2</span><span class="on">3</span><span>4</span><span>5</span></span></div>
+        </div>
+        <p class="caption" style="margin-top:0"><b>Nothing you configured changes.</b> Your verifiers, their order, their instructions and both limits are kept exactly. They become one level named Full, marked Full review, that runs all of them, so every review behaves as it did. No second level is added for you; the first time you press Add level, the form is filled in as Light with your first reviewer ticked. A new install starts with two: Full, with every suggested verifier, and Light, a re-check with the first suggested reviewer.</p>
+      </div>
+    </div>
+    <p class="caption"><b>(b)</b> The pencil opens the level’s name and its “Use it” line for editing; the ticks and the kind are always live. Removing a level asks nothing unless it is the last one marked Full review. Removing a verifier takes it out of every level, and is refused if that would leave a level empty. A cycle that already ran keeps the level name it ran under, whatever you rename or remove later.</p>
+  </section>
+
+  <!-- (c) What the coordinator sees, and what the app refuses -->
+  <section>
+    <div class="two">
+      <div class="col">
+        <div class="panel" aria-label="What the coordinator reads">
+          <div class="eyebrow" style="margin-bottom:6px">What the coordinator reads · workspace_context</div>
+<pre>"model_selection": {
+  "review_levels": [
+    { "name": "Full", "kind": "full_review",
+      "verifiers": ["Tests", "Correctness", "Regressions", "Style"],
+      "use_when": "for a ticket's first review, and after any
+                   change to what the code does." },
+    { "name": "Light", "kind": "recheck",
+      "verifiers": ["Correctness"],
+      "use_when": "after a rebase, a resolved merge conflict or a
+                   small fix, on a ticket whose last review passed." },
+    { "name": "Docs", "kind": "full_review", "verifiers": ["Style"],
+      "use_when": "for a ticket that changes only documentation." }
+  ],
+  "verifiers": [ …as today: role, focus, provider, instruction… ],
+  "max_rounds": 3, "max_cycles": 2, …
+}</pre>
+        </div>
+        <div class="panel" aria-label="How the coordinator starts a review">
+          <div class="eyebrow" style="margin-bottom:6px">How it starts a review · verify_ticket</div>
+<pre>{
+  "ticket_id": "…",
+  "level": "Light",
+  "verifiers": [
+    { "focus": "Correctness",
+      "profile": { "provider": "claude", "model": "sonnet",
+                   "effort": "medium" },
+      "reason": "The conflict was confined to one import block" }
+  ]
+}</pre>
+          <p class="hint" style="margin-top:8px">One model choice for each verifier in the level, and none for the others.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="panel" aria-label="What the app refuses">
+          <div class="eyebrow" style="margin-bottom:8px">Refused at once, with nothing started</div>
+          <div class="col">
+            <div class="refused">Name a review level: Full, Light or Docs.</div>
+            <div class="refused">Light is a re-check, and this ticket has not passed a review yet. Start with a full review: Full or Docs.</div>
+            <div class="refused">Light is a re-check, and this ticket’s last review ended blocked. Run a full review, accept with a waiver, close the ticket or ask the human.</div>
+            <div class="refused">Regressions has the open finding F5, and Docs does not run Regressions. Use a level that runs it, or settle F5 with triage_findings.</div>
+            <div class="refused">Tests is not part of Light. Choose a model only for Correctness.</div>
+            <div class="refused">Ticket “Session search” has used its 2 full reviews; accept it with a waiver, close it or ask the human. Only the human can raise the limit, in Models → Review.</div>
+          </div>
+        </div>
+        <div class="message" aria-label="Outcome message to the coordinator">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the coordinator, when the re-check ends</div>
+          <p>Wiffletree verification of ticket “Session search” passed in cycle 2, a Light re-check, 1 of 3 rounds; verified commit <code>b41d2aa</code>.<br>- Reviewer · Correctness: passed at <code>b41d2aa</code><br>Accept the ticket.</p>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(c)</b> <b>The text chooses; the app holds four lines.</b> Which level fits a ticket is decided by the “Use it” lines and the coordinator’s instructions, and you can rewrite both. The app does not judge that choice. It enforces only this: a level must be named; every verifier in it must pass; a re-check never stands in for a ticket’s first review, or for a review that ended blocked; and no level may leave out a verifier that still has an open blocking finding. Because of the last two, a pass always rests on a full review, so accepting a ticket and publishing it need no new rule. Within a review nothing changes: a failed round goes back to the implementer and only the failed verifiers of that level check again.</p>
+  </section>
+
+  <!-- (d) The ticket and the publish approval card -->
+  <section>
+    <div class="two">
+      <div class="col">
+        <div class="panel" aria-label="Tickets panel card">
+          <div class="eyebrow" style="margin-bottom:8px">Tickets panel · the ticket’s card</div>
+          <div class="card">
+            <div class="card-head"><b>wiffletree · Session search</b><span class="pill green">Passed</span></div>
+            <div class="hint">Search sessions from the sidebar by title, with matches kept per project.</div>
+            <div class="hint">Branch <span class="mono">wiffletree/session-search</span></div>
+            <div class="lines">
+              <div class="new"><b>Verification cycle 2 · Light re-check: passed, 1 of 3 rounds</b></div>
+              <div>Round 1 at b41d2aa: Reviewer · Correctness passed</div>
+              <div class="new">Verification cycle 1 · Full: passed, 2 of 3 rounds</div>
+            </div>
+          </div>
+          <p class="hint" style="margin-top:8px">Marked lines are the ones that change: each cycle names its level, and says so when it was a re-check. A cycle from before this change shows no level.</p>
+        </div>
+        <div class="message" aria-label="Allowed owner result">
+          <div class="from"><svg class="i"><use href="#server"/></svg><b>Wiffletree</b> · to the coordinator, in an allowed owner’s repository · no Inbox card</div>
+          <p>Pushed <code>wiffletree/session-search</code> at <code>b41d2aa</code> to Vyttle-LLC/wiffletree. PR #52 now has this commit.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="panel" aria-label="Inbox approval for a later push">
+          <div class="eyebrow" style="margin-bottom:8px">Inbox · celadon-website · Fix palette contrast · the owner is not allowed</div>
+          <div class="card">
+            <div class="card-head"><span class="hint">Coordinator · Fix palette contrast</span><span class="pill yellow">Approval</span></div>
+            <div class="ask">Push 1 new commit to celadon-theme/website?</div>
+            <dl class="facts-grid">
+              <dt>Repository</dt><dd>celadon-theme/website · <b>public</b> · celadon-theme is not an allowed owner</dd>
+              <dt>Updates</dt><dd>PR #212 · <span class="mono">wiffletree/fix-palette-contrast</span></dd>
+              <dt>Commit</dt><dd><span class="mono">b41d2aa</span> · 1 file changed, 6 insertions(+), 2 deletions(−)</dd>
+              <dt class="new">Review</dt><dd>Cycle 2 · Light re-check passed at this commit · Correctness</dd>
+              <dt class="new">Last full review</dt><dd>Cycle 1 · Full passed at <span class="mono">9e03c1b</span> · Tests, Correctness, Regressions, Style</dd>
+            </dl>
+            <div class="actions"><span class="btn ghost">Deny</span><span class="btn primary">Push once</span></div>
+          </div>
+        </div>
+        <div class="panel" aria-label="Review row after a full review">
+          <div class="eyebrow" style="margin-bottom:8px">The same row after a full review · one line</div>
+          <dl class="facts-grid">
+            <dt class="new">Review</dt><dd>Cycle 1 · Full passed at this commit · Tests, Correctness, Regressions, Style</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(d)</b> The ticket’s card names the level of every cycle. The publish approval card’s Review row names it too, and after a re-check a second row shows the full review it rests on and the commit that review saw, so you can tell how much has only been re-checked. In an allowed owner’s repository the push still runs without a card after any review that passed, a re-check included, which is what lets a rebase or a conflict fix go out after one reviewer. A review that ended blocked still always asks you, at every level.</p>
+  </section>
+</div>
+
+<ul class="notes">
+  <li><b>Settled with the human on October 13, 2026</b> (see <span class="mono">openspec/changes/review-levels/design.md</span>): (1) two kinds of level, Full review and Re-check, with the app refusing a re-check on a ticket whose last review did not pass, and refusing any level that leaves out a verifier with an open blocking finding; (2) an update adds no level beside your migrated Full, and a new install starts with Full and Light; (3) the coordinator must name a level every time, and none is the default; (4) re-checks are not counted against “Full reviews per ticket”.</li>
+  <li><b>What this does not measure.</b> After a full review has passed, later changes of any size can pass on re-checks alone. The app does not judge how much changed since the full review, and in an allowed owner’s repository that push goes out without a card. Where a card is shown, it names both commits.</li>
+  <li><b>Not in this change:</b> the PR keeper, the Skills page, the settings repository, and any per-level choice of model. Until the Skills page exists, “when to use each level” lives in the level’s own “Use it” line plus one sentence in the coordinator’s instructions.</li>
+  <li>The verifier named Style, the Docs level and all tickets, commits and pull requests here are examples. A new install’s suggested verifiers are Tests, Correctness and Regressions, as today.</li>
+  <li>This is a static design study, not the GPUI implementation.</li>
+</ul>
+</body>
+</html>
