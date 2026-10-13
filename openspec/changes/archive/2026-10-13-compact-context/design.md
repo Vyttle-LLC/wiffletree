@@ -72,7 +72,7 @@ A request therefore never disappears and never runs while the person cannot see 
 
 **Stop and Pause while it runs.** A compaction that has started is not interrupted: a human Pause or Stop, a parent's `stop_agents` and a project Stop still set the session's status, and the compaction finishes. No turn follows, because the session is then paused.
 
-**Host shutdown.** A compaction is stopped at a quit the way a turn is. `stop` sets the cancel flag of every entry in `compacting`, as it does for `active`, and its one bounded wait (`QUIT_WAIT`) covers both maps. A cancelled compaction's provider thread stops and reaps its process group before it reports the end, exactly as a turn's does, and the host then settles the compaction as `interrupted` (decision 10) with the run marked `process_gone`. Only a shutdown ever sets a compaction's cancel flag, so a cancelled end always means the quit. A compaction that outlasts the wait stays unfinished, its request still `running`, for the next start.
+**Host shutdown.** A compaction is stopped at a quit the way a turn is. `stop` sets the cancel flag of every entry in `compacting`, as it does for `active`, and its one bounded wait (`QUIT_WAIT`) covers both maps. A cancelled compaction's provider thread stops and reaps its process group before it reports the end, exactly as a turn's does, and `compaction_finished` then settles the compaction as `interrupted` (decision 10) with the run marked `process_gone`. Only a shutdown ever sets a compaction's cancel flag, so a cancelled end always means the quit. A compaction that outlasts the wait stays unfinished, its request still `running`, for the next start.
 
 **Status.** The stored status does not change, so an agent that was Blocked is Blocked again afterwards. The desktop draws "Compacting" from `compaction.state` (decision 9). `send_message` to a compacting agent returns the plain `queued` receipt.
 
@@ -80,7 +80,7 @@ A request therefore never disappears and never runs while the person cannot see 
 `Turn` gains a kind: a prompt, or a compaction with its optional instructions. For a compaction, `provider::input` returns exactly `/compact` or `/compact <instructions>` as plain text, with no wrapper and no attachments, and `configure` adds no `--input-format`.
 
 Every other argument is the same as a turn's: model, effort, the appended role instructions, `--resume`, and the `agent_workspace` MCP configuration with a fresh token that is never registered in `active`. So the `init` check in `provider::run` is **satisfied, not bypassed**, and stays one unconditional check. A tool call under that token is refused by the existing token lookup; a compaction makes none.
-*Alternative:* the context probe's empty MCP configuration, skipping the `init` check for compactions. Rejected for now because it changes the tool list the summary request is built from. If that misses the prompt cache the turns built, an 800k-token compaction is billed as fresh input. Task 2.1 measures both on a throwaway session before the choice is final.
+*Alternative:* the context probe's empty MCP configuration, skipping the `init` check for compactions. Rejected for now because it changes the tool list the summary request is built from. If that misses the prompt cache the turns built, an 800k-token compaction is billed as fresh input. Task 2.1 measured both on throwaway sessions (Claude Code 2.1.295, `claude-sonnet-5-5`, three turns then `/compact`): 90,110 cache-read tokens with a turn's arguments and 90,204 with the empty configuration, on contexts of 32,560 and 32,576 tokens. The two are equal within 0.1%, so the empty configuration does not miss the cache. The turn's arguments are kept anyway: they need no branch in `configure` and none in the `init` check.
 
 ### 6. The outcome is read from the status record
 `provider::run` gains two Claude arms and emits one new event, `ProviderEvent::Compaction`:
@@ -109,7 +109,7 @@ The host writes one message from the session to itself with id `compaction:<run>
 | interrupted (decision 10) | `Compaction interrupted` |
 | nothing to compact | no message |
 
-`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter `compact` moves from `context_view.rs` to `workspace-core`, so the line and the card print figures the same way. The figures are Claude's `pre_tokens` and `post_tokens`. The second counts only the summary, not the system prompt and tools the card also counts, so it reads lower than the card's new total: the mockup's line says 5k beside a card at 41k.
+`conversation.rs` draws a `compaction:` message as a one-line entry at the turn summary's indent, never as a bubble, and red for the two failure bodies. The token formatter moves from `context_view.rs` to `workspace-core` as `compact_tokens`, so the line and the card print figures the same way. The figures are Claude's `pre_tokens` and `post_tokens`. The second counts only the summary, not the system prompt and tools the card also counts, so it reads lower than the card's new total: the mockup's line says 5k beside a card at 41k.
 
 ### 9. Desktop
 All of it matches `design/mockups/current/compact-context.html`.
@@ -130,8 +130,8 @@ A `queued` request is untouched by a restart.
 A compaction that was running when the host stopped is **interrupted**. It uses the machinery `stop-leftover-provider-processes` built for turns and adds no rule of its own; its run row records the process group and the leader's start time like any run's.
 
 - **Quit.** Decision 4: the process group is stopped before the run is settled, so the host knows it is gone.
-- **Startup.** `recover_unfinished_turns` handles an unfinished compaction run in the same loop as an unfinished turn. `stop_leftover` signals the group only while its leader has the recorded pid and start time; the run is marked `interrupted` with `process_stopped_at` and `process_gone`; a group it could not confirm gets the same leftover-process inbox note. The one difference is the session. A turn's session becomes `Disconnected` with its input held. A compaction's is settled by `interrupt_compaction` and is otherwise left alone.
-- **`interrupt_compaction`**, called from both places: the request is cleared, `last_compaction` is `interrupted`, and the `Compaction interrupted` line is written. The host never runs it again. It cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged" and lets the measurement show the truth.
+- **Startup.** `recover_unfinished_turns` handles an unfinished compaction run in the same loop as an unfinished turn. `stop_leftover` signals the group only while its leader has the recorded pid and start time; the run is marked `interrupted` with `process_stopped_at` and `process_gone`; a group it could not confirm gets the same leftover-process inbox note. The one difference is the session. A turn's session becomes `Disconnected` with its input held. A compaction's is settled by `Host::compaction_ended` with the result `interrupted`, and is otherwise left alone.
+- **`compaction_ended`** settles the session's side of every compaction, and both places call it with `interrupted`: the request is cleared, `last_compaction` is `interrupted`, and the `Compaction interrupted` line is written. The host never runs it again. It cannot know whether Claude finished rewriting the session, so it says neither "compacted" nor "context unchanged" and lets the measurement show the truth.
 - **The session keeps its status,** such as Ready, Blocked or Paused, and its `last_error`. A compaction delivers no input, so nothing is held and nothing needs a Resume. Waiting messages stay `queued`, and the first turn the scheduler starts takes them.
 - **A leftover the host could not stop.** The open note holds the session through `hold_reason`, unchanged: a due turn is held (Blocked, the reason naming the process, the parent told once), the group is checked again every two seconds, and the turn starts when the group exits or the human dismisses the note. The compaction pass asks the same `hold_reason` (decision 3), so a new request waits too.
 
@@ -156,11 +156,12 @@ Checked against the code on main e62b305:
 ### Files and functions to change
 | File | Functions / items |
 |---|---|
-| `crates/workspace-core/src/lib.rs` | `Compaction`, `CompactionState`, `CompactionOutcome`, `CompactionResult` (new); `SessionRuntime` (`compaction`, `last_compaction`); `Command` (`CompactContext`, `CancelCompaction`, `DismissCompaction`); `compact` token formatter (moved) |
-| `crates/workspace-host/src/service.rs` | `handle` (three commands), `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `start_compaction` and `compaction_finished`, `provider_event` (`Compaction`, and `Finished` for a compaction run), `stop` (cancel compactions and wait for them with the turns), new `interrupt_compaction`, `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (an unfinished compaction run goes through the same leftover handling, then `interrupt_compaction`) |
+| `crates/workspace-core/src/lib.rs`, `usage.rs` | `Compaction`, `CompactionState`, `CompactionOutcome`, `CompactionResult` (new); `SessionRuntime` (`compaction`, `last_compaction`); `Command` (`CompactContext`, `CancelCompaction`, `DismissCompaction`); `COMPACTION_LINE_PREFIX`; `compact_tokens` token formatter (moved) |
+| `crates/workspace-host/src/compaction.rs` (new), `lib.rs` | `request_compaction`, `cancel_compaction`, `dismiss_compaction`, `compaction_ended`, the outcome mapping and the line's text; `execute` (three commands); `IS_TURN_RUN` |
+| `crates/workspace-host/src/service.rs` | `schedule` (compaction pass first, skip in the message pass), `admit_round` and `start_turn` (request guard), new `due_compactions`, `start_compaction`, `compaction_event` and `compaction_finished`, `stop` (cancel compactions and wait for them with the turns), `IS_TURN_RUN` in `check_in_by_turns`, `stopped_by_parent_note` and `resume_note`, `recover_unfinished_turns` (an unfinished compaction run goes through the same leftover handling, then `compaction_ended`) |
 | `crates/workspace-host/src/steps.rs`, `usage.rs` | `IS_TURN_RUN` in the latest-run and unreported-run queries |
 | `crates/workspace-host/src/provider.rs` | `Turn` (kind), `input`, `configure`, `run` (`status`, `compact_boundary`, `modelUsage`), `ProviderEvent::Compaction` |
-| `crates/workspace-host/src/usage.rs` | a `modelUsage` entry mapped to the fields `normalize` reads |
+| `crates/workspace-host/src/usage.rs` | `compaction_requests`: each `modelUsage` entry mapped to the fields `normalize` reads |
 | `crates/workspace-desktop/src/` | `context_view.rs` (`context_card`, `context_chip`, `sync_context`, form state), `ui.rs::session_badge`, `conversation.rs` (compaction line, Pause), `bridge.rs` |
 | Tests | new `crates/workspace-host/tests/compaction.rs`; recorded streams in `tests/fixtures/streams`; unit tests in `provider.rs`, `usage.rs`, `context_view.rs`, `conversation.rs` |
 | Docs | `docs/PRD.md` (context paragraph), `docs/DEVELOPMENT.md` (turn scheduling and usage paragraphs) |
@@ -172,7 +173,7 @@ Checked against the code on main e62b305:
 - [A request waits a long time on a paused agent] → It is on the chip and the card the whole time and can be cancelled.
 - [The line's figures and the card's can differ] → Accepted; decision 8 says why.
 - [A compaction on a very full session can itself fail for size] → It ends as "failed" with Claude's reason; Claude's automatic compaction is unchanged and still applies.
-- [`last_compaction.at` drives a measurement on every outcome, possibly during the next turn] → One `/context` call with no model request and no session write. Measuring during a turn is new, so task 4.3 checks on a real session that it returns a figure and leaves the turn undisturbed.
+- [`last_compaction.at` drives a measurement on every outcome, possibly during the next turn] → One `/context` call with no model request and no session write. Measuring during a turn is new, so task 4.3 checked it on a throwaway session: during a running turn the probe returned a figure in 1.6 seconds and wrote nothing to the session's record, and the turn finished normally and was resumed afterwards.
 
 ## Migration Plan
 
