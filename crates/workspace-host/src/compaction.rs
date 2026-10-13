@@ -139,9 +139,9 @@ impl Host {
         )
     }
     /// Settles a session's compaction: the request is cleared, the outcome stored for the
-    /// Context card and its one line written, once however often this runs for a run. The session's status, its messages' receipts
-    /// and its parent are left alone. `line_id` is the run's id, or any unique id for a
-    /// compaction that could not start.
+    /// Context card and its one line written, once however often this runs for a run. The
+    /// session's status, its messages' receipts and its parent are left alone. `line_id` is the
+    /// run's id, or any unique id for a compaction that could not start.
     pub(crate) fn compaction_ended(
         &mut self,
         session: &Session,
