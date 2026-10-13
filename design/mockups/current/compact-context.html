@@ -32,6 +32,7 @@ p{margin:0}
 .pad{padding:14px}
 .caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
 .caption b{color:var(--text);font-weight:500}
+.caption+.caption{margin-top:5px}
 .pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
 .three{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
 .step{font-size:11px;color:var(--subtle);margin:0 0 6px 2px}
@@ -482,11 +483,10 @@ svg.i{width:13px;height:13px;flex:none}
             <div class="card">
               <div class="section"><span class="eyebrow">CONTEXT</span><span class="icon-btn"><svg class="i"><use href="#refresh"/></svg></span></div>
               <div class="figure"><span class="used">14k</span><span class="hint">of 272k</span><span class="pct" style="--c:var(--green)">5%</span></div>
-              <div class="bar"><i style="width:2.2%;background:var(--blue)"></i><i style="width:1.1%;background:var(--yellow)"></i><i style="width:1.8%;background:var(--magenta)"></i></div>
+              <div class="bar"><i style="width:1.9%;background:var(--blue)"></i><i style="width:3.2%;background:var(--yellow)"></i></div>
               <div class="legend">
-                <span><i style="background:var(--blue)"></i><em>system prompt</em><b>6k</b><em>2%</em></span>
-                <span><i style="background:var(--yellow)"></i><em>messages</em><b>3k</b><em>1%</em></span>
-                <span><i style="background:var(--magenta)"></i><em>tools and overhead</em><b>5k</b><em>2%</em></span>
+                <span><i style="background:var(--blue)"></i><em>system prompt</em><b>5k</b><em>2%</em></span>
+                <span><i style="background:var(--yellow)"></i><em>messages</em><b>9k</b><em>3%</em></span>
                 <span><i class="free"></i><em>free</em><b>258k</b><em>95%</em></span>
               </div>
               <div class="hint">Codex reports the total; categories are estimated from its session record · gpt-6.1-sol · just now</div>
@@ -517,7 +517,12 @@ svg.i{width:13px;height:13px;flex:none}
         </div>
       </div>
     </div>
-    <p class="caption"><b>Codex.</b> Compact is available on a measured Codex card, with the same row and button as for Claude. The Codex card has no “compacts at” figure and says its categories are estimated. <b>The form</b> has no “What to keep” field, because Codex’s compact request takes no instructions: one line says Codex chooses what the summary keeps and that it can’t be undone, then <b>Compact now</b> or <b>Cancel</b>. While the agent is working the line and the button read as in state 2. <b>Done</b> leaves one work-stream line, <b>Context compacted · 212k → 14k</b>, never with a “Kept:” line. Its figures are Codex’s own totals for the whole context before and after, so the second one matches the card measured again. Right after a compaction Codex’s figure leaves out its fixed system prompt and tools, so the line and the card read low until the agent’s next turn. For Claude the second figure is the summary alone. <b>Usage:</b> the compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. Codex does not report them while it compacts, so the figures are read from the entry Codex writes in the thread’s own session record for that compaction; here the input is the 212k context, nearly all of it read from the cache. When the record has no such entry, or more than one, no row is written and the compaction still shows as done. The Usage page gains nothing new, and the record is drawn here only to make the accounting visible. Queued, compacting, failed and interrupted look the same as for Claude in states 3, 4 and 6, with “Codex” where they name Claude and no “Keeping:” line. “Nothing to compact” does not arise: Codex compacts again whenever it is asked.</p>
+    <p class="caption"><b>Codex.</b> Compact is available on a measured Codex card, with the same row and button as for Claude. The Codex card has no “compacts at” figure and says its categories are estimated.</p>
+    <p class="caption"><b>The form</b> has no “What to keep” field, because Codex’s compact request takes no instructions: one line says Codex chooses what the summary keeps and that it can’t be undone, then <b>Compact now</b> or <b>Cancel</b>. While the agent is working the line and the button read as in state 2.</p>
+    <p class="caption"><b>Done</b> leaves one work-stream line, <b>Context compacted · 212k → 14k</b>, never with a “Kept:” line. Its figures are Codex’s own totals for the whole context before and after, so the second one matches the card measured again. For Claude the second figure is the summary alone.</p>
+    <p class="caption"><b>Reads low.</b> Right after a compaction Codex’s figure leaves out its fixed system prompt and tools, so the line and the card read low until the agent’s next turn. The card’s categories are estimates fitted to that figure: they shrink to add up to 14k and no “tools and overhead” is left over.</p>
+    <p class="caption"><b>Usage.</b> The compaction’s tokens are one row in the usage ledger, recorded against the agent like any other request. Codex does not report them while it compacts, so the figures are read from the entry Codex writes in the thread’s own session record for that compaction; here the input is the 212k context, nearly all of it read from the cache. When the record has no such entry, or more than one, no row is written and the compaction still shows as done. The Usage page gains nothing new, and the record is drawn here only to make the accounting visible.</p>
+    <p class="caption"><b>Other states.</b> Queued, compacting, failed and interrupted look the same as for Claude in states 3, 4 and 6, with “Codex” where they name Claude and no “Keeping:” line. “Nothing to compact” does not arise: Codex compacts again whenever it is asked.</p>
   </section>
 
   <!-- 8. No provider session yet -->
