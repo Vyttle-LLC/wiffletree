@@ -3207,6 +3207,16 @@ mod tests {
 
     #[test]
     fn a_running_turn_shows_as_working_after_a_blocked_report() {
+        a_running_turn_shows_as_working_after_reporting("blocked", Status::Blocked);
+    }
+
+    #[test]
+    fn a_running_turn_shows_as_working_after_a_ready_for_testing_report() {
+        a_running_turn_shows_as_working_after_reporting("ready_for_testing", Status::Done);
+    }
+
+    /// A report of `kind` stores `stored` at once, and shows it only once the turn has ended.
+    fn a_running_turn_shows_as_working_after_reporting(kind: &str, stored: Status) {
         let (_home, mut host, ticket, coordinator) = ticket_fixture();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
@@ -3220,7 +3230,7 @@ mod tests {
         actor
             .active
             .insert(implementer.id.clone(), active_turn("run", vec![]));
-        let report = json!({"message_id":"stuck","kind":"blocked","body":"Need a decision"});
+        let report = json!({"message_id":"report","kind":kind,"body":"Where it stands"});
         actor
             .host
             .agent_tool(&implementer.id, "report", report)
@@ -3249,10 +3259,7 @@ mod tests {
             )
         );
         // Ticket and agent operations still see the report.
-        assert_eq!(
-            actor.host.session(&implementer.id).unwrap().status,
-            Status::Blocked
-        );
+        assert_eq!(actor.host.session(&implementer.id).unwrap().status, stored);
         actor
             .provider_event(
                 &implementer.id,
@@ -3264,15 +3271,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            shown(&actor),
-            (
-                Status::Blocked,
-                json!("blocked"),
-                json!("blocked"),
-                json!("blocked")
-            )
-        );
+        let label = serde_json::to_value(stored).unwrap();
+        assert_eq!(shown(&actor), (stored, label.clone(), label.clone(), label));
     }
 
     /// A ticket in `state` whose implementer is in its turn, run `run`, started at 7.
