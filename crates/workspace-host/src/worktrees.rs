@@ -212,10 +212,11 @@ impl Host {
     }
     /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
     /// until it finishes, and an agent that has reported is Done but still in its turn. A finished
-    /// run also counts while its process group exists, whatever its outcome: a stopped or crashed
-    /// host does not wait for the process. A normal finish signals the group and reaps its leader,
-    /// so only a descendant that ignored the signal or a recycled group id keeps the worktree
-    /// longer. Runs recorded before groups were kept do not count.
+    /// run also counts while its process group exists, whatever its outcome: a crashed host does
+    /// not wait for the process, and the next start leaves one it cannot confirm. A normal finish
+    /// signals the group and reaps its leader, so only a descendant that ignored the signal or a
+    /// recycled group id keeps the worktree longer. Runs recorded before groups were kept do not
+    /// count.
     fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
         let runs = self
             .db
@@ -494,15 +495,20 @@ impl Host {
     }
 }
 
-/// Adds provider runs' process group, recorded when the provider starts.
+/// Adds provider runs' process group and its leader's start time, recorded when the provider
+/// starts.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
-    let present: i64 = db.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('provider_runs') WHERE name='process_group'",
-        [],
-        |r| r.get(0),
-    )?;
-    if present == 0 {
-        db.execute_batch("ALTER TABLE provider_runs ADD COLUMN process_group INTEGER")?;
+    for column in ["process_group", "process_started"] {
+        let present: i64 = db.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('provider_runs') WHERE name=?1",
+            [column],
+            |r| r.get(0),
+        )?;
+        if present == 0 {
+            db.execute_batch(&format!(
+                "ALTER TABLE provider_runs ADD COLUMN {column} INTEGER"
+            ))?;
+        }
     }
     Ok(())
 }

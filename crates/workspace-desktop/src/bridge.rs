@@ -56,6 +56,12 @@ impl Bridge {
             .map_err(Clone::clone)?
             .request(command)
     }
+    /// Stops running turns and the host; returns once their provider processes are stopped.
+    pub fn shutdown(&self) {
+        if let Ok(service) = &self.service {
+            service.shutdown();
+        }
+    }
     pub fn changes(&self) -> Option<Receiver<()>> {
         self.service.as_ref().ok().map(Service::changes)
     }
