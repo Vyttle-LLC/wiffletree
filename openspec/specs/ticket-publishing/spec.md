@@ -32,7 +32,7 @@ The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id and a
 - **THEN** it is refused and nothing is sent
 
 ### Requirement: Checks before anything leaves the machine
-Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. The host SHALL make the same checks again, for the same commit, when the human approves a step and immediately before it sends anything. A request SHALL record the verification cycle it was decided on and how that cycle ended. If the ticket's latest cycle is no longer that one at either of those moments, the host SHALL send nothing, SHALL end the request and SHALL tell the caller to publish again, so that the later cycle decides whether the human is asked.
+Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. The host SHALL also refuse while the ticket records a head that is not reviewed, as after the PR keeper adopted commits Wiffletree did not make (see pr-keeper), whatever the HEAD's patch id; the refusal SHALL say that the branch has commits no review has checked. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. The host SHALL make the same checks again, for the same commit, when the human approves a step and immediately before it sends anything. A request SHALL record the verification cycle it was decided on and how that cycle ended. If the ticket's latest cycle is no longer that one at either of those moments, the host SHALL send nothing, SHALL end the request and SHALL tell the caller to publish again, so that the later cycle decides whether the human is asked.
 
 #### Scenario: Never reviewed
 - **WHEN** `publish_ticket` is called for a ticket that has had no verification cycle
@@ -69,6 +69,14 @@ Before pushing or asking the human, the host SHALL refuse a publish unless all o
 #### Scenario: HEAD moves while a card waits
 - **WHEN** the human approves a push after the worktree's HEAD has moved to different changes
 - **THEN** nothing is pushed and the caller is told
+
+#### Scenario: Adopted commits with the same patch id
+- **WHEN** the PR keeper adopted a commit that only re-indents a line, so the worktree's HEAD has the verified commit's stable patch id, and `publish_ticket` is called before any later review
+- **THEN** it is refused, saying the branch has commits no review has checked, and nothing is sent
+
+#### Scenario: After the adopted head was reviewed
+- **WHEN** a review started after the adoption has passed at the adopted head and `publish_ticket` is called
+- **THEN** the publish goes ahead
 
 ### Requirement: The host never overwrites commits it did not push
 The host SHALL record the commit it last pushed for each ticket. It SHALL push a ticket's branch only when GitHub's branch is absent, is behind the commit being pushed, or is at a commit the host may replace, as after a squash or a clean rebase. The host MAY replace GitHub's branch head only when it is the commit the host last pushed, or a commit that was once the tip of this ticket's branch in this repository on this machine, as the branch's reflog records, such as one an agent's shell pushed before the host published tickets. Otherwise it SHALL refuse and push nothing.
