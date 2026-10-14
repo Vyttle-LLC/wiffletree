@@ -81,10 +81,15 @@ fn compact_form_text(provider: Provider, working: bool) -> (&'static str, &'stat
     }
 }
 
+/// Whether the form has the "What to keep" field.
+fn takes_note(provider: Provider) -> bool {
+    provider == Provider::Claude
+}
+
 /// What the request carries of what was typed. Codex's compact request has no field for a
 /// note, so its form has none and a draft kept for the session is never sent.
 fn compact_instructions(provider: Provider, note: &str) -> Option<String> {
-    (provider == Provider::Claude && !note.trim().is_empty()).then(|| note.to_owned())
+    (takes_note(provider) && !note.trim().is_empty()).then(|| note.to_owned())
 }
 
 /// What a queued compaction waits for: its turn, or an agent that is paused, stopped or
@@ -244,8 +249,7 @@ impl Workspace {
         let Some(session) = self.selected_session() else {
             return;
         };
-        // Only a Claude agent's form has the field to focus.
-        let takes_note = session.provider == Provider::Claude;
+        let takes_note = takes_note(session.provider);
         self.compact_forms
             .insert(session.id.clone(), CompactForm::default());
         self.compact_note.update(cx, |input, cx| {
@@ -503,8 +507,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    // Codex chooses what its summary keeps, so its form has no field.
-                    .when(session.provider == Provider::Claude, |form| {
+                    .when(takes_note(session.provider), |form| {
                         form.child(
                             div()
                                 .flex()
@@ -709,7 +712,7 @@ impl Workspace {
 mod tests {
     use super::{
         Measured, chip_note, compact_action, compact_form_text, compact_instructions, compacting,
-        compaction_notice, measure_now, percent, queued_text,
+        compaction_notice, measure_now, percent, queued_text, takes_note,
     };
     use workspace_core::{
         Compaction, CompactionOutcome, CompactionResult, CompactionState, Provider, SessionRuntime,
@@ -817,6 +820,8 @@ mod tests {
             compact_form_text(Provider::Codex, true),
             compact_form_text(Provider::Claude, true)
         );
+        assert!(takes_note(Provider::Claude));
+        assert!(!takes_note(Provider::Codex));
         // A draft typed on a Claude agent and kept for the session never reaches Codex.
         let draft = "the failing test names";
         assert_eq!(compact_instructions(Provider::Codex, draft), None);

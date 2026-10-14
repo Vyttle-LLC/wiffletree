@@ -75,7 +75,7 @@ fn codex() -> ModelProfile {
     }
 }
 
-/// Shortens how long a Codex compaction may run; see `provider::CODEX_COMPACTION_LIMIT`.
+/// Shortens how long a Codex compaction may run, which is ten minutes.
 const CODEX_LIMIT: &str = "WORKSPACE_CODEX_COMPACTION_LIMIT_MS";
 
 /// A recorded app-server exchange or session record, one JSON object per line.
@@ -190,6 +190,29 @@ impl World {
         std::fs::write(folder.join(record), before).unwrap();
     }
 
+    /// The thread's session record as it now is, one entry per line.
+    fn session_record(&self, session: &str) -> String {
+        let record = format!("rollout-2026-10-13T17-10-48-{}.jsonl", self.thread(session));
+        let folder = self.scratch.path().join("codex/sessions/2026/10/13");
+        std::fs::read_to_string(folder.join(record)).unwrap()
+    }
+
+    /// The context total the card shows for a Codex agent, read from its session record.
+    fn context_total(&self, session: &str) -> u64 {
+        let runtime = self.runtime(session);
+        let (thread, directory) = (
+            runtime.provider_session_id.unwrap(),
+            runtime.directory.unwrap(),
+        );
+        let probe = workspace_host::context::Probe {
+            role: Role::ProjectOrchestrator,
+            profile: &codex(),
+            provider_session: &thread,
+            directory: Path::new(&directory),
+        };
+        workspace_host::context::usage(&probe).unwrap().used
+    }
+
     /// What the fake app-server was started with and read, for each Codex compaction.
     fn codex_compactions(&self) -> Vec<Value> {
         let log = self.scratch.path().join("prompts/codex-compactions.txt");
@@ -204,7 +227,6 @@ impl World {
         self.scratch.path().join("codex-compact-extra.txt").exists()
     }
 
-    /// A compaction run's stored result.
     fn result(&self, run: &str) -> Value {
         let result: String = self
             .db()
@@ -217,7 +239,6 @@ impl World {
         serde_json::from_str(&result).unwrap()
     }
 
-    /// The ledger's requests for one run.
     fn requests(&self, run: &str) -> Vec<Request> {
         let db = self.db();
         let mut requests = db
@@ -1484,8 +1505,7 @@ fn a_codex_agent_is_compacted_through_the_app_server_with_codexs_figures_and_one
     );
     assert_eq!(world.compaction(), None);
     assert_eq!(world.status(&main), Status::Ready);
-    // The server would have stayed: the host stopped it once the outcome was read, having
-    // written to it only once.
+    // The server is gone once the outcome was read, and was written to only once.
     let run = world.compactions(&main).remove(0);
     assert_eq!(run.outcome.as_deref(), Some("compacted"));
     assert!(!group_runs(run.group.unwrap()));
@@ -1554,6 +1574,45 @@ fn a_codex_agent_is_compacted_through_the_app_server_with_codexs_figures_and_one
 }
 
 #[test]
+fn a_codex_server_that_writes_its_record_once_its_input_closes_is_given_time_to() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    // Codex 0.160 writes the record before it reports the outcome; nothing promises it.
+    world.plan(json!({"record":"late"}));
+
+    let outcome = world.compacted(None);
+
+    assert_eq!(outcome.result, CompactionResult::Compacted);
+    let run = world.compactions(&main).remove(0);
+    assert!(!group_runs(run.group.unwrap()));
+    assert_eq!(world.result(&run.id)["unrecorded"], Value::Null);
+    assert_eq!(world.requests(&run.id).len(), 1);
+    assert_eq!(world.requests(&run.id)[0].input, 29_552);
+    assert_eq!(world.context_total(&main), 6_550);
+}
+
+#[test]
+fn a_codex_server_that_ignores_its_input_closing_is_stopped_once_its_margin_has_passed() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(json!({"ignore_input_closing":true}));
+
+    let outcome = world.compacted(None);
+
+    assert_eq!(outcome.result, CompactionResult::Compacted);
+    let run = world.compactions(&main).remove(0);
+    assert!(!group_runs(run.group.unwrap()));
+    assert_eq!(world.requests(&run.id).len(), 1);
+    // The server saw its input close and stayed. The margin is a second; half of one allows
+    // for how late the fake may note the close.
+    let closed = world.scratch.path().join("codex-compact-input-closed.txt");
+    let closed: i64 = std::fs::read_to_string(closed).unwrap().parse().unwrap();
+    assert!(run.finished_at.unwrap() - closed >= 500);
+}
+
+#[test]
 fn the_turn_after_a_codex_compaction_is_counted_whole() {
     let world = World::codex();
     let main = world.main.id.clone();
@@ -1562,6 +1621,9 @@ fn the_turn_after_a_codex_compaction_is_counted_whole() {
 
     world.send("JUST_REPLY second");
     world.until_replies(2);
+
+    // The line keeps the figures it was written with, though the turn has since run.
+    assert_eq!(world.lines(), ["Context compacted · 30k → 6.5k"]);
 
     // Codex's running total leaves the compaction out, so the turn's request is exactly what
     // the total rose by since the first turn, and the compaction between them does not make
@@ -1618,6 +1680,25 @@ fn a_failed_codex_turn_fails_the_compaction_with_codexs_message_cut_to_one_line(
 
     assert_eq!(reason, format!("{}…", &said[..200]));
     assert_eq!(reported, said, "the run keeps all of it");
+}
+
+#[test]
+fn a_failed_codex_compaction_records_nothing_even_when_its_record_has_a_usage_entry() {
+    let failed = json!({"status":"failed","error":{"message":"The model is overloaded"}});
+    let plan = json!({"turn":failed,"record":"failed"});
+
+    // The helper checks that the run has no request.
+    let (world, reason, _) = failed_codex_compaction(plan);
+
+    assert_eq!(reason, "The model is overloaded");
+    let record = world.session_record(&world.main.id);
+    let turn_of = |entry: &Value| entry["payload"]["turn_id"].as_str().map(str::to_owned);
+    let entries = record.lines().map(|l| serde_json::from_str(l).unwrap());
+    let spent: Vec<Value> = entries
+        .filter(|entry: &Value| entry["type"] == "token_usage_record")
+        .collect();
+    assert_eq!(spent.len(), 2, "the earlier turn's and the compaction's");
+    assert_ne!(turn_of(&spent[0]), turn_of(&spent[1]));
 }
 
 #[test]
@@ -1723,6 +1804,23 @@ fn a_codex_server_that_exits_early_fails_the_compaction_with_its_exit_and_error_
 }
 
 #[test]
+fn a_codex_server_that_exits_early_leaves_a_one_line_reason_and_the_run_keeps_the_rest() {
+    let output = format!("{}\nTraceback (most recent call last):\n", "x".repeat(300));
+    let plan = json!({"stop_before":"turn/completed","exit":3,"stderr":output});
+
+    let (world, reason, reported) = failed_codex_compaction(plan);
+
+    let whole =
+        format!("Provider exited without a successful terminal result (exit status: 3). {output}");
+    assert_eq!(reason, format!("{}…", &whole[..200]));
+    assert_eq!(reported, whole);
+    // The event holds the same reason as the card.
+    let stored = "SELECT detail FROM activity WHERE kind='compaction_failed'";
+    let stored: String = world.db().query_row(stored, [], |r| r.get(0)).unwrap();
+    assert_eq!(stored, reason);
+}
+
+#[test]
 fn a_codex_compaction_that_never_completes_is_stopped_at_the_limit_and_the_next_turn_runs() {
     let world = World::codex();
     let main = world.main.id.clone();
@@ -1734,8 +1832,6 @@ fn a_codex_compaction_that_never_completes_is_stopped_at_the_limit_and_the_next_
     world.compact(&main, None).unwrap();
     world.until_compacting(&main);
     let waiting = world.send("JUST_REPLY waiting");
-    world.several_passes();
-    assert_eq!(world.receipt(&waiting), Receipt::Queued);
     until("the limit", || world.outcome().is_some());
 
     let outcome = world.outcome().unwrap();
@@ -1751,6 +1847,9 @@ fn a_codex_compaction_that_never_completes_is_stopped_at_the_limit_and_the_next_
     assert_eq!(world.lines(), ["Compaction failed · context unchanged"]);
     world.until_replies(2);
     assert_eq!(world.receipt(&waiting), Receipt::Completed);
+    // The message waited for the compaction: its turn began once the server was stopped.
+    let turn = world.turns(&main).remove(1);
+    assert!(turn.started_at >= run.finished_at.unwrap());
 }
 
 #[test]

@@ -5,7 +5,6 @@ use crate::compaction::CompactionRecord;
 use crate::runtime::OwnDescriptors as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
-pub use codex_compaction::CODEX_COMPACTION_LIMIT;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
 use std::os::unix::process::CommandExt;
@@ -429,6 +428,10 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     // Codex's app-server exits when its input closes, so a compaction holds it open until its
     // outcome is read. Any other run closes it as soon as it is written.
     let mut open_input = codex_compaction.is_some().then_some(writer);
+    // When a Codex server that has not exited by itself is stopped: a margin after its outcome
+    // is read and its input closed, and at once when its time is up.
+    let mut stop_at: Option<Instant> = None;
+    let due = |at: Option<Instant>| at.is_some_and(|at| Instant::now() >= at);
     let mut stderr = process.child.stderr.take().context("No provider stderr")?;
     // The tail is kept as it arrives, so a process still holding stderr when the turn ends
     // cannot withhold what was already written.
@@ -457,8 +460,8 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let mut requests = crate::telemetry::ClaudeRequests::default();
     let mut claude = ClaudeSteps::new(&turn.cwd);
     let mut codex = CodexSteps::new(&turn.cwd);
-    // A Codex compaction's outcome has been read, or its time is up: its server runs until
-    // the host stops it, and nothing it says or exits with afterwards counts.
+    // A Codex compaction's outcome has been read, or its time is up: nothing its server says
+    // or exits with afterwards counts.
     let mut ended = false;
     // The exit is checked on every pass, so a leftover process writing to stdout cannot hide
     // it. Every event the reader accepted is handled; the reader decides when to stop.
@@ -468,8 +471,9 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         if !ended && out_of_time() {
             failure = Some(codex_compaction::out_of_time());
             ended = true;
+            stop_at = Some(Instant::now());
         }
-        if !exited && (ended || process.exited()?) {
+        if !exited && (due(stop_at) || process.exited()?) {
             drop(open_input.take());
             // First, so the reader never waits for room while the group is being stopped.
             output.provider_exited();
@@ -494,6 +498,8 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
                 }
                 failure = end.reported;
                 ended = true;
+                drop(open_input.take());
+                stop_at = Some(Instant::now() + codex_compaction::EXIT_MARGIN);
             }
             continue;
         }
@@ -620,12 +626,15 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     }
     // A provider can close stdout and keep running; returning early drops `process`, which
     // stops its whole process group. A Codex server that does so can report no outcome any
-    // more, and is stopped below when its time is up.
+    // more, and is stopped below when its time is up or its margin has passed.
     while !process.exited()? {
         check_running(&cancel)?;
         if !ended && out_of_time() {
             failure = Some(codex_compaction::out_of_time());
             ended = true;
+            break;
+        }
+        if due(stop_at) {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
