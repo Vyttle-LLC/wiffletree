@@ -73,7 +73,6 @@ struct Recorded {
 /// A process group's id and the processes in it, as a notice names them.
 type Group = (i64, Vec<ProcessInfo>);
 
-/// "1 process" or "8 processes".
 fn count(processes: usize) -> String {
     match processes {
         1 => "1 process".into(),
@@ -81,7 +80,6 @@ fn count(processes: usize) -> String {
     }
 }
 
-/// Whether a notice says what is running or what was stopped.
 #[derive(Clone, Copy)]
 enum Tense {
     Present,

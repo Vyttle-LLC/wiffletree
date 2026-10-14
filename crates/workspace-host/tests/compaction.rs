@@ -2089,13 +2089,16 @@ fn what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stop
         found.ok()
     };
     let mut helper = None;
-    until("the helper to be recorded against the agent", || {
+    until("the helper's process id to be saved", || {
         let id = std::fs::read_to_string(&saved).ok();
         helper = id.and_then(|id| id.trim().parse::<i32>().ok());
-        helper.is_some_and(|helper| recorded(&world, helper) == Some(None))
+        helper.is_some()
     });
     let helper = helper.unwrap();
     let _kill = Kill(helper);
+    until("the helper to be recorded against the agent", || {
+        recorded(&world, helper) == Some(None)
+    });
     assert!(group_runs(helper));
 
     // A pause lets a started compaction finish, and what its server started is part of it.
@@ -2131,13 +2134,16 @@ fn a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared
         found.ok()
     };
     let mut helper = None;
-    until("the helper to be recorded against the agent", || {
+    until("the helper's process id to be saved", || {
         let id = std::fs::read_to_string(&saved).ok();
         helper = id.and_then(|id| id.trim().parse::<i32>().ok());
-        helper.is_some_and(|helper| row(&world, helper).is_some())
+        helper.is_some()
     });
     let helper = helper.unwrap();
     let _kill = Kill(helper);
+    until("the helper to be recorded against the agent", || {
+        row(&world, helper).is_some()
+    });
     let compaction = world.compactions(&main).remove(0).id;
 
     // As if the helper's group id had once been a group an earlier turn left, which emptied
