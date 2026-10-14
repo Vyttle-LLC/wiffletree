@@ -3022,6 +3022,16 @@ mod tests {
         );
         assert!(context.get("child_reports").is_none());
 
+        // A client that sends its unused optional arguments as null gets the normal context.
+        let with_null = host
+            .agent_tool(
+                &coordinator.id,
+                "workspace_context",
+                json!({"ticket_id":null}),
+            )
+            .unwrap();
+        assert_eq!(with_null, context);
+
         // ticket_id reads one finished ticket in full, and only within the caller's project.
         let record = host
             .agent_tool(

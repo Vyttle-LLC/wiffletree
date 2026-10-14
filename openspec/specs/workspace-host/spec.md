@@ -169,7 +169,7 @@ The `send_message` tool result SHALL read `queued_behind_turn` and carry `recipi
 - **THEN** the result is `queued_behind_turn` with the time the worker's turn started
 
 ### Requirement: Questions waiting are counted
-The host SHALL count, for each session, the `blocked` reports it sent to its parent that have not been answered, and SHALL give that count in the snapshot and as `questions_waiting` on each `team` entry of `workspace_context`. A report SHALL count as answered once a message its parent sent after it has been delivered to the session by the start of a turn; an answer that is only queued SHALL leave it waiting. The host's own report that a session's turn is held SHALL NOT count. The count SHALL be read from stored messages, SHALL be the same after a host restart, and SHALL NOT change the session's status or its ticket's state.
+The host SHALL count, for each session, the `blocked` reports it sent to its parent that have not been answered, and SHALL give that count in the snapshot and as `questions_waiting` on each live (not archived) agent's `team` entry of `workspace_context`. A report SHALL count as answered once a message its parent sent after it has been delivered to the session by the start of a turn; an answer that is only queued SHALL leave it waiting. The host's own report that a session's turn is held SHALL NOT count. The count SHALL be read from stored messages, SHALL be the same after a host restart, and SHALL NOT change the session's status or its ticket's state.
 
 #### Scenario: Blocked report mid-turn
 - **WHEN** an implementer reports `blocked` and keeps working in the same turn

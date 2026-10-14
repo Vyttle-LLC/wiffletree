@@ -731,7 +731,7 @@ impl Host {
             args[key].as_str().with_context(|| format!("Missing {key}"))
         };
         match name {
-            "workspace_context" => match args.get("ticket_id") {
+            "workspace_context" => match args.get("ticket_id").filter(|id| !id.is_null()) {
                 Some(_) => self.ticket_record(&session, string("ticket_id")?),
                 None => self.agent_context(id),
             },
