@@ -132,7 +132,8 @@ pub struct ModelSelection { …, pub keeper: Option<ModelProfile> }
 **When it is not clean.**
 - *Conflict:* with the conflicts trigger off, or no checks command, or the try already used, nothing changes: the watcher's message tells the coordinator, as today. Otherwise decision 5.
 - *Changed:* the commit is not pushed, because no review covers it. With the conflicts trigger on and a checks command, the host runs the checks on it and then the keeper's review (decision 6), with no model; it is not a try. A review that fails there is withdrawn like any keeper review, because the rollback record belongs to the review, not to a try. Otherwise the coordinator is told once per head and base that the rebase needs a re-check.
-- A given pair of head and base is rebased once (`Ticket.keeper.last`), so a failed push is not repeated until one of them changes.
+- A given pair of head and base is rebased once (`Ticket.keeper.rebased`), so a failed push is not repeated until one of them changes. A rebase that fails outright, as on a failed fetch, is not counted: later passes try it again, and the coordinator is told once after three failures in a row. A result dropped at a restart is not counted either.
+- A keeper push cut short by a restart ends at the next start with one message to the coordinator: the worktree holds the rebase, GitHub may still have the old head, and `publish_ticket` pushes it.
 
 ### 5. One try by the model, behind a gate
 **What starts one.** A conflict from decision 4, or `Ticket.pull_request.checks == Failure` with the checks trigger on. In both cases the repository needs a checks command and the ticket must have no earlier try for this problem at this head.
@@ -236,7 +237,7 @@ One PR each, in this order. Each is useful alone and leaves the others off. The 
 
 Slices 2 and 3 depend only on slice 1. Slice 4 depends on slice 3 for the keeper's model and its role and on slice 2 for the record of a head that is not reviewed, and slice 5 on slice 4.
 
-**One change, five PRs** (decided, (f) 7); slice 1 became two PRs, 1a and 1b, on October 14, 2026, when it measured about twice its estimate. The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
+**One change, five PRs** (decided, (f) 7). The coordinator then split slice 1 into two PRs, 1a and 1b, on October 14, 2026, because it measured about twice its estimate, and told the human; the split was not the human's decision. The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
 
 ## What this closes and what it does not
 

@@ -50,7 +50,7 @@ The host SHALL keep the keeper's settings in this machine's host settings: one s
 - **THEN** the save is refused and the previous settings stay in effect
 
 ### Requirement: The base must be quiet before a rebase
-With the rebase trigger on, a rebase SHALL be due for a kept ticket whose branch may be changed when the head commit of the PR's base branch, as the watcher last read it from GitHub, is not contained in the PR's head, and every pass for at least the quiet period has reported that same base commit. The host SHALL remember, for each repository and base branch, the base commit of the latest pass and when a pass first reported it. A pass that reports another base commit SHALL start the wait again. The record SHALL be kept in memory only, so a host restart SHALL start the wait again. No model SHALL be used to decide that a rebase is due.
+With the rebase trigger on, a rebase SHALL be due for a kept ticket whose branch may be changed when the head commit of the PR's base branch, as the watcher last read it from GitHub, is not contained in the PR's head, and every pass for at least the quiet period has reported that same base commit. The host SHALL remember, for each repository and base branch, the base commit of the latest pass and when a pass first reported it. A pass that reports another base commit SHALL start the wait again. The record SHALL be kept in memory only, so a host restart SHALL start the wait again. An error while deciding for one ticket SHALL NOT change what is decided or done for any other ticket. No model SHALL be used to decide that a rebase is due.
 
 #### Scenario: Quiet for the period
 - **WHEN** the quiet period is 2 minutes, `main` moved to `4a1c2e9`, and passes have reported `4a1c2e9` for 2 minutes
@@ -72,8 +72,12 @@ With the rebase trigger on, a rebase SHALL be due for a kept ticket whose branch
 - **WHEN** the host restarts while a base has been quiet for 90 seconds of a 2 minute period
 - **THEN** the wait starts again from the first pass after the restart
 
+#### Scenario: One ticket's error
+- **WHEN** a pass makes two tickets' rebases due and reading one of them fails
+- **THEN** the other ticket's rebase still starts
+
 ### Requirement: A rebase runs in the keeper's checkout
-The keeper SHALL rebase in a temporary Git worktree of its own, at the PR's head, and SHALL NOT run Git commands that change the ticket's worktree, index or branch while rebasing. Before rebasing it SHALL update the base's remote-tracking ref alone and SHALL stop, changing nothing, when that ref is not the commit the quiet period was measured on. It SHALL report the rebase as one of: the same change, when the rebased commit is patch-equivalent to the commit the ticket's latest cycle verified; a changed patch, when Git rebased without conflict and it is not; or a conflict, with the files Git could not merge. The checkout SHALL be removed when the rebase ends, however it ends. A given PR head SHALL be rebased onto a given base commit at most once.
+The keeper SHALL rebase in a temporary Git worktree of its own, at the PR's head, and SHALL NOT run Git commands that change the ticket's worktree, index or branch while rebasing. Before rebasing it SHALL update the base's remote-tracking ref alone and SHALL stop, changing nothing, when that ref is not the commit the quiet period was measured on. It SHALL report the rebase as one of: the same change, when the rebased commit is patch-equivalent to the commit the ticket's latest cycle verified; a changed patch, when Git rebased without conflict and it is not; or a conflict, with the files Git could not merge. The checkout SHALL be removed when the rebase ends, however it ends. A given PR head SHALL be rebased onto a given base commit at most once. A rebase that ends with none of these reports, as when the fetch fails, SHALL NOT count: that head and base SHALL be rebased again on a later pass, and after 3 such failures in a row the coordinator SHALL be told once for that head and base. There SHALL be no other limit on these retries.
 
 #### Scenario: The same change
 - **WHEN** a PR's branch is rebased onto a base whose new commits touch other files
@@ -94,6 +98,10 @@ The keeper SHALL rebase in a temporary Git worktree of its own, at the PR's head
 #### Scenario: The same head and base again
 - **WHEN** a rebase of head `e21f0aa` onto `4a1c2e9` ended in a failed push, and the next pass reports the same head and base
 - **THEN** no second rebase of that pair starts
+
+#### Scenario: The fetch fails
+- **WHEN** the fetch before a rebase fails on a network error three passes in a row
+- **THEN** each later pass rebases that head and base again, nothing is moved or pushed, and the coordinator is told once, after the third failure
 
 ### Requirement: The ticket's branch moves only in a free, clean, unchanged worktree
 The keeper SHALL move a ticket's branch to a result of its own only in one step on the host's own thread, and only while all of these hold: the worktree is on the ticket's branch; its HEAD is the commit the keeper's work started from; it has no uncommitted or untracked files; no agent of the ticket is in a turn; no verification cycle is running; and no publish request is running or waiting. When an agent of the ticket is in a turn, the result SHALL wait and the move SHALL be tried again after later passes. When any other condition fails, the result SHALL be dropped, the worktree and the branch SHALL be left exactly as they are, and the next pass SHALL decide anew. The keeper SHALL never force a move, stash, clean or discard anything in a ticket's worktree. The commit the branch moved from SHALL remain in the branch's reflog.
@@ -166,6 +174,27 @@ Each ticket SHALL record the keeper's last action on its branch: what it was, wh
 - **WHEN** the coordinator calls `workspace_context` after a rebase
 - **THEN** the ticket's entry names the rebase, its time, both commits and the base commit
 
+### Requirement: The ticket shows what the keeper did
+The ticket's card in the Team panel SHALL say in one line what the keeper last did, when, and for a rebase that the change is the same as the reviewed commit.
+
+A kept ticket's PR line SHALL end with the keeper's part (see pr-watch), one of these, the first that applies: "rebase in N min" while a rebase waits for the quiet period, with the minutes rounded up; "rebase waiting" while a result waits for the worktree to be free; "rebased N ago" when the PR's head is the keeper's own rebase of less than an hour ago; "up to date" when the PR's head contains the base's head. Parts that other requirements of this capability define SHALL come before these. A ticket whose PR is not kept, or whose branch the keeper may not change, SHALL show no such part.
+
+#### Scenario: Rebased a moment ago
+- **WHEN** the keeper rebased PR #143 one minute ago and its checks are running
+- **THEN** its row's second line reads "#143 · checks … · rebased 1 min ago", and its card says the keeper rebased it onto main and pushed, naming both commits
+
+#### Scenario: Waiting for the base to settle
+- **WHEN** the base moved 40 seconds ago and the quiet period is 2 minutes
+- **THEN** the PR line ends "rebase in 2 min"
+
+#### Scenario: Up to date
+- **WHEN** a kept ticket's PR #142 contains the base's head and the keeper has done nothing to it for a day
+- **THEN** its line reads "#142 · checks ✓ · up to date"
+
+#### Scenario: Not kept
+- **WHEN** a ticket's repository asks first
+- **THEN** its PR line has no keeper part
+
 ### Requirement: The Repositories page holds the triggers and says which repositories are kept
 The Repositories page SHALL show, under the owner list, a block titled "Keep pull requests up to date" with a tick box for each trigger the app offers and the quiet period beside the rebase trigger. The block SHALL say that the triggers apply only in repositories that open pull requests without asking, that they are off until ticked, and that Wiffletree never merges, approves, closes or comments on a pull request. The rebase trigger's text SHALL say that it replaces the branch on GitHub. While any trigger is on, each repository row SHALL say "kept" when the repository publishes without asking and "not kept" otherwise; with every trigger off the rows SHALL say neither. `workspace_context` SHALL say for each repository the project uses whether it is kept.
 
@@ -189,11 +218,15 @@ The keeper SHALL NOT merge, approve, close, reopen, label, comment on, review, r
 - **THEN** every call it made to GitHub was a read, except pushes of tickets' own branches
 
 ### Requirement: Keeper work interrupted by a restart leaves nothing behind
-When the host starts, it SHALL remove every keeper checkout an earlier run left, SHALL drop any keeper result that was not yet moved onto its ticket's branch, and SHALL change no ticket's worktree or branch in doing so. Work that was due SHALL be decided anew by the passes after the start.
+When the host starts, it SHALL remove every keeper checkout an earlier run left, SHALL drop any keeper result that was not yet moved onto its ticket's branch, and SHALL change no ticket's worktree or branch in doing so. Work that was due SHALL be decided anew by the passes after the start, and a dropped result SHALL NOT count as a rebase of its head and base. A keeper push that was running when the host stopped SHALL end, and the coordinator, unless it is archived, SHALL be told once, even when its queue is full, that the ticket's worktree holds the rebase, that GitHub's branch may still be the old head, and that `publish_ticket` pushes it.
 
 #### Scenario: Stopped while rebasing
 - **WHEN** the host stops while a keeper checkout exists and starts again
 - **THEN** the checkout is gone, the ticket's worktree and branch are as they were, and nothing was pushed
+
+#### Scenario: Stopped while pushing
+- **WHEN** the host stops after the keeper moved a ticket's branch and before its push ended, and starts again
+- **THEN** the coordinator gets one message naming the worktree's commit and asking it to call `publish_ticket`, and no later restart repeats it
 
 ### Requirement: Agents are told about the keeper
 The bundled project coordinator instructions SHALL say that the workspace may rebase a kept ticket's branch and push it itself, that the coordinator need not dispatch a rebase for such a ticket, and what each keeper message asks of it. The implementer's instructions SHALL say that the workspace may rebase its ticket's branch between its turns. Neither SHALL give any agent a way to turn a trigger on.

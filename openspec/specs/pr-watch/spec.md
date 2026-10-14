@@ -139,7 +139,7 @@ Messages from the PR watcher SHALL contain only the ticket's title and id, PR nu
 - **THEN** its sender reads "Wiffletree PR watcher", not "human", and the chat shows it as a Wiffletree notice
 
 ### Requirement: PR status on tickets and repositories
-A sidebar ticket row whose ticket has a PR SHALL show a second line with the PR number and only the parts that apply: the checks as passed, failed or running; the number of unresolved threads; and one word from the merge state, `conflict`, `draft`, `behind` or `blocked`, the first that applies in that order. A merged or closed PR SHALL instead show `merged` or `closed`. Only failed checks and a conflict SHALL use the error color. A ticket without a PR SHALL keep a single-line row. The row's tooltip and the ticket's card in the Team panel SHALL describe the PR in full, say when the repository's PRs were last checked, and link to the PR on GitHub. Each repository row on the Repositories page SHALL show its number of open PRs on open tickets, and when its PRs were last checked or why the last check failed. A repository that is no longer watched, because each of its open tickets belongs to an archived coordinator, SHALL show no check status.
+A sidebar ticket row whose ticket has a PR SHALL show a second line with the PR number and only the parts that apply: the checks as passed, failed or running; the number of unresolved threads; and one word from the merge state, `conflict`, `draft`, `behind` or `blocked`, the first that applies in that order. A kept ticket's line SHALL end with the PR keeper's part when the keeper has one for the ticket (see pr-keeper). A merged or closed PR SHALL instead show `merged` or `closed`. Only failed checks and a conflict SHALL use the error color. A ticket without a PR SHALL keep a single-line row. The row's tooltip and the ticket's card in the Team panel SHALL describe the PR in full, say when the repository's PRs were last checked, and link to the PR on GitHub. Each repository row on the Repositories page SHALL show its number of open PRs on open tickets, and when its PRs were last checked or why the last check failed. A repository that is no longer watched, because each of its open tickets belongs to an archived coordinator, SHALL show no check status.
 
 #### Scenario: Ticket row
 - **WHEN** a ticket's PR #142 is open with passing checks, one unresolved thread and its branch behind the base
@@ -168,6 +168,10 @@ A sidebar ticket row whose ticket has a PR SHALL show a second line with the PR 
 #### Scenario: Repository no longer watched
 - **WHEN** the human archives the coordinator of a repository's only open ticket after its PRs were checked
 - **THEN** the repository's row no longer says when its PRs were checked
+
+#### Scenario: The keeper's part
+- **WHEN** a kept ticket's PR #143 has running checks and the PR keeper rebased it one minute ago
+- **THEN** its row's second line reads "#143 · checks … · rebased 1 min ago"
 
 ### Requirement: The base branch's head is read with each pass
 Each pass SHALL also read, for every PR it finds, the head commit of the PR's base branch as GitHub reports it, in the same request. The host SHALL NOT store it on the ticket's PR snapshot and SHALL NOT log an activity event when it changes; it is kept in memory for the PR keeper (see pr-keeper).

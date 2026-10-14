@@ -118,8 +118,9 @@ pub struct PrPart {
 }
 
 /// A ticket row's PR line, such as "#142 · checks ✓ · 1 thread · behind", in parts. Only the
-/// parts that apply appear; a finished PR shows `merged` or `closed` instead of its checks.
-pub fn pr_line(pr: &PullRequest) -> Vec<PrPart> {
+/// parts that apply appear, and an open PR ends with the keeper's part, if it has one; a
+/// finished PR shows `merged` or `closed` instead of its checks.
+pub fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, now: i64) -> Vec<PrPart> {
     let part = |text: &str, tone| PrPart {
         text: text.into(),
         tone,
@@ -153,9 +154,51 @@ pub fn pr_line(pr: &PullRequest) -> Vec<PrPart> {
             if let Some((word, tone)) = merge_word {
                 parts.push(part(word, tone));
             }
+            if let Some(keeper) = keeper {
+                parts.push(part(&keeper_words(keeper, now), Tone::Muted));
+            }
         }
     }
     parts
+}
+
+/// The keeper's part of a PR line, with minutes rounded up before a rebase and down after it.
+fn keeper_words(part: KeeperPart, now: i64) -> String {
+    const MINUTE: i64 = 60_000;
+    match part {
+        KeeperPart::RebaseAt(at) => {
+            let minutes = ((at - now).max(1) as u64).div_ceil(MINUTE as u64);
+            format!("rebase in {minutes} min")
+        }
+        KeeperPart::Waiting => "rebase waiting".into(),
+        KeeperPart::Rebased(at) => format!("rebased {} min ago", ((now - at) / MINUTE).max(1)),
+        KeeperPart::UpToDate => "up to date".into(),
+    }
+}
+
+/// What the keeper last did to the ticket's branch, for its card: a line, and a detail line.
+pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
+    let last = ticket.keeper.as_ref()?.last.as_ref()?;
+    let base = ticket
+        .pull_request
+        .as_ref()
+        .map_or("its base", |pr| pr.base.as_str());
+    let pushed = match last.pushed {
+        true => "and pushed",
+        false => "but did not push it",
+    };
+    Some((
+        format!(
+            "rebased onto {base} at {} {pushed}, {}",
+            short_sha(&last.base),
+            age(last.at).to_lowercase()
+        ),
+        format!(
+            "{} → {} · the same change as the reviewed commit, so the passed review stands",
+            short_sha(&last.before),
+            short_sha(&last.after)
+        ),
+    ))
 }
 
 /// The PR in full words, for the row's tooltip and the ticket's card.
@@ -1716,15 +1759,20 @@ mod tests {
         }
     }
     fn line(pr: &PullRequest) -> String {
-        pr_line(pr)
+        kept_line(pr, None)
+    }
+    /// The line of a PR with the keeper's part, a minute after the epoch.
+    fn kept_line(pr: &PullRequest, keeper: Option<KeeperPart>) -> String {
+        pr_line(pr, keeper, MINUTE)
             .iter()
             .map(|p| p.text.as_str())
             .collect::<Vec<_>>()
             .join(" · ")
     }
     fn tones(pr: &PullRequest) -> Vec<Tone> {
-        pr_line(pr).iter().map(|p| p.tone).collect()
+        pr_line(pr, None, 0).iter().map(|p| p.tone).collect()
     }
+    const MINUTE: i64 = 60_000;
 
     #[test]
     fn the_pr_line_shows_only_the_parts_that_apply() {
@@ -1775,6 +1823,68 @@ mod tests {
         let closed = pr(S::Closed, C::Failure, M::Dirty);
         assert_eq!(line(&closed), "#142 · closed");
         assert_eq!(pr_sentence(&closed), "PR #142 closed without merging");
+    }
+
+    #[test]
+    fn a_kept_pr_line_ends_with_what_the_keeper_is_doing() {
+        use {CheckState as C, KeeperPart as K, MergeState as M, PrState as S};
+        let mut rebased = pr(S::Open, C::Pending, M::Clean);
+        rebased.number = 143;
+        assert_eq!(
+            kept_line(&rebased, Some(K::Rebased(0))),
+            "#143 · checks … · rebased 1 min ago"
+        );
+        assert_eq!(
+            pr_line(&rebased, Some(K::Rebased(0)), 0)[2].text,
+            "rebased 1 min ago",
+            "a moment ago"
+        );
+        // The base moved 40 seconds ago and the quiet period is 2 minutes: 80 seconds to go.
+        let settling = pr(S::Open, C::Success, M::Behind);
+        let due = MINUTE + 80_000;
+        assert_eq!(
+            kept_line(&settling, Some(K::RebaseAt(due))),
+            "#142 · checks ✓ · behind · rebase in 2 min"
+        );
+        assert_eq!(
+            kept_line(&settling, Some(K::Waiting)),
+            "#142 · checks ✓ · behind · rebase waiting"
+        );
+        let current = pr(S::Open, C::Success, M::Clean);
+        assert_eq!(
+            kept_line(&current, Some(K::UpToDate)),
+            "#142 · checks ✓ · up to date"
+        );
+        assert_eq!(pr_line(&current, Some(K::UpToDate), 0)[2].tone, Tone::Muted);
+        // Not kept: no part. A finished PR has none either.
+        assert_eq!(kept_line(&current, None), "#142 · checks ✓");
+        let merged = pr(S::Merged, C::Success, M::Unknown);
+        assert_eq!(kept_line(&merged, Some(K::UpToDate)), "#142 · merged");
+    }
+
+    #[test]
+    fn the_card_says_what_the_keeper_last_did() {
+        let (_home, _host, _coordinator, mut ticket) = store();
+        assert_eq!(keeper_lines(&ticket), None);
+        ticket.pull_request = Some(pr(PrState::Open, CheckState::Pending, MergeState::Clean));
+        let last = KeeperAction {
+            kind: KeeperKind::Rebase,
+            at: crate::ui::now() - 90_000,
+            before: "e21f0aa11".into(),
+            after: "77b0c13ff".into(),
+            base: "4a1c2e9dd".into(),
+            pushed: true,
+        };
+        ticket.keeper = Some(Keeper {
+            last: Some(last),
+            ..Default::default()
+        });
+        let (line, detail) = keeper_lines(&ticket).unwrap();
+        assert_eq!(line, "rebased onto main at 4a1c2e9 and pushed, 1m ago");
+        assert_eq!(
+            detail,
+            "e21f0aa → 77b0c13 · the same change as the reviewed commit, so the passed review stands"
+        );
     }
 
     #[test]

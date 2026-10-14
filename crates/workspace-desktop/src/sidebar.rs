@@ -7,7 +7,7 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use ui::{
-    bar_color, brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, pill,
+    bar_color, brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, now, pill,
     progress_bar, session_icon, status_glyph, status_label, ticket_state_color,
 };
 
@@ -1354,7 +1354,13 @@ impl Workspace {
                 .flex_1()
                 .min_w_0()
                 .child(div().text_ellipsis().text_color(p.text).child(label))
-                .children(ticket.pull_request.as_ref().map(|pr| pr_line(pr, p)))
+                .children(ticket.pull_request.as_ref().map(|pr| {
+                    let keeper = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.keeper_parts.get(&ticket.id));
+                    pr_line(pr, keeper.copied(), p)
+                }))
                 .children(waiting.map(|waiting| {
                     div()
                         .text_size(px(11.))
@@ -1407,8 +1413,8 @@ fn track(progress: Option<(Option<u16>, BarState)>, p: Palette) -> Div {
 }
 
 /// A ticket row's second line: its PR, muted except for passed or failed checks, a conflict
-/// and a merge.
-fn pr_line(pr: &PullRequest, p: Palette) -> Div {
+/// and a merge, and the keeper's part at its end.
+fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, p: Palette) -> Div {
     let glyph = if pr.state == PrState::Merged {
         "git-merge"
     } else {
@@ -1423,7 +1429,7 @@ fn pr_line(pr: &PullRequest, p: Palette) -> Div {
         .text_size(px(11.))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
-    for (i, part) in tree::pr_line(pr).into_iter().enumerate() {
+    for (i, part) in tree::pr_line(pr, keeper, now()).into_iter().enumerate() {
         if i > 0 {
             line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
         }

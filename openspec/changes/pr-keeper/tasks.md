@@ -1,4 +1,4 @@
-Five slices in six PRs, in this order: slice 1 is built as two PRs, 1a and 1b, because it came to about twice its estimate (decided October 14, 2026). Each PR leaves the later ones off and is useful alone. Every requirement of the delta specs belongs to exactly one slice, named at the head of that slice; a slice's PR implements its tasks and syncs those requirements, and only those, into the main specs. Line numbers are at origin/main e45cd30 unless a task says otherwise.
+Five slices in six PRs, in this order: slice 1 is built as two PRs, 1a and 1b, because it came to about twice its estimate (the coordinator's decision on October 14, 2026, on the measured size; the human was told). Each PR leaves the later ones off and is useful alone. Every requirement of the delta specs belongs to exactly one slice, named at the head of that slice; a slice's PR implements its tasks and syncs those requirements, and only those, into the main specs. Line numbers are at origin/main e45cd30 unless a task says otherwise.
 
 ## 1. Slice 1: clean rebases
 
@@ -27,10 +27,10 @@ Requirements. `pr-keeper`: "Where the PR keeper acts", "Triggers are off until t
 
 Requirements. `pr-keeper`: "The ticket shows what the keeper did". `pr-watch`: "PR status on tickets and repositories".
 
-- [ ] 1.17 Keep each kept ticket's PR line ending in the host's memory, computed after each pass for tickets whose branch the keeper may change, and send it with the snapshot: "rebase in N min" (the time the rebase is due), "rebase waiting", "rebased N ago" (the time of the keeper's pushed rebase that is the PR's head, under an hour old) and "up to date".
-- [ ] 1.18 In `workspace-desktop/src/tree.rs::pr_line` (`:122`), append the keeper's part, and add the keeper's line to the ticket's card in `team_view.rs::tickets` (`:99`). Verify "Rebased a moment ago", "Waiting for the base to settle", "Up to date", "Not kept" and the pr-watch scenario "The keeper's part" in `tree.rs`'s tests.
-- [ ] 1.19 Compare by eye with the mockup in both themes on a throwaway store: PR lines 1, 2, 3 and 8 of panel (c), and the first card of panel (d). List every difference.
-- [ ] 1.20 Run the checks of 1.16 and sync 1b's two requirements into `pr-keeper` and `pr-watch`.
+- [x] 1.17 Keep each kept ticket's PR line ending in the host's memory, computed after each pass for tickets whose branch the keeper may change, and send it with the snapshot: "rebase in N min" (the time the rebase is due), "rebase waiting", "rebased N ago" (the time of the keeper's pushed rebase that is the PR's head, under an hour old) and "up to date".
+- [x] 1.18 In `workspace-desktop/src/tree.rs::pr_line` (`:122`), append the keeper's part, and add the keeper's line to the ticket's card in `team_view.rs::tickets` (`:99`). Verify "Rebased a moment ago", "Waiting for the base to settle", "Up to date", "Not kept" and the pr-watch scenario "The keeper's part" in `tree.rs`'s tests.
+- [x] 1.19 Compare by eye with the mockup in both themes on a throwaway store: PR lines 1, 2, 3 and 8 of panel (c), and the first card of panel (d). List every difference.
+- [x] 1.20 Run the checks of 1.16 and sync 1b's two requirements into `pr-keeper` and `pr-watch`.
 
 ## 2. Slice 2: commits Wiffletree did not make
 
