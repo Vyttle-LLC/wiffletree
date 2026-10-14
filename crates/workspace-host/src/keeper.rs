@@ -21,8 +21,11 @@ pub(crate) struct Memory {
 pub(crate) struct Job {
     pub ticket_id: String,
     pub repository: PathBuf,
-    /// The repository's base, such as `origin/main`.
+    /// The repository's base, such as `origin/main`, against which patches compare as
+    /// publishing compares them.
     pub base: String,
+    /// The PR's base branch on `origin`, such as `origin/main`: fetched and rebased onto.
+    pub pr_base: String,
     /// The base commit the quiet period was measured on.
     pub base_commit: String,
     /// The PR's head, which is the worktree's HEAD.
@@ -65,8 +68,8 @@ fn result_ref(ticket_id: &str) -> String {
 /// checkout however the rebase ends. `fetch` updates the base's remote-tracking ref alone.
 pub(crate) fn rebase(job: &Job, fetch: impl FnOnce(&Path, &str) -> Result<bool>) -> Outcome {
     let rebased = (|| {
-        fetch(&job.repository, &job.base)?;
-        let base = format!("{}^{{commit}}", job.base);
+        fetch(&job.repository, &job.pr_base)?;
+        let base = format!("{}^{{commit}}", job.pr_base);
         let fetched = runtime::git_output(&job.repository, &["rev-parse", "--verify", &base])?;
         if fetched.trim() != job.base_commit {
             return Ok(Rebased::BaseMoved);
@@ -117,7 +120,7 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
         ));
     }
     let result = worktrees::head(checkout)?;
-    let patch = |commit| worktrees::patch_id(checkout, &job.base_commit, commit);
+    let patch = |commit| worktrees::patch_id(checkout, &job.base, commit);
     if patch(&result)? != patch(&job.verified)? {
         return Ok(Rebased::Changed);
     }
@@ -214,9 +217,7 @@ impl Host {
             .and_then(|k| k.rebased.as_ref())
             .is_some_and(|r| r.head == pr.head && r.base == base);
         let quiet = at >= since + i64::from(settings.keeper.quiet_minutes) * MINUTE;
-        // The fetch updates the repository's base alone, so only a PR into it is rebased.
-        let into_base = origin_branch(&repository.base) == Some(pr.base.as_str());
-        if tried || !quiet || !into_base || self.keeper.running.contains(&ticket.id) {
+        if tried || !quiet || self.keeper.running.contains(&ticket.id) {
             return Ok(None);
         }
         let path = Path::new(&repository.path);
@@ -237,6 +238,7 @@ impl Host {
             ticket_id: ticket.id.clone(),
             repository: path.into(),
             base: repository.base.clone(),
+            pr_base: format!("origin/{}", pr.base),
             base_commit: base,
             head: pr.head.clone(),
             verified: verified.into(),
@@ -534,9 +536,9 @@ pub(crate) mod tests {
     pub(crate) fn fetch(r: &Remote) -> impl FnOnce(&Path, &str) -> Result<bool> + use<> {
         let bare = r.bare.to_string_lossy().into_owned();
         move |repository, base| {
-            assert_eq!(base, "origin/main");
-            let refspec = "+refs/heads/main:refs/remotes/origin/main";
-            git(repository, &["fetch", "-q", &bare, refspec]);
+            let branch = base.strip_prefix("origin/").unwrap();
+            let refspec = format!("+refs/heads/{branch}:refs/remotes/{base}");
+            git(repository, &["fetch", "-q", &bare, &refspec]);
             Ok(true)
         }
     }
@@ -727,6 +729,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_pr_into_another_branch_is_rebased_onto_that_branch_and_compared_as_publishing_compares() {
+        let (mut f, r) = kept();
+        let release = move_base(&f, &r, "release.txt", "1\n");
+        git(
+            &f.repository,
+            &["push", "-q", r.bare.to_str().unwrap(), "main:release"],
+        );
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().base = "release".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let job = due(&mut f, &release);
+        assert_eq!(job.pr_base, "origin/release");
+        let before = (worktree(&f), r.branch(BRANCH));
+        // Against the repository's base, the rebased change carries release's commit too, so
+        // publishing would refuse it: it is a changed patch and nothing is moved.
+        keep(&mut f, &r, job);
+        assert_eq!((worktree(&f), r.branch(BRANCH)), before);
+        assert_eq!(notices(&f.host).len(), 1);
+    }
+
+    #[test]
     fn a_base_that_moved_while_fetching_rebases_nothing_and_waits_again() {
         let (mut f, r) = kept();
         let measured = move_base(&f, &r, "other.txt", "1\n");
@@ -745,13 +768,20 @@ pub(crate) mod tests {
 
     #[test]
     fn a_result_is_dropped_when_the_worktree_is_dirty_has_moved_or_is_on_another_branch() {
-        let cases: [Touch; 4] = [
+        let cases: [Touch; 5] = [
             ("uncommitted change", |f| {
                 fs::write(f.worktree.join("a.txt"), "edited\n").unwrap()
             }),
             ("untracked file", |f| {
                 fs::write(f.worktree.join("new.txt"), "new\n").unwrap()
             }),
+            (
+                "untracked file the base adds, status hiding untracked files",
+                |f| {
+                    git(&f.worktree, &["config", "status.showUntrackedFiles", "no"]);
+                    fs::write(f.worktree.join("other.txt"), "mine\n").unwrap()
+                },
+            ),
             ("HEAD moved", |f| {
                 git(
                     &f.worktree,
