@@ -288,17 +288,13 @@ impl Process {
         }
         Ok(info.si_pid != 0)
     }
-    /// Stops the provider's group, SIGTERM and then SIGKILL after the grace period, and only
-    /// then reaps the leader. Later calls return its status without signalling again.
+    /// Stops the provider's group, after the watcher's last look at it, and only then reaps
+    /// the leader. Later calls return its status without signalling again.
     fn stop(&mut self) -> Result<ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
         }
-        let group = self.child.id() as i32;
-        processes::terminate(group);
-        unsafe {
-            libc::killpg(group, libc::SIGKILL);
-        }
+        processes::stop_provider_group(self.child.id() as i32, processes::look);
         let status = self.child.wait()?;
         self.status = Some(status);
         Ok(status)

@@ -19,7 +19,7 @@ impl Drop for Process {
     }
 }
 
-pub(crate) trait OwnDescriptors {
+pub trait OwnDescriptors {
     /// Leaves the child only its standard input, output and error. macOS cannot make a pipe
     /// that is close-on-exec from the start, so a child started while another thread is making
     /// one would otherwise hold it for as long as it and everything it started run.
@@ -30,7 +30,7 @@ impl OwnDescriptors for Command {
         // SAFETY: `close_others_on_exec` is async-signal-safe.
         unsafe {
             self.pre_exec(|| {
-                close_others_on_exec();
+                close_others_on_exec::<1024>();
                 Ok(())
             })
         }
@@ -59,18 +59,18 @@ impl LowPriority for Command {
     }
 }
 
-/// Marks every descriptor above stderr close-on-exec.
+/// Marks every descriptor above stderr close-on-exec, from a list of up to `LISTED` of them.
 ///
 /// It runs between fork and exec in a copy of a process that had other threads, any of which
 /// may have held a lock, the allocator's included. So it only makes system calls: it must not
 /// allocate, lock, log or panic.
-fn close_others_on_exec() {
+fn close_others_on_exec<const LISTED: usize>() {
     let close_on_exec = |descriptor| unsafe {
         libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
     };
     #[cfg(target_os = "macos")]
     {
-        let mut open: [libc::proc_fdinfo; 1024] = unsafe { std::mem::zeroed() };
+        let mut open: [libc::proc_fdinfo; LISTED] = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of_val(&open) as libc::c_int;
         let list = libc::PROC_PIDLISTFDS;
         let read =
@@ -602,6 +602,32 @@ fn claude_version_label(id: &str) -> String {
 #[cfg(test)]
 mod model_tests {
     use super::*;
+
+    #[test]
+    fn a_child_whose_descriptor_list_may_be_cut_short_marks_every_descriptor() {
+        // More inheritable descriptors than a list of four can hold, so the list fills and the
+        // child marks every number up to its limit instead.
+        let mut pipes = [[0; 2]; 4];
+        for ends in &mut pipes {
+            assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        }
+        let mut ls = Command::new("/bin/ls");
+        ls.arg("/dev/fd");
+        // SAFETY: as in `own_descriptors_only`.
+        unsafe {
+            ls.pre_exec(|| {
+                close_others_on_exec::<4>();
+                Ok(())
+            })
+        };
+        let output = ls.output();
+        for descriptor in pipes.iter().flatten() {
+            unsafe { libc::close(*descriptor) };
+        }
+        // `ls` holds the standard three and the two it opens to read `/dev/fd`.
+        let held = String::from_utf8(output.unwrap().stdout).unwrap();
+        assert_eq!(held, "0\n1\n2\n3\n4\n");
+    }
 
     #[test]
     fn a_command_that_cannot_run_gives_an_error() {

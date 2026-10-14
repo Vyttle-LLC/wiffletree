@@ -91,7 +91,6 @@ Archiving and `finish_ticket` check that the worktrees can be removed, then stop
 
 - **A shell the watcher never lists.** A shell that starts and exits between two ticks, under about 4 ms plus scheduling delay, is never seen, and what it leaves behind is not recorded. A test pins this with a watcher ticked by hand.
 - **A process that daemonizes after its parent has exited.** It is in a new session and group and no longer anyone's descendant, so it is not recorded.
-- **A tool forked just before a cancel.** A tool the provider forks within one scan interval before a cancel kills the provider is orphaned before any scan lists it, so it is never recorded. A later change could close this by freezing the provider's group before the final look.
 - **Sightings travel with the turn.** What the watcher saw reaches the store when the turn's thread next wakes, at most 50 ms later, for as long as the provider runs. A host that dies in between has not recorded it. A stop or a quit does not wait: it asks the watcher, which answers for a run until the host has stored the run's last sightings.
 - **A watcher that could not look for over a second.** A process id may have been given out again in that time, so a group whose last known member has gone is neither adopted nor dropped while its id still names a running group. Its record stays, and a later stop either finds it gone or raises the inbox note.
 - **Members are refreshed during the run that saw the group.** A group that later replaces every one of its processes while its agent is idle can no longer be confirmed; it raises the inbox note instead of being stopped.
@@ -146,7 +145,7 @@ A handed-over tree is dropped by the watcher itself once nothing in it is alive,
 
 - The look a stop takes returned only what was new to the watcher. A sighting the turn's thread had already taken, but the host had not yet stored, was in neither place, and the stop returned with the tool alive. `processes::followed_now` now returns every process followed for the run, found by the run's id, so the look needs nothing the store may not have yet. The archive of an agent in its turn has no such gap: its processes are stopped when the turn ends, and the turn's thread hands on everything the watcher saw before it reports the end, on the one channel the host reads in order.
 - Startup put a stop time on a run when any group of the run was stopped, so a run whose provider had gone and whose tool was stopped told its agent that the provider had kept running. Only the provider's own group counts now.
-- An archive, close or accept stops the agents' processes before it removes worktrees, outside that change. When the change then failed, the agents were still there with their processes gone, the record said `archived` and the notice was stored as already read. The notice and the reason are now written once the outcome is known: on a failure the record says `archive_failed` and the notice waits for the agent's next turn. One case is not covered: an archive nested in a larger change that later fails, as when `verify_ticket` replaces a verifier and then cannot start the cycle, rolls the record and the notice back with it.
+- An archive, close or accept stops the agents' processes before it removes worktrees, outside that change. When the change then failed, the agents were still there with their processes gone, the record said `archived` and the notice was stored as already read. The notice and the reason are now written once the outcome is known: on a failure the record says `archive_failed` and the notice waits for the agent's next turn.
 - The scripted provider's lingering `sleep` is killed by its saved id; a second set of processes left by a later turn has a test for its own notice.
 
 ## Fixed in review, round 1
@@ -169,3 +168,7 @@ The follow-ups change (#54) landed first. It gave startup a third outcome, a lef
 - The human's project **Stop** stops the recorded processes of every agent in the project, idle ones included, and Pause stops the paused session's: an emergency stop that left an idle agent's processes running would repeat the incident.
 - The notices state the count first and name programs as programs, "Tester left 8 processes running. All 8 are the program `yes`.", never a name beside a bare count: the human could not read "`yes` × 8".
 - A Processes panel is an approved follow-up. It will read this record, which keeps per group the member process ids with their start times, each member's program name, when the group was first seen and which run saw it first.
+
+## Closed later
+
+Two gaps this change left are closed by `2026-10-14-process-follow-ups`: a tool the provider forked just before a cancel, which the stop orphaned before any scan listed it, and a verifier that `verify_ticket` replaced inside a review that then failed to start, whose stop the failure rolled out of the record.

@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use workspace_host::runtime::OwnDescriptors as _;
 
 pub const VERSION: Option<&str> = option_env!("WIFFLETREE_VERSION");
 const LATEST_RELEASE: &str = "https://api.github.com/repos/Vyttle-LLC/wiffletree/releases/latest";
@@ -89,12 +90,12 @@ pub fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
         matches_digest(&fs::read(&archive)?, digest),
         "{name} does not match its published digest"
     );
-    run(Command::new("/usr/bin/ditto")
+    run(command("/usr/bin/ditto")
         .args(["-x", "-k"])
         .arg(&archive)
         .arg(&staging))?;
     let app = staging.join("Wiffletree.app");
-    run(Command::new("/usr/bin/codesign")
+    run(command("/usr/bin/codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(&app))?;
     // A Developer ID build only accepts updates signed by the same team.
@@ -116,7 +117,7 @@ pub fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
 impl Staged {
     /// Swaps the bundle once this process exits, then optionally reopens it.
     pub fn install_after_exit(&self, relaunch: bool) -> Result<()> {
-        Command::new("/bin/sh")
+        command("/bin/sh")
             .args(["-c", SWAP, "swap"])
             .arg(std::process::id().to_string())
             .arg(&self.installed)
@@ -190,7 +191,7 @@ fn matches_digest(bytes: &[u8], digest: &str) -> bool {
 }
 
 fn team_identifier(app: &Path) -> Result<Option<String>> {
-    let output = Command::new("/usr/bin/codesign")
+    let output = command("/usr/bin/codesign")
         .args(["-d", "--verbose=2"])
         .arg(app)
         .output()?;
@@ -248,7 +249,7 @@ fn parse_feed(response: &str) -> Result<Release> {
 }
 
 fn curl(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("/usr/bin/curl")
+    let output = command("/usr/bin/curl")
         .args(["--silent", "--show-error", "--location"])
         .args(["--header", "Accept: application/vnd.github+json"])
         .args(args)
@@ -257,6 +258,15 @@ fn curl(args: &[&str]) -> Result<Vec<u8>> {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(output.stdout)
+}
+
+/// A command that leaves the child only its standard input, output and error. The host runs
+/// in this process, so another thread may be making a provider's pipe, which is inheritable
+/// until it is marked, at the moment this child starts.
+fn command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.own_descriptors_only();
+    command
 }
 
 fn run(command: &mut Command) -> Result<()> {
@@ -276,6 +286,25 @@ fn path_str(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn its_commands_leave_the_child_only_its_standard_streams() {
+        // An inheritable descriptor, as a provider's pipe is between being made and marked.
+        let mut ends = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        let held = 100;
+        assert_eq!(unsafe { libc::dup2(ends[1], held) }, held);
+        let output = command("/bin/sh")
+            .args([
+                "-c",
+                &format!("test -e /dev/fd/{held} && echo held || echo closed"),
+            ])
+            .output();
+        for descriptor in [ends[0], ends[1], held] {
+            unsafe { libc::close(descriptor) };
+        }
+        assert_eq!(String::from_utf8_lossy(&output.unwrap().stdout), "closed\n");
+    }
 
     #[test]
     fn compares_versions_numerically() {

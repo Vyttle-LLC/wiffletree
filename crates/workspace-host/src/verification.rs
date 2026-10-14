@@ -410,7 +410,8 @@ impl Host {
         // A cycle queues behind every slot holder and every cycle queued before it.
         let slots = self.verification_slots()?;
         let queued_at = (slots.taken >= VERIFICATION_SLOTS || !slots.queued.is_empty()).then(now);
-        self.atomically(|host| {
+        let mut replaced = vec![];
+        let started = self.atomically(|host| {
             let mut verifiers = vec![];
             for (config, (profile, reason)) in level_verifiers.into_iter().zip(chosen) {
                 let existing =
@@ -424,7 +425,9 @@ impl Host {
                         Some(agent)
                     }
                     Some(retired) => {
-                        host.change_archived(&retired.id, true, Some("verifier_replaced"))?;
+                        let archived =
+                            host.archive_in_change(&retired.id, Some("verifier_replaced"))?;
+                        replaced.extend(archived);
                         None
                     }
                     None => None,
@@ -490,7 +493,11 @@ impl Host {
                 &format!("{}; cycle {cycle}", ticket.id),
             )?;
             Ok(ticket)
-        })
+        })?;
+        // Only now: a call that failed to start or queue the cycle leaves a replaced verifier as
+        // it was.
+        self.stop_archived(&replaced);
+        Ok(started)
     }
     /// How a ticket's cycle stands. Only a cycle that can make progress holds or takes a slot:
     /// its ticket is open, its project live with its coordinator not archived, and none of the

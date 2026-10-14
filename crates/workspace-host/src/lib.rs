@@ -529,6 +529,33 @@ impl Host {
         archived: bool,
         milestone: Option<&str>,
     ) -> Result<Vec<Session>> {
+        self.archive_change(id, archived, milestone, true)
+    }
+    /// Archives `id` as one step of a larger change, recording `milestone`, and leaves what the
+    /// archived sessions started running: a stop cannot be rolled back with the change. Once the
+    /// change has committed, the caller passes the returned sessions to `stop_archived`.
+    pub(crate) fn archive_in_change(
+        &mut self,
+        id: &str,
+        milestone: Option<&str>,
+    ) -> Result<Vec<Session>> {
+        self.archive_change(id, true, milestone, false)
+    }
+    /// Stops what these archived sessions started, once the change that archived them has
+    /// committed. The change stands whatever the stop meets, so a failure is only logged.
+    pub(crate) fn stop_archived(&mut self, sessions: &[Session]) {
+        match self.stop_started_by(sessions.iter().map(|s| &s.id)) {
+            Ok(stopped) => self.archive_settled(&stopped, true),
+            Err(error) => eprintln!("Stopping what archived agents started: {error:#}"),
+        }
+    }
+    fn archive_change(
+        &mut self,
+        id: &str,
+        archived: bool,
+        milestone: Option<&str>,
+        stop_now: bool,
+    ) -> Result<Vec<Session>> {
         let mut affected = self.session_tree(id)?;
         ensure!(
             archived || affected[0].role != Role::TaskOrchestrator,
@@ -557,7 +584,10 @@ impl Host {
             // A refused archive stops nothing, and no worktree is removed under a live process.
             true => {
                 self.check_removable(&tickets)?;
-                self.stop_started_by(affected.iter().map(|s| &s.id))?
+                match stop_now {
+                    true => self.stop_started_by(affected.iter().map(|s| &s.id))?,
+                    false => vec![],
+                }
             }
             false => vec![],
         };

@@ -1,7 +1,7 @@
 mod common;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
-use workspace_core::{Provider, Receipt, Role, Session, Status, Ticket};
+use workspace_core::{PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket};
 use workspace_host::Host;
 
 fn git(path: &Path, args: &[&str]) -> std::process::Output {
@@ -991,28 +991,24 @@ fn a_verifier_retired_by_its_cycle_has_what_it_started_stopped() {
     assert_eq!(left.stopped(&db), archived());
 }
 
-#[test]
-fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
-    let (_root, coordinator) = team(&mut host, directory.path());
-    let db = store(directory.path());
-    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
-    // The first review passed and retired its verifier; the human restored it, and it has
-    // left a process running since.
-    let verifier = passed(&mut host, &ticket);
+/// A verifier that passed the first review, was restored by the human and has left a process
+/// running since, with the arguments for a next review that chooses another model for it. A
+/// fresh session takes that choice and the restored one is archived in its place.
+fn to_be_replaced(
+    host: &mut Host,
+    db: &rusqlite::Connection,
+    ticket: &Ticket,
+) -> (Session, Started, serde_json::Value) {
+    let verifier = passed(host, ticket);
     host.set_archived(&verifier.id, false).unwrap();
-    let mut left = Started::by(&db, &verifier);
+    let left = Started::by(db, &verifier);
     host.agent_tool(
-        &implementer(&host).id,
+        &implementer(host).id,
         "report",
         json!({"message_id":"ready again","kind":"ready_for_testing","body":"Committed"}),
     )
     .unwrap();
-
-    // The next review chooses another profile for that verifier, so a fresh session takes it
-    // and the restored one is archived in its place.
-    let mut choices = common::verifier_choices(&host);
+    let mut choices = common::verifier_choices(host);
     let pinned = choices[0].profile.clone();
     let selection = host.model_selection().unwrap();
     let allowed = selection.allowed(pinned.provider);
@@ -1022,13 +1018,58 @@ fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
     let other = other.expect("a second allowed model or effort");
     choices[0].profile.model = other.model.clone();
     choices[0].profile.effort = other.effort.clone();
-    host.agent_tool(
-        &coordinator.id,
-        "verify_ticket",
-        json!({"ticket_id": ticket.id, "level": "Full", "verifiers": choices}),
+    let review = json!({"ticket_id": ticket.id, "level": "Full", "verifiers": choices});
+    (verifier, left, review)
+}
+
+#[test]
+fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let (verifier, mut left, review) = to_be_replaced(&mut host, &db, &ticket);
+
+    host.agent_tool(&coordinator.id, "verify_ticket", review)
+        .unwrap();
+
+    assert!(host.session(&verifier.id).unwrap().archived);
+    assert_eq!(left.stopped(&db), archived());
+}
+
+#[test]
+fn a_review_that_fails_after_replacing_a_verifier_leaves_what_it_started_running() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let (verifier, mut left, review) = to_be_replaced(&mut host, &db, &ticket);
+    // A step after the replacement fails: the round's messages cannot be stored.
+    db.execute_batch(
+        "CREATE TRIGGER no_round BEFORE INSERT ON messages WHEN NEW.id LIKE 'verify:%'
+         BEGIN SELECT RAISE(ABORT, 'no round'); END",
     )
     .unwrap();
 
+    host.agent_tool(&coordinator.id, "verify_ticket", review.clone())
+        .unwrap_err();
+
+    // The review never happened, so neither did the replacement or its stop.
+    assert!(!host.session(&verifier.id).unwrap().archived);
+    assert_eq!(left.stopped(&db), (false, None));
+    let messages = host.messages(&verifier.id, None, 100).unwrap();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.id.starts_with(PROCESS_NOTICE_PREFIX)),
+        "no notice of a stop"
+    );
+
+    db.execute_batch("DROP TRIGGER no_round").unwrap();
+    host.agent_tool(&coordinator.id, "verify_ticket", review)
+        .unwrap();
     assert!(host.session(&verifier.id).unwrap().archived);
     assert_eq!(left.stopped(&db), archived());
 }
