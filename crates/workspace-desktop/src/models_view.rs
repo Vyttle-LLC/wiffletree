@@ -384,6 +384,81 @@ impl Workspace {
             })
     }
 
+    /// One setting: the PR keeper's model, from the models allowed on this machine, or none.
+    fn keeper_card(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let chosen = self.model_selection.keeper.clone();
+        let choices = models::keeper_choices(&self.model_selection);
+        let catalog = self.model_catalog.clone();
+        let label = chosen
+            .as_ref()
+            .map_or("No model chosen".to_owned(), |profile| {
+                models::profile_label(&catalog, profile)
+            });
+        let weak = cx.weak_entity();
+        let picker = button("keeper-model")
+            .small()
+            .label(label)
+            .dropdown_caret(true)
+            .disabled(!self.models_editable() || choices.is_empty())
+            .dropdown_menu(move |mut menu, _, _| {
+                let options = choices.iter().cloned().map(Some).chain([None]);
+                for option in options {
+                    let label = option.as_ref().map_or("No model".to_owned(), |profile| {
+                        models::profile_label(&catalog, profile)
+                    });
+                    let checked = option == chosen;
+                    let weak = weak.clone();
+                    menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                        move |_, _, c| {
+                            let _ = weak.update(c, |v, c| {
+                                v.model_selection.keeper = option.clone();
+                                c.notify();
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
+        let fact = |term: &'static str, value: Div| {
+            div()
+                .flex()
+                .gap_3()
+                .text_size(px(12.))
+                .child(
+                    div()
+                        .w(px(96.))
+                        .flex_none()
+                        .text_color(p.subtle)
+                        .child(term),
+                )
+                .child(value.flex_1().min_w_0())
+        };
+        card(p)
+            .gap_3()
+            .child(Self::card_title(
+                "PR keeper",
+                "the small model that keeps pull requests current",
+                p,
+            ))
+            .child(fact(
+                "Model",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(picker)
+                    .child(hint("one of the models allowed on this machine", p)),
+            ))
+            .child(fact(
+                "Used for",
+                div().child("One try at a conflict or a failed check, and sorting new comments. Watching pull requests and rebasing use no model."),
+            ))
+            .child(hint(
+                "Sorting comments needs a Claude model: it runs with every tool turned off, and Codex cannot be started that way.",
+                p,
+            ))
+    }
+
     fn guide_card(&self, p: Palette) -> Div {
         let bytes = self.model_selection.guide.len();
         card(p)
@@ -446,6 +521,7 @@ impl Workspace {
         body.child(providers)
             .child(self.roles_card(p, cx))
             .child(self.review_card(p))
+            .child(self.keeper_card(p, cx))
             .child(self.guide_card(p))
     }
 
