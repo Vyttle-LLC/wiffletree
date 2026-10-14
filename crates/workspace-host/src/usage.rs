@@ -154,7 +154,10 @@ impl Host {
         };
         let tx = &self.db;
         let mut complete = complete;
-        if provider == Provider::Codex {
+        // A Codex turn reports its thread's running total. A compaction's usage is its one
+        // request's own counts, which that total leaves out: it neither reads nor moves the
+        // thread's counter.
+        if provider == Provider::Codex && profile["kind"].is_null() {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM usage_requests WHERE provider=?1 AND request_id=?2)",
                 params![tag(&provider)?, request],
@@ -187,6 +190,11 @@ impl Host {
         own_unit.map_or(Ok(()), |unit| unit.commit())?;
         Ok(())
     }
+    /// Records a Codex compaction's one model request, from the usage entry Codex wrote for
+    /// its turn in the session record. Its id is the run's, so recording it again adds nothing.
+    pub(crate) fn record_codex_compaction(&self, run: &str, usage: &Value) -> Result<()> {
+        self.record_usage(run, &format!("compact:{run}"), None, usage, true, now())
+    }
     fn codex_delta(
         &self,
         tx: &Connection,
@@ -218,7 +226,8 @@ impl Host {
             }) else {
                 return Ok(None);
             };
-            let preceding:Option<String>=tx.query_row("SELECT id FROM provider_runs WHERE session_id=?1 AND rowid<(SELECT rowid FROM provider_runs WHERE id=?2) ORDER BY rowid DESC LIMIT 1",params![session.id,run],|r|r.get(0)).optional()?;
+            // The turn before this one: a compaction between them takes no reading.
+            let preceding:Option<String>=tx.query_row(&format!("SELECT id FROM provider_runs WHERE session_id=?1 AND {IS_TURN_RUN} AND rowid<(SELECT rowid FROM provider_runs WHERE id=?2) ORDER BY rowid DESC LIMIT 1"),params![session.id,run],|r|r.get(0)).optional()?;
             Ok(Some((delta, preceding.as_deref() == Some(&prior_run))))
         } else {
             let first: String = tx.query_row(
@@ -981,6 +990,101 @@ mod tests {
         assert_eq!(report.totals.output, 40);
         assert_eq!(report.totals.cache_read, 40);
         assert_eq!(report.totals.requests, 3);
+    }
+    #[test]
+    fn a_codex_compaction_is_one_request_of_its_own_and_leaves_the_threads_counter_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(directory.path()).unwrap();
+        let mut session = root(&mut host, "Codex");
+        session.provider = Provider::Codex;
+        host.db
+            .execute(
+                "UPDATE sessions SET data=?2 WHERE id=?1",
+                params![session.id, encode(&session).unwrap()],
+            )
+            .unwrap();
+        let time = now() - 1000;
+        let turn = |host: &Host, id: &str, input: u64, cached: u64, output: u64| {
+            run(host, &session, id, time, Value::Null);
+            let total =
+                json!({"input_tokens":input,"cached_input_tokens":cached,"output_tokens":output});
+            host.record_usage(id, id, None, &total, true, time).unwrap();
+        };
+        let reading = |host: &Host| -> String {
+            let counter = "SELECT run_id FROM usage_counters";
+            host.db.query_row(counter, [], |r| r.get(0)).unwrap()
+        };
+        turn(&host, "first", 124_793, 100_992, 185);
+        host.db.execute("INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES('compaction',?1,'[]',?2,?2,'compacted',?3)",
+            params![session.id,time,json!({"kind":"compaction","profile":{"provider":"codex","model":"gpt-6.1-sol"}}).to_string()]).unwrap();
+        // The usage entry of the compaction's one request, with Codex's input counting the
+        // cached tokens. Its running sums beside it are never read.
+        let entry = json!({"input_tokens":29_552,"cached_input_tokens":29_312,"cache_write_input_tokens":0,"output_tokens":440,"reasoning_output_tokens":0,"total_tokens":29_992});
+
+        host.record_codex_compaction("compaction", &entry).unwrap();
+        // Settling the same run again adds nothing.
+        host.record_codex_compaction("compaction", &entry).unwrap();
+
+        assert_eq!(reading(&host), "first", "it is not a reading of the total");
+        // Codex's running total leaves the compaction out: the next turn's 19,882 tokens are
+        // exactly what the total rose by, and the compaction between does not make it partial.
+        turn(
+            &host,
+            "second",
+            124_793 + 19_690,
+            100_992 + 13_184,
+            185 + 192,
+        );
+        assert_eq!(reading(&host), "second");
+        let rows: Vec<(String, String, i64, i64, i64, i64, bool)> = host
+            .db
+            .prepare("SELECT request_id,model,input,cache_read,output,reasoning,complete FROM usage_requests ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "first".into(),
+                    "fixture".into(),
+                    124_793,
+                    100_992,
+                    185,
+                    0,
+                    true
+                ),
+                (
+                    "compact:compaction".into(),
+                    "gpt-6.1-sol".into(),
+                    29_552,
+                    29_312,
+                    440,
+                    0,
+                    true
+                ),
+                (
+                    "second".into(),
+                    "fixture".into(),
+                    19_690,
+                    13_184,
+                    192,
+                    0,
+                    true
+                ),
+            ]
+        );
+        let report = host
+            .usage_report(7, None, None, "America/New_York")
+            .unwrap();
+        assert_eq!(report.totals.requests, 3);
+        assert_eq!(report.totals.partial_requests, 0);
+        assert_eq!(report.totals.input, 124_793 + 29_552 + 19_690);
+        assert_eq!(report.coordinators[0].own.output, 185 + 440 + 192);
     }
     #[test]
     fn unknown_resumed_baseline_and_counter_reset_never_become_fresh_tokens() {

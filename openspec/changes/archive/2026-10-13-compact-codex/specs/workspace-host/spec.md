@@ -20,15 +20,16 @@ The host SHALL run a Codex agent's compaction as one `codex app-server` process 
 - **THEN** the server's process group no longer runs when the shutdown returns, and the outcome is interrupted
 
 ### Requirement: A Codex compaction's outcome comes from its turn's completion
-The host SHALL decide a Codex agent's compaction's outcome from what the app-server sends, never from the process's exit code. A `turn/completed` notification whose `turn.status` is `completed` SHALL be **compacted**. A `turn/completed` with the status `failed` SHALL be **failed** with `turn.error.message` as the reason, and one with any other status, or with none the host can read, SHALL be **failed** with a reason naming that status. An error reply to `initialize`, `thread/resume` or `thread/compact/start` SHALL be **failed** with a reason naming the refused request and Codex's message; when several are refused the first SHALL be the reason. A request the server sends to the host SHALL NOT be answered and SHALL be **failed** with a reason naming what Codex asked for. A reason taken from Codex's text SHALL be its first line, cut to 200 characters and marked as cut when it was longer, and a refusal saying the server has no such method SHALL be given as a short reason that names the request and says this Codex has no such method; Codex's full text SHALL be kept with the run. A process that ends, or cannot start, before an outcome is read SHALL be **failed** with what it ended with. A compaction whose outcome has not been read within a fixed limit SHALL be stopped and SHALL be **failed** with a reason saying Codex did not finish in that time. A Codex compaction SHALL never end as nothing to compact. Notifications the host does not use SHALL be ignored. The token counts of a compacted outcome SHALL be the context total in the thread's session record as the compaction starts and the `tokenUsage.last.totalTokens` Codex reports during the compaction's turn, as Codex gave them; when either is missing the outcome SHALL carry no counts.
+The host SHALL decide a Codex agent's compaction's outcome from what the app-server sends, never from the process's exit code. A `turn/completed` notification whose `turn.status` is `completed` SHALL be **compacted**. A `turn/completed` with the status `failed` SHALL be **failed** with `turn.error.message` as the reason, bounded as every reason is, and one with any other status, with none the host can read, or failed without a message, SHALL be **failed** with a reason naming that status. An error reply to `initialize`, `thread/resume` or `thread/compact/start` SHALL be **failed** with a reason naming the refused request and Codex's message; when several are refused the first SHALL be the reason. A request the server sends to the host SHALL NOT be answered and SHALL be **failed** with a reason naming what Codex asked for. A reason built from Codex's text SHALL be one line of at most 200 characters, the name of a refused request included, and SHALL end with "…" when it was cut. A refusal SHALL be given as a short reason that names the request and says this Codex has no such method only when Codex's message says the unknown variant is that request's own method; a refusal that opens the same way about anything else, such as a value Codex does not have for one of the request's parameters, SHALL keep Codex's words in the bounded form. Codex's full text SHALL be kept with the run. A process that ends, or cannot start, before an outcome is read SHALL be **failed** with what it ended with. A compaction whose outcome has not been read within a fixed limit SHALL be stopped and SHALL be **failed** with a reason saying Codex did not finish in that time. A Codex compaction SHALL never end as nothing to compact. Notifications the host does not use SHALL be ignored. The token counts of a compacted outcome SHALL be the context total in the thread's session record as the compaction starts and the `tokenUsage.last.totalTokens` Codex reports during the compaction's turn, as Codex gave them; when either is missing the outcome SHALL carry no counts.
 
 #### Scenario: Success
 - **WHEN** the server sends `turn/started`, a `thread/tokenUsage/updated` whose `last.totalTokens` is 6,550, and `turn/completed` with `turn.status` `completed`, on a thread whose record's last total was 29,532
 - **THEN** the outcome is compacted with the figures 29,532 and 6,550, and the request is cleared
 
 #### Scenario: The turn failed
-- **WHEN** the server sends `turn/completed` with `turn.status` `failed` and `turn.error.message` "Error running remote compact task: …"
-- **THEN** the outcome is failed with that message as its reason
+- **WHEN** the server sends `turn/completed` with `turn.status` `failed` and a `turn.error.message` of 204 characters on one line, starting "Error running remote compact task: "
+- **THEN** the outcome is failed, and its reason is the first 200 characters of that message followed by "…"
+- **AND** the run keeps the whole message
 
 #### Scenario: The turn was interrupted
 - **WHEN** the server sends `turn/completed` with `turn.status` `interrupted` and no error
@@ -45,7 +46,15 @@ The host SHALL decide a Codex agent's compaction's outcome from what the app-ser
 
 #### Scenario: A long refusal is cut
 - **WHEN** a request is refused with a message of 4,000 characters over three lines
-- **THEN** the reason is its first line cut to 200 characters and ends with "…"
+- **THEN** the reason is one line of 200 characters, the request's name and then the start of the message's first line, and ends with "…"
+
+#### Scenario: A parameter value Codex does not have
+- **WHEN** `thread/resume` is answered with the error "Invalid request: unknown variant `no-such-sandbox`, expected one of `read-only`, `workspace-write`, `danger-full-access`"
+- **THEN** the outcome is failed, and its reason names `thread/resume` and gives that message, not that this Codex has no such method
+
+#### Scenario: A reply out of order
+- **WHEN** `thread/compact/start` is answered with "thread not found: …" before the reply to `thread/resume` arrives
+- **THEN** the outcome is failed, and its reason names `thread/compact/start` and that message
 
 #### Scenario: Codex asks the client something
 - **WHEN** the server sends a request of its own, such as `item/commandExecution/requestApproval`, before the compaction's turn completes

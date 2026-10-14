@@ -1,8 +1,10 @@
 //! Noninteractive provider turns with the user's YOLO execution policy.
+mod codex_compaction;
 mod output;
 use crate::compaction::CompactionRecord;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
+pub use codex_compaction::CODEX_COMPACTION_LIMIT;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
 use output::{Next, Output, StopReading};
 use std::os::unix::process::CommandExt;
@@ -37,7 +39,7 @@ pub enum ProviderEvent {
     Quota(QuotaReading),
     /// A Claude result record's `modelUsage`: the session's counts so far, by model.
     ModelUsage(Value),
-    /// What Claude said about the compaction this run is; a turn's run sends none.
+    /// What the provider said about the compaction this run is; a turn's run sends none.
     Compaction(CompactionRecord),
     Finished {
         error: Option<String>,
@@ -53,6 +55,9 @@ pub enum TurnKind {
     Prompt,
     /// Claude's compact command with what to keep, sent bare. Not a turn: `prompt` is unused.
     Compaction(Option<String>),
+    /// A Codex thread compacted through `codex app-server`, which takes no note. `before` is
+    /// the context total in the thread's record, when it gave one. Not a turn either.
+    CodexCompaction { before: Option<u64> },
 }
 pub struct Turn {
     pub run_id: String,
@@ -142,8 +147,9 @@ fn codex_images(turn: &Turn) -> impl Iterator<Item = PathBuf> {
         })
 }
 /// What the provider reads on stdin. Claude takes images only as content blocks of a
-/// stream-json user message; otherwise the prompt is plain text. A compaction is the bare
-/// command, which Claude runs only when nothing wraps it.
+/// stream-json user message; otherwise the prompt is plain text. A Claude compaction is the
+/// bare command, which Claude runs only when nothing wraps it; a Codex one is the app-server's
+/// requests.
 fn input(turn: &Turn) -> Result<Vec<u8>> {
     if let TurnKind::Compaction(instructions) = &turn.kind {
         let command = match instructions {
@@ -151,6 +157,9 @@ fn input(turn: &Turn) -> Result<Vec<u8>> {
             None => "/compact".into(),
         };
         return Ok(command.into_bytes());
+    }
+    if matches!(turn.kind, TurnKind::CodexCompaction { .. }) {
+        return codex_compaction::input(turn);
     }
     if turn.session.provider == Provider::Codex || images(turn).next().is_none() {
         return Ok(turn.prompt.clone().into_bytes());
@@ -199,11 +208,28 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
             }
         }
         Provider::Codex => {
-            cmd.args(["exec","--json","--skip-git-repo-check","--color","never"])
+            let compaction = matches!(turn.kind, TurnKind::CodexCompaction { .. });
+            if compaction {
+                // The app-server takes a turn's overrides, so the summary request shares the
+                // turns' prefix; what `exec`'s own flags say goes in `thread/resume`.
+                cmd.arg("app-server");
+            } else {
+                cmd.args([
+                    "exec",
+                    "--json",
+                    "--skip-git-repo-check",
+                    "--color",
+                    "never",
+                ])
                 .arg("--dangerously-bypass-approvals-and-sandbox")
-                .args(["-m",&turn.profile.model,"-c",&format!("model_reasoning_effort={}",json!(turn.profile.effort))])
+                .args(["-m", &turn.profile.model]);
+            }
+            cmd.args(["-c",&format!("model_reasoning_effort={}",json!(turn.profile.effort))])
                 .args(["-c",&format!("developer_instructions={}",json!(instructions))])
                 .args(["-c",&format!("mcp_servers.agent_workspace={{required=true, default_tools_approval_mode=\"approve\", command={}, args=[\"agent-mcp\"], env_vars=[\"WORKSPACE_SOCKET\",\"WORKSPACE_TOKEN\"] }}",json!(turn.helper))]);
+            if compaction {
+                return;
+            }
             // `--image` takes several values: the joined form keeps it from consuming `-`, and
             // `codex_images` avoids the commas it also splits on.
             for path in codex_images(turn) {
@@ -380,12 +406,27 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         group: process.child.id(),
         started: process_start(process.child.id() as i32),
     });
+    let mut codex_compaction = match turn.kind {
+        TurnKind::CodexCompaction { before } => Some(codex_compaction::Messages::new(before)),
+        _ => None,
+    };
+    // When a Codex compaction is out of time, counted from its process's start. It holds for
+    // as long as the server runs, also once the server has closed its output.
+    let deadline = codex_compaction
+        .as_ref()
+        .map(|_| Instant::now() + codex_compaction::limit());
+    let out_of_time = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
     let mut stdin = process.child.stdin.take().context("No provider stdin")?;
     // Images can make the input large; writing it alongside reading output cannot deadlock.
-    // A provider that exits before reading it all is reported by its exit status.
-    std::thread::spawn(move || {
+    // A provider that exits before reading it all is reported by its exit status. The writer
+    // hands the input back when it is done, and dropping its handle closes it.
+    let writer = std::thread::spawn(move || {
         let _ = stdin.write_all(&input);
+        stdin
     });
+    // Codex's app-server exits when its input closes, so a compaction holds it open until its
+    // outcome is read. Any other run closes it as soon as it is written.
+    let mut open_input = codex_compaction.is_some().then_some(writer);
     let mut stderr = process.child.stderr.take().context("No provider stderr")?;
     // The tail is kept as it arrives, so a process still holding stderr when the turn ends
     // cannot withhold what was already written.
@@ -414,12 +455,20 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let mut requests = crate::telemetry::ClaudeRequests::default();
     let mut claude = ClaudeSteps::new(&turn.cwd);
     let mut codex = CodexSteps::new(&turn.cwd);
+    // A Codex compaction's outcome has been read, or its time is up: its server runs until
+    // the host stops it, and nothing it says or exits with afterwards counts.
+    let mut ended = false;
     // The exit is checked on every pass, so a leftover process writing to stdout cannot hide
     // it. Every event the reader accepted is handled; the reader decides when to stop.
     let mut exited = false;
     loop {
         check_running(&cancel)?;
-        if !exited && process.exited()? {
+        if !ended && out_of_time() {
+            failure = Some(codex_compaction::out_of_time());
+            ended = true;
+        }
+        if !exited && (ended || process.exited()?) {
+            drop(open_input.take());
             // First, so the reader never waits for room while the group is being stopped.
             output.provider_exited();
             process.stop()?;
@@ -433,9 +482,19 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         let value = match event {
             Ok(value) => value,
             // Stray output after the terminal result cannot change the turn's outcome.
-            Err(_) if terminal => continue,
+            Err(_) if terminal || ended => continue,
             Err(error) => anyhow::bail!(error),
         };
+        if let Some(messages) = &mut codex_compaction {
+            if !ended && let Some(end) = messages.read(&value) {
+                for record in end.records {
+                    emit(ProviderEvent::Compaction(record));
+                }
+                failure = end.reported;
+                ended = true;
+            }
+            continue;
+        }
         match turn.session.provider {
             Provider::Codex => match value["type"].as_str().unwrap_or_default() {
                 "thread.started" => {
@@ -558,9 +617,15 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         }
     }
     // A provider can close stdout and keep running; returning early drops `process`, which
-    // stops its whole process group.
+    // stops its whole process group. A Codex server that does so can report no outcome any
+    // more, and is stopped below when its time is up.
     while !process.exited()? {
         check_running(&cancel)?;
+        if !ended && out_of_time() {
+            failure = Some(codex_compaction::out_of_time());
+            ended = true;
+            break;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
     // Stops tool subprocesses that outlived the provider.
@@ -569,7 +634,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let stderr = without_terminal_codes(&String::from_utf8_lossy(
         &errors.lock().unwrap_or_else(|e| e.into_inner()),
     ));
-    if (!status.success() || !terminal) && failure.is_none() {
+    if !ended && (!status.success() || !terminal) && failure.is_none() {
         failure = Some(format!(
             "Provider exited without a successful terminal result ({status}). {}",
             stderr.chars().take(1500).collect::<String>()
@@ -895,6 +960,74 @@ pub(crate) mod tests {
         assert_eq!(after("--model"), "m");
         assert!(after("--mcp-config").contains("agent_workspace"));
         assert!(!args.iter().any(|a| a == "--input-format"));
+    }
+
+    #[test]
+    fn a_codex_compaction_starts_the_app_server_with_a_turns_overrides_and_no_prompt() {
+        let turn = turn(Provider::Codex, Some("thread"), vec![]);
+        let mut compaction = self::turn(Provider::Codex, Some("thread"), vec![]);
+        compaction.kind = TurnKind::CodexCompaction { before: None };
+        let overrides = |turn: &Turn| -> Vec<String> {
+            let args = arguments(turn);
+            let pairs = args.iter().zip(args.iter().skip(1));
+            let values = pairs.filter(|(flag, _)| *flag == "-c");
+            values.map(|(_, value)| value.clone()).collect()
+        };
+        let args = arguments(&compaction);
+        // The reasoning effort, the role instructions and the workspace's tool server are a
+        // turn's own, so the summary request shares the turns' prefix.
+        let shared = overrides(&turn);
+        assert_eq!(overrides(&compaction), shared);
+        for (value, name) in shared.iter().zip([
+            "model_reasoning_effort=",
+            "developer_instructions=",
+            "mcp_servers.agent_workspace=",
+        ]) {
+            assert!(value.starts_with(name), "{value}");
+        }
+        // Nothing else: `exec`'s flags are not the app-server's, and there is no prompt.
+        assert_eq!(args[0], "app-server");
+        assert_eq!(args.len(), 1 + 2 * shared.len());
+        for exec_only in ["exec", "resume", "thread", "-", "-m", "--json"] {
+            assert!(!args.iter().any(|a| a == exec_only), "{exec_only}");
+        }
+    }
+
+    #[test]
+    fn a_codex_compaction_writes_four_requests_and_resumes_the_thread_as_a_turn_runs_it() {
+        let mut compaction = turn(Provider::Codex, Some("thread"), vec![]);
+        compaction.kind = TurnKind::CodexCompaction { before: None };
+        let written = String::from_utf8(input(&compaction).unwrap()).unwrap();
+        assert!(written.ends_with('\n'));
+        let lines: Vec<Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            (&lines[0]["id"], &lines[0]["method"]),
+            (&json!(1), &json!("initialize"))
+        );
+        assert_eq!(lines[0]["params"]["clientInfo"]["name"], "wiffletree");
+        assert_eq!(lines[1], json!({"method":"initialized"}));
+        assert_eq!(
+            lines[2],
+            json!({"id":2,"method":"thread/resume","params":{
+                "threadId":"thread",
+                "cwd":"/tmp",
+                "model":"m",
+                "sandbox":"danger-full-access",
+                "approvalPolicy":"never",
+                "excludeTurns":true,
+            }})
+        );
+        assert_eq!(
+            lines[3],
+            json!({"id":3,"method":"thread/compact/start","params":{"threadId":"thread"}})
+        );
+        // An agent that has run no turn has no thread to compact.
+        compaction.provider_session = None;
+        assert!(input(&compaction).is_err());
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! How full the selected session's context window is, and with what; and the Compact action
-//! that asks Claude to replace the conversation with a summary.
+//! that asks the agent's provider to replace the conversation with a summary.
 use super::*;
 use gpui_component::{Disableable, Sizable, button::ButtonVariants, spinner::Spinner};
 use ui::{age, card, hint, icon, progress_bar, section};
+use workspace_host::compaction::REASON_LIMIT;
 use workspace_host::context::{ContextUsage, Probe};
 
 /// The Compact form on a session's Context card, while it is open.
@@ -47,42 +48,43 @@ fn measure_now(seen: Option<Measured>, runtime: &SessionRuntime, working: bool) 
     !compacting(Some(runtime)) && (new_outcome || (new_turn && !working))
 }
 
-/// The Compact row: its hint, the button's label, and whether the button works.
-fn compact_action(
-    provider: Provider,
-    has_session: bool,
-    working: bool,
-) -> (&'static str, &'static str, bool) {
+/// The Compact row: its hint, the button's label, and whether the button works. The same for
+/// either provider.
+fn compact_action(has_session: bool, working: bool) -> (&'static str, &'static str, bool) {
     const HINT: &str = "Replace the conversation with a summary.";
-    match (provider, has_session, working) {
-        (Provider::Codex, _, _) => (
-            "Not available for Codex agents: the Codex CLI has no compact command.",
-            "Compact…",
-            false,
-        ),
-        (Provider::Claude, false, _) => (
+    match (has_session, working) {
+        (false, _) => (
             "Available after this agent’s first turn.",
             "Compact…",
             false,
         ),
-        (Provider::Claude, true, true) => (HINT, "Compact after this turn", true),
-        (Provider::Claude, true, false) => (HINT, "Compact…", true),
+        (true, true) => (HINT, "Compact after this turn", true),
+        (true, false) => (HINT, "Compact…", true),
     }
 }
 
 /// The form's consequence line and its confirm button.
-fn compact_form_text(working: bool) -> (&'static str, &'static str) {
-    if working {
-        (
+fn compact_form_text(provider: Provider, working: bool) -> (&'static str, &'static str) {
+    match (working, provider) {
+        (true, _) => (
             "This agent is working. The compaction runs when this turn ends, before any waiting messages are delivered. It can’t be undone and uses one model call.",
             "Compact after this turn",
-        )
-    } else {
-        (
+        ),
+        (false, Provider::Claude) => (
             "Claude replaces this agent’s conversation with a summary. This can’t be undone and uses one model call.",
             "Compact now",
-        )
+        ),
+        (false, Provider::Codex) => (
+            "Codex replaces this agent’s conversation with a summary and chooses what the summary keeps. This can’t be undone and uses one model call.",
+            "Compact now",
+        ),
     }
+}
+
+/// What the request carries of what was typed. Codex's compact request has no field for a
+/// note, so its form has none and a draft kept for the session is never sent.
+fn compact_instructions(provider: Provider, note: &str) -> Option<String> {
+    (provider == Provider::Claude && !note.trim().is_empty()).then(|| note.to_owned())
 }
 
 /// What a queued compaction waits for: its turn, or an agent that is paused, stopped or
@@ -104,10 +106,14 @@ fn chip_note(compaction: Option<&Compaction>) -> Option<&'static str> {
 }
 
 /// The notice a compaction's outcome leaves on the card: its title, its text, and whether it is
-/// a failure. A compacted context needs none; the lower figure is the result.
-fn compaction_notice(outcome: &CompactionOutcome) -> Option<(&'static str, String, bool)> {
+/// a failure. A compacted context needs none; the lower figure is the result. A reason is
+/// cut where the host cuts the ones it builds, so those show whole.
+fn compaction_notice(
+    provider: Provider,
+    outcome: &CompactionOutcome,
+) -> Option<(&'static str, String, bool)> {
     let reason = outcome.reason.as_deref().map(|reason| {
-        let reason = conversation::first_line(reason, 180);
+        let reason = conversation::first_line(reason, REASON_LIMIT);
         if reason.ends_with(['.', '!', '?', '…']) {
             format!("{reason} ")
         } else {
@@ -136,8 +142,10 @@ fn compaction_notice(outcome: &CompactionOutcome) -> Option<(&'static str, Strin
         )),
         CompactionResult::Interrupted => Some((
             "Compaction interrupted",
-            "Wiffletree stopped while Claude was compacting. The figure above was measured again."
-                .into(),
+            format!(
+                "Wiffletree stopped while {} was compacting. The figure above was measured again.",
+                provider.label()
+            ),
             true,
         )),
     }
@@ -233,14 +241,20 @@ impl Workspace {
     }
 
     fn open_compact_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.selected.clone() {
-            self.compact_forms.insert(id, CompactForm::default());
-            self.compact_note.update(cx, |input, cx| {
-                input.set_value("", window, cx);
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        // Only a Claude agent's form has the field to focus.
+        let takes_note = session.provider == Provider::Claude;
+        self.compact_forms
+            .insert(session.id.clone(), CompactForm::default());
+        self.compact_note.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            if takes_note {
                 input.focus(window, cx);
-            });
-            cx.notify();
-        }
+            }
+        });
+        cx.notify();
     }
 
     fn close_compact_form(&mut self, cx: &mut Context<Self>) {
@@ -252,17 +266,18 @@ impl Workspace {
 
     /// Sends the request; nothing reaches the host before this.
     fn confirm_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.selected.clone() else {
+        let Some(session) = self.selected_session() else {
             return;
         };
+        let (session_id, provider) = (session.id.clone(), session.provider);
         let note = self.compact_note.read(cx).value().to_string();
+        let instructions = compact_instructions(provider, &note);
         let form = self.compact_forms.entry(session_id.clone()).or_default();
         *form = CompactForm {
-            note: note.clone(),
+            note,
             refused: None,
             sending: true,
         };
-        let instructions = (!note.trim().is_empty()).then_some(note);
         self.request(
             Command::CompactContext {
                 session_id,
@@ -461,7 +476,7 @@ impl Workspace {
         }
         let outcome = runtime.and_then(|r| r.last_compaction.as_ref());
         let left = outcome
-            .and_then(compaction_notice)
+            .and_then(|outcome| compaction_notice(session.provider, outcome))
             .map(|(title, text, failed)| {
                 let color = if failed { p.red } else { p.subtle };
                 notice(color)
@@ -483,20 +498,23 @@ impl Workspace {
             });
         let action = match self.compact_forms.get(&session.id) {
             Some(form) => {
-                let (consequence, confirm) = compact_form_text(working);
+                let (consequence, confirm) = compact_form_text(session.provider, working);
                 below_measurement(p)
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .text_size(px(12.))
-                            .child(div().font_weight(FontWeight::MEDIUM).child("What to keep"))
-                            .child(div().text_color(p.subtle).child("· optional")),
-                    )
-                    .child(Textarea::new(&self.compact_note).w_full())
+                    // Codex chooses what its summary keeps, so its form has no field.
+                    .when(session.provider == Provider::Claude, |form| {
+                        form.child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .text_size(px(12.))
+                                .child(div().font_weight(FontWeight::MEDIUM).child("What to keep"))
+                                .child(div().text_color(p.subtle).child("· optional")),
+                        )
+                        .child(Textarea::new(&self.compact_note).w_full())
+                    })
                     .child(hint(consequence, p))
                     .when_some(form.refused.clone(), |d, reason| {
                         d.child(hint(reason, p).text_color(p.red))
@@ -523,8 +541,7 @@ impl Workspace {
             }
             None => {
                 let has_session = runtime.is_some_and(|r| r.provider_session_id.is_some());
-                let (reason, label, enabled) =
-                    compact_action(session.provider, has_session, working);
+                let (reason, label, enabled) = compact_action(has_session, working);
                 below_measurement(p)
                     .flex()
                     .flex_wrap()
@@ -691,8 +708,8 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        Measured, chip_note, compact_action, compact_form_text, compacting, compaction_notice,
-        measure_now, percent, queued_text,
+        Measured, chip_note, compact_action, compact_form_text, compact_instructions, compacting,
+        compaction_notice, measure_now, percent, queued_text,
     };
     use workspace_core::{
         Compaction, CompactionOutcome, CompactionResult, CompactionState, Provider, SessionRuntime,
@@ -768,46 +785,57 @@ mod tests {
 
     #[test]
     fn the_compact_row_says_why_it_is_off_and_what_it_does_now() {
+        // The row never asks which provider the agent runs on: a Codex agent's is the same.
         const HINT: &str = "Replace the conversation with a summary.";
+        assert_eq!(compact_action(true, false), (HINT, "Compact…", true));
         assert_eq!(
-            compact_action(Provider::Claude, true, false),
-            (HINT, "Compact…", true)
-        );
-        assert_eq!(
-            compact_action(Provider::Claude, true, true),
+            compact_action(true, true),
             (HINT, "Compact after this turn", true)
         );
         for working in [false, true] {
             assert_eq!(
-                compact_action(Provider::Claude, false, working),
+                compact_action(false, working),
                 (
                     "Available after this agent’s first turn.",
                     "Compact…",
                     false
                 )
             );
-            for has_session in [false, true] {
-                assert_eq!(
-                    compact_action(Provider::Codex, has_session, working),
-                    (
-                        "Not available for Codex agents: the Codex CLI has no compact command.",
-                        "Compact…",
-                        false
-                    )
-                );
-            }
         }
     }
 
     #[test]
+    fn a_codex_form_says_codex_chooses_and_sends_no_note() {
+        let (line, confirm) = compact_form_text(Provider::Codex, false);
+        assert_eq!(confirm, "Compact now");
+        assert_eq!(
+            line,
+            "Codex replaces this agent’s conversation with a summary and chooses what the summary keeps. This can’t be undone and uses one model call."
+        );
+        // While the agent works the line names no provider, so both forms show the same one.
+        assert_eq!(
+            compact_form_text(Provider::Codex, true),
+            compact_form_text(Provider::Claude, true)
+        );
+        // A draft typed on a Claude agent and kept for the session never reaches Codex.
+        let draft = "the failing test names";
+        assert_eq!(compact_instructions(Provider::Codex, draft), None);
+        assert_eq!(
+            compact_instructions(Provider::Claude, draft),
+            Some(draft.into())
+        );
+        assert_eq!(compact_instructions(Provider::Claude, " \n "), None);
+    }
+
+    #[test]
     fn the_form_names_the_cost_and_where_a_queued_compaction_falls() {
-        let (line, confirm) = compact_form_text(false);
+        let (line, confirm) = compact_form_text(Provider::Claude, false);
         assert_eq!(confirm, "Compact now");
         assert_eq!(
             line,
             "Claude replaces this agent’s conversation with a summary. This can’t be undone and uses one model call."
         );
-        let (line, confirm) = compact_form_text(true);
+        let (line, confirm) = compact_form_text(Provider::Claude, true);
         assert_eq!(confirm, "Compact after this turn");
         for said in [
             "runs when this turn ends, before any waiting messages are delivered",
@@ -841,12 +869,13 @@ mod tests {
             reason: reason.map(str::to_owned),
             at: 1,
         };
+        let compaction_notice = |outcome| compaction_notice(Provider::Claude, &outcome);
         assert_eq!(
-            compaction_notice(&outcome(CompactionResult::Compacted, None)),
+            compaction_notice(outcome(CompactionResult::Compacted, None)),
             None
         );
         assert_eq!(
-            compaction_notice(&outcome(
+            compaction_notice(outcome(
                 CompactionResult::NothingToCompact,
                 Some("Not enough messages to compact.")
             )),
@@ -857,7 +886,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            compaction_notice(&outcome(
+            compaction_notice(outcome(
                 CompactionResult::Failed,
                 Some("Claude stopped before finishing: the connection was lost\nTraceback")
             )),
@@ -869,7 +898,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            compaction_notice(&outcome(CompactionResult::Interrupted, None)),
+            compaction_notice(outcome(CompactionResult::Interrupted, None)),
             Some((
                 "Compaction interrupted",
                 "Wiffletree stopped while Claude was compacting. The figure above was measured again."
@@ -877,6 +906,45 @@ mod tests {
                 true
             ))
         );
+    }
+
+    #[test]
+    fn a_codex_notice_names_codex_and_shows_the_hosts_reason_whole() {
+        let outcome = |result, reason: Option<String>| CompactionOutcome {
+            result,
+            reason,
+            at: 1,
+        };
+        let notice = |outcome| super::compaction_notice(Provider::Codex, &outcome);
+        assert_eq!(
+            notice(outcome(CompactionResult::Interrupted, None)),
+            Some((
+                "Compaction interrupted",
+                "Wiffletree stopped while Codex was compacting. The figure above was measured again."
+                    .into(),
+                true
+            ))
+        );
+        let refused = "Codex refused thread/compact/start: this Codex has no such method";
+        assert_eq!(
+            notice(outcome(CompactionResult::Failed, Some(refused.into()))),
+            Some((
+                "Compaction failed",
+                format!("{refused}. The context is unchanged."),
+                true
+            ))
+        );
+        // A reason the host cut at its limit is not cut again, so it ends once, with its "…".
+        let cut = format!("{}…", "x".repeat(super::REASON_LIMIT));
+        assert_eq!(
+            notice(outcome(CompactionResult::Failed, Some(cut.clone()))),
+            Some((
+                "Compaction failed",
+                format!("{cut} The context is unchanged."),
+                true
+            ))
+        );
+        assert_eq!(notice(outcome(CompactionResult::Compacted, None)), None);
     }
 
     #[test]
