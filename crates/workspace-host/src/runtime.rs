@@ -3,6 +3,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
+    os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
@@ -16,6 +17,55 @@ impl Drop for Process {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+pub(crate) trait OwnDescriptors {
+    /// Leaves the child only its standard input, output and error. macOS cannot make a pipe
+    /// that is close-on-exec from the start, so a child started while another thread is making
+    /// one would otherwise hold it for as long as it and everything it started run.
+    fn own_descriptors_only(&mut self) -> &mut Self;
+}
+impl OwnDescriptors for Command {
+    fn own_descriptors_only(&mut self) -> &mut Self {
+        // SAFETY: `close_others_on_exec` is async-signal-safe.
+        unsafe {
+            self.pre_exec(|| {
+                close_others_on_exec();
+                Ok(())
+            })
+        }
+    }
+}
+
+/// Marks every descriptor above stderr close-on-exec.
+///
+/// It runs between fork and exec in a copy of a process that had other threads, any of which
+/// may have held a lock, the allocator's included. So it only makes system calls: it must not
+/// allocate, lock, log or panic.
+fn close_others_on_exec() {
+    let close_on_exec = |descriptor| unsafe {
+        libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC);
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let mut open: [libc::proc_fdinfo; 1024] = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&open) as libc::c_int;
+        let list = libc::PROC_PIDLISTFDS;
+        let read =
+            unsafe { libc::proc_pidinfo(libc::getpid(), list, 0, open.as_mut_ptr().cast(), size) };
+        // A list that filled the buffer may be a cut one. That and a failed call mark every
+        // possible descriptor below, so none stays inheritable.
+        if (1..size).contains(&read) {
+            let listed = read as usize / std::mem::size_of::<libc::proc_fdinfo>();
+            let above_stderr = open
+                .iter()
+                .take(listed)
+                .map(|d| d.proc_fd)
+                .filter(|d| *d > 2);
+            return above_stderr.for_each(close_on_exec);
+        }
+    }
+    (3..unsafe { libc::getdtablesize() }).for_each(close_on_exec);
 }
 
 pub fn git_output(path: &Path, args: &[&str]) -> Result<String> {
@@ -164,6 +214,7 @@ pub(crate) fn bounded_output(
     };
     let mut child = Process(
         command
+            .own_descriptors_only()
             .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -270,6 +321,7 @@ fn with_codex<T>(
 ) -> Result<T> {
     let mut child = Process(
         Command::new(crate::provider::executable(Provider::Codex)?)
+            .own_descriptors_only()
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -330,6 +382,7 @@ pub fn codex_quota() -> Result<workspace_core::QuotaReading> {
 pub fn claude_account(cwd: &Path) -> Result<Option<String>> {
     let mut child = Process(
         Command::new(crate::provider::executable(Provider::Claude)?)
+            .own_descriptors_only()
             .current_dir(cwd)
             .args(["auth", "status", "--json"])
             .stdin(Stdio::null())
@@ -416,6 +469,7 @@ fn codex_option(model: &Value) -> Result<ModelOption> {
 fn claude_models() -> Result<Vec<ModelOption>> {
     let mut child = Process(
         Command::new(crate::provider::executable(Provider::Claude)?)
+            .own_descriptors_only()
             .args([
                 "-p",
                 "--input-format",
@@ -637,11 +691,16 @@ mod model_tests {
         let failed = git_push(folder.path(), &args).unwrap();
         assert!(!failed.status.success());
         assert!(failed.error.starts_with("fatal: "), "{}", failed.error);
-        // A pre-push hook that never returns is given up on.
+        // A pre-push hook that never returns is given up on. Git's kill does not reach the
+        // hook, so it waits only for as long as Git runs and cannot outlive the test.
         let remote = folder.path().join("remote.git");
         git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
         let hook = folder.path().join(".git/hooks/pre-push");
-        std::fs::write(&hook, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.1; done\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let args = ["push", remote.to_str().unwrap(), "HEAD:refs/heads/main"];
