@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: The host may start a review for the PR keeper
-The host SHALL be able to start one verification cycle on a ticket for the PR keeper, without a `verify_ticket` call and without the ticket being `ready_for_testing`, only for a commit the keeper has moved onto the ticket's branch. The cycle SHALL run the level the keeper's settings name, whose kind SHALL be re-check, and every rule for starting a level SHALL apply unchanged: the ticket's latest cycle passed, and the level leaves out no configured verifier that has an open finding. It SHALL be one round. Each verifier SHALL run on the exact model the coordinator last chose for that verifier on this ticket, which SHALL still be allowed for it; the host SHALL NOT choose or substitute a model. When any of this cannot be met, no cycle SHALL start and nothing about the ticket SHALL change. The cycle SHALL be recorded as the keeper's, SHALL take the next cycle number, and SHALL NOT count against the cycle cap. The Tickets panel and `workspace_context` SHALL mark it as the PR keeper's. Verifiers SHALL get the same message and SHALL be bound by the same read-only and pinned-commit rules as in any cycle.
+The host SHALL be able to start one verification cycle on a ticket for the PR keeper, without a `verify_ticket` call and without the ticket being `ready_for_testing`, only for a commit the keeper has moved onto the ticket's branch. The cycle SHALL run the level the keeper's settings name, whose kind SHALL be re-check, and every rule for starting a level SHALL apply unchanged: the ticket's latest cycle passed, and the level leaves out no configured verifier that has an open finding. It SHALL NOT start while the ledger holds any `open` entry, so that the review can only add entries and never change one. It SHALL be one round. Each verifier SHALL run on the exact model the coordinator last chose for that verifier on this ticket, which SHALL still be allowed for it; the host SHALL NOT choose or substitute a model. When any of this cannot be met, no cycle SHALL start and nothing about the ticket SHALL change. The cycle SHALL be recorded as the keeper's, SHALL take the next cycle number, and SHALL NOT count against the cycle cap. When it starts the cycle, the host SHALL record on the ticket, for every keeper review whether or not a model made the commit, the cycle's number, the commit the branch had before the keeper moved it and the ticket's state at that moment; a withdrawal uses that record and nothing else. The Tickets panel and `workspace_context` SHALL mark it as the PR keeper's. Verifiers SHALL get the same message and SHALL be bound by the same read-only and pinned-commit rules as in any cycle.
 
 #### Scenario: A keeper review starts
 - **WHEN** the keeper has moved a fix onto the branch of a ticket whose cycle 1, a "Full" review, passed with Correctness on Claude · sonnet · high, and the keeper's level is "Light", a re-check that runs Correctness
@@ -23,6 +23,14 @@ The host SHALL be able to start one verification cycle on a ticket for the PR ke
 - **WHEN** the ledger holds an open entry from Regressions and the keeper's level runs only Correctness
 - **THEN** no keeper review starts
 
+#### Scenario: An open entry in the ledger
+- **WHEN** the ledger holds an `open` entry and the keeper has a commit to review
+- **THEN** no keeper review starts
+
+#### Scenario: A review without a try
+- **WHEN** the keeper reviews a rebase whose patch changed, which no model made
+- **THEN** the ticket records the cycle's number, the commit before and the state before, exactly as for a try's review
+
 #### Scenario: Not counted against the cap
 - **WHEN** a ticket has used both full reviews of a cycle cap of 2 and the second one passed
 - **THEN** a keeper review may still start
@@ -41,15 +49,23 @@ When every verifier of a keeper review passes in its one round, the cycle SHALL 
 ### Requirement: A keeper review that does not pass is withdrawn
 A keeper review SHALL end after its one round. When any verifier's result is failed or blocked, the host SHALL withdraw the review instead of ending it blocked: it SHALL NOT send findings to the implementer, SHALL NOT start another round, and SHALL NOT send the coordinator a cycle message.
 
-The host SHALL withdraw only the cycle that the keeper's running try recorded as its own, and only while that cycle is the ticket's latest; it SHALL never withdraw a cycle started with `verify_ticket`, an earlier cycle, or a keeper review that passed.
+The host SHALL withdraw only the cycle the keeper recorded as its own when it started it, for a try or for a rebase whose patch changed, and only while that cycle is the ticket's latest; it SHALL never withdraw a cycle started with `verify_ticket`, an earlier cycle, or a keeper review that passed.
 
-Withdrawing SHALL, in one store change: make the cycle before it the ticket's latest cycle again, with its level, rounds, results and outcome unchanged; put the ledger back as it was when the review started; and put the ticket's state back to what it was then. The withdrawn cycle, its verdicts and its findings SHALL be kept on the keeper's record of the try and SHALL be shown there, not among the ticket's cycles. The cycle's activity events SHALL remain, and a `keeper_review_withdrawn` event SHALL be logged. Verifier sessions SHALL be kept.
+Withdrawing SHALL, in one store change: make the cycle before it the ticket's latest cycle again, with its level, rounds, results and outcome unchanged; remove from the ledger exactly the entries that cycle recorded, and no others; and put the ticket's state back to what the record says it was. Every other ledger entry SHALL stay as it is at that moment, with any decision the coordinator recorded while the review ran. The withdrawn cycle, its verdicts and its findings, with any decision recorded on them, SHALL be kept on the keeper's record of that review and SHALL be shown there, not among the ticket's cycles. The cycle's activity events SHALL remain, and a `keeper_review_withdrawn` event SHALL be logged. Verifier sessions SHALL be kept.
 
-The host SHALL then put the ticket's branch back to the commit it had before the keeper moved it, under the rule for moving a ticket's branch (see pr-keeper): only while the worktree is on the ticket's branch at the keeper's commit, with no uncommitted or untracked files, and no agent of the ticket is in a turn. While an agent is in a turn it SHALL wait. When the worktree is not clean or its HEAD is no longer the keeper's commit, the host SHALL NOT change the worktree or the branch; the records SHALL stay withdrawn, so that `accept_ticket` and `publish_ticket` refuse because HEAD is not the verified commit. The coordinator SHALL be told by the keeper only after the branch is back or has been found not restorable, and in the second case the message SHALL name the commit the worktree is at and the verified commit.
+The host SHALL then put the ticket's branch back to the commit it had before the keeper moved it, under the rule for moving a ticket's branch (see pr-keeper): only while the worktree is on the ticket's branch at the keeper's commit, with no uncommitted or untracked files, and no agent of the ticket is in a turn. While an agent is in a turn it SHALL wait. When the worktree is not clean or its HEAD is no longer the keeper's commit, the host SHALL NOT change the worktree or the branch; the records SHALL stay withdrawn, and the host SHALL record the keeper's commit as a head that is not reviewed, as it does for an adopted head (see pr-keeper), so that `accept_ticket`, `publish_ticket` and the keeper refuse until a later cycle ends, whatever the commit's patch id. The coordinator SHALL be told by the keeper only after the branch is back or has been found not restorable, and in the second case the message SHALL name the commit the worktree is at and the verified commit.
 
 #### Scenario: Withdrawn
 - **WHEN** cycle 1, a "Full" review, passed at `3daf610` with ledger entries F1 to F4, and the keeper's review, cycle 2 at `77b0c13`, records a blocking finding F5
-- **THEN** the ticket's latest cycle is cycle 1, passed at `3daf610`; the ledger holds F1 to F4 as before; the ticket is `passed`; and cycle 2 with F5 is on the keeper's record of the try
+- **THEN** the ticket's latest cycle is cycle 1, passed at `3daf610`; the ledger holds F1 to F4 as before; the ticket is `passed`; and cycle 2 with F5 is on the keeper's record of that review
+
+#### Scenario: The coordinator triaged during the review
+- **WHEN** the ledger holds F1 `untriaged` when a keeper review starts, the coordinator marks F1 `wont_fix` with a reason while the review runs, the review records F5, and it is then withdrawn
+- **THEN** F1 is still `wont_fix` with that reason, F5 is not in the ledger, and F5 is on the keeper's record of that review
+
+#### Scenario: A decision on the review's own finding
+- **WHEN** the coordinator marks the keeper review's own entry F5 `follow_up` while the review runs, and the review is then withdrawn
+- **THEN** F5 leaves the ledger and is kept, with that decision and its reason, on the keeper's record of that review
 
 #### Scenario: The branch is put back
 - **WHEN** that review is withdrawn and the worktree is clean at `77b0c13` with no agent in a turn
@@ -77,7 +93,7 @@ The host SHALL then put the ticket's branch back to the commit it had before the
 
 #### Scenario: HEAD has moved
 - **WHEN** the implementer committed on top of the keeper's commit before the branch could be put back
-- **THEN** nothing is reset, the implementer's commit is kept, `publish_ticket` refuses because HEAD is not the verified commit, and the coordinator's message names both commits
+- **THEN** nothing is reset, the implementer's commit is kept, the keeper's commit is recorded as not reviewed so `publish_ticket` refuses, and the coordinator's message names both commits
 
 #### Scenario: A verifier cannot check
 - **WHEN** the keeper review's only verifier reports `blocked`
@@ -127,7 +143,7 @@ This requirement covers cycles started with `verify_ticket`; how a review the ho
 - **THEN** the coordinator's message offers sending fixes and running a full review, accepting with a waiver, closing the ticket or asking the human, and does not offer another re-check
 
 ### Requirement: Decision ledger
-Each ticket SHALL keep a ledger of every recorded finding, across all its cycles. Each entry SHALL have an id unique in the ticket (`F1`, `F2`, …), the finding's severity, location, summary, trigger and evidence, its source (verifier focus, cycle and round), a status, and a reason once the coordinator decides it. The status SHALL be one of `open`, `fixed`, `untriaged`, `fix_now`, `follow_up` or `wont_fix`. Only a completed check SHALL add or change entries: a `passed` or `failed` report whose worktree check passed. A `blocked` report, or a result the host recorded as failed because the worktree changed, SHALL leave the ledger unchanged, so an `open` entry stays `open` until a completed check clears it. An evidenced blocking finding SHALL enter as `open`, and every other finding as `untriaged`. After a completed check, each `open` entry of the verifier's focus that the report did not name again SHALL become `fixed`; an entry it names again SHALL stay `open`, with its round and evidence updated. A `wont_fix` or `follow_up` entry named again SHALL stay unchanged. When a cycle ends, an `open` entry whose focus had no verifier in that cycle SHALL become `untriaged`. Entries SHALL never be deleted, except that withdrawing a keeper review SHALL put the ledger back as it was when that review started.
+Each ticket SHALL keep a ledger of every recorded finding, across all its cycles. Each entry SHALL have an id unique in the ticket (`F1`, `F2`, …), the finding's severity, location, summary, trigger and evidence, its source (verifier focus, cycle and round), a status, and a reason once the coordinator decides it. The status SHALL be one of `open`, `fixed`, `untriaged`, `fix_now`, `follow_up` or `wont_fix`. Only a completed check SHALL add or change entries: a `passed` or `failed` report whose worktree check passed. A `blocked` report, or a result the host recorded as failed because the worktree changed, SHALL leave the ledger unchanged, so an `open` entry stays `open` until a completed check clears it. An evidenced blocking finding SHALL enter as `open`, and every other finding as `untriaged`. After a completed check, each `open` entry of the verifier's focus that the report did not name again SHALL become `fixed`; an entry it names again SHALL stay `open`, with its round and evidence updated. A `wont_fix` or `follow_up` entry named again SHALL stay unchanged. When a cycle ends, an `open` entry whose focus had no verifier in that cycle SHALL become `untriaged`. Entries SHALL never be deleted, except that withdrawing a keeper review SHALL remove the entries that review recorded, and no others.
 
 #### Scenario: Blocking finding fixed
 - **WHEN** the Regressions reviewer's finding F3 is open after round 1, and in round 2 it reports `passed` without naming F3
@@ -151,7 +167,7 @@ Each ticket SHALL keep a ledger of every recorded finding, across all its cycles
 
 #### Scenario: A withdrawn keeper review leaves no entry
 - **WHEN** the ledger holds F1 to F4, a keeper review records F5 and F6, and that review is withdrawn
-- **THEN** the ledger holds F1 to F4 exactly as before, and F5 and F6 are kept only on the keeper's record of that try
+- **THEN** the ledger holds F1 to F4, each with whatever decision it has at that moment, and F5 and F6 are kept only on the keeper's record of that review
 
 ### Requirement: Cycle history is kept
 Starting a new cycle SHALL keep every earlier cycle of the ticket, with its rounds, results and outcome, instead of replacing it. A keeper review that is withdrawn SHALL NOT remain among the ticket's cycles, and its cycle number SHALL NOT be given to a later cycle. The latest cycle SHALL remain the one that verdicts, readiness and acceptance refer to.

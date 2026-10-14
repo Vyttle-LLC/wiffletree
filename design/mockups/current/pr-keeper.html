@@ -156,7 +156,7 @@ table.usage td{padding:4px 8px 4px 0;border-top:1px solid color-mix(in srgb,var(
           <div class="trigger"><span class="tick on"><svg><use href="#check"/></svg></span><b>Rebase when the base branch moves</b>
             <span class="what">Plain Git, no model and no review. Waits until the base has been quiet for <span class="field">2</span> minutes, then replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).</span></div>
           <div class="trigger"><span class="tick on"><svg><use href="#check"/></svg></span><b>Try to resolve conflicts</b>
-            <span class="what">The PR keeper’s model tries once. Its result must change only the conflicted files, pass the repository’s checks and pass a <span class="field">Light ▾</span> review before anything is pushed. If not, the try is thrown away and the coordinator is told.</span></div>
+            <span class="what">The PR keeper’s model tries once. Its result must change only the conflicted files, pass the repository’s checks and pass a <span class="field">Light ▾</span> review before anything is pushed. If not, the try is thrown away and the coordinator is told. Needs the rebase trigger above.</span></div>
           <div class="trigger"><span class="tick"></span><b>Try to fix failed checks</b>
             <span class="what">Only when the checks also fail on this machine. One try, the same gate and review, and only in files the pull request already changes.</span></div>
           <div class="trigger"><span class="tick on"><svg><use href="#check"/></svg></span><b>Sort new comments</b>

@@ -58,7 +58,7 @@ He was also told, and accepted:
 - A try that fails is thrown away including its review record (decision 6).
 - The model making a fix has an ordinary shell with his credentials. The app checks what it leaves behind, not everything it ran (see "What this closes and what it does not").
 
-**Everything else in this document is a design decision made in review, not the human's.** That includes the exact conditions in decision 2, the 20-comment and 4,000-character bounds, the rule for when waiting comments stop showing, setting an adopted ticket to `ready_for_testing`, and running the checks on a rebase whose patch changed.
+**Everything else in this document is a design decision made in review, not the human's.** That includes the exact conditions in decision 2, the conflicts trigger needing the rebase trigger, the record of a head that is not reviewed (decision 8), the 20-comment and 4,000-character bounds, the rule for when waiting comments stop showing, setting an adopted ticket to `ready_for_testing`, and running the checks on a rebase whose patch changed.
 
 ### 1. What the keeper is
 Host code, in a new `workspace-host/src/keeper.rs`, driven by the watcher's passes. It has no session of its own and no prompt. After each recorded pass (`Event::PullRequests`, `service.rs:1181`) the actor asks `Host::keeper_due()` what to do for each kept ticket and starts at most one keeper job per ticket on its own thread, as publish steps run (`spawn_publish_step`, `service.rs:411`). A job reports back with a new `Event::Kept`.
@@ -81,6 +81,7 @@ Sorting comments needs nothing more, since it changes nothing. The keeper **chan
 - the latest verification cycle passed and none is running;
 - the worktree's HEAD is the reviewed commit or patch-equivalent to it (`live::verified_head`);
 - the PR's head is the worktree's HEAD;
+- the ticket records no head that is not reviewed (decision 8);
 - no publish request is running or waiting.
 
 Together these are the conditions under which `publish_ticket` would push without asking. The keeper therefore never needs an Inbox approval, and never raises one. It does one thing to a ticket's branch at a time.
@@ -103,6 +104,7 @@ pub struct ModelSelection { …, pub keeper: Option<ModelProfile> }
 ```
 - The triggers and the quiet period are one value for the workspace, changed by a new `Command::SetKeeper` handled by `settings.rs::set_keeper`, beside `set_check_ins` (`:141`). Only the human's client can send it.
 - Saving refuses `conflicts` or `checks` without a model and a `review_level` naming a level whose kind is re-check, and refuses `comments` without a Claude model.
+- Saving refuses `conflicts` without `rebase`, and `rebase` off while `conflicts` is on. A conflict is found by the keeper's own rebase, which runs only with the rebase trigger; without it no try could start, and the watcher's held wake (decision 10) would never be sent.
 - `Repository.checks` is the one per-repository value, changed by `Command::SetRepositoryChecks`. The command is the human's own text, run with `/bin/sh -c` in the keeper's checkout. A repository without one gets rebases and comment sorting, and no tries.
 - `ModelSelection.keeper` is saved with the rest of the Models page and must be an allowed model of an enabled provider (`ModelSelection::validate`). It is `None` until the human chooses.
 
@@ -129,7 +131,7 @@ pub struct ModelSelection { …, pub keeper: Option<ModelProfile> }
 
 **When it is not clean.**
 - *Conflict:* with the conflicts trigger off, or no checks command, or the try already used, nothing changes: the watcher's message tells the coordinator, as today. Otherwise decision 5.
-- *Changed:* the commit is not pushed, because no review covers it. With the conflicts trigger on and a checks command, the host runs the checks on it and then the keeper's review (decision 6), with no model; it is not a try. Otherwise the coordinator is told once per head and base that the rebase needs a re-check.
+- *Changed:* the commit is not pushed, because no review covers it. With the conflicts trigger on and a checks command, the host runs the checks on it and then the keeper's review (decision 6), with no model; it is not a try. A review that fails there is withdrawn like any keeper review, because the rollback record belongs to the review, not to a try. Otherwise the coordinator is told once per head and base that the rebase needs a re-check.
 - A given pair of head and base is rebased once (`Ticket.keeper.last`), so a failed push is not repeated until one of them changes.
 
 ### 5. One try by the model, behind a gate
@@ -163,12 +165,14 @@ A result that passed the gate is moved onto the ticket's branch with `keeper_ado
 - **Passed:** the cycle stays as the ticket's latest, and `keeper_publish` pushes. The coordinator gets the ordinary cycle message only when the pass left findings to triage.
 - **Not passed:** `Host::withdraw_keeper_review` throws the review away with the try. Findings are not routed to the implementer and no second round runs.
 
-**What a withdrawal does.** It applies only to the cycle the running try recorded as its own: the ticket's latest cycle, marked as the keeper's, with that try's id. Any other cycle is never touched.
-1. *At once, in one store write:* the ticket's latest cycle is the one before again, with its outcome and rounds unchanged; the ledger is as it was when the review started (the try keeps a copy while its review runs); the ticket's state is what it was then. The withdrawn cycle, its verdicts and its findings are kept on the try's record. The activity log keeps its `verification_started` entry and gains `keeper_review_withdrawn`.
+**The record of a keeper review.** When `keeper_review` starts a cycle it saves `Ticket.keeper.review`: the cycle's number, the commit the branch had before the keeper moved it, the ticket's state then, and the try it belongs to, if any. Every keeper review has one, so a rebase whose patch changed rolls back the same way a try does. A keeper review does not start while the ledger holds an `open` entry (after a passed cycle there is none), so the cycle can only add ledger entries, never change one.
+
+**What a withdrawal does.** It applies only to the cycle `Ticket.keeper.review` names, while that cycle is the ticket's latest and marked as the keeper's. Any other cycle is never touched.
+1. *At once, in one store write:* the ticket's latest cycle is the one before again, with its outcome and rounds unchanged; the ledger loses exactly the entries that cycle recorded, found by their source cycle, and no others; the ticket's state is what the record says it was. Every other entry stays as it is at that moment. The coordinator can call `triage_findings` while the review runs (`verification.rs:464` does not look at cycles), and a decision it records then on an earlier entry is kept; restoring a copy of the ledger would have erased it. The withdrawn cycle, its verdicts and its findings, with any decision recorded on them, are kept on the review's record. The activity log keeps its `verification_started` entry and gains `keeper_review_withdrawn`.
 2. *The cycle's number is not reused.* The next cycle takes the number after the withdrawn one, because verifier messages are keyed by cycle number and a reused number would be mistaken for a message already sent.
 3. *Then the branch is put back,* under the same rule as any move: the worktree is on the ticket's branch at the keeper's commit, clean, and no agent of the ticket is in a turn. The reporting verifier's turn is usually still winding down at that moment, so the reset waits until the worktree is free.
 4. *The coordinator is told after the branch is back,* not before, so it cannot dispatch an implementer onto the discarded commit.
-5. *If the branch cannot be put back,* because the worktree is not clean or its HEAD is no longer the keeper's commit, nothing is forced. The records stay restored. HEAD is then not the reviewed commit, so `publish_ticket`, `accept_ticket` and the keeper all refuse, by today's rules. The coordinator's message names the commit the worktree is at and the reviewed commit.
+5. *If the branch cannot be put back,* because the worktree is not clean or its HEAD is no longer the keeper's commit, nothing is forced. The records stay restored, and the keeper's commit is recorded as a head that is not reviewed (decision 8), so `publish_ticket`, `accept_ticket` and the keeper all refuse until a later cycle ends, whatever the commit's patch id. The coordinator's message names the commit the worktree is at and the reviewed commit.
 
 Verifier sessions are not removed: a verifier keeps its session and its conversation, as between any two cycles.
 
@@ -192,7 +196,7 @@ Nothing in a comment can make the keeper act: a comment's only effect is which o
 ### 8. Commits Wiffletree did not make
 This runs while the rebase, conflicts or checks trigger is on, for a kept ticket with no cycle running and no publish request. When the PR's head is not the worktree's HEAD and is not contained in it, the job fetches GitHub's branch from the push URL into the keeper's ref. If the worktree's HEAD is an ancestor of what it fetched, GitHub's branch has commits on top that the host did not push, and `keeper_adopt` fast-forwards the ticket's branch to them (`git merge --ff-only`), under the same conditions as any move. Their content and their commits are unchanged. A later rebase replays them like every commit on the branch: same content and author, new commit ids.
 
-The ticket's review is not touched, and HEAD is no longer the reviewed commit, so `publish_ticket`, `accept_ticket` and the keeper all refuse until a review passes at the new head, by the rules that exist today. To let the coordinator start that review without an implementer turn, the adoption sets a ticket whose state is `passed` to `ready_for_testing`; any other state is left alone. The coordinator gets one message naming the old and new head and the number of commits. "Keep going" (H6) therefore means: the ticket keeps its PR and the keeper resumes once a review has passed.
+The ticket's review is not touched. Today's rule would not be enough to hold the ticket there: `live::verified_head` (`:900`) accepts any HEAD with the verified commit's stable patch id, and `git patch-id` ignores whitespace, so an adopted commit that only re-indents a line, which in Python changes what the code does, would count as reviewed. So the adoption records the adopted head on the ticket as not reviewed (`Ticket.keeper.unreviewed`), and `verified_head`, the one function `accept_ticket`, `publish::check` and the keeper's own conditions all go through, refuses while that record stands. The record is cleared only when a verification cycle that started after it ends; that cycle's outcome then decides, by the existing rules. A keeper rebase of a reviewed commit is unaffected: it sets no record. To let the coordinator start that review without an implementer turn, the adoption sets a ticket whose state is `passed` to `ready_for_testing`; any other state is left alone. The coordinator gets one message naming the old and new head and the number of commits. "Keep going" (H6) therefore means: the ticket keeps its PR and the keeper resumes once a review has passed.
 
 When the two have diverged, nothing is adopted and the coordinator is told once per head.
 
@@ -200,7 +204,7 @@ When the two have diverged, nothing is adopted and the coordinator is told once 
 A problem is `conflict` or `checks`. `Ticket.keeper.tries` records each try: the problem, the PR's head, the base commit, when, and how it ended (pushed, or discarded with the reason). A try is due only when the list has none for that problem at that head. A new head, from an implementer's fix or an adopted commit, allows a new try. A clean rebase is not a try and is not limited, except once per head and base. There is no count per PR and no budget (H7). A try that was running when the host stopped is recorded as discarded at the next start and counts as that head's try, so a crash cannot repeat a model run without end.
 
 ### 10. The watcher's messages
-`pull_request_notices` (`pr_watch.rs:490`) holds back its conflict or failed-checks wake for a head when the keeper will try that problem there or has already tried it (`keeper::handles`: the trigger is on, the repository has a checks command, the ticket's branch may be changed as decision 2 defines, or a try for that problem at that head is recorded). The coordinator then hears once, from the keeper, and only if the try is thrown away.
+`pull_request_notices` (`pr_watch.rs:490`) holds back its conflict or failed-checks wake for a head when the keeper will try that problem there or has already tried it (`keeper::handles`: the trigger is on, which for a conflict means the rebase trigger is on too, the repository has a checks command, the ticket's branch may be changed as decision 2 defines, or a try for that problem at that head is recorded). The coordinator then hears once, from the keeper, and only if the try is thrown away.
 
 GitHub often reports the conflict before the quiet period has passed, so the wake is held back before any try exists. The host notes it on the ticket (`Ticket.keeper.held`). On each later pass, a held wake whose try has started is dropped; one whose head has changed or whose problem is gone is dropped; and one the keeper can no longer try, as when an implementer started working in the worktree or the trigger was unticked, is sent then, in the watcher's own words. So a held wake is never lost.
 
@@ -229,7 +233,7 @@ One PR each, in this order. Each is useful alone and leaves the others off. The 
 | 4 | A try at a conflict | `Repository.checks`, the try session, the gate, `keeper_review` and `withdraw_keeper_review`, tries, the watcher's held wake | 520 |
 | 5 | A try at failed checks | reproduce first, the scope rule for checks | 120 |
 
-Slices 2 and 3 depend only on slice 1. Slice 4 depends on slice 3 for the keeper's model and its role, and slice 5 on slice 4.
+Slices 2 and 3 depend only on slice 1. Slice 4 depends on slice 3 for the keeper's model and its role and on slice 2 for the record of a head that is not reviewed, and slice 5 on slice 4.
 
 **One change, five PRs** (decided, (f) 7). The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
 
@@ -253,7 +257,7 @@ Slices 2 and 3 depend only on slice 1. Slice 4 depends on slice 3 for the keeper
 - [Every rebase re-runs the PR's checks on GitHub, and a busy base means many rebases] → the quiet period; it is a setting.
 - [A force-push changes every commit id on the PR, so reviewers lose "changes since my last review", and a repository set to dismiss stale approvals drops them] → accepted by the human, (a).
 - [Checks run from a fresh checkout, so a Rust repository builds from nothing on each try] → accepted for the first version; one try per head bounds it.
-- [Withdrawing a review edits the ticket's cycles and ledger, which nothing does today] → it is one function, the withdrawn cycle is kept on the try's record, it only ever removes the cycle the running try started, and the human accepted it.
+- [Withdrawing a review edits the ticket's cycles and ledger, which nothing does today] → it is one function, the withdrawn cycle is kept on the try's record, it only ever removes the cycle the keeper's own review record names and the ledger entries that cycle recorded, and the human accepted it.
 - [The waiting-comments counts are cleared by a rule, not by GitHub] → a question answered without a code change stays on the PR line until the next review or the merge.
 - [The implementer's next turn finds its branch rebased] → the move happens only between turns on a clean worktree, and its instructions say so.
 - [A checks command is the human's shell text] → only the human's client can set it; no agent tool does.

@@ -72,7 +72,7 @@ When an open PR's recorded checks become `failure`, the host SHALL send the tick
 - **THEN** the recorded comment id of that kind changes and no agent is woken
 
 #### Scenario: The keeper will try the conflict
-- **WHEN** PR #139 conflicts with its base at head `3daf610`, the conflicts trigger is on, its repository is kept and has a checks command, its branch may be changed and no try is recorded for that head
+- **WHEN** PR #139 conflicts with its base at head `3daf610`, the rebase and conflicts triggers are on, its repository is kept and has a checks command, its branch may be changed and no try is recorded for that head
 - **THEN** the coordinator receives no watcher message for that conflict
 
 #### Scenario: The keeper cannot try

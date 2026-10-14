@@ -3,7 +3,7 @@
 ### Requirement: Where the PR keeper acts
 The PR keeper SHALL be host code that acts after the PR watcher's passes, with no model session to watch or decide. A ticket's PR SHALL be kept only when all of these hold: the ticket is open, its coordinator is not archived, its project is not paused, its repository publishes without asking (see repository-owners), and its PR, as the watcher last read it, is open. For any other PR the keeper SHALL do nothing and SHALL raise no Inbox item, and the PR SHALL be watched as before. A PR that is not the PR of one of this workspace's tickets SHALL never be kept.
 
-The keeper SHALL change a kept ticket's branch only when these also hold: the ticket's latest verification cycle passed and none is running; the worktree's HEAD is the commit that cycle verified or a patch-equivalent one; the PR's head is the worktree's HEAD; and no publish request for the ticket is running or waiting. It SHALL do at most one thing to a ticket's branch at a time. Adopting commits Wiffletree did not make has its own conditions (see below).
+The keeper SHALL change a kept ticket's branch only when these also hold: the ticket's latest verification cycle passed and none is running; the worktree's HEAD is the commit that cycle verified or a patch-equivalent one; the PR's head is the worktree's HEAD; the ticket records no head that is not reviewed (see "Commits Wiffletree did not make are adopted"); and no publish request for the ticket is running or waiting. It SHALL do at most one thing to a ticket's branch at a time. Adopting commits Wiffletree did not make has its own conditions (see below).
 
 #### Scenario: Owner not allowed
 - **WHEN** a ticket in `celadon-theme/website` has an open PR that is behind its base, `celadon-theme` is not allowed, and every trigger is on
@@ -223,7 +223,7 @@ The README and the development notes SHALL say that Wiffletree can rebase a tick
 - **THEN** it says the keeper is off until turned on, where it acts, and that a rebase replaces the branch on GitHub
 
 ### Requirement: Commits Wiffletree did not make are adopted
-While the rebase, conflicts or checks trigger is on, for a kept ticket with no verification cycle running and no publish request running or waiting, the keeper SHALL act when the PR's head is not the worktree's HEAD and is not contained in it. It SHALL fetch GitHub's branch, read-only. When the worktree's HEAD is an ancestor of the fetched head, it SHALL fast-forward the ticket's branch to that head, under the rule for moving a ticket's branch, so that the adopted commits and their content are unchanged. It SHALL NOT drop, squash, amend or reorder them. A ticket whose state is `passed` SHALL then be `ready_for_testing`; any other state SHALL be left alone. The ticket's verification record SHALL NOT be changed, so the adopted head is not reviewed and nothing more is pushed for the ticket until a review passes at it. The coordinator SHALL be told once per adopted head, naming the old and the new head and the number of commits, that the head is not reviewed and that a review may be started. The PR line's keeper part SHALL read "N commits not reviewed", before any other part, until a cycle verifies the head.
+While the rebase, conflicts or checks trigger is on, for a kept ticket with no verification cycle running and no publish request running or waiting, the keeper SHALL act when the PR's head is not the worktree's HEAD and is not contained in it. It SHALL fetch GitHub's branch, read-only. When the worktree's HEAD is an ancestor of the fetched head, it SHALL fast-forward the ticket's branch to that head, under the rule for moving a ticket's branch, so that the adopted commits and their content are unchanged. It SHALL NOT drop, squash, amend or reorder them. A ticket whose state is `passed` SHALL then be `ready_for_testing`; any other state SHALL be left alone. The ticket's verification record SHALL NOT be changed. Instead the ticket SHALL record the adopted head as not reviewed. While that record stands, the keeper SHALL NOT change the ticket's branch, and `publish_ticket`, the keeper's publish and `accept_ticket` SHALL refuse, saying the branch has commits no review has checked, also when the worktree's HEAD is patch-equivalent to the verified commit (see ticket-publishing and ticket-workspaces). The record SHALL be cleared only when a verification cycle that started after the adoption ends; that cycle's outcome then decides, by the existing rules. The coordinator SHALL be told once per adopted head, naming the old and the new head and the number of commits, that the head is not reviewed and that a review may be started. The PR line's keeper part SHALL read "N commits not reviewed", before any other part, while that record stands.
 
 #### Scenario: One commit pushed from GitHub
 - **WHEN** someone commits a suggestion on PR #141, so its head `5f2e7a0` is one commit ahead of the worktree's `7c1c59e`, and the worktree is free
@@ -231,11 +231,19 @@ While the rebase, conflicts or checks trigger is on, for a kept ticket with no v
 
 #### Scenario: Nothing more is pushed
 - **WHEN** the base moves after an adoption and before any review
-- **THEN** the keeper does not rebase or push the ticket's branch, and `publish_ticket` refuses because HEAD has changes the last cycle did not check
+- **THEN** the keeper does not rebase or push the ticket's branch, and `publish_ticket` refuses because the branch has commits no review has checked
+
+#### Scenario: An adopted commit with the same patch id
+- **WHEN** the adopted commit only re-indents a line, so the adopted head has the same stable patch id as the verified commit, and the base then moves
+- **THEN** the keeper does not rebase or push, `publish_ticket` and `accept_ticket` refuse because the branch has commits no review has checked, and the ticket's latest cycle is unchanged
 
 #### Scenario: After the review
 - **WHEN** the coordinator starts a re-check at the adopted head and it passes
-- **THEN** the PR line no longer says "not reviewed", and the keeper keeps the PR again
+- **THEN** the record is cleared, the PR line no longer says "not reviewed", and the keeper keeps the PR again
+
+#### Scenario: The review of the adopted head ends blocked
+- **WHEN** the review started after the adoption ends blocked
+- **THEN** the record is cleared, and the ticket is as any ticket whose latest review ended blocked: the keeper leaves its branch alone and a publish needs the human's approval
 
 #### Scenario: The worktree is busy
 - **WHEN** GitHub's branch gains a commit while the ticket's implementer is in a turn
@@ -372,11 +380,19 @@ Each workspace repository SHALL be able to hold one checks command and its time 
 - **THEN** no tool changes a repository's checks command
 
 ### Requirement: The conflicts trigger needs a model and a re-check level
-The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the PR keeper's model is chosen and the review level names a configured level whose kind is re-check. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
+The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the rebase trigger is on, the PR keeper's model is chosen and the review level names a configured level whose kind is re-check, and SHALL refuse to turn the rebase trigger off while the conflicts trigger is on: a conflict is found by the keeper's own rebase, so without the rebase trigger no try could ever start. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
 
 #### Scenario: No re-check level
 - **WHEN** the only review level is "Full" and the human ticks "Try to resolve conflicts"
 - **THEN** the save is refused, saying to add a re-check level in Models → Review
+
+#### Scenario: Without the rebase trigger
+- **WHEN** the rebase trigger is off and the human ticks "Try to resolve conflicts"
+- **THEN** the save is refused, saying it needs "Rebase when the base branch moves"
+
+#### Scenario: Turning the rebase trigger off
+- **WHEN** both triggers are on and the human unticks the rebase trigger alone
+- **THEN** the save is refused and both stay on
 
 #### Scenario: The level is removed later
 - **WHEN** the conflicts trigger is on with the level "Light" and the human removes "Light"
@@ -466,7 +482,7 @@ A result that passed the gate SHALL be moved onto the ticket's branch under the 
 - **THEN** the try is thrown away and the implementer's commit is untouched
 
 ### Requirement: A thrown-away try leaves the ticket as it was
-When a try is thrown away, the keeper's checkout and its result SHALL be removed, its agent SHALL be archived, and the ticket's branch, worktree, verification cycles, ledger and state SHALL be what they were before the try, except as ticket-verification defines for a branch that cannot be put back. The coordinator SHALL get one keeper message naming the problem, the PR head and why the try was thrown away: the file outside its scope, that the checks failed or ran out of time, that the review did not pass, that a verifier had no model chosen on the ticket, that the worktree changed, or that the host stopped. For a review that did not pass, the message SHALL also give each blocking finding's verifier, location and summary. It SHALL say that nothing was pushed and that the keeper will not try this head again.
+When a try is thrown away, the keeper's checkout and its result SHALL be removed, its agent SHALL be archived, and the ticket SHALL carry nothing of the try: its branch and worktree SHALL be at the commit before, its verification cycles SHALL be those before, its ledger SHALL hold no entry the try's review recorded, and its state SHALL be what it was, except as ticket-verification defines for a branch that cannot be put back. Decisions the coordinator recorded on other ledger entries while the try ran SHALL stay. The coordinator SHALL get one keeper message naming the problem, the PR head and why the try was thrown away: the file outside its scope, that the checks failed or ran out of time, that the review did not pass, that a verifier had no model chosen on the ticket, that the worktree changed, or that the host stopped. For a review that did not pass, the message SHALL also give each blocking finding's verifier, location and summary. It SHALL say that nothing was pushed and that the keeper will not try this head again.
 
 #### Scenario: Thrown away at the gate
 - **WHEN** a try is thrown away because it changed a file outside the conflict
@@ -477,11 +493,15 @@ When a try is thrown away, the keeper's checkout and its result SHALL be removed
 - **THEN** the coordinator's message names the verifier, the finding's location and its summary, and says nothing was pushed
 
 ### Requirement: A rebase whose patch changed is reviewed by the keeper
-With the conflicts trigger on, in a repository with a checks command, a rebase reported as a changed patch SHALL NOT be dropped. The host SHALL run the repository's checks on the rebased commit as the gate does, SHALL then move it onto the ticket's branch and review it with a keeper review, and SHALL push it when the review passes. No model SHALL be used to produce the commit, and it SHALL NOT count as a try. When the checks or the review do not pass, the commit SHALL be dropped as a thrown-away try is, and the coordinator SHALL be told once for that head and base.
+With the conflicts trigger on, in a repository with a checks command, a rebase reported as a changed patch SHALL NOT be dropped. The host SHALL run the repository's checks on the rebased commit as the gate does, SHALL then move it onto the ticket's branch and review it with a keeper review, and SHALL push it when the review passes. No model SHALL be used to produce the commit, and it SHALL NOT count as a try. When the checks do not pass, the commit SHALL be dropped before the ticket's branch is moved. When the review does not pass, it SHALL be withdrawn and the branch put back exactly as ticket-verification defines for every keeper review, whether or not a model made the commit. In both cases the coordinator SHALL be told once for that head and base, with each blocking finding's verifier, location and summary after a review.
 
 #### Scenario: Changed patch, reviewed and pushed
 - **WHEN** a rebase is reported as a changed patch, the checks pass and the Light re-check passes
 - **THEN** the rebased commit is pushed, and no PR keeper agent ran
+
+#### Scenario: Changed patch whose review fails
+- **WHEN** the checks pass on a rebased commit `77b0c13` whose patch changed, the ticket's branch is moved from `3daf610` to it, and the Light re-check records a blocking finding
+- **THEN** that cycle is withdrawn, the branch and the worktree are back at `3daf610`, nothing was pushed, no try is recorded, and the coordinator gets one message naming the finding
 
 #### Scenario: Changed patch that fails its checks
 - **WHEN** the checks fail on the rebased commit
