@@ -199,16 +199,38 @@ impl Host {
         Ok(())
     }
     /// Whether a worktree was removed; a missing one only has its stale registration pruned.
+    /// Removal is whole whatever the folder's size: the folder is renamed aside, Git forgets it
+    /// within its usual time limit, and the folder is then deleted off the host thread. If Git
+    /// fails, the folder is renamed back.
     fn remove_worktree(&self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
-        if !Path::new(&ticket.worktree).exists() {
+        let worktree = Path::new(&ticket.worktree);
+        if !worktree.exists() {
             runtime::git_output(repository, &["worktree", "prune"])?;
             return Ok(false);
         }
-        runtime::git_output(repository, &["worktree", "remove", &ticket.worktree])
-            .with_context(|| format!("Remove \"{}\" ({})", ticket.title, ticket.id))?;
+        let context = || format!("Remove \"{}\" ({})", ticket.title, ticket.id);
+        let aside = removal_folder(ticket);
+        fs::rename(worktree, &aside).with_context(context)?;
+        let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
+        if forgotten.is_err() {
+            fs::rename(&aside, worktree).with_context(context)?;
+        }
+        forgotten.with_context(context)?;
+        delete_in_background(aside);
         Ok(true)
+    }
+    /// Deletes worktree folders that a stop left renamed aside, off the host thread. The service
+    /// calls this at startup.
+    pub fn delete_removed_worktrees(&self) -> Result<()> {
+        for ticket in self.tickets()? {
+            let aside = removal_folder(&ticket);
+            if aside.exists() {
+                delete_in_background(aside);
+            }
+        }
+        Ok(())
     }
     /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
     /// until it finishes, and an agent that has reported is Done but still in its turn. An agent
@@ -629,6 +651,21 @@ fn is_worktree(repository: &Path, path: &Path) -> Result<bool> {
 /// Adds the worktree unless it is already registered: from an existing branch, or as a new
 /// branch from `base` when the ticket is created. An empty folder left in its place is replaced;
 /// any other folder that is not this worktree is refused.
+/// Where a ticket's worktree waits while it is deleted: beside it, so the rename stays on one
+/// filesystem.
+fn removal_folder(ticket: &Ticket) -> PathBuf {
+    Path::new(&ticket.worktree).with_file_name(format!(".removing-{}", ticket.id))
+}
+
+/// Deletes the folder without a time limit on a thread of its own.
+fn delete_in_background(folder: PathBuf) {
+    std::thread::spawn(move || {
+        if let Err(error) = fs::remove_dir_all(&folder) {
+            eprintln!("Delete removed worktree {}: {error}", folder.display());
+        }
+    });
+}
+
 pub(crate) fn ensure_worktree(
     repository: &Path,
     path: &Path,
