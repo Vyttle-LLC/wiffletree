@@ -175,9 +175,9 @@ Each ticket SHALL record the keeper's last action on its branch: what it was, wh
 - **THEN** the ticket's entry names the rebase, its time, both commits and the base commit
 
 ### Requirement: The ticket shows what the keeper did
-The ticket's card in the Team panel SHALL say in one line what the keeper last did, when, and for a rebase that the change is the same as the reviewed commit.
+The ticket's card in the Team panel SHALL say in one line what the keeper last did, when, and for a rebase that the change is the same as the reviewed commit. A rebase less than an hour old SHALL be dated in the PR line's words, such as "1 min ago".
 
-A kept ticket's PR line SHALL end with the keeper's part (see pr-watch), one of these, the first that applies: "rebase in N min" while a rebase waits for the quiet period, with the minutes rounded up; "rebase waiting" while a result waits for the worktree to be free; "rebased N ago" when the PR's head is the keeper's own rebase of less than an hour ago; "up to date" when the PR's head contains the base's head. Parts that other requirements of this capability define SHALL come before these. A ticket whose PR is not kept, or whose branch the keeper may not change, SHALL show no such part.
+A kept ticket's PR line SHALL end with the keeper's part (see pr-watch), one of these, the first that applies: "rebase waiting" while a result waits for the worktree to be free, since that result is moved before any later rebase is measured; "rebase in N min" while a rebase waits for the quiet period, with the minutes rounded up; "rebased N min ago" when the PR's head is the keeper's own rebase of less than an hour ago; "up to date" when the PR's head contains the base's head. Parts that other requirements of this capability define SHALL come before these. A ticket whose PR is not kept, or whose branch the keeper may not change, SHALL show no such part. The minutes SHALL stay current in an open window that receives no other update, redrawn about once a minute.
 
 #### Scenario: Rebased a moment ago
 - **WHEN** the keeper rebased PR #143 one minute ago and its checks are running
@@ -241,3 +241,49 @@ The README and the development notes SHALL say that Wiffletree can rebase a tick
 #### Scenario: README
 - **WHEN** a reader opens the README's section on pull requests
 - **THEN** it says the keeper is off until turned on, where it acts, and that a rebase replaces the branch on GitHub
+
+### Requirement: Commits Wiffletree did not make are adopted
+While the rebase, conflicts or checks trigger is on, for a kept ticket with no verification cycle running and no publish request running or waiting, the keeper SHALL act when the PR's head is not the worktree's HEAD and is not contained in it, unless the worktree holds the keeper's own rebase of that head that it did not push. It SHALL fetch GitHub's branch, read-only. When the worktree's HEAD is an ancestor of the fetched head, it SHALL fast-forward the ticket's branch to that head, under the rule for moving a ticket's branch, so that the adopted commits and their content are unchanged. It SHALL NOT drop, squash, amend or reorder them. A ticket whose state is `passed` SHALL then be `ready_for_testing`; any other state SHALL be left alone. The ticket's verification record SHALL NOT be changed. Instead the ticket SHALL record the adopted head as not reviewed, storing the record before the branch moves. A move Git reports as failed SHALL be judged by where the branch is: the record SHALL be taken back only while the branch is still at the commit it started from; at the adopted head the adoption SHALL stand; anywhere else the record SHALL stay and the coordinator SHALL be told once. While that record stands, the keeper SHALL NOT change the ticket's branch, and `publish_ticket`, the keeper's publish and `accept_ticket` SHALL refuse, saying the branch has commits no review has checked, also when the worktree's HEAD is patch-equivalent to the verified commit (see ticket-publishing and ticket-workspaces). The record SHALL be cleared only when a verification cycle that started after the adoption ends, whether its last round ends it, its implementer's report does, or the host ends it because it cannot start or go on; that cycle's outcome then decides, by the existing rules. The coordinator SHALL be told once per adopted head, naming the old and the new head and the number of commits, that the head is not reviewed and that a review may be started. The PR line's keeper part SHALL read "N commits not reviewed", before any other part, while that record stands.
+
+#### Scenario: One commit pushed from GitHub
+- **WHEN** someone commits a suggestion on PR #141, so its head `5f2e7a0` is one commit ahead of the worktree's `7c1c59e`, and the worktree is free
+- **THEN** the ticket's branch is at `5f2e7a0` with that commit unchanged, the ticket is `ready_for_testing`, and the coordinator gets one message naming `7c1c59e`, `5f2e7a0` and 1 commit
+
+#### Scenario: Nothing more is pushed
+- **WHEN** the base moves after an adoption and before any review
+- **THEN** the keeper does not rebase or push the ticket's branch, and `publish_ticket` refuses because the branch has commits no review has checked
+
+#### Scenario: An adopted commit with the same patch id
+- **WHEN** the adopted commit only re-indents a line, so the adopted head has the same stable patch id as the verified commit, and the base then moves
+- **THEN** the keeper does not rebase or push, `publish_ticket` and `accept_ticket` refuse because the branch has commits no review has checked, and the ticket's latest cycle is unchanged
+
+#### Scenario: After the review
+- **WHEN** the coordinator starts a re-check at the adopted head and it passes
+- **THEN** the record is cleared, the PR line no longer says "not reviewed", and the keeper keeps the PR again
+
+#### Scenario: The review of the adopted head ends blocked
+- **WHEN** the review started after the adoption ends blocked
+- **THEN** the record is cleared, and the ticket is as any ticket whose latest review ended blocked: the keeper leaves its branch alone and a publish needs the human's approval
+
+#### Scenario: The implementer ends the review of the adopted head
+- **WHEN** the review started after the adoption is running and the ticket's implementer reports `blocked`, which ends the cycle
+- **THEN** the record is cleared, and the ticket is as any ticket whose latest review ended blocked
+
+#### Scenario: The keeper's own rebase was not pushed
+- **WHEN** the keeper moved its rebase of `e21f0aa` onto the ticket's branch and its push was refused, so the PR's head is still `e21f0aa`
+- **THEN** nothing is fetched or adopted, and the coordinator hears only that the rebase was not pushed
+
+#### Scenario: The worktree is busy
+- **WHEN** GitHub's branch gains a commit while the ticket's implementer is in a turn
+- **THEN** nothing is changed until the turn ends, and the commit is adopted then only if the worktree is clean and its HEAD is still an ancestor
+
+#### Scenario: A later rebase keeps their content
+- **WHEN** an adopted commit has passed review and the keeper later rebases the branch
+- **THEN** the rebased branch carries that commit's change and author unchanged
+
+### Requirement: A diverged branch is not adopted
+When the fetched head and the worktree's HEAD each have a commit the other lacks, the keeper SHALL change nothing, SHALL NOT merge or rebase the two, and SHALL tell the coordinator once for that head, naming both commits.
+
+#### Scenario: Both sides moved
+- **WHEN** the implementer committed `aa11bb2` locally and someone pushed `5f2e7a0` to GitHub's branch
+- **THEN** the worktree and GitHub's branch are unchanged, and the coordinator gets one message naming `aa11bb2` and `5f2e7a0`

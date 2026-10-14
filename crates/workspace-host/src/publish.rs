@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 /// A command run in a folder with an argument list, never through a shell.
 type Tool<Answer> = Arc<dyn Fn(&Path, &[&str]) -> Result<Answer> + Send + Sync>;
-/// `gh`, and Git's two commands that reach the network, as a step runs them.
+pub(crate) type GitTool = Tool<runtime::GitAnswer>;
+/// `gh`, and Git's commands that reach the network, as a step runs them.
 #[derive(Clone)]
 pub(crate) struct Tools {
     pub gh: Tool<runtime::GhAnswer>,
-    /// `git ls-remote` and `git push`.
-    pub git: Tool<runtime::GitAnswer>,
+    /// `git ls-remote` and `git push`, and the PR keeper's read-only `git fetch` and the
+    /// fast-forward it takes adopted commits in with.
+    pub git: GitTool,
 }
 impl Default for Tools {
     fn default() -> Self {
@@ -1124,7 +1126,7 @@ pub(crate) mod tests {
             .map(|(name, head)| (name.to_owned(), head.to_owned()))
             .collect()
     }
-    fn exit(code: i32) -> std::process::ExitStatus {
+    pub(crate) fn exit(code: i32) -> std::process::ExitStatus {
         std::os::unix::process::ExitStatusExt::from_raw(code << 8)
     }
 
@@ -3258,29 +3260,15 @@ pub(crate) mod tests {
         }
     }
     /// Reports `kind` from within `session`'s turn.
-    fn report(host: &mut Host, session: &str, kind: &str) {
+    pub(crate) fn report(host: &mut Host, session: &str, kind: &str) {
         take_input(host, session);
         let report = json!({"message_id": format!("{kind}-{session}"), "kind": kind, "body": kind});
         host.agent_tool(session, "report", report).unwrap();
     }
 
-    #[test]
-    fn a_later_review_that_ends_blocked_stops_a_push_that_was_queued_without_asking() {
-        let mut f = fixture();
-        let remote = remote(&f);
-        f.allow("allowed-org");
-        let (coordinator, implementer) = (f.coordinator.id.clone(), f.implementer.id.clone());
-        // The first review passed and the owner is allowed, so the push is queued with no item.
-        let (status, step) = f.publish(&coordinator).unwrap();
-        let job = step.unwrap();
-        assert_eq!(status["status"], "publishing");
-        assert_eq!(
-            (job.request.cycle, job.request.outcome),
-            (1, VerificationOutcome::Passed)
-        );
-        // Before it sends: the implementer reports ready again, the coordinator starts a second
-        // review of the same commit, and a verifier reports that it could not verify.
-        report(&mut f.host, &implementer, "ready_for_testing");
+    /// Starts a full review of the ticket with each verifier's first allowed model, as the
+    /// coordinator would, and returns the verifiers' sessions.
+    pub(crate) fn start_review(f: &mut Fixture) -> Vec<String> {
         let selection = f.host.model_selection().unwrap();
         let verifiers: Vec<VerifierChoice> = f
             .host
@@ -3303,6 +3291,7 @@ pub(crate) mod tests {
                 }
             })
             .collect();
+        let coordinator = f.coordinator.id.clone();
         f.host
             .agent_tool(
                 &coordinator,
@@ -3310,11 +3299,31 @@ pub(crate) mod tests {
                 json!({"ticket_id": f.ticket, "level": "Full", "verifiers": verifiers}),
             )
             .unwrap();
-        let sessions: Vec<String> = f.ticket().verification.unwrap().rounds[0]
+        f.ticket().verification.unwrap().rounds[0]
             .verifiers
             .iter()
             .map(|run| run.session_id.clone())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn a_later_review_that_ends_blocked_stops_a_push_that_was_queued_without_asking() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        f.allow("allowed-org");
+        let (coordinator, implementer) = (f.coordinator.id.clone(), f.implementer.id.clone());
+        // The first review passed and the owner is allowed, so the push is queued with no item.
+        let (status, step) = f.publish(&coordinator).unwrap();
+        let job = step.unwrap();
+        assert_eq!(status["status"], "publishing");
+        assert_eq!(
+            (job.request.cycle, job.request.outcome),
+            (1, VerificationOutcome::Passed)
+        );
+        // Before it sends: the implementer reports ready again, the coordinator starts a second
+        // review of the same commit, and a verifier reports that it could not verify.
+        report(&mut f.host, &implementer, "ready_for_testing");
+        let sessions = start_review(&mut f);
         for (n, session) in sessions.iter().enumerate() {
             let verdict = if n == 0 { "blocked" } else { "passed" };
             report(&mut f.host, session, verdict);
@@ -3450,7 +3459,9 @@ pub(crate) mod tests {
         let (f, remote, result) = keeper::tests::waiting();
         let old = f.head();
         let mut ticket = f.ticket();
-        f.host.keeper_adopt(&ticket, &old, &result).unwrap();
+        f.host
+            .keeper_adopt(&ticket, &old, &result, keeper::Move::Reset)
+            .unwrap();
         let record = ticket.keeper.get_or_insert_default();
         let base = record.rebased.clone().unwrap().base;
         record.waiting = None;
