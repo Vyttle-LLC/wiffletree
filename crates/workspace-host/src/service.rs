@@ -577,6 +577,7 @@ impl Service {
                 let setup = (|| -> Result<_> {
                     let mut host = Host::open(home)?;
                     recover_unfinished_turns(&mut host)?;
+                    host.delete_removed_worktrees()?;
                     host.settle_pending_worktrees();
                     let directory = tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
                     let socket = directory.path().join("ipc");
