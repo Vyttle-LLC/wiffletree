@@ -148,6 +148,16 @@ impl Host {
         self.save_settings(&settings)?;
         Ok(settings)
     }
+    /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.
+    pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
+        keeper.validate()?;
+        let settings = HostSettings {
+            keeper,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        Ok(settings)
+    }
     pub fn set_workspaces_dir(&mut self, path: &str) -> Result<HostSettings> {
         text(path, 4096)?;
         let folder = expand_home(path.trim())?;
@@ -340,6 +350,51 @@ mod tests {
             assert!(allow(&mut host, entry, true).is_err(), "{entry}");
         }
         assert_eq!(host.settings().allowed_owners, ["MHohlios/gpui-component"]);
+    }
+
+    #[test]
+    fn the_keeper_is_off_until_the_human_saves_a_valid_setting_and_no_agent_tool_saves_one() {
+        let home = tempfile::tempdir().unwrap();
+        // Settings saved before the keeper existed.
+        fs::write(
+            home.path().join(FILE),
+            r#"{"workspaces_dir": "/tmp/w", "allowed_owners": ["Sage-Social"]}"#,
+        )
+        .unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        assert_eq!(host.settings().keeper, KeeperSettings::default());
+        assert!(!host.settings().keeper.rebase);
+        assert_eq!(host.settings().keeper.quiet_minutes, 2);
+        let on = KeeperSettings {
+            rebase: true,
+            quiet_minutes: 5,
+        };
+        host.execute(Command::SetKeeper { keeper: on.clone() })
+            .unwrap();
+        for quiet_minutes in [0, 61] {
+            let refused = KeeperSettings {
+                rebase: true,
+                quiet_minutes,
+            };
+            assert!(host.set_keeper(refused).is_err(), "{quiet_minutes}");
+        }
+        assert_eq!(host.settings().keeper, on);
+        assert_eq!(host.snapshot().unwrap().keeper, on);
+        // Every workspace tool an agent has; none of them changes settings.
+        let tools = mcp::tools();
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"publish_ticket"), "{names:?}");
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.contains("keeper") && !name.contains("setting")),
+            "{names:?}"
+        );
     }
 
     #[test]

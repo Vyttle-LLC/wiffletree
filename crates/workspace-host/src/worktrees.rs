@@ -513,8 +513,10 @@ pub(crate) fn head(worktree: &Path) -> Result<String> {
 }
 
 /// No uncommitted or untracked files; ignored files such as build output do not count.
+/// Untracked files are listed whatever `status.showUntrackedFiles` says.
 pub(crate) fn is_clean(worktree: &Path) -> Result<bool> {
-    Ok(runtime::git_output(worktree, &["status", "--porcelain"])?.is_empty())
+    let status = ["status", "--porcelain", "--untracked-files=normal"];
+    Ok(runtime::git_output(worktree, &status)?.is_empty())
 }
 
 /// Where `commit`'s history meets `base`, the repository's base such as `origin/main`.

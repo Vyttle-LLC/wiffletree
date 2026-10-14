@@ -1,6 +1,6 @@
 //! Which repositories publish a ticket without asking the human. One rule, shared by the host
 //! that enforces it and the Repositories page that shows it.
-use crate::{Repository, Serialize};
+use crate::{KeeperSettings, Repository, Serialize};
 
 /// The branch `base` names on `origin`, such as `main` for `origin/main`. `None` for a local
 /// base or one on another remote, which a pull request from `origin` cannot merge into.
@@ -30,6 +30,21 @@ pub fn is_entry_allowed(entry: &str, allowed: &[String]) -> bool {
 pub fn is_allowed(repository: &Repository, allowed: &[String]) -> bool {
     origin_branch(&repository.base).is_some()
         && owner_entry(repository).is_some_and(|entry| is_entry_allowed(&entry, allowed))
+}
+
+/// A repository row's PR keeper label while a trigger is on: "kept" where it publishes without
+/// asking, "not kept" elsewhere.
+pub fn kept_label(
+    repository: &Repository,
+    allowed: &[String],
+    keeper: &KeeperSettings,
+) -> Option<&'static str> {
+    keeper
+        .is_on()
+        .then(|| match is_allowed(repository, allowed) {
+            true => "kept",
+            false => "not kept",
+        })
 }
 
 /// The rule a repository's row states, such as "Vyttle-LLC · without asking".

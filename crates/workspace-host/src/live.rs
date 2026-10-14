@@ -195,6 +195,7 @@ impl Host {
             pull_request: None,
             publishing: None,
             pushed: None,
+            keeper: None,
         };
         self.db.execute(
             "INSERT INTO tickets VALUES (?1,?2,?3)",
@@ -510,12 +511,15 @@ impl Host {
                 team.push(entry);
             }
         }
-        // Each repository says whether a ticket there publishes without asking the human.
-        let allowed = self.settings().allowed_owners;
+        // Each repository says whether a ticket there publishes without asking the human, and
+        // whether the PR keeper keeps its tickets' PRs.
+        let settings = self.settings();
         let mut repositories = vec![];
         for repository in self.project_repositories(&session.project_id)? {
             let mut entry = serde_json::to_value(&repository)?;
-            entry["publishes_without_asking"] = json!(is_allowed(&repository, &allowed));
+            let allowed = is_allowed(&repository, &settings.allowed_owners);
+            entry["publishes_without_asking"] = json!(allowed);
+            entry["kept"] = json!(allowed && settings.keeper.is_on());
             repositories.push(entry);
         }
         let mut context = json!({"self":self.shown(session.clone()),"project":self.project(&session.project_id)?,

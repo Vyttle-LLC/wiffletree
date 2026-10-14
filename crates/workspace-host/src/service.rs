@@ -368,6 +368,20 @@ fn spawn_publish_step(sender: Sender<Event>, job: publish::Job, tools: publish::
         let _ = sender.send_blocking(Event::Published(outcome));
     });
 }
+/// Runs one PR keeper rebase on its own thread and always reports back, even if it panics, so
+/// the ticket is never left marked as rebasing.
+fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
+    std::thread::spawn(move || {
+        let rebase = std::panic::AssertUnwindSafe(|| keeper::rebase(&job, overlaps::fetch_base));
+        let outcome = std::panic::catch_unwind(rebase).unwrap_or_else(|_| keeper::Outcome {
+            ticket_id: job.ticket_id.clone(),
+            head: job.head.clone(),
+            base_commit: job.base_commit.clone(),
+            result: keeper::Rebased::Failed("The rebase stopped unexpectedly".into()),
+        });
+        let _ = sender.send_blocking(Event::Kept(outcome));
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -405,6 +419,8 @@ enum Event {
     GitHub(Option<repositories::GitHubReading>),
     /// A publish step finished on its own thread.
     Published(publish::Outcome),
+    /// A PR keeper rebase finished on its own thread.
+    Kept(keeper::Outcome),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
     Shutdown,
@@ -1146,12 +1162,27 @@ impl Actor {
                 let Some(next_at) = self.pr_watch.finish(&repository, at, &outcome) else {
                     return false;
                 };
-                self.host
+                let recorded = self
+                    .host
                     .record_pull_requests(&repository, &outcome, at, next_at)
                     .unwrap_or_else(|e| {
                         eprintln!("Workspace PR watch: {e:#}");
                         false
-                    })
+                    });
+                if let pr_watch::Outcome::Read(pass) = &outcome {
+                    self.host.note_bases(&repository, pass, at);
+                }
+                self.keep_pull_requests(&repository, at);
+                recorded
+            }
+            Event::Kept(outcome) => {
+                let ticket = outcome.ticket_id.clone();
+                match self.host.keeper_rebased(outcome) {
+                    Ok(true) => self.keeper_move(&ticket),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("Workspace PR keeper: {e:#}"),
+                }
+                true
             }
             Event::GitHub(reading) => {
                 self.github_reading = false;
@@ -1641,6 +1672,35 @@ impl Actor {
                 self.refresh_github();
                 Err(refusal)
             }
+        }
+    }
+    /// Starts the rebases a pass made due and moves the results that wait for their worktree.
+    fn keep_pull_requests(&mut self, repository: &str, at: i64) {
+        let due = match self.host.keeper_due(repository, at) {
+            Ok(due) => due,
+            Err(e) => return eprintln!("Workspace PR keeper: {e:#}"),
+        };
+        for ticket in &due.waiting {
+            self.keeper_move(ticket);
+        }
+        for job in due.rebases {
+            spawn_keeper_rebase(self.sender.clone(), job);
+        }
+    }
+    /// Moves a ticket's waiting rebase onto its branch and pushes it, unless an agent of the
+    /// ticket is in a turn; then it waits for a later pass.
+    fn keeper_move(&mut self, ticket_id: &str) {
+        let in_turn = self.active.keys().any(|id| {
+            self.host
+                .session_runtime(id)
+                .is_ok_and(|r| r.ticket_id.as_deref() == Some(ticket_id))
+        });
+        if in_turn {
+            return;
+        }
+        match self.host.keeper_move(ticket_id) {
+            Ok(step) => self.run_publish_step(step),
+            Err(e) => eprintln!("Workspace PR keeper: {ticket_id}: {e:#}"),
         }
     }
     fn run_publish_step(&mut self, step: Option<publish::Job>) {
@@ -7659,5 +7719,28 @@ mod tests {
         assert!(
             notice.contains("\n````text\nKeyError in __getitem__\n```\n**not markdown**\n````\n")
         );
+    }
+
+    #[test]
+    fn a_keeper_result_waits_while_an_agent_of_the_ticket_is_in_a_turn() {
+        let (f, _remote, result) = keeper::tests::waiting();
+        let before = keeper::tests::worktree(&f);
+        let (ticket, implementer) = (f.ticket.clone(), f.implementer.id.clone());
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        actor.active.insert(implementer, active_turn("run", vec![]));
+        actor.keeper_move(&ticket);
+        let worktree = actor.host.ticket(&ticket).unwrap().worktree;
+        let status = ["status", "--porcelain", "--untracked-files=all"];
+        assert_eq!(publish::tests::git(Path::new(&worktree), &status), before.0);
+        assert_eq!(worktrees::head(Path::new(&worktree)).unwrap(), before.2);
+        let keeper = actor.host.ticket(&ticket).unwrap().keeper.unwrap();
+        assert_eq!(keeper.waiting, Some(result.clone()));
+        // After the turn, a later pass moves it, the worktree being clean at the same commit.
+        actor.active.clear();
+        actor.host.keeper_move(&ticket).unwrap();
+        assert_eq!(worktrees::head(Path::new(&worktree)).unwrap(), result);
     }
 }

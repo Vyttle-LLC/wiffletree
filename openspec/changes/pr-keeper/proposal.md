@@ -32,8 +32,8 @@ Wiffletree watches each ticket's pull request and tells the coordinator when it 
 
 ## Impact
 
-- `workspace-core`: `HostSettings.keeper` (triggers, quiet minutes, review level), `ModelSelection.keeper`, `Repository.checks`, `Ticket.keeper`, `PullRequest.base_head`, `PublishRequest.keeper`, `Verification.keeper`, `Role::Keeper`, the `keeper:` notice prefix, two commands for the settings.
-- `workspace-host`: a new `keeper.rs` (what is due, the checkout, the rebase, the gate, comment reading, the messages); small additions to `pr_watch.rs`, `publish.rs`, `verification.rs`, `service.rs`, `provider.rs`, `settings.rs`, `live.rs`; a new `skills/keeper.md`.
+- `workspace-core`: `HostSettings.keeper` (triggers, quiet minutes, review level), `ModelSelection.keeper`, `Repository.checks`, `Ticket.keeper`, `PublishRequest.keeper`, `Verification.keeper`, `Role::Keeper`, the `keeper:` notice prefix, two commands for the settings.
+- `workspace-host`: the base head carried on `pr_watch::Found`, never stored on `PullRequest`; a new `keeper.rs` (what is due, the checkout, the rebase, the gate, comment reading, the messages); small additions to `pr_watch.rs`, `publish.rs`, `verification.rs`, `service.rs`, `provider.rs`, `settings.rs`, `live.rs`; a new `skills/keeper.md`.
 - `workspace-desktop`: `repositories_view.rs` (triggers block, checks field, "kept" label), `models_view.rs` (the model), `tree.rs` and `sidebar.rs` (the PR line), `team_view.rs` (the card).
 - Stored data: optional fields on JSON already stored. No table and no migration.
 - Runtime: the same authenticated `gh` and Git the watcher and publishing use. A rebase pushed to GitHub re-runs the PR's checks there.

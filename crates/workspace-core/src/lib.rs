@@ -396,6 +396,8 @@ pub struct Snapshot {
     /// Why GitHub could not be read for the repositories' fork status and visibility.
     #[serde(default)]
     pub github_error: Option<String>,
+    #[serde(default)]
+    pub keeper: KeeperSettings,
 }
 /// How many of a session's `blocked` reports wait for its parent's answer to reach it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,6 +549,8 @@ pub struct HostSettings {
     /// Kept on this machine only.
     #[serde(default)]
     pub allowed_owners: Vec<String>,
+    #[serde(default)]
+    pub keeper: KeeperSettings,
 }
 fn default_checkin_child_turns() -> u32 {
     25
@@ -567,6 +571,7 @@ impl HostSettings {
             checkin_child_turns: default_checkin_child_turns(),
             checkin_human_turns: default_checkin_human_turns(),
             allowed_owners: vec![],
+            keeper: KeeperSettings::default(),
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -583,6 +588,46 @@ impl HostSettings {
             CHECKIN_HUMAN_TURNS.end()
         );
         Ok(())
+    }
+}
+
+/// The PR keeper's triggers and quiet period, one value for the whole workspace. Every trigger
+/// is off until the human turns it on; only the human's client changes them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeeperSettings {
+    /// Rebase a kept ticket's PR when its base branch moves.
+    #[serde(default)]
+    pub rebase: bool,
+    /// How long the base must stay at one commit before a rebase.
+    #[serde(default = "default_quiet_minutes")]
+    pub quiet_minutes: u32,
+}
+fn default_quiet_minutes() -> u32 {
+    2
+}
+/// The quiet periods the settings accept, in minutes.
+pub const KEEPER_QUIET_MINUTES: std::ops::RangeInclusive<u32> = 1..=60;
+impl Default for KeeperSettings {
+    fn default() -> Self {
+        Self {
+            rebase: false,
+            quiet_minutes: default_quiet_minutes(),
+        }
+    }
+}
+impl KeeperSettings {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            KEEPER_QUIET_MINUTES.contains(&self.quiet_minutes),
+            "The base must be quiet for {}–{} minutes",
+            KEEPER_QUIET_MINUTES.start(),
+            KEEPER_QUIET_MINUTES.end()
+        );
+        Ok(())
+    }
+    /// Whether any trigger is on, so repositories are said to be kept or not.
+    pub fn is_on(&self) -> bool {
+        self.rebase
     }
 }
 
@@ -875,6 +920,44 @@ pub struct Ticket {
     /// The commit the host last pushed to the ticket's branch on GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pushed: Option<String>,
+    /// What the PR keeper did to the ticket's branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper: Option<Keeper>,
+}
+/// The PR keeper's record of a ticket.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Keeper {
+    /// The keeper's last action on the branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<KeeperAction>,
+    /// The PR head and base commit last rebased; a pair is rebased at most once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebased: Option<KeeperRebase>,
+    /// The rebase of `rebased`, waiting for the ticket's worktree to be free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeeperRebase {
+    pub head: String,
+    pub base: String,
+}
+/// What the keeper did, when, the branch's commits before and after, and the base commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeeperAction {
+    pub kind: KeeperKind,
+    pub at: i64,
+    pub before: String,
+    pub after: String,
+    pub base: String,
+    /// GitHub's branch is at `after`.
+    pub pushed: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeeperKind {
+    /// A rebase with the same change as the reviewed commit.
+    Rebase,
 }
 /// One accepted `publish_ticket` call: everything the Inbox item shows and the host will send,
 /// frozen when the call passed its checks.
@@ -913,6 +996,10 @@ pub struct PublishRequest {
     /// How many of this request's Inbox items the human approved.
     #[serde(default)]
     pub approvals: u8,
+    /// Started by the host for the PR keeper: it never asks, and its result goes to the
+    /// keeper's record rather than to an agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keeper: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1093,6 +1180,8 @@ pub struct PullRequestCheck {
 pub fn host_notice(id: &str) -> Option<&'static str> {
     if id.starts_with(PR_NOTICE_PREFIX) {
         Some("Wiffletree PR watcher")
+    } else if id.starts_with(KEEPER_NOTICE_PREFIX) {
+        Some("Wiffletree PR keeper")
     } else {
         HOST_NOTICE_PREFIXES
             .iter()
@@ -1102,6 +1191,8 @@ pub fn host_notice(id: &str) -> Option<&'static str> {
 }
 /// The id prefix of the PR watcher's messages.
 pub const PR_NOTICE_PREFIX: &str = "pr:";
+/// The id prefix of the PR keeper's messages.
+pub const KEEPER_NOTICE_PREFIX: &str = "keeper:";
 /// The id prefix of the line a compaction leaves in its session's conversation; the rest is
 /// the run's id. A session's other messages to itself are replies, under `output:` ids.
 pub const COMPACTION_LINE_PREFIX: &str = "compaction:";
@@ -1780,6 +1871,11 @@ pub enum Command {
     SetOwnerAllowed {
         entry: String,
         allowed: bool,
+    },
+    /// Validates and saves the PR keeper's settings; answers with `HostSettings`. Only the
+    /// human's client sends it.
+    SetKeeper {
+        keeper: KeeperSettings,
     },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,
