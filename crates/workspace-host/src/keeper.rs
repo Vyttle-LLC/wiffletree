@@ -333,7 +333,12 @@ impl Host {
             return Ok(());
         };
         let pair = (pr.head.clone(), head.clone());
-        if publish::is_ancestor(worktree, &pr.head, &head)
+        // The keeper's own rebase that it did not push is no one else's commit.
+        let unpushed = ticket.keeper.as_ref().and_then(|k| k.last.as_ref());
+        let unpushed =
+            unpushed.is_some_and(|l| !l.pushed && pair == (l.before.clone(), l.after.clone()));
+        if unpushed
+            || publish::is_ancestor(worktree, &pr.head, &head)
             || self.keeper.diverged.get(&ticket.id) == Some(&pair)
             || !self.kept(ticket, repository, &self.session(&ticket.coordinator_id)?)?
             || self
@@ -629,18 +634,10 @@ impl Host {
         commits: u32,
     ) -> Result<()> {
         let coordinator = self.session(&ticket.coordinator_id)?;
-        let moved =
-            match self.settings().keeper.rebase && self.kept(ticket, repository, &coordinator)? {
-                true => self.keeper_adopt(ticket, from, head, Move::FastForward),
-                false => Err(anyhow::anyhow!("the keeper no longer keeps the ticket")),
-            };
-        if let Err(e) = moved {
-            eprintln!(
-                "Workspace PR keeper: {}: commits not adopted: {e:#}",
-                ticket.id
-            );
+        if !(self.settings().keeper.rebase && self.kept(ticket, repository, &coordinator)?) {
             return Ok(());
         }
+        let before = ticket.clone();
         let earlier = ticket.unreviewed().map_or(0, |u| u.commits);
         let passed = ticket
             .verification
@@ -654,7 +651,17 @@ impl Host {
         if ticket.state == "passed" {
             ticket.state = "ready_for_testing".into();
         }
+        // The hold is stored before the branch moves, so no failed write or stop can leave the
+        // adopted commits without it. A move that fails takes the hold back.
         self.save_ticket(ticket)?;
+        if let Err(e) = self.keeper_adopt(&before, from, head, Move::FastForward) {
+            eprintln!(
+                "Workspace PR keeper: {}: commits not adopted: {e:#}",
+                ticket.id
+            );
+            *ticket = before;
+            return self.save_ticket(ticket);
+        }
         let (count, them) = match commits {
             1 => ("1 commit".to_owned(), "it, unchanged. It has"),
             n => (format!("{n} commits"), "them, unchanged. They have"),
@@ -1769,5 +1776,47 @@ pub(crate) mod tests {
         pass(&mut f, &moved, 3 * MINUTE);
         let part = f.host.keeper_parts().get(&f.ticket).copied();
         assert_eq!(part, Some(KeeperPart::Waiting));
+    }
+
+    #[test]
+    fn the_keepers_own_rebase_that_was_not_pushed_is_not_taken_for_a_diverged_branch() {
+        let (mut f, r) = kept();
+        let old = f.head();
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &base);
+        let hook = r.bare.join("hooks/pre-receive");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        keep(&mut f, &r, job);
+        let ticket = f.ticket();
+        assert_eq!(ticket.pull_request.unwrap().head, old);
+        assert_ne!(f.head(), old);
+        assert!(fetches(&mut f).is_empty());
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].0.contains(":push:"), "{}", told[0].0);
+    }
+
+    #[test]
+    fn the_hold_is_stored_before_the_branch_moves_and_taken_back_when_it_cannot() {
+        // The store refuses the write: the branch does not move.
+        let (mut f, r) = kept();
+        let old = f.head();
+        pushed_elsewhere(&mut f, &r, "a.txt", "    one\n");
+        let fetched = super::fetch(&fetches(&mut f).remove(0), &r.tools.git);
+        let refuse = "CREATE TRIGGER refuse BEFORE UPDATE ON tickets BEGIN SELECT RAISE(ABORT, 'injected'); END";
+        f.host.db.execute(refuse, []).unwrap();
+        assert!(f.host.keeper_fetched(fetched, false).is_err());
+        assert_eq!(f.head(), old);
+        f.host.db.execute("DROP TRIGGER refuse", []).unwrap();
+        // The branch cannot move: the hold is taken back and nothing is told.
+        let mut ticket = f.ticket();
+        ticket.state = "passed".into();
+        f.host.save_ticket(&ticket).unwrap();
+        fs::write(f.worktree.join("new.txt"), "new\n").unwrap();
+        fetch_and_adopt(&mut f, &r);
+        let ticket = f.ticket();
+        assert_eq!((f.head(), ticket.state.as_str()), (old, "passed"));
+        assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
     }
 }
