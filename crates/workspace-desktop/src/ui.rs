@@ -457,8 +457,9 @@ impl Workspace {
                             .ghost()
                             .icon(icon("close"))
                             .tooltip("Back to the conversation")
-                            .on_click(cx.listener(|v, _, _, c| {
+                            .on_click(cx.listener(|v, _, w, c| {
                                 v.view = Page::Conversation;
+                                v.sync_process_readings(w, c);
                                 c.notify();
                             })),
                     ),

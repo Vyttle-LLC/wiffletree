@@ -398,6 +398,48 @@ pub struct Snapshot {
     pub github_error: Option<String>,
     #[serde(default)]
     pub keeper: KeeperSettings,
+    /// How many processes each agent is recorded as having left running.
+    #[serde(default)]
+    pub running_processes: Vec<RunningProcesses>,
+}
+/// How many processes the record says an agent started and still runs; between turns the
+/// record is exact, during one it can count members that have since exited.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningProcesses {
+    pub session_id: String,
+    pub count: u32,
+}
+/// What one agent has running, as the Processes panel lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentProcesses {
+    pub session_id: String,
+    pub name: String,
+    pub groups: Vec<ProcessGroup>,
+}
+/// A process group an agent started that the host believes still runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessGroup {
+    /// The record's id, by which `StopProcesses` names the group.
+    pub id: String,
+    pub group: i64,
+    /// A process the host recorded is still alive in the group, so the rest is the agent's
+    /// too and Stop may signal it. An unconfirmed group is never signalled.
+    pub confirmed: bool,
+    /// The earliest start among `processes`, or among the recorded ones when unconfirmed, in
+    /// microseconds since the epoch.
+    pub started: i64,
+    /// The processes in the group now; empty when unconfirmed.
+    pub processes: Vec<GroupProcess>,
+}
+/// One live process of a group, with the CPU time it has used so far.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupProcess {
+    pub pid: i32,
+    /// Microseconds since the epoch; with `pid`, the process's identity.
+    pub started: i64,
+    pub program: String,
+    /// User and system time, in nanoseconds.
+    pub cpu_nanos: u64,
 }
 /// How many of a session's `blocked` reports wait for its parent's answer to reach it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1883,6 +1925,18 @@ pub enum Command {
     /// each first; answered with `Vec<LeftoverRemoval>`.
     RemoveLeftoverWorktrees {
         ticket_ids: Vec<String>,
+    },
+    /// What the agent has left running, or for a coordinator every agent of its project;
+    /// answered with `Vec<AgentProcesses>`. Groups that have exited are forgotten.
+    Processes {
+        session_id: String,
+    },
+    /// Stops these groups of the Processes panel of `session_id`, or with none named every
+    /// group it lists, as the human's stop; answered as `Processes`. The agents keep working.
+    StopProcesses {
+        session_id: String,
+        #[serde(default)]
+        groups: Vec<String>,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

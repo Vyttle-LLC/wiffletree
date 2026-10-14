@@ -18,6 +18,7 @@ mod models;
 mod models_view;
 mod palette;
 mod preferences;
+mod processes_view;
 mod progress;
 mod project_name;
 mod repositories_view;
@@ -61,6 +62,7 @@ enum Panel {
     Attention,
     Git,
     Files,
+    Processes,
     /// Opened from the coordinator's progress strip, not from the rail. It lists the whole
     /// project, so it stays open whichever of the project's agents is selected.
     Crew,
@@ -168,6 +170,8 @@ struct Workspace {
     run_summaries: BTreeMap<String, RunSummary>,
     /// What the Files panel shows; fetched only while that panel is open.
     files: files_view::Files,
+    /// What the Processes panel shows; read only while that panel is open.
+    processes: processes_view::Processes,
     /// How far along every agent, ticket and project is, as the host last derived it.
     progress: progress::ProgressBoard,
     progress_fetch: activity::StepFetch,
@@ -297,6 +301,7 @@ impl Workspace {
             history: None,
             run_summaries: BTreeMap::new(),
             files: Default::default(),
+            processes: Default::default(),
             progress: Default::default(),
             progress_fetch: Default::default(),
             crew_clock: false,
@@ -1109,6 +1114,7 @@ impl Workspace {
                 }
             }
             Some(Panel::Files) => self.fetch_files(window, cx),
+            Some(Panel::Processes) => self.sync_process_readings(window, cx),
             _ => {}
         }
     }

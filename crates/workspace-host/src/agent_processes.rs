@@ -10,6 +10,8 @@ use crate::processes::{self, Member, ProcessInfo, Sighting, Stop};
 use crate::*;
 use std::collections::HashMap;
 
+mod panel;
+
 /// Why the host stopped an agent's processes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StopReason {
@@ -19,6 +21,8 @@ pub(crate) enum StopReason {
     Stopped,
     Quit,
     Startup,
+    /// The human pressed Stop in the Processes panel; the agent keeps working.
+    StoppedByHuman,
 }
 impl StopReason {
     /// As the record keeps it in `process_groups.ended`.
@@ -29,6 +33,7 @@ impl StopReason {
             Self::Stopped => "stopped",
             Self::Quit => "quit",
             Self::Startup => "startup",
+            Self::StoppedByHuman => "stopped_by_human",
         }
     }
     /// Completes "stopped when …" and "still running after …".
@@ -39,6 +44,7 @@ impl StopReason {
             Self::Stopped => format!("{agent} was stopped"),
             Self::Quit => "Wiffletree quit".into(),
             Self::Startup => "Wiffletree restarted".into(),
+            Self::StoppedByHuman => "the human pressed Stop in the Processes panel".into(),
         }
     }
 }
