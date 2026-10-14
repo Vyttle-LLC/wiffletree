@@ -6,7 +6,6 @@
 //! process.
 mod common;
 use std::{
-    io::Write as _,
     os::unix::{
         fs::PermissionsExt,
         process::{CommandExt, ExitStatusExt},
@@ -50,9 +49,13 @@ case "$prompt" in
   tool sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; touch "$0"; exec sleep 300' "$ready"
   started;;
 *LEAVE_ORPHANS*)
-  # The tool shell leads the group, starts two children and exits before the turn ends.
-  tool sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; for n in 1 2; do sleep 300 & echo $! >> "$WORKSPACE_TEST_PIDS"; done; touch "$0"' "$ready"
+  # The tool shell leads the group and starts two children. It exits when the test has seen
+  # them recorded, and the turn ends after it has: whether the watcher lists a short-lived
+  # shell in time is the known gap BRIEF_SHELL is for.
+  tool sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; for n in 1 2; do sleep 300 & echo $! >> "$WORKSPACE_TEST_PIDS"; done; touch "$0"; while [ ! -e "$0.exit" ]; do sleep 0.01; done' "$ready"
+  shell=$!
   started
+  wait "$shell"
   finish;;
 *BRIEF_SHELL*)
   # A shell in a group of its own that starts a child and is gone 20 ms later.
@@ -502,6 +505,19 @@ fn until_tool_recorded(home: &Path, session: &Session, provider: &Provider, coun
     }
 }
 
+/// Waits until a group one of the agent's tools started is recorded as running, and returns it.
+fn until_tool_running(home: &Path, session: &Session) -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let running = recorded(home, session);
+        if let Some(tool) = running.iter().find(|r| !r.provider && r.ended.is_none()) {
+            return tool.group;
+        }
+        assert!(Instant::now() < deadline, "timed out: a tool process");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// One process group the record holds for an agent.
 #[derive(Debug, PartialEq)]
 struct Recorded {
@@ -748,10 +764,22 @@ fn archiving_stops_orphans_whose_group_leader_exited_before_the_turn_ended() {
     let service = start(home.path());
 
     send(&service, "leave", &main, "LEAVE_ORPHANS");
-    until_finished(home.path(), &main, 1);
-    let [shell, first, second] = ids(&provider.pids)[..] else {
-        panic!("the tool shell and its two children")
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (shell, first, second) = loop {
+        if let [shell, first, second] = ids(&provider.pids)[..]
+            && recorded(home.path(), &main).iter().any(|r| {
+                r.group == shell && r.members.contains(&first) && r.members.contains(&second)
+            })
+        {
+            break (shell, first, second);
+        }
+        assert!(Instant::now() < deadline, "timed out: the tool's processes");
+        std::thread::sleep(Duration::from_millis(20));
     };
+    // The tool shell exits, and then the turn ends.
+    let ready = format!("{}.{}", provider.pids.display(), groups(&provider)[0]);
+    std::fs::write(format!("{ready}.exit"), "").unwrap();
+    until_finished(home.path(), &main, 1);
     // The shell that led the group is gone; only its orphans remain in it.
     assert_eq!(unsafe { libc::kill(shell, 0) }, -1);
     assert!(group_runs(shell));
@@ -1062,11 +1090,15 @@ fn a_restart_stops_what_a_killed_host_left_running_mid_turn_and_between_turns() 
     let provider = install_provider(scratch.path());
     let (_, between) = project(home.path(), scratch.path(), "Between turns");
     let (_, working) = project(home.path(), scratch.path(), "Working");
+    // Both turns start together.
     {
         let mut host = Host::open_set_up(home.path()).unwrap();
         host.send("leave", None, &between.id, "LEAVE").unwrap();
+        host.send("tool", None, &working.id, "TOOL_THEN_LINGER")
+            .unwrap();
     }
-    // A host of its own, so it can be killed as a crash would kill it.
+    // A host of its own, so it can be killed as a crash would kill it. Its command input stays
+    // open: closing it would be a quit.
     let mut headless = std::process::Command::new(env!("CARGO_BIN_EXE_workspace-host"))
         .arg("--data-dir")
         .arg(home.path())
@@ -1075,23 +1107,8 @@ fn a_restart_stops_what_a_killed_host_left_running_mid_turn_and_between_turns() 
         .spawn()
         .unwrap();
     until_finished(home.path(), &between, 1);
-    let left = ids(&provider.pids)[0];
-    // The second turn starts once the first has ended, through the host's own command input,
-    // which stays open: closing it would be a quit.
-    let mut commands = headless.stdin.take().unwrap();
-    let tool = Request {
-        version: PROTOCOL_VERSION,
-        id: "tool".into(),
-        command: Command::Send {
-            id: "tool".into(),
-            sender: None,
-            recipient: working.id.clone(),
-            body: "TOOL_THEN_LINGER".into(),
-            attachments: vec![],
-        },
-    };
-    writeln!(commands, "{}", serde_json::to_string(&tool).unwrap()).unwrap();
-    let tool = until_tool_recorded(home.path(), &working, &provider, 2);
+    let left = until_tool_running(home.path(), &between);
+    let tool = until_tool_running(home.path(), &working);
     headless.kill().unwrap();
     headless.wait().unwrap();
     let providers = groups(&provider);

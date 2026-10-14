@@ -384,7 +384,8 @@ impl Host {
         let coordinator = self.session(&ticket.coordinator_id)?;
         let chosen = self.verifier_choices(&coordinator, level, &level_verifiers, choices)?;
         let commit = head(&ticket)?;
-        self.atomically(|host| {
+        let mut replaced = vec![];
+        let started = self.atomically(|host| {
             let mut verifiers = vec![];
             for (config, (profile, reason)) in level_verifiers.into_iter().zip(chosen) {
                 let existing =
@@ -398,7 +399,9 @@ impl Host {
                         Some(agent)
                     }
                     Some(retired) => {
-                        host.change_archived(&retired.id, true, Some("verifier_replaced"))?;
+                        let archived =
+                            host.archive_in_change(&retired.id, Some("verifier_replaced"))?;
+                        replaced.extend(archived);
                         None
                     }
                     None => None,
@@ -456,7 +459,10 @@ impl Host {
                 &format!("{}; cycle {cycle}", ticket.id),
             )?;
             Ok(ticket)
-        })
+        })?;
+        // Only now: a cycle that failed to start leaves a replaced verifier as it was.
+        self.stop_archived(&replaced);
+        Ok(started)
     }
     /// Records the coordinator's decision on each named entry, all or none, and wakes nobody. An
     /// untriaged entry takes any decision; an open one, already routed for a fix, only follow-up

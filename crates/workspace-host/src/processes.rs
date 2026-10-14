@@ -30,6 +30,8 @@ const CONTINUITY: Duration = Duration::from_secs(1);
 const SETTLE: Duration = Duration::from_millis(300);
 /// Bounds one provider's tree, so a runaway fork cannot grow the watcher's work without limit.
 const MAX_TREE: usize = 4096;
+/// How long a provider's group may take to stop on SIGSTOP before the stop looks anyway.
+const FREEZE_WAIT: Duration = Duration::from_millis(100);
 
 /// One live process. Process ids are reused; an id and its start time together are not.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,16 +49,25 @@ mod os {
     use super::ProcessInfo;
     use std::ffi::{CStr, c_char, c_int, c_void};
 
-    /// The process, unless it has exited or belongs to another user. A zombie has exited.
-    pub(crate) fn read(pid: i32) -> Option<ProcessInfo> {
+    /// The kernel's account of a live process. A zombie has exited.
+    fn info(pid: i32) -> Option<libc::proc_bsdinfo> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
         let read = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        if read != size || info.pbi_status == libc::SZOMB {
-            return None;
-        }
+        (read == size && info.pbi_status != libc::SZOMB).then_some(info)
+    }
+
+    /// Whether the process has stopped, as on SIGSTOP. A process stops on its way back to
+    /// user mode, so one that has stopped is not part way through a fork.
+    pub(crate) fn stopped(pid: i32) -> bool {
+        info(pid).is_some_and(|info| info.pbi_status == libc::SSTOP)
+    }
+
+    /// The process, unless it has exited or belongs to another user.
+    pub(crate) fn read(pid: i32) -> Option<ProcessInfo> {
+        let info = info(pid)?;
         let name = |text: &[c_char]| {
             // SAFETY: the kernel ends both names with a NUL inside their arrays.
             let text = unsafe { CStr::from_ptr(text.as_ptr()) };
@@ -112,6 +123,9 @@ mod os {
     pub(crate) fn read(_pid: i32) -> Option<ProcessInfo> {
         None
     }
+    pub(crate) fn stopped(_pid: i32) -> bool {
+        false
+    }
     pub(crate) fn all() -> Vec<i32> {
         vec![]
     }
@@ -145,9 +159,14 @@ pub(crate) fn group_runs(group: i32) -> bool {
     unsafe { libc::killpg(group, 0) == 0 }
 }
 
-/// Sends SIGTERM and waits out the grace period while live members remain.
+/// Sends SIGTERM and waits out the grace period while live members remain. A frozen process
+/// acts on SIGTERM only once continued, so the group is continued after it: one frozen by a
+/// host that died before it could stop it is stopped like any other.
 pub(crate) fn terminate(group: i32) {
-    signal(group, libc::SIGTERM);
+    unsafe {
+        libc::killpg(group, libc::SIGTERM);
+    }
+    signal(group, libc::SIGCONT);
 }
 
 pub(crate) fn kill(group: i32) {
@@ -161,6 +180,53 @@ fn signal(group: i32, signal: i32) {
     let deadline = Instant::now() + TERMINATION_GRACE;
     while group_runs(group) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A process group stopped with SIGSTOP. Dropping it continues the group, so a stop that fails
+/// part way does not leave the group frozen.
+struct Frozen(i32);
+
+impl Frozen {
+    /// Returns once every member has stopped, or after `FREEZE_WAIT` if one is slow to. A
+    /// running group whose members cannot be read, as during an exec, has not stopped.
+    fn new(group: i32) -> Self {
+        unsafe {
+            libc::killpg(group, libc::SIGSTOP);
+        }
+        let deadline = Instant::now() + FREEZE_WAIT;
+        let all_stopped = || match group_members(group) {
+            members if members.is_empty() => !group_runs(group),
+            members => members.iter().all(|p| os::stopped(p.pid)),
+        };
+        while !all_stopped() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        Self(group)
+    }
+}
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        unsafe {
+            libc::killpg(self.0, libc::SIGCONT);
+        }
+    }
+}
+
+/// Stops a provider's own group, whose leader the caller keeps unreaped: SIGTERM, the grace
+/// period, then SIGKILL. A tool the provider forked a moment ago into a session of its own
+/// would be orphaned by the stop before the watcher had listed it. So the group is frozen
+/// first and `look` called while it is: anything a member forked before the freeze is still
+/// that member's child, and the look adopts it into the run's tree.
+pub(crate) fn stop_provider_group(group: i32, look: impl FnOnce()) {
+    {
+        let _frozen = Frozen::new(group);
+        look();
+        terminate(group);
+    }
+    unsafe {
+        libc::killpg(group, libc::SIGKILL);
     }
 }
 
@@ -454,6 +520,12 @@ fn watch_until_idle() {
     }
 }
 
+/// Has the watcher look now, whatever its clock. What it finds goes out with each run's next
+/// sightings.
+pub(crate) fn look() {
+    shared().0.scan();
+}
+
 /// Every process the watcher follows for the provider of `run` after a look made now, apart
 /// from those in the provider's own group, which its turn stops itself. This is for a caller
 /// that cannot wait for the run's thread, such as a stop. It is everything followed, not only
@@ -711,6 +783,111 @@ pub(crate) mod tests {
             !recorded_group_runs(group)
         });
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_group_left_frozen_is_stopped_with_sigterm() {
+        // A provider that handles SIGTERM, as Claude Code does. macOS ends a stopped process
+        // on a SIGTERM it does not handle, but a handler runs only once the process continues.
+        let mut child = in_own_group("trap 'exit 3' TERM; echo ready; sleep 30 & wait");
+        let pid = child.id() as i32;
+        let _started = Started(vec![pid]);
+        until("the provider's child to be exec'd", || {
+            group_members(pid)
+                .iter()
+                .any(|member| member.command == "sleep")
+        });
+        // As when a host dies between freezing a provider's group and stopping it: the next
+        // startup stops the group it recorded.
+        unsafe {
+            libc::killpg(pid, libc::SIGSTOP);
+        }
+        until("the group to stop", || {
+            group_members(pid)
+                .iter()
+                .all(|member| os::stopped(member.pid))
+        });
+
+        let leader = read(pid).unwrap();
+        assert_eq!(
+            stopped(stop_group(i64::from(pid), &[member(&leader)])).len(),
+            2
+        );
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+    }
+
+    /// A stand-in provider that, once it reads a line, forks a tool that leads a session of
+    /// its own, as Claude Code and Codex start a tool command, says the tool's id and waits.
+    const FORKS_A_TOOL: &str = "\
+import os, sys
+sys.stdin.readline()
+tool = os.fork()
+if tool == 0:
+    os.setsid()
+    os.execvp('sleep', ['sleep', '30'])
+print(tool, flush=True)
+sys.stdin.readline()
+";
+
+    #[test]
+    fn a_tool_forked_just_before_a_cancel_is_found_by_the_stops_look() {
+        let mut provider = Command::new("python3")
+            .args(["-c", FORKS_A_TOOL])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = provider.id() as i32;
+        let mut started = Started(vec![group]);
+        let mut watcher = Watcher::default();
+        let key = watcher.add(group);
+        watcher.take(key);
+
+        writeln!(provider.stdin.as_mut().unwrap(), "fork").unwrap();
+        let mut line = String::new();
+        BufReader::new(provider.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let tool: i32 = line.trim().parse().unwrap();
+        started.0.push(tool);
+        until("the tool to lead its own session", || {
+            read(tool).is_some_and(|p| p.group == tool && p.command == "sleep")
+        });
+
+        // The cancel lands before the watcher has listed the tool. The stop orphans it, but
+        // its look comes while the provider is frozen and still the tool's parent.
+        let mut frozen = false;
+        stop_provider_group(group, || {
+            frozen = os::stopped(group);
+            watcher.scan();
+        });
+        assert!(frozen, "the look came while the provider was frozen");
+        assert_eq!(provider.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(read(tool).is_some_and(|p| p.parent == 1), "orphaned");
+        assert_eq!(members(&watcher.take(key)), [(tool, tool)]);
+    }
+
+    #[test]
+    fn a_stop_whose_look_fails_leaves_the_group_running() {
+        let mut child = in_own_group("echo ready; exec sleep 30");
+        let pid = child.id() as i32;
+        let _started = Started(vec![pid]);
+        until("the exec", || {
+            read(pid).is_some_and(|p| p.command == "sleep")
+        });
+
+        let mut frozen = false;
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stop_provider_group(pid, || {
+                frozen = os::stopped(pid);
+                panic!("the look failed");
+            })
+        }));
+        assert!(failed.is_err());
+        assert!(frozen);
+        until("the group to be continued", || !os::stopped(pid));
+        assert_eq!(child.try_wait().unwrap(), None);
     }
 
     /// A tool shell that started `sleep` in the background, said its id and exited: the

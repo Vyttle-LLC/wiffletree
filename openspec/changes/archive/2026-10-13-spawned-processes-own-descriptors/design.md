@@ -37,7 +37,7 @@ If the list call fails, or the list fills the buffer and so may be cut short, th
 ### 2. Every process the host starts, not only provider turns
 The hook is applied at all six places the host starts a process: provider turns and compactions (`provider::configure`), `bounded_output` (Git, `gh`, CLI detection), the Codex app-server probe, the two Claude probes in `runtime.rs` and the Claude context probe. The provider turn alone would keep a provider from holding another's pipe. The others matter in the opposite direction: a `git push` may run its hooks for ten minutes, and a probe is a provider CLI, so either could hold a provider's prompt pipe open for that long. Each site is one line.
 
-The desktop app's own spawns (`git`, `codesign`, `curl`, the login shell) are left alone. They run in another process, which makes no provider pipes.
+The desktop app's own spawns (`git`, `codesign`, `curl`, the login shell) were left alone here, on the belief that they ran in another process. They do not: the host runs inside the desktop process (`Service::start` runs it on a thread), so they can inherit a provider's half-made pipe as well. `2026-10-14-process-follow-ups` gives the update commands the hook; the login shell runs before any other thread exists, and the desktop's `git` calls are in its tests.
 
 ## Risks / Trade-offs
 
