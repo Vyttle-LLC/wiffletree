@@ -865,7 +865,11 @@ sys.stdin.readline()
         assert!(frozen, "the look came while the provider was frozen");
         assert_eq!(provider.wait().unwrap().signal(), Some(libc::SIGTERM));
         assert!(read(tool).is_some_and(|p| p.parent == 1), "orphaned");
-        assert_eq!(members(&watcher.take(key)), [(tool, tool)]);
+        // The provider itself may be named again: a framework Python, as `/usr/bin/python3`
+        // starts, re-execs itself under the same id, which changes its command.
+        let seen = members(&watcher.take(key));
+        let started: Vec<_> = seen.into_iter().filter(|(g, _)| *g != group).collect();
+        assert_eq!(started, [(tool, tool)]);
     }
 
     #[test]
