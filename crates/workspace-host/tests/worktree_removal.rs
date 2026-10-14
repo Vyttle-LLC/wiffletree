@@ -1,8 +1,8 @@
 //! Removing a ticket's worktree is whole whatever its size. Every test here runs Git through a
 //! stand-in that refuses `git worktree remove`, as if the time limit had cut it off, and fails
 //! `git worktree prune` in a repository holding a `fail-prune` mark, after pruning in one holding
-//! a `fail-after-prune` mark, or after deleting worktrees' `HEAD`, as a prune cut off partway
-//! can, in one holding a `fail-mid-prune` mark.
+//! a `fail-after-prune` mark, or after deleting the worktrees' administrative file the
+//! `fail-mid-prune` mark names, as a prune cut off partway can.
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -32,7 +32,7 @@ fn stand_in_git() {
                  \"worktree remove\") echo 'fatal: timed out' >&2; exit 1;;\n\
                  \"worktree prune\") [ -e \"$2/.git/fail-prune\" ] && {{ echo 'fatal: injected' >&2; exit 1; }}\n\
                  [ -e \"$2/.git/fail-after-prune\" ] && {{ {real} \"$@\"; echo 'fatal: timed out' >&2; exit 1; }}\n\
-                 [ -e \"$2/.git/fail-mid-prune\" ] && {{ rm -f \"$2\"/.git/worktrees/*/HEAD; echo 'fatal: timed out' >&2; exit 1; }};;\n\
+                 [ -e \"$2/.git/fail-mid-prune\" ] && {{ rm -f \"$2\"/.git/worktrees/*/$(cat \"$2/.git/fail-mid-prune\"); echo 'fatal: timed out' >&2; exit 1; }};;\n\
                  esac\n\
                  exec {real} \"$@\"\n",
                 real = real.trim()
@@ -187,10 +187,16 @@ fn a_git_failure_after_it_forgot_the_worktree_still_completes_the_removal() {
 
 #[test]
 fn a_prune_cut_off_partway_completes_the_removal_and_the_next_start_prunes() {
+    for deleted in ["HEAD", "index"] {
+        prune_cut_off_after_deleting(deleted);
+    }
+}
+
+fn prune_cut_off_after_deleting(file: &str) {
     let directory = tempfile::tempdir().unwrap();
     let (mut host, _, ticket) = ticket_with_build_output(directory.path(), 10);
     let mark = directory.path().join("web/.git/fail-mid-prune");
-    fs::write(&mark, "").unwrap();
+    fs::write(&mark, file).unwrap();
 
     host.close_ticket(&ticket.id).unwrap();
 

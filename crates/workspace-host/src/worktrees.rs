@@ -201,8 +201,9 @@ impl Host {
     /// Whether a worktree was removed; a missing one only has its stale registration pruned.
     /// Removal is whole whatever the folder's size: the folder is renamed aside, Git forgets it
     /// within its usual time limit, and the folder is then deleted off the host thread. If Git
-    /// fails, the folder is renamed back only when the worktree still works there; otherwise the
-    /// removal completes, losing nothing because the folder was clean, and the next start prunes.
+    /// fails, the folder is renamed back only when the worktree is as clean there as it was
+    /// checked to be; otherwise the removal completes, losing nothing because the folder was
+    /// clean, and the next start prunes.
     fn remove_worktree(&self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
@@ -217,7 +218,7 @@ impl Host {
         let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
         if forgotten.is_err() {
             fs::rename(&aside, worktree).with_context(context)?;
-            if runtime::git_output(worktree, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+            if is_clean(worktree).unwrap_or(false) {
                 forgotten.with_context(context)?;
             }
             fs::rename(worktree, &aside).with_context(context)?;
