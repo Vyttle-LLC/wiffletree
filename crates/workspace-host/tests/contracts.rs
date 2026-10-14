@@ -225,7 +225,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator — v12"));
+    assert!(coordinator.contains("Project coordinator — v13"));
     for role in Role::ALL {
         let skill = provider::skill(role);
         assert!(skill.contains("Wiffletree communication contract — v7"));
@@ -255,6 +255,9 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         "product, security or data-loss decision",
         "Treat each check-in as a decision",
         "without a message from you",
+        "Wiffletree PR keeper",
+        "Do not dispatch a rebase for a kept ticket",
+        "Only the human turns the keeper on or off",
     ] {
         assert!(coordinator.contains(phrase), "{phrase}");
     }
@@ -303,7 +306,10 @@ fn verify_ticket_requires_a_level_and_states_the_level_rules() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let implementer = provider::skill(Role::Implementer);
-    assert!(implementer.contains("Implementer — v5"));
+    assert!(implementer.contains("Implementer — v6"));
+    assert!(
+        implementer.contains("may rebase this ticket's branch onto its base between your turns")
+    );
     assert!(implementer.contains(
         "If a finding is wrong or out of scope, tell the coordinator in one sentence with evidence"
     ));

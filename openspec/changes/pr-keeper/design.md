@@ -227,7 +227,8 @@ One PR each, in this order. Each is useful alone and leaves the others off. The 
 
 | # | Slice | Adds | Est. lines |
 |---|---|---|---|
-| 1 | Clean rebases | `KeeperSettings` with the rebase trigger and quiet period, `baseRefOid`, `keeper.rs` (due, checkout, rebase), `keeper_adopt`, `keeper_publish`, the triggers block, the PR line and card | 400 |
+| 1a | Clean rebases: the host and its switch | `KeeperSettings` with the rebase trigger and quiet period, `baseRefOid`, `keeper.rs` (due, checkout, rebase), `keeper_adopt`, `keeper_publish`, the triggers block and row labels | 400; measured 722 lines of code, 830 with comments |
+| 1b | Clean rebases: what the human sees | the PR line's keeper part and the card | 130 |
 | 2 | Commits Wiffletree did not make | fetch and fast-forward, the message, "not reviewed" on the PR line | 120 |
 | 3 | Sorting comments | `ModelSelection.keeper` and its card, `Role::Keeper`, `TurnKind::Sort`, reading, the classes, the message | 320 |
 | 4 | A try at a conflict | `Repository.checks`, the try session, the gate, `keeper_review` and `withdraw_keeper_review`, tries, the watcher's held wake | 520 |
@@ -235,7 +236,7 @@ One PR each, in this order. Each is useful alone and leaves the others off. The 
 
 Slices 2 and 3 depend only on slice 1. Slice 4 depends on slice 3 for the keeper's model and its role and on slice 2 for the record of a head that is not reviewed, and slice 5 on slice 4.
 
-**One change, five PRs** (decided, (f) 7). The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
+**One change, five PRs** (decided, (f) 7); slice 1 became two PRs, 1a and 1b, on October 14, 2026, when it measured about twice its estimate. The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
 
 ## What this closes and what it does not
 

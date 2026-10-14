@@ -168,3 +168,14 @@ A sidebar ticket row whose ticket has a PR SHALL show a second line with the PR 
 #### Scenario: Repository no longer watched
 - **WHEN** the human archives the coordinator of a repository's only open ticket after its PRs were checked
 - **THEN** the repository's row no longer says when its PRs were checked
+
+### Requirement: The base branch's head is read with each pass
+Each pass SHALL also read, for every PR it finds, the head commit of the PR's base branch as GitHub reports it, in the same request. The host SHALL NOT store it on the ticket's PR snapshot and SHALL NOT log an activity event when it changes; it is kept in memory for the PR keeper (see pr-keeper).
+
+#### Scenario: A moving base logs nothing
+- **WHEN** a repository's base branch gains five commits in an hour and a ticket's PR is otherwise unchanged
+- **THEN** no `pull_request` event is logged for that ticket and its stored snapshot is unchanged
+
+#### Scenario: Still one request
+- **WHEN** a repository has three open tickets and a pass is due
+- **THEN** the host makes one GitHub request, and it carries each PR's base head

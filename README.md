@@ -48,7 +48,7 @@ Then press **⌘N**, add a repository, and tell the coordinator what you want bu
 **Updates are automatic.** The app checks hourly, downloads new versions in the background and shows a card in the sidebar with what changed. Click **Restart to update**, or just quit. To check right away, click the version number at the bottom of the sidebar.
 
 > [!WARNING]
-> Agents run with their provider's permission prompts bypassed so they can work unattended. Add only repositories you are comfortable letting them change. Wiffletree itself pushes a ticket's branch and opens its pull request only through its own checked operation: without asking in repositories whose GitHub owner you allow, and after your approval everywhere else. It never approves, merges, closes or comments on a pull request. Agents can still run any command on your Mac, including a push with your credentials, which Wiffletree does not prevent.
+> Agents run with their provider's permission prompts bypassed so they can work unattended. Add only repositories you are comfortable letting them change. Wiffletree itself pushes a ticket's branch and opens its pull request only through its own checked operation: without asking in repositories whose GitHub owner you allow, and after your approval everywhere else. It never approves, merges, closes or comments on a pull request. If you turn on the PR keeper, Wiffletree also rebases a ticket's open pull request when its base moves and replaces the branch on GitHub, which changes every commit id on the pull request. Agents can still run any command on your Mac, including a push with your credentials, which Wiffletree does not prevent.
 
 ## Why we built this
 
@@ -79,6 +79,8 @@ Wiffletree has opinions about how agent work should be organized.
 **Software does the routine work; models do the thinking.** Git state, status, polling and usage tracking are ordinary deterministic code. Models are woken only for decisions that need reasoning, so coordinators sleep between events instead of polling.
 
 **Humans own integration.** Agents deliver tested branches. Once a ticket's review has ended, Wiffletree pushes its branch and opens its pull request itself: without asking for the GitHub owners you allow on the Repositories page, and only after you approve each step everywhere else. It never approves, merges, closes or comments on a pull request, so merging stays yours.
+
+**The PR keeper keeps pull requests current, if you ask it to.** It is off until you tick "Rebase when the base branch moves" on the Repositories page, and it acts only in repositories that open pull requests without asking. Once a pull request's base has been quiet for a couple of minutes, Wiffletree rebases the branch itself, with no model and no review, and replaces the branch on GitHub with a lease, only when the rebased change is the same as the reviewed one. Every commit id on the pull request changes. A rebase that conflicts or changes the patch is left to the coordinator. It works only while Wiffletree is running.
 
 **It should feel instant.** Wiffletree is a native Rust app built on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), not a web view, and it stays light when idle.
 
