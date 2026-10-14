@@ -388,14 +388,8 @@ impl Host {
         let chosen = self.verifier_choices(&coordinator, level, &level_verifiers, choices)?;
         let commit = head(&ticket)?;
         // A cycle queues behind every slot holder and every cycle queued before it.
-        let tickets = self.tickets()?;
-        let queued_at = (tickets
-            .iter()
-            .filter(|t| t.holds_verification_slot())
-            .count()
-            >= VERIFICATION_SLOTS
-            || tickets.iter().any(|t| t.queued_since().is_some()))
-        .then(now);
+        let (taken, queued) = self.verification_queue()?;
+        let queued_at = (taken >= VERIFICATION_SLOTS || !queued.is_empty()).then(now);
         self.atomically(|host| {
             let mut verifiers = vec![];
             for (config, (profile, reason)) in level_verifiers.into_iter().zip(chosen) {
@@ -478,25 +472,40 @@ impl Host {
             Ok(ticket)
         })
     }
+    /// How many cycles hold a verification slot, and the queued ones, oldest first. A ticket
+    /// whose project was archived is left out: its verifiers can never run, so it must neither
+    /// hold a slot nor take one.
+    fn verification_queue(&self) -> Result<(usize, Vec<Ticket>)> {
+        let mut taken = 0;
+        let mut queued = vec![];
+        for ticket in self.tickets()? {
+            if self.session(&ticket.coordinator_id)?.archived {
+                continue;
+            }
+            if ticket.holds_verification_slot() {
+                taken += 1;
+            } else if ticket.queued_since().is_some() {
+                queued.push(ticket);
+            }
+        }
+        queued.sort_by_key(Ticket::queued_since);
+        Ok((taken, queued))
+    }
     /// Starts the oldest queued cycles while slots are free, so a queued cycle starts once a
     /// running one passes, is blocked or its ticket closes. The scheduler calls it on every
-    /// pass, and the queue is stored with the tickets, so it survives a restart. Returns
-    /// whether any cycle started.
+    /// pass, and the queue is stored with the tickets, so it survives a restart. A cycle that
+    /// cannot start, such as one whose verifier was archived, ends blocked and tells the
+    /// coordinator instead of stopping the pass. Returns whether any cycle changed.
     pub fn start_queued_cycles(&mut self) -> Result<bool> {
-        let tickets = self.tickets()?;
-        let taken = tickets
-            .iter()
-            .filter(|t| t.holds_verification_slot())
-            .count();
-        let mut queued: Vec<Ticket> = tickets
-            .into_iter()
-            .filter(|t| t.queued_since().is_some())
-            .collect();
-        queued.sort_by_key(Ticket::queued_since);
-        queued.truncate(VERIFICATION_SLOTS.saturating_sub(taken));
-        let started = !queued.is_empty();
+        let (taken, queued) = self.verification_queue()?;
+        let mut free = VERIFICATION_SLOTS.saturating_sub(taken);
+        let mut changed = false;
         for mut ticket in queued {
-            self.atomically(|host| {
+            if free == 0 {
+                break;
+            }
+            changed = true;
+            let started = self.atomically(|host| {
                 let verification = ticket.verification.as_mut().context("No verification")?;
                 verification.queued_at = None;
                 let cycle = verification.cycle;
@@ -509,9 +518,30 @@ impl Host {
                     "verification_started",
                     &format!("{}; cycle {cycle}", ticket.id),
                 )
-            })?;
+            });
+            match started {
+                Ok(()) => free -= 1,
+                Err(error) => self.end_unstartable(&ticket.id, &error)?,
+            }
         }
-        Ok(started)
+        Ok(changed)
+    }
+    /// Ends a queued cycle that could not start as blocked, and tells its coordinator why.
+    fn end_unstartable(&mut self, ticket_id: &str, error: &anyhow::Error) -> Result<()> {
+        let mut ticket = self.ticket(ticket_id)?;
+        self.atomically(|host| {
+            let verification = ticket.verification.as_mut().context("No verification")?;
+            verification.outcome = VerificationOutcome::Blocked;
+            let id = format!("verification:{}:{}:unstartable", ticket.id, verification.cycle);
+            let body = format!(
+                "Wiffletree could not start the queued verification cycle {} of ticket \"{}\" ({}): {error:#}. The cycle is blocked; fix the cause and call verify_ticket again, close the ticket or ask the human.",
+                verification.cycle, ticket.title, ticket.id
+            );
+            ticket.state = "blocked".into();
+            host.save_ticket(&ticket)?;
+            host.send(&id, None, &ticket.coordinator_id, &body)?;
+            host.retire(&cycle_verifiers(&ticket))
+        })
     }
     /// Records the coordinator's decision on each named entry, all or none, and wakes nobody. An
     /// untriaged entry takes any decision; an open one, already routed for a fix, only follow-up
