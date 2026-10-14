@@ -321,25 +321,7 @@ impl Host {
             for sighting in sightings {
                 match sighting {
                     Sighting::Member(process) => {
-                        let running = host
-                            .db
-                            .query_row(
-                                "SELECT id FROM process_groups WHERE session_id=?1 AND process_group=?2 AND ended_at IS NULL",
-                                params![session, process.group],
-                                |r| r.get::<_, String>(0),
-                            )
-                            .optional()?;
-                        let record = match running {
-                            Some(record) => record,
-                            None => {
-                                let id = new_id();
-                                host.db.execute(
-                                    "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at) VALUES (?1,?2,?3,?4,?5)",
-                                    params![id, session, run, process.group, now()],
-                                )?;
-                                id
-                            }
-                        };
+                        let record = host.record_for_sighting(session, run, process)?;
                         host.record_members(&record, std::slice::from_ref(process))?;
                     }
                     Sighting::GroupExited(group) => {
@@ -361,6 +343,47 @@ impl Host {
         let followed = processes::followed_now(run);
         let seen: Vec<Sighting> = followed.into_iter().map(Sighting::Member).collect();
         self.record_sightings(session, run, &seen)
+    }
+    /// The open row a sighting of `process` belongs to. An open row with the same group id is
+    /// the same group only while a member it recorded is still alive in it, by the rule that
+    /// confirms a group before it is signalled. Otherwise that group emptied unseen and its id
+    /// was given out again: the row is forgotten, and a fresh one is opened for the sighting's
+    /// run with no notice yet, so neither the earlier run nor an earlier notice is taken over.
+    fn record_for_sighting(
+        &mut self,
+        session: &str,
+        run: &str,
+        process: &ProcessInfo,
+    ) -> Result<String> {
+        let open = self
+            .db
+            .query_row(
+                "SELECT id,run_id,provider FROM process_groups WHERE session_id=?1 AND process_group=?2 AND ended_at IS NULL",
+                params![session, process.group],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)),
+            )
+            .optional()?;
+        let mut provider = false;
+        if let Some((record, its_run, its_provider)) = open {
+            let members: Vec<Member> = self
+                .db
+                .prepare("SELECT pid,started FROM process_group_members WHERE group_id=?1")?
+                .query_map([&record], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let group = i64::from(process.group);
+            if processes::confirmed_members(group, &members).is_some() {
+                return Ok(record);
+            }
+            self.forget_process_group(&record)?;
+            // The run's own provider group, seen again after its provider exited, stays that.
+            provider = its_provider && its_run == run;
+        }
+        let id = new_id();
+        self.db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,provider,seen_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, session, run, process.group, provider, now()],
+        )?;
+        Ok(id)
     }
     /// A run has ended and its provider thread has stopped the provider's group.
     pub(crate) fn provider_process_ended(&mut self, run: &str) -> Result<()> {

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: The host records every process group an agent starts
-While a provider run is live, the host SHALL watch the provider's process and its descendants on a clock that does not depend on the provider's output, sleeping no more than 5 ms between two looks, and listing the process table once per look however many runs are live. It SHALL record against the run's agent every process group seen among them, with each member's process id and start time, and SHALL add as members the processes it later finds in a recorded group while a recorded member is still in it. The record SHALL belong to the agent across its turns, SHALL hold any number of groups and SHALL survive a host restart. A group whose every member has exited SHALL be dropped from the record. What the watcher saw SHALL keep reaching the record for as long as the provider runs, also after the provider has closed its output. When the watcher could not look for longer than a second, a process id may have been given out again in the meantime: a recorded group whose last known member has gone but whose id still names a running group SHALL then stay recorded as running, with none of that group's processes added as members, so the host later stops it or asks the human about it. A normal turn end SHALL stop the provider's own process group and SHALL leave every other recorded group running.
+While a provider run is live, the host SHALL watch the provider's process and its descendants on a clock that does not depend on the provider's output, sleeping no more than 5 ms between two looks, and listing the process table once per look however many runs are live. It SHALL record against the run's agent every process group seen among them, with each member's process id and start time, and SHALL add as members the processes it later finds in a recorded group while a recorded member is still in it. The record SHALL belong to the agent across its turns, SHALL hold any number of groups and SHALL survive a host restart. A group whose every member has exited SHALL be dropped from the record. A process seen in a group SHALL be added to the agent's open record of that group id only while a member that record holds is still alive in the group, by the rule that confirms a group before it is signalled; otherwise that group emptied unseen and its id was given out again, so the old record SHALL be dropped and a new one opened for the run that saw the process, with no notice yet. What the watcher saw SHALL keep reaching the record for as long as the provider runs, also after the provider has closed its output. When the watcher could not look for longer than a second, a process id may have been given out again in the meantime: a recorded group whose last known member has gone but whose id still names a running group SHALL then stay recorded as running, with none of that group's processes added as members, so the host later stops it or asks the human about it. A normal turn end SHALL stop the provider's own process group and SHALL leave every other recorded group running.
 
 #### Scenario: A tool starts a process in its own session
 - **WHEN** a turn's provider starts a child in a new session and process group, and the turn finishes normally
@@ -27,6 +27,10 @@ While a provider run is live, the host SHALL watch the provider's process and it
 #### Scenario: The watcher could not look for over a second
 - **WHEN** the watcher did not look for over a second, the last member it knew of a recorded group has exited meanwhile, and the group's id still names a running group
 - **THEN** the group stays recorded as running and none of its processes is added as a member
+
+#### Scenario: A group id given out again
+- **WHEN** an agent's open record of a group holds only members that have exited, and the agent's current run is seen with a process in a new group that has the same id
+- **THEN** the process is recorded in a new record of the current run, which no notice has named yet, and the old record is gone
 
 #### Scenario: Several turns at once
 - **WHEN** three providers run at the same time
@@ -174,6 +178,40 @@ The communication contract given to every agent SHALL say that a process the age
 - **THEN** its instructions include that rule
 
 ## MODIFIED Requirements
+
+### Requirement: Compaction outcome comes from the provider's status record
+The host SHALL decide a Claude agent's compaction's outcome from the status record Claude streams, not from the process's exit code or the result record's error flag. A `compact_result` of `success` SHALL be **compacted**, with the token counts before and after taken from the compaction boundary record when it is present. A `compact_result` of `failed` whose error starts with "Not enough messages to compact" SHALL be **nothing to compact**. Every other ending, including a missing status record, a nonzero exit and a process that could not start, SHALL be **failed**, with the provider's own reason when it gave one. When a process ended without a status record, the reason SHALL be what the run ended with held to one line of at most 200 characters, ended with "…" when it was cut, and the run SHALL keep the whole of it. A Codex agent's compaction SHALL be decided from its turn's completion notification, as its own requirement says. For either provider the host SHALL store the last outcome and its reason on the session's runtime, clear the request, and clear the stored outcome when a `DismissCompaction` command or a new request arrives. A compaction that is running when the host stops, by a shutdown or a crash, SHALL be settled as **interrupted**, at shutdown or at the next startup, through the handling every run gets. A shutdown SHALL cancel a running compaction and wait for its provider process group to be stopped as it does for a running turn, and SHALL record the run as finished only once the group is stopped; a compaction still running when the wait ends SHALL stay unfinished for the next start. At startup an unfinished compaction run SHALL be handled like any unfinished run, under the rule that confirms every recorded group before it is signalled: the host SHALL stop its process group only while a member it recorded for that group, matched by process id and start time, is still alive in it, whether or not that member is the group's leader, and SHALL otherwise signal nothing and raise the leftover-process note, which holds the session's turns and compactions until the group exits or the note is dismissed. An interrupted compaction SHALL leave the session's stored status and its waiting messages as they were, SHALL hold no input and SHALL need no resume. It SHALL NOT be run again by the host and SHALL NOT be reported as compacted or as unchanged, and the host SHALL NOT tell the session's next turn that a turn was interrupted.
+
+#### Scenario: Success
+- **WHEN** the stream has `"compact_result":"success"` and a boundary record with `pre_tokens` 812000 and `post_tokens` 5000
+- **THEN** the outcome is compacted with those two figures and the request is cleared
+
+#### Scenario: Nothing to compact
+- **WHEN** the stream has `"compact_result":"failed"` with `"compact_error":"Not enough messages to compact."`, exit code 0 and `is_error` false
+- **THEN** the outcome is nothing to compact, with that text as its reason
+
+#### Scenario: Failure with exit code 0
+- **WHEN** the stream has `"compact_result":"failed"` with another error and the process exits 0
+- **THEN** the outcome is failed, with that error as its reason
+
+#### Scenario: No status record
+- **WHEN** the process exits without streaming a `compact_result`
+- **THEN** the outcome is failed
+
+#### Scenario: Quit while compacting
+- **WHEN** the host shuts down while an agent's compaction is running and the agent has a message waiting
+- **THEN** the compaction's process group no longer runs when the shutdown returns, the outcome is interrupted, the request is cleared, and the agent's status is what it was
+- **AND** when the host starts again no compaction runs, and the agent's next turn takes the waiting message with a prompt that names no interrupted turn
+
+#### Scenario: Crash while compacting
+- **WHEN** the host starts with an unfinished compaction run whose provider process still runs with its recorded start time, and the agent has a message waiting
+- **THEN** the process group is stopped, the compaction is settled as interrupted and is not run again, and the agent's status is what it was
+- **AND** the agent's next turn takes the waiting message
+
+#### Scenario: Crash while compacting, process not confirmed
+- **WHEN** the host starts with an unfinished compaction run whose process id now belongs to a process with a different start time, and the agent has a message waiting
+- **THEN** that process receives no signal, the compaction is settled as interrupted, and one inbox note names the agent and the process id
+- **AND** no turn and no compaction starts for the agent while that process group runs, and its turn starts once the note is dismissed
 
 ### Requirement: A quit stops running turns
 The host SHALL offer a shutdown that cancels every running turn, looks afresh at what each running turn has started, stops every process group recorded for any agent under the confirmation rule, and returns only once each of those turns' provider process groups has been stopped, as at any turn's end, or a bounded wait has passed. The desktop app SHALL call it before it exits from a quit, and the headless host SHALL call it when its input closes. A run SHALL be recorded as finished only after its process group has been stopped; a turn still running when the wait ends SHALL stay unfinished, and a group still running then SHALL stay recorded as running, so the next start handles both. Each group the shutdown stops SHALL be recorded with the reason `quit`.

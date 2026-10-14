@@ -102,6 +102,12 @@ Archiving and `finish_ticket` check that the worktrees can be removed, then stop
 - A quit or an archive waits out the grace period when a process ignores SIGTERM.
 - A helper that takes longer than 300 ms to exit after its provider is announced as left running, once.
 
+## Fixed in the final review
+
+A sighting joined whatever open row the agent had under the same group id. A row whose processes had all exited unseen, say between turns while no watcher ran, kept its earlier run and its notice, so when the id was given out again a new group took both over: a pause then stopped a Codex compaction's tool server that it should have spared, as the earlier turn's, and the new group was never announced. A row is now the same group only while a member it recorded is alive in it, the rule that confirms a group before it is signalled. Otherwise the row is forgotten and a fresh one is opened for the sighting's run, with no notice. This applies wherever a sighting reaches the store: a run's own sightings and a stop's look both go through `record_for_sighting`, and startup records no sightings.
+
+The compaction requirement that still described startup confirming a group by its leader alone now states the shared, member-based rule.
+
 ## Rebased onto review levels and Codex compaction
 
 **Codex compaction (#56).** A Codex agent's compaction runs `codex app-server`, and it runs through the same `provider::run` as every turn and as Claude's compaction: the same spawn in a group of its own, the same watch under the run's id, the same sightings and the same end. So the rules hold for it without a path of its own. The server's own group is stopped by its run when the outcome is read or its time is up. What it starts in other groups, which for Codex means its tool servers, is followed and recorded against the agent, and the run's tree is released when the host has handled the run's end. Three things are specific to a compaction:

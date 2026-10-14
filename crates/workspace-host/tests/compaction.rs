@@ -2114,6 +2114,69 @@ fn what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stop
 }
 
 #[test]
+fn a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(json!({"gate":true,"helper":true}));
+    world.compact(&main, None).unwrap();
+    world.until_compacting(&main);
+    let saved = world.scratch.path().join("codex-helper.pid");
+    let row = |world: &World, helper: i32| -> Option<(String, bool, Option<String>)> {
+        let found = world.db().query_row(
+            "SELECT run_id,noticed_at IS NOT NULL,ended FROM process_groups WHERE session_id=?1 AND process_group=?2 AND provider=0",
+            rusqlite::params![main, helper],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        found.ok()
+    };
+    let mut helper = None;
+    until("the helper to be recorded against the agent", || {
+        let id = std::fs::read_to_string(&saved).ok();
+        helper = id.and_then(|id| id.trim().parse::<i32>().ok());
+        helper.is_some_and(|helper| row(&world, helper).is_some())
+    });
+    let helper = helper.unwrap();
+    let _kill = Kill(helper);
+    let compaction = world.compactions(&main).remove(0).id;
+
+    // As if the helper's group id had once been a group an earlier turn left, which emptied
+    // unseen between turns: an open row of that turn's, announced, whose member is long gone.
+    let db = world.db();
+    db.execute(
+        "UPDATE process_groups SET run_id='an-earlier-turn',noticed_at=1 WHERE session_id=?1 AND process_group=?2",
+        rusqlite::params![main, helper],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE process_group_members SET started=started-1 WHERE group_id IN (SELECT id FROM process_groups WHERE session_id=?1 AND process_group=?2)",
+        rusqlite::params![main, helper],
+    )
+    .unwrap();
+
+    world.request(Command::SetStatus {
+        session_id: main.clone(),
+        status: Status::Paused,
+    });
+
+    // The pause's look found the helper, could not confirm the old row by any member it
+    // recorded, and opened a fresh one for the compaction: so the pause spared it.
+    assert!(group_runs(helper), "spared by the pause");
+    assert_eq!(row(&world, helper), Some((compaction, false, None)));
+    let earlier: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM process_groups WHERE run_id='an-earlier-turn'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(earlier, 0, "the stale row is gone");
+
+    world.stop();
+    assert!(!group_runs(helper));
+}
+
+#[test]
 fn a_crash_while_a_codex_agent_compacts_stops_the_app_server_at_the_next_start() {
     let mut world = World::codex();
     let main = world.main.id.clone();

@@ -6439,6 +6439,47 @@ mod tests {
     }
 
     #[test]
+    fn a_group_id_given_out_again_gets_a_record_and_a_notice_of_its_own() {
+        let (_home, mut actor, _, tester, _) = ticket_in_turn();
+        let process = LeftoverProcess::spawn();
+        // An earlier run's group had this id, emptied unseen and was announced: its row is
+        // still open, with a member that is long gone.
+        let db = &actor.host.db;
+        db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at,noticed_at) VALUES ('stale',?1,'earlier',?2,1,1)",
+            params![tester.id, process.group()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO process_group_members(group_id,pid,started,command) VALUES ('stale',?1,?2,'yes')",
+            params![process.group(), process.started() - 1],
+        )
+        .unwrap();
+
+        started_by(&mut actor, &tester.id, "run", &process);
+        finish(&mut actor, &tester, true, None);
+
+        // The sighting did not join the old row: a fresh one is this run's, and it is
+        // announced in its own notice.
+        let rows: Vec<(String, String, bool)> = actor
+            .host
+            .db
+            .prepare("SELECT id,run_id,noticed_at IS NOT NULL FROM process_groups WHERE process_group=?1")
+            .unwrap()
+            .query_map([process.group()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_ne!(rows[0].0, "stale");
+        assert_eq!((rows[0].1.as_str(), rows[0].2), ("run", true));
+        let notices = process_notices(&actor, &tester);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let group = format!("process group {} ", process.group());
+        assert!(notices[0].contains(&group), "{notices:?}");
+    }
+
+    #[test]
     fn an_agent_archived_in_its_turn_keeps_its_processes_until_the_turn_ends() {
         let (_home, mut actor, ticket, tester, _) = ticket_in_turn();
         let mut tool = LeftoverProcess::spawn();
