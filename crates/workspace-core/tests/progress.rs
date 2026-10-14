@@ -141,6 +141,7 @@ fn cycle(outcome: VerificationOutcome, rounds: &[&[(&str, VerifierResult)]]) -> 
         cycle: 1,
         level: None,
         max_rounds: 2,
+        queued_at: None,
         outcome,
         rounds: rounds.collect(),
     }

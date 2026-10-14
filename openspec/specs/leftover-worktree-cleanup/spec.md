@@ -28,7 +28,7 @@ The listing SHALL classify each leftover as exactly one of, in this precedence: 
 - **THEN** it is listed as `unpushed`, unselected, with a note that its branch is kept
 
 ### Requirement: Removal only after explicit approval
-The host SHALL remove leftover worktrees only through a separate removal command carrying the ticket ids the human selected after seeing the listing. For each id it SHALL re-classify the worktree at removal time and skip, with the reason, anything no longer `clean` or `unpushed`. Removal SHALL use non-forced `git worktree remove`, SHALL never delete a branch, ticket, session or message, and SHALL record each outcome in the project's activity.
+The host SHALL remove leftover worktrees only through a separate removal command carrying the ticket ids the human selected after seeing the listing. For each id it SHALL re-classify the worktree at removal time and skip, with the reason, anything no longer `clean` or `unpushed`. Removal SHALL be the whole removal of a ticket's worktree, never forced past a lock or unsaved work, SHALL never delete a branch, ticket, session or message, and SHALL record each outcome in the project's activity.
 
 #### Scenario: Nothing selected
 - **WHEN** the human opens the listing and closes it without selecting

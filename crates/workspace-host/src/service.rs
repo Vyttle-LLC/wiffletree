@@ -577,6 +577,7 @@ impl Service {
                 let setup = (|| -> Result<_> {
                     let mut host = Host::open(home)?;
                     recover_unfinished_turns(&mut host)?;
+                    host.delete_removed_worktrees()?;
                     host.settle_pending_worktrees();
                     let directory = tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
                     let socket = directory.path().join("ipc");
@@ -2408,9 +2409,13 @@ impl Actor {
         }
         Ok(false)
     }
-    /// Starts each verification round that can start. A round's verifiers start together or
-    /// not at all, so they are never scheduled one by one; returns them all.
+    /// Starts the queued cycles that now have a slot, then each verification round that can
+    /// start. A round's verifiers start together or not at all, so they are never scheduled one
+    /// by one; returns them all.
     fn admit_rounds(&mut self) -> Result<HashSet<String>> {
+        if self.host.start_queued_cycles()? {
+            self.state_changed();
+        }
         let mut members_of_rounds = HashSet::new();
         for (ticket, members) in self.waiting_rounds()? {
             self.admit_round(&ticket, &members)?;
@@ -7274,6 +7279,7 @@ mod tests {
             cycle: 1,
             level: None,
             max_rounds: 1,
+            queued_at: None,
             outcome: VerificationOutcome::Blocked,
             rounds: vec![VerificationRound {
                 round: 1,

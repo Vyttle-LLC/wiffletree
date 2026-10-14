@@ -3,7 +3,7 @@ mod codex_compaction;
 mod output;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
-use crate::runtime::OwnDescriptors as _;
+use crate::runtime::{LowPriority as _, OwnDescriptors as _};
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
@@ -118,7 +118,16 @@ pub fn skill(role: Role) -> String {
                 include_str!("../skills/main-coordinator.md")
             }
             Role::Implementer | Role::Maintenance => include_str!("../skills/implementer.md"),
-            _ => include_str!("../skills/tester.md"),
+            Role::Tester => concat!(
+                include_str!("../skills/tester.md"),
+                "\n",
+                include_str!("../skills/tester-role.md")
+            ),
+            Role::Reviewer => concat!(
+                include_str!("../skills/tester.md"),
+                "\n",
+                include_str!("../skills/reviewer-role.md")
+            ),
         }
     )
 }
@@ -190,6 +199,7 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
+        .at_low_priority()
         .own_descriptors_only();
     // Credentials go to the MCP subprocess environment, never in the prompt.
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
@@ -970,6 +980,43 @@ mod tests {
                     .any(|a| a == "--input-format" || a.starts_with("--image"))
             );
             assert_eq!(input(&turn).unwrap(), b"Look");
+        }
+    }
+
+    #[test]
+    fn providers_and_the_tool_commands_they_start_run_at_low_priority() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("provider");
+        // The provider prints its own niceness, then starts a tool command the way a Bash tool
+        // does, leading its own process group, which prints its pid, group and niceness.
+        fs::write(
+            &script,
+            "#!/bin/sh\nps -o nice= -p $$\nset -m\nsh -c 'ps -o pid=,pgid=,nice= -p $$' &\nwait\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        for provider in [Provider::Claude, Provider::Codex] {
+            let mut cmd = ProcessCommand::new(&script);
+            configure(&mut cmd, &turn(provider, None, vec![]));
+            let output = cmd.stdin(Stdio::null()).output().unwrap();
+            let output = String::from_utf8(output.stdout).unwrap();
+            let lines: Vec<Vec<&str>> = output
+                .lines()
+                .map(|line| line.split_whitespace().collect())
+                .collect();
+            let [own, tool] = lines.as_slice() else {
+                panic!("{provider:?}: {output}");
+            };
+            let [pid, group, tool] = tool.as_slice() else {
+                panic!("{provider:?}: {output}");
+            };
+            assert_eq!(own.as_slice(), ["10"], "{provider:?}");
+            assert_eq!(
+                pid, group,
+                "{provider:?}: the tool command leads its own group"
+            );
+            assert_eq!(*tool, "10", "{provider:?}");
         }
     }
 
