@@ -107,7 +107,7 @@ fn current(role: Role) -> Value {
             [("opus", "high"), ("sonnet", "medium")],
             sol,
         ),
-        Role::Maintenance => codex_fixed(role),
+        Role::Maintenance | Role::Keeper => codex_fixed(role),
     }
 }
 
@@ -118,7 +118,8 @@ fn seed(home: &Path, rows: impl Fn(Role) -> Value, setup: impl FnOnce(&mut Host)
     setup(&mut host);
     drop(host);
     let db = Connection::open(home.join("workspace.sqlite3")).unwrap();
-    for role in Role::ALL {
+    // Legacy stores predate the PR keeper, which never had a policy row.
+    for role in Role::ALL.into_iter().filter(|&r| r != Role::Keeper) {
         db.execute(
             "INSERT INTO policies VALUES (?1,?2) ON CONFLICT(role) DO UPDATE SET data=excluded.data",
             rusqlite::params![

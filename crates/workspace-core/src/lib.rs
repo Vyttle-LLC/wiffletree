@@ -41,15 +41,18 @@ pub enum Role {
     Tester,
     Reviewer,
     Maintenance,
+    /// The PR keeper's model runs. Only the host creates these agents; no coordinator tool can.
+    Keeper,
 }
 impl Role {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ProjectOrchestrator,
         Self::TaskOrchestrator,
         Self::Implementer,
         Self::Tester,
         Self::Reviewer,
         Self::Maintenance,
+        Self::Keeper,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -59,6 +62,7 @@ impl Role {
             Self::Tester => "Tester",
             Self::Reviewer => "Reviewer",
             Self::Maintenance => "Maintenance",
+            Self::Keeper => "PR keeper",
         }
     }
     pub fn is_worker(self) -> bool {
