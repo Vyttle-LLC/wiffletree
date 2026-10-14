@@ -237,7 +237,7 @@ One PR each, in this order. Each is useful alone and leaves the others off. The 
 
 Slices 2 and 3 depend only on slice 1. Slice 4 depends on slice 3 for the keeper's model and its role and on slice 2 for the record of a head that is not reviewed, and slice 5 on slice 4.
 
-**One change, five PRs** (decided, (f) 7); slice 1 became two PRs, 1a and 1b, on October 14, 2026, when it measured about twice its estimate. The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
+**One change, five PRs** (decided, (f) 7). The coordinator then split slice 1 into two PRs, 1a and 1b, on October 14, 2026, because it measured about twice its estimate, and told the human; the split was not the human's decision. The delta specs are written so that each requirement belongs to exactly one slice, and tasks.md lists each slice's requirements. Each slice's PR implements its tasks and syncs its own requirements into the main specs, and the last PR archives the change.
 
 ## What this closes and what it does not
 

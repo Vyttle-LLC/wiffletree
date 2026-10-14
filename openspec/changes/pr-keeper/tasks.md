@@ -1,4 +1,4 @@
-Five slices in six PRs, in this order: slice 1 is built as two PRs, 1a and 1b, because it came to about twice its estimate (decided October 14, 2026). Each PR leaves the later ones off and is useful alone. Every requirement of the delta specs belongs to exactly one slice, named at the head of that slice; a slice's PR implements its tasks and syncs those requirements, and only those, into the main specs. Line numbers are at origin/main e45cd30 unless a task says otherwise.
+Five slices in six PRs, in this order: slice 1 is built as two PRs, 1a and 1b, because it came to about twice its estimate (the coordinator's decision on October 14, 2026, on the measured size; the human was told). Each PR leaves the later ones off and is useful alone. Every requirement of the delta specs belongs to exactly one slice, named at the head of that slice; a slice's PR implements its tasks and syncs those requirements, and only those, into the main specs. Line numbers are at origin/main e45cd30 unless a task says otherwise.
 
 ## 1. Slice 1: clean rebases
 
