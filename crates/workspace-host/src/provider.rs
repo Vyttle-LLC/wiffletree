@@ -675,12 +675,17 @@ mod tests {
             Some(libc::EPERM)
         );
         assert_eq!(process.stop().unwrap().code(), Some(3));
-        // Reaped: the group id is free for reuse, and stopping again signals nothing.
-        assert_eq!(unsafe { libc::killpg(group, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        // Reaped: the group id is free for reuse, and stopping again signals nothing. Under
+        // load the kernel takes a moment after the reap to let go of the group.
+        let gone = || {
+            let probe = unsafe { libc::killpg(group, 0) };
+            (probe, std::io::Error::last_os_error().raw_os_error())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while gone() != (-1, Some(libc::ESRCH)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(gone(), (-1, Some(libc::ESRCH)));
         assert_eq!(process.stop().unwrap().code(), Some(3));
     }
 
