@@ -734,7 +734,21 @@ impl Host {
             ));
         }
         let memory = memory.join("\n");
+        // The cycle's first tester owns its one run of the full suite; any other tester is told so.
+        let suite_owner = verification.rounds[0]
+            .verifiers
+            .iter()
+            .find(|v| v.role == Role::Tester);
         for run in &round.verifiers {
+            let suite = match suite_owner {
+                Some(owner) if run.role == Role::Tester && owner.session_id != run.session_id => {
+                    format!(
+                        "Suite owner: {}. It runs this cycle's full build, lint and test suite; you do not. Check as a reviewer does, running one narrowly targeted check at a time.\n",
+                        verifier_label(owner)
+                    )
+                }
+                _ => String::new(),
+            };
             let instruction = settings
                 .verifiers
                 .iter()
@@ -765,7 +779,7 @@ impl Host {
                 Some(&ticket.coordinator_id),
                 &run.session_id,
                 &format!(
-                    "{again}Verify ticket \"{}\" at commit {}: round {} of at most {}.\n\nTicket brief:\n{}\n\nFocus: {}\n{instruction}Worktree: {}\nBranch: {}\n\n{memory}{open}\n\nYou are read-only: do not edit, stage, commit or switch branches in the worktree. Check commit {}, then report passed, failed or blocked, with every finding in findings.",
+                    "{again}Verify ticket \"{}\" at commit {}: round {} of at most {}.\n\nTicket brief:\n{}\n\nFocus: {}\n{instruction}{suite}Worktree: {}\nBranch: {}\n\n{memory}{open}\n\nYou are read-only: do not edit, stage, commit or switch branches in the worktree. Check commit {}, then report passed, failed or blocked, with every finding in findings.",
                     ticket.title,
                     round.commit,
                     round.round,

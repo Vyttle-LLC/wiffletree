@@ -292,6 +292,22 @@ fn one_call_starts_every_verifier_on_the_same_commit() {
         assert!(message.body.contains(&head), "{}", message.body);
         assert!(message.body.contains(&format!("Check {}", run.focus)));
     }
+    // Only the first tester owns the full suite; the second is told so.
+    let bodies: Vec<String> = round
+        .verifiers
+        .iter()
+        .map(|run| f.host.message(&run.message_id).unwrap().body)
+        .collect();
+    assert!(!bodies[0].contains("Suite owner:"));
+    assert!(
+        bodies[1].contains("Suite owner: Tester · Claude."),
+        "{}",
+        bodies[1]
+    );
+    assert!(
+        !bodies[2].contains("Suite owner:"),
+        "a reviewer never runs it"
+    );
     let providers: Vec<_> = round
         .verifiers
         .iter()
