@@ -2,13 +2,19 @@
 //! server's messages say it ended. The protocol is experimental, so only a turn that completed
 //! is a success; everything else is a failure with a reason a person can read.
 use super::*;
-use crate::compaction::REASON_LIMIT;
+use crate::compaction::bounded;
 
 /// The requests in the order they are written. A request's id is its place, from 1.
 const REQUESTS: [&str; 3] = ["initialize", "thread/resume", "thread/compact/start"];
 /// How long a Codex compaction may run. Its server never exits on its own, so nothing else
 /// ends one whose turn does not complete.
-pub const CODEX_COMPACTION_LIMIT: Duration = Duration::from_secs(10 * 60);
+const CODEX_COMPACTION_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// How long the server may take to exit by itself once its outcome is read and its input is
+/// closed, before its process group is stopped. Codex 0.160 writes the last entries of the
+/// thread's record before it reports the outcome, but no interface promises that order, and
+/// it exits within 0.02 seconds of its input closing. A second is fifty times that and the
+/// grace a stopped group already gets; less would trust one machine's timing.
+pub(super) const EXIT_MARGIN: Duration = Duration::from_secs(1);
 /// Shortens the limit, in milliseconds, so a test need not wait it out.
 const LIMIT_OVERRIDE: &str = "WORKSPACE_CODEX_COMPACTION_LIMIT_MS";
 
@@ -49,16 +55,6 @@ pub(super) fn input(turn: &Turn) -> Result<Vec<u8>> {
     ];
     let lines: String = lines.iter().map(|line| format!("{line}\n")).collect();
     Ok(lines.into_bytes())
-}
-
-/// One line of at most `REASON_LIMIT` characters, ended with "…" when it was cut.
-fn bounded(text: &str) -> String {
-    let line = text.lines().next().unwrap_or_default();
-    if line.chars().count() > REASON_LIMIT {
-        format!("{}…", line.chars().take(REASON_LIMIT).collect::<String>())
-    } else {
-        line.to_owned()
-    }
 }
 
 /// Why a compaction failed when Codex refused `request` with `text`. Codex answers a method
@@ -146,14 +142,18 @@ impl Messages {
     }
 
     fn completed(&self, turn: &Value) -> Ended {
-        let mut ended = match (turn["status"].as_str(), turn["error"]["message"].as_str()) {
+        let said = turn["error"]["message"].as_str();
+        let said = said.filter(|said| !said.trim().is_empty());
+        // A message whose first line is blank gives no reason to show.
+        let message = said.filter(|said| !bounded(said).trim().is_empty());
+        let mut ended = match (turn["status"].as_str(), message) {
             (Some("completed"), _) => Ended {
                 records: vec![CompactionRecord::Status(Ok(()))],
                 reported: None,
             },
             (Some("failed"), Some(error)) => Ended::failed(error, Some(error)),
             (Some(status), _) => {
-                Ended::failed(&format!("Codex ended the compaction as {status}"), None)
+                Ended::failed(&format!("Codex ended the compaction as {status}"), said)
             }
             (None, _) => Ended::failed("Codex ended the compaction with no status", None),
         };
@@ -172,6 +172,7 @@ impl Messages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compaction::REASON_LIMIT;
     use CompactionRecord::{Boundary, Status, Turn as TurnId};
 
     /// The server's side of a recorded exchange.
@@ -251,6 +252,18 @@ mod tests {
         assert_eq!(
             end(json!({"status":"failed","error":null})),
             failure("Codex ended the compaction as failed", None)
+        );
+        // So is one whose message has no first line to show; the run keeps what Codex said.
+        assert_eq!(
+            end(json!({"status":"failed","error":{"message":""}})),
+            failure("Codex ended the compaction as failed", None)
+        );
+        assert_eq!(
+            end(json!({"status":"failed","error":{"message":"\nThe model is overloaded"}})),
+            failure(
+                "Codex ended the compaction as failed",
+                Some("\nThe model is overloaded")
+            )
         );
         assert_eq!(
             end(json!({"state":"completed"})),

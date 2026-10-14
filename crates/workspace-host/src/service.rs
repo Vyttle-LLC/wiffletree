@@ -1454,17 +1454,21 @@ impl Actor {
         // now that the server is stopped and writes no more.
         let spent = (session.provider == Provider::Codex && result == CompactionResult::Compacted)
             .then(|| self.codex_compaction_usage(id, compacting.turn.as_deref()));
-        let detail = match session.provider {
+        // `reported` is what the run ended with, whole, where `error` is cut to a reason: the
+        // provider's own text for a failure, or the host's words for a quit, the limit or a
+        // process that exited first. `unrecorded` says why a compacted Codex run has no
+        // request in the ledger.
+        let mut detail = json!({"error":reason,"reported":error});
+        match session.provider {
             Provider::Claude => {
-                json!({"error":reason,"modelUsage":usage["modelUsage"],"total_cost_usd":usage["total_cost_usd"]})
+                detail["modelUsage"] = usage["modelUsage"].clone();
+                detail["total_cost_usd"] = usage["total_cost_usd"].clone();
             }
-            // `reported` is Codex's whole text for a failure; `unrecorded` says why a
-            // compacted run has no request in the ledger.
             Provider::Codex => {
                 let unrecorded = spent.as_ref().and_then(|spent| spent.as_ref().err());
-                json!({"error":reason,"reported":error,"unrecorded":unrecorded.map(|why| format!("{why:#}"))})
+                detail["unrecorded"] = json!(unrecorded.map(|why| format!("{why:#}")));
             }
-        };
+        }
         // One unit: a host that dies here leaves the run unfinished with its request, which
         // the next start settles, never a finished run beside a request that still runs, and
         // never a ledger request without its settled run. The provider thread stopped the

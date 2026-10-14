@@ -36,20 +36,30 @@ if '/context' in args:
     print(json.dumps({'is_error':False,'num_turns':0,'result':report}))
     sys.exit(0)
 def wait_for(gate):
-    # Holds a turn or a compaction until the test creates the gate file.
     deadline=time.time()+30
     while not (Path(os.environ['WORKSPACE_TEST_USAGE_DIR'])/gate).exists() and time.time()<deadline:time.sleep(0.02)
 if args[:1]==['app-server']:
     # Codex's app-server for one compaction, not a turn: it checks the four requests it reads
     # and replays the server side of a recorded exchange. `codex-compact.json` in the test's
     # scratch directory chooses the recording and what to change in it.
-    import tomllib
+    import threading,tomllib
     scratch=Path(os.environ['WORKSPACE_TEST_USAGE_DIR']);streams=Path(__file__).parent/'streams'
     plan=json.loads((scratch/'codex-compact.json').read_text()) if (scratch/'codex-compact.json').exists() else {}
     overrides=[tomllib.loads(o) for o in args[2::2]]
     assert args[1::2]==['-c']*3 and [list(o)[0] for o in overrides]==['model_reasoning_effort','developer_instructions','mcp_servers'],args
     requests=[json.loads(sys.stdin.readline()) for _ in range(4)]
     assert [(r.get('method'),r.get('id')) for r in requests]==[('initialize',1),('initialized',None),('thread/resume',2),('thread/compact/start',3)],requests
+    # The real server ends when its input closes, whatever it was doing. The double logs
+    # anything more it is sent and notes the close.
+    input_closed=threading.Event()
+    def read_input():
+        for line in sys.stdin:
+            with open(scratch/'codex-compact-extra.txt','a') as log:log.write(line)
+        input_closed.set()
+    threading.Thread(target=read_input,daemon=True).start()
+    def leave(code):
+        # Past the interpreter's shutdown, which cannot take the input from a thread reading it.
+        sys.stdout.flush();sys.stderr.flush();os._exit(code)
     # A turn's token lets the workspace's tools answer; a compaction's must not.
     helper=overrides[2]['mcp_servers']['agent_workspace']['command']
     call=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'workspace_context','arguments':{}}})
@@ -78,25 +88,33 @@ if args[:1]==['app-server']:
         record=next(sessions.rglob(f'*{thread}.jsonl'),sessions/'2026/10/13'/f'rollout-2026-10-13T17-10-48-{thread}.jsonl')
         record.parent.mkdir(parents=True,exist_ok=True)
         with open(record,'a') as file:file.write(''.join(json.dumps(e)+'\n' for e in entries))
+    record_owed=False
     for message in recording:
         method=message.get('method')
+        if input_closed.is_set():leave(0)
         if method and method==plan.get('stop_before'):break
         if str(message.get('id')) in plan.get('refuse',{}) and not method:message={'error':{'code':-32600,'message':plan['refuse'][str(message['id'])]},'id':message['id']}
         if plan.get('no_figure') and method=='thread/tokenUsage/updated' and message['params']['turnId']==recorded_turn:continue
         if method=='turn/completed':
             if plan.get('gate'):wait_for('gate-compact')
             message['params']['turn'].update(plan.get('turn',{}))
-            if message['params']['turn']['status']=='completed':write_session_record()
+            # Codex writes the record only for a turn that completed, and before it says so.
+            # `record` changes that: 'failed' writes it for any ending, and 'late' only once
+            # the input has closed.
+            if message['params']['turn']['status']=='completed' or plan.get('record')=='failed':
+                if plan.get('record')=='late':record_owed=True
+                else:write_session_record()
         print(own(json.dumps(message)),flush=True)
     if 'exit' in plan:
-        sys.stderr.write(plan.get('stderr',''));sys.exit(plan['exit'])
+        sys.stderr.write(plan.get('stderr',''));leave(plan['exit'])
     # A server that stops talking for good but stays alive.
     if plan.get('close_output'):os.close(1)
-    # The real server runs until its input closes. The double logs anything more it is sent and
-    # then stays, so only the host's stopping its process group ends it.
-    for line in sys.stdin:
-        with open(scratch/'codex-compact-extra.txt','a') as log:log.write(line)
-    time.sleep(30);sys.exit(0)
+    input_closed.wait()
+    if record_owed:write_session_record()
+    if plan.get('ignore_input_closing'):
+        (scratch/'codex-compact-input-closed.txt').write_text(str(int(time.time()*1000)))
+        time.sleep(30)
+    leave(0)
 claude='--output-format' in args
 if claude:
     assert '--dangerously-skip-permissions' in args, args

@@ -10,6 +10,16 @@ const NOTHING_TO_COMPACT: &str = "Not enough messages to compact";
 /// card cuts every reason it shows at the same length.
 pub const REASON_LIMIT: usize = 200;
 
+/// One line of at most `REASON_LIMIT` characters, ended with "…" when it was cut.
+pub(crate) fn bounded(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    if line.chars().count() > REASON_LIMIT {
+        format!("{}…", line.chars().take(REASON_LIMIT).collect::<String>())
+    } else {
+        line.to_owned()
+    }
+}
+
 /// What the provider said about a compaction, as `provider::run` reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompactionRecord {
@@ -36,8 +46,10 @@ fn instructions(note: Option<&str>) -> Result<Option<String>> {
 
 /// The outcome of a compaction whose process ended on its own, from the status record alone:
 /// the exit code and the result record's error flag never decide success. `error` is what the
-/// run ended with otherwise, and is the reason only when the status record gave none. Only
-/// Claude finds nothing to compact; Codex compacts whenever it is asked.
+/// run ended with otherwise, and is the reason only when the status record gave none: then it
+/// can be an exit with the end of the process's error output, so it is held to one bounded
+/// line for either provider. Only Claude finds nothing to compact; Codex compacts whenever it
+/// is asked.
 pub(crate) fn outcome(
     provider: Provider,
     status: Option<std::result::Result<(), String>>,
@@ -52,12 +64,11 @@ pub(crate) fn outcome(
         }
         Some(Err(reason)) => (CompactionResult::Failed, Some(reason)),
         None => {
-            (
-                CompactionResult::Failed,
-                Some(error.unwrap_or_else(|| {
-                    format!("{} reported no compaction result.", provider.label())
-                })),
-            )
+            let reason = error.map_or_else(
+                || format!("{} reported no compaction result.", provider.label()),
+                |error| bounded(&error),
+            );
+            (CompactionResult::Failed, Some(reason))
         }
     }
 }
@@ -216,6 +227,15 @@ mod tests {
                 (Failed, Some("Conversation too long".into()))
             );
             assert_eq!(outcome(None, exit()), (Failed, exit()));
+        }
+        // What a process ended with can be long and run over several lines.
+        let output = format!("{}\nTraceback\n  File", "x".repeat(300));
+        let early = format!("{} (exit status: 1). {output}", exit().unwrap());
+        for provider in [Provider::Claude, Provider::Codex] {
+            let (result, reason) = outcome(provider, None, Some(early.clone()));
+            let reason = reason.unwrap();
+            assert_eq!(result, Failed);
+            assert_eq!(reason, format!("{}…", &early[..REASON_LIMIT]));
         }
         assert_eq!(
             outcome(Provider::Claude, Some(Err(nothing.clone())), None),
