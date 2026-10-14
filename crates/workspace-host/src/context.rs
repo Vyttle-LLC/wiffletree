@@ -3,7 +3,7 @@
 //! Claude reports its own categories through `/context`. Codex reports only how full the window
 //! is, so its categories are estimated from the sizes of the items in its session record.
 use crate::provider::{executable, skill};
-use crate::runtime::OwnDescriptors as _;
+use crate::runtime::{LowPriority as _, OwnDescriptors as _};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::Value;
 use std::{
@@ -64,6 +64,7 @@ fn claude(probe: &Probe) -> Result<ContextUsage> {
     // workspace's own tool server needs a live turn's credentials and is left out.
     let output = Command::new(executable(Provider::Claude)?)
         .own_descriptors_only()
+        .at_low_priority()
         .current_dir(probe.directory)
         .args(["-p", "/context", "--output-format", "json"])
         .args(["--resume", probe.provider_session])

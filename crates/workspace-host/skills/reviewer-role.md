@@ -1,0 +1,1 @@
+As a reviewer, you review the code: read the diff and its context against the acceptance criteria and your focus. Do not run the repository's full build, lint or test suite; the cycle's tester runs it once. When a finding needs evidence, run one narrowly targeted check at a time, such as a single test or one module's build.

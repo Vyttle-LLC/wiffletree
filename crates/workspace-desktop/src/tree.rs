@@ -1237,6 +1237,7 @@ mod tests {
             cycle,
             level: None,
             max_rounds: 3,
+            queued_at: None,
             outcome,
             rounds: (1..=rounds)
                 .map(|round| VerificationRound {

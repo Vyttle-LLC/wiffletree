@@ -312,7 +312,7 @@ fn verify_ticket_requires_a_level_and_states_the_level_rules() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let implementer = provider::skill(Role::Implementer);
-    assert!(implementer.contains("Implementer — v6"));
+    assert!(implementer.contains("Implementer — v7"));
     assert!(
         implementer.contains("may rebase this ticket's branch onto its base between your turns")
     );
@@ -327,7 +327,7 @@ fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
 fn verifiers_report_located_evidenced_findings_without_patches() {
     for role in [Role::Tester, Role::Reviewer] {
         let verifier = provider::skill(role);
-        assert!(verifier.contains("Tester / reviewer — v5"));
+        assert!(verifier.contains("Tester / reviewer — v6"));
         for phrase in [
             "severity, `path:line` location",
             "trigger and the evidence",
@@ -338,5 +338,24 @@ fn verifiers_report_located_evidenced_findings_without_patches() {
         ] {
             assert!(verifier.contains(phrase), "{role:?}: {phrase}");
         }
+    }
+}
+
+#[test]
+fn only_the_tester_runs_the_full_suite_and_every_build_reuses_the_cache_one_at_a_time() {
+    let tester = provider::skill(Role::Tester);
+    assert!(tester.contains("you own its one run of the full suite"));
+    let reviewer = provider::skill(Role::Reviewer);
+    assert!(reviewer.contains("Do not run the repository's full build, lint or test suite"));
+    assert!(reviewer.contains("one narrowly targeted check at a time"));
+    assert!(!reviewer.contains("you own its one run of the full suite"));
+    for role in [Role::Tester, Role::Reviewer, Role::Implementer] {
+        let skill = provider::skill(role);
+        assert!(
+            skill.contains("one heavy build or test command at a time"),
+            "{role:?}"
+        );
+        assert!(skill.contains("normal build output and cache"), "{role:?}");
+        assert!(!skill.contains("scratch output outside"), "{role:?}");
     }
 }

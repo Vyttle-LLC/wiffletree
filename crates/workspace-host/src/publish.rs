@@ -1028,6 +1028,7 @@ pub(crate) mod tests {
                 cycle,
                 level: None,
                 max_rounds: 3,
+                queued_at: None,
                 outcome,
                 rounds: vec![VerificationRound {
                     round: 1,
