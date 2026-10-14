@@ -1100,11 +1100,6 @@ impl Ticket {
             .filter(|_| self.is_open())
             .and_then(|v| v.queued_at)
     }
-    /// Whether this open ticket's running cycle holds a verification slot: from its start until
-    /// it passes, is blocked or the ticket closes, its rounds in between included.
-    pub fn holds_verification_slot(&self) -> bool {
-        self.is_open() && self.running_cycle().is_some_and(|v| v.queued_at.is_none())
-    }
     /// The most recent full review that passed, which any later re-check rests on.
     pub fn last_full_review(&self) -> Option<&Verification> {
         self.previous_cycles
