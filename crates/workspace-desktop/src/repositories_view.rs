@@ -8,6 +8,10 @@ const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a 
 const UNTIL_GITHUB_ANSWERS: &str = "Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has answered for a repository, it asks first, whatever is ticked. Wiffletree asks GitHub again the next time you come back.";
 const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TICK";
 const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
+const KEEP: &str = "Only in the repositories ticked above · all off until you tick them.";
+const REBASE: &str = "Plain Git, no model and no review. Once the base has been quiet, replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).";
+const NEVER_KEEPER: &str =
+    "Wiffletree never merges, approves, closes or comments on a pull request.";
 
 impl Workspace {
     pub(super) fn repositories_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -16,7 +20,9 @@ impl Workspace {
         };
         let mut body = div().flex().flex_col().gap_3();
         if !snapshot.repositories.is_empty() {
-            body = body.child(self.owners_block(snapshot, p, cx));
+            body = body
+                .child(self.owners_block(snapshot, p, cx))
+                .child(self.keeper_block(&snapshot.keeper, p, cx));
         }
         body = body.child(
             section(
@@ -113,6 +119,11 @@ impl Workspace {
                             p.subtle
                         },
                     ))
+                    .children(
+                        kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper).map(
+                            |label| pill(label, if label == "kept" { p.focus } else { p.subtle }),
+                        ),
+                    )
                     .child(pill(repository.base.clone(), p.subtle))
                     .child(
                         button(SharedString::from(format!("remove-repository-{id}")))
@@ -204,6 +215,92 @@ impl Workspace {
             rows = rows.child(self.owner_row(None, &local.name, None, detail, allowed, p, cx));
         }
         block.child(rows)
+    }
+
+    /// The PR keeper's triggers, for the whole workspace: the rebase trigger and its quiet
+    /// period.
+    fn keeper_block(&self, keeper: &KeeperSettings, p: Palette, cx: &mut Context<Self>) -> Div {
+        let save = |keeper: KeeperSettings| {
+            cx.listener(move |v, _, w, c| {
+                v.request(
+                    Command::SetKeeper {
+                        keeper: keeper.clone(),
+                    },
+                    w,
+                    c,
+                )
+            })
+        };
+        let quiet = |minutes: u32| KeeperSettings {
+            quiet_minutes: minutes,
+            ..keeper.clone()
+        };
+        let minutes = keeper.quiet_minutes;
+        let step = |id: &str, glyph: &str, minutes: u32| {
+            button(SharedString::from(format!("keeper-quiet-{id}")))
+                .ghost()
+                .xsmall()
+                .label(glyph.to_owned())
+                .disabled(!KEEPER_QUIET_MINUTES.contains(&minutes))
+        };
+        let current = keeper.clone();
+        let rebase = cx.listener(move |v, checked: &bool, w, c| {
+            let keeper = KeeperSettings {
+                rebase: *checked,
+                ..current.clone()
+            };
+            v.request(Command::SetKeeper { keeper }, w, c)
+        });
+        let period = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(12.))
+            .text_color(p.subtle)
+            .child("Waits until the base has been quiet for")
+            .child(step("less", "−", minutes - 1).on_click(save(quiet(minutes - 1))))
+            .child(
+                div()
+                    .text_color(p.text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(minutes.to_string()),
+            )
+            .child(step("more", "+", minutes + 1).on_click(save(quiet(minutes + 1))))
+            .child("minutes");
+        div()
+            .mb_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("KEEP PULL REQUESTS UP TO DATE", p))
+            .child(hint(KEEP, p))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        Checkbox::new("keeper-rebase")
+                            .checked(keeper.rebase)
+                            .on_click(rebase),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Rebase when the base branch moves"),
+                            )
+                            .child(hint(REBASE, p))
+                            .child(period),
+                    ),
+            )
+            .child(div().text_size(px(12.)).child(NEVER_KEEPER))
     }
 
     /// One row of the owners block. `entry` is what its tick box allows; a repository that is
