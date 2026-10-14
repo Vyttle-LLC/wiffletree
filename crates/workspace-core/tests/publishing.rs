@@ -187,6 +187,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
     };
     let passed = Verification {
         cycle: 1,
+        level: None,
         max_rounds: 3,
         outcome: VerificationOutcome::Passed,
         rounds: vec![round(
@@ -209,6 +210,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
     assert!(passed.unchecked().is_empty());
     let blocked = Verification {
         cycle: 2,
+        level: None,
         max_rounds: 3,
         outcome: VerificationOutcome::Blocked,
         rounds: vec![
@@ -444,6 +446,127 @@ fn the_blocked_review_card_lists_the_open_findings_and_what_one_approval_would_s
     assert_eq!(step.title, "Push this branch to celadon-theme/website?");
     assert_eq!(step.findings, card.findings);
     assert!(step.would_send.is_none());
+}
+
+/// The waiting ticket after a re-check: cycle 1, "Full", passed at `9e03c1b` with three
+/// verifiers, and cycle 2, the re-check "Light" by Correctness, ended `outcome` at the commit
+/// being pushed.
+fn rechecked_ticket(outcome: &str) -> (Ticket, Repository) {
+    let (mut ticket, repository) = waiting_ticket("push", outcome);
+    let level = |name: &str, kind| {
+        Some(CycleLevel {
+            name: name.into(),
+            kind,
+        })
+    };
+    let mut full = ticket.verification.take().unwrap();
+    full.outcome = VerificationOutcome::Passed;
+    full.level = level("Full", LevelKind::FullReview);
+    full.rounds[0].verifiers = ["Tests", "Correctness", "Regressions"]
+        .map(|focus| run(focus, VerifierResult::Passed))
+        .to_vec();
+    let result = match outcome {
+        "passed" => VerifierResult::Passed,
+        _ => VerifierResult::Failed,
+    };
+    let mut recheck = full.clone();
+    recheck.cycle = 2;
+    recheck.outcome = serde_json::from_value(json!(outcome)).unwrap();
+    recheck.level = level("Light", LevelKind::Recheck);
+    recheck.rounds[0].commit = "b41d2aa000".into();
+    recheck.rounds[0].verifiers = vec![run("Correctness", result)];
+    ticket.previous_cycles = vec![full];
+    ticket.verification = Some(recheck);
+    ticket.publishing.as_mut().unwrap().commit = "b41d2aa000".into();
+    (ticket, repository)
+}
+
+fn row<'a>(card: &'a PublishCard, label: &str) -> Option<&'a str> {
+    card.rows
+        .iter()
+        .find(|(name, _)| *name == label)
+        .map(|(_, value)| value.as_str())
+}
+
+#[test]
+fn the_review_row_names_the_level_and_a_re_check_shows_the_full_review_it_rests_on() {
+    // After a full review: one row.
+    let (mut ticket, repository) = rechecked_ticket("passed");
+    let recheck = ticket
+        .verification
+        .replace(ticket.previous_cycles.remove(0));
+    ticket.publishing.as_mut().unwrap().commit = "9e03c1b000".into();
+    let full = card(&ticket, &repository, &[]);
+    assert_eq!(
+        row(&full, "Review"),
+        Some("Cycle 1 · Full passed at this commit · Tests, Correctness, Regressions")
+    );
+    assert_eq!(row(&full, "Last full review"), None);
+
+    // After a re-check: the row after Review names the last full review and its commit.
+    let (ticket, repository) = rechecked_ticket("passed");
+    assert_eq!(ticket.verification, recheck);
+    let rechecked = card(&ticket, &repository, &[]);
+    let rows: Vec<_> = rechecked.rows.iter().rev().take(2).rev().collect();
+    assert_eq!(
+        rows,
+        [
+            &(
+                "Review",
+                "Cycle 2 · Light re-check passed at this commit · Correctness".to_owned()
+            ),
+            &(
+                "Last full review",
+                "Cycle 1 · Full passed at 9e03c1b · Tests, Correctness, Regressions".to_owned()
+            ),
+        ]
+    );
+    assert!(rechecked.text().contains(
+        "Last full review: Cycle 1 · Full passed at 9e03c1b · Tests, Correctness, Regressions"
+    ));
+
+    // A cycle recorded before levels reads as before and counts as a full review.
+    let (ticket, repository) = waiting_ticket("push", "passed");
+    let before = card(&ticket, &repository, &[]);
+    assert_eq!(
+        row(&before, "Review"),
+        Some("Cycle 1 passed at this commit · Tests, Correctness")
+    );
+    assert_eq!(row(&before, "Last full review"), None);
+}
+
+#[test]
+fn a_blocked_re_check_asks_at_every_level_and_shows_the_last_full_review() {
+    let (mut ticket, repository) = rechecked_ticket("blocked");
+    ticket.ledger = vec![entry("F6", EntryStatus::Open)];
+    let request = ticket.publishing.clone().unwrap();
+    let allowed = vec!["celadon-theme".to_owned()];
+
+    assert_eq!(
+        publish_ask(&ticket, &request, &repository, &allowed),
+        Some(PublishAsk::BlockedReview)
+    );
+    let card = card(&ticket, &repository, &["celadon-theme"]);
+    assert_eq!(
+        card.title,
+        "Publish this ticket although its review ended blocked?"
+    );
+    assert_eq!(
+        row(&card, "Review"),
+        Some(
+            "Cycle 2 · Light re-check ended blocked at b41d2aa, after 1 of 3 rounds · Correctness failed"
+        )
+    );
+    assert_eq!(
+        row(&card, "Last full review"),
+        Some("Cycle 1 · Full passed at 9e03c1b · Tests, Correctness, Regressions")
+    );
+    assert_eq!(card.findings.len(), 1);
+
+    // A passed re-check publishes as any passed review does.
+    let (ticket, repository) = rechecked_ticket("passed");
+    let request = ticket.publishing.clone().unwrap();
+    assert_eq!(publish_ask(&ticket, &request, &repository, &allowed), None);
 }
 
 #[test]

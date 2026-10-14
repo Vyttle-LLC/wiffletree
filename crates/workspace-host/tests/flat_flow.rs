@@ -70,15 +70,15 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
         testers_on_both_providers(&mut host);
-        host.set_verification(VerificationSettings {
-            verifiers: vec![
+        host.set_verification(VerificationSettings::one_level(
+            vec![
                 verifier(Role::Tester, "Claude", Some(Provider::Claude)),
                 verifier(Role::Tester, "Codex", Some(Provider::Codex)),
                 verifier(Role::Reviewer, "Style", None),
             ],
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+            2,
+            2,
+        ))
         .unwrap();
         let project = host.create_project("SH-1171").unwrap();
         let main = host.sessions().unwrap().remove(0);

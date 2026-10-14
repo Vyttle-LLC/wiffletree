@@ -453,6 +453,30 @@ fn the_coordinator_receives_the_model_configuration_and_workers_do_not() {
         model["verifiers"],
         json!(host.settings().verification.verifiers)
     );
+    let light = json!({"name":"Light","kind":"recheck","verifiers":["Correctness"],
+        "use_when":"after a rebase, on a ticket whose last review passed."});
+    let mut verification = host.settings().verification;
+    verification
+        .levels
+        .push(serde_json::from_value(light.clone()).unwrap());
+    host.set_verification(verification.clone()).unwrap();
+    let model = host.agent_context(&coordinator.id).unwrap()["model_selection"].clone();
+    assert_eq!(
+        model["review_levels"],
+        json!([{"name":"Full","kind":"full_review",
+            "verifiers":["Tests","Correctness","Regressions"],"use_when":"for every review."},
+            light])
+    );
+    // A level the human adds while the coordinator is idle is in its next context.
+    verification.levels.push(ReviewLevel {
+        name: "Docs".into(),
+        kind: LevelKind::FullReview,
+        verifiers: vec!["Regressions".into()],
+        use_when: "for a ticket that changes only documentation.".into(),
+    });
+    host.set_verification(verification).unwrap();
+    let model = host.agent_context(&coordinator.id).unwrap()["model_selection"].clone();
+    assert_eq!(model["review_levels"][2]["name"], "Docs");
     selection.guide = "Raise effort for migrations.".into();
     selection.role_providers.insert(
         Role::Implementer,

@@ -3560,8 +3560,8 @@ mod tests {
     /// yet started.
     fn waiting_round(count: usize) -> (tempfile::TempDir, Actor, Ticket, Vec<String>) {
         let (home, mut host, ticket, coordinator) = ticket_fixture();
-        host.set_verification(VerificationSettings {
-            verifiers: (0..count)
+        host.set_verification(VerificationSettings::one_level(
+            (0..count)
                 .map(|i| VerifierConfig {
                     role: Role::Tester,
                     focus: format!("Tester {i}"),
@@ -3569,9 +3569,9 @@ mod tests {
                     provider: None,
                 })
                 .collect(),
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+            2,
+            2,
+        ))
         .unwrap();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Do", None)
@@ -3598,7 +3598,7 @@ mod tests {
                 reason: "Routine check".into(),
             })
             .collect();
-        let ticket = host.verify_ticket(&ticket.id, &choices).unwrap();
+        let ticket = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
         host.set_live(&coordinator.project_id, true).unwrap();
         let verifiers = ticket.verification.as_ref().unwrap().rounds[0]
             .verifiers
@@ -6504,6 +6504,7 @@ mod tests {
         ticket.state = "blocked".into();
         ticket.verification = Some(Verification {
             cycle: 1,
+            level: None,
             max_rounds: 1,
             outcome: VerificationOutcome::Blocked,
             rounds: vec![VerificationRound {

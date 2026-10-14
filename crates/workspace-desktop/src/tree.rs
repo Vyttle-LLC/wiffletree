@@ -42,8 +42,8 @@ fn cycle_line(verification: &Verification) -> String {
         VerificationOutcome::Blocked => "blocked",
     };
     format!(
-        "Verification cycle {}: {outcome}, {} of {} rounds",
-        verification.cycle,
+        "{}: {outcome}, {} of {} rounds",
+        verification.cycle_label("Verification cycle"),
         verification.rounds.len(),
         verification.max_rounds
     )
@@ -1105,8 +1105,8 @@ mod tests {
     #[test]
     fn the_tickets_view_lists_each_round_with_its_commit_and_results() {
         let (_directory, mut host, _root, ticket) = store();
-        host.set_verification(VerificationSettings {
-            verifiers: ["Claude", "Codex"]
+        host.set_verification(VerificationSettings::one_level(
+            ["Claude", "Codex"]
                 .map(|focus| VerifierConfig {
                     role: Role::Tester,
                     focus: focus.into(),
@@ -1114,9 +1114,9 @@ mod tests {
                     provider: None,
                 })
                 .to_vec(),
-            max_rounds: 2,
-            max_cycles: 2,
-        })
+            2,
+            2,
+        ))
         .unwrap();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
@@ -1138,7 +1138,7 @@ mod tests {
             profile: profile.clone(),
             reason: "Routine check".into(),
         });
-        let verifying = host.verify_ticket(&ticket.id, &choices).unwrap();
+        let verifying = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
         let round = &verifying.verification.as_ref().unwrap().rounds[0];
         // The verifier's turn takes its round input before it reports.
         host.advance_receipt(&round.verifiers[0].message_id, Receipt::Delivered)
@@ -1149,6 +1149,10 @@ mod tests {
             serde_json::json!({"message_id":"ok","kind":"passed","body":"Green"}),
         )
         .unwrap();
+        // Renaming the level later does not change the line of a cycle that ran under it.
+        let mut renamed = host.settings().verification;
+        renamed.levels[0].name = "Thorough".into();
+        host.set_verification(renamed).unwrap();
 
         let lines = verification_lines(&host.ticket(&ticket.id).unwrap());
 
@@ -1156,7 +1160,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "Verification cycle 1: running, 1 of 2 rounds".to_owned(),
+                "Verification cycle 1 · Full: running, 1 of 2 rounds".to_owned(),
                 format!("Round 1 at {commit}: Tester · Claude passed, Tester · Codex pending"),
             ]
         );
@@ -1188,6 +1192,7 @@ mod tests {
     fn verification(cycle: u32, outcome: VerificationOutcome, rounds: u32) -> Verification {
         Verification {
             cycle,
+            level: None,
             max_rounds: 3,
             outcome,
             rounds: (1..=rounds)
@@ -1198,6 +1203,39 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn each_cycles_line_names_its_level_and_says_when_it_was_a_re_check() {
+        let (_directory, _host, _root, mut ticket) = store();
+        let level = |name: &str, kind| {
+            Some(CycleLevel {
+                name: name.into(),
+                kind,
+            })
+        };
+        ticket.verification = Some(Verification {
+            level: level("Light", LevelKind::Recheck),
+            ..verification(3, VerificationOutcome::Passed, 1)
+        });
+        ticket.previous_cycles = vec![
+            // Recorded before levels existed.
+            verification(1, VerificationOutcome::Passed, 1),
+            Verification {
+                level: level("Full", LevelKind::FullReview),
+                ..verification(2, VerificationOutcome::Passed, 2)
+            },
+        ];
+
+        assert_eq!(
+            verification_lines(&ticket),
+            [
+                "Verification cycle 3 · Light re-check: passed, 1 of 3 rounds",
+                "Round 1 at 1abcdef: ",
+                "Verification cycle 2 · Full: passed, 2 of 3 rounds",
+                "Verification cycle 1: passed, 1 of 3 rounds",
+            ]
+        );
     }
 
     #[test]

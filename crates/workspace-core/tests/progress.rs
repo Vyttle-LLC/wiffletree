@@ -139,6 +139,7 @@ fn cycle(outcome: VerificationOutcome, rounds: &[&[(&str, VerifierResult)]]) -> 
         });
     Verification {
         cycle: 1,
+        level: None,
         max_rounds: 2,
         outcome,
         rounds: rounds.collect(),

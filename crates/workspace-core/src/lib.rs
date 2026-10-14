@@ -7,7 +7,7 @@ mod selection;
 mod steps;
 mod suggestion;
 mod usage;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 pub use files::*;
 pub use owners::*;
 pub use progress::*;
@@ -590,22 +590,46 @@ impl HostSettings {
 pub const MAX_VERIFICATION_ROUNDS: u32 = 5;
 /// The highest verification cycle cap the settings accept.
 pub const MAX_VERIFICATION_CYCLES: u32 = 5;
-/// Who verifies a ticket when `verify_ticket` is called, how many rounds a cycle may take and
-/// how many cycles a ticket may start.
+/// Who verifies a ticket when `verify_ticket` is called, the levels the coordinator picks from, how
+/// many rounds a cycle may take and how many full reviews a ticket may start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SavedVerification")]
 pub struct VerificationSettings {
     pub verifiers: Vec<VerifierConfig>,
+    pub levels: Vec<ReviewLevel>,
     pub max_rounds: u32,
-    /// Settings saved before the cycle cap existed use the default.
-    #[serde(default = "default_max_cycles")]
+    /// Counts full reviews only; re-checks are not counted.
     pub max_cycles: u32,
+}
+/// The setting as it is stored. Reading it never fails for a setting saved before levels or the
+/// cycle cap existed, because an unreadable settings file drops every setting to its default.
+#[derive(Deserialize)]
+struct SavedVerification {
+    verifiers: Vec<VerifierConfig>,
+    levels: Option<Vec<ReviewLevel>>,
+    max_rounds: u32,
+    #[serde(default = "default_max_cycles")]
+    max_cycles: u32,
+}
+impl From<SavedVerification> for VerificationSettings {
+    fn from(saved: SavedVerification) -> Self {
+        match saved.levels {
+            Some(levels) => Self {
+                verifiers: saved.verifiers,
+                levels,
+                max_rounds: saved.max_rounds,
+                max_cycles: saved.max_cycles,
+            },
+            None => Self::one_level(saved.verifiers, saved.max_rounds, saved.max_cycles),
+        }
+    }
 }
 fn default_max_cycles() -> u32 {
     2
 }
 impl Default for VerificationSettings {
-    /// A tester and a Claude and a Codex review with their lenses, which fit the default turn
-    /// limit; three rounds and two cycles.
+    /// A tester and a Claude and a Codex review with their lenses, all run by the one level
+    /// "Full"; three rounds and two full reviews.
     fn default() -> Self {
         let verifier = |role, focus: &str, instruction: Option<&str>, provider| VerifierConfig {
             role,
@@ -613,8 +637,8 @@ impl Default for VerificationSettings {
             instruction: instruction.map(Into::into),
             provider,
         };
-        Self {
-            verifiers: vec![
+        Self::one_level(
+            vec![
                 verifier(Role::Tester, "Tests", None, None),
                 verifier(
                     Role::Reviewer,
@@ -629,12 +653,39 @@ impl Default for VerificationSettings {
                     Some(Provider::Codex),
                 ),
             ],
-            max_rounds: 3,
-            max_cycles: default_max_cycles(),
-        }
+            3,
+            default_max_cycles(),
+        )
+    }
+}
+/// Names and focuses are compared ignoring surrounding spaces and ASCII case.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+/// Such as "Full, Light or Docs".
+pub fn or_list(names: &[&str]) -> String {
+    match names {
+        [rest @ .., last] if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => names.concat(),
     }
 }
 impl VerificationSettings {
+    /// What a setting saved before levels becomes: its verifiers and caps with one level,
+    /// "Full", a full review that runs every verifier.
+    pub fn one_level(verifiers: Vec<VerifierConfig>, max_rounds: u32, max_cycles: u32) -> Self {
+        let full = ReviewLevel {
+            name: "Full".into(),
+            kind: LevelKind::FullReview,
+            verifiers: verifiers.iter().map(|v| v.focus.clone()).collect(),
+            use_when: "for every review.".into(),
+        };
+        Self {
+            verifiers,
+            levels: vec![full],
+            max_rounds,
+            max_cycles,
+        }
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (1..=MAX_VERIFICATION_ROUNDS).contains(&self.max_rounds),
@@ -642,7 +693,7 @@ impl VerificationSettings {
         );
         ensure!(
             (1..=MAX_VERIFICATION_CYCLES).contains(&self.max_cycles),
-            "Reviews per ticket must be 1–{MAX_VERIFICATION_CYCLES}"
+            "Full reviews per ticket must be 1–{MAX_VERIFICATION_CYCLES}"
         );
         ensure!(
             !self.verifiers.is_empty(),
@@ -671,8 +722,102 @@ impl VerificationSettings {
                 "Verifier instruction is too long"
             );
         }
+        ensure!(
+            self.levels.iter().any(|l| l.kind == LevelKind::FullReview),
+            "Keep at least one level marked Full review."
+        );
+        let mut names = BTreeSet::new();
+        for level in &self.levels {
+            let name = level.name.trim();
+            ensure!(
+                !name.is_empty() && name.len() <= 60,
+                "Give each level a name of 1–60 bytes"
+            );
+            ensure!(
+                names.insert(name.to_lowercase()),
+                "Two levels are named \"{name}\"."
+            );
+            ensure!(
+                !level.verifiers.is_empty(),
+                "{name} would run no verifier. Tick another verifier for {name}, or remove {name}."
+            );
+            let mut run = BTreeSet::new();
+            for focus in &level.verifiers {
+                let focus = focus.trim();
+                ensure!(
+                    focuses.contains(&focus.to_lowercase()),
+                    "{name} runs \"{focus}\", which is not a configured verifier"
+                );
+                ensure!(
+                    run.insert(focus.to_lowercase()),
+                    "{name} names the verifier \"{focus}\" twice"
+                );
+            }
+            ensure!(
+                one_line_reason(&level.use_when).is_ok(),
+                "Say when to use {name}, in one line of at most {MAX_REASON_CHARS} characters"
+            );
+        }
         Ok(())
     }
+    /// The level named `name` and its verifiers in configured order. The only place a level
+    /// becomes verifiers.
+    pub fn level(&self, name: &str) -> Result<(&ReviewLevel, Vec<&VerifierConfig>)> {
+        let level = self
+            .levels
+            .iter()
+            .find(|l| same_name(&l.name, name))
+            .with_context(|| {
+                format!(
+                    "No review level is named \"{}\". {}",
+                    name.trim(),
+                    self.name_a_level()
+                )
+            })?;
+        let configured = |focus: &str| self.verifiers.iter().find(|v| same_name(&v.focus, focus));
+        if let Some(missing) = level.verifiers.iter().find(|f| configured(f).is_none()) {
+            bail!(
+                "{} runs \"{missing}\", which is not a configured verifier. Choose its verifiers again in Models → Review.",
+                level.name
+            );
+        }
+        let verifiers = self
+            .verifiers
+            .iter()
+            .filter(|v| level.runs(&v.focus))
+            .collect();
+        Ok((level, verifiers))
+    }
+    /// Such as "Name a review level: Full, Light or Docs."
+    pub fn name_a_level(&self) -> String {
+        let names: Vec<&str> = self.levels.iter().map(|l| l.name.as_str()).collect();
+        format!("Name a review level: {}.", or_list(&names))
+    }
+}
+/// A named set of the configured verifiers. The coordinator names one each time it starts a
+/// review, and every verifier in it must pass.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewLevel {
+    pub name: String,
+    pub kind: LevelKind,
+    /// The focuses of the verifiers it runs.
+    pub verifiers: Vec<String>,
+    /// One line telling the coordinator when to pick this level.
+    pub use_when: String,
+}
+impl ReviewLevel {
+    /// Focuses match as level names do: trimmed and ignoring ASCII case.
+    pub fn runs(&self, focus: &str) -> bool {
+        self.verifiers.iter().any(|f| same_name(f, focus))
+    }
+}
+/// Whether a level can be a ticket's only review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LevelKind {
+    FullReview,
+    /// Starts only on a ticket whose latest review passed.
+    Recheck,
 }
 /// One configured verifier. The coordinator picks its exact model when it calls
 /// `verify_ticket`; a configured `provider` limits that choice to the provider's models.
@@ -799,6 +944,14 @@ impl Ticket {
         self.verification
             .as_ref()
             .filter(|v| v.outcome == VerificationOutcome::Running)
+    }
+    /// The most recent full review that passed, which any later re-check rests on.
+    pub fn last_full_review(&self) -> Option<&Verification> {
+        self.previous_cycles
+            .iter()
+            .chain(&self.verification)
+            .rev()
+            .find(|v| v.is_full_review() && v.outcome == VerificationOutcome::Passed)
     }
     /// Every finding that is neither fixed nor settled as follow-up or won't-fix.
     pub fn open_findings(&self) -> Vec<&LedgerEntry> {
@@ -970,11 +1123,37 @@ const HOST_NOTICE_PREFIXES: [&str; 4] = [
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verification {
     pub cycle: u32,
+    /// The level the cycle ran. A cycle recorded before levels existed has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<CycleLevel>,
     pub max_rounds: u32,
     pub outcome: VerificationOutcome,
     pub rounds: Vec<VerificationRound>,
 }
+/// A level's name and kind as they were when a cycle started at it; later edits to the level do
+/// not change them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CycleLevel {
+    pub name: String,
+    pub kind: LevelKind,
+}
+impl CycleLevel {
+    /// Such as "Full" or "Light re-check".
+    pub fn label(&self) -> String {
+        match self.kind {
+            LevelKind::FullReview => self.name.clone(),
+            LevelKind::Recheck => format!("{} re-check", self.name),
+        }
+    }
+}
 impl Verification {
+    /// A cycle recorded before levels existed ran every configured verifier, so it counts as a
+    /// full review.
+    pub fn is_full_review(&self) -> bool {
+        self.level
+            .as_ref()
+            .is_none_or(|level| level.kind == LevelKind::FullReview)
+    }
     pub fn current_round(&self) -> Option<&VerificationRound> {
         self.rounds.last()
     }
@@ -1007,12 +1186,39 @@ impl Verification {
             .map(|run| run.focus.as_str())
             .collect()
     }
-    /// How the review ended for `commit`, such as "Cycle 2 passed at this commit · Tests,
-    /// Correctness" or "Cycle 2 ended blocked at c81f04d, after 3 of 3 rounds · Tests passed,
-    /// Correctness failed".
+    /// Such as "Cycle 2 · Light re-check", or "Cycle 1" for a cycle recorded without a level.
+    pub fn cycle_label(&self, noun: &str) -> String {
+        match &self.level {
+            Some(level) => format!("{noun} {} · {}", self.cycle, level.label()),
+            None => format!("{noun} {}", self.cycle),
+        }
+    }
+    /// The verifiers whose latest result stands, such as "Tests, Correctness".
+    fn focuses(&self) -> String {
+        let focuses: Vec<&str> = self
+            .latest_results()
+            .iter()
+            .map(|run| run.focus.as_str())
+            .collect();
+        focuses.join(", ")
+    }
+    /// A passed cycle with the commit it verified, such as "Cycle 1 · Full passed at 9e03c1b ·
+    /// Tests, Correctness, Regressions".
+    pub fn passed_line(&self) -> String {
+        format!(
+            "{} passed at {} · {}",
+            self.cycle_label("Cycle"),
+            short_sha(self.verified_commit().unwrap_or_default()),
+            self.focuses()
+        )
+    }
+    /// How the review ended for `commit`, such as "Cycle 2 · Light re-check passed at this
+    /// commit · Correctness" or "Cycle 2 · Full ended blocked at c81f04d, after 3 of 3 rounds ·
+    /// Tests passed, Correctness failed".
     pub fn review_line(&self, commit: &str) -> String {
         let verified = self.verified_commit().unwrap_or_default();
         let results = self.latest_results();
+        let cycle = self.cycle_label("Cycle");
         match self.outcome {
             VerificationOutcome::Passed => {
                 let at = if verified == commit {
@@ -1023,8 +1229,7 @@ impl Verification {
                         short_sha(verified)
                     )
                 };
-                let foci: Vec<&str> = results.iter().map(|run| run.focus.as_str()).collect();
-                format!("Cycle {} passed {at} · {}", self.cycle, foci.join(", "))
+                format!("{cycle} passed {at} · {}", self.focuses())
             }
             _ => {
                 let results: Vec<String> = results
@@ -1036,8 +1241,7 @@ impl Verification {
                     })
                     .collect();
                 format!(
-                    "Cycle {} ended blocked at {}, after {} of {} rounds · {}",
-                    self.cycle,
+                    "{cycle} ended blocked at {}, after {} of {} rounds · {}",
                     short_sha(verified),
                     self.rounds.len(),
                     self.max_rounds,

@@ -30,14 +30,16 @@ pub fn verifier_choices(host: &Host) -> Vec<VerifierChoice> {
         .collect()
 }
 
-/// `verify_ticket`'s arguments with a valid choice for every configured verifier.
+/// `verify_ticket`'s arguments for the level "Full", with a valid choice for every configured
+/// verifier.
 pub fn verify_args(host: &Host, ticket_id: &str) -> Value {
-    json!({"ticket_id": ticket_id, "verifiers": verifier_choices(host)})
+    json!({"ticket_id": ticket_id, "level": "Full", "verifiers": verifier_choices(host)})
 }
 
 /// Verification by the default tester alone, for tests that pass or fail one verifier.
 pub fn one_tester(host: &mut Host) {
     let mut verification = VerificationSettings::default();
     verification.verifiers.truncate(1);
+    verification.levels[0].verifiers.truncate(1);
     host.set_verification(verification).unwrap();
 }

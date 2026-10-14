@@ -302,7 +302,7 @@ pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--
           <div class="col">
             <div class="refused">Name a review level: Full, Light or Docs.</div>
             <div class="refused">Light is a re-check, and this ticket has not passed a review yet. Start with a full review: Full or Docs.</div>
-            <div class="refused">Light is a re-check, and this ticket’s last review ended blocked. Run a full review, accept with a waiver, close the ticket or ask the human.</div>
+            <div class="refused">Light is a re-check, and this ticket’s last review ended blocked. Run a full review (Full or Docs), accept with a waiver, close the ticket or ask the human.</div>
             <div class="refused">Regressions has the open finding F5, and Docs does not run Regressions. Use a level that runs it, or settle F5 with triage_findings.</div>
             <div class="refused">Tests is not part of Light. Choose a model only for Correctness.</div>
             <div class="refused">Ticket “Session search” has used its 2 full reviews; accept it with a waiver, close it or ask the human. Only the human can raise the limit, in Models → Review.</div>
@@ -369,7 +369,7 @@ pre{margin:0;font:10.5px/1.55 ui-monospace,SFMono-Regular,monospace;color:var(--
 </div>
 
 <ul class="notes">
-  <li><b>Settled with the human on October 13, 2026</b> (see <span class="mono">openspec/changes/review-levels/design.md</span>): (1) two kinds of level, Full review and Re-check, with the app refusing a re-check on a ticket whose last review did not pass, and refusing any level that leaves out a verifier with an open blocking finding; (2) an update adds no level beside your migrated Full, and a new install starts with Full and Light; (3) the coordinator must name a level every time, and none is the default; (4) re-checks are not counted against “Full reviews per ticket”.</li>
+  <li><b>Settled with the human on October 13, 2026</b> (see <span class="mono">openspec/changes/archive/2026-10-13-review-levels/design.md</span>): (1) two kinds of level, Full review and Re-check, with the app refusing a re-check on a ticket whose last review did not pass, and refusing any level that leaves out a verifier with an open blocking finding; (2) an update adds no level beside your migrated Full, and a new install starts with Full and Light; (3) the coordinator must name a level every time, and none is the default; (4) re-checks are not counted against “Full reviews per ticket”.</li>
   <li><b>What this does not measure.</b> After a full review has passed, later changes of any size can pass on re-checks alone. The app does not judge how much changed since the full review, and in an allowed owner’s repository that push goes out without a card. Where a card is shown, it names both commits.</li>
   <li><b>Not in this change:</b> the PR keeper, the Skills page, the settings repository, and any per-level choice of model. Until the Skills page exists, “when to use each level” lives in the level’s own “Use it” line plus one sentence in the coordinator’s instructions.</li>
   <li>The verifier named Style, the Docs level and all tickets, commits and pull requests here are examples. A new install’s suggested verifiers are Tests, Correctness and Regressions, as today.</li>

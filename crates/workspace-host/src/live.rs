@@ -527,7 +527,8 @@ impl Host {
             let verification = self.settings().verification;
             context["model_selection"] = json!({"revision": selection.revision,
                 "providers": providers, "role_providers": selection.role_providers,
-                "verifiers": verification.verifiers, "max_rounds": verification.max_rounds,
+                "verifiers": verification.verifiers, "review_levels": verification.levels,
+                "max_rounds": verification.max_rounds,
                 "max_cycles": verification.max_cycles, "guide": selection.guide});
         }
         let child_reports = self.child_reports(id)?;
@@ -785,12 +786,15 @@ impl Host {
             }
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                let level = args["level"]
+                    .as_str()
+                    .with_context(|| self.settings().verification.name_a_level())?;
                 let choices: Vec<VerifierChoice> =
                     serde_json::from_value(args.get("verifiers").cloned().context(
-                        "Missing verifiers: choose a profile and reason for each verifier",
+                        "Missing verifiers: choose a profile and reason for each verifier of the level",
                     )?)?;
                 Ok(serde_json::to_value(
-                    self.verify_ticket(&ticket.id, &choices)?,
+                    self.verify_ticket(&ticket.id, level, &choices)?,
                 )?)
             }
             "triage_findings" => {

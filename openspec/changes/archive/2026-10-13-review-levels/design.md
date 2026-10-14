@@ -48,6 +48,9 @@ See proposal.md for why. The code this builds on, at origin/main 4b29415:
 9. The cap (decision 9). Re-checks are not counted against it, and it becomes "Full reviews per ticket".
 10. The limit, which he was told and accepted: once a full review has passed, later changes of any size can pass on a re-check. The app does not measure how much changed, and in an allowed owner's repository that push goes out without a card.
 
+**Decided by the coordinator on October 13, 2026**, during implementation, and cheap to reverse:
+11. A newly added verifier is ticked in every level whose kind is Full review, and in no Re-check level, in the same save. Before levels, adding a verifier made it run; with a migrated single "Full" level, a new verifier that ran nowhere would be a silent trap. Reviewing too much is the safer default, and unticking is one click.
+
 **Not approved, and left out:** a one-line reason for the level choice.
 
 **Everything else here is a design decision made in this proposal.**
@@ -62,7 +65,7 @@ A level holds the focuses of the verifiers it runs, chosen from the one configur
 
 The cost: a level cannot give the same focus a different instruction. A person who wants that adds a second verifier, such as "Rebase check", and ticks it only where it belongs.
 
-A verifier may be in no level; it then never runs, and the page shows it with no tick anywhere. Removing a verifier takes it out of every level, and is refused when that would leave a level with none.
+A verifier may be in no level; it then never runs, and the page shows it with no tick anywhere. A newly added verifier starts ticked in every full-review level (item 11 above), so it reaches that state only when the human unticks it. Removing a verifier takes it out of every level, and is refused when that would leave a level with none.
 
 ### 2. Two kinds of level, checked when a review starts
 In an allowed owner's repository a passed review lets the app push and open a PR without asking, and it unlocks `accept_ticket`. If any level's pass counted, a coordinator could pick the lightest level and lower that bar by itself. Three ways to prevent it were weighed.
@@ -88,7 +91,7 @@ All on JSON that is already stored.
 // workspace-core/src/lib.rs
 pub struct VerificationSettings {
     pub verifiers: Vec<VerifierConfig>,   // unchanged: the one list
-    pub levels: Vec<ReviewLevel>,         // never empty once read (decision 4)
+    pub levels: Vec<ReviewLevel>,         // one level "Full" when saved without levels (decision 4)
     pub max_rounds: u32,                  // unchanged
     pub max_cycles: u32,                  // now counts full reviews only (decision 9)
 }
@@ -115,9 +118,9 @@ A setting saved before this change has no `levels`. It is read as:
 - `verifiers`, `max_rounds` and `max_cycles`: exactly as saved, in the same order, with every instruction and provider.
 - `levels`: one level named **Full**, kind full review, running every saved verifier in order, with the "Use it" line "for every review."
 
-So every review starts the same verifiers as before and unlocks the same things. Nothing is rewritten on disk until the human next changes the card; the level is filled in on read, by deserializing through a private `SavedVerification` struct (`#[serde(from = …)]`) whose `From` adds the level when `levels` is empty. That conversion cannot fail, which matters because `Host::settings` drops to every default on a parse error. A settings file with no `verification` key at all uses `VerificationSettings::default()`, which is today's three verifiers and the same single Full level.
+So every review starts the same verifiers as before and unlocks the same things. Nothing is rewritten on disk until the human next changes the card; the level is filled in on read, by deserializing through a private `SavedVerification` struct (`#[serde(from = …)]`) whose `From` adds the level when the saved setting has no `levels`. A setting sent with an empty list is not filled in; `validate` refuses it, so removing the last level on the card cannot quietly bring back "Full". That conversion cannot fail, which matters because `Host::settings` drops to every default on a parse error. A settings file with no `verification` key at all uses `VerificationSettings::default()`, which is today's three verifiers and the same single Full level.
 
-No second level is added on update. *Why not add Light too:* it would change what runs after a rebase without the human having seen the page. The first time Add level is pressed while no level is a re-check, the form is filled in as Light with the first reviewer ticked and the stock "Use it" line, so adding it is two clicks.
+No second level is added on update. *Why not add Light too:* it would change what runs after a rebase without the human having seen the page. While no level is a re-check, Add level opens its form filled in as Light with the first reviewer ticked and the stock "Use it" line, so adding it is two clicks. Two cases get the empty form instead, as a re-check: a level is already named "Light" (ignoring case), so confirming the filled-in form would be refused as a duplicate name; and no reviewer is configured, so there is no first reviewer to tick.
 
 `max_cycles` keeps its saved number. Its meaning narrows from "cycles" to "full reviews", which never refuses a review the old meaning allowed.
 
@@ -167,7 +170,7 @@ In two small places:
 
 ### 9. The caps
 - **Rounds per review stays one global setting.** It bounds every cycle at every level. Nothing argues for a different number per level.
-- **The cycle cap stays one global setting but counts full reviews only.** This departs from "keep it global and unchanged", for a reason. Counted against the default of 2, one full review and one re-check would exhaust a ticket, and the cap's maximum of 5 would stop every later rebase check on a PR that stays open for days, which is the case the human named. What the cap exists for is to end a review that does not converge, and re-checks cannot be used for that: a re-check starts only after a pass, and a blocked one must be followed by a full review, which is counted. A chain of re-checks is therefore a chain of passes, each caused by a new commit. Nothing caps its length; the coordinator's and the human's check-ins supervise it, as the plan chose for the keeper.
+- **The cycle cap stays one global setting but counts full reviews only.** This departs from "keep it global and unchanged", for a reason. Counted against the default of 2, one full review and one re-check would exhaust a ticket, and the cap's maximum of 5 would stop every later rebase check on a PR that stays open for days, which is the case the human named. What the cap exists for is to end a review that does not converge, and re-checks cannot be used for that: a re-check starts only after a pass, and a blocked one must be followed by a full review, which is counted. A chain of re-checks is therefore a chain of passes. Each is meant to follow a new commit, such as a rebase or a small fix, but the app does not check that. Nothing caps its length; the coordinator's and the human's check-ins supervise it, as the plan chose for the keeper.
 - The card's label becomes "Full reviews per ticket" and its caption says re-checks are not counted. The setting's name in data stays `max_cycles`.
 - The alternative, counting every cycle, keeps the code one line shorter and would need the human to raise the cap whenever a PR needs a third check.
 
@@ -180,7 +183,7 @@ In two small places:
 ### 11. The Review card
 See `design/mockups/current/review-levels.html`.
 
-`verifiers.rs` gains a Levels block above the verifier list. Each level is one row group: its name, a two-option kind control built with the `segment` helper the role and provider pickers use, one tick chip per configured verifier, and its "Use it" line. Ticks and the kind save at once through `save` (`:108`), as everything on the card does. A pencil opens the name and the "Use it" line as two inputs with Done and Cancel; Add level opens the same form empty, or filled in as Light when no re-check exists (decision 4). The host's refusals appear in the card's existing error line, in `validate`'s words: "Keep at least one level marked Full review.", "Light would run no verifier. Tick another verifier for Light, or remove Light." and "Two levels are named \"Light\".".
+`verifiers.rs` gains a Levels block above the verifier list. Each level is one row group: its name, a two-option kind control built with the `segment` helper the role and provider pickers use, one tick chip per configured verifier, and its "Use it" line. Ticks and the kind save at once through `save` (`:108`), as everything on the card does. A pencil opens the name and the "Use it" line as two inputs with Done and Cancel; Add level opens the same form empty, or filled in as Light under the conditions in decision 4. The host's refusals appear in the card's existing error line, in `validate`'s words: "Keep at least one level marked Full review.", "Light would run no verifier. Tick another verifier for Light, or remove Light." and "Two levels are named \"Light\".".
 
 The second `cap_selector` is labelled "Full reviews per ticket". `models_view.rs::review_card` (`:370`) changes its subtitle to "who reviews a ticket, and how thoroughly". The card's closing hint says `verify_ticket` starts every verifier of the level the coordinator names.
 
@@ -230,7 +233,7 @@ Not changed: `live.rs::accept_ticket`, `publishing.rs::publish_ask`, `publish.rs
 - [A coordinator omits `level` out of habit] → one refused call that lists the levels; nothing starts.
 - [The human marks every level as a full review] → their choice; the page says the lightest full review is the bar.
 - [A re-check passes a large change] → accepted by the human (item 10). The ticket's card and the publish card show the re-check, the last full review and both commits. A size threshold would be a hard limit the human has said he does not want.
-- [Many re-checks on one ticket] → each follows a pass and a new commit; check-ins supervise. If it proves a problem, a setting can cap them later without a migration.
+- [Many re-checks on one ticket] → each follows a pass, and is meant to follow a new commit, which the app does not check; check-ins supervise. If it proves a problem, a setting can cap them later without a migration.
 - [The first-run change is not archived yet, so its "Suggested setup on first run" requirement is not in the main `model-routing` spec] → the suggested levels are specified under `ticket-verification`, beside the default verifiers, so this change does not depend on that archive.
 - [`model_selection` grows] → a few hundred bytes per level.
 - [A hand-edited `settings.json` names a verifier that does not exist in a level] → `verify_ticket` refuses that level and says why; the card shows the level with the missing verifier unticked and saves a valid setting on the next change.

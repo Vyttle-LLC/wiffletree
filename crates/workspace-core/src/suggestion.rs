@@ -1,7 +1,7 @@
 //! The setup suggested on first run, from the provider CLIs signed in on this machine.
 use crate::{
-    AllowedModel, ModelSelection, PROVIDER_ROLES, PROVIDERS, Provider, ProviderAccess, Role,
-    VerificationSettings,
+    AllowedModel, LevelKind, ModelSelection, PROVIDER_ROLES, PROVIDERS, Provider, ProviderAccess,
+    ReviewLevel, Role, VerificationSettings, VerifierConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,6 +63,33 @@ pub fn starter_guide(providers: &[Provider]) -> String {
     )
 }
 
+/// The stock "Use it" line of the re-check level "Light".
+pub const LIGHT_USE_WHEN: &str = "after a rebase, a resolved merge conflict or a small fix, on a ticket whose last review passed.";
+
+/// "Light", a re-check that runs the first reviewer among `verifiers`, when there is one.
+pub fn light_level(verifiers: &[VerifierConfig]) -> Option<ReviewLevel> {
+    let reviewer = verifiers.iter().find(|v| v.role == Role::Reviewer)?;
+    Some(ReviewLevel {
+        name: "Light".into(),
+        kind: LevelKind::Recheck,
+        verifiers: vec![reviewer.focus.clone()],
+        use_when: LIGHT_USE_WHEN.into(),
+    })
+}
+
+/// "Full", a full review with every suggested verifier, and "Light".
+fn suggested_levels(verifiers: &[VerifierConfig]) -> Vec<ReviewLevel> {
+    let full = ReviewLevel {
+        name: "Full".into(),
+        kind: LevelKind::FullReview,
+        verifiers: verifiers.iter().map(|v| v.focus.clone()).collect(),
+        use_when: "for a ticket's first review, and after any change to what the code does.".into(),
+    };
+    std::iter::once(full)
+        .chain(light_level(verifiers))
+        .collect()
+}
+
 /// A setup that uses only the providers found installed and signed in: Claude coordinates and
 /// implements and Codex tests when both are, otherwise the one found does everything. With
 /// neither, both providers are disabled and the setup cannot be saved.
@@ -98,6 +125,7 @@ pub fn suggest(detection: &Detection) -> Setup {
     verification
         .verifiers
         .retain(|v| v.provider.is_none_or(|p| usable.contains(&p)));
+    verification.levels = suggested_levels(&verification.verifiers);
     Setup {
         selection: ModelSelection {
             revision: 0,

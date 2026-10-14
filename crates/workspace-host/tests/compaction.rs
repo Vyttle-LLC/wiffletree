@@ -1064,11 +1064,11 @@ fn round_with_a_paused_verifier(
         instruction: None,
         provider: Some(Provider::Claude),
     };
-    host.set_verification(VerificationSettings {
-        verifiers: vec![tester("First"), tester("Second")],
-        max_rounds: 2,
-        max_cycles: 2,
-    })
+    host.set_verification(VerificationSettings::one_level(
+        vec![tester("First"), tester("Second")],
+        2,
+        2,
+    ))
     .unwrap();
     let mut selection = host.model_selection().unwrap();
     selection
@@ -1098,7 +1098,7 @@ fn round_with_a_paused_verifier(
             reason: "Routine check".into(),
         })
         .into();
-    let ticket = host.verify_ticket(&ticket.id, &choices).unwrap();
+    let ticket = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
     let verifiers = ticket.verification.unwrap().rounds[0].verifiers.clone();
     for session in [&main.id, &implementer.id, &verifiers[1].session_id] {
         host.set_status(session, Status::Paused).unwrap();

@@ -1,5 +1,5 @@
-//! Ticket verification. One call starts every configured verifier on the ticket's current
-//! commit; the scheduler runs a round's verifiers together. Verifiers are read-only. Failures go
+//! Ticket verification. One call starts every verifier of the review level the coordinator names
+//! on the ticket's current commit; the scheduler runs a round's verifiers together. Verifiers are read-only. Failures go
 //! back to the implementer, only failed verifiers re-run, rounds are capped, and the project
 //! coordinator wakes once, when the cycle ends. Verifiers are archived once the cycle no longer
 //! needs them, so every cycle starts fresh sessions.
@@ -95,6 +95,74 @@ fn cycle_verifiers(ticket: &Ticket) -> Vec<String> {
             .map(|run| run.session_id.clone())
             .collect()
     })
+}
+
+/// How many full reviews the ticket has started, its latest cycle included. Re-checks are not
+/// counted against the cycle cap.
+fn full_reviews(ticket: &Ticket) -> usize {
+    ticket
+        .previous_cycles
+        .iter()
+        .chain(&ticket.verification)
+        .filter(|v| v.is_full_review())
+        .count()
+}
+
+/// The rules that keep a lighter level from lowering the bar for accepting or publishing: a
+/// re-check starts only on a ticket whose latest cycle passed, no level leaves out a configured
+/// verifier that has an open finding, and full reviews stop at the cycle cap. With these, every
+/// passed cycle rests on a passed full review.
+fn level_may_start(
+    ticket: &Ticket,
+    settings: &VerificationSettings,
+    level: &ReviewLevel,
+) -> Result<()> {
+    if level.kind == LevelKind::Recheck {
+        let full_reviews: Vec<&str> = settings
+            .levels
+            .iter()
+            .filter(|l| l.kind == LevelKind::FullReview)
+            .map(|l| l.name.as_str())
+            .collect();
+        let full_reviews = or_list(&full_reviews);
+        match ticket.verification.as_ref().map(|v| v.outcome) {
+            Some(VerificationOutcome::Passed) => {}
+            None => bail!(
+                "{} is a re-check, and this ticket has not passed a review yet. Start with a full review: {full_reviews}.",
+                level.name
+            ),
+            Some(_) => bail!(
+                "{} is a re-check, and this ticket's last review ended blocked. Run a full review ({full_reviews}), accept with a waiver, close the ticket or ask the human.",
+                level.name
+            ),
+        }
+    }
+    for outside in settings.verifiers.iter().filter(|v| !level.runs(&v.focus)) {
+        let open: Vec<&str> = ticket
+            .ledger
+            .iter()
+            .filter(|e| e.status == EntryStatus::Open && e.focus == outside.focus)
+            .map(|e| e.id.as_str())
+            .collect();
+        let (findings, them) = match open.as_slice() {
+            [] => continue,
+            [one] => ("finding", *one),
+            _ => ("findings", "them"),
+        };
+        bail!(
+            "{focus} has the open {findings} {}, and {} does not run {focus}. Use a level that runs it, or settle {them} with triage_findings.",
+            open.join(", "),
+            level.name,
+            focus = outside.focus
+        );
+    }
+    ensure!(
+        level.kind == LevelKind::Recheck || full_reviews(ticket) < settings.max_cycles as usize,
+        "Ticket \"{}\" has used its {} full reviews; accept it with a waiver, close it or ask the human. Only the human can raise the limit, in Models → Review.",
+        ticket.title,
+        settings.max_cycles
+    );
+    Ok(())
 }
 
 fn verifier_label(run: &VerifierRun) -> String {
@@ -278,10 +346,19 @@ pub(crate) struct Triage {
 }
 
 impl Host {
-    /// Starts a cycle: pins HEAD and sends every configured verifier one message naming it.
-    /// `choices` gives each verifier, by focus, the coordinator's exact model and reason; a new
-    /// verifier is pinned to it. An existing one is reused only at the same profile; otherwise it is archived and a fresh one takes the choice, so no pinned model ever changes.
-    pub fn verify_ticket(&mut self, ticket_id: &str, choices: &[VerifierChoice]) -> Result<Ticket> {
+    /// Starts a cycle at the review level named `level`: pins HEAD and sends every verifier of
+    /// that level one message naming it. A re-check starts only on a ticket whose latest cycle
+    /// passed, no level may leave out a configured verifier that has an open finding, and only
+    /// full reviews count against the cycle cap. `choices` gives each verifier of the level, by
+    /// focus, the coordinator's exact model and reason; a new verifier is pinned to it. An
+    /// existing one is reused only at the same profile; otherwise it is archived and a fresh one
+    /// takes the choice, so no pinned model ever changes.
+    pub fn verify_ticket(
+        &mut self,
+        ticket_id: &str,
+        level: &str,
+        choices: &[VerifierChoice],
+    ) -> Result<Ticket> {
         let mut ticket = self.ticket(ticket_id)?;
         if let Some(cycle) = ticket.running_cycle() {
             bail!("Verification cycle {} is already running", cycle.cycle);
@@ -301,19 +378,15 @@ impl Host {
             "The worktree has uncommitted or untracked files; ask the implementer to commit or discard them"
         );
         let settings = self.settings().verification;
+        let (level, level_verifiers) = settings.level(level)?;
+        level_may_start(&ticket, &settings, level)?;
         let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
-        ensure!(
-            cycle <= settings.max_cycles,
-            "Ticket \"{}\" has used its {} verification cycles; accept it with a waiver, close it or ask the human. Only the human can raise the cycle cap, in Models → Review.",
-            ticket.title,
-            settings.max_cycles
-        );
         let coordinator = self.session(&ticket.coordinator_id)?;
-        let chosen = self.verifier_choices(&coordinator, &settings.verifiers, choices)?;
+        let chosen = self.verifier_choices(&coordinator, level, &level_verifiers, choices)?;
         let commit = head(&ticket)?;
         self.atomically(|host| {
             let mut verifiers = vec![];
-            for (config, (profile, reason)) in settings.verifiers.iter().zip(chosen) {
+            for (config, (profile, reason)) in level_verifiers.into_iter().zip(chosen) {
                 let existing =
                     host.existing_assignment(&ticket.id, config.role, Some(&config.focus))?;
                 // A verifier keeps its model: one pinned to another profile is retired, and a
@@ -362,6 +435,10 @@ impl Host {
             ticket.previous_cycles.extend(ticket.verification.take());
             ticket.verification = Some(Verification {
                 cycle,
+                level: Some(CycleLevel {
+                    name: level.name.clone(),
+                    kind: level.kind,
+                }),
                 max_rounds: settings.max_rounds,
                 outcome: VerificationOutcome::Running,
                 rounds: vec![VerificationRound {
@@ -435,23 +512,27 @@ impl Host {
             Ok(ticket)
         })
     }
-    /// Pairs every configured verifier with the coordinator's choice for it, checking each
+    /// Pairs every verifier of `level` with the coordinator's choice for it, checking each
     /// against the machine's model selection and the verifier's provider. Nothing is substituted:
     /// one refusal starts no verifier.
     fn verifier_choices(
         &self,
         coordinator: &Session,
-        verifiers: &[VerifierConfig],
+        level: &ReviewLevel,
+        verifiers: &[&VerifierConfig],
         choices: &[VerifierChoice],
     ) -> Result<Vec<(ModelProfile, String)>> {
         let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
-        if let Some(unknown) = choices
+        if let Some(outside) = choices
             .iter()
             .find(|c| !verifiers.iter().any(|v| same(&v.focus, &c.focus)))
         {
+            let focuses: Vec<&str> = verifiers.iter().map(|v| v.focus.as_str()).collect();
             bail!(
-                "No verifier has the focus \"{}\"; choose one model for each verifier in model_selection",
-                unknown.focus
+                "{} is not part of {}. Choose a model only for {}.",
+                outside.focus.trim(),
+                level.name,
+                focuses.join(", ")
             );
         }
         let selection = self.model_selection()?;
@@ -459,9 +540,12 @@ impl Host {
         for verifier in verifiers {
             let label = verifier.role.agent_label(Some(&verifier.focus));
             let mut matching = choices.iter().filter(|c| same(&c.focus, &verifier.focus));
-            let choice = matching
-                .next()
-                .with_context(|| format!("Choose a profile and reason for {label}"))?;
+            let choice = matching.next().with_context(|| {
+                format!(
+                    "Choose a profile and reason for {label}, which {} runs",
+                    level.name
+                )
+            })?;
             ensure!(matching.next().is_none(), "Choose {label}'s model once");
             let reason = Selection::check_reason(&choice.reason)?.to_owned();
             if let Err(rejection) = selection.permits_verifier(verifier, &choice.profile) {
@@ -831,11 +915,20 @@ impl Host {
             self.send(&id, None, &implementer, &body)?;
             return self.retire(&passed);
         }
+        let max_cycles = self.settings().verification.max_cycles;
+        let level = match &verification.level {
+            Some(level) if level.kind == LevelKind::Recheck => format!("a {} re-check", level.name),
+            level => format!(
+                "full review {} of {max_cycles}{}",
+                full_reviews(&ticket),
+                level
+                    .as_ref()
+                    .map_or(String::new(), |level| format!(" ({})", level.name))
+            ),
+        };
         let rounds = format!(
-            "cycle {cycle} of {}, {} of {} rounds",
-            self.settings().verification.max_cycles,
-            round.round,
-            verification.max_rounds
+            "cycle {cycle}, {level}, {} of {} rounds",
+            round.round, verification.max_rounds
         );
         // The cycle ends here, so its message already lists orphaned entries as untriaged.
         untriage_orphans(verification, &mut ticket.ledger);
@@ -854,8 +947,10 @@ impl Host {
                 .filter(|v| v.result == VerifierResult::Blocked)
                 .collect();
             let mut actions = vec![];
-            if cycle < self.settings().verification.max_cycles {
-                actions.push("send the implementer fixes and call verify_ticket again");
+            if full_reviews(&ticket) < max_cycles as usize {
+                actions.push(
+                    "send the implementer fixes and call verify_ticket again with a full-review level, not a re-check",
+                );
             }
             if !blocked {
                 actions.push(

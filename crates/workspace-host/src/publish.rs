@@ -980,6 +980,7 @@ pub(crate) mod tests {
             let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
             ticket.verification = Some(Verification {
                 cycle,
+                level: None,
                 max_rounds: 3,
                 outcome,
                 rounds: vec![VerificationRound {
@@ -1758,6 +1759,25 @@ pub(crate) mod tests {
             "{again}"
         );
         assert_eq!(pushes(&remote), before);
+    }
+
+    #[test]
+    fn a_passed_re_check_pushes_to_the_open_pull_request_without_asking() {
+        let (mut f, remote) = published();
+        let head = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        let mut ticket = f.ticket();
+        ticket.verification.as_mut().unwrap().level = Some(CycleLevel {
+            name: "Light".into(),
+            kind: LevelKind::Recheck,
+        });
+        f.host.save_ticket(&ticket).unwrap();
+
+        let result = update(&mut f, &remote);
+
+        assert!(result.starts_with("Pushed "), "{result}");
+        assert_eq!(remote.branch(BRANCH), Some(head));
+        assert!(f.open_items().is_empty());
     }
 
     #[test]
@@ -3240,7 +3260,7 @@ pub(crate) mod tests {
             .agent_tool(
                 &coordinator,
                 "verify_ticket",
-                json!({"ticket_id": f.ticket, "verifiers": verifiers}),
+                json!({"ticket_id": f.ticket, "level": "Full", "verifiers": verifiers}),
             )
             .unwrap();
         let sessions: Vec<String> = f.ticket().verification.unwrap().rounds[0]

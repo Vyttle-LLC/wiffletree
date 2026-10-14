@@ -414,3 +414,28 @@ fn nested_branches_take_their_prefix_and_a_wiffletree_branch_is_reported() {
         .to_string();
     assert!(error.contains("branch named \"wiffletree\""), "{error}");
 }
+
+#[test]
+fn settings_saved_before_levels_read_as_one_full_level_without_rewriting_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("settings.json");
+    let mut host = Host::open_set_up(directory.path()).unwrap();
+    let saved = r#"{"workspaces_dir":"/tmp/w","verification":{"verifiers":[{"role":"tester","focus":"Tests"},{"role":"reviewer","focus":"Claude","instruction":"Correctness.","provider":"claude"},{"role":"reviewer","focus":"Codex","provider":"codex"},{"role":"reviewer","focus":"Style"}],"max_rounds":2,"max_cycles":3}}"#;
+    std::fs::write(&file, saved).unwrap();
+
+    let verification = host.settings().verification;
+    assert_eq!((verification.max_rounds, verification.max_cycles), (2, 3));
+    let levels = serde_json::to_value(&verification.levels).unwrap();
+    assert_eq!(
+        levels,
+        serde_json::json!([{"name":"Full","kind":"full_review",
+            "verifiers":["Tests","Claude","Codex","Style"],"use_when":"for every review."}])
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), saved);
+
+    // The human's next change writes the level it has been read as, and nothing else changes.
+    host.set_verification(verification.clone()).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(raw["verification"]["levels"], levels);
+    assert_eq!(host.settings().verification, verification);
+}
