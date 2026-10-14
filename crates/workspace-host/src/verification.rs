@@ -16,6 +16,9 @@ const REPORT_KINDS: [&str; 6] = [
     "completed",
 ];
 const WORKTREE_CHANGED: &str = "worktree changed during verification";
+/// How many verification cycles may hold a slot at once across the host, so concurrent
+/// verifiers do not overload the machine. A further cycle queues; see `start_queued_cycles`.
+pub(crate) const VERIFICATION_SLOTS: usize = 2;
 /// Bounds on a finding's fields; they keep a ticket's ledger small in `workspace_context`.
 const FINDING_LINE_BYTES: usize = 256;
 const FINDING_TEXT_BYTES: usize = 2048;
@@ -384,6 +387,15 @@ impl Host {
         let coordinator = self.session(&ticket.coordinator_id)?;
         let chosen = self.verifier_choices(&coordinator, level, &level_verifiers, choices)?;
         let commit = head(&ticket)?;
+        // A cycle queues behind every slot holder and every cycle queued before it.
+        let tickets = self.tickets()?;
+        let queued_at = (tickets
+            .iter()
+            .filter(|t| t.holds_verification_slot())
+            .count()
+            >= VERIFICATION_SLOTS
+            || tickets.iter().any(|t| t.queued_since().is_some()))
+        .then(now);
         self.atomically(|host| {
             let mut verifiers = vec![];
             for (config, (profile, reason)) in level_verifiers.into_iter().zip(chosen) {
@@ -446,17 +458,60 @@ impl Host {
                     commit,
                     verifiers,
                 }],
+                queued_at,
             });
-            host.start_round(&mut ticket)?;
+            let milestone = if queued_at.is_some() {
+                ticket.state = "verifying".into();
+                host.save_ticket(&ticket)?;
+                "verification_queued"
+            } else {
+                host.start_round(&mut ticket)?;
+                "verification_started"
+            };
             Self::event(
                 &host.db,
                 &coordinator.project_id,
                 Some(&ticket.coordinator_id),
-                "verification_started",
+                milestone,
                 &format!("{}; cycle {cycle}", ticket.id),
             )?;
             Ok(ticket)
         })
+    }
+    /// Starts the oldest queued cycles while slots are free, so a queued cycle starts once a
+    /// running one passes, is blocked or its ticket closes. The scheduler calls it on every
+    /// pass, and the queue is stored with the tickets, so it survives a restart. Returns
+    /// whether any cycle started.
+    pub fn start_queued_cycles(&mut self) -> Result<bool> {
+        let tickets = self.tickets()?;
+        let taken = tickets
+            .iter()
+            .filter(|t| t.holds_verification_slot())
+            .count();
+        let mut queued: Vec<Ticket> = tickets
+            .into_iter()
+            .filter(|t| t.queued_since().is_some())
+            .collect();
+        queued.sort_by_key(Ticket::queued_since);
+        queued.truncate(VERIFICATION_SLOTS.saturating_sub(taken));
+        let started = !queued.is_empty();
+        for mut ticket in queued {
+            self.atomically(|host| {
+                let verification = ticket.verification.as_mut().context("No verification")?;
+                verification.queued_at = None;
+                let cycle = verification.cycle;
+                host.start_round(&mut ticket)?;
+                let project = host.session(&ticket.coordinator_id)?.project_id;
+                Self::event(
+                    &host.db,
+                    &project,
+                    Some(&ticket.coordinator_id),
+                    "verification_started",
+                    &format!("{}; cycle {cycle}", ticket.id),
+                )
+            })?;
+        }
+        Ok(started)
     }
     /// Records the coordinator's decision on each named entry, all or none, and wakes nobody. An
     /// untriaged entry takes any decision; an open one, already routed for a fix, only follow-up

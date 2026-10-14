@@ -1094,6 +1094,17 @@ impl Ticket {
             .as_ref()
             .filter(|v| v.outcome == VerificationOutcome::Running)
     }
+    /// When the running cycle of this open ticket was queued, while it waits for a slot.
+    pub fn queued_since(&self) -> Option<i64> {
+        self.running_cycle()
+            .filter(|_| self.is_open())
+            .and_then(|v| v.queued_at)
+    }
+    /// Whether this open ticket's running cycle holds a verification slot: from its start until
+    /// it passes, is blocked or the ticket closes, its rounds in between included.
+    pub fn holds_verification_slot(&self) -> bool {
+        self.is_open() && self.running_cycle().is_some_and(|v| v.queued_at.is_none())
+    }
     /// The most recent full review that passed, which any later re-check rests on.
     pub fn last_full_review(&self) -> Option<&Verification> {
         self.previous_cycles
@@ -1286,6 +1297,10 @@ pub struct Verification {
     pub max_rounds: u32,
     pub outcome: VerificationOutcome,
     pub rounds: Vec<VerificationRound>,
+    /// When the cycle was queued for a verification slot. Until the host starts it, its first
+    /// round's verifiers have been chosen but sent nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<i64>,
 }
 /// A level's name and kind as they were when a cycle started at it; later edits to the level do
 /// not change them.

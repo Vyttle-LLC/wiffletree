@@ -37,6 +37,28 @@ impl OwnDescriptors for Command {
     }
 }
 
+/// How nice every provider process runs, so agents' builds and tests yield to the desktop.
+const AGENT_NICENESS: libc::c_int = 10;
+
+pub(crate) trait LowPriority {
+    /// Runs the child, and so everything it starts, at `AGENT_NICENESS`. A niceness is
+    /// inherited across fork and exec, so it reaches tool commands that lead their own process
+    /// group or session too.
+    fn at_low_priority(&mut self) -> &mut Self;
+}
+impl LowPriority for Command {
+    fn at_low_priority(&mut self) -> &mut Self {
+        // SAFETY: `setpriority` is async-signal-safe. Its failure is ignored: it fails only for a
+        // host already running nicer than this, which the child then inherits.
+        unsafe {
+            self.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS as _, 0, AGENT_NICENESS);
+                Ok(())
+            })
+        }
+    }
+}
+
 /// Marks every descriptor above stderr close-on-exec.
 ///
 /// It runs between fork and exec in a copy of a process that had other threads, any of which
@@ -322,6 +344,7 @@ fn with_codex<T>(
     let mut child = Process(
         Command::new(crate::provider::executable(Provider::Codex)?)
             .own_descriptors_only()
+            .at_low_priority()
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -383,6 +406,7 @@ pub fn claude_account(cwd: &Path) -> Result<Option<String>> {
     let mut child = Process(
         Command::new(crate::provider::executable(Provider::Claude)?)
             .own_descriptors_only()
+            .at_low_priority()
             .current_dir(cwd)
             .args(["auth", "status", "--json"])
             .stdin(Stdio::null())
@@ -470,6 +494,7 @@ fn claude_models() -> Result<Vec<ModelOption>> {
     let mut child = Process(
         Command::new(crate::provider::executable(Provider::Claude)?)
             .own_descriptors_only()
+            .at_low_priority()
             .args([
                 "-p",
                 "--input-format",

@@ -1,5 +1,6 @@
 //! Whether each provider's CLI is installed and signed in, and on which plan. Reads the CLIs'
 //! own status only: no inference, and no token contents leave this module.
+use crate::runtime::LowPriority as _;
 use crate::*;
 use base64::Engine as _;
 use std::{process::Command as ProcessCommand, time::Duration};
@@ -38,7 +39,7 @@ pub fn detect(provider: Provider) -> ProviderStatus {
 /// which case it is killed.
 fn status_output(binary: &Path, args: &[&str]) -> Option<[String; 2]> {
     let mut command = ProcessCommand::new(binary);
-    command.args(args);
+    command.args(args).at_low_priority();
     let (_, stdout, stderr) = runtime::bounded_output(command, TIMEOUT, None).ok()?;
     Some([stdout, stderr].map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
 }

@@ -380,6 +380,7 @@ fn cycle(
             kind,
         }),
         max_rounds: 3,
+        queued_at: None,
         outcome,
         rounds: vec![],
     }
@@ -516,6 +517,7 @@ fn latest_results_keep_each_verifiers_last_round() {
         cycle: 1,
         level: None,
         max_rounds: 2,
+        queued_at: None,
         outcome: VerificationOutcome::Running,
         rounds: vec![
             VerificationRound {

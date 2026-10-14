@@ -2730,3 +2730,155 @@ fn the_host_does_not_judge_whether_a_level_suits_the_ticket() {
     assert_eq!(ticket.state, "verifying");
     assert_eq!(f.cycle_level(), ("Docs".into(), LevelKind::FullReview));
 }
+
+/// Three ready tickets of one project, each verified by one tester; the first two are verified.
+fn two_cycles_running() -> (Fixture, Vec<Ticket>) {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Tests", None)], 2);
+    let mut tickets = vec![f.verify().unwrap()];
+    for title in ["Fix ringing", "Fix voicemail"] {
+        let ticket = f
+            .host
+            .create_ticket(&f.coordinator.id, &f.ticket.repository_id, title, "Fix it")
+            .unwrap();
+        let implementer = f
+            .host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        f.handled(&implementer.id);
+        let worktree = Path::new(&ticket.worktree);
+        std::fs::write(worktree.join("fix.txt"), title).unwrap();
+        git(worktree, &["add", "fix.txt"]);
+        git(worktree, &["commit", "-q", "-m", title]);
+        f.report(&implementer.id, "ready", "ready_for_testing")
+            .unwrap();
+        tickets.push(f.host.ticket(&ticket.id).unwrap());
+    }
+    let second = &tickets[1].id;
+    let args = common::verify_args(&f.host, second);
+    let coordinator = f.coordinator.id.clone();
+    let started = f
+        .host
+        .agent_tool(&coordinator, "verify_ticket", args)
+        .unwrap();
+    assert!(started.get("queued").is_none(), "{started}");
+    (f, tickets)
+}
+
+/// Verifies `ticket` and checks that its cycle queued: the coordinator is told, and its
+/// verifier has nothing to take.
+fn queue(host: &mut Host, coordinator: &str, ticket: &str) {
+    let args = common::verify_args(host, ticket);
+    let result = host.agent_tool(coordinator, "verify_ticket", args).unwrap();
+    let note = result["queued"].as_str().unwrap();
+    assert!(
+        note.contains("2 verification cycles are already running"),
+        "{note}"
+    );
+    assert_queued(host, ticket);
+}
+
+fn assert_queued(host: &Host, ticket: &str) {
+    let ticket = host.ticket(ticket).unwrap();
+    assert_eq!(ticket.state, "verifying");
+    assert!(ticket.queued_since().is_some());
+    let run = &ticket.verification.unwrap().rounds[0].verifiers[0];
+    assert!(
+        host.message(&run.message_id).is_err(),
+        "no round message yet"
+    );
+}
+
+fn assert_started(host: &Host, ticket: &str) {
+    let ticket = host.ticket(ticket).unwrap();
+    assert!(ticket.holds_verification_slot());
+    let run = &ticket.verification.unwrap().rounds[0].verifiers[0];
+    assert_eq!(
+        host.message(&run.message_id).unwrap().receipt,
+        Receipt::Queued
+    );
+}
+
+#[test]
+fn a_third_cycle_queues_until_a_running_one_passes_is_blocked_or_closes() {
+    for end in ["passed", "blocked", "closed"] {
+        let (mut f, tickets) = two_cycles_running();
+        let coordinator = f.coordinator.id.clone();
+        queue(&mut f.host, &coordinator, &tickets[2].id);
+        // Nothing frees a slot yet.
+        assert!(!f.host.start_queued_cycles().unwrap());
+        assert_queued(&f.host, &tickets[2].id);
+
+        match end {
+            "passed" => {
+                let tester = f.verifier("Tests");
+                f.report(&tester, "pass", "passed").unwrap();
+            }
+            "blocked" => {
+                let implementer = f.implementer.id.clone();
+                f.report(&implementer, "stuck", "blocked").unwrap();
+            }
+            _ => {
+                f.host.close_ticket(&tickets[0].id).unwrap();
+            }
+        }
+        assert!(
+            !f.host
+                .ticket(&tickets[0].id)
+                .unwrap()
+                .holds_verification_slot()
+        );
+
+        assert!(f.host.start_queued_cycles().unwrap(), "{end}");
+        assert_started(&f.host, &tickets[2].id);
+        assert!(
+            !f.host.start_queued_cycles().unwrap(),
+            "{end}: nothing left"
+        );
+    }
+}
+
+#[test]
+fn a_cycle_rerunning_after_a_failed_round_keeps_its_slot() {
+    let (mut f, tickets) = two_cycles_running();
+    let tester = f.verifier("Tests");
+    f.fail(&tester, "busy line").unwrap();
+    assert_eq!(f.current().state, "failed");
+    let coordinator = f.coordinator.id.clone();
+    queue(&mut f.host, &coordinator, &tickets[2].id);
+
+    f.commit("fix.txt", "two");
+    let implementer = f.implementer.id.clone();
+    f.report(&implementer, "again", "ready_for_testing")
+        .unwrap();
+
+    assert_eq!(f.round().round, 2, "the re-run starts at once");
+    assert!(!f.host.start_queued_cycles().unwrap());
+    assert_queued(&f.host, &tickets[2].id);
+}
+
+#[test]
+fn a_queued_cycle_survives_a_restart_and_starts_when_a_slot_frees() {
+    let (mut f, tickets) = two_cycles_running();
+    let coordinator = f.coordinator.id.clone();
+    queue(&mut f.host, &coordinator, &tickets[2].id);
+    let tester = f.verifier("Tests");
+    let Fixture {
+        _directory, host, ..
+    } = f;
+    let home = host.home.clone();
+    drop(host);
+
+    let mut host = Host::open(&home).unwrap();
+    assert!(!host.start_queued_cycles().unwrap());
+    assert_queued(&host, &tickets[2].id);
+    take_input(&mut host, &tester);
+    host.agent_tool(
+        &tester,
+        "report",
+        json!({"message_id":"pass","kind":"passed","body":"Passed"}),
+    )
+    .unwrap();
+
+    assert!(host.start_queued_cycles().unwrap());
+    assert_started(&host, &tickets[2].id);
+}
