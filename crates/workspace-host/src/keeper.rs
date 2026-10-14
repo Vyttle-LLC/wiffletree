@@ -213,12 +213,28 @@ impl Host {
         }
         Ok(due)
     }
-    /// The keeper's part of each kept ticket's PR line, while the rebase trigger is on.
+    /// The keeper's part of each kept ticket's PR line, while the rebase trigger is on. A part
+    /// shows only while the keeper still keeps the ticket and may change its branch, so an
+    /// owner unticked or a project paused since the last pass hides it at once.
     pub(crate) fn keeper_parts(&self) -> BTreeMap<String, KeeperPart> {
-        match self.settings().keeper.rebase {
-            true => self.keeper.parts.clone(),
-            false => BTreeMap::new(),
+        if !self.settings().keeper.rebase {
+            return BTreeMap::new();
         }
+        let keeps = |id: &str| {
+            let ticket = self.ticket(id)?;
+            self.keeps_branch(&ticket, &self.ticket_repository(&ticket)?)
+        };
+        self.keeper
+            .parts
+            .iter()
+            .filter(|(id, _)| keeps(id).unwrap_or(false))
+            .map(|(id, part)| (id.clone(), *part))
+            .collect()
+    }
+    /// Whether the keeper keeps the ticket's PR and may change its branch.
+    fn keeps_branch(&self, ticket: &Ticket, repository: &Repository) -> Result<bool> {
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        Ok(self.kept(ticket, repository, &coordinator)? && self.may_change_branch(ticket))
     }
     /// Makes the ticket's rebase due when its base has been quiet for the period, its head does
     /// not contain the base yet, that pair was not rebased before, and the keeper may change the
@@ -237,8 +253,7 @@ impl Host {
         else {
             return Ok(None);
         };
-        let coordinator = self.session(&ticket.coordinator_id)?;
-        if !self.kept(ticket, repository, &coordinator)? || !self.may_change_branch(ticket) {
+        if !self.keeps_branch(ticket, repository)? {
             return Ok(None);
         }
         let record = ticket.keeper.clone().unwrap_or_default();
@@ -373,10 +388,7 @@ impl Host {
             return Ok(None);
         };
         let repository = self.ticket_repository(&ticket)?;
-        let coordinator = self.session(&ticket.coordinator_id)?;
-        let may = self.settings().keeper.rebase
-            && self.kept(&ticket, &repository, &coordinator)?
-            && self.may_change_branch(&ticket);
+        let may = self.settings().keeper.rebase && self.keeps_branch(&ticket, &repository)?;
         let moved = match may {
             true => self.keeper_adopt(&ticket, &rebase.head, &result),
             false => Err(anyhow::anyhow!(
@@ -1208,6 +1220,30 @@ pub(crate) mod tests {
         assert_eq!(part(&f), Some(KeeperPart::UpToDate));
         f.host.set_keeper(KeeperSettings::default()).unwrap();
         assert!(f.host.keeper_parts().is_empty());
+    }
+
+    #[test]
+    fn a_part_hides_at_the_next_snapshot_once_the_owner_is_unticked_or_the_project_paused() {
+        let (mut f, _r) = kept();
+        let part = |f: &Fixture| {
+            f.host
+                .snapshot()
+                .unwrap()
+                .keeper_parts
+                .get(&f.ticket)
+                .copied()
+        };
+        let main = git(&f.repository, &["rev-parse", "main"]);
+        pass(&mut f, &main, 0);
+        assert_eq!(part(&f), Some(KeeperPart::UpToDate));
+        f.host.set_owner_allowed("allowed-org", false).unwrap();
+        assert_eq!(part(&f), None, "owner unticked, before any pass");
+        f.host.set_owner_allowed("allowed-org", true).unwrap();
+        pass(&mut f, &main, MINUTE);
+        assert_eq!(part(&f), Some(KeeperPart::UpToDate), "ticked again");
+        let project = f.coordinator.project_id.clone();
+        f.host.set_live(&project, false).unwrap();
+        assert_eq!(part(&f), None, "project paused, before any pass");
     }
 
     #[test]
