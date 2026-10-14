@@ -1359,7 +1359,7 @@ impl Workspace {
                         .snapshot
                         .as_ref()
                         .and_then(|s| s.keeper_parts.get(&ticket.id));
-                    pr_line(pr, keeper.copied(), p)
+                    pr_line(pr, ticket.unreviewed(), keeper.copied(), p)
                 }))
                 .children(waiting.map(|waiting| {
                     div()
@@ -1412,9 +1412,14 @@ fn track(progress: Option<(Option<u16>, BarState)>, p: Palette) -> Div {
     progress_bar(position, state, 3., p)
 }
 
-/// A ticket row's second line: its PR, muted except for passed or failed checks, a conflict
-/// and a merge, and the keeper's part at its end.
-fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, p: Palette) -> Div {
+/// A ticket row's second line: its PR, muted except for passed or failed checks, a conflict,
+/// a merge and commits no review has checked, and the keeper's part at its end.
+fn pr_line(
+    pr: &PullRequest,
+    unreviewed: Option<&Unreviewed>,
+    keeper: Option<KeeperPart>,
+    p: Palette,
+) -> Div {
     let glyph = if pr.state == PrState::Merged {
         "git-merge"
     } else {
@@ -1429,7 +1434,10 @@ fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, p: Palette) -> Div {
         .text_size(px(11.))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
-    for (i, part) in tree::pr_line(pr, keeper, now()).into_iter().enumerate() {
+    for (i, part) in tree::pr_line(pr, unreviewed, keeper, now())
+        .into_iter()
+        .enumerate()
+    {
         if i > 0 {
             line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
         }
@@ -1438,6 +1446,7 @@ fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, p: Palette) -> Div {
             tree::Tone::Good => p.green,
             tree::Tone::Bad => p.red,
             tree::Tone::Merged => p.focus,
+            tree::Tone::Warn => p.yellow,
         };
         line = line.child(div().text_color(color).child(part.text));
     }

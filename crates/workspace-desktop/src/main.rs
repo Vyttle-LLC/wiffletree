@@ -335,6 +335,8 @@ impl Workspace {
             }
         })
         .detach();
+        // Each minute's redraw also keeps the times shown in minutes current in an idle window,
+        // such as the PR keeper's countdown and age on PR lines.
         cx.spawn_in(window, async move |this, cx| {
             let mut minute = 0u8;
             loop {

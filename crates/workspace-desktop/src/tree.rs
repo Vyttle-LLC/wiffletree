@@ -110,6 +110,7 @@ pub enum Tone {
     Good,
     Bad,
     Merged,
+    Warn,
 }
 #[derive(Debug, PartialEq)]
 pub struct PrPart {
@@ -118,9 +119,15 @@ pub struct PrPart {
 }
 
 /// A ticket row's PR line, such as "#142 · checks ✓ · 1 thread · behind", in parts. Only the
-/// parts that apply appear, and an open PR ends with the keeper's part, if it has one; a
-/// finished PR shows `merged` or `closed` instead of its checks.
-pub fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, now: i64) -> Vec<PrPart> {
+/// parts that apply appear, and an open PR ends with the keeper's part: the commits it adopted
+/// that no review has checked, then what it is doing, if anything; a finished PR shows `merged`
+/// or `closed` instead of its checks.
+pub fn pr_line(
+    pr: &PullRequest,
+    unreviewed: Option<&Unreviewed>,
+    keeper: Option<KeeperPart>,
+    now: i64,
+) -> Vec<PrPart> {
     let part = |text: &str, tone| PrPart {
         text: text.into(),
         tone,
@@ -154,6 +161,9 @@ pub fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, now: i64) -> Vec<Pr
             if let Some((word, tone)) = merge_word {
                 parts.push(part(word, tone));
             }
+            if let Some(unreviewed) = unreviewed {
+                parts.push(part(&not_reviewed(unreviewed), Tone::Warn));
+            }
             if let Some(keeper) = keeper {
                 parts.push(part(&keeper_words(keeper, now), Tone::Muted));
             }
@@ -162,22 +172,47 @@ pub fn pr_line(pr: &PullRequest, keeper: Option<KeeperPart>, now: i64) -> Vec<Pr
     parts
 }
 
+const MINUTE: i64 = 60_000;
+
 /// The keeper's part of a PR line, with minutes rounded up before a rebase and down after it.
 fn keeper_words(part: KeeperPart, now: i64) -> String {
-    const MINUTE: i64 = 60_000;
     match part {
         KeeperPart::RebaseAt(at) => {
             let minutes = ((at - now).max(1) as u64).div_ceil(MINUTE as u64);
             format!("rebase in {minutes} min")
         }
         KeeperPart::Waiting => "rebase waiting".into(),
-        KeeperPart::Rebased(at) => format!("rebased {} min ago", ((now - at) / MINUTE).max(1)),
+        KeeperPart::Rebased(at) => format!("rebased {}", rebased_ago(at, now)),
         KeeperPart::UpToDate => "up to date".into(),
     }
 }
 
+/// How long ago the keeper rebased, in the same words on the PR line and the card: whole
+/// minutes, at least one, within the hour; the app's usual age after that.
+fn rebased_ago(at: i64, now: i64) -> String {
+    match now - at {
+        elapsed if elapsed < 60 * MINUTE => format!("{} min ago", (elapsed / MINUTE).max(1)),
+        _ => age(at).to_lowercase(),
+    }
+}
+
+fn not_reviewed(unreviewed: &Unreviewed) -> String {
+    let plural = if unreviewed.commits == 1 { "" } else { "s" };
+    format!("{} commit{plural} not reviewed", unreviewed.commits)
+}
+
 /// What the keeper last did to the ticket's branch, for its card: a line, and a detail line.
+/// Adopted commits no review has checked come first, since they hold the ticket.
 pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
+    if let Some(unreviewed) = ticket.unreviewed() {
+        return Some((
+            format!("{}, taken from GitHub's branch", not_reviewed(unreviewed)),
+            format!(
+                "now at {} · nothing more is pushed or accepted until a review that starts after it ends",
+                short_sha(&unreviewed.head)
+            ),
+        ));
+    }
     let last = ticket.keeper.as_ref()?.last.as_ref()?;
     let base = ticket
         .pull_request
@@ -191,7 +226,7 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
         format!(
             "rebased onto {base} at {} {pushed}, {}",
             short_sha(&last.base),
-            age(last.at).to_lowercase()
+            rebased_ago(last.at, crate::ui::now())
         ),
         format!(
             "{} → {} · the same change as the reviewed commit, so the passed review stands",
@@ -1764,14 +1799,14 @@ mod tests {
     }
     /// The line of a PR with the keeper's part, a minute after the epoch.
     fn kept_line(pr: &PullRequest, keeper: Option<KeeperPart>) -> String {
-        pr_line(pr, keeper, MINUTE)
+        pr_line(pr, None, keeper, MINUTE)
             .iter()
             .map(|p| p.text.as_str())
             .collect::<Vec<_>>()
             .join(" · ")
     }
     fn tones(pr: &PullRequest) -> Vec<Tone> {
-        pr_line(pr, None, 0).iter().map(|p| p.tone).collect()
+        pr_line(pr, None, None, 0).iter().map(|p| p.tone).collect()
     }
     const MINUTE: i64 = 60_000;
 
@@ -1836,7 +1871,7 @@ mod tests {
             "#143 · checks … · rebased 1 min ago"
         );
         assert_eq!(
-            pr_line(&rebased, Some(K::Rebased(0)), 0)[2].text,
+            pr_line(&rebased, None, Some(K::Rebased(0)), 0)[2].text,
             "rebased 1 min ago",
             "a moment ago"
         );
@@ -1856,11 +1891,45 @@ mod tests {
             kept_line(&current, Some(K::UpToDate)),
             "#142 · checks ✓ · up to date"
         );
-        assert_eq!(pr_line(&current, Some(K::UpToDate), 0)[2].tone, Tone::Muted);
+        assert_eq!(
+            pr_line(&current, None, Some(K::UpToDate), 0)[2].tone,
+            Tone::Muted
+        );
         // Not kept: no part. A finished PR has none either.
         assert_eq!(kept_line(&current, None), "#142 · checks ✓");
         let merged = pr(S::Merged, C::Success, M::Unknown);
         assert_eq!(kept_line(&merged, Some(K::UpToDate)), "#142 · merged");
+    }
+
+    #[test]
+    fn adopted_commits_no_review_has_checked_show_as_a_warning_before_the_keepers_part() {
+        use {CheckState as C, KeeperPart as K, MergeState as M, PrState as S};
+        let unreviewed = |commits| Unreviewed {
+            head: "5f2e7a0aa".into(),
+            commits,
+            cycle: 1,
+        };
+        let mut adopted = pr(S::Open, C::Pending, M::Clean);
+        adopted.number = 141;
+        let parts = pr_line(&adopted, Some(&unreviewed(1)), None, MINUTE);
+        let texts: Vec<&str> = parts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["#141", "checks …", "1 commit not reviewed"]);
+        assert_eq!(parts[2].tone, Tone::Warn);
+        let parts = pr_line(&adopted, Some(&unreviewed(2)), Some(K::UpToDate), MINUTE);
+        assert_eq!(parts[2].text, "2 commits not reviewed");
+        assert_eq!(parts[3].text, "up to date");
+        // The card says so first, whatever the keeper did before.
+        let (_home, _host, _coordinator, mut ticket) = store();
+        ticket.keeper = Some(Keeper {
+            unreviewed: Some(unreviewed(1)),
+            ..Default::default()
+        });
+        let (line, detail) = keeper_lines(&ticket).unwrap();
+        assert_eq!(line, "1 commit not reviewed, taken from GitHub's branch");
+        assert_eq!(
+            detail,
+            "now at 5f2e7a0 · nothing more is pushed or accepted until a review that starts after it ends"
+        );
     }
 
     #[test]
@@ -1881,7 +1950,12 @@ mod tests {
             ..Default::default()
         });
         let (line, detail) = keeper_lines(&ticket).unwrap();
-        assert_eq!(line, "rebased onto main at 4a1c2e9 and pushed, 1m ago");
+        assert_eq!(line, "rebased onto main at 4a1c2e9 and pushed, 1 min ago");
+        // Older than the PR line shows, the usual age.
+        let keeper = ticket.keeper.as_mut().unwrap();
+        keeper.last.as_mut().unwrap().at = crate::ui::now() - 2 * 60 * MINUTE;
+        let (line, _) = keeper_lines(&ticket).unwrap();
+        assert_eq!(line, "rebased onto main at 4a1c2e9 and pushed, 2h ago");
         assert_eq!(
             detail,
             "e21f0aa → 77b0c13 · the same change as the reviewed commit, so the passed review stands"
