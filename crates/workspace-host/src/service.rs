@@ -8113,6 +8113,12 @@ mod tests {
             attempt.id, sorting.id,
             "a try never resumes the sorting session"
         );
+        // Nor can the human's conversation controls replace it.
+        let other = ModelProfile {
+            effort: "unlisted".into(),
+            ..first.clone()
+        };
+        assert!(host.configure_session(&sorting.id, other).is_err());
         assert_eq!(host.turn_profile(&sorting).unwrap(), first);
         assert_eq!(host.turn_profile(&attempt).unwrap(), second);
     }

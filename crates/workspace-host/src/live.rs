@@ -53,6 +53,10 @@ impl Host {
         text(&profile.effort, 32)?;
         let mut session = self.session(id)?;
         ensure!(
+            session.role != Role::Keeper,
+            "A PR keeper agent keeps the model it was created with; choose the PR keeper's model in Models"
+        );
+        ensure!(
             session.status != Status::Working,
             "Stop the current turn before changing its runtime"
         );
