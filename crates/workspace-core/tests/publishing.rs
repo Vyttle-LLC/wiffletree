@@ -78,6 +78,7 @@ fn a_ticket_stored_before_publishing_decodes_and_a_request_round_trips() {
         waiting: Some("attention".into()),
         blocked_review_approved: false,
         approvals: 1,
+        keeper: false,
     };
     ticket.publishing = Some(request.clone());
     ticket.pushed = Some("9e03c1b".into());
