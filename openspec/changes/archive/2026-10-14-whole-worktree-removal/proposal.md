@@ -5,8 +5,8 @@ Accepting a ticket ran `git worktree remove` on a worktree holding a 4 GB `targe
 ## What Changes
 
 - Removing a ticket's worktree (accept, close, archive, a pending removal or an approved leftover) renames the folder aside beside it, has Git forget it with `git worktree prune` under the usual limit, then deletes the renamed folder without a time limit off the host thread.
-- If Git fails, the folder is renamed back, so the worktree is whole and today's failure handling applies.
-- At startup the host deletes any folder a stop left renamed aside.
+- If Git fails, the folder is renamed back when the worktree still works there, so it is whole and today's failure handling applies; otherwise the removal completes, which loses nothing because the worktree was clean.
+- At startup the host deletes any folder a stop left renamed aside and prunes each repository's worktree registrations.
 - The keeper's own checkouts are unchanged.
 
 ## Capabilities

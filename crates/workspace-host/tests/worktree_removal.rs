@@ -1,7 +1,8 @@
 //! Removing a ticket's worktree is whole whatever its size. Every test here runs Git through a
 //! stand-in that refuses `git worktree remove`, as if the time limit had cut it off, and fails
-//! `git worktree prune` in a repository holding a `fail-prune` mark, or after pruning in one
-//! holding a `fail-after-prune` mark.
+//! `git worktree prune` in a repository holding a `fail-prune` mark, after pruning in one holding
+//! a `fail-after-prune` mark, or after deleting worktrees' `HEAD`, as a prune cut off partway
+//! can, in one holding a `fail-mid-prune` mark.
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -30,7 +31,8 @@ fn stand_in_git() {
                  case \"$3 $4\" in\n\
                  \"worktree remove\") echo 'fatal: timed out' >&2; exit 1;;\n\
                  \"worktree prune\") [ -e \"$2/.git/fail-prune\" ] && {{ echo 'fatal: injected' >&2; exit 1; }}\n\
-                 [ -e \"$2/.git/fail-after-prune\" ] && {{ {real} \"$@\"; echo 'fatal: timed out' >&2; exit 1; }};;\n\
+                 [ -e \"$2/.git/fail-after-prune\" ] && {{ {real} \"$@\"; echo 'fatal: timed out' >&2; exit 1; }}\n\
+                 [ -e \"$2/.git/fail-mid-prune\" ] && {{ rm -f \"$2\"/.git/worktrees/*/HEAD; echo 'fatal: timed out' >&2; exit 1; }};;\n\
                  esac\n\
                  exec {real} \"$@\"\n",
                 real = real.trim()
@@ -148,6 +150,7 @@ fn a_failed_git_step_leaves_the_worktree_whole_and_the_ticket_open() {
     assert!(!removal_folder(&ticket).exists());
     assert!(registered(directory.path(), &ticket));
     assert_eq!(git(worktree, &["status", "--porcelain"]), "");
+    git(worktree, &["rev-parse", "--verify", "HEAD"]);
 
     fs::remove_file(&mark).unwrap();
     host.close_ticket(&ticket.id).unwrap();
@@ -180,4 +183,26 @@ fn a_git_failure_after_it_forgot_the_worktree_still_completes_the_removal() {
     assert!(!Path::new(&ticket.worktree).exists());
     assert!(!registered(directory.path(), &ticket));
     assert!(deleted_soon(&removal_folder(&ticket)));
+}
+
+#[test]
+fn a_prune_cut_off_partway_completes_the_removal_and_the_next_start_prunes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut host, _, ticket) = ticket_with_build_output(directory.path(), 10);
+    let mark = directory.path().join("web/.git/fail-mid-prune");
+    fs::write(&mark, "").unwrap();
+
+    host.close_ticket(&ticket.id).unwrap();
+
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert!(!Path::new(&ticket.worktree).exists());
+    assert!(deleted_soon(&removal_folder(&ticket)));
+    git(
+        &directory.path().join("web"),
+        &["rev-parse", "--verify", &ticket.branch],
+    );
+
+    fs::remove_file(&mark).unwrap();
+    host.delete_removed_worktrees().unwrap();
+    assert!(!registered(directory.path(), &ticket));
 }
