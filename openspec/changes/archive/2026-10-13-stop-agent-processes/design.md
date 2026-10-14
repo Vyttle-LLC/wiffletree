@@ -91,6 +91,7 @@ Archiving and `finish_ticket` check that the worktrees can be removed, then stop
 
 - **A shell the watcher never lists.** A shell that starts and exits between two ticks, under about 4 ms plus scheduling delay, is never seen, and what it leaves behind is not recorded. A test pins this with a watcher ticked by hand.
 - **A process that daemonizes after its parent has exited.** It is in a new session and group and no longer anyone's descendant, so it is not recorded.
+- **A tool forked just before a cancel.** A tool the provider forks within one scan interval before a cancel kills the provider is orphaned before any scan lists it, so it is never recorded. A later change could close this by freezing the provider's group before the final look.
 - **Sightings travel with the turn.** What the watcher saw reaches the store when the turn's thread next wakes, at most 50 ms later, for as long as the provider runs. A host that dies in between has not recorded it. A stop or a quit does not wait: it asks the watcher, which answers for a run until the host has stored the run's last sightings.
 - **A watcher that could not look for over a second.** A process id may have been given out again in that time, so a group whose last known member has gone is neither adopted nor dropped while its id still names a running group. Its record stays, and a later stop either finds it gone or raises the inbox note.
 - **Members are refreshed during the run that saw the group.** A group that later replaces every one of its processes while its agent is idle can no longer be confirmed; it raises the inbox note instead of being stopped.
@@ -100,6 +101,18 @@ Archiving and `finish_ticket` check that the worktrees can be removed, then stop
 - The watcher costs roughly 2% to 4% of one core in a release build while any turn runs, more the more processes the machine runs, nearly all of it the cold listing after each sleep. It does not run when no turn runs. Being told of forks by the kernel instead of looking on a clock would remove that cost; see the other choices considered.
 - A quit or an archive waits out the grace period when a process ignores SIGTERM.
 - A helper that takes longer than 300 ms to exit after its provider is announced as left running, once.
+
+## Rebased onto review levels and Codex compaction
+
+**Codex compaction (#56).** A Codex agent's compaction runs `codex app-server`, and it runs through the same `provider::run` as every turn and as Claude's compaction: the same spawn in a group of its own, the same watch under the run's id, the same sightings and the same end. So the rules hold for it without a path of its own. The server's own group is stopped by its run when the outcome is read or its time is up. What it starts in other groups, which for Codex means its tool servers, is followed and recorded against the agent, and the run's tree is released when the host has handled the run's end. Three things are specific to a compaction:
+
+- A stop lets a started compaction finish, an earlier requirement. So Pause, the project's Stop and `stop_agents` leave alone what the compaction's run started, and stop only what the agent's earlier runs left. When the compaction ends, what it left running is stopped if its agent is still paused or its project still stopped, and announced as left running otherwise, as after a turn.
+- An archive never reaches into a running compaction: an agent with an unfinished run keeps its processes until the run ends, and an archived agent's run then stops them.
+- A quit cancels the compaction and stops everything, the look of its own included.
+
+A run now keeps its provider's process group id in its own detail (`$.process_group`), as a fact about the run that outlasts the record's row, since a finished run's provider row is deleted. Nothing is signalled by it.
+
+**Review levels (#58).** Nothing new archives a session. A full review and a re-check both start their verifiers through the one loop that reuses a verifier at its profile or archives it with `change_archived` (`verifier_replaced`), and every end of a cycle, the new one where a ready report ends a cycle included, retires verifiers through `retire`, which calls `set_archived`. All of them therefore stop what the verifier started. Replacement, which had no test of its own, now has one.
 
 ## Why a stop's look names every live process
 

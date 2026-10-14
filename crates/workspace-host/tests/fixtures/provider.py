@@ -66,6 +66,11 @@ if args[:1]==['app-server']:
     answer=json.loads(subprocess.run([helper,'agent-mcp'],input=call+'\n',capture_output=True,text=True,timeout=10).stdout)
     with open(Path(os.environ['WORKSPACE_TEST_PROMPT_DIR'])/'codex-compactions.txt','a') as log:
         log.write(json.dumps({'cwd':os.getcwd(),'effort':overrides[0]['model_reasoning_effort'],'instructions':overrides[1]['developer_instructions'],'tools_refused':'error' in answer or answer['result']['isError'],'requests':requests})+'\n')
+    if plan.get('helper'):
+        # A tool server of the app-server's own, started as the real one starts them: as the
+        # leader of a session and process group of its own. Its id is saved for the test.
+        own_helper=subprocess.Popen(['sleep','300'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        (scratch/'codex-helper.pid').write_text(str(own_helper.pid))
     exchange=[json.loads(line) for line in (streams/f"codex-compact-{plan.get('stream','success')}.jsonl").read_text().splitlines()]
     recording=[entry['message'] for entry in exchange if entry['from']=='server']
     # The recording's thread becomes the agent's, and its compaction turn gets an id of its own.

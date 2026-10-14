@@ -1475,7 +1475,11 @@ impl Actor {
             }
             host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
         })?;
-        if let Err(e) = self.settle_processes(&session, &compacting.run, cancelled) {
+        // A stop let this compaction finish. If its agent is still stopped, paused or in a
+        // stopped project, what the compaction's provider left running is stopped now.
+        let live = self.host.live_projects()?.contains(&session.project_id);
+        let stopped = cancelled || session.status == Status::Paused || !live;
+        if let Err(e) = self.settle_processes(&session, &compacting.run, stopped) {
             eprintln!("Workspace processes: {e:#}");
         }
         if !self.stopping {
@@ -1520,8 +1524,10 @@ impl Actor {
     /// reaches a tool started a moment ago. A failure here is only logged.
     fn record_running_trees<'a>(&mut self, sessions: impl Iterator<Item = &'a String>) {
         for session in sessions {
-            if let Some(active) = self.active.get(session)
-                && let Err(e) = self.host.record_tree_now(session, &active.run)
+            let turn = self.active.get(session).map(|active| &active.run);
+            let run = turn.or_else(|| self.compacting.get(session).map(|c| &c.run));
+            if let Some(run) = run.cloned()
+                && let Err(e) = self.host.record_tree_now(session, &run)
             {
                 eprintln!("Workspace processes: {e:#}");
             }
@@ -1531,7 +1537,14 @@ impl Actor {
     /// a failure here is only logged.
     fn stop_processes_of(&mut self, sessions: &[String]) {
         self.record_running_trees(sessions.iter());
-        if let Err(e) = self.host.stop_processes(sessions, StopReason::Stopped) {
+        // A stop lets a started compaction finish. What its provider started, such as Codex's
+        // tool servers, is part of it, and is settled when the compaction ends.
+        let compactions = sessions.iter().filter_map(|s| self.compacting.get(s));
+        let spared: Vec<String> = compactions.map(|c| c.run.clone()).collect();
+        let stopped = self
+            .host
+            .stop_processes_except(sessions, StopReason::Stopped, &spared);
+        if let Err(e) = stopped {
             eprintln!("Workspace processes: {e:#}");
         }
     }
@@ -1547,7 +1560,8 @@ impl Actor {
         }
         let deadline = Instant::now() + QUIT_WAIT;
         // Agents between turns too; each cancelled turn's agent is looked at again as it ends.
-        let running: Vec<String> = self.active.keys().cloned().collect();
+        let running = self.active.keys().chain(self.compacting.keys());
+        let running: Vec<String> = running.cloned().collect();
         self.record_running_trees(running.iter());
         let stopped = self
             .host
@@ -6358,6 +6372,70 @@ mod tests {
         let retry = interrupted_turn_note(&actor.host, "m1").unwrap();
         assert!(retry.contains(&run), "{retry}");
         assert!(!retry.contains("stopped at startup"), "{retry}");
+    }
+
+    /// A child whose project runs and that is compacting, with one process an earlier turn of
+    /// its own left running and one its compaction's provider started, such as a tool server.
+    fn compacting_with_processes() -> (
+        tempfile::TempDir,
+        Actor,
+        String,
+        String,
+        String,
+        LeftoverProcess,
+        LeftoverProcess,
+    ) {
+        let (home, mut actor, parent, child) = actor_with_child();
+        let project = actor.host.session(&child).unwrap().project_id;
+        actor.host.set_live(&project, true).unwrap();
+        let left = LeftoverProcess::spawn();
+        started_by(&mut actor, &child, "earlier", &left);
+        let run = compacting(&mut actor, &child, None);
+        let helper = LeftoverProcess::spawn();
+        started_by(&mut actor, &child, &run, &helper);
+        (home, actor, parent, child, run, left, helper)
+    }
+
+    #[test]
+    fn a_stop_spares_what_a_running_compaction_started_until_the_compaction_ends() {
+        let (_home, mut actor, parent, child, run, mut left, mut helper) =
+            compacting_with_processes();
+
+        let args = json!({"reason":"Wrong approach"});
+        actor.stop_agents(&parent, &args).unwrap();
+
+        // A stop lets a started compaction finish, with what its provider started.
+        assert_eq!(stopped(&actor, &mut left), (true, Some("stopped".into())));
+        assert_eq!(stopped(&actor, &mut helper), (false, None));
+
+        // The compaction ends on its own. Its agent is still stopped, so what is left of it
+        // is stopped now and not announced as left running.
+        compaction_events(&mut actor, &child, &run, vec![compaction_finished(false)]);
+        assert_eq!(stopped(&actor, &mut helper), (true, Some("stopped".into())));
+        let child = actor.host.session(&child).unwrap();
+        let notices = process_notices(&actor, &child);
+        assert!(
+            notices.iter().all(|n| n.starts_with("Stopped ")),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn what_a_compaction_leaves_running_stays_when_its_agent_was_not_stopped() {
+        let (_home, mut actor, _, child, run, mut left, mut helper) = compacting_with_processes();
+
+        compaction_events(&mut actor, &child, &run, vec![compaction_finished(false)]);
+
+        // As after a turn: nothing is stopped, and a notice names what the run left.
+        assert_eq!(stopped(&actor, &mut left), (false, None));
+        assert_eq!(stopped(&actor, &mut helper), (false, None));
+        let child = actor.host.session(&child).unwrap();
+        let notices = process_notices(&actor, &child);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(" left 2 processes running. "),
+            "{notices:?}"
+        );
     }
 
     #[test]

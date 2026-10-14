@@ -448,7 +448,7 @@ impl World {
         let db = self.db();
         let mut runs = db
             .prepare(
-                "SELECT id,json_extract(detail,'$.kind') IS NOT NULL,outcome,started_at,finished_at,(SELECT process_group FROM process_groups g WHERE g.run_id=provider_runs.id AND g.provider=1) FROM provider_runs WHERE session_id=?1 ORDER BY rowid",
+                "SELECT id,json_extract(detail,'$.kind') IS NOT NULL,outcome,started_at,finished_at,json_extract(detail,'$.process_group') FROM provider_runs WHERE session_id=?1 ORDER BY rowid",
             )
             .unwrap();
         let runs = runs.query_map([session], |r| {
@@ -2057,6 +2057,60 @@ fn a_quit_stops_a_codex_compaction_and_the_next_start_delivers_the_waiting_messa
     assert_eq!(world.compactions(&main).len(), 1, "never run again");
     assert_eq!(world.receipt(&waiting), Receipt::Completed);
     assert!(world.snapshot().attention.is_empty());
+}
+
+/// Kills the process with this id when dropped, so a failed test leaves nothing running.
+struct Kill(i32);
+impl Drop for Kill {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+        }
+    }
+}
+
+#[test]
+fn what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stopped_at_a_quit() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    // The server starts a helper in a session of its own, as Codex starts its tool servers,
+    // and then waits at the gate with the compaction unfinished.
+    world.plan(json!({"gate":true,"helper":true}));
+    world.compact(&main, None).unwrap();
+    world.until_compacting(&main);
+    let saved = world.scratch.path().join("codex-helper.pid");
+    let recorded = |world: &World, helper: i32| -> Option<Option<String>> {
+        let found = world.db().query_row(
+            "SELECT ended FROM process_groups WHERE session_id=?1 AND process_group=?2 AND provider=0",
+            rusqlite::params![main, helper],
+            |r| r.get(0),
+        );
+        found.ok()
+    };
+    let mut helper = None;
+    until("the helper to be recorded against the agent", || {
+        let id = std::fs::read_to_string(&saved).ok();
+        helper = id.and_then(|id| id.trim().parse::<i32>().ok());
+        helper.is_some_and(|helper| recorded(&world, helper) == Some(None))
+    });
+    let helper = helper.unwrap();
+    let _kill = Kill(helper);
+    assert!(group_runs(helper));
+
+    // A pause lets a started compaction finish, and what its server started is part of it.
+    world.request(Command::SetStatus {
+        session_id: main.clone(),
+        status: Status::Paused,
+    });
+    assert!(group_runs(helper), "spared by the pause");
+    assert_eq!(recorded(&world, helper), Some(None));
+
+    world.stop();
+
+    // No waiting here: the quit returned only once the helper's group was stopped too.
+    assert!(!group_runs(helper));
+    assert_eq!(recorded(&world, helper), Some(Some("quit".into())));
 }
 
 #[test]

@@ -277,6 +277,8 @@ impl Host {
     }
     /// Records a run's own provider process, which leads its group. A group this agent had
     /// recorded under the same id has emptied, or the id could not have been given out again.
+    /// The run itself keeps the group's id in its detail, as a fact about the run that
+    /// outlasts the record's row; nothing is ever signalled by it.
     pub(crate) fn record_provider_process(
         &mut self,
         session: &str,
@@ -300,6 +302,10 @@ impl Host {
                     params![id, group, started],
                 )?;
             }
+            host.db.execute(
+                "UPDATE provider_runs SET detail=json_set(detail,'$.process_group',?2) WHERE id=?1",
+                params![run, group],
+            )?;
             Ok(())
         })
     }
@@ -546,7 +552,18 @@ impl Host {
     }
     /// Stops everything these agents started with their tools, across all their turns.
     pub(crate) fn stop_processes(&mut self, sessions: &[String], reason: StopReason) -> Result<()> {
-        let recorded = self.recorded_for(sessions)?;
+        self.stop_processes_except(sessions, reason, &[])
+    }
+    /// As `stop_processes`, leaving alone what the runs in `spared` started: a stop lets a
+    /// compaction that has started finish, and what its provider started is part of it.
+    pub(crate) fn stop_processes_except(
+        &mut self,
+        sessions: &[String],
+        reason: StopReason,
+        spared: &[String],
+    ) -> Result<()> {
+        let mut recorded = self.recorded_for(sessions)?;
+        recorded.retain(|recorded| !spared.contains(&recorded.run_id));
         if !recorded.is_empty() {
             let (_, stopped) = self.stop_recorded(recorded, reason)?;
             self.notice_stopped(&stopped, reason);

@@ -992,6 +992,48 @@ fn a_verifier_retired_by_its_cycle_has_what_it_started_stopped() {
 }
 
 #[test]
+fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    // The first review passed and retired its verifier; the human restored it, and it has
+    // left a process running since.
+    let verifier = passed(&mut host, &ticket);
+    host.set_archived(&verifier.id, false).unwrap();
+    let mut left = Started::by(&db, &verifier);
+    host.agent_tool(
+        &implementer(&host).id,
+        "report",
+        json!({"message_id":"ready again","kind":"ready_for_testing","body":"Committed"}),
+    )
+    .unwrap();
+
+    // The next review chooses another profile for that verifier, so a fresh session takes it
+    // and the restored one is archived in its place.
+    let mut choices = common::verifier_choices(&host);
+    let pinned = choices[0].profile.clone();
+    let selection = host.model_selection().unwrap();
+    let allowed = selection.allowed(pinned.provider);
+    let other = allowed
+        .iter()
+        .find(|m| (&m.model, &m.effort) != (&pinned.model, &pinned.effort));
+    let other = other.expect("a second allowed model or effort");
+    choices[0].profile.model = other.model.clone();
+    choices[0].profile.effort = other.effort.clone();
+    host.agent_tool(
+        &coordinator.id,
+        "verify_ticket",
+        json!({"ticket_id": ticket.id, "level": "Full", "verifiers": choices}),
+    )
+    .unwrap();
+
+    assert!(host.session(&verifier.id).unwrap().archived);
+    assert_eq!(left.stopped(&db), archived());
+}
+
+#[test]
 fn archiving_a_project_stops_what_every_agent_in_it_started() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
