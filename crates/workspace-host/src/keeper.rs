@@ -555,6 +555,35 @@ impl Host {
         to: &str,
         how: Move,
     ) -> Result<()> {
+        self.movable(ticket, from)?;
+        let worktree = Path::new(&ticket.worktree);
+        match how {
+            Move::Reset => {
+                runtime::git_output(worktree, &["reset", "--quiet", "--hard", to]).map(drop)
+            }
+            Move::FastForward(git) => {
+                let merge = [
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "merge",
+                    "--quiet",
+                    "--ff-only",
+                    "--no-autostash",
+                    to,
+                ];
+                let answer = git(worktree, &merge)?;
+                ensure!(
+                    answer.status.success(),
+                    "git merge failed{}",
+                    answer.reason()
+                );
+                Ok(())
+            }
+        }
+    }
+    /// Whether the ticket's branch may move from `from` now: the worktree is on the ticket's
+    /// branch at `from`, clean, and no cycle or publish request runs.
+    fn movable(&self, ticket: &Ticket, from: &str) -> Result<()> {
         ensure!(
             ticket.running_cycle().is_none(),
             "a verification cycle is running"
@@ -577,24 +606,17 @@ impl Host {
             worktrees::is_clean(worktree)?,
             "the worktree has uncommitted or untracked files"
         );
-        let args: &[&str] = match how {
-            Move::Reset => &["reset", "--quiet", "--hard", to],
-            Move::FastForward => &[
-                "-c",
-                "core.hooksPath=/dev/null",
-                "merge",
-                "--quiet",
-                "--ff-only",
-                "--no-autostash",
-                to,
-            ],
-        };
-        runtime::git_output(worktree, args).map(drop)
+        Ok(())
     }
-    /// Takes the commits a fetch found on top of the worktree's HEAD into the ticket's branch,
-    /// or tells the coordinator once that the two diverged. The actor calls it only while no
-    /// agent of the ticket is in a turn; otherwise commits wait for the next pass's fetch.
-    pub(crate) fn keeper_fetched(&mut self, fetched: Fetched, in_turn: bool) -> Result<()> {
+    /// Takes the commits a fetch found on top of the worktree's HEAD into the ticket's branch
+    /// with `git`, or tells the coordinator once that the two diverged. While an agent of the
+    /// ticket is in a turn, `in_turn`, nothing is taken in: the next pass fetches again.
+    pub(crate) fn keeper_fetched(
+        &mut self,
+        fetched: Fetched,
+        in_turn: bool,
+        git: &publish::GitTool,
+    ) -> Result<()> {
         self.keeper.running.remove(&fetched.ticket_id);
         let mut ticket = self.ticket(&fetched.ticket_id)?;
         let repository = self.ticket_repository(&ticket)?;
@@ -603,7 +625,7 @@ impl Host {
         let from = fetched.from;
         match fetched.found {
             Found::Ahead { head, commits } if !in_turn => {
-                self.adopt(&mut ticket, &repository, &from, &head, commits)
+                self.adopt(&mut ticket, &repository, &from, &head, commits, git)
             }
             Found::Ahead { .. } => Ok(()),
             Found::Diverged(head) => {
@@ -632,9 +654,19 @@ impl Host {
         from: &str,
         head: &str,
         commits: u32,
+        git: &publish::GitTool,
     ) -> Result<()> {
         let coordinator = self.session(&ticket.coordinator_id)?;
-        if !(self.settings().keeper.rebase && self.kept(ticket, repository, &coordinator)?) {
+        let kept = self.settings().keeper.rebase && self.kept(ticket, repository, &coordinator)?;
+        let movable = match kept {
+            true => self.movable(ticket, from),
+            false => Err(anyhow::anyhow!("the keeper no longer keeps the ticket")),
+        };
+        if let Err(e) = movable {
+            eprintln!(
+                "Workspace PR keeper: {}: commits not adopted: {e:#}",
+                ticket.id
+            );
             return Ok(());
         }
         let before = ticket.clone();
@@ -652,15 +684,30 @@ impl Host {
             ticket.state = "ready_for_testing".into();
         }
         // The hold is stored before the branch moves, so no failed write or stop can leave the
-        // adopted commits without it. A move that fails takes the hold back.
+        // adopted commits without it. A failed move is judged by where HEAD is, never by Git's
+        // answer: only a branch still at `from` gets the hold taken back.
         self.save_ticket(ticket)?;
-        if let Err(e) = self.keeper_adopt(&before, from, head, Move::FastForward) {
-            eprintln!(
-                "Workspace PR keeper: {}: commits not adopted: {e:#}",
-                ticket.id
-            );
-            *ticket = before;
-            return self.save_ticket(ticket);
+        if let Err(e) = self.keeper_adopt(&before, from, head, Move::FastForward(git)) {
+            eprintln!("Workspace PR keeper: {}: fast-forward: {e:#}", ticket.id);
+            match verification::head(ticket) {
+                Ok(now) if now == from => {
+                    *ticket = before;
+                    return self.save_ticket(ticket);
+                }
+                Ok(now) if now == head => {}
+                now => {
+                    let now = now.map_or("a commit that could not be read".into(), |c| {
+                        short_sha(&c).to_owned()
+                    });
+                    let body = format!(
+                        "{}: the PR keeper tried to take GitHub's branch at {} into the ticket's worktree and Git failed. The worktree is now at {now}, neither the commit it started from, {}, nor GitHub's head. Nothing is pushed or accepted until a review that starts after this ends; look at the worktree before starting one.",
+                        named(ticket),
+                        short_sha(head),
+                        short_sha(from)
+                    );
+                    return self.keeper_notice(ticket, "unexpected", &[head], &body);
+                }
+            }
         }
         let (count, them) = match commits {
             1 => ("1 commit".to_owned(), "it, unchanged. It has"),
@@ -800,10 +847,11 @@ fn notice_id(ticket: &Ticket, what: &str, commits: &[&str]) -> String {
         commits.join(":")
     )
 }
-/// How the keeper moves a ticket's branch: to its own rebase, or forward to adopted commits.
-pub(crate) enum Move {
+/// How the keeper moves a ticket's branch: to its own rebase, or forward to adopted commits
+/// with Git as the actor runs it.
+pub(crate) enum Move<'a> {
     Reset,
-    FastForward,
+    FastForward(&'a publish::GitTool),
 }
 
 /// How keeper messages name a ticket's PR, as the watcher's do.
@@ -1547,7 +1595,7 @@ pub(crate) mod tests {
         let mut jobs = fetches(f);
         assert_eq!(jobs.len(), 1);
         let fetched = super::fetch(&jobs.remove(0), &r.tools.git);
-        f.host.keeper_fetched(fetched, false).unwrap();
+        f.host.keeper_fetched(fetched, false, &r.tools.git).unwrap();
     }
     /// A passed, kept ticket that adopted `content` in `file` from GitHub's branch.
     fn adopted(file: &str, content: &str) -> (Fixture, Remote, String) {
@@ -1594,7 +1642,7 @@ pub(crate) mod tests {
         );
         assert!(call.contains(&"--no-tags".to_owned()) && call.contains(&ORIGIN.to_owned()));
         // Recorded, the keeper's ref goes whatever happened.
-        f.host.keeper_fetched(fetched, true).unwrap();
+        f.host.keeper_fetched(fetched, true, &r.tools.git).unwrap();
         assert!(!has_result_ref(&f));
     }
 
@@ -1806,7 +1854,7 @@ pub(crate) mod tests {
         let fetched = super::fetch(&fetches(&mut f).remove(0), &r.tools.git);
         let refuse = "CREATE TRIGGER refuse BEFORE UPDATE ON tickets BEGIN SELECT RAISE(ABORT, 'injected'); END";
         f.host.db.execute(refuse, []).unwrap();
-        assert!(f.host.keeper_fetched(fetched, false).is_err());
+        assert!(f.host.keeper_fetched(fetched, false, &r.tools.git).is_err());
         assert_eq!(f.head(), old);
         f.host.db.execute("DROP TRIGGER refuse", []).unwrap();
         // The branch cannot move: the hold is taken back and nothing is told.
@@ -1817,6 +1865,124 @@ pub(crate) mod tests {
         fetch_and_adopt(&mut f, &r);
         let ticket = f.ticket();
         assert_eq!((f.head(), ticket.state.as_str()), (old, "passed"));
+        assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
+    }
+
+    /// A passed, kept ticket whose PR's head is a commit pushed on GitHub, and that fetch's
+    /// result.
+    fn fetched_from_github(f: &mut Fixture, r: &Remote) -> (String, Fetched) {
+        let mut ticket = f.ticket();
+        ticket.state = "passed".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let theirs = pushed_elsewhere(f, r, "c.txt", "three\n");
+        let fetched = super::fetch(&fetches(f).remove(0), &r.tools.git);
+        (theirs, fetched)
+    }
+    /// A Git that runs `before` in the worktree, then fails: with an error, as at its time
+    /// limit, or with a non-zero exit.
+    fn failing_git(before: fn(&Path), timed_out: bool) -> publish::GitTool {
+        std::sync::Arc::new(move |path: &Path, _: &[&str]| {
+            before(path);
+            match timed_out {
+                true => anyhow::bail!("git timed out after 15 s"),
+                false => Ok(runtime::GitAnswer {
+                    status: exit(1),
+                    output: String::new(),
+                    error: "fatal: stand-in failure".into(),
+                }),
+            }
+        })
+    }
+
+    #[test]
+    fn a_failed_fast_forward_is_judged_by_where_head_is() {
+        // Git moved the branch, then failed: the adoption stands, with its hold and message.
+        fn merged(path: &Path) {
+            git(path, &["merge", "--quiet", "--ff-only", "FETCH_TARGET"]);
+        }
+        for timed_out in [true, false] {
+            let (mut f, r) = kept();
+            let (theirs, fetched) = fetched_from_github(&mut f, &r);
+            git(
+                &f.worktree,
+                &["update-ref", "refs/heads/FETCH_TARGET", &theirs],
+            );
+            f.host
+                .keeper_fetched(fetched, false, &failing_git(merged, timed_out))
+                .unwrap();
+            let ticket = f.ticket();
+            assert_eq!(f.head(), theirs);
+            assert_eq!(ticket.state, "ready_for_testing");
+            assert_eq!(ticket.unreviewed().unwrap().head, theirs);
+            refused(f.host.accept_ticket(&f.ticket.clone(), None));
+            let told = notices(&f.host);
+            assert_eq!(told.len(), 1);
+            assert!(told[0].0.contains(":adopted:"), "{}", told[0].0);
+        }
+        // Git failed with the branch where it was: the hold is taken back, nothing is told.
+        let (mut f, r) = kept();
+        let old = f.head();
+        let (_, fetched) = fetched_from_github(&mut f, &r);
+        f.host
+            .keeper_fetched(fetched, false, &failing_git(|_| {}, true))
+            .unwrap();
+        let ticket = f.ticket();
+        assert_eq!((f.head(), ticket.state.as_str()), (old.clone(), "passed"));
+        assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
+        // Git failed with the branch somewhere else: the hold stays and the coordinator is
+        // told once.
+        let (mut f, r) = kept();
+        let (theirs, fetched) = fetched_from_github(&mut f, &r);
+        fn elsewhere(path: &Path) {
+            git(
+                path,
+                &["commit", "--quiet", "--allow-empty", "-m", "elsewhere"],
+            );
+        }
+        f.host
+            .keeper_fetched(fetched, false, &failing_git(elsewhere, true))
+            .unwrap();
+        let ticket = f.ticket();
+        assert_eq!(ticket.unreviewed().unwrap().head, theirs);
+        refused(f.host.accept_ticket(&f.ticket.clone(), None));
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0].0.ends_with(&format!(":unexpected:{theirs:.20}")),
+            "{}",
+            told[0].0
+        );
+        assert!(told[0].2.contains(short_sha(&f.head())), "{}", told[0].2);
+    }
+
+    #[test]
+    fn a_second_adoption_before_any_review_adds_to_the_record() {
+        let (mut f, r, first) = adopted("c.txt", "three\n");
+        let second = pushed_elsewhere(&mut f, &r, "d.txt", "four\n");
+        fetch_and_adopt(&mut f, &r);
+        assert_eq!(f.head(), second);
+        assert_eq!(
+            git(&f.worktree, &["rev-parse", &format!("{second}~")]),
+            first
+        );
+        let ticket = f.ticket();
+        let record = Unreviewed {
+            head: second.clone(),
+            commits: 2,
+            cycle: ticket.verification.as_ref().unwrap().cycle,
+        };
+        assert_eq!(ticket.unreviewed(), Some(&record));
+        assert_eq!(notices(&f.host).len(), 2);
+    }
+
+    #[test]
+    fn a_head_that_moved_before_the_adoption_moves_nothing_and_holds_nothing() {
+        let (mut f, r) = kept();
+        let (_, fetched) = fetched_from_github(&mut f, &r);
+        let ours = f.commit("d.txt", "mine\n");
+        f.host.keeper_fetched(fetched, false, &r.tools.git).unwrap();
+        let ticket = f.ticket();
+        assert_eq!((f.head(), ticket.state.as_str()), (ours, "passed"));
         assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
     }
 }

@@ -12,7 +12,8 @@ pub(crate) type GitTool = Tool<runtime::GitAnswer>;
 #[derive(Clone)]
 pub(crate) struct Tools {
     pub gh: Tool<runtime::GhAnswer>,
-    /// `git ls-remote` and `git push`, and the PR keeper's read-only `git fetch`.
+    /// `git ls-remote` and `git push`, and the PR keeper's read-only `git fetch` and the
+    /// fast-forward it takes adopted commits in with.
     pub git: GitTool,
 }
 impl Default for Tools {
@@ -1125,7 +1126,7 @@ pub(crate) mod tests {
             .map(|(name, head)| (name.to_owned(), head.to_owned()))
             .collect()
     }
-    fn exit(code: i32) -> std::process::ExitStatus {
+    pub(crate) fn exit(code: i32) -> std::process::ExitStatus {
         std::os::unix::process::ExitStatusExt::from_raw(code << 8)
     }
 

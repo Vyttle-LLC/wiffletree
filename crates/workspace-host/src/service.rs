@@ -1211,7 +1211,8 @@ impl Actor {
             }
             Event::Fetched(fetched) => {
                 let in_turn = self.ticket_in_turn(&fetched.ticket_id);
-                if let Err(e) = self.host.keeper_fetched(fetched, in_turn) {
+                let git = &self.publish_tools.git;
+                if let Err(e) = self.host.keeper_fetched(fetched, in_turn, git) {
                     eprintln!("Workspace PR keeper: {e:#}");
                 }
                 true
