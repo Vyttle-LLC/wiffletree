@@ -1110,14 +1110,18 @@ pub const COMPACTION_LINE_PREFIX: &str = "compaction:";
 pub const PUBLISH_PREFIX: &str = "publish:";
 /// The id prefix of the Inbox item for a parked provider permission.
 pub const PERMISSION_PREFIX: &str = "permission:";
+/// The id prefix of the notices about the processes an agent left running and the ones the
+/// host stopped. Only the host creates them.
+pub const PROCESS_NOTICE_PREFIX: &str = "processes:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees, migration notices and publish results. Inbox answers (`answer:`) carry the human's
-/// words.
-const HOST_NOTICE_PREFIXES: [&str; 4] = [
+/// worktrees, migration notices, publish results and process notices. Inbox answers (`answer:`)
+/// carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 5] = [
     "verification:",
     "worktree-kept:",
     "migration:",
     PUBLISH_PREFIX,
+    PROCESS_NOTICE_PREFIX,
 ];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 //! Single-writer durable host, independent of graphics and provider inference.
+mod agent_processes;
 pub mod attachments;
 pub mod compaction;
 pub mod context;
@@ -12,6 +13,7 @@ mod order;
 mod overlaps;
 mod policies;
 mod pr_watch;
+mod processes;
 mod progress;
 pub mod provider;
 mod publish;
@@ -103,9 +105,9 @@ pub(crate) const CHECK_IN: &str = "check-in:";
 /// Prefix of the inbox item raised when the project coordinator has run many turns without the
 /// human; reserved like `CHECK_IN`.
 pub(crate) const TURN_COUNT: &str = "turn-count:";
-/// Prefix of the inbox note for a provider process an earlier host left running that startup
-/// could not confirm and so did not stop; the rest is the run's id. Reserved like `CHECK_IN`.
-/// While the note is open, its session starts no turn.
+/// Prefix of the inbox note for a process group an agent's run left running that the host could
+/// not confirm and so did not stop; the rest is the id of its `process_groups` record. Reserved
+/// like `CHECK_IN`. While the note of a provider's own group is open, its session starts no turn.
 pub(crate) const LEFTOVER_PROCESS: &str = "leftover-process:";
 /// SQL condition for a `provider_runs` row that is a turn. A compaction's row has a `kind`
 /// and must not count as the session's turn: not for check-ins, not as its latest turn.
@@ -195,6 +197,7 @@ impl Host {
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
+        agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
         order::migrate(&db)?;
         let mut host = Self {
@@ -545,6 +548,14 @@ impl Host {
             true => vec![],
             false => tickets.iter().map(|t| t.id.clone()).collect(),
         };
+        let stopped = match archived {
+            // A refused archive stops nothing, and no worktree is removed under a live process.
+            true => {
+                self.check_removable(&tickets)?;
+                self.stop_started_by(affected.iter().map(|s| &s.id))?
+            }
+            false => vec![],
+        };
         let save = move |host: &mut Self| -> Result<Vec<Session>> {
             let project = affected[0].project_id.clone();
             let stops_project = archived && affected[0].role == Role::ProjectOrchestrator;
@@ -593,12 +604,35 @@ impl Host {
             tx.commit()?;
             Ok(affected)
         };
-        if archived {
-            self.with_worktrees_removed(&tickets, save)
-        } else {
+        if !archived {
             self.restore_worktrees(&tickets)?;
-            save(self)
+            return save(self);
         }
+        let saved = self.with_worktrees_removed(&tickets, save);
+        // The stop cannot be undone, so what it says depends on whether the archive was made.
+        self.archive_settled(&stopped, saved.is_ok());
+        saved
+    }
+    /// Stops what these sessions started, as they are about to be archived, and returns what
+    /// it stopped for `archive_settled` to say once the archive is made or has failed. One
+    /// whose run has not finished keeps its processes until it has: a verifier is archived
+    /// while it writes its summary.
+    pub(crate) fn stop_started_by<'a>(
+        &mut self,
+        sessions: impl Iterator<Item = &'a String>,
+    ) -> Result<Vec<agent_processes::Stopped>> {
+        let mut idle = vec![];
+        for session in sessions {
+            let running: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_runs WHERE session_id=?1 AND finished_at IS NULL)",
+                [session],
+                |r| r.get(0),
+            )?;
+            if !running {
+                idle.push(session.clone());
+            }
+        }
+        self.stop_for_archive(&idle)
     }
     /// Runs `work` as one unit: if it fails, none of its writes remain. Helpers called inside
     /// must use savepoints rather than transactions.
@@ -953,7 +987,8 @@ impl Host {
             options: options.to_vec(),
             answer: None,
         };
-        let tx = self.db.transaction()?;
+        // A savepoint, so a note can be raised inside another change, such as an archive.
+        let tx = self.db.savepoint()?;
         tx.execute(
             "INSERT INTO attention VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -992,6 +1027,14 @@ impl Host {
             "UPDATE attention SET data=?2 WHERE id=?1",
             params![id, encode(&attention)?],
         )?;
+        // A leftover-process note the human settles says the group is not the agent's: it is
+        // no longer recorded as running, so it holds neither a turn nor a worktree.
+        if let Some(record) = attention.operation_id.strip_prefix(LEFTOVER_PROCESS) {
+            tx.execute(
+                "UPDATE process_groups SET ended_at=?2,ended='dismissed' WHERE id=?1 AND ended_at IS NULL",
+                params![record, now()],
+            )?;
+        }
         Self::event(
             &tx,
             &attention.project_id,

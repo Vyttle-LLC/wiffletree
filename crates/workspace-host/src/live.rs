@@ -456,7 +456,12 @@ impl Host {
         state: &str,
         milestone: &str,
     ) -> Result<Ticket> {
-        self.with_worktrees_removed(&[ticket.clone()], |host| {
+        // The agents' processes are stopped before the worktree goes, and not at all when the
+        // worktree cannot be removed.
+        self.check_removable(std::slice::from_ref(&ticket))?;
+        let agents = self.ticket_agents(&ticket.id)?;
+        let stopped = self.stop_started_by(agents.iter().map(|agent| &agent.id))?;
+        let finished = self.with_worktrees_removed(&[ticket.clone()], |host| {
             // Before its caller is archived, so the caller still gets the request's one message.
             host.withdraw_request(&mut ticket, &format!("the ticket was {state}"))?;
             for agent in host.ticket_agents(&ticket.id)? {
@@ -484,7 +489,10 @@ impl Host {
                 milestone,
                 &body,
             )
-        })?;
+        });
+        // The stop cannot be undone, so what it says depends on whether the ticket was finished.
+        self.archive_settled(&stopped, finished.is_ok());
+        finished?;
         Ok(ticket)
     }
     pub fn agent_context(&self, id: &str) -> Result<Value> {

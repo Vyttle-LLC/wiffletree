@@ -448,7 +448,7 @@ impl World {
         let db = self.db();
         let mut runs = db
             .prepare(
-                "SELECT id,json_extract(detail,'$.kind') IS NOT NULL,outcome,started_at,finished_at,process_group FROM provider_runs WHERE session_id=?1 ORDER BY rowid",
+                "SELECT id,json_extract(detail,'$.kind') IS NOT NULL,outcome,started_at,finished_at,(SELECT process_group FROM process_groups g WHERE g.run_id=provider_runs.id AND g.provider=1) FROM provider_runs WHERE session_id=?1 ORDER BY rowid",
             )
             .unwrap();
         let runs = runs.query_map([session], |r| {
@@ -1093,7 +1093,7 @@ fn a_compactions_process_the_start_cannot_confirm_holds_the_agent_until_its_note
     world
         .db()
         .execute(
-            "UPDATE provider_runs SET process_started=process_started+1 WHERE process_group=?1",
+            "UPDATE process_group_members SET started=started+1 WHERE group_id IN (SELECT id FROM process_groups WHERE process_group=?1)",
             [group],
         )
         .unwrap();
