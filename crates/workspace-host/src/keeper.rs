@@ -6,6 +6,8 @@ use crate::*;
 use std::collections::{HashMap, HashSet};
 
 const MINUTE: i64 = 60_000;
+/// Rebases of one head and base that fail in a row before the coordinator is told.
+const FAILURES_TOLD: u32 = 3;
 
 /// What the keeper keeps in memory, so a restart starts every wait again.
 #[derive(Default)]
@@ -15,6 +17,8 @@ pub(crate) struct Memory {
     bases: HashMap<(String, String), (String, i64)>,
     /// Tickets whose rebase is running.
     running: HashSet<String>,
+    /// By ticket: the head and base whose rebase failed outright, and how often in a row.
+    failures: HashMap<String, (KeeperRebase, u32)>,
 }
 
 /// One rebase, with everything it needs off the host thread.
@@ -135,7 +139,7 @@ impl Host {
     /// Whether the keeper acts for the ticket's PR: the ticket is open, its coordinator is not
     /// archived, its project is not paused, its repository publishes without asking and its PR
     /// is open.
-    pub(crate) fn kept(
+    fn kept(
         &self,
         ticket: &Ticket,
         repository: &Repository,
@@ -175,7 +179,8 @@ impl Host {
             }
         }
     }
-    /// After a pass of the repository: the rebases due and the results waiting to be moved.
+    /// After a pass of the repository: the rebases due and the results waiting to be moved. An
+    /// error for one ticket is logged and leaves every other ticket's work as it is.
     pub(crate) fn keeper_due(&mut self, repository_id: &str, at: i64) -> Result<Due> {
         let settings = self.settings();
         let repository = self.repository(repository_id)?;
@@ -186,10 +191,11 @@ impl Host {
             }
             if ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some()) {
                 due.waiting.push(ticket.id.clone());
-            } else if settings.keeper.rebase
-                && let Some(job) = self.rebase_due(&ticket, &repository, &settings, at)?
-            {
-                due.rebases.push(job);
+            } else if settings.keeper.rebase {
+                match self.rebase_due(&ticket, &repository, &settings, at) {
+                    Ok(job) => due.rebases.extend(job),
+                    Err(e) => eprintln!("Workspace PR keeper: {}: {e:#}", ticket.id),
+                }
             }
         }
         Ok(due)
@@ -286,14 +292,41 @@ impl Host {
             }
             Rebased::Failed(error) => {
                 eprintln!("Workspace PR keeper: {}: {error}", ticket.id);
-                None
+                return self.rebase_failed(&ticket, rebase).map(|()| false);
             }
         };
+        self.keeper.failures.remove(&ticket.id);
         let record = ticket.keeper.get_or_insert_default();
         record.rebased = Some(rebase);
         record.waiting = waiting.clone();
         self.save_ticket(&ticket)?;
         Ok(waiting.is_some())
+    }
+    /// A rebase that failed outright, such as on a failed fetch, is not a try: the next pass
+    /// tries that head and base again. When it keeps failing, the coordinator is told once.
+    fn rebase_failed(&mut self, ticket: &Ticket, rebase: KeeperRebase) -> Result<()> {
+        let failures = self
+            .keeper
+            .failures
+            .entry(ticket.id.clone())
+            .or_insert((rebase.clone(), 0));
+        if failures.0 != rebase {
+            *failures = (rebase.clone(), 0);
+        }
+        failures.1 += 1;
+        if failures.1 < FAILURES_TOLD {
+            return Ok(());
+        }
+        let base = ticket
+            .pull_request
+            .as_ref()
+            .map_or("", |pr| pr.base.as_str());
+        let body = format!(
+            "{}: the PR keeper could not rebase it onto {base} at {} {FAILURES_TOLD} times in a row, for a reason outside the branch, such as a fetch that failed. Nothing was moved or pushed. It tries again after each pass; Wiffletree's log has the error.",
+            named(ticket),
+            short_sha(&rebase.base)
+        );
+        self.keeper_notice(ticket, "failed", &rebase, &body)
     }
     /// Moves the ticket's waiting rebase onto its branch and starts its push. The actor calls
     /// it only while no agent of the ticket is in a turn. A result that cannot be moved is
@@ -369,6 +402,17 @@ impl Host {
     /// Ends the ticket's keeper publish: records the push, or tells the coordinator once that
     /// the rebase was not pushed. No agent gets it as a publish result.
     pub(crate) fn keeper_published(&mut self, ticket: &mut Ticket, pushed: bool) -> Result<()> {
+        let unpushed = "did not push it, so GitHub's branch is unchanged";
+        self.end_keeper_push(ticket, pushed, unpushed)
+    }
+    /// Ends a keeper publish that was running when the host stopped, and tells the coordinator
+    /// once: the worktree holds the rebase, and GitHub may still have the old head.
+    pub(crate) fn keeper_push_interrupted(&mut self, ticket: &mut Ticket) -> Result<()> {
+        let unpushed =
+            "was pushing it when Wiffletree stopped, so GitHub's branch may still be the old head";
+        self.end_keeper_push(ticket, false, unpushed)
+    }
+    fn end_keeper_push(&mut self, ticket: &mut Ticket, pushed: bool, unpushed: &str) -> Result<()> {
         ticket.publishing = None;
         let last = ticket.keeper.as_mut().and_then(|k| k.last.as_mut());
         let last = last.context("The keeper's push has no rebase")?;
@@ -395,7 +439,7 @@ impl Host {
             return Self::event(&self.db, &project, None, "pull_request_rebased", &detail);
         }
         let body = format!(
-            "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but did not push it, so GitHub's branch is unchanged. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
+            "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
             named(ticket),
             short_sha(&last.after)
         );
@@ -450,8 +494,10 @@ impl Host {
                     fs::remove_dir_all(&checkout)?;
                 }
             }
+            // A dropped result is no try: a later pass rebases that head and base again.
             if let Some(record) = ticket.keeper.as_mut().filter(|k| k.waiting.is_some()) {
                 record.waiting = None;
+                record.rebased = None;
                 self.save_ticket(&ticket)?;
             }
         }
@@ -969,13 +1015,114 @@ pub(crate) mod tests {
         ];
         git(&f.repository, &[&add[..], &[result.as_str()]].concat());
         let (before, pushed) = (worktree(&f), r.branch(BRANCH));
-        let f = restart(f);
+        let mut f = restart(f);
         assert!(!checkout.exists());
         assert!(!has_result_ref(&f));
         assert!(f.ticket().keeper.unwrap().waiting.is_none());
         assert_eq!((worktree(&f), r.branch(BRANCH)), (before, pushed));
         let worktrees = git(&f.repository, &["worktree", "list", "--porcelain"]);
         assert_eq!(worktrees.matches("worktree ").count(), 2, "{worktrees}");
+        // The dropped result was no try: that head and base are rebased again.
+        let base = git(&f.repository, &["rev-parse", "main"]);
+        due(&mut f, &base);
+    }
+
+    #[test]
+    fn a_rebase_that_fails_outright_is_tried_again_and_told_once_when_it_keeps_failing() {
+        let (mut f, r) = kept();
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let mut job = due(&mut f, &base);
+        let missing = f.home.path().join("missing.git");
+        let origin = ["remote", "set-url", "origin", missing.to_str().unwrap()];
+        git(&f.repository, &origin);
+        let before = (worktree(&f), r.branch(BRANCH));
+        for failed in 1..=4 {
+            // The real fetch fails, as it does on a network error.
+            let outcome = rebase(&job, overlaps::fetch_base);
+            assert!(matches!(outcome.result, Rebased::Failed(_)));
+            assert!(!f.host.keeper_rebased(outcome).unwrap());
+            let told = notices(&f.host);
+            assert_eq!(told.len(), usize::from(failed >= FAILURES_TOLD), "{failed}");
+            let mut jobs = pass(&mut f, &base, (2 + i64::from(failed)) * MINUTE);
+            assert_eq!(jobs.len(), 1, "a failed rebase is not a try");
+            job = jobs.remove(0);
+        }
+        assert_eq!((worktree(&f), r.branch(BRANCH)), before);
+        let told = notices(&f.host);
+        assert!(told[0].0.contains(":failed:"), "{}", told[0].0);
+        assert!(!told[0].2.contains("missing.git"), "{}", told[0].2);
+    }
+
+    #[test]
+    fn the_real_fetch_updates_the_bases_tracking_ref_and_the_rebase_goes_on() {
+        let (mut f, r) = kept();
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &base);
+        let origin = ["remote", "set-url", "origin", r.bare.to_str().unwrap()];
+        git(&f.repository, &origin);
+        assert_ne!(git(&f.repository, &["rev-parse", "origin/main"]), base);
+        let Rebased::Same(result) = rebase(&job, overlaps::fetch_base).result else {
+            panic!("not the same change");
+        };
+        assert_eq!(git(&f.repository, &["rev-parse", "origin/main"]), base);
+        assert!(publish::is_ancestor(&f.repository, &base, &result));
+    }
+
+    #[test]
+    fn an_error_for_one_ticket_leaves_the_others_rebase_due() {
+        let (mut f, r) = kept();
+        // A second ticket of the repository whose coordinator cannot be read.
+        let mut broken = f.ticket();
+        broken.id = "broken".into();
+        broken.coordinator_id = "gone".into();
+        f.host
+            .db
+            .execute(
+                "INSERT INTO tickets VALUES (?1,?2,?3)",
+                rusqlite::params![broken.id, f.coordinator.id, crate::encode(&broken).unwrap()],
+            )
+            .unwrap();
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &base);
+        assert_eq!(job.ticket_id, f.ticket);
+    }
+
+    #[test]
+    fn a_pr_that_is_no_tickets_is_never_kept() {
+        let (mut f, r) = kept();
+        // The watcher asks GitHub only about tickets' branches.
+        let queries = f.host.pull_request_queries().unwrap();
+        let asked: Vec<_> = queries
+            .iter()
+            .flat_map(|(_, query)| query.tickets.iter().map(|t| t.branch.as_str()))
+            .collect();
+        assert_eq!(asked, [BRANCH]);
+        // A pass that reports another PR into a base quiet for an hour, while the ticket has
+        // none, makes nothing due.
+        let mut ticket = f.ticket();
+        let mut other = ticket.pull_request.take().unwrap();
+        f.host.save_ticket(&ticket).unwrap();
+        other.number = 200;
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let found = pr_watch::Found {
+            ticket_id: String::new(),
+            pull_request: other,
+            base_head: base,
+            worktree_head: None,
+        };
+        let pass = pr_watch::Pass {
+            found: vec![found],
+            rate_limit: pr_watch::RateLimit {
+                remaining: 4000,
+                reset_at: 0,
+            },
+        };
+        for at in [0, 60 * MINUTE] {
+            f.host.note_bases(&ticket.repository_id, &pass, at);
+            let due = f.host.keeper_due(&ticket.repository_id, at).unwrap();
+            assert!(due.rebases.is_empty() && due.waiting.is_empty());
+        }
+        assert!(notices(&f.host).is_empty() && f.ticket().keeper.is_none());
     }
 
     #[test]

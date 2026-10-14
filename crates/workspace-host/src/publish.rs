@@ -923,10 +923,8 @@ impl Host {
             {
                 continue;
             }
-            // The keeper's next pass decides anew; nobody is told.
             if request.keeper {
-                ticket.publishing = None;
-                self.save_ticket(&ticket)?;
+                self.keeper_push_interrupted(&mut ticket)?;
                 continue;
             }
             let notice = format!(
@@ -3562,15 +3560,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_keeper_push_interrupted_by_a_restart_ends_and_tells_nobody() {
-        let (mut f, _remote, _) = keeper::tests::waiting();
+    fn a_keeper_push_interrupted_by_a_restart_is_told_to_the_coordinator_once() {
+        let (mut f, _remote, result) = keeper::tests::waiting();
         assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_some());
-        let messages = keeper::tests::message_count(&f.host);
-        let mut f = restart(f);
+        let sent = results(&f.host);
+        let f = restart(f);
         assert!(f.ticket().publishing.is_none());
-        assert_eq!(keeper::tests::message_count(&f.host), messages);
-        // That head and base were rebased once, so no later pass rebases or pushes them again.
-        let base = git(&f.repository, &["rev-parse", "refs/remotes/origin/main"]);
-        assert!(keeper::tests::pass(&mut f, &base, 60 * 60_000).is_empty());
+        // The worktree holds the rebase and GitHub may not: the coordinator is told, and no
+        // agent gets a publish result.
+        assert_eq!(f.head(), result);
+        let told = keeper::tests::notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].1, f.coordinator.id);
+        assert!(
+            told[0].2.contains("when Wiffletree stopped"),
+            "{}",
+            told[0].2
+        );
+        assert!(told[0].2.contains("Call publish_ticket"), "{}", told[0].2);
+        assert_eq!(results(&f.host), sent);
+        let f = restart(f);
+        assert_eq!(keeper::tests::notices(&f.host).len(), 1);
     }
 }
