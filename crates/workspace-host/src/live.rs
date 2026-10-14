@@ -506,6 +506,10 @@ impl Host {
                     .iter()
                     .find(|q| q.session_id == member.id)
                     .map_or(0, |q| q.count);
+                if member.archived {
+                    team.push(json!({"id":member.id,"parent_id":member.parent_id,"name":member.name,"role":member.role,"status":member.status,"archived":true}));
+                    continue;
+                }
                 let mut entry = serde_json::to_value(self.shown(member))?;
                 entry["questions_waiting"] = json!(count);
                 team.push(entry);
@@ -549,8 +553,9 @@ impl Host {
         }
         Ok(context)
     }
-    /// The project's tickets, each with its repository name, agents, verification record and any
-    /// warnings about its branch.
+    /// The project's open tickets in full, each with its repository name, agents, verification
+    /// record and any warnings about its branch; accepted and closed tickets as one short entry,
+    /// so the reply stays bounded as the project ages. `ticket_record` has the full record.
     fn ticket_overview(&self, project: &str) -> Result<Vec<Value>> {
         let repositories = self.repositories()?;
         let runtimes = self.runtimes()?;
@@ -563,37 +568,71 @@ impl Host {
             {
                 continue;
             }
-            let mut agents = vec![];
-            for runtime in runtimes
-                .iter()
-                .filter(|r| r.ticket_id.as_ref() == Some(&ticket.id))
-            {
-                let s = self.shown(self.session(&runtime.session_id)?);
-                agents.push(json!({"id":s.id,"name":s.name,"role":s.role,"focus":runtime.focus,"status":s.status,"archived":s.archived}));
-            }
-            let mut entry = serde_json::to_value(&ticket)?;
-            entry["repository"] = json!(
-                repositories
-                    .iter()
-                    .find(|r| r.id == ticket.repository_id)
-                    .map(|r| r.name.as_str())
-            );
-            entry["agents"] = json!(agents);
-            if let Some(warnings) = warnings.iter().find(|w| w.ticket_id == ticket.id) {
-                entry["warnings"] = json!(warnings.lines());
-            }
-            overview.push(entry);
+            overview.push(if ticket.is_open() {
+                self.full_ticket(&ticket, &repositories, &runtimes, &warnings)?
+            } else {
+                let mut short = json!({"id":ticket.id,"title":ticket.title,"state":ticket.state,
+                    "repository":Self::repository_name(&repositories, &ticket),"branch":ticket.branch});
+                if let Some(pr) = &ticket.pull_request {
+                    short["pull_request"] = json!({"number":pr.number,"state":pr.state,"url":pr.url});
+                }
+                short
+            });
         }
         Ok(overview)
     }
+    /// One ticket of the caller's project in full, whatever its state.
+    fn ticket_record(&self, caller: &Session, ticket_id: &str) -> Result<Value> {
+        let ticket = self.shown_ticket(self.ticket(ticket_id)?);
+        ensure!(
+            self.session(&ticket.coordinator_id)?.project_id == caller.project_id,
+            "Ticket {ticket_id} is not in your project"
+        );
+        self.full_ticket(
+            &ticket,
+            &self.repositories()?,
+            &self.runtimes()?,
+            &self.open_branch_warnings()?,
+        )
+    }
+    fn repository_name<'a>(repositories: &'a [Repository], ticket: &Ticket) -> Option<&'a str> {
+        repositories
+            .iter()
+            .find(|r| r.id == ticket.repository_id)
+            .map(|r| r.name.as_str())
+    }
+    fn full_ticket(
+        &self,
+        ticket: &Ticket,
+        repositories: &[Repository],
+        runtimes: &[SessionRuntime],
+        warnings: &[BranchWarnings],
+    ) -> Result<Value> {
+        let mut agents = vec![];
+        for runtime in runtimes
+            .iter()
+            .filter(|r| r.ticket_id.as_ref() == Some(&ticket.id))
+        {
+            let s = self.shown(self.session(&runtime.session_id)?);
+            agents.push(json!({"id":s.id,"name":s.name,"role":s.role,"focus":runtime.focus,"status":s.status,"archived":s.archived}));
+        }
+        let mut entry = serde_json::to_value(ticket)?;
+        entry["repository"] = json!(Self::repository_name(repositories, ticket));
+        entry["agents"] = json!(agents);
+        if let Some(warnings) = warnings.iter().find(|w| w.ticket_id == ticket.id) {
+            entry["warnings"] = json!(warnings.lines());
+        }
+        Ok(entry)
+    }
     /// Recent reports each direct child sent this session, newest first. Children
-    /// that never reported are omitted, so a session without children gets nothing.
+    /// that never reported, and archived ones, are omitted, so a session without children
+    /// gets nothing.
     fn child_reports(&self, id: &str) -> Result<Vec<Value>> {
         let mut children = Vec::new();
         for child in self
             .sessions()?
             .into_iter()
-            .filter(|s| s.parent_id.as_deref() == Some(id))
+            .filter(|s| s.parent_id.as_deref() == Some(id) && !s.archived)
         {
             let reports = self
                 .db
@@ -704,7 +743,10 @@ impl Host {
             args[key].as_str().with_context(|| format!("Missing {key}"))
         };
         match name {
-            "workspace_context" => self.agent_context(id),
+            "workspace_context" => match args.get("ticket_id").filter(|id| !id.is_null()) {
+                Some(_) => self.ticket_record(&session, string("ticket_id")?),
+                None => self.agent_context(id),
+            },
             "schedule" | "unschedule" | "list_schedules" => {
                 self.schedule_tool(&session, name, &args, now())
             }

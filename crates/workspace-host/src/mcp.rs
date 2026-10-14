@@ -21,8 +21,8 @@ pub fn tools() -> Value {
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and review levels with their round and cycle caps, and the guide.",
-            json!({}),
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and review levels with their round and cycle caps, and the guide. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
+            json!({"ticket_id":string}),
             vec![]
         ),
         tool(

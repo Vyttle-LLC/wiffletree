@@ -2858,11 +2858,9 @@ mod tests {
         (home, actor, ticket, tester, coordinator)
     }
 
-    /// A ticket "Toolbar" in a fresh repository, owned by its project's coordinator.
-    fn ticket_fixture() -> (tempfile::TempDir, Host, Ticket, Session) {
-        let home = tempfile::tempdir().unwrap();
-        let repository = home.path().join("web");
-        fs::create_dir_all(&repository).unwrap();
+    /// A git repository at `path` with one empty commit on `main`.
+    fn init_repository(path: &Path) {
+        fs::create_dir_all(path).unwrap();
         for args in [
             vec!["init", "-q", "-b", "main"],
             vec![
@@ -2879,13 +2877,20 @@ mod tests {
         ] {
             assert!(
                 std::process::Command::new("git")
-                    .current_dir(&repository)
+                    .current_dir(path)
                     .args(args)
                     .status()
                     .unwrap()
                     .success()
             );
         }
+    }
+
+    /// A ticket "Toolbar" in a fresh repository, owned by its project's coordinator.
+    fn ticket_fixture() -> (tempfile::TempDir, Host, Ticket, Session) {
+        let home = tempfile::tempdir().unwrap();
+        let repository = home.path().join("web");
+        init_repository(&repository);
         let mut host = Host::open_set_up(home.path().join("home")).unwrap();
         host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
             .unwrap();
@@ -2976,6 +2981,169 @@ mod tests {
         );
         assert!(actor.overlaps_checked[&repository] >= before);
         assert!(actor.overlaps_running.contains(&repository));
+    }
+
+    #[test]
+    fn an_aged_project_keeps_its_context_small_and_ticket_id_reads_a_finished_ticket() {
+        let (home, mut host, open, coordinator) = ticket_fixture();
+        let long = "a long line of detail. ".repeat(40);
+        let finding = |n: usize| LedgerEntry {
+            id: format!("F{n}"),
+            finding: Finding {
+                severity: Severity::Blocking,
+                location: format!("src/lib.rs:{n}"),
+                summary: long.clone(),
+                trigger: long.clone(),
+                evidence: long.clone(),
+            },
+            focus: "Correctness".into(),
+            cycle: 1,
+            round: 1,
+            status: EntryStatus::Fixed,
+            reason: None,
+        };
+        let mut finished = vec![];
+        for n in 0..20 {
+            let ticket = host
+                .create_ticket(
+                    &coordinator.id,
+                    &open.repository_id,
+                    &format!("Done {n}"),
+                    &long,
+                )
+                .unwrap();
+            for focus in ["a", "b", "c", "d", "e", "f"] {
+                host.assign_ticket(
+                    &ticket.id,
+                    Role::Tester,
+                    Provider::Codex,
+                    "Check",
+                    Some(focus),
+                )
+                .unwrap();
+            }
+            let mut ticket = host.close_ticket(&ticket.id).unwrap();
+            ticket.ledger = (0..4).map(finding).collect();
+            ticket.pull_request = Some(PullRequest {
+                number: 40 + n,
+                url: format!("https://github.com/o/r/pull/{}", 40 + n),
+                state: PrState::Merged,
+                draft: false,
+                base: "main".into(),
+                head: "abc".into(),
+                merge_state: MergeState::Clean,
+                checks: CheckState::Success,
+                unresolved_threads: 0,
+                comments: CommentCursors::default(),
+                merge_commit: None,
+            });
+            host.save_ticket(&ticket).unwrap();
+            finished.push(ticket);
+        }
+        let reporter = host
+            .agent_tool(&coordinator.id, "workspace_context", json!({}))
+            .unwrap()["team"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["archived"] == true)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        host.agent_tool(
+            &reporter,
+            "report",
+            json!({"message_id":"r","kind":"progress","body":"x"}),
+        )
+        .unwrap();
+
+        let context = host
+            .agent_tool(&coordinator.id, "workspace_context", json!({}))
+            .unwrap();
+        let size = serde_json::to_vec(&context).unwrap().len();
+        assert!(size < 64 * 1024, "{size} bytes");
+
+        // The open ticket is still in full; a finished one is one short entry.
+        let tickets = context["tickets"].as_array().unwrap();
+        assert_eq!(tickets[0]["brief"], "Do");
+        assert!(tickets[0]["agents"].is_array());
+        assert_eq!(
+            tickets[1],
+            json!({"id":finished[0].id,"title":"Done 0","state":"closed","repository":"web",
+                "branch":finished[0].branch,
+                "pull_request":{"number":40,"state":"merged","url":"https://github.com/o/r/pull/40"}})
+        );
+        // Archived agents are short entries and their reports are left out.
+        let archived = context["team"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|member| member["archived"] == true)
+            .collect::<Vec<_>>();
+        assert_eq!(archived.len(), 120);
+        let mut keys = archived[0].as_object().unwrap().keys().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["archived", "id", "name", "parent_id", "role", "status"]
+        );
+        assert!(context.get("child_reports").is_none());
+
+        // A client that sends its unused optional arguments as null gets the normal context.
+        let with_null = host
+            .agent_tool(
+                &coordinator.id,
+                "workspace_context",
+                json!({"ticket_id":null}),
+            )
+            .unwrap();
+        assert_eq!(with_null, context);
+
+        // ticket_id reads one finished ticket in full, and only within the caller's project.
+        let record = host
+            .agent_tool(
+                &coordinator.id,
+                "workspace_context",
+                json!({"ticket_id":finished[3].id}),
+            )
+            .unwrap();
+        assert_eq!(record["brief"], long);
+        assert_eq!(record["ledger"].as_array().unwrap().len(), 4);
+        assert_eq!(record["pull_request"]["number"], 43);
+        assert_eq!(record["agents"].as_array().unwrap().len(), 6);
+
+        let other_repository = home.path().join("other");
+        init_repository(&other_repository);
+        let other = host.create_project("Other").unwrap();
+        let other_coordinator = host
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.project_id == other.id && s.role == Role::ProjectOrchestrator)
+            .unwrap();
+        let attached = host
+            .attach_repository(&other.id, other_repository.to_str().unwrap(), "HEAD")
+            .unwrap();
+        let foreign = host
+            .create_ticket(
+                &other_coordinator.id,
+                &attached.id,
+                "Elsewhere",
+                "Not yours",
+            )
+            .unwrap();
+        let refused = host
+            .agent_tool(
+                &coordinator.id,
+                "workspace_context",
+                json!({"ticket_id":foreign.id}),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("not in your project"),
+            "{refused:#}"
+        );
     }
 
     #[test]
