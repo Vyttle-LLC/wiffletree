@@ -64,12 +64,11 @@ impl Processes {
     }
 }
 
-/// The session to read processes for next, only while the Processes panel is open on one:
-/// with it closed the host reads nothing.
-fn reading(panel: Option<Panel>, selected: Option<&str>) -> Option<String> {
-    selected
-        .filter(|_| panel == Some(Panel::Processes))
-        .map(str::to_owned)
+/// The session to read processes for next, only while the Processes panel shows on one:
+/// with it closed, or hidden by a workspace page, the host reads nothing.
+fn reading(panel: Option<Panel>, page: Page, selected: Option<&str>) -> Option<String> {
+    let shown = panel == Some(Panel::Processes) && page == Page::Conversation;
+    selected.filter(|_| shown).map(str::to_owned)
 }
 
 fn groups(listing: &[AgentProcesses]) -> impl Iterator<Item = &ProcessGroup> {
@@ -211,7 +210,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let next = this.update(cx, |view, _| {
-                    let session_id = reading(view.panel, view.selected.as_deref());
+                    let session_id = reading(view.panel, view.view, view.selected.as_deref());
                     view.processes.reading_loop = session_id.is_some();
                     Some((session_id?, view.bridge.clone()))
                 });
@@ -476,8 +475,8 @@ fn column_heads(p: Palette) -> Div {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        Duration, HashMap, Instant, Panel, Processes, cpu_percent, programs, rail_count, reading,
-        running_count, running_label,
+        Duration, HashMap, Instant, Page, Panel, Processes, cpu_percent, programs, rail_count,
+        reading, running_count, running_label,
     };
     use workspace_core::*;
 
@@ -510,13 +509,18 @@ mod tests {
 
     #[test]
     fn readings_are_asked_for_only_while_the_panel_is_open_on_a_session() {
+        let shown = Page::Conversation;
         assert_eq!(
-            reading(Some(Panel::Processes), Some("tester")).as_deref(),
+            reading(Some(Panel::Processes), shown, Some("tester")).as_deref(),
             Some("tester")
         );
-        assert_eq!(reading(Some(Panel::Files), Some("tester")), None);
-        assert_eq!(reading(None, Some("tester")), None);
-        assert_eq!(reading(Some(Panel::Processes), None), None);
+        assert_eq!(reading(Some(Panel::Files), shown, Some("tester")), None);
+        assert_eq!(reading(None, shown, Some("tester")), None);
+        assert_eq!(reading(Some(Panel::Processes), shown, None), None);
+        // A workspace page hides the inspector, panel and all.
+        for page in [Page::Models, Page::Usage, Page::Repositories] {
+            assert_eq!(reading(Some(Panel::Processes), page, Some("tester")), None);
+        }
     }
 
     #[test]
