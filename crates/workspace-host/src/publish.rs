@@ -83,7 +83,7 @@ struct Checked {
 }
 
 /// Whether `commit` contains `older`. A commit this repository does not have is not contained.
-fn is_ancestor(worktree: &Path, older: &str, commit: &str) -> bool {
+pub(crate) fn is_ancestor(worktree: &Path, older: &str, commit: &str) -> bool {
     runtime::git_answer(worktree, &["merge-base", "--is-ancestor", older, commit])
         .is_ok_and(|answer| answer.status.success())
 }
@@ -411,6 +411,38 @@ impl Host {
                 "publish_ticket was called again with another commit, review, title or description",
             )?;
         }
+        let repository = checked.repository.clone();
+        let job = self.start_request(&mut ticket, checked, caller, title, body, false)?;
+        Ok((self.publish_status(&ticket, &repository), job))
+    }
+
+    /// Publishes a ticket for the PR keeper: only a push to its open pull request, with every
+    /// check `publish_ticket` makes. It never asks the human; its result goes to the keeper.
+    pub(crate) fn keeper_publish(&mut self, ticket_id: &str) -> Result<Option<Job>> {
+        let mut ticket = self.ticket(ticket_id)?;
+        ensure!(
+            ticket.open_pull_request().is_some(),
+            "The ticket has no open pull request"
+        );
+        ensure!(
+            ticket.publishing.is_none(),
+            "A publish request for this ticket is running or waiting"
+        );
+        let checked = check(&ticket, self.ticket_repository(&ticket)?)?;
+        let caller = ticket.coordinator_id.clone();
+        self.start_request(&mut ticket, checked, &caller, None, None, true)
+    }
+
+    /// Freezes what the checked ticket's publish will send and starts its first step.
+    fn start_request(
+        &mut self,
+        ticket: &mut Ticket,
+        checked: Checked,
+        caller: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        keeper: bool,
+    ) -> Result<Option<Job>> {
         let worktree = Path::new(&ticket.worktree);
         let size = commit_size(
             worktree,
@@ -435,10 +467,10 @@ impl Host {
             waiting: None,
             blocked_review_approved: false,
             approvals: 0,
+            keeper,
         });
-        self.save_ticket(&ticket)?;
-        let job = self.start_step(&mut ticket, &checked.repository)?;
-        Ok((self.publish_status(&ticket, &checked.repository), job))
+        self.save_ticket(ticket)?;
+        self.start_step(ticket, &checked.repository)
     }
 
     /// Returns the request's next step to run, or raises its Inbox item and returns nothing when
@@ -449,6 +481,11 @@ impl Host {
         let Some(ask) = publish_ask(ticket, &request, repository, &allowed) else {
             return Ok(Some(self.job(ticket, request, repository)));
         };
+        if request.keeper {
+            // A keeper request never raises an Inbox item: it ends with nothing sent.
+            self.keeper_published(ticket, false)?;
+            return Ok(None);
+        }
         let step = match request.step {
             PublishStep::Push => "push",
             PublishStep::OpenPullRequest => "pull_request",
@@ -658,6 +695,7 @@ impl Host {
             return Ok(None);
         };
         let project = self.session(&ticket.coordinator_id)?.project_id;
+        let pushed = matches!(outcome.result, StepResult::Pushed { .. });
         let sent = format!(
             "{} at {} to {}",
             request.branch,
@@ -736,6 +774,10 @@ impl Host {
                 nothing_sent(&request)
             ),
         };
+        if request.keeper {
+            self.keeper_published(&mut ticket, pushed)?;
+            return Ok(None);
+        }
         self.end_request(&mut ticket, &result)?;
         Ok(None)
     }
@@ -879,6 +921,12 @@ impl Host {
             if let Some(item) = &request.waiting
                 && self.is_unanswered(item)?
             {
+                continue;
+            }
+            // The keeper's next pass decides anew; nobody is told.
+            if request.keeper {
+                ticket.publishing = None;
+                self.save_ticket(&ticket)?;
                 continue;
             }
             let notice = format!(
@@ -1195,7 +1243,7 @@ pub(crate) mod tests {
             .unwrap()
     }
     /// Marks the ticket's PR open, as the watcher would after reading it.
-    fn watch_open_pr(f: &mut Fixture, number: u64) -> PullRequest {
+    pub(crate) fn watch_open_pr(f: &mut Fixture, number: u64) -> PullRequest {
         let pr = PullRequest {
             number,
             url: format!("https://github.com/allowed-org/app/pull/{number}"),
@@ -1215,7 +1263,7 @@ pub(crate) mod tests {
         pr
     }
     /// Stops the host and starts it again on the same store.
-    fn restart(f: Fixture) -> Fixture {
+    pub(crate) fn restart(f: Fixture) -> Fixture {
         let Fixture {
             home,
             host,
@@ -1237,7 +1285,7 @@ pub(crate) mod tests {
             worktree,
         }
     }
-    const BRANCH: &str = "wiffletree/fix-contrast";
+    pub(crate) const BRANCH: &str = "wiffletree/fix-contrast";
 
     pub(crate) fn fixture() -> Fixture {
         let home = tempfile::tempdir().unwrap();
@@ -1795,7 +1843,7 @@ pub(crate) mod tests {
     }
 
     /// Pushes a commit to the ticket's branch on the remote from another clone.
-    fn push_from_elsewhere(f: &Fixture, remote: &Remote) -> String {
+    pub(crate) fn push_from_elsewhere(f: &Fixture, remote: &Remote) -> String {
         let clone = f.home.path().join("elsewhere");
         let bare = remote.bare.to_str().unwrap();
         git(
@@ -3396,5 +3444,133 @@ pub(crate) mod tests {
         );
         let ticket = f.ticket();
         assert!(ticket.publishing.is_none() && ticket.pushed.is_none());
+    }
+
+    /// A kept ticket whose same-change rebase is on its branch, not yet pushed: the old head.
+    fn moved_for_the_keeper() -> (Fixture, Remote, String) {
+        let (f, remote, result) = keeper::tests::waiting();
+        let old = f.head();
+        let mut ticket = f.ticket();
+        f.host.keeper_adopt(&ticket, &old, &result).unwrap();
+        let record = ticket.keeper.get_or_insert_default();
+        let base = record.rebased.clone().unwrap().base;
+        record.waiting = None;
+        record.last = Some(KeeperAction {
+            kind: KeeperKind::Rebase,
+            at: now(),
+            before: old.clone(),
+            after: result,
+            base,
+            pushed: false,
+        });
+        f.host.save_ticket(&ticket).unwrap();
+        (f, remote, old)
+    }
+
+    #[test]
+    fn a_keeper_publish_refuses_a_commit_the_review_did_not_check() {
+        let (mut f, remote, _) = moved_for_the_keeper();
+        f.commit("c.txt", "unreviewed\n");
+        let pushed = remote.branch(BRANCH);
+        let error = f.host.keeper_publish(&f.ticket.clone()).unwrap_err();
+        assert!(format!("{error:#}").contains("differ from the verified commit"));
+        assert!(f.ticket().publishing.is_none());
+        assert_eq!(remote.branch(BRANCH), pushed);
+    }
+
+    #[test]
+    fn a_keeper_publish_that_would_ask_ends_with_nothing_sent_and_no_item() {
+        for case in ["owner unticked", "review ended blocked"] {
+            let (mut f, remote, _) = moved_for_the_keeper();
+            if case == "owner unticked" {
+                f.host.set_owner_allowed("allowed-org", false).unwrap();
+            } else {
+                f.review(VerificationOutcome::Blocked);
+            }
+            let (pushed, sent) = (remote.branch(BRANCH), results(&f.host));
+            let step = f.host.keeper_publish(&f.ticket.clone()).unwrap();
+            assert!(step.is_none(), "{case}");
+            assert!(f.ticket().publishing.is_none(), "{case}");
+            assert!(f.open_items().is_empty(), "{case}");
+            assert_eq!(remote.branch(BRANCH), pushed, "{case}");
+            // No agent gets a publish result; the coordinator hears once from the keeper.
+            assert_eq!(results(&f.host), sent, "{case}");
+            assert_eq!(keeper::tests::notices(&f.host).len(), 1, "{case}");
+        }
+        // A blocked review is never due for the keeper in the first place.
+        let (mut f, _remote, _) = keeper::tests::waiting();
+        f.review(VerificationOutcome::Blocked);
+        assert!(!f.host.may_change_branch(&f.ticket()));
+    }
+
+    #[test]
+    fn a_keeper_push_to_a_transferred_repository_sends_nothing_and_tells_the_coordinator() {
+        let (mut f, remote, _) = keeper::tests::waiting();
+        let pushed = remote.branch(BRANCH);
+        remote.github.lock().unwrap().answer = Some(("other-org/app".into(), false));
+        let step = f.host.keeper_move(&f.ticket.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), pushed);
+        assert!(f.open_items().is_empty());
+        assert_eq!(keeper::tests::notices(&f.host).len(), 1);
+        assert!(
+            results(&f.host)
+                .iter()
+                .all(|(_, body)| !body.contains("other-org"))
+        );
+    }
+
+    #[test]
+    fn a_keeper_push_creates_or_updates_only_the_tickets_branch() {
+        let (mut f, remote, _) = keeper::tests::waiting();
+        git(&f.worktree, &["tag", "-a", "v1", "-m", "v1"]);
+        git(&f.worktree, &["branch", "side"]);
+        for (key, value) in [
+            ("push.followTags", "true"),
+            ("push.default", "matching"),
+            ("remote.origin.push", "refs/heads/*:refs/heads/*"),
+            ("remote.origin.mirror", "true"),
+        ] {
+            git(&f.repository, &["config", key, value]);
+        }
+        let before = refs(&remote.bare);
+        let step = f.host.keeper_move(&f.ticket.clone()).unwrap();
+        drive(&mut f, &remote, step);
+        let branch = format!("refs/heads/{BRANCH}");
+        let mut expected: Vec<_> = before
+            .into_iter()
+            .filter(|(name, _)| *name != branch)
+            .collect();
+        expected.push((branch, f.head()));
+        expected.sort();
+        assert_eq!(refs(&remote.bare), expected);
+    }
+
+    #[test]
+    fn an_agents_publish_is_refused_while_the_keepers_push_runs() {
+        let (mut f, remote, _) = keeper::tests::waiting();
+        let step = f.host.keeper_move(&f.ticket.clone()).unwrap();
+        assert!(step.is_some());
+        let (caller, ticket) = (f.implementer.id.clone(), f.ticket.clone());
+        let error = f
+            .host
+            .publish_ticket(&caller, &ticket, None, None)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("A publish step for this ticket is running"));
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(f.head()));
+    }
+
+    #[test]
+    fn a_keeper_push_interrupted_by_a_restart_ends_and_tells_nobody() {
+        let (mut f, _remote, _) = keeper::tests::waiting();
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_some());
+        let messages = keeper::tests::message_count(&f.host);
+        let mut f = restart(f);
+        assert!(f.ticket().publishing.is_none());
+        assert_eq!(keeper::tests::message_count(&f.host), messages);
+        // That head and base were rebased once, so no later pass rebases or pushes them again.
+        let base = git(&f.repository, &["rev-parse", "refs/remotes/origin/main"]);
+        assert!(keeper::tests::pass(&mut f, &base, 60 * 60_000).is_empty());
     }
 }

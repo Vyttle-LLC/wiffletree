@@ -41,6 +41,8 @@ pub(crate) struct Pass {
 pub(crate) struct Found {
     pub ticket_id: String,
     pub pull_request: PullRequest,
+    /// The head of the PR's base branch, for the PR keeper; never stored on the ticket.
+    pub base_head: String,
     /// The ticket worktree's HEAD, read only for a merged PR.
     pub worktree_head: Option<String>,
 }
@@ -90,7 +92,7 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
         let output = gh(&query.repository, &args)?;
         let (pull_requests, limit) = parse(&serde_json::from_str(&output)?, tickets)?;
         rate_limit = Some(limit);
-        for (ticket, pull_request) in pull_requests {
+        for (ticket, pull_request, base_head) in pull_requests {
             let worktree_head = (pull_request.state == PrState::Merged)
                 .then(|| runtime::git_output(&ticket.worktree, &["rev-parse", "HEAD"]).ok())
                 .flatten()
@@ -98,6 +100,7 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
             found.push(Found {
                 ticket_id: ticket.ticket_id.clone(),
                 pull_request,
+                base_head,
                 worktree_head,
             });
         }
@@ -145,7 +148,7 @@ pub(crate) fn github_repository(remote_url: &str) -> Option<(String, String)> {
 }
 
 const PULL_REQUEST_FIELDS: &str = "fragment pr on PullRequest { number url state isDraft \
-    isCrossRepository headRefOid baseRefName mergeStateStatus mergeCommit { oid } \
+    isCrossRepository headRefOid baseRefName baseRefOid mergeStateStatus mergeCommit { oid } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } \
     reviewThreads(first: 50) { nodes { isResolved comments(last: 1) { nodes { databaseId createdAt } } } } \
     comments(last: 1) { nodes { databaseId } } reviews(last: 1) { nodes { databaseId } } }";
@@ -169,12 +172,15 @@ fn graphql(branches: usize) -> String {
     )
 }
 
-/// Each ticket's PR from a query's answer, with the remaining rate limit. A ticket's PR is its
+/// A ticket's PR, with the head of its base branch.
+type TicketPullRequest<'a> = (&'a TicketBranch, PullRequest, String);
+
+/// Each ticket's PR and its base's head from a query's answer, with the remaining rate limit. A ticket's PR is its
 /// branch's open PR, or else its newest; PRs from other repositories, such as forks, are skipped.
 pub(crate) fn parse<'a>(
     json: &Value,
     tickets: &'a [TicketBranch],
-) -> Result<(Vec<(&'a TicketBranch, PullRequest)>, RateLimit)> {
+) -> Result<(Vec<TicketPullRequest<'a>>, RateLimit)> {
     let data = &json["data"];
     let repository = &data["repository"];
     if !repository.is_object() {
@@ -199,7 +205,10 @@ pub(crate) fn parse<'a>(
             .find(|n| n["state"] == "OPEN")
             .or_else(|| own.first());
         if let Some(node) = chosen {
-            found.push((ticket, pull_request(node)?));
+            let base_head = node["baseRefOid"]
+                .as_str()
+                .context("A PR is missing baseRefOid")?;
+            found.push((ticket, pull_request(node)?, base_head.to_owned()));
         }
     }
     let limit = &data["rateLimit"];
@@ -602,6 +611,7 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "7c1c59eda70e41456e62530280eed9e930a140c8";
+    const BASE: &str = "4a1c2e9d1f0b8c7a6e5d4c3b2a19087f6e5d4c3b";
 
     /// A PR node as the query returns it, in PR #31's shape.
     fn node(number: u64, state: &str) -> Value {
@@ -609,7 +619,8 @@ mod tests {
             "number": number,
             "url": format!("https://github.com/Vyttle-LLC/wiffletree/pull/{number}"),
             "state": state, "isDraft": false, "isCrossRepository": false,
-            "headRefOid": HEAD, "baseRefName": "main", "mergeStateStatus": "UNKNOWN",
+            "headRefOid": HEAD, "baseRefName": "main", "baseRefOid": BASE,
+            "mergeStateStatus": "UNKNOWN",
             "mergeCommit": {"oid": "be5f484628aa0ff990f6f65773ab731eeab93642"},
             "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
             "reviewThreads": {"nodes": []}, "comments": {"nodes": []}, "reviews": {"nodes": []}
@@ -636,7 +647,7 @@ mod tests {
     fn chosen(nodes: Vec<Value>) -> Option<PullRequest> {
         let tickets = branches(1);
         let (found, _) = parse(&answer(vec![nodes]), &tickets).unwrap();
-        found.into_iter().next().map(|(_, pr)| pr)
+        found.into_iter().next().map(|(_, pr, _)| pr)
     }
 
     #[test]
@@ -862,6 +873,7 @@ mod tests {
             assert!(
                 args[5].starts_with("query=query($owner: String!, $name: String!, $h0: String!)")
             );
+            assert!(args[5].contains("baseRefOid"));
             assert_eq!(
                 args[6..],
                 [
@@ -879,6 +891,7 @@ mod tests {
             panic!("not read");
         };
         assert_eq!(pass.found.len(), 1);
+        assert_eq!(pass.found[0].base_head, BASE);
         assert_eq!(pass.found[0].pull_request.number, 31);
         assert_eq!(pass.found[0].worktree_head, Some(worktree_head));
         assert_eq!(pass.rate_limit.remaining, 4996);
@@ -916,6 +929,7 @@ mod tests {
             found: vec![Found {
                 ticket_id: "t".into(),
                 pull_request: pr,
+                base_head: BASE.into(),
                 worktree_head: None,
             }],
             rate_limit: RateLimit {
@@ -1091,6 +1105,7 @@ mod tests {
             found: vec![Found {
                 ticket_id: ticket.id.clone(),
                 pull_request,
+                base_head: BASE.into(),
                 worktree_head: None,
             }],
             rate_limit: RateLimit {
@@ -1232,6 +1247,31 @@ mod tests {
         let queries = host.pull_request_queries().unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].1.tickets[0].ticket_id, ticket.id);
+    }
+
+    #[test]
+    fn a_moving_base_logs_nothing_and_is_not_stored() {
+        let (_home, mut host, ticket) = host_with_ticket();
+        let repository = ticket.repository_id.clone();
+        let at_base = |base: &str| {
+            let Outcome::Read(mut pass) = found(&ticket, open_pr(MergeState::Clean)) else {
+                unreachable!()
+            };
+            pass.found[0].base_head = base.into();
+            Outcome::Read(pass)
+        };
+        host.record_pull_requests(&repository, &at_base(BASE), 0, 0)
+            .unwrap();
+        let stored = host.ticket(&ticket.id).unwrap().pull_request;
+        for base in ["1111111", "2222222", "3333333", "4444444", "5555555"] {
+            assert!(
+                !host
+                    .record_pull_requests(&repository, &at_base(base), 0, 0)
+                    .unwrap()
+            );
+        }
+        assert_eq!(pull_request_events(&host), 1);
+        assert_eq!(host.ticket(&ticket.id).unwrap().pull_request, stored);
     }
 
     #[test]
