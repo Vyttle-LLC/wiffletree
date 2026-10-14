@@ -1206,3 +1206,199 @@ fn a_recorded_group_whose_members_are_gone_is_never_signalled_and_is_noted_only_
     );
     assert_eq!(unrelated.0.try_wait().unwrap(), None);
 }
+
+/// What the Processes panel opened on `session` lists.
+fn panel(service: &Service, session: &Session) -> Vec<AgentProcesses> {
+    let listing = request(
+        service,
+        Command::Processes {
+            session_id: session.id.clone(),
+        },
+    );
+    serde_json::from_value(listing).unwrap()
+}
+
+fn stop_from_panel(service: &Service, session: &Session, groups: &[&str]) -> Vec<AgentProcesses> {
+    let listing = request(
+        service,
+        Command::StopProcesses {
+            session_id: session.id.clone(),
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+        },
+    );
+    serde_json::from_value(listing).unwrap()
+}
+
+/// The rail's count for the agent, from the snapshot.
+fn rail_count(service: &Service, session: &Session) -> u32 {
+    let counts = snapshot(service).running_processes;
+    let count = counts.iter().find(|c| c.session_id == session.id);
+    count.map_or(0, |c| c.count)
+}
+
+#[test]
+fn the_panel_lists_what_each_agent_left_running_and_stops_a_group_without_stopping_the_agent() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = install_provider(scratch.path());
+    let (project, main) = project(home.path(), scratch.path(), "Panel");
+    let reviewer = Host::open_set_up(home.path())
+        .unwrap()
+        .create_session(
+            &project.id,
+            &main.id,
+            None,
+            "Reviewer",
+            Role::Reviewer,
+            workspace_core::Provider::Claude,
+        )
+        .unwrap();
+    let service = start(home.path());
+    send(&service, "first", &main, "LEAVE");
+    until_finished(home.path(), &main, 1);
+    send(&service, "second", &main, "LEAVE");
+    until_finished(home.path(), &main, 2);
+    let [first, second] = ids(&provider.pids)[..] else {
+        panic!("one process a turn")
+    };
+    assert_eq!(rail_count(&service, &main), 2);
+
+    // The coordinator's panel lists every agent, with nothing for the one that started none.
+    let listing = panel(&service, &main);
+    let agents: Vec<_> = listing.iter().map(|a| a.session_id.as_str()).collect();
+    assert_eq!(agents, [main.id.as_str(), reviewer.id.as_str()]);
+    assert!(listing[1].groups.is_empty());
+    let groups = &listing[0].groups;
+    assert_eq!(
+        groups.iter().map(|g| g.group).collect::<Vec<_>>(),
+        [i64::from(first), i64::from(second)]
+    );
+    let group = &groups[0];
+    assert!(group.confirmed);
+    assert_eq!(group.started, common::process_started(first));
+    let [process] = &group.processes[..] else {
+        panic!("one process: {group:?}")
+    };
+    assert_eq!(
+        (process.pid, process.started, process.program.as_str()),
+        (first, common::process_started(first), "sleep")
+    );
+    // The reviewer's own panel lists only the reviewer.
+    assert_eq!(
+        panel(&service, &reviewer),
+        [AgentProcesses {
+            session_id: reviewer.id.clone(),
+            name: reviewer.name.clone(),
+            groups: vec![],
+        }]
+    );
+
+    // Stop on one row stops that group alone and tells the agent; the agent is not stopped.
+    let listing = stop_from_panel(&service, &main, &[&group.id]);
+    assert!(!group_runs(first), "stopped before the stop returned");
+    assert!(group_runs(second));
+    let left: Vec<_> = listing[0].groups.iter().map(|g| g.group).collect();
+    assert_eq!(left, [i64::from(second)]);
+    assert_eq!(
+        recorded(home.path(), &main),
+        [
+            tool_group(first, Some("stopped_by_human"), &[first]),
+            tool_group(second, None, &[second])
+        ]
+    );
+    let name = &main.name;
+    assert_eq!(
+        notices(home.path(), &main).pop().unwrap(),
+        format!(
+            "Stopped 1 process {name} had left running. It was the program `sleep`.\nProcess group {first} · stopped when the human pressed Stop in the Processes panel."
+        )
+    );
+    assert_eq!(rail_count(&service, &main), 1);
+    let after = snapshot(&service);
+    assert_eq!(status(&after, &main.id), Status::Ready);
+    assert!(after.live_projects.contains(&project.id));
+    assert!(after.attention.is_empty(), "{:?}", after.attention);
+
+    // Stop all on the agent's panel stops the rest.
+    let listing = stop_from_panel(&service, &main, &[]);
+    assert!(!group_runs(second));
+    assert!(listing[0].groups.is_empty());
+    assert_tool_stopped(&recorded(home.path(), &main)[1], second, "stopped_by_human");
+    assert_eq!(rail_count(&service, &main), 0);
+
+    // The notices ride along with the agent's next turn.
+    send(&service, "next", &main, "FINISH");
+    until_finished(home.path(), &main, 3);
+    let prompts = std::fs::read_to_string(&provider.prompts).unwrap();
+    let told = prompts.split("=====").nth(2).unwrap();
+    assert!(
+        told.contains(&format!("Process group {first} · stopped when the human")),
+        "{told}"
+    );
+    assert!(
+        told.contains(&format!("Process group {second} · stopped when the human")),
+        "{told}"
+    );
+}
+
+#[test]
+fn the_panel_never_lists_or_stops_a_group_it_cannot_confirm() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let _provider = install_provider(scratch.path());
+    let (_, main) = project(home.path(), scratch.path(), "Unconfirmed");
+    let service = start(home.path());
+    // Two groups the agent once started have emptied. The id of the first now belongs to an
+    // unrelated process; nothing has the id of the second.
+    let mut unrelated = Leftover::spawn();
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    let db = store(home.path());
+    db.execute(
+        "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail) VALUES ('earlier',?1,'[]',?2,?2,'completed','{}')",
+        rusqlite::params![main.id, now()],
+    )
+    .unwrap();
+    for (record, group) in [("recycled", unrelated.id()), ("emptied", gone.id())] {
+        db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at) VALUES (?1,?2,'earlier',?3,?4)",
+            rusqlite::params![record, main.id, group, now()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO process_group_members(group_id,pid,started,command) VALUES (?1,?2,7,'yes')",
+            rusqlite::params![record, gone.id()],
+        )
+        .unwrap();
+    }
+    assert_eq!(rail_count(&service, &main), 2);
+
+    // The emptied group is forgotten; the recycled one is listed as unconfirmed, with nothing
+    // of the unrelated process in it.
+    let listing = panel(&service, &main);
+    let recycled = i64::from(unrelated.id());
+    assert_eq!(
+        listing[0].groups,
+        [ProcessGroup {
+            id: "recycled".into(),
+            group: recycled,
+            confirmed: false,
+            started: 7,
+            processes: vec![],
+        }]
+    );
+    let record = recorded(home.path(), &main);
+    assert_eq!(
+        record,
+        [tool_group(recycled as i32, None, &[gone.id() as i32])]
+    );
+    assert_eq!(rail_count(&service, &main), 1);
+
+    // Stop is refused by the confirmation rule: nothing is signalled and nothing is told.
+    let listing = stop_from_panel(&service, &main, &["recycled"]);
+    assert_eq!(unrelated.0.try_wait().unwrap(), None, "never signalled");
+    assert!(!listing[0].groups[0].confirmed);
+    assert!(notices(home.path(), &main).is_empty());
+}

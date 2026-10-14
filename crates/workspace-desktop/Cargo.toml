@@ -19,6 +19,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = 
 gpui-component = { version = "=0.7.1", features = ["tree-sitter-languages"] }
 async-channel = "2.5"
 libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 objc = "0.2"
 sha2 = "0.11"
 

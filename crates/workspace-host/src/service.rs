@@ -912,6 +912,7 @@ impl Actor {
                         | Command::Quotas
                         | Command::Usage { .. }
                         | Command::Settings
+                        | Command::Processes { .. }
                 );
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
@@ -954,6 +955,15 @@ impl Actor {
                             run_id.as_deref(),
                             *after,
                         )?)?,
+                        // Read once a second while the panel is open, so it signals a change
+                        // only when it forgot a group that has exited.
+                        Command::Processes { session_id } => {
+                            let (listing, forgot) = self.host.running_processes(session_id)?;
+                            if forgot {
+                                self.state_changed();
+                            }
+                            serde_json::to_value(listing)?
+                        }
                         _ => self.host.execute(command.clone())?,
                     };
                     // Stopping an agent stops what it started, before the command returns: for

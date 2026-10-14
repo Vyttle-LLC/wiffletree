@@ -339,7 +339,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper: self.settings().keeper })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper: self.settings().keeper, running_processes: self.running_process_counts()? })
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
@@ -1371,6 +1371,13 @@ impl Host {
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?
+            }
+            Command::Processes { session_id } => {
+                serde_json::to_value(self.running_processes(&session_id)?.0)?
+            }
+            Command::StopProcesses { session_id, groups } => {
+                self.stop_processes_by_human(&session_id, &groups)?;
+                serde_json::to_value(self.running_processes(&session_id)?.0)?
             }
         })
     }

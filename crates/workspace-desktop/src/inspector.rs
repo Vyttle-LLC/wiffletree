@@ -76,6 +76,7 @@ impl Panel {
             Self::Attention => "inbox",
             Self::Git => "git",
             Self::Files => "folder",
+            Self::Processes => "terminal",
             Self::Crew => "team",
         }
     }
@@ -88,13 +89,14 @@ impl Panel {
             Self::Attention => "Inbox",
             Self::Git => "Git",
             Self::Files => "Files",
+            Self::Processes => "Processes",
             Self::Crew => "Crew",
         }
     }
 }
 
 impl Workspace {
-    fn selected_role(&self) -> Role {
+    pub(super) fn selected_role(&self) -> Role {
         self.selected_session()
             .map_or(Role::ProjectOrchestrator, |s| s.role)
     }
@@ -123,6 +125,7 @@ impl Workspace {
             Panel::Attention,
             Panel::Git,
             Panel::Files,
+            Panel::Processes,
             Panel::Memory,
             Panel::Events,
         ]
@@ -130,7 +133,11 @@ impl Workspace {
         .filter(|panel| panel.available(role))
         {
             let selected = self.panel == Some(panel);
-            let badge = (panel == Panel::Attention && attention > 0).then_some(attention);
+            let badge = match panel {
+                Panel::Attention => (attention > 0).then_some((attention, p.accent, p.on_accent)),
+                Panel::Processes => self.processes_badge().map(|count| (count, p.red, p.base)),
+                _ => None,
+            };
             let tooltip = format!("{} · {}", panel.title(), self.owner_name());
             rail = rail.child(
                 div()
@@ -157,7 +164,7 @@ impl Workspace {
                             .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                             .child(panel.title()),
                     )
-                    .when_some(badge, |d, count| {
+                    .when_some(badge, |d, (count, fill, text)| {
                         d.child(
                             div()
                                 .absolute()
@@ -167,8 +174,8 @@ impl Workspace {
                                 .h(px(15.))
                                 .px(px(4.))
                                 .rounded_full()
-                                .bg(p.accent)
-                                .text_color(p.on_accent)
+                                .bg(fill)
+                                .text_color(text)
                                 .text_size(px(9.5))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .flex()
@@ -192,11 +199,13 @@ impl Workspace {
             Panel::Attention => self.attention_panel(p, cx),
             Panel::Git => self.git_panel(p),
             Panel::Files => self.files_panel(p, cx),
+            Panel::Processes => self.processes_panel(p, cx),
             Panel::Crew => self.crew_panel(p, cx),
         };
         // The Files panel keeps its counts and what is live now in view while its tree scrolls.
         let (head, foot) = match panel {
             Panel::Files => (self.files_head(p, cx), self.files_live(p)),
+            Panel::Processes => (self.processes_head(p, cx), None),
             _ => (None, None),
         };
         // The crew is the project's, whichever of its agents is selected.
