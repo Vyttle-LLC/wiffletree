@@ -374,6 +374,7 @@ pub(crate) mod legacy {
             providers,
             role_providers,
             guide,
+            keeper: None,
         }
     }
     /// The verifiers saved with a Big or Small `size`, which model selection replaces with the

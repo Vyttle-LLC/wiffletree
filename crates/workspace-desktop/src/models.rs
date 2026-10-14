@@ -409,6 +409,7 @@ mod tests {
                 .map(|r| (r, BTreeSet::from([Provider::Claude])))
                 .collect(),
             guide: String::new(),
+            keeper: None,
         }
     }
 

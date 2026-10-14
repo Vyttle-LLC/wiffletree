@@ -51,6 +51,9 @@ pub struct ModelSelection {
     pub role_providers: BTreeMap<Role, BTreeSet<Provider>>,
     /// The human's advice on choosing a model within a provider. Never parsed.
     pub guide: String,
+    /// The PR keeper's model, chosen only by the human. Nothing picks one by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper: Option<ModelProfile>,
 }
 /// Whether this machine has the provider's subscription, and which of its models may run.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +295,14 @@ impl ModelSelection {
             self.guide.len() <= MAX_GUIDE_BYTES,
             "The guide must be at most 32 KB"
         );
+        if let Some(keeper) = &self.keeper {
+            ensure!(
+                self.allowed(keeper.provider)
+                    .iter()
+                    .any(|m| m.model == keeper.model && m.effort == keeper.effort),
+                "The PR keeper uses {keeper}, which is not an allowed model of an enabled provider. Choose another for the PR keeper first."
+            );
+        }
         Ok(())
     }
 }
