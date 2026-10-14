@@ -382,6 +382,19 @@ fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
         let _ = sender.send_blocking(Event::Kept(outcome));
     });
 }
+/// Runs one PR keeper fetch of GitHub's branch on its own thread and always reports back, even
+/// if it panics, so the ticket is never left marked as fetching.
+fn spawn_keeper_fetch(sender: Sender<Event>, job: keeper::Fetch, git: publish::GitTool) {
+    std::thread::spawn(move || {
+        let fetch = std::panic::AssertUnwindSafe(|| keeper::fetch(&job, &git));
+        let fetched = std::panic::catch_unwind(fetch).unwrap_or_else(|_| keeper::Fetched {
+            ticket_id: job.ticket_id.clone(),
+            from: job.from.clone(),
+            found: keeper::Found::Failed("The fetch stopped unexpectedly".into()),
+        });
+        let _ = sender.send_blocking(Event::Fetched(fetched));
+    });
+}
 enum Event {
     Command(Command, Reply),
     /// A root scan finished on its own thread; adding what it found is quick.
@@ -421,6 +434,8 @@ enum Event {
     Published(publish::Outcome),
     /// A PR keeper rebase finished on its own thread.
     Kept(keeper::Outcome),
+    /// A PR keeper fetch of GitHub's branch finished on its own thread.
+    Fetched(keeper::Fetched),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
     Shutdown,
@@ -1194,6 +1209,13 @@ impl Actor {
                 }
                 true
             }
+            Event::Fetched(fetched) => {
+                let in_turn = self.ticket_in_turn(&fetched.ticket_id);
+                if let Err(e) = self.host.keeper_fetched(fetched, in_turn) {
+                    eprintln!("Workspace PR keeper: {e:#}");
+                }
+                true
+            }
             Event::GitHub(reading) => {
                 self.github_reading = false;
                 reading.is_some_and(|reading| {
@@ -1684,7 +1706,8 @@ impl Actor {
             }
         }
     }
-    /// Starts the rebases a pass made due and moves the results that wait for their worktree.
+    /// Starts the rebases and fetches a pass made due and moves the results that wait for their
+    /// worktree.
     /// Returns whether a ticket's PR line changed.
     fn keep_pull_requests(&mut self, repository: &str, at: i64) -> bool {
         let due = match self.host.keeper_due(repository, at) {
@@ -1700,23 +1723,28 @@ impl Actor {
         for job in due.rebases {
             spawn_keeper_rebase(self.sender.clone(), job);
         }
+        for job in due.fetches {
+            spawn_keeper_fetch(self.sender.clone(), job, self.publish_tools.git.clone());
+        }
         due.shown
     }
     /// Moves a ticket's waiting rebase onto its branch and pushes it, unless an agent of the
     /// ticket is in a turn; then it waits for a later pass.
     fn keeper_move(&mut self, ticket_id: &str) {
-        let in_turn = self.active.keys().any(|id| {
-            self.host
-                .session_runtime(id)
-                .is_ok_and(|r| r.ticket_id.as_deref() == Some(ticket_id))
-        });
-        if in_turn {
+        if self.ticket_in_turn(ticket_id) {
             return;
         }
         match self.host.keeper_move(ticket_id) {
             Ok(step) => self.run_publish_step(step),
             Err(e) => eprintln!("Workspace PR keeper: {ticket_id}: {e:#}"),
         }
+    }
+    fn ticket_in_turn(&self, ticket_id: &str) -> bool {
+        self.active.keys().any(|id| {
+            self.host
+                .session_runtime(id)
+                .is_ok_and(|r| r.ticket_id.as_deref() == Some(ticket_id))
+        })
     }
     fn run_publish_step(&mut self, step: Option<publish::Job>) {
         if let Some(job) = step {
@@ -7930,5 +7958,83 @@ mod tests {
         actor.active.clear();
         actor.host.keeper_move(&ticket).unwrap();
         assert_eq!(worktrees::head(Path::new(&worktree)).unwrap(), result);
+    }
+
+    #[test]
+    fn commits_pushed_on_github_wait_while_an_agent_of_the_ticket_is_in_a_turn() {
+        let (mut f, r) = keeper::tests::kept();
+        let theirs = keeper::tests::pushed_elsewhere(&mut f, &r, "c.txt", "three\n");
+        let job = keeper::tests::fetches(&mut f).remove(0);
+        let (old, ticket, implementer) = (f.head(), f.ticket(), f.implementer.id.clone());
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        actor
+            .active
+            .insert(implementer.clone(), active_turn("run", vec![]));
+        actor.host.in_turn.insert(implementer.clone());
+        actor.handle(Event::Fetched(keeper::fetch(&job, &r.tools.git)));
+        let worktree = Path::new(&ticket.worktree);
+        assert_eq!(worktrees::head(worktree).unwrap(), old);
+        assert!(
+            actor
+                .host
+                .ticket(&ticket.id)
+                .unwrap()
+                .unreviewed()
+                .is_none()
+        );
+        // No fetch is due while the turn runs; after it, the next pass's fetch adopts them.
+        let due = |actor: &mut Actor| actor.host.keeper_due(&ticket.repository_id, 0).unwrap();
+        assert!(due(&mut actor).fetches.is_empty());
+        actor.active.clear();
+        actor.host.turn_ended(&implementer);
+        let job = due(&mut actor).fetches.remove(0);
+        actor.handle(Event::Fetched(keeper::fetch(&job, &r.tools.git)));
+        assert_eq!(worktrees::head(worktree).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_change_in_the_keepers_part_alone_refreshes_the_snapshot() {
+        let (f, r) = keeper::tests::kept();
+        let ticket = f.ticket();
+        let main = publish::tests::git(&f.repository, &["rev-parse", "main"]);
+        let moved = keeper::tests::move_base(&f, &r, "other.txt", "1\n");
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, changes, _) = idle_actor(host);
+        let repository = ticket.repository_id.clone();
+        // Up to date, then a base that moved and waits for its quiet period: each is news once.
+        for (base, signalled) in [
+            (&main, true),
+            (&main, false),
+            (&moved, true),
+            (&moved, false),
+        ] {
+            let found = pr_watch::Found {
+                ticket_id: ticket.id.clone(),
+                pull_request: ticket.pull_request.clone().unwrap(),
+                base_head: base.clone(),
+                worktree_head: None,
+            };
+            let pass = pr_watch::Pass {
+                found: vec![found],
+                rate_limit: pr_watch::RateLimit {
+                    remaining: 4000,
+                    reset_at: 0,
+                },
+            };
+            actor.pr_watch.keep([repository.as_str()]);
+            actor.pr_watch.start_due(i64::MAX);
+            actor.process(Event::PullRequests {
+                repository: repository.clone(),
+                outcome: pr_watch::Outcome::Read(pass),
+            });
+            assert_eq!(changes.try_recv().is_ok(), signalled, "{base}");
+        }
+        let part = actor.host.keeper_parts().get(&ticket.id).copied();
+        assert!(matches!(part, Some(KeeperPart::RebaseAt(_))));
     }
 }

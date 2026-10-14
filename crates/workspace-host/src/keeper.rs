@@ -23,6 +23,8 @@ pub(crate) struct Memory {
     failures: HashMap<String, (KeeperRebase, u32)>,
     /// By ticket: the keeper's part of its PR line after the latest pass.
     parts: BTreeMap<String, KeeperPart>,
+    /// By ticket: GitHub's head and the worktree's HEAD last found diverged, not fetched again.
+    diverged: HashMap<String, (String, String)>,
 }
 
 /// One rebase, with everything it needs off the host thread.
@@ -59,10 +61,37 @@ pub(crate) enum Rebased {
     BaseMoved,
     Failed(String),
 }
+/// A read-only fetch of GitHub's branch of a ticket whose PR has a head the worktree lacks.
+pub(crate) struct Fetch {
+    pub ticket_id: String,
+    pub repository: PathBuf,
+    pub push_url: String,
+    pub branch: String,
+    /// The PR's head as the pass read it, which the fetched head must be.
+    pub expected: String,
+    /// The worktree's HEAD.
+    pub from: String,
+}
+pub(crate) struct Fetched {
+    pub ticket_id: String,
+    pub from: String,
+    pub found: Found,
+}
+pub(crate) enum Found {
+    /// GitHub's branch is the worktree's HEAD with these commits on top.
+    Ahead {
+        head: String,
+        commits: u32,
+    },
+    /// Each has a commit the other lacks.
+    Diverged(String),
+    Failed(String),
+}
 /// What a pass made due.
 #[derive(Default)]
 pub(crate) struct Due {
     pub rebases: Vec<Job>,
+    pub fetches: Vec<Fetch>,
     /// Tickets with a rebase waiting to be moved onto their branch.
     pub waiting: Vec<String>,
     /// Whether a ticket's part of its PR line changed.
@@ -99,6 +128,47 @@ pub(crate) fn rebase(job: &Job, fetch: impl FnOnce(&Path, &str) -> Result<bool>)
         head: job.head.clone(),
         base_commit: job.base_commit.clone(),
         result: rebased.unwrap_or_else(|e: anyhow::Error| Rebased::Failed(format!("{e:#}"))),
+    }
+}
+
+/// Fetches GitHub's branch into the keeper's ref alone, with `git` as publishing runs it, and
+/// says how its head relates to the worktree's HEAD.
+pub(crate) fn fetch(job: &Fetch, git: &publish::GitTool) -> Fetched {
+    let found = (|| {
+        let target = result_ref(&job.ticket_id);
+        let refspec = format!("+refs/heads/{}:{target}", job.branch);
+        let fetch = [
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            &job.push_url,
+            &refspec,
+        ];
+        let answer = git(&job.repository, &fetch)?;
+        ensure!(
+            answer.status.success(),
+            "git fetch failed{}",
+            answer.reason()
+        );
+        let head = runtime::git_output(&job.repository, &["rev-parse", "--verify", &target])?;
+        let head = head.trim().to_owned();
+        ensure!(head == job.expected, "GitHub's branch moved since the pass");
+        if !publish::is_ancestor(&job.repository, &job.from, &head) {
+            return Ok(Found::Diverged(head));
+        }
+        let range = format!("{}..{head}", job.from);
+        let commits = runtime::git_output(&job.repository, &["rev-list", "--count", &range])?;
+        Ok(Found::Ahead {
+            commits: commits.trim().parse()?,
+            head,
+        })
+    })();
+    Fetched {
+        ticket_id: job.ticket_id.clone(),
+        from: job.from.clone(),
+        found: found.unwrap_or_else(|e: anyhow::Error| Found::Failed(format!("{e:#}"))),
     }
 }
 
@@ -200,7 +270,8 @@ impl Host {
                 due.waiting.push(ticket.id.clone());
             }
             let part = self
-                .ticket_due(&ticket, &repository, &settings, at, &mut due)
+                .fetch_due(&ticket, &repository, &settings, &mut due)
+                .and_then(|()| self.ticket_due(&ticket, &repository, &settings, at, &mut due))
                 .unwrap_or_else(|e| {
                     eprintln!("Workspace PR keeper: {}: {e:#}", ticket.id);
                     None
@@ -235,6 +306,57 @@ impl Host {
     fn keeps_branch(&self, ticket: &Ticket, repository: &Repository) -> Result<bool> {
         let coordinator = self.session(&ticket.coordinator_id)?;
         Ok(self.kept(ticket, repository, &coordinator)? && self.may_change_branch(ticket))
+    }
+    /// Makes a fetch of GitHub's branch due when the PR's head is neither the worktree's HEAD
+    /// nor contained in it, for a kept ticket with no cycle running, no publish request and no
+    /// keeper work of its own, while no agent of the ticket is in a turn, unless the same two
+    /// heads were already found diverged.
+    fn fetch_due(
+        &mut self,
+        ticket: &Ticket,
+        repository: &Repository,
+        settings: &HostSettings,
+        due: &mut Due,
+    ) -> Result<()> {
+        let Some(pr) = ticket
+            .open_pull_request()
+            .filter(|_| settings.keeper.rebase)
+        else {
+            return Ok(());
+        };
+        let busy = ticket.running_cycle().is_some()
+            || ticket.publishing.is_some()
+            || ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some())
+            || self.keeper.running.contains(&ticket.id);
+        let worktree = Path::new(&ticket.worktree);
+        let Some(head) = verification::head(ticket).ok().filter(|_| !busy) else {
+            return Ok(());
+        };
+        let pair = (pr.head.clone(), head.clone());
+        if publish::is_ancestor(worktree, &pr.head, &head)
+            || self.keeper.diverged.get(&ticket.id) == Some(&pair)
+            || !self.kept(ticket, repository, &self.session(&ticket.coordinator_id)?)?
+            || self
+                .ticket_agents(&ticket.id)?
+                .iter()
+                .any(|a| self.in_turn.contains(&a.id))
+        {
+            return Ok(());
+        }
+        let repositories::Origin::GitHub { push_url, .. } = repositories::read_origin(worktree)
+        else {
+            bail!("origin is not one place on GitHub");
+        };
+        self.keeper.running.insert(ticket.id.clone());
+        due.fetches.push(Fetch {
+            ticket_id: ticket.id.clone(),
+            repository: repository.path.clone().into(),
+            push_url,
+            branch: ticket.branch.clone(),
+            expected: pr.head.clone(),
+            from: head,
+        });
+        Ok(())
     }
     /// Makes the ticket's rebase due when its base has been quiet for the period, its head does
     /// not contain the base yet, that pair was not rebased before, and the keeper may change the
@@ -328,7 +450,7 @@ impl Host {
                     pr.base,
                     short_sha(&rebase.base)
                 );
-                self.keeper_notice(&ticket, "changed", &rebase, &body)?;
+                self.keeper_notice(&ticket, "changed", &[&rebase.head, &rebase.base], &body)?;
                 None
             }
             Rebased::Conflict(files) => {
@@ -376,7 +498,7 @@ impl Host {
             named(ticket),
             short_sha(&rebase.base)
         );
-        self.keeper_notice(ticket, "failed", &rebase, &body)
+        self.keeper_notice(ticket, "failed", &[&rebase.head, &rebase.base], &body)
     }
     /// Moves the ticket's waiting rebase onto its branch and starts its push. The actor calls
     /// it only while no agent of the ticket is in a turn. A result that cannot be moved is
@@ -390,7 +512,7 @@ impl Host {
         let repository = self.ticket_repository(&ticket)?;
         let may = self.settings().keeper.rebase && self.keeps_branch(&ticket, &repository)?;
         let moved = match may {
-            true => self.keeper_adopt(&ticket, &rebase.head, &result),
+            true => self.keeper_adopt(&ticket, &rebase.head, &result, Move::Reset),
             false => Err(anyhow::anyhow!(
                 "the keeper may no longer change the branch"
             )),
@@ -421,7 +543,13 @@ impl Host {
     /// Moves the ticket's branch from `from` to the keeper's `to`, only while the worktree is on
     /// the ticket's branch at `from`, clean, and no cycle or publish request runs. Nothing is
     /// forced, stashed or cleaned; `from` stays in the branch's reflog.
-    pub(crate) fn keeper_adopt(&self, ticket: &Ticket, from: &str, to: &str) -> Result<()> {
+    pub(crate) fn keeper_adopt(
+        &self,
+        ticket: &Ticket,
+        from: &str,
+        to: &str,
+        how: Move,
+    ) -> Result<()> {
         ensure!(
             ticket.running_cycle().is_none(),
             "a verification cycle is running"
@@ -444,7 +572,106 @@ impl Host {
             worktrees::is_clean(worktree)?,
             "the worktree has uncommitted or untracked files"
         );
-        runtime::git_output(worktree, &["reset", "--quiet", "--hard", to]).map(drop)
+        let args: &[&str] = match how {
+            Move::Reset => &["reset", "--quiet", "--hard", to],
+            Move::FastForward => &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "merge",
+                "--quiet",
+                "--ff-only",
+                "--no-autostash",
+                to,
+            ],
+        };
+        runtime::git_output(worktree, args).map(drop)
+    }
+    /// Takes the commits a fetch found on top of the worktree's HEAD into the ticket's branch,
+    /// or tells the coordinator once that the two diverged. The actor calls it only while no
+    /// agent of the ticket is in a turn; otherwise commits wait for the next pass's fetch.
+    pub(crate) fn keeper_fetched(&mut self, fetched: Fetched, in_turn: bool) -> Result<()> {
+        self.keeper.running.remove(&fetched.ticket_id);
+        let mut ticket = self.ticket(&fetched.ticket_id)?;
+        let repository = self.ticket_repository(&ticket)?;
+        let drop_ref = ["update-ref", "-d", &result_ref(&ticket.id)];
+        runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+        let from = fetched.from;
+        match fetched.found {
+            Found::Ahead { head, commits } if !in_turn => {
+                self.adopt(&mut ticket, &repository, &from, &head, commits)
+            }
+            Found::Ahead { .. } => Ok(()),
+            Found::Diverged(head) => {
+                let pair = (head.clone(), from.clone());
+                self.keeper.diverged.insert(ticket.id.clone(), pair);
+                let body = format!(
+                    "{}: GitHub's branch is at {}, and the ticket's worktree at {}; each has commits the other does not. The PR keeper changed nothing. Bring the two together in the ticket's worktree, then verify and publish it again.",
+                    named(&ticket),
+                    short_sha(&head),
+                    short_sha(&from)
+                );
+                self.keeper_notice(&ticket, "diverged", &[&head], &body)
+            }
+            Found::Failed(error) => {
+                eprintln!("Workspace PR keeper: {}: {error}", ticket.id);
+                Ok(())
+            }
+        }
+    }
+    /// Fast-forwards the ticket's branch to the adopted head, unchanged, and records it as not
+    /// reviewed. A passed ticket is ready for testing again; its review record is not touched.
+    fn adopt(
+        &mut self,
+        ticket: &mut Ticket,
+        repository: &Repository,
+        from: &str,
+        head: &str,
+        commits: u32,
+    ) -> Result<()> {
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        let moved =
+            match self.settings().keeper.rebase && self.kept(ticket, repository, &coordinator)? {
+                true => self.keeper_adopt(ticket, from, head, Move::FastForward),
+                false => Err(anyhow::anyhow!("the keeper no longer keeps the ticket")),
+            };
+        if let Err(e) = moved {
+            eprintln!(
+                "Workspace PR keeper: {}: commits not adopted: {e:#}",
+                ticket.id
+            );
+            return Ok(());
+        }
+        let earlier = ticket.unreviewed().map_or(0, |u| u.commits);
+        let passed = ticket
+            .verification
+            .as_ref()
+            .filter(|v| v.outcome == VerificationOutcome::Passed);
+        ticket.keeper.get_or_insert_default().unreviewed = Some(Unreviewed {
+            head: head.into(),
+            commits: earlier + commits,
+            cycle: ticket.verification.as_ref().map_or(0, |v| v.cycle),
+        });
+        if ticket.state == "passed" {
+            ticket.state = "ready_for_testing".into();
+        }
+        self.save_ticket(ticket)?;
+        let (count, them) = match commits {
+            1 => ("1 commit".to_owned(), "it, unchanged. It has"),
+            n => (format!("{n} commits"), "them, unchanged. They have"),
+        };
+        let recheck = if passed.is_some() {
+            "; a re-check is allowed"
+        } else {
+            ""
+        };
+        let body = format!(
+            "{} has {count} Wiffletree did not push: its head is now {}, was {}. The ticket's branch now includes {them} not been reviewed, so nothing more is pushed and the ticket cannot be accepted until a review passes at {}. Start one with verify_ticket{recheck}.",
+            named(ticket),
+            short_sha(head),
+            short_sha(from),
+            short_sha(head)
+        );
+        self.keeper_notice(ticket, "adopted", &[head], &body)
     }
     /// Ends the ticket's keeper publish: records the push, or tells the coordinator once that
     /// the rebase was not pushed. No agent gets it as a publish result.
@@ -487,7 +714,7 @@ impl Host {
             let project = &coordinator.project_id;
             Self::event(&self.db, project, None, "pull_request_rebased", &detail)?;
         } else {
-            let id = notice_id(ticket, "push", &rebase);
+            let id = notice_id(ticket, "push", &[&rebase.head, &rebase.base]);
             if !coordinator.archived && !self.message_exists(&id)? {
                 let body = format!(
                     "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
@@ -505,10 +732,10 @@ impl Host {
         &mut self,
         ticket: &Ticket,
         what: &str,
-        rebase: &KeeperRebase,
+        commits: &[&str],
         body: &str,
     ) -> Result<()> {
-        let id = notice_id(ticket, what, rebase);
+        let id = notice_id(ticket, what, commits);
         if !self.message_exists(&id)? {
             self.send(&id, None, &ticket.coordinator_id, body)?;
         }
@@ -556,13 +783,20 @@ impl Host {
     }
 }
 
-/// A keeper message's id: one per ticket, kind, head and base. Commit ids cut to 20 characters
-/// keep it within a message id's limit.
-fn notice_id(ticket: &Ticket, what: &str, rebase: &KeeperRebase) -> String {
+/// A keeper message's id: one per ticket, kind and commits, such as a head and a base. Commit
+/// ids cut to 20 characters keep it within a message id's limit.
+fn notice_id(ticket: &Ticket, what: &str, commits: &[&str]) -> String {
+    let commits: Vec<String> = commits.iter().map(|c| format!("{c:.20}")).collect();
     format!(
-        "{KEEPER_NOTICE_PREFIX}{}:{what}:{:.20}:{:.20}",
-        ticket.id, rebase.head, rebase.base
+        "{KEEPER_NOTICE_PREFIX}{}:{what}:{}",
+        ticket.id,
+        commits.join(":")
     )
+}
+/// How the keeper moves a ticket's branch: to its own rebase, or forward to adopted commits.
+pub(crate) enum Move {
+    Reset,
+    FastForward,
 }
 
 /// How keeper messages name a ticket's PR, as the watcher's do.
@@ -1263,5 +1497,277 @@ pub(crate) mod tests {
         f.host.set_keeper(KeeperSettings::default()).unwrap();
         let context = f.host.agent_context(&f.coordinator.id).unwrap();
         assert_eq!(context["repositories"][0]["kept"], false);
+    }
+
+    /// Commits `content` to `file` in another clone of GitHub's branch, as Rae, pushes it and
+    /// has the watcher read it as the PR's head.
+    pub(crate) fn pushed_elsewhere(
+        f: &mut Fixture,
+        r: &Remote,
+        file: &str,
+        content: &str,
+    ) -> String {
+        let clone = (0..)
+            .map(|n| f.home.path().join(format!("elsewhere-{n}")))
+            .find(|path| !path.exists())
+            .unwrap();
+        let bare = r.bare.to_str().unwrap();
+        let into = clone.to_str().unwrap();
+        git(
+            f.home.path(),
+            &["clone", "-q", "--branch", BRANCH, bare, into],
+        );
+        fs::write(clone.join(file), content).unwrap();
+        git(&clone, &["add", file]);
+        git(
+            &clone,
+            &["-c", "user.name=Rae", "commit", "-q", "-m", "Suggestion"],
+        );
+        git(&clone, &["push", "-q", "origin", BRANCH]);
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().head = head.clone();
+        f.host.save_ticket(&ticket).unwrap();
+        head
+    }
+    /// The fetches of GitHub's branch a pass makes due.
+    pub(crate) fn fetches(f: &mut Fixture) -> Vec<Fetch> {
+        let repository = f.ticket().repository_id;
+        f.host.keeper_due(&repository, 0).unwrap().fetches
+    }
+    /// Runs the one fetch due and records it with no agent of the ticket in a turn.
+    fn fetch_and_adopt(f: &mut Fixture, r: &Remote) {
+        let mut jobs = fetches(f);
+        assert_eq!(jobs.len(), 1);
+        let fetched = super::fetch(&jobs.remove(0), &r.tools.git);
+        f.host.keeper_fetched(fetched, false).unwrap();
+    }
+    /// A passed, kept ticket that adopted `content` in `file` from GitHub's branch.
+    fn adopted(file: &str, content: &str) -> (Fixture, Remote, String) {
+        let (mut f, r) = kept();
+        let mut ticket = f.ticket();
+        ticket.state = "passed".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let theirs = pushed_elsewhere(&mut f, &r, file, content);
+        fetch_and_adopt(&mut f, &r);
+        assert_eq!(f.head(), theirs);
+        (f, r, theirs)
+    }
+    fn refused(result: Result<impl std::fmt::Debug>) {
+        let error = format!("{:#}", result.unwrap_err());
+        let reason = "The branch has commits no review has checked";
+        assert!(error.contains(reason), "{error}");
+    }
+
+    #[test]
+    fn the_fetch_of_githubs_branch_writes_only_the_keepers_ref() {
+        let (mut f, r) = kept();
+        let fetch_head = |f: &Fixture| fs::read(f.repository.join(".git/FETCH_HEAD")).ok();
+        let before = (refs(&f.repository), worktree(&f), fetch_head(&f));
+        let theirs = pushed_elsewhere(&mut f, &r, "c.txt", "three\n");
+        let github = refs(&r.bare);
+        let mut jobs = fetches(&mut f);
+        assert_eq!(jobs.len(), 1);
+        let fetched = super::fetch(&jobs.remove(0), &r.tools.git);
+        assert!(matches!(&fetched.found, Found::Ahead { head, commits: 1 } if *head == theirs));
+        let mut written = refs(&f.repository);
+        let kept_ref = (result_ref(&f.ticket), theirs);
+        assert!(written.contains(&kept_ref));
+        written.retain(|r| *r != kept_ref);
+        assert_eq!((written, worktree(&f), fetch_head(&f)), before);
+        assert_eq!(refs(&r.bare), github);
+        let calls = r.git_calls();
+        let call = calls.last().unwrap();
+        assert_eq!(
+            (call[0].as_str(), call.last().unwrap()),
+            (
+                "fetch",
+                &format!("+refs/heads/{BRANCH}:{}", result_ref(&f.ticket))
+            )
+        );
+        assert!(call.contains(&"--no-tags".to_owned()) && call.contains(&ORIGIN.to_owned()));
+        // Recorded, the keeper's ref goes whatever happened.
+        f.host.keeper_fetched(fetched, true).unwrap();
+        assert!(!has_result_ref(&f));
+    }
+
+    #[test]
+    fn a_commit_pushed_on_github_is_adopted_unchanged_and_nothing_more_is_pushed() {
+        let (mut f, r) = kept();
+        let mut ticket = f.ticket();
+        ticket.state = "passed".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let (old, cycle) = (f.head(), ticket.verification);
+        let theirs = pushed_elsewhere(&mut f, &r, "c.txt", "three\n");
+        fetch_and_adopt(&mut f, &r);
+        assert_eq!(f.head(), theirs);
+        assert_eq!(git(&f.worktree, &["rev-parse", &format!("{theirs}~")]), old);
+        let ticket = f.ticket();
+        assert_eq!(ticket.state, "ready_for_testing");
+        assert_eq!(ticket.verification, cycle);
+        let record = Unreviewed {
+            head: theirs.clone(),
+            commits: 1,
+            cycle: cycle.as_ref().unwrap().cycle,
+        };
+        assert_eq!(ticket.unreviewed(), Some(&record));
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert_eq!(
+            told[0].0,
+            format!("keeper:{}:adopted:{theirs:.20}", f.ticket)
+        );
+        assert_eq!(told[0].1, f.coordinator.id);
+        let named = format!(
+            "has 1 commit Wiffletree did not push: its head is now {}, was {}. The ticket's branch now includes it, unchanged. It has not been reviewed",
+            short_sha(&theirs),
+            short_sha(&old)
+        );
+        assert!(told[0].2.contains(&named), "{}", told[0].2);
+        assert!(
+            told[0]
+                .2
+                .ends_with("Start one with verify_ticket; a re-check is allowed.")
+        );
+        // The base moves: the keeper neither rebases nor shows a part, and publishing refuses.
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        assert!(pass(&mut f, &base, 0).is_empty());
+        assert!(pass(&mut f, &base, 60 * MINUTE).is_empty());
+        assert!(f.host.keeper_parts().is_empty());
+        let caller = f.coordinator.id.clone();
+        refused(
+            f.host
+                .publish_ticket(&caller, &f.ticket.clone(), None, None),
+        );
+        assert_eq!(r.branch(BRANCH), Some(theirs));
+        // The adopted head is the PR's head: nothing more is fetched, and nothing is told again.
+        assert!(fetches(&mut f).is_empty());
+        assert_eq!(notices(&f.host).len(), 1);
+    }
+
+    #[test]
+    fn an_adopted_commit_with_the_same_patch_id_still_holds_publishing_and_accepting() {
+        let (mut f, r) = kept();
+        let verified = f.head();
+        let theirs = pushed_elsewhere(&mut f, &r, "a.txt", "    one\n");
+        fetch_and_adopt(&mut f, &r);
+        let patch = |commit: &str| worktrees::patch_id(&f.worktree, "origin/main", commit).unwrap();
+        assert_eq!(
+            patch(&theirs),
+            patch(&verified),
+            "it only re-indents a line"
+        );
+        let cycle = f.ticket().verification;
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        assert!(pass(&mut f, &base, 0).is_empty());
+        assert!(pass(&mut f, &base, 60 * MINUTE).is_empty());
+        let caller = f.coordinator.id.clone();
+        refused(
+            f.host
+                .publish_ticket(&caller, &f.ticket.clone(), None, None),
+        );
+        refused(f.host.accept_ticket(&f.ticket.clone(), None));
+        assert_eq!(f.ticket().verification, cycle);
+        assert_eq!(r.branch(BRANCH), Some(theirs));
+    }
+
+    #[test]
+    fn a_review_that_passes_after_the_adoption_lets_the_keeper_rebase_their_commit_unchanged() {
+        let (mut f, r, theirs) = adopted("c.txt", "three\n");
+        for session in start_review(&mut f) {
+            report(&mut f.host, &session, "passed");
+        }
+        let ticket = f.ticket();
+        let outcome = ticket.verification.as_ref().unwrap().outcome;
+        assert_eq!(
+            (outcome, ticket.unreviewed()),
+            (VerificationOutcome::Passed, None)
+        );
+        // Publishing goes ahead again: GitHub already has the adopted head.
+        let caller = f.coordinator.id.clone();
+        let (_, step) = f
+            .host
+            .publish_ticket(&caller, &f.ticket.clone(), None, None)
+            .unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(theirs.clone()));
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &base);
+        keep(&mut f, &r, job);
+        let rebased = f.head();
+        assert_ne!(rebased, theirs);
+        assert_eq!(r.branch(BRANCH), Some(rebased.clone()));
+        let commit = |c: &str| git(&f.worktree, &["show", "--format=%an %ae%n%s", c]);
+        assert_eq!(commit(&rebased), commit(&theirs));
+    }
+
+    #[test]
+    fn the_record_is_cleared_however_the_review_after_the_adoption_ends() {
+        // Its last round ends it blocked.
+        let (mut f, _r, _) = adopted("c.txt", "three\n");
+        for session in start_review(&mut f) {
+            report(&mut f.host, &session, "blocked");
+        }
+        let ticket = f.ticket();
+        assert_eq!(
+            (ticket.state.as_str(), ticket.unreviewed()),
+            ("blocked", None)
+        );
+        assert!(!f.host.may_change_branch(&ticket));
+        // Its implementer's report ends it.
+        let (mut f, _r, _) = adopted("c.txt", "three\n");
+        start_review(&mut f);
+        assert!(f.ticket().unreviewed().is_some(), "not while it runs");
+        let implementer = f.implementer.id.clone();
+        report(&mut f.host, &implementer, "blocked");
+        let ticket = f.ticket();
+        let outcome = ticket.verification.as_ref().unwrap().outcome;
+        assert_eq!(
+            (outcome, ticket.unreviewed()),
+            (VerificationOutcome::Blocked, None)
+        );
+        // The host ends it because it cannot go on: a verifier it needs was archived.
+        let (mut f, _r, _) = adopted("c.txt", "three\n");
+        let verifiers = start_review(&mut f);
+        f.host.set_archived(&verifiers[0], true).unwrap();
+        assert!(f.host.start_queued_cycles().unwrap());
+        let ticket = f.ticket();
+        let outcome = ticket.verification.as_ref().unwrap().outcome;
+        assert_eq!(
+            (outcome, ticket.unreviewed()),
+            (VerificationOutcome::Blocked, None)
+        );
+    }
+
+    #[test]
+    fn a_diverged_branch_changes_nothing_and_is_told_once_naming_both_heads() {
+        let (mut f, r) = kept();
+        let ours = f.commit("d.txt", "mine\n");
+        let theirs = pushed_elsewhere(&mut f, &r, "c.txt", "three\n");
+        let before = (worktree(&f), refs(&r.bare));
+        fetch_and_adopt(&mut f, &r);
+        assert_eq!((worktree(&f), refs(&r.bare)), before);
+        assert!(!has_result_ref(&f) && f.ticket().unreviewed().is_none());
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0].0.ends_with(&format!(":diverged:{theirs:.20}")),
+            "{}",
+            told[0].0
+        );
+        for head in [&ours, &theirs] {
+            assert!(told[0].2.contains(short_sha(head)), "{}", told[0].2);
+        }
+        // The same two heads are not fetched again.
+        assert!(fetches(&mut f).is_empty());
+    }
+
+    #[test]
+    fn a_waiting_result_shows_before_a_later_rebases_countdown() {
+        let (mut f, r, _) = waiting();
+        let moved = move_base(&f, &r, "other.txt", "2\n");
+        pass(&mut f, &moved, 3 * MINUTE);
+        let part = f.host.keeper_parts().get(&f.ticket).copied();
+        assert_eq!(part, Some(KeeperPart::Waiting));
     }
 }

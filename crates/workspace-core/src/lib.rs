@@ -984,6 +984,18 @@ pub struct Keeper {
     /// The rebase of `rebased`, waiting for the ticket's worktree to be free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// Commits Wiffletree did not make, taken from GitHub's branch; while set, nothing is
+    /// pushed or accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreviewed: Option<Unreviewed>,
+}
+/// The head the keeper adopted, how many commits no review has checked, and the number of the
+/// ticket's latest cycle then: only a later cycle that ends clears the record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unreviewed {
+    pub head: String,
+    pub commits: u32,
+    pub cycle: u32,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeeperRebase {
@@ -1126,6 +1138,27 @@ impl Ticket {
         self.pull_request
             .as_ref()
             .filter(|pr| pr.state != PrState::Open)
+    }
+    /// The commits the PR keeper adopted that no review has checked yet.
+    pub fn unreviewed(&self) -> Option<&Unreviewed> {
+        self.keeper.as_ref()?.unreviewed.as_ref()
+    }
+    /// Clears the record of adopted commits once a cycle that started after the adoption has
+    /// ended, however it ended; that cycle's outcome then decides.
+    pub fn end_unreviewed(&mut self) {
+        let ended = self
+            .verification
+            .as_ref()
+            .filter(|v| v.outcome != VerificationOutcome::Running)
+            .map(|v| v.cycle);
+        if let Some(keeper) = &mut self.keeper
+            && keeper
+                .unreviewed
+                .as_ref()
+                .is_some_and(|u| ended > Some(u.cycle))
+        {
+            keeper.unreviewed = None;
+        }
     }
 }
 /// A ticket branch's GitHub PR, as the PR watcher last read it.

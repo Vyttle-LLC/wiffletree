@@ -596,6 +596,7 @@ impl Host {
                 verification.cycle, ticket.title, ticket.id
             );
             ticket.state = "blocked".into();
+            ticket.end_unreviewed();
             host.save_ticket(&ticket)?;
             host.send(&id, None, &ticket.coordinator_id, &body)?;
             host.retire(&cycle_verifiers(&ticket))
@@ -923,6 +924,7 @@ impl Host {
                             untriage_orphans(verification, &mut ticket.ledger);
                         }
                         ticket.state = "blocked".into();
+                        ticket.end_unreviewed();
                         host.save_ticket(&ticket)?;
                         host.retire(&cycle_verifiers(&ticket))?;
                     }
@@ -1165,6 +1167,7 @@ impl Host {
         if let Some(verification) = &mut ticket.verification {
             verification.outcome = outcome;
         }
+        ticket.end_unreviewed();
         self.save_ticket(&ticket)?;
         self.send(&id, None, &coordinator, &summary)?;
         self.retire(&cycle_verifiers(&ticket))

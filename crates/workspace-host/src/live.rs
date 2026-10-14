@@ -445,7 +445,7 @@ impl Host {
         self.finish_ticket(ticket, "accepted", "ticket_accepted")
     }
     /// HEAD is the verified commit, or has the same patch id against the repository's base, as
-    /// after a squash or a clean rebase.
+    /// after a squash or a clean rebase, and the keeper adopted no commit no review has checked.
     pub(crate) fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
         verified_head(ticket, verified, || {
             Ok(self.ticket_repository(ticket)?.base)
@@ -970,6 +970,13 @@ pub(crate) fn verified_head(
     verified: &str,
     base: impl FnOnce() -> Result<String>,
 ) -> Result<()> {
+    // Whatever their patch id: `git patch-id` ignores whitespace, which can change behaviour.
+    if let Some(unreviewed) = ticket.unreviewed() {
+        bail!(
+            "The branch has commits no review has checked: the PR keeper took GitHub's branch at {} into it. Start a review with verify_ticket; nothing is pushed or accepted until one ends.",
+            unreviewed.head
+        );
+    }
     let head = verification::head(ticket)?;
     if head == verified {
         return Ok(());
