@@ -228,7 +228,13 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     assert!(coordinator.contains("Project coordinator — v12"));
     for role in Role::ALL {
         let skill = provider::skill(role);
-        assert!(skill.contains("Wiffletree communication contract — v7"));
+        assert!(skill.contains("Wiffletree communication contract — v8"));
+        // Every role is told that what it starts keeps running, and how to stop it.
+        assert!(skill.contains("keeps running after your command ends"));
+        assert!(skill.contains("until you are archived"));
+        assert!(skill.contains("save its process id from `$!` and kill those ids"));
+        assert!(skill.contains("do not use `jobs -p`, which is empty in a zsh subshell"));
+        assert!(skill.contains("confirm by name"));
         // Every role is asked for a checklist, which is display only.
         assert!(skill.contains("record a checklist of the steps you expect with set_plan"));
         assert!(skill.contains("never replaces report"));

@@ -43,3 +43,13 @@ pub fn one_tester(host: &mut Host) {
     verification.levels[0].verifiers.truncate(1);
     host.set_verification(verification).unwrap();
 }
+
+/// A process's start time in microseconds, as the kernel reports it.
+pub fn process_started(pid: i32) -> i64 {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    assert_eq!(read, size, "process {pid} is not running");
+    (info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec) as i64
+}

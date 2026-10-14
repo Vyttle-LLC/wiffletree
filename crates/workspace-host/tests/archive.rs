@@ -619,6 +619,46 @@ fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it
 }
 
 #[test]
+fn a_close_that_fails_after_stopping_processes_says_so_and_tells_the_agent() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Review");
+    let reviewer = host
+        .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Review", None)
+        .unwrap();
+    let db = fail_activity(directory.path(), "ticket_closed");
+    let mut left = Started::by(&db, &reviewer);
+
+    // The worktree could be removed, so the processes were stopped; then the close failed.
+    assert!(host.close_ticket(&ticket.id).is_err());
+
+    // A stop cannot be undone. The record says why it happened, not that the agent was
+    // archived, and the agent, still there, reads the notice at its next turn.
+    assert!(!host.session(&reviewer.id).unwrap().archived);
+    assert_eq!(left.stopped(&db), (true, Some("archive_failed".into())));
+    let notices = |host: &Host| -> Vec<(String, Receipt)> {
+        let messages = host.messages(&reviewer.id, None, 100).unwrap().into_iter();
+        let notices = messages.filter(|m| m.id.starts_with("processes:stopped:"));
+        notices.map(|m| (m.body, m.receipt)).collect()
+    };
+    let told = notices(&host);
+    let said = format!(
+        "Stopped 1 process {name} had left running. It was the program `sleep`.\nProcess group {group} · stopped when {name} was to be archived, which then failed.",
+        name = reviewer.name,
+        group = left.0.id()
+    );
+    assert_eq!(told, [(said, Receipt::Queued)]);
+
+    // The retry closes the ticket and has nothing left to stop or to say.
+    db.execute_batch("DROP TRIGGER fail_activity").unwrap();
+    host.close_ticket(&ticket.id).unwrap();
+    assert!(host.session(&reviewer.id).unwrap().archived);
+    assert_eq!(notices(&host).len(), 1);
+    assert_eq!(left.stopped(&db).1.as_deref(), Some("archive_failed"));
+}
+
+#[test]
 fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
@@ -724,12 +764,19 @@ impl Orphan {
                 .unwrap(),
         )
     }
-    /// Records it on a finished run of `agent` with `outcome`, as a stopped host leaves it.
+    /// Records it as the provider of a finished run of `agent` with `outcome`, as a stopped
+    /// host leaves it. No member is recorded, so no later host can confirm or stop it.
     fn record(&self, db: &rusqlite::Connection, agent: &Session, outcome: &str) {
         db.execute(
-            "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail,process_group)
-             VALUES (?1,?1,'[]',1,2,?3,'{}',?2)",
-            rusqlite::params![agent.id, self.0.id(), outcome],
+            "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail)
+             VALUES (?1,?1,'[]',1,2,?2,'{}')",
+            rusqlite::params![agent.id, outcome],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,provider,seen_at)
+             VALUES (?1,?1,?1,?2,1,1)",
+            rusqlite::params![agent.id, self.0.id()],
         )
         .unwrap();
     }
@@ -792,4 +839,235 @@ fn archiving_while_only_an_orphan_runs_defers_removal_whatever_its_run_outcome()
     drop(orphan);
     host.settle_pending_worktrees();
     assert!(!Path::new(&ticket.worktree).exists());
+}
+
+/// A process an agent started with a tool and left running, in a group of its own, recorded
+/// against the agent as the host records what its watcher sees.
+struct Started(std::process::Child);
+impl Started {
+    fn by(db: &rusqlite::Connection, agent: &Session) -> Self {
+        use std::os::unix::process::CommandExt;
+        let sleep = Command::new("sleep").arg("30").process_group(0).spawn();
+        let started = Self(sleep.unwrap());
+        let pid = started.0.id();
+        db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at) VALUES (?1,?2,'earlier',?1,1)",
+            rusqlite::params![pid, agent.id],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO process_group_members(group_id,pid,started,command) VALUES (?1,?1,?2,'sleep')",
+            rusqlite::params![pid, common::process_started(pid as i32)],
+        )
+        .unwrap();
+        started
+    }
+    /// Whether the host has stopped it, and the reason the record gives.
+    fn stopped(&mut self, db: &rusqlite::Connection) -> (bool, Option<String>) {
+        use std::os::unix::process::ExitStatusExt;
+        let reason: Option<String> = db
+            .query_row(
+                "SELECT ended FROM process_groups WHERE id=?1",
+                [self.0.id()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A stop returns once the group is gone, which under load is a moment before the
+        // process can be collected. Only a process the record says was stopped is waited for.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut status = self.0.try_wait().unwrap();
+        while reason.is_some() && status.is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            status = self.0.try_wait().unwrap();
+        }
+        (
+            status.is_some_and(|s| s.signal() == Some(libc::SIGTERM)),
+            reason,
+        )
+    }
+}
+impl Drop for Started {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn archived() -> (bool, Option<String>) {
+    (true, Some("archived".into()))
+}
+
+fn implementer(host: &Host) -> Session {
+    let mut sessions = host.sessions().unwrap().into_iter();
+    sessions.find(|s| s.role == Role::Implementer).unwrap()
+}
+
+#[test]
+fn accepting_a_ticket_stops_what_its_agents_started_and_then_removes_the_worktree() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    passed(&mut host, &ticket);
+    let mut left = Started::by(&db, &implementer(&host));
+
+    host.agent_tool(
+        &coordinator.id,
+        "accept_ticket",
+        json!({"ticket_id":ticket.id}),
+    )
+    .unwrap();
+
+    assert_eq!(left.stopped(&db), archived());
+    // Nothing of the agent's ran any more, so the worktree went at once instead of waiting.
+    assert!(!Path::new(&ticket.worktree).exists());
+    assert!(host.pending_worktree_removals().unwrap().is_empty());
+}
+
+#[test]
+fn closing_a_ticket_stops_what_its_agents_started() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let agent = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    let mut left = Started::by(&db, &agent);
+
+    host.agent_tool(
+        &coordinator.id,
+        "close_ticket",
+        json!({"ticket_id":ticket.id}),
+    )
+    .unwrap();
+
+    assert_eq!(left.stopped(&db), archived());
+    assert!(!Path::new(&ticket.worktree).exists());
+}
+
+#[test]
+fn archive_agent_stops_what_the_agent_started() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let reviewer = host
+        .assign_ticket(&ticket.id, Role::Reviewer, Provider::Claude, "Read", None)
+        .unwrap();
+    let mut left = Started::by(&db, &reviewer);
+
+    host.agent_tool(
+        &coordinator.id,
+        "archive_agent",
+        json!({"session_id":reviewer.id}),
+    )
+    .unwrap();
+
+    assert_eq!(left.stopped(&db), archived());
+    assert!(
+        Path::new(&ticket.worktree).exists(),
+        "the ticket is still open"
+    );
+}
+
+#[test]
+fn a_verifier_retired_by_its_cycle_has_what_it_started_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let verifier = verifying(&mut host, &ticket);
+    let mut left = Started::by(&db, &verifier);
+
+    // The cycle passes with its one verifier, which verification then archives.
+    pass(&mut host, &verifier);
+
+    assert!(host.session(&verifier.id).unwrap().archived);
+    assert_eq!(left.stopped(&db), archived());
+}
+
+#[test]
+fn a_verifier_replaced_at_another_model_has_what_it_started_stopped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    // The first review passed and retired its verifier; the human restored it, and it has
+    // left a process running since.
+    let verifier = passed(&mut host, &ticket);
+    host.set_archived(&verifier.id, false).unwrap();
+    let mut left = Started::by(&db, &verifier);
+    host.agent_tool(
+        &implementer(&host).id,
+        "report",
+        json!({"message_id":"ready again","kind":"ready_for_testing","body":"Committed"}),
+    )
+    .unwrap();
+
+    // The next review chooses another profile for that verifier, so a fresh session takes it
+    // and the restored one is archived in its place.
+    let mut choices = common::verifier_choices(&host);
+    let pinned = choices[0].profile.clone();
+    let selection = host.model_selection().unwrap();
+    let allowed = selection.allowed(pinned.provider);
+    let other = allowed
+        .iter()
+        .find(|m| (&m.model, &m.effort) != (&pinned.model, &pinned.effort));
+    let other = other.expect("a second allowed model or effort");
+    choices[0].profile.model = other.model.clone();
+    choices[0].profile.effort = other.effort.clone();
+    host.agent_tool(
+        &coordinator.id,
+        "verify_ticket",
+        json!({"ticket_id": ticket.id, "level": "Full", "verifiers": choices}),
+    )
+    .unwrap();
+
+    assert!(host.session(&verifier.id).unwrap().archived);
+    assert_eq!(left.stopped(&db), archived());
+}
+
+#[test]
+fn archiving_a_project_stops_what_every_agent_in_it_started() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let agent = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    let mut by_agent = Started::by(&db, &agent);
+    let mut by_coordinator = Started::by(&db, &coordinator);
+
+    host.set_archived(&coordinator.id, true).unwrap();
+
+    assert_eq!(by_agent.stopped(&db), archived());
+    assert_eq!(by_coordinator.stopped(&db), archived());
+    assert!(!Path::new(&ticket.worktree).exists());
+}
+
+#[test]
+fn a_refused_archive_stops_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (_root, coordinator) = team(&mut host, directory.path());
+    let db = store(directory.path());
+    let ticket = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let agent = host
+        .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+        .unwrap();
+    let mut left = Started::by(&db, &agent);
+    fs::write(Path::new(&ticket.worktree).join("draft.css"), "unsaved").unwrap();
+
+    host.close_ticket(&ticket.id).unwrap_err();
+    host.set_archived(&coordinator.id, true).unwrap_err();
+
+    assert_eq!(left.stopped(&db), (false, None));
 }

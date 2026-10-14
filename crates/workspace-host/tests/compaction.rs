@@ -448,7 +448,7 @@ impl World {
         let db = self.db();
         let mut runs = db
             .prepare(
-                "SELECT id,json_extract(detail,'$.kind') IS NOT NULL,outcome,started_at,finished_at,process_group FROM provider_runs WHERE session_id=?1 ORDER BY rowid",
+                "SELECT id,json_extract(detail,'$.kind') IS NOT NULL,outcome,started_at,finished_at,json_extract(detail,'$.process_group') FROM provider_runs WHERE session_id=?1 ORDER BY rowid",
             )
             .unwrap();
         let runs = runs.query_map([session], |r| {
@@ -1093,7 +1093,7 @@ fn a_compactions_process_the_start_cannot_confirm_holds_the_agent_until_its_note
     world
         .db()
         .execute(
-            "UPDATE provider_runs SET process_started=process_started+1 WHERE process_group=?1",
+            "UPDATE process_group_members SET started=started+1 WHERE group_id IN (SELECT id FROM process_groups WHERE process_group=?1)",
             [group],
         )
         .unwrap();
@@ -2057,6 +2057,129 @@ fn a_quit_stops_a_codex_compaction_and_the_next_start_delivers_the_waiting_messa
     assert_eq!(world.compactions(&main).len(), 1, "never run again");
     assert_eq!(world.receipt(&waiting), Receipt::Completed);
     assert!(world.snapshot().attention.is_empty());
+}
+
+/// Kills the process with this id when dropped, so a failed test leaves nothing running.
+struct Kill(i32);
+impl Drop for Kill {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+        }
+    }
+}
+
+#[test]
+fn what_a_codex_compactions_server_starts_is_recorded_spared_by_a_pause_and_stopped_at_a_quit() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    // The server starts a helper in a session of its own, as Codex starts its tool servers,
+    // and then waits at the gate with the compaction unfinished.
+    world.plan(json!({"gate":true,"helper":true}));
+    world.compact(&main, None).unwrap();
+    world.until_compacting(&main);
+    let saved = world.scratch.path().join("codex-helper.pid");
+    let recorded = |world: &World, helper: i32| -> Option<Option<String>> {
+        let found = world.db().query_row(
+            "SELECT ended FROM process_groups WHERE session_id=?1 AND process_group=?2 AND provider=0",
+            rusqlite::params![main, helper],
+            |r| r.get(0),
+        );
+        found.ok()
+    };
+    let mut helper = None;
+    until("the helper's process id to be saved", || {
+        let id = std::fs::read_to_string(&saved).ok();
+        helper = id.and_then(|id| id.trim().parse::<i32>().ok());
+        helper.is_some()
+    });
+    let helper = helper.unwrap();
+    let _kill = Kill(helper);
+    until("the helper to be recorded against the agent", || {
+        recorded(&world, helper) == Some(None)
+    });
+    assert!(group_runs(helper));
+
+    // A pause lets a started compaction finish, and what its server started is part of it.
+    world.request(Command::SetStatus {
+        session_id: main.clone(),
+        status: Status::Paused,
+    });
+    assert!(group_runs(helper), "spared by the pause");
+    assert_eq!(recorded(&world, helper), Some(None));
+
+    world.stop();
+
+    // No waiting here: the quit returned only once the helper's group was stopped too.
+    assert!(!group_runs(helper));
+    assert_eq!(recorded(&world, helper), Some(Some("quit".into())));
+}
+
+#[test]
+fn a_helper_given_an_earlier_groups_id_is_recorded_as_the_compactions_and_spared() {
+    let mut world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    world.plan(json!({"gate":true,"helper":true}));
+    world.compact(&main, None).unwrap();
+    world.until_compacting(&main);
+    let saved = world.scratch.path().join("codex-helper.pid");
+    let row = |world: &World, helper: i32| -> Option<(String, bool, Option<String>)> {
+        let found = world.db().query_row(
+            "SELECT run_id,noticed_at IS NOT NULL,ended FROM process_groups WHERE session_id=?1 AND process_group=?2 AND provider=0",
+            rusqlite::params![main, helper],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        found.ok()
+    };
+    let mut helper = None;
+    until("the helper's process id to be saved", || {
+        let id = std::fs::read_to_string(&saved).ok();
+        helper = id.and_then(|id| id.trim().parse::<i32>().ok());
+        helper.is_some()
+    });
+    let helper = helper.unwrap();
+    let _kill = Kill(helper);
+    until("the helper to be recorded against the agent", || {
+        row(&world, helper).is_some()
+    });
+    let compaction = world.compactions(&main).remove(0).id;
+
+    // As if the helper's group id had once been a group an earlier turn left, which emptied
+    // unseen between turns: an open row of that turn's, announced, whose member is long gone.
+    let db = world.db();
+    db.execute(
+        "UPDATE process_groups SET run_id='an-earlier-turn',noticed_at=1 WHERE session_id=?1 AND process_group=?2",
+        rusqlite::params![main, helper],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE process_group_members SET started=started-1 WHERE group_id IN (SELECT id FROM process_groups WHERE session_id=?1 AND process_group=?2)",
+        rusqlite::params![main, helper],
+    )
+    .unwrap();
+
+    world.request(Command::SetStatus {
+        session_id: main.clone(),
+        status: Status::Paused,
+    });
+
+    // The pause's look found the helper, could not confirm the old row by any member it
+    // recorded, and opened a fresh one for the compaction: so the pause spared it.
+    assert!(group_runs(helper), "spared by the pause");
+    assert_eq!(row(&world, helper), Some((compaction, false, None)));
+    let earlier: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM process_groups WHERE run_id='an-earlier-turn'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(earlier, 0, "the stale row is gone");
+
+    world.stop();
+    assert!(!group_runs(helper));
 }
 
 #[test]

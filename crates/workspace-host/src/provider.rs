@@ -2,6 +2,7 @@
 mod codex_compaction;
 mod output;
 use crate::compaction::CompactionRecord;
+use crate::processes::{self, Sighting, Watch};
 use crate::runtime::OwnDescriptors as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
@@ -26,6 +27,9 @@ pub enum ProviderEvent {
         group: u32,
         started: Option<i64>,
     },
+    /// What the watcher saw of the provider's tree: the processes the agent's tools started,
+    /// each in a group of its own, and the groups that have exited since.
+    Processes(Vec<Sighting>),
     Session(String),
     Step(StepUpdate),
     /// The turn's final text, sent once before `Finished` when the turn succeeds.
@@ -245,13 +249,13 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         }
     }
 }
-/// How long a provider's process group may take to exit after SIGTERM before it is killed.
-const TERMINATION_GRACE: Duration = Duration::from_secs(1);
 /// How long a finished turn waits for the rest of the provider's stderr.
 const STDERR_DRAIN: Duration = Duration::from_millis(500);
-/// The provider and its tool subprocesses, one owned process group. The leader stays
-/// unreaped until `stop` has finished signalling: its zombie keeps its pid, which is also the
-/// group id, from being reused, so the signals can only reach this turn's processes.
+/// The provider and the helpers that stay in its process group, which this turn owns. What the
+/// agent's tools start is not in it: Claude Code and Codex both run each tool command as the
+/// leader of its own session and process group, and `processes::Watch` follows those. The
+/// leader stays unreaped until `stop` has finished signalling: its zombie keeps its pid, which
+/// is also the group id, from being reused, so the signals can only reach this turn's group.
 struct Process {
     child: Child,
     status: Option<ExitStatus>,
@@ -274,101 +278,20 @@ impl Process {
         }
         Ok(info.si_pid != 0)
     }
-    /// Stops the whole group, SIGTERM and then SIGKILL after the grace period, and only then
-    /// reaps the leader. Later calls return its status without signalling again.
+    /// Stops the provider's group, SIGTERM and then SIGKILL after the grace period, and only
+    /// then reaps the leader. Later calls return its status without signalling again.
     fn stop(&mut self) -> Result<ExitStatus> {
         if let Some(status) = self.status {
             return Ok(status);
         }
         let group = self.child.id() as i32;
-        terminate(group);
+        processes::terminate(group);
         unsafe {
             libc::killpg(group, libc::SIGKILL);
         }
         let status = self.child.wait()?;
         self.status = Some(status);
         Ok(status)
-    }
-}
-/// Whether the group has a live process this user may signal; the probe delivers nothing. A
-/// group whose only members are zombies answers EPERM.
-fn group_runs(group: i32) -> bool {
-    unsafe { libc::killpg(group, 0) == 0 }
-}
-/// Sends SIGTERM and waits out the grace period while live members remain.
-fn terminate(group: i32) {
-    unsafe {
-        libc::killpg(group, libc::SIGTERM);
-    }
-    wait_while_running(group);
-}
-fn wait_while_running(group: i32) {
-    let deadline = Instant::now() + TERMINATION_GRACE;
-    while group_runs(group) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-/// A process's start time in microseconds since the epoch. Process ids are reused; an id and
-/// its start time together are not.
-#[cfg(target_os = "macos")]
-pub fn process_start(pid: i32) -> Option<i64> {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let read =
-        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
-    (read == size).then(|| (info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec) as i64)
-}
-/// Without a start time to compare, a leftover group is never confirmed and never signalled.
-#[cfg(not(target_os = "macos"))]
-pub fn process_start(_pid: i32) -> Option<i64> {
-    None
-}
-/// What became of a process group an earlier host left running.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Leftover {
-    /// Nothing of the group ran any more; nothing was signalled.
-    Gone,
-    /// Its leader was the recorded provider, and the group has been stopped.
-    Stopped,
-    /// Its leader was the recorded provider and the group was signalled, but members of it
-    /// still run: once the leader has exited on SIGTERM, nothing confirms a second signal.
-    Signalled,
-    /// It still runs. Its leader could not be confirmed as the recorded provider, so the group
-    /// was not signalled.
-    Running,
-}
-/// The group as a signal target, while it runs. Ids 0 and 1 never name a provider's group.
-fn running_group(group: i64) -> Option<i32> {
-    i32::try_from(group)
-        .ok()
-        .filter(|group| *group > 1 && group_runs(*group))
-}
-/// Whether a recorded process group still has a live process.
-pub(crate) fn leftover_runs(group: i64) -> bool {
-    running_group(group).is_some()
-}
-/// Stops a process group an earlier host left running, the way `Process::stop` does. Nothing
-/// keeps a leftover's id from being reused, so each signal goes out only while the group's
-/// leader has the recorded start time.
-pub(crate) fn stop_leftover(group: i64, started: Option<i64>) -> Leftover {
-    let Some(group) = running_group(group) else {
-        return Leftover::Gone;
-    };
-    let confirmed = || started.is_some() && process_start(group) == started;
-    if !confirmed() {
-        return Leftover::Running;
-    }
-    terminate(group);
-    if group_runs(group) && confirmed() {
-        unsafe {
-            libc::killpg(group, libc::SIGKILL);
-        }
-        wait_while_running(group);
-    }
-    if group_runs(group) {
-        Leftover::Signalled
-    } else {
-        Leftover::Stopped
     }
 }
 /// The error a running turn stops with when its cancel flag is set. Callers recognise it by
@@ -388,7 +311,37 @@ fn check_running(cancel: &AtomicBool) -> Result<()> {
     }
     Ok(())
 }
+/// Runs the provider to the end of its turn, sending `emit` every event and, when the turn ran
+/// to an end of its own, `Finished` last. Whichever way it ends, the host hears of every
+/// process the watcher saw before it hears of the end.
 pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEvent)) -> Result<()> {
+    let mut watch = None;
+    let finished = run_turn(turn, cancel, &mut emit, &mut watch);
+    if let Some(watch) = watch {
+        // A turn that ended on its own may leave processes running, so those still exiting
+        // with the provider get a moment first. A turn cut short has everything stopped.
+        let seen = watch.finish(finished.is_ok());
+        if !seen.is_empty() {
+            emit(ProviderEvent::Processes(seen));
+        }
+    }
+    emit(finished?);
+    Ok(())
+}
+/// Sends the host what the watcher has seen of the run's tree since it was last asked.
+fn report_seen(watching: &Watch, emit: &mut impl FnMut(ProviderEvent)) {
+    let seen = watching.seen();
+    if !seen.is_empty() {
+        emit(ProviderEvent::Processes(seen));
+    }
+}
+/// The turn itself. Returns its `Finished` event; `watch` is set once the provider has started.
+fn run_turn(
+    turn: Turn,
+    cancel: Arc<AtomicBool>,
+    emit: &mut impl FnMut(ProviderEvent),
+    watch: &mut Option<Watch>,
+) -> Result<ProviderEvent> {
     let quota_account = if turn.session.provider == Provider::Claude {
         crate::runtime::claude_account(&turn.cwd).ok().flatten()
     } else {
@@ -405,8 +358,9 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     };
     emit(ProviderEvent::Spawned {
         group: process.child.id(),
-        started: process_start(process.child.id() as i32),
+        started: processes::process_start(process.child.id() as i32),
     });
+    let watching = watch.insert(Watch::start(process.child.id() as i32, &turn.run_id));
     let mut codex_compaction = match turn.kind {
         TurnKind::CodexCompaction { before } => Some(codex_compaction::Messages::new(before)),
         _ => None,
@@ -468,6 +422,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     let mut exited = false;
     loop {
         check_running(&cancel)?;
+        report_seen(watching, emit);
         if !ended && out_of_time() {
             failure = Some(codex_compaction::out_of_time());
             ended = true;
@@ -629,6 +584,8 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
     // more, and is stopped below when its time is up or its margin has passed.
     while !process.exited()? {
         check_running(&cancel)?;
+        // What it starts meanwhile is recorded as it is seen, not when the turn ends.
+        report_seen(watching, emit);
         if !ended && out_of_time() {
             failure = Some(codex_compaction::out_of_time());
             ended = true;
@@ -639,7 +596,7 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Stops tool subprocesses that outlived the provider.
+    // Stops the helpers in the provider's group that outlived it.
     let status = process.stop()?;
     let _ = errors_closed.recv_timeout(STDERR_DRAIN);
     let stderr = without_terminal_codes(&String::from_utf8_lossy(
@@ -651,12 +608,11 @@ pub fn run(turn: Turn, cancel: Arc<AtomicBool>, mut emit: impl FnMut(ProviderEve
             stderr.chars().take(1500).collect::<String>()
         ));
     }
-    emit(ProviderEvent::Finished {
+    Ok(ProviderEvent::Finished {
         error: failure,
         usage,
         cancelled: false,
-    });
-    Ok(())
+    })
 }
 
 /// Drops terminal color and cursor sequences so provider errors read as plain text.
@@ -692,7 +648,7 @@ fn without_terminal_codes(text: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -719,91 +675,18 @@ pub(crate) mod tests {
             Some(libc::EPERM)
         );
         assert_eq!(process.stop().unwrap().code(), Some(3));
-        // Reaped: the group id is free for reuse, and stopping again signals nothing.
-        assert_eq!(unsafe { libc::killpg(group, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
-        assert_eq!(process.stop().unwrap().code(), Some(3));
-    }
-
-    /// A process in its own group, as a provider runs, that says `ready` once `script` has
-    /// set it up.
-    fn leftover(script: &str) -> (Child, i64) {
-        let mut child = ProcessCommand::new("/bin/sh")
-            .args(["-c", script])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let mut ready = [0; 6];
-        child
-            .stdout
-            .as_mut()
-            .unwrap()
-            .read_exact(&mut ready)
-            .unwrap();
-        assert_eq!(&ready, b"ready\n");
-        let started = process_start(child.id() as i32).unwrap();
-        (child, started)
-    }
-
-    /// A provider that exits on SIGTERM beside a tool subprocess that ignores it, in one group.
-    /// The subprocess needs no signal to end: it lives until the child's input closes, as when
-    /// the child is dropped.
-    pub(crate) fn leftover_with_survivor() -> (Child, i64) {
-        leftover("exec 3<&0; (trap '' TERM; echo ready; exec cat <&3) & exec sleep 30")
-    }
-
-    #[test]
-    fn a_leftover_group_is_signalled_only_while_its_leader_is_the_recorded_process() {
-        use std::os::unix::process::ExitStatusExt;
-        let (mut child, started) = leftover("echo ready; exec sleep 30");
-        let group = i64::from(child.id());
-
-        // The same id with another start time is another process; so is one with none recorded.
-        assert_eq!(stop_leftover(group, Some(started + 1)), Leftover::Running);
-        assert_eq!(stop_leftover(group, None), Leftover::Running);
-        assert_eq!(child.try_wait().unwrap(), None);
-        assert!(leftover_runs(group));
-
-        assert_eq!(stop_leftover(group, Some(started)), Leftover::Stopped);
-        assert!(!leftover_runs(group));
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
-        assert_eq!(stop_leftover(group, Some(started)), Leftover::Gone);
-    }
-
-    #[test]
-    fn a_leftover_that_ignores_sigterm_is_killed_after_the_grace_period() {
-        use std::os::unix::process::ExitStatusExt;
-        let (mut child, started) = leftover("trap '' TERM; echo ready; exec sleep 30");
-
-        assert_eq!(
-            stop_leftover(i64::from(child.id()), Some(started)),
-            Leftover::Stopped
-        );
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
-    }
-
-    #[test]
-    fn a_leftover_whose_leader_exits_on_sigterm_is_signalled_once_and_reported_so() {
-        use std::os::unix::process::ExitStatusExt;
-        let (mut child, started) = leftover_with_survivor();
-        let group = i64::from(child.id());
-
-        // The provider exits on SIGTERM; after that nothing confirms the group for SIGKILL.
-        assert_eq!(stop_leftover(group, Some(started)), Leftover::Signalled);
-        assert!(leftover_runs(group));
-
-        drop(child.stdin.take());
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while leftover_runs(group) {
-            assert!(Instant::now() < deadline, "the survivor outlived its input");
-            std::thread::sleep(Duration::from_millis(10));
+        // Reaped: the group id is free for reuse, and stopping again signals nothing. Under
+        // load the kernel takes a moment after the reap to let go of the group.
+        let gone = || {
+            let probe = unsafe { libc::killpg(group, 0) };
+            (probe, std::io::Error::last_os_error().raw_os_error())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while gone() != (-1, Some(libc::ESRCH)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert_eq!(gone(), (-1, Some(libc::ESRCH)));
+        assert_eq!(process.stop().unwrap().code(), Some(3));
     }
 
     #[test]

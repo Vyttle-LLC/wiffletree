@@ -1,4 +1,5 @@
 //! Event-driven host actor: all SQLite access stays on one thread; provider I/O never blocks it.
+use crate::agent_processes::StopReason;
 use crate::compaction::CompactionRecord;
 use crate::provider::{ProviderEvent, Turn, TurnKind};
 use crate::stream::StepUpdate;
@@ -27,8 +28,8 @@ const MAX_TURN_MESSAGES: usize = 20;
 /// Longest a wake-up sleeps before the actor looks again; macOS suspends sleeping threads
 /// while the Mac sleeps, so a long sleep could miss a timer by hours.
 const MAX_WAKE_SLEEP_MS: i64 = 60_000;
-/// How often a session held beside a leftover process is looked at again; the exit of a
-/// process the host does not own sends no event.
+/// How often a session held beside a leftover provider process is looked at again; the exit
+/// of a process the host does not own sends no event.
 const LEFTOVER_RETRY_MS: i64 = 2_000;
 /// How long a quit waits for running turns to stop: the grace period, and room to report it.
 const QUIT_WAIT: Duration = Duration::from_secs(3);
@@ -94,47 +95,28 @@ fn open_questions_reminder(questions: &[Attention]) -> String {
 }
 /// A clean exit stops turns this way. An unexpected stop, or a turn that outlasts the quit's
 /// wait, leaves its run unfinished for the next start.
-const QUIT_DURING_TURN: &str =
+pub(crate) const QUIT_DURING_TURN: &str =
     "Wiffletree quit during a turn (app quit or restart to update); inspect work before retrying";
 const STOPPED_UNEXPECTEDLY: &str =
     "Host stopped unexpectedly during a turn; inspect the worktree before retrying held input";
-/// Marks turns the last host left unfinished as interrupted, after stopping the provider
-/// processes it left running. Projects keep their live state, so queued work and timer fires
-/// run on their own after a restart; only the interrupted sessions wait, Disconnected with
-/// their input held, until the human retries or skips it. An unfinished compaction's process
-/// is dealt with the same way, but it held no input: its request is settled as interrupted and
-/// its session is otherwise left as it was.
+/// Stops every process the last host left running, then marks the turns it left unfinished as
+/// interrupted. Projects keep their live state, so queued work and timer fires run on their
+/// own after a restart; only the interrupted sessions wait, Disconnected with their input
+/// held, until the human retries or skips it. An unfinished compaction's process is dealt
+/// with the same way, but it held no input: its request is settled as interrupted and its
+/// session is otherwise left as it was.
 fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
-    use provider::Leftover::{Gone, Running, Signalled, Stopped};
-    type Unfinished = (String, String, Option<i64>, Option<i64>, bool);
+    // First, and for agents between turns as much as for unfinished runs: nothing an agent
+    // started runs while no host supervises it.
+    let stopped = host.stop_processes_left_running()?;
     let unfinished = host
         .db
         .prepare(&format!(
-            "SELECT id,session_id,process_group,process_started,{IS_TURN_RUN} FROM provider_runs WHERE finished_at IS NULL"
+            "SELECT id,session_id,{IS_TURN_RUN} FROM provider_runs WHERE finished_at IS NULL"
         ))?
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })?
-        .collect::<rusqlite::Result<Vec<Unfinished>>>()?;
-    // Each stop can take the grace period, so the groups are stopped together.
-    let leftovers = std::thread::scope(|scope| {
-        let stops = unfinished
-            .iter()
-            .map(|(_, _, group, started, _)| {
-                scope.spawn(move || {
-                    group.map_or(Gone, |group| provider::stop_leftover(group, *started))
-                })
-            })
-            .collect::<Vec<_>>();
-        stops
-            .into_iter()
-            .map(|stop| stop.join().unwrap_or(Running))
-            .collect::<Vec<_>>()
-    });
-    for ((run, session, group, _, turn), leftover) in unfinished.iter().zip(leftovers) {
-        // The provider was stopped also when members of its group outlived the signal.
-        let stopped_at = matches!(leftover, Stopped | Signalled).then(now);
-        let gone = matches!(leftover, Gone | Stopped).then_some(true);
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String, bool)>>>()?;
+    for (run, session, turn) in &unfinished {
         let error = if *turn {
             STOPPED_UNEXPECTEDLY
         } else {
@@ -155,14 +137,11 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
                 host.compaction_ended(&session, run, CompactionResult::Interrupted, None, None)?;
             }
             host.db.execute(
-                "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4,'$.process_gone',?5) WHERE id=?1",
-                params![run, now(), error, stopped_at, gone],
+                "UPDATE provider_runs SET finished_at=?2,outcome='interrupted',detail=json_set(detail,'$.result',json_object('error',?3),'$.process_stopped_at',?4) WHERE id=?1",
+                params![run, now(), error, stopped.get(run)],
             )?;
             Ok(())
         })?;
-        if let (Signalled | Running, Some(group)) = (&leftover, group) {
-            note_leftover_process(host, session, run, *group, leftover == Signalled)?;
-        }
     }
     // No turn runs any more, so no check-in still says one does.
     let check_ins = host
@@ -173,37 +152,6 @@ fn recover_unfinished_turns(host: &mut Host) -> Result<()> {
     for id in check_ins {
         host.resolve_attention(&id, "Superseded by a host restart")?;
     }
-    Ok(())
-}
-/// Raises the inbox note for a run's provider process group that still runs: one nobody could
-/// confirm, or one startup `signalled` whose members outlived that. While the note is open, its
-/// session starts no turn.
-fn note_leftover_process(
-    host: &mut Host,
-    session: &str,
-    run: &str,
-    group: i64,
-    signalled: bool,
-) -> Result<()> {
-    let name = host.session(session)?.name;
-    let found = if signalled {
-        format!(
-            "{name}: Wiffletree signalled provider process group {group} from its interrupted turn at startup, but part of it is still running. Wiffletree signals a group only while it can confirm the group's leader is that agent's provider, so it did not signal the rest again."
-        )
-    } else {
-        format!(
-            "{name}: provider process {group} from its interrupted turn is still running. Wiffletree could not confirm it is still that agent's process, so it did not stop it."
-        )
-    };
-    host.request_attention(
-        session,
-        "local",
-        &format!("{LEFTOVER_PROCESS}{run}"),
-        &format!(
-            "{found} The agent starts no turn while process group {group} runs. Stop the process if it is the agent's, or dismiss this note if it is not."
-        ),
-        &[],
-    )?;
     Ok(())
 }
 /// Says that an interrupted turn's provider process outlived its host until startup stopped it,
@@ -992,6 +940,26 @@ impl Actor {
                         )?)?,
                         _ => self.host.execute(command.clone())?,
                     };
+                    // Stopping an agent stops what it started, before the command returns: for
+                    // every agent of a stopped project, and for a paused session.
+                    let stopped = match &command {
+                        Command::SetLive {
+                            project_id,
+                            enabled: false,
+                        } => {
+                            let sessions = self.host.sessions()?.into_iter();
+                            sessions
+                                .filter(|s| s.project_id == *project_id)
+                                .map(|s| s.id)
+                                .collect()
+                        }
+                        Command::SetStatus {
+                            session_id,
+                            status: Status::Paused,
+                        } => vec![session_id.clone()],
+                        _ => vec![],
+                    };
+                    self.stop_processes_of(&stopped);
                     // The stop itself has happened, and human_stopped records who made it before
                     // the notice; a notice that cannot be sent is only logged.
                     for id in human_stops {
@@ -1144,21 +1112,13 @@ impl Actor {
                 run,
                 event,
             } => {
-                if self.compacting.get(&session).is_some_and(|c| c.run == run) {
-                    let changes_state = matches!(event, ProviderEvent::Finished { .. });
-                    if let Err(e) = self.compaction_event(&session, &run, event) {
-                        eprintln!("Workspace compaction event: {e:#}");
-                    }
-                    return changes_state;
-                }
-                let Some(active) = self.active.get_mut(&session).filter(|a| a.run == run) else {
-                    return false;
-                };
-                active.last_event_at = now();
-                let changes_state =
-                    !matches!(event, ProviderEvent::Step(_) | ProviderEvent::Reply(_));
-                if let Err(e) = self.provider_event(&session, &run, event) {
-                    eprintln!("Workspace provider event: {e:#}");
+                let ended = matches!(event, ProviderEvent::Finished { .. });
+                let changes_state = self.run_event(&session, &run, event);
+                if ended {
+                    // Everything the run's thread sent is stored now, its last sightings
+                    // before its end, so the store answers for what the run started and the
+                    // watcher can let go of the run's tree. Until here a stop asks both.
+                    processes::release(&run);
                 }
                 changes_state
             }
@@ -1228,16 +1188,39 @@ impl Actor {
             Event::Shutdown => false,
         }
     }
+    /// Handles one event of a run, a turn's or a compaction's, and says whether it changed
+    /// what clients show. An event of a run the host no longer has is dropped.
+    fn run_event(&mut self, session: &str, run: &str, event: ProviderEvent) -> bool {
+        if self.compacting.get(session).is_some_and(|c| c.run == run) {
+            let changes_state = matches!(event, ProviderEvent::Finished { .. });
+            if let Err(e) = self.compaction_event(session, run, event) {
+                eprintln!("Workspace compaction event: {e:#}");
+            }
+            return changes_state;
+        }
+        let Some(active) = self.active.get_mut(session).filter(|a| a.run == run) else {
+            return false;
+        };
+        // What the watcher saw is not something the provider said.
+        let watched = matches!(event, ProviderEvent::Processes(_));
+        if !watched {
+            active.last_event_at = now();
+        }
+        let changes_state =
+            !watched && !matches!(event, ProviderEvent::Step(_) | ProviderEvent::Reply(_));
+        if let Err(e) = self.provider_event(session, run, event) {
+            eprintln!("Workspace provider event: {e:#}");
+        }
+        changes_state
+    }
     fn provider_event(&mut self, id: &str, run: &str, event: ProviderEvent) -> Result<()> {
         let session = self.host.session(id)?;
         let mut runtime = self.host.session_runtime(id)?;
         match event {
             ProviderEvent::Spawned { group, started } => {
-                self.host.db.execute(
-                    "UPDATE provider_runs SET process_group=?2,process_started=?3 WHERE id=?1",
-                    params![run, group, started],
-                )?;
+                self.host.record_provider_process(id, run, group, started)?;
             }
+            ProviderEvent::Processes(seen) => self.host.record_sightings(id, run, &seen)?,
             ProviderEvent::Session(provider_id) => {
                 self.host.db.execute("UPDATE provider_runs SET detail=json_set(detail,'$.provider_thread_id',?2) WHERE id=?1",params![run,provider_id])?;
                 runtime.provider_session_id = Some(provider_id);
@@ -1292,7 +1275,7 @@ impl Actor {
                 // fails, the run stays open and blocks worktree removal until restart: safe.
                 // The provider thread stopped the process group before reporting this end.
                 self.host.db.execute(
-                    "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5,'$.stop_reason',?6,'$.process_gone',1) WHERE id=?1",
+                    "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.omitted_steps',?5,'$.stop_reason',?6) WHERE id=?1",
                     params![
                         run,
                         now(),
@@ -1351,7 +1334,15 @@ impl Actor {
                 } else if session.status == Status::Working {
                     self.host.set_status(id, Status::Ready)?;
                 }
-                // A quit only stops turns; the next start settles.
+                // After the reply, so a notice about what the turn left running follows it, and
+                // before any worktree is removed.
+                // A stop that found the turn already finishing still stopped its agent, so
+                // what the turn started is stopped, not announced as left running.
+                let stopped = cancelled || active.cancel.load(Ordering::Relaxed);
+                if let Err(e) = self.settle_processes(&session, run, stopped) {
+                    eprintln!("Workspace processes: {e:#}");
+                }
+                // At a quit, worktrees pending removal wait for the next start.
                 if !self.stopping {
                     self.host.settle_pending_worktrees();
                 }
@@ -1427,6 +1418,7 @@ impl Actor {
                 cancelled,
             } => self.compaction_finished(id, error, usage, cancelled),
             event @ (ProviderEvent::Spawned { .. }
+            | ProviderEvent::Processes(_)
             | ProviderEvent::Usage { .. }
             | ProviderEvent::ModelUsage(_)
             | ProviderEvent::Quota(_)) => self.provider_event(id, run, event),
@@ -1475,7 +1467,7 @@ impl Actor {
         // process group before reporting this end.
         self.host.atomically(|host| {
             host.db.execute(
-                "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4),'$.process_gone',1) WHERE id=?1",
+                "UPDATE provider_runs SET finished_at=?2,outcome=?3,detail=json_set(detail,'$.result',json(?4)) WHERE id=?1",
                 params![compacting.run, now(), tag(&result)?, detail.to_string()],
             )?;
             if let Some(Ok(spent)) = &spent {
@@ -1483,6 +1475,13 @@ impl Actor {
             }
             host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
         })?;
+        // A stop let this compaction finish. If its agent is still stopped, paused or in a
+        // stopped project, what the compaction's provider left running is stopped now.
+        let live = self.host.live_projects()?.contains(&session.project_id);
+        let stopped = cancelled || session.status == Status::Paused || !live;
+        if let Err(e) = self.settle_processes(&session, &compacting.run, stopped) {
+            eprintln!("Workspace processes: {e:#}");
+        }
         if !self.stopping {
             self.host.settle_pending_worktrees();
         }
@@ -1503,9 +1502,56 @@ impl Actor {
         );
         Ok(spent)
     }
-    /// Cancels every active turn and every compaction, and waits for each provider thread to
-    /// report its end, which it does once the provider's process group is stopped. A run that
-    /// outlasts the wait stays unfinished, so the next start stops its process.
+    /// A run has ended and its provider thread has stopped the provider's own group. What the
+    /// agent started with its tools keeps running after a run that ended on its own, and a
+    /// notice says so once. It is stopped with a turn whose agent was `stopped`, whether that
+    /// cut the turn off or found it finishing, with an archived agent's turn and at a quit.
+    fn settle_processes(&mut self, session: &Session, run: &str, stopped: bool) -> Result<()> {
+        self.host.provider_process_ended(run)?;
+        let reason = if self.stopping {
+            StopReason::Quit
+        } else if session.archived {
+            StopReason::Archived
+        } else if stopped {
+            StopReason::Stopped
+        } else {
+            return self.host.note_processes_left_running(session, run);
+        };
+        self.host
+            .stop_processes(std::slice::from_ref(&session.id), reason)
+    }
+    /// Records what each of these agents' running turns has started as of now, so a stop
+    /// reaches a tool started a moment ago. A failure here is only logged.
+    fn record_running_trees<'a>(&mut self, sessions: impl Iterator<Item = &'a String>) {
+        for session in sessions {
+            let turn = self.active.get(session).map(|active| &active.run);
+            let run = turn.or_else(|| self.compacting.get(session).map(|c| &c.run));
+            if let Some(run) = run.cloned()
+                && let Err(e) = self.host.record_tree_now(session, &run)
+            {
+                eprintln!("Workspace processes: {e:#}");
+            }
+        }
+    }
+    /// Stops what these agents started, when they are stopped. The stop itself has happened;
+    /// a failure here is only logged.
+    fn stop_processes_of(&mut self, sessions: &[String]) {
+        self.record_running_trees(sessions.iter());
+        // A stop lets a started compaction finish. What its provider started, such as Codex's
+        // tool servers, is part of it, and is settled when the compaction ends.
+        let compactions = sessions.iter().filter_map(|s| self.compacting.get(s));
+        let spared: Vec<String> = compactions.map(|c| c.run.clone()).collect();
+        let stopped = self
+            .host
+            .stop_processes_except(sessions, StopReason::Stopped, &spared);
+        if let Err(e) = stopped {
+            eprintln!("Workspace processes: {e:#}");
+        }
+    }
+    /// Cancels every active turn and every compaction, stops what every agent started, and
+    /// waits for each provider thread to report its end, which it does once the provider's
+    /// process group is stopped. A run that outlasts the wait stays unfinished, and a process
+    /// that could not be stopped stays recorded, so the next start stops both.
     fn stop(&mut self, events: &Receiver<Event>) {
         self.stopping = true;
         let turns = self.active.values().map(|a| &a.cancel);
@@ -1513,6 +1559,17 @@ impl Actor {
             cancel.store(true, Ordering::Relaxed);
         }
         let deadline = Instant::now() + QUIT_WAIT;
+        // Agents between turns too; each cancelled turn's agent is looked at again as it ends.
+        let running = self.active.keys().chain(self.compacting.keys());
+        let running: Vec<String> = running.cloned().collect();
+        self.record_running_trees(running.iter());
+        let stopped = self
+            .host
+            .agents_with_processes()
+            .and_then(|agents| self.host.stop_processes(&agents, StopReason::Quit));
+        if let Err(e) = stopped {
+            eprintln!("Workspace processes: {e:#}");
+        }
         while !(self.active.is_empty() && self.compacting.is_empty()) && Instant::now() < deadline {
             match events.try_recv() {
                 Ok(event @ Event::Provider { .. }) => {
@@ -1733,6 +1790,7 @@ impl Actor {
                 .collect(),
         };
         let mut results = Vec::new();
+        let mut stopped = Vec::new();
         for target in targets {
             let running = self
                 .active
@@ -1768,8 +1826,11 @@ impl Actor {
                 self.host.set_status(&target.id, Status::Paused)?;
                 self.host.record_stop(&target.id, Stopper::Parent)?;
             }
+            stopped.push(target.id.clone());
             results.push(json!({"session_id":target.id,"name":target.name,"result":result}));
         }
+        // Before the call returns; a stopped turn's agent is looked at again as the turn ends.
+        self.stop_processes_of(&stopped);
         Ok(json!({ "agents": results }))
     }
     /// Lets a coordinator release a direct child that is paused or interrupted, through the same
@@ -2358,7 +2419,7 @@ impl Actor {
     }
     /// Why this session's turn cannot start now, if anything holds it.
     fn hold_reason(&mut self, session: &Session) -> Result<Option<String>> {
-        if let Some(group) = self.leftover_process(session)? {
+        if let Some(group) = self.host.leftover_provider_process(&session.id)? {
             self.wake(now() + LEFTOVER_RETRY_MS);
             return Ok(Some(format!(
                 "Provider process {group} from an earlier turn is still running. No turn starts until it exits or its inbox note is dismissed."
@@ -2366,69 +2427,16 @@ impl Actor {
         }
         self.host.hold_reason(session)
     }
-    /// The process group an earlier host left running that holds this session, while its inbox
-    /// note is open. Settles each note once its group has exited.
-    fn leftover_process(&mut self, session: &Session) -> Result<Option<i64>> {
-        self.note_unsettled_runs(session)?;
-        for (note, group) in self.leftover_notes(Some(&session.id))? {
-            if provider::leftover_runs(group) {
-                return Ok(Some(group));
-            }
-            self.host.resolve_attention(&note, "The process exited")?;
-        }
-        Ok(None)
-    }
     /// Settles every leftover-process note whose group has exited, whether or not its session
-    /// has a turn due, and looks again while one still runs.
+    /// has a turn due, and looks again while one still runs: the exit of a process the host
+    /// does not own sends no event.
     fn settle_leftover_notes(&mut self) -> Result<()> {
-        for (note, group) in self.leftover_notes(None)? {
-            if provider::leftover_runs(group) {
-                self.wake(now() + LEFTOVER_RETRY_MS);
-            } else {
-                self.host.resolve_attention(&note, "The process exited")?;
-                self.state_changed();
-            }
+        let (settled, running) = self.host.settle_process_notes()?;
+        if settled {
+            self.state_changed();
         }
-        Ok(())
-    }
-    /// The open leftover-process notes, of one session or of all, each with its process group.
-    fn leftover_notes(&self, session: Option<&str>) -> Result<Vec<(String, i64)>> {
-        let notes = self
-            .host
-            .db
-            .prepare(
-                "SELECT a.id,r.process_group FROM attention a JOIN provider_runs r ON r.id=substr(a.operation_id,length(?2)+1) WHERE (?1 IS NULL OR a.session_id=?1) AND substr(a.operation_id,1,length(?2))=?2 AND json_extract(a.data,'$.answer') IS NULL",
-            )?
-            .query_map(params![session, LEFTOVER_PROCESS], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(notes)
-    }
-    /// Looks once at each of the session's finished runs whose end no host saw, such as one an
-    /// older version marked interrupted without looking for its process. A run whose process
-    /// group still runs gets the note; the rest are settled for good, since ids are reused.
-    fn note_unsettled_runs(&mut self, session: &Session) -> Result<()> {
-        let runs = self
-            .host
-            .db
-            .prepare(
-                "SELECT r.id,r.process_group FROM provider_runs r WHERE r.session_id=?1 AND r.finished_at IS NOT NULL AND r.process_group IS NOT NULL AND (r.outcome='interrupted' OR (r.outcome='failed' AND json_extract(r.detail,'$.result.error')=?2)) AND json_extract(r.detail,'$.process_gone') IS NULL AND NOT EXISTS (SELECT 1 FROM attention a WHERE a.session_id=r.session_id AND a.operation_id=?3||r.id)",
-            )?
-            .query_map(
-                params![session.id, QUIT_DURING_TURN, LEFTOVER_PROCESS],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?
-            .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
-        for (run, group) in runs {
-            if provider::leftover_runs(group) {
-                note_leftover_process(&mut self.host, &session.id, &run, group, false)?;
-            } else {
-                self.host.db.execute(
-                    "UPDATE provider_runs SET detail=json_set(detail,'$.process_gone',1) WHERE id=?1",
-                    [&run],
-                )?;
-            }
+        if running {
+            self.wake(now() + LEFTOVER_RETRY_MS);
         }
         Ok(())
     }
@@ -5741,7 +5749,7 @@ mod tests {
             i64::from(self.0.id())
         }
         fn started(&self) -> i64 {
-            provider::process_start(self.0.id() as i32).unwrap()
+            processes::process_start(self.0.id() as i32).unwrap()
         }
     }
     impl Drop for LeftoverProcess {
@@ -5763,17 +5771,58 @@ mod tests {
         group: i64,
         kept: Option<i64>,
     ) -> (tempfile::TempDir, Actor, Session, String) {
-        let (home, actor, session, run) = actor_with_turn();
+        let (home, mut actor, session, run) = actor_with_turn();
         actor
             .host
             .db
             .execute(
-                "UPDATE provider_runs SET messages='[\"m1\"]',process_group=?2,process_started=?3 WHERE id=?1",
-                params![run, group, kept],
+                "UPDATE provider_runs SET messages='[\"m1\"]' WHERE id=?1",
+                [&run],
             )
+            .unwrap();
+        let host = &mut actor.host;
+        host.record_provider_process(&session, &run, group as u32, kept)
             .unwrap();
         let session = actor.host.session(&session).unwrap();
         (home, actor, session, run)
+    }
+
+    /// The run's process group as an earlier version kept it: on the run itself, with the start
+    /// time `kept`. Opening the store carries it into the record.
+    fn recorded_by_an_older_version(
+        actor: &Actor,
+        run: &str,
+        process: &LeftoverProcess,
+        kept: Option<i64>,
+    ) {
+        let db = &actor.host.db;
+        db.execute("DELETE FROM process_groups", []).unwrap();
+        db.execute(
+            "UPDATE provider_runs SET process_group=?2,process_started=?3 WHERE id=?1",
+            params![run, process.group(), kept],
+        )
+        .unwrap();
+    }
+
+    /// The groups the record holds for a run: id, process group, whether it is the provider's,
+    /// and why it ended if it has.
+    fn recorded(actor: &Actor, run: &str) -> Vec<(String, i64, bool, Option<String>)> {
+        actor
+            .host
+            .db
+            .prepare("SELECT id,process_group,provider,ended FROM process_groups WHERE run_id=?1 ORDER BY rowid")
+            .unwrap()
+            .query_map([run], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// The inbox note id of the run's one recorded group.
+    fn note_of(actor: &Actor, run: &str) -> String {
+        let recorded = recorded(actor, run);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        format!("{LEFTOVER_PROCESS}{}", recorded[0].0)
     }
 
     fn process_stopped_at(actor: &Actor, run: &str) -> Option<i64> {
@@ -5804,6 +5853,13 @@ mod tests {
         let open = actor.host.open_attention(&session.project_id).unwrap();
         assert!(open.is_empty(), "{open:?}");
         assert_eq!(actor.hold_reason(&session).unwrap(), None);
+        // The record says what was stopped and why.
+        let record = recorded(&actor, &run);
+        assert_eq!(record.len(), 1, "{record:?}");
+        assert_eq!(
+            (record[0].1, record[0].2, record[0].3.as_deref()),
+            (process.group(), true, Some("startup"))
+        );
         // Both notes an agent can get for the run say its process was stopped, and when.
         let expected = format!("was stopped at startup ({stopped})");
         let retry = interrupted_turn_note(&actor.host, "m1").unwrap();
@@ -5831,7 +5887,7 @@ mod tests {
             let group = process.group().to_string();
             let notes = actor.host.open_attention(&session.project_id).unwrap();
             assert_eq!(notes.len(), 1, "{notes:?}");
-            assert_eq!(notes[0].operation_id, format!("{LEFTOVER_PROCESS}{run}"));
+            assert_eq!(notes[0].operation_id, note_of(&actor, &run));
             assert_eq!(notes[0].session_id, session.id);
             assert!(notes[0].prompt.contains(&session.name), "{notes:?}");
             assert!(notes[0].prompt.contains(&group), "{notes:?}");
@@ -5844,14 +5900,20 @@ mod tests {
             assert_eq!(actor.hold_reason(&session).unwrap(), None);
             let open = actor.host.open_attention(&session.project_id).unwrap();
             assert!(open.is_empty(), "{open:?}");
+            // Forgotten: a later process given the group's id never holds the session.
+            assert_eq!(recorded(&actor, &run), []);
         }
     }
 
     #[test]
-    fn startup_says_what_it_signalled_when_members_of_a_stopped_providers_group_survive() {
-        let (mut provider, started) = provider::tests::leftover_with_survivor();
+    fn startup_says_what_it_signalled_when_part_of_a_stopped_providers_group_survives() {
+        // The provider exits on SIGTERM, starting a helper as it goes that ignores the signal.
+        // Whatever was in the group when the host confirmed it would be killed; this helper
+        // joined afterwards, and nothing confirms a second signal for it.
+        let mut provider = processes::tests::with_late_survivor();
         let group = i64::from(provider.id());
-        let (_home, mut actor, session, run) = actor_with_process_group(group, Some(started));
+        let started = processes::process_start(provider.id() as i32);
+        let (_home, mut actor, session, run) = actor_with_process_group(group, started);
 
         recover_unfinished_turns(&mut actor.host).unwrap();
 
@@ -5863,7 +5925,7 @@ mod tests {
         // The rest of its group still runs: the note says it was signalled, and the hold stays.
         let notes = actor.host.open_attention(&session.project_id).unwrap();
         assert_eq!(notes.len(), 1, "{notes:?}");
-        assert_eq!(notes[0].operation_id, format!("{LEFTOVER_PROCESS}{run}"));
+        assert_eq!(notes[0].operation_id, note_of(&actor, &run));
         let said = format!(
             "{}: Wiffletree signalled provider process group {group} from its interrupted turn at startup, but part of it is still running.",
             session.name
@@ -5945,7 +6007,7 @@ mod tests {
     #[test]
     fn dismissing_its_note_releases_a_session_held_beside_a_leftover_process() {
         let mut process = LeftoverProcess::spawn();
-        let (_home, mut actor, session, _) = actor_with_leftover(&process, None);
+        let (_home, mut actor, session, run) = actor_with_leftover(&process, None);
         recover_unfinished_turns(&mut actor.host).unwrap();
         let note = actor.host.open_attention(&session.project_id).unwrap();
         assert!(actor.hold_reason(&session).unwrap().is_some());
@@ -5954,18 +6016,7 @@ mod tests {
 
         assert_eq!(actor.hold_reason(&session).unwrap(), None);
         assert_eq!(process.0.try_wait().unwrap(), None);
-    }
-
-    /// Gives the run the process group of `process`, as when its recorded id is reused.
-    fn reuse_group(actor: &Actor, run: &str, process: &LeftoverProcess) {
-        actor
-            .host
-            .db
-            .execute(
-                "UPDATE provider_runs SET process_group=?2 WHERE id=?1",
-                params![run, process.group()],
-            )
-            .unwrap();
+        assert_eq!(recorded(&actor, &run)[0].3.as_deref(), Some("dismissed"));
     }
 
     #[test]
@@ -5978,16 +6029,15 @@ mod tests {
         recover_unfinished_turns(&mut actor.host).unwrap();
 
         assert_eq!(process_stopped_at(&actor, &run), None);
-        // The run is settled: a later process given its id never holds the session.
-        let later = LeftoverProcess::spawn();
-        reuse_group(&actor, &run, &later);
+        // The group is forgotten: a later process given its id never holds the session.
+        assert_eq!(recorded(&actor, &run), []);
         assert_eq!(actor.hold_reason(&session).unwrap(), None);
         let open = actor.host.open_attention(&session.project_id).unwrap();
         assert!(open.is_empty(), "{open:?}");
     }
 
-    /// Marks the run finished the way a host before this change did at startup or at a quit,
-    /// without looking for its process.
+    /// Marks the run finished the way a host before leftover processes were stopped did at
+    /// startup or at a quit, without looking for its process.
     fn finished_by_an_older_host(actor: &Actor, run: &str, outcome: &str, error: &str) {
         actor
             .host
@@ -6007,11 +6057,12 @@ mod tests {
         ] {
             let mut process = LeftoverProcess::spawn();
             let (_home, mut actor, session, run) = actor_with_leftover(&process, None);
+            recorded_by_an_older_version(&actor, &run, &process, None);
             finished_by_an_older_host(&actor, &run, outcome, error);
-            // Startup has nothing unfinished to find; the session's next turn finds the run.
+            // Opening the store carries the run's process into the record under the run's id;
+            // startup cannot confirm it, having no start time, and raises its note.
+            agent_processes::migrate(&actor.host.db).unwrap();
             recover_unfinished_turns(&mut actor.host).unwrap();
-            let open = actor.host.open_attention(&session.project_id).unwrap();
-            assert!(open.is_empty(), "{open:?}");
 
             let group = process.group().to_string();
             let reason = actor.hold_reason(&session).unwrap().unwrap();
@@ -6030,20 +6081,438 @@ mod tests {
     }
 
     #[test]
-    fn an_earlier_run_is_looked_at_once_so_a_reused_id_never_holds_the_session() {
-        let process = LeftoverProcess::spawn();
+    fn what_an_older_version_recorded_on_a_run_is_carried_into_the_record_once() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut process = LeftoverProcess::spawn();
         let (_home, mut actor, session, run) = actor_with_leftover(&process, None);
-        finished_by_an_older_host(&actor, &run, "interrupted", STOPPED_UNEXPECTEDLY);
-        drop(process);
-        assert_eq!(actor.hold_reason(&session).unwrap(), None);
+        recorded_by_an_older_version(&actor, &run, &process, Some(process.started()));
+        // A second run of an older version: finished and seen to end, so nothing of it is kept.
+        let settled = LeftoverProcess::spawn();
+        actor.host.db.execute(
+            "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail,process_group,process_started) VALUES ('settled',?1,'[]',?2,?2,'interrupted','{\"process_gone\":1}',?3,?4)",
+            params![session.id, now(), settled.group(), settled.started()],
+        ).unwrap();
 
-        let later = LeftoverProcess::spawn();
-        reuse_group(&actor, &run, &later);
+        // A third whose process the human said was not the agent's, by dismissing its note.
+        let dismissed = LeftoverProcess::spawn();
+        actor.host.db.execute(
+            "INSERT INTO provider_runs(id,session_id,messages,started_at,finished_at,outcome,detail,process_group) VALUES ('dismissed',?1,'[]',?2,?2,'interrupted','{}',?3)",
+            params![session.id, now(), dismissed.group()],
+        ).unwrap();
+        let note = format!("{LEFTOVER_PROCESS}dismissed");
+        let note = actor
+            .host
+            .request_attention(&session.id, "local", &note, "Still running", &[])
+            .unwrap();
+        actor.host.dismiss_attention(&note.id).unwrap();
 
-        assert!(provider::leftover_runs(later.group()));
-        assert_eq!(actor.hold_reason(&session).unwrap(), None);
-        let open = actor.host.open_attention(&session.project_id).unwrap();
-        assert!(open.is_empty(), "{open:?}");
+        agent_processes::migrate(&actor.host.db).unwrap();
+        agent_processes::migrate(&actor.host.db).unwrap();
+
+        assert_eq!(recorded(&actor, "dismissed"), []);
+        let record = recorded(&actor, &run);
+        assert_eq!(record.len(), 1, "{record:?}");
+        assert_eq!(
+            (record[0].0.as_str(), record[0].1, record[0].2),
+            (run.as_str(), process.group(), true)
+        );
+        assert_eq!(recorded(&actor, "settled"), []);
+        let kept: i64 = actor
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM provider_runs WHERE process_group IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 0, "the old columns are read once");
+
+        // Its one member is the leader with its start time, so startup confirms and stops it.
+        recover_unfinished_turns(&mut actor.host).unwrap();
+        assert_eq!(process.0.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(process_stopped_at(&actor, &run).is_some());
+    }
+
+    /// Records `process` as something the session's run started with a tool.
+    fn started_by(actor: &mut Actor, session: &str, run: &str, process: &LeftoverProcess) {
+        let process = processes::read(process.0.id() as i32).unwrap();
+        let seen = [processes::Sighting::Member(process)];
+        actor.host.record_sightings(session, run, &seen).unwrap();
+    }
+
+    /// Whether the host has stopped `process`, and the reason its record gives.
+    fn stopped(actor: &Actor, process: &mut LeftoverProcess) -> (bool, Option<String>) {
+        use std::os::unix::process::ExitStatusExt;
+        let reason: Option<String> = actor
+            .host
+            .db
+            .query_row(
+                "SELECT ended FROM process_groups WHERE process_group=?1",
+                [process.group()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A stop returns once the group is gone, which under load is a moment before the
+        // process can be collected. Only a process the record says was stopped is waited for.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut status = process.0.try_wait().unwrap();
+        while reason.is_some() && status.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+            status = process.0.try_wait().unwrap();
+        }
+        let terminated = status.is_some_and(|s| s.signal() == Some(libc::SIGTERM));
+        (terminated, reason)
+    }
+
+    #[test]
+    fn stop_agents_stops_what_a_child_started_and_its_stopped_turns_end_stops_the_rest() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let mut tool = LeftoverProcess::spawn();
+        started_by(&mut actor, &tester.id, "run", &tool);
+
+        let args = json!({"reason":"Wrong approach"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
+
+        // Before the call returned, not when the turn gets round to ending.
+        assert_eq!(stopped(&actor, &mut tool), (true, Some("stopped".into())));
+        // What the turn started while it wound down is stopped as it ends.
+        let mut late = LeftoverProcess::spawn();
+        started_by(&mut actor, &tester.id, "run", &late);
+        let cancelled = ProviderEvent::Finished {
+            error: Some(provider::Cancelled.to_string()),
+            usage: Value::Null,
+            cancelled: true,
+        };
+        actor.provider_event(&tester.id, "run", cancelled).unwrap();
+        assert_eq!(stopped(&actor, &mut late), (true, Some("stopped".into())));
+    }
+
+    /// Gives the session's running turn a run id no other test's turn has, as every real run
+    /// has: the watcher is shared by the whole process and finds a run's tree by that id.
+    fn own_run(
+        actor: &mut Actor,
+        session: &Session,
+        provider: &processes::tests::Provider,
+    ) -> String {
+        let run = format!("run-{}", provider.pid());
+        actor.active.get_mut(&session.id).unwrap().run = run.clone();
+        run
+    }
+
+    /// The Wiffletree process notices in the session's conversation, oldest first.
+    fn process_notices(actor: &Actor, session: &Session) -> Vec<String> {
+        let messages = actor.host.messages(&session.id, None, 100).unwrap();
+        let notices = messages
+            .into_iter()
+            .filter(|m| m.id.starts_with("processes:"));
+        notices.map(|m| m.body).collect()
+    }
+
+    #[test]
+    fn a_stop_finds_what_a_finishing_turn_left_while_its_last_sightings_are_on_their_way() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let mut provider = processes::tests::Provider::start();
+        let run = own_run(&mut actor, &tester, &provider);
+        let watch = processes::Watch::start(provider.pid(), &run);
+        let tool = provider.run("sleep 30 >/dev/null 2>&1 & echo $!");
+        let tool: i32 = tool.parse().unwrap();
+        let _started = processes::tests::Started(vec![tool]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut on_their_way = vec![];
+        while !on_their_way
+            .iter()
+            .any(|seen| matches!(seen, processes::Sighting::Member(process) if process.pid == tool))
+        {
+            assert!(Instant::now() < deadline, "timed out: the tool's sighting");
+            on_their_way.extend(watch.seen());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The provider finishes on its own and its thread makes its last look. Neither those
+        // last sightings nor the turn's end have reached the host: the store knows nothing.
+        drop(provider);
+        on_their_way.extend(watch.finish(true));
+        assert!(processes::recorded_group_runs(i64::from(tool)));
+
+        let args = json!({"reason":"Wrong approach"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
+
+        // The watcher still answered for the run, so the stop found the tool.
+        assert!(
+            !processes::recorded_group_runs(i64::from(tool)),
+            "stopped before it returned"
+        );
+        // Now the sightings and the turn's own, normal end arrive, as the thread sent them.
+        for event in [
+            ProviderEvent::Processes(on_their_way),
+            ProviderEvent::Finished {
+                error: None,
+                usage: Value::Null,
+                cancelled: false,
+            },
+        ] {
+            actor.handle(Event::Provider {
+                session: tester.id.clone(),
+                run: run.clone(),
+                event,
+            });
+        }
+        // The agent was stopped, so nothing is announced as left running, and the store now
+        // answers for the run: the watcher has let go of its tree.
+        let notices = process_notices(&actor, &tester);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].starts_with("Stopped 1 process "), "{notices:?}");
+        assert!(notices[0].ends_with("was stopped."), "{notices:?}");
+        assert_eq!(
+            actor.host.session(&tester.id).unwrap().status,
+            Status::Paused
+        );
+        assert_eq!(processes::followed_now(&run), []);
+        let running: i64 = actor
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM process_groups WHERE ended_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(running, 0);
+    }
+
+    #[test]
+    fn a_turn_that_finishes_as_its_agent_is_stopped_has_what_it_started_stopped() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        let args = json!({"reason":"Wrong approach"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
+
+        // The provider had finished on its own a moment before: its end says nothing of a
+        // stop, and its last sightings name a process the stop's look came too early for.
+        let mut late = LeftoverProcess::spawn();
+        started_by(&mut actor, &tester.id, "run", &late);
+        let ended = ProviderEvent::Finished {
+            error: None,
+            usage: Value::Null,
+            cancelled: false,
+        };
+        actor.provider_event(&tester.id, "run", ended).unwrap();
+
+        // Stopped with its agent, not announced as left running until the agent is archived.
+        assert_eq!(stopped(&actor, &mut late), (true, Some("stopped".into())));
+        let notices = process_notices(&actor, &tester);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].starts_with("Stopped 1 process "), "{notices:?}");
+    }
+
+    #[test]
+    fn a_stop_reaches_a_tool_whose_sighting_has_not_reached_the_store() {
+        let (_home, mut actor, tester, coordinator) = tester_in_long_turn(now());
+        // The tester's provider, followed by the watcher under its run as a real turn's is.
+        let mut provider = processes::tests::Provider::start();
+        let run = own_run(&mut actor, &tester, &provider);
+        let watch = processes::Watch::start(provider.pid(), &run);
+        let tool = provider.run("sleep 30 >/dev/null 2>&1 & echo $!");
+        let tool: i32 = tool.parse().unwrap();
+        let _started = processes::tests::Started(vec![tool]);
+        // The run's thread has taken the tool's sighting from the watcher and not handed it
+        // on yet: nothing is new to the watcher, and the store knows nothing of the tool.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut taken = vec![];
+        while !taken
+            .iter()
+            .any(|seen| matches!(seen, processes::Sighting::Member(process) if process.pid == tool))
+        {
+            assert!(Instant::now() < deadline, "timed out: the tool's sighting");
+            taken.extend(watch.seen());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let recorded: i64 = actor
+            .host
+            .db
+            .query_row("SELECT COUNT(*) FROM process_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0);
+        assert!(processes::read(tool).is_some());
+
+        let args = json!({"reason":"Wrong approach"});
+        actor.stop_agents(&coordinator.id, &args).unwrap();
+
+        // The stop looked for itself at everything the provider has running.
+        assert!(
+            !processes::recorded_group_runs(i64::from(tool)),
+            "stopped before it returned"
+        );
+        let ended: Option<String> = actor
+            .host
+            .db
+            .query_row(
+                "SELECT ended FROM process_groups WHERE session_id=?1 AND process_group=?2",
+                params![tester.id, tool],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ended.as_deref(), Some("stopped"));
+    }
+
+    #[test]
+    fn a_tool_stopped_at_startup_does_not_say_its_runs_provider_kept_running() {
+        // The provider went down with the host; only a tool it had started outlived both.
+        let provider = LeftoverProcess::spawn();
+        let (_home, mut actor, session, run) =
+            actor_with_leftover(&provider, Some(provider.started()));
+        let mut tool = LeftoverProcess::spawn();
+        started_by(&mut actor, &session.id, &run, &tool);
+        drop(provider);
+
+        recover_unfinished_turns(&mut actor.host).unwrap();
+
+        assert_eq!(stopped(&actor, &mut tool), (true, Some("startup".into())));
+        // Nothing of the provider was stopped, so neither the run nor the retry note says so.
+        assert_eq!(process_stopped_at(&actor, &run), None);
+        let retry = interrupted_turn_note(&actor.host, "m1").unwrap();
+        assert!(retry.contains(&run), "{retry}");
+        assert!(!retry.contains("stopped at startup"), "{retry}");
+    }
+
+    /// A child whose project runs and that is compacting, with one process an earlier turn of
+    /// its own left running and one its compaction's provider started, such as a tool server.
+    fn compacting_with_processes() -> (
+        tempfile::TempDir,
+        Actor,
+        String,
+        String,
+        String,
+        LeftoverProcess,
+        LeftoverProcess,
+    ) {
+        let (home, mut actor, parent, child) = actor_with_child();
+        let project = actor.host.session(&child).unwrap().project_id;
+        actor.host.set_live(&project, true).unwrap();
+        let left = LeftoverProcess::spawn();
+        started_by(&mut actor, &child, "earlier", &left);
+        let run = compacting(&mut actor, &child, None);
+        let helper = LeftoverProcess::spawn();
+        started_by(&mut actor, &child, &run, &helper);
+        (home, actor, parent, child, run, left, helper)
+    }
+
+    #[test]
+    fn a_stop_spares_what_a_running_compaction_started_until_the_compaction_ends() {
+        let (_home, mut actor, parent, child, run, mut left, mut helper) =
+            compacting_with_processes();
+
+        let args = json!({"reason":"Wrong approach"});
+        actor.stop_agents(&parent, &args).unwrap();
+
+        // A stop lets a started compaction finish, with what its provider started.
+        assert_eq!(stopped(&actor, &mut left), (true, Some("stopped".into())));
+        assert_eq!(stopped(&actor, &mut helper), (false, None));
+
+        // The compaction ends on its own. Its agent is still stopped, so what is left of it
+        // is stopped now and not announced as left running.
+        compaction_events(&mut actor, &child, &run, vec![compaction_finished(false)]);
+        assert_eq!(stopped(&actor, &mut helper), (true, Some("stopped".into())));
+        let child = actor.host.session(&child).unwrap();
+        let notices = process_notices(&actor, &child);
+        assert!(
+            notices.iter().all(|n| n.starts_with("Stopped ")),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn what_a_compaction_leaves_running_stays_when_its_agent_was_not_stopped() {
+        let (_home, mut actor, _, child, run, mut left, mut helper) = compacting_with_processes();
+
+        compaction_events(&mut actor, &child, &run, vec![compaction_finished(false)]);
+
+        // As after a turn: nothing is stopped, and a notice names what the run left.
+        assert_eq!(stopped(&actor, &mut left), (false, None));
+        assert_eq!(stopped(&actor, &mut helper), (false, None));
+        let child = actor.host.session(&child).unwrap();
+        let notices = process_notices(&actor, &child);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(" left 2 processes running. "),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_id_given_out_again_gets_a_record_and_a_notice_of_its_own() {
+        let (_home, mut actor, _, tester, _) = ticket_in_turn();
+        let process = LeftoverProcess::spawn();
+        // An earlier run's group had this id, emptied unseen and was announced: its row is
+        // still open, with a member that is long gone.
+        let db = &actor.host.db;
+        db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at,noticed_at) VALUES ('stale',?1,'earlier',?2,1,1)",
+            params![tester.id, process.group()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO process_group_members(group_id,pid,started,command) VALUES ('stale',?1,?2,'yes')",
+            params![process.group(), process.started() - 1],
+        )
+        .unwrap();
+
+        started_by(&mut actor, &tester.id, "run", &process);
+        finish(&mut actor, &tester, true, None);
+
+        // The sighting did not join the old row: a fresh one is this run's, and it is
+        // announced in its own notice.
+        let rows: Vec<(String, String, bool)> = actor
+            .host
+            .db
+            .prepare("SELECT id,run_id,noticed_at IS NOT NULL FROM process_groups WHERE process_group=?1")
+            .unwrap()
+            .query_map([process.group()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_ne!(rows[0].0, "stale");
+        assert_eq!((rows[0].1.as_str(), rows[0].2), ("run", true));
+        let notices = process_notices(&actor, &tester);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let group = format!("process group {} ", process.group());
+        assert!(notices[0].contains(&group), "{notices:?}");
+    }
+
+    #[test]
+    fn an_agent_archived_in_its_turn_keeps_its_processes_until_the_turn_ends() {
+        let (_home, mut actor, ticket, tester, _) = ticket_in_turn();
+        let mut tool = LeftoverProcess::spawn();
+        started_by(&mut actor, &tester.id, "run", &tool);
+
+        // A verifier is archived while it still writes its summary; its command is not cut off.
+        actor.host.close_ticket(&ticket.id).unwrap();
+        assert!(actor.host.session(&tester.id).unwrap().archived);
+        assert_eq!(stopped(&actor, &mut tool), (false, None));
+
+        finish(&mut actor, &tester, true, None);
+
+        assert_eq!(stopped(&actor, &mut tool), (true, Some("archived".into())));
+        assert!(
+            !Path::new(&ticket.worktree).exists(),
+            "and then its worktree goes"
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_leaves_what_it_started_running() {
+        let (_home, mut actor, _, tester, _) = ticket_in_turn();
+        let mut tool = LeftoverProcess::spawn();
+        started_by(&mut actor, &tester.id, "run", &tool);
+
+        finish(&mut actor, &tester, false, Some("Provider exited"));
+
+        assert_eq!(stopped(&actor, &mut tool), (false, None));
+        let notice = actor.host.messages(&tester.id, None, 10).unwrap();
+        let notice = notice.iter().find(|m| m.id == "processes:left:run");
+        let body = &notice.unwrap().body;
+        let said = "left 1 process running. It is the program `sleep`.";
+        assert!(body.contains(said), "{body}");
     }
 
     #[test]
@@ -6872,13 +7341,9 @@ mod tests {
         let (mut actor, _, _) = idle_actor(host);
         let run = compacting(&mut actor, &session.id, None);
         actor.compacting.clear();
-        actor
-            .host
-            .db
-            .execute(
-                "UPDATE provider_runs SET process_group=?2,process_started=?3 WHERE id=?1",
-                params![run, process.group(), kept],
-            )
+        let group = process.group() as u32;
+        let host = &mut actor.host;
+        host.record_provider_process(&session.id, &run, group, kept)
             .unwrap();
         actor.host.set_status(&session.id, Status::Blocked).unwrap();
         actor.host.send("next", None, &session.id, "Next").unwrap();
@@ -7006,7 +7471,7 @@ mod tests {
         );
         let notes = actor.host.open_attention(&session.project_id).unwrap();
         assert_eq!(notes.len(), 1, "{notes:?}");
-        assert_eq!(notes[0].operation_id, format!("{LEFTOVER_PROCESS}{run}"));
+        assert_eq!(notes[0].operation_id, note_of(&actor, &run));
         let group = process.group().to_string();
         assert!(notes[0].prompt.contains(&group), "{notes:?}");
 
@@ -7044,16 +7509,17 @@ mod tests {
         );
         assert_eq!(compaction_lines(&actor, &child), ["Compaction interrupted"]);
         // Settled with its process stopped, so no later start looks for it.
-        let (outcome, gone): (String, bool) = actor
+        let outcome: String = actor
             .host
             .db
             .query_row(
-                "SELECT outcome,json_extract(detail,'$.process_gone') FROM provider_runs WHERE id=?1",
+                "SELECT outcome FROM provider_runs WHERE id=?1",
                 [&run],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!((outcome.as_str(), gone), ("interrupted", true));
+        assert_eq!(outcome, "interrupted");
+        assert_eq!(recorded(&actor, &run), []);
     }
 
     #[test]

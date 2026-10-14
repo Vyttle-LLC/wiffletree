@@ -164,7 +164,7 @@ impl Host {
         }
         Ok(undone?)
     }
-    fn check_removable(&self, tickets: &[Ticket]) -> Result<()> {
+    pub(crate) fn check_removable(&self, tickets: &[Ticket]) -> Result<()> {
         let mut blockers = vec![];
         for ticket in tickets {
             let path = Path::new(&ticket.worktree);
@@ -211,28 +211,20 @@ impl Host {
         Ok(true)
     }
     /// Whether an agent on the ticket is in its turn: a provider run is open from turn start
-    /// until it finishes, and an agent that has reported is Done but still in its turn. A finished
-    /// run also counts while its process group exists, whatever its outcome: a crashed host does
-    /// not wait for the process, and the next start leaves one it cannot confirm. A normal finish
-    /// signals the group and reaps its leader, so only a descendant that ignored the signal or a
-    /// recycled group id keeps the worktree longer. Runs recorded before groups were kept do not
-    /// count.
+    /// until it finishes, and an agent that has reported is Done but still in its turn. An agent
+    /// also counts while a process group recorded for it exists: its provider's, which a crashed
+    /// host did not wait for and the next start could not confirm, or one it started itself.
+    /// Archiving stops what an agent started before it asks, so only a group that could not be
+    /// confirmed, or a recycled group id, keeps the worktree longer.
     fn agent_in_turn(&self, ticket: &Ticket) -> Result<bool> {
-        let runs = self
-            .db
-            .prepare(
-                "SELECT r.finished_at IS NULL,r.process_group FROM provider_runs r
-                 JOIN runtimes t ON t.session_id=r.session_id
-                 WHERE json_extract(t.data,'$.ticket_id')=?1
-                 AND (r.finished_at IS NULL OR r.process_group IS NOT NULL)",
-            )?
-            .query_map([&ticket.id], |r| {
-                Ok((r.get::<_, bool>(0)?, r.get::<_, Option<i64>>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(runs
-            .into_iter()
-            .any(|(open, group)| open || group.is_some_and(process_group_exists)))
+        let unfinished: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_runs r JOIN runtimes t ON t.session_id=r.session_id
+             WHERE json_extract(t.data,'$.ticket_id')=?1 AND r.finished_at IS NULL)",
+            [&ticket.id],
+            |r| r.get(0),
+        )?;
+        let mut groups = self.ticket_process_groups(&ticket.id)?.into_iter();
+        Ok(unfinished || groups.any(process_group_exists))
     }
     /// Worktrees left by finished tickets, and Wiffletree-made worktrees no ticket records, each
     /// with the one class that says whether it may be removed. Changes nothing.
@@ -495,8 +487,8 @@ impl Host {
     }
 }
 
-/// Adds provider runs' process group and its leader's start time, recorded when the provider
-/// starts.
+/// Adds provider runs' process group and its leader's start time, which an earlier version
+/// recorded when the provider started; `agent_processes::migrate` carries them into the record.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     for column in ["process_group", "process_started"] {
         let present: i64 = db.query_row(
