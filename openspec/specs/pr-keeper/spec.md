@@ -218,7 +218,7 @@ The keeper SHALL NOT merge, approve, close, reopen, label, comment on, review, r
 - **THEN** every call it made to GitHub was a read, except pushes of tickets' own branches
 
 ### Requirement: Keeper work interrupted by a restart leaves nothing behind
-When the host starts, it SHALL remove every keeper checkout an earlier run left, SHALL drop any keeper result that was not yet moved onto its ticket's branch, and SHALL change no ticket's worktree or branch in doing so. Work that was due SHALL be decided anew by the passes after the start, and a dropped result SHALL NOT count as a rebase of its head and base. A keeper push that was running when the host stopped SHALL end, and the coordinator SHALL be told once that the ticket's worktree holds the rebase, that GitHub's branch may still be the old head, and that `publish_ticket` pushes it.
+When the host starts, it SHALL remove every keeper checkout an earlier run left, SHALL drop any keeper result that was not yet moved onto its ticket's branch, and SHALL change no ticket's worktree or branch in doing so. Work that was due SHALL be decided anew by the passes after the start, and a dropped result SHALL NOT count as a rebase of its head and base. A keeper push that was running when the host stopped SHALL end, and the coordinator, unless it is archived, SHALL be told once, even when its queue is full, that the ticket's worktree holds the rebase, that GitHub's branch may still be the old head, and that `publish_ticket` pushes it.
 
 #### Scenario: Stopped while rebasing
 - **WHEN** the host stops while a keeper checkout exists and starts again

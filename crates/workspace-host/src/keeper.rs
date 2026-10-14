@@ -447,13 +447,14 @@ impl Host {
             "was pushing it when Wiffletree stopped, so GitHub's branch may still be the old head";
         self.end_keeper_push(ticket, false, unpushed)
     }
+    /// Records how the keeper's push ended. Its message, the request's one result, is sent
+    /// before the request is cleared and past the coordinator's queue cap, as publishing sends
+    /// results; an archived coordinator has nobody to tell.
     fn end_keeper_push(&mut self, ticket: &mut Ticket, pushed: bool, unpushed: &str) -> Result<()> {
-        ticket.publishing = None;
         let last = ticket.keeper.as_mut().and_then(|k| k.last.as_mut());
         let last = last.context("The keeper's push has no rebase")?;
         last.pushed = pushed;
         let last = last.clone();
-        self.save_ticket(ticket)?;
         let rebase = KeeperRebase {
             head: last.before.clone(),
             base: last.base.clone(),
@@ -468,17 +469,24 @@ impl Host {
             short_sha(&last.base),
             short_sha(&last.after)
         );
+        let coordinator = self.session(&ticket.coordinator_id)?;
         if pushed {
-            let project = self.session(&ticket.coordinator_id)?.project_id;
             let detail = format!("{}: {moved}", ticket.id);
-            return Self::event(&self.db, &project, None, "pull_request_rebased", &detail);
+            let project = &coordinator.project_id;
+            Self::event(&self.db, project, None, "pull_request_rebased", &detail)?;
+        } else {
+            let id = notice_id(ticket, "push", &rebase);
+            if !coordinator.archived && !self.message_exists(&id)? {
+                let body = format!(
+                    "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
+                    named(ticket),
+                    short_sha(&last.after)
+                );
+                self.send_publish_result(&id, &coordinator.id, &body)?;
+            }
         }
-        let body = format!(
-            "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
-            named(ticket),
-            short_sha(&last.after)
-        );
-        self.keeper_notice(ticket, "push", &rebase, &body)
+        ticket.publishing = None;
+        self.save_ticket(ticket)
     }
     /// Sends the coordinator one message per ticket, kind, head and base, ever.
     fn keeper_notice(
@@ -488,11 +496,7 @@ impl Host {
         rebase: &KeeperRebase,
         body: &str,
     ) -> Result<()> {
-        // Commit ids cut to 20 characters keep the id within a message id's limit.
-        let id = format!(
-            "{KEEPER_NOTICE_PREFIX}{}:{what}:{:.20}:{:.20}",
-            ticket.id, rebase.head, rebase.base
-        );
+        let id = notice_id(ticket, what, rebase);
         if !self.message_exists(&id)? {
             self.send(&id, None, &ticket.coordinator_id, body)?;
         }
@@ -538,6 +542,15 @@ impl Host {
         }
         Ok(())
     }
+}
+
+/// A keeper message's id: one per ticket, kind, head and base. Commit ids cut to 20 characters
+/// keep it within a message id's limit.
+fn notice_id(ticket: &Ticket, what: &str, rebase: &KeeperRebase) -> String {
+    format!(
+        "{KEEPER_NOTICE_PREFIX}{}:{what}:{:.20}:{:.20}",
+        ticket.id, rebase.head, rebase.base
+    )
 }
 
 /// How keeper messages name a ticket's PR, as the watcher's do.

@@ -3564,6 +3564,13 @@ pub(crate) mod tests {
         let (mut f, _remote, result) = keeper::tests::waiting();
         assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_some());
         let sent = results(&f.host);
+        // The coordinator's queue is full: the notice, the request's one result, still goes.
+        let coordinator = f.coordinator.id.clone();
+        let fill = |i| format!("fill-{i}");
+        let mut i = 0;
+        while f.host.send(&fill(i), None, &coordinator, "waiting").is_ok() {
+            i += 1;
+        }
         let f = restart(f);
         assert!(f.ticket().publishing.is_none());
         // The worktree holds the rebase and GitHub may not: the coordinator is told, and no
@@ -3581,5 +3588,16 @@ pub(crate) mod tests {
         assert_eq!(results(&f.host), sent);
         let f = restart(f);
         assert_eq!(keeper::tests::notices(&f.host).len(), 1);
+    }
+
+    #[test]
+    fn a_keeper_push_interrupted_after_its_coordinator_was_archived_ends_at_the_next_start() {
+        let (mut f, _remote, _) = keeper::tests::waiting();
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_some());
+        let coordinator = f.coordinator.id.clone();
+        f.host.set_archived(&coordinator, true).unwrap();
+        let f = restart(f);
+        assert!(f.ticket().publishing.is_none());
+        assert!(keeper::tests::notices(&f.host).is_empty());
     }
 }
