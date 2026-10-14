@@ -201,7 +201,8 @@ impl Host {
     /// Whether a worktree was removed; a missing one only has its stale registration pruned.
     /// Removal is whole whatever the folder's size: the folder is renamed aside, Git forgets it
     /// within its usual time limit, and the folder is then deleted off the host thread. If Git
-    /// fails, the folder is renamed back.
+    /// fails before forgetting it, the folder is renamed back; a failure after, such as a time
+    /// limit reached while pruning other worktrees, still completes the removal.
     fn remove_worktree(&self, ticket: &Ticket) -> Result<bool> {
         let repository = self.ticket_repository(ticket)?;
         let repository = Path::new(&repository.path);
@@ -214,10 +215,10 @@ impl Host {
         let aside = removal_folder(ticket);
         fs::rename(worktree, &aside).with_context(context)?;
         let forgotten = runtime::git_output(repository, &["worktree", "prune"]);
-        if forgotten.is_err() {
+        if forgotten.is_err() && still_registered(&aside) {
             fs::rename(&aside, worktree).with_context(context)?;
+            forgotten.with_context(context)?;
         }
-        forgotten.with_context(context)?;
         delete_in_background(aside);
         Ok(true)
     }
@@ -655,6 +656,15 @@ fn is_worktree(repository: &Path, path: &Path) -> Result<bool> {
 /// filesystem.
 fn removal_folder(ticket: &Ticket) -> PathBuf {
     Path::new(&ticket.worktree).with_file_name(format!(".removing-{}", ticket.id))
+}
+
+/// Whether Git still keeps the administrative folder named in the worktree's `.git` file. Read
+/// from disk, so it answers after a Git call timed out; anything unreadable counts as kept.
+fn still_registered(worktree: &Path) -> bool {
+    fs::read_to_string(worktree.join(".git")).map_or(true, |link| {
+        link.strip_prefix("gitdir:")
+            .is_none_or(|admin| worktree.join(admin.trim()).exists())
+    })
 }
 
 /// Deletes the folder without a time limit on a thread of its own.

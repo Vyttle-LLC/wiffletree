@@ -1,6 +1,7 @@
 //! Removing a ticket's worktree is whole whatever its size. Every test here runs Git through a
 //! stand-in that refuses `git worktree remove`, as if the time limit had cut it off, and fails
-//! `git worktree prune` in a repository holding a `fail-prune` mark.
+//! `git worktree prune` in a repository holding a `fail-prune` mark, or after pruning in one
+//! holding a `fail-after-prune` mark.
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -28,10 +29,11 @@ fn stand_in_git() {
                 "#!/bin/sh\n\
                  case \"$3 $4\" in\n\
                  \"worktree remove\") echo 'fatal: timed out' >&2; exit 1;;\n\
-                 \"worktree prune\") [ -e \"$2/.git/fail-prune\" ] && {{ echo 'fatal: injected' >&2; exit 1; }};;\n\
+                 \"worktree prune\") [ -e \"$2/.git/fail-prune\" ] && {{ echo 'fatal: injected' >&2; exit 1; }}\n\
+                 [ -e \"$2/.git/fail-after-prune\" ] && {{ {real} \"$@\"; echo 'fatal: timed out' >&2; exit 1; }};;\n\
                  esac\n\
-                 exec {} \"$@\"\n",
-                real.trim()
+                 exec {real} \"$@\"\n",
+                real = real.trim()
             ),
         )
         .unwrap();
@@ -164,4 +166,18 @@ fn a_folder_left_aside_by_a_stop_is_deleted_at_start() {
 
     assert!(deleted_soon(&left));
     assert!(Path::new(&ticket.worktree).join("style.css").exists());
+}
+
+#[test]
+fn a_git_failure_after_it_forgot_the_worktree_still_completes_the_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut host, _, ticket) = ticket_with_build_output(directory.path(), 10);
+    fs::write(directory.path().join("web/.git/fail-after-prune"), "").unwrap();
+
+    host.close_ticket(&ticket.id).unwrap();
+
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert!(!Path::new(&ticket.worktree).exists());
+    assert!(!registered(directory.path(), &ticket));
+    assert!(deleted_soon(&removal_folder(&ticket)));
 }
