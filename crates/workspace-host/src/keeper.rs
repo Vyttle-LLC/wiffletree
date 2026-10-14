@@ -3,9 +3,11 @@
 //! a checkout of its own; the ticket's branch moves only on the host thread, in a free, clean and
 //! unchanged worktree; and the push goes through publishing with all of its checks.
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const MINUTE: i64 = 60_000;
+/// How long a pushed rebase shows on the PR line.
+const SHOWN_REBASED: i64 = 60 * MINUTE;
 /// Rebases of one head and base that fail in a row before the coordinator is told.
 const FAILURES_TOLD: u32 = 3;
 
@@ -19,6 +21,8 @@ pub(crate) struct Memory {
     running: HashSet<String>,
     /// By ticket: the head and base whose rebase failed outright, and how often in a row.
     failures: HashMap<String, (KeeperRebase, u32)>,
+    /// By ticket: the keeper's part of its PR line after the latest pass.
+    parts: BTreeMap<String, KeeperPart>,
 }
 
 /// One rebase, with everything it needs off the host thread.
@@ -61,6 +65,8 @@ pub(crate) struct Due {
     pub rebases: Vec<Job>,
     /// Tickets with a rebase waiting to be moved onto their branch.
     pub waiting: Vec<String>,
+    /// Whether a ticket's part of its PR line changed.
+    pub shown: bool,
 }
 
 /// The ref that keeps a ticket's rebased commit until it is moved onto its branch or dropped.
@@ -179,8 +185,9 @@ impl Host {
             }
         }
     }
-    /// After a pass of the repository: the rebases due and the results waiting to be moved. An
-    /// error for one ticket is logged and leaves every other ticket's work as it is.
+    /// After a pass of the repository: the rebases due, the results waiting to be moved and each
+    /// ticket's part of its PR line. An error for one ticket is logged and leaves every other
+    /// ticket's work as it is.
     pub(crate) fn keeper_due(&mut self, repository_id: &str, at: i64) -> Result<Due> {
         let settings = self.settings();
         let repository = self.repository(repository_id)?;
@@ -191,48 +198,75 @@ impl Host {
             }
             if ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some()) {
                 due.waiting.push(ticket.id.clone());
-            } else if settings.keeper.rebase {
-                match self.rebase_due(&ticket, &repository, &settings, at) {
-                    Ok(job) => due.rebases.extend(job),
-                    Err(e) => eprintln!("Workspace PR keeper: {}: {e:#}", ticket.id),
-                }
             }
+            let part = self
+                .ticket_due(&ticket, &repository, &settings, at, &mut due)
+                .unwrap_or_else(|e| {
+                    eprintln!("Workspace PR keeper: {}: {e:#}", ticket.id);
+                    None
+                });
+            let shown = match part {
+                Some(part) => self.keeper.parts.insert(ticket.id.clone(), part),
+                None => self.keeper.parts.remove(&ticket.id),
+            };
+            due.shown |= shown != part;
         }
         Ok(due)
     }
-    /// A rebase of the ticket's PR, when its base has been quiet for the period, its head does
+    /// The keeper's part of each kept ticket's PR line, while the rebase trigger is on.
+    pub(crate) fn keeper_parts(&self) -> BTreeMap<String, KeeperPart> {
+        match self.settings().keeper.rebase {
+            true => self.keeper.parts.clone(),
+            false => BTreeMap::new(),
+        }
+    }
+    /// Makes the ticket's rebase due when its base has been quiet for the period, its head does
     /// not contain the base yet, that pair was not rebased before, and the keeper may change the
-    /// branch.
-    fn rebase_due(
+    /// branch. Returns the ticket's part of its PR line, in that order of precedence.
+    fn ticket_due(
         &mut self,
         ticket: &Ticket,
         repository: &Repository,
         settings: &HostSettings,
         at: i64,
-    ) -> Result<Option<Job>> {
-        let Some(pr) = ticket.open_pull_request() else {
+        due: &mut Due,
+    ) -> Result<Option<KeeperPart>> {
+        let Some(pr) = ticket
+            .open_pull_request()
+            .filter(|_| settings.keeper.rebase)
+        else {
             return Ok(None);
         };
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        if !self.kept(ticket, repository, &coordinator)? || !self.may_change_branch(ticket) {
+            return Ok(None);
+        }
+        let record = ticket.keeper.clone().unwrap_or_default();
+        if record.waiting.is_some() {
+            return Ok(Some(KeeperPart::Waiting));
+        }
         let key = (repository.id.clone(), pr.base.clone());
         let Some((base, since)) = self.keeper.bases.get(&key).cloned() else {
             return Ok(None);
         };
-        let tried = ticket
-            .keeper
-            .as_ref()
-            .and_then(|k| k.rebased.as_ref())
+        let path = Path::new(&repository.path);
+        if publish::is_ancestor(path, &base, &pr.head) {
+            let rebased = record
+                .last
+                .filter(|last| last.after == pr.head && at - last.at < SHOWN_REBASED);
+            return Ok(Some(rebased.map_or(KeeperPart::UpToDate, |last| {
+                KeeperPart::Rebased(last.at)
+            })));
+        }
+        let tried = record
+            .rebased
             .is_some_and(|r| r.head == pr.head && r.base == base);
-        let quiet = at >= since + i64::from(settings.keeper.quiet_minutes) * MINUTE;
-        if tried || !quiet || self.keeper.running.contains(&ticket.id) {
+        if tried || self.keeper.running.contains(&ticket.id) {
             return Ok(None);
         }
-        let path = Path::new(&repository.path);
-        let coordinator = self.session(&ticket.coordinator_id)?;
-        if publish::is_ancestor(path, &base, &pr.head)
-            || !self.kept(ticket, repository, &coordinator)?
-            || !self.may_change_branch(ticket)
-        {
-            return Ok(None);
+        let quiet_at = since + i64::from(settings.keeper.quiet_minutes) * MINUTE;
+        if at < quiet_at {
+            return Ok(Some(KeeperPart::RebaseAt(quiet_at)));
         }
         let verified = ticket
             .verification
@@ -240,7 +274,7 @@ impl Host {
             .and_then(|v| v.verified_commit());
         let verified = verified.context("No verified commit")?;
         self.keeper.running.insert(ticket.id.clone());
-        Ok(Some(Job {
+        due.rebases.push(Job {
             ticket_id: ticket.id.clone(),
             repository: path.into(),
             base: repository.base.clone(),
@@ -251,7 +285,8 @@ impl Host {
             checkout: Path::new(&settings.workspaces_dir)
                 .join("keeper")
                 .join(&ticket.id),
-        }))
+        });
+        Ok(None)
     }
     /// Records a finished rebase. Returns whether its result waits to be moved onto the branch.
     pub(crate) fn keeper_rebased(&mut self, outcome: Outcome) -> Result<bool> {
@@ -1123,6 +1158,43 @@ pub(crate) mod tests {
             assert!(due.rebases.is_empty() && due.waiting.is_empty());
         }
         assert!(notices(&f.host).is_empty() && f.ticket().keeper.is_none());
+    }
+
+    #[test]
+    fn the_pr_lines_part_follows_what_the_keeper_does() {
+        let (mut f, r) = kept();
+        let part = |f: &Fixture| f.host.keeper_parts().get(&f.ticket).copied();
+        let main = git(&f.repository, &["rev-parse", "main"]);
+        pass(&mut f, &main, 0);
+        assert_eq!(part(&f), Some(KeeperPart::UpToDate));
+        // The base moved 40 seconds ago, and the quiet period is 2 minutes.
+        let base = move_base(&f, &r, "other.txt", "1\n");
+        pass(&mut f, &base, 0);
+        pass(&mut f, &base, 40_000);
+        assert_eq!(part(&f), Some(KeeperPart::RebaseAt(2 * MINUTE)));
+        let job = pass(&mut f, &base, 2 * MINUTE).remove(0);
+        assert_eq!(part(&f), None, "rebasing");
+        assert!(f.host.keeper_rebased(rebase(&job, fetch(&r))).unwrap());
+        pass(&mut f, &base, 3 * MINUTE);
+        assert_eq!(part(&f), Some(KeeperPart::Waiting));
+        let step = f.host.keeper_move(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        // The next pass reads the pushed head.
+        watch_open_pr(&mut f, NUMBER);
+        let at = f.ticket().keeper.unwrap().last.unwrap().at;
+        pass(&mut f, &base, at + MINUTE);
+        assert_eq!(part(&f), Some(KeeperPart::Rebased(at)));
+        pass(&mut f, &base, at + 60 * MINUTE);
+        assert_eq!(part(&f), Some(KeeperPart::UpToDate));
+        // Not kept: the owner asks first.
+        f.host.set_owner_allowed("allowed-org", false).unwrap();
+        pass(&mut f, &base, at + 61 * MINUTE);
+        assert_eq!(part(&f), None);
+        f.host.set_owner_allowed("allowed-org", true).unwrap();
+        pass(&mut f, &base, at + 62 * MINUTE);
+        assert_eq!(part(&f), Some(KeeperPart::UpToDate));
+        f.host.set_keeper(KeeperSettings::default()).unwrap();
+        assert!(f.host.keeper_parts().is_empty());
     }
 
     #[test]

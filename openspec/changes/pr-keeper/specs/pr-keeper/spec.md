@@ -176,7 +176,7 @@ A kept ticket's PR line SHALL end with the keeper's part (see pr-watch), one of 
 
 #### Scenario: Rebased a moment ago
 - **WHEN** the keeper rebased PR #143 one minute ago and its checks are running
-- **THEN** its row's second line reads "#143 · checks · rebased 1 min ago", and its card says the keeper rebased it onto main and pushed, naming both commits
+- **THEN** its row's second line reads "#143 · checks … · rebased 1 min ago", and its card says the keeper rebased it onto main and pushed, naming both commits
 
 #### Scenario: Waiting for the base to settle
 - **WHEN** the base moved 40 seconds ago and the quiet period is 2 minutes

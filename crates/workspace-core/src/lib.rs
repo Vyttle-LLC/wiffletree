@@ -14,7 +14,10 @@ pub use progress::*;
 pub use publishing::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 pub use steps::*;
 pub use suggestion::*;
 pub use usage::*;
@@ -401,6 +404,9 @@ pub struct Snapshot {
     /// How many processes each agent is recorded as having left running.
     #[serde(default)]
     pub running_processes: Vec<RunningProcesses>,
+    /// By ticket, the PR keeper's part of a kept ticket's PR line.
+    #[serde(default)]
+    pub keeper_parts: BTreeMap<String, KeeperPart>,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -1000,6 +1006,20 @@ pub struct KeeperAction {
 pub enum KeeperKind {
     /// A rebase with the same change as the reviewed commit.
     Rebase,
+}
+/// What the PR keeper is doing for a kept ticket whose branch it may change, as the host found
+/// it after the latest pass: the end of the ticket's PR line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeeperPart {
+    /// A rebase waits for the base to stay quiet until this time.
+    RebaseAt(i64),
+    /// A rebase waits for the ticket's worktree to be free.
+    Waiting,
+    /// The PR's head is the keeper's rebase made at this time, less than an hour ago.
+    Rebased(i64),
+    /// The PR's head contains the base's head.
+    UpToDate,
 }
 /// One accepted `publish_ticket` call: everything the Inbox item shows and the host will send,
 /// frozen when the call passed its checks.

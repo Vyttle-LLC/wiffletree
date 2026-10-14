@@ -173,7 +173,8 @@ impl Workspace {
                         .pull_request
                         .as_ref()
                         .map(|pr| pr_block(&ticket.id, pr, tree::pr_checked(snapshot, ticket), p)),
-                );
+                )
+                .children(tree::keeper_lines(ticket).map(|lines| keeper_block(lines, p)));
             let rounds = tree::verification_lines(ticket);
             if !rounds.is_empty() {
                 let mut list = div().flex().flex_col().gap_1();
@@ -310,6 +311,26 @@ fn pr_block(ticket_id: &str, pr: &PullRequest, checked: Option<String>, p: Palet
                 )
                 .child(hint(details, p).text_size(px(11.))),
         )
+}
+
+/// What the PR keeper last did to the ticket's branch.
+fn keeper_block((line, detail): (String, String), p: Palette) -> Div {
+    div()
+        .border_l_2()
+        .border_color(p.accent)
+        .rounded_r(px(6.))
+        .bg(p.accent.opacity(0.05))
+        .px(px(10.))
+        .py(px(6.))
+        .text_size(px(12.))
+        .child(
+            div()
+                .flex()
+                .gap_x(px(4.))
+                .child(div().font_weight(FontWeight::MEDIUM).child("PR keeper"))
+                .child(div().flex_1().min_w_0().child(format!("· {line}"))),
+        )
+        .child(hint(detail, p).text_size(px(11.)))
 }
 
 /// Each entry's id, summary, place and decision, with its status as a pill.

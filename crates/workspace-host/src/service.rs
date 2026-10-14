@@ -1182,8 +1182,7 @@ impl Actor {
                 if let pr_watch::Outcome::Read(pass) = &outcome {
                     self.host.note_bases(&repository, pass, at);
                 }
-                self.keep_pull_requests(&repository, at);
-                recorded
+                self.keep_pull_requests(&repository, at) || recorded
             }
             Event::Kept(outcome) => {
                 let ticket = outcome.ticket_id.clone();
@@ -1685,10 +1684,14 @@ impl Actor {
         }
     }
     /// Starts the rebases a pass made due and moves the results that wait for their worktree.
-    fn keep_pull_requests(&mut self, repository: &str, at: i64) {
+    /// Returns whether a ticket's PR line changed.
+    fn keep_pull_requests(&mut self, repository: &str, at: i64) -> bool {
         let due = match self.host.keeper_due(repository, at) {
             Ok(due) => due,
-            Err(e) => return eprintln!("Workspace PR keeper: {e:#}"),
+            Err(e) => {
+                eprintln!("Workspace PR keeper: {e:#}");
+                return false;
+            }
         };
         for ticket in &due.waiting {
             self.keeper_move(ticket);
@@ -1696,6 +1699,7 @@ impl Actor {
         for job in due.rebases {
             spawn_keeper_rebase(self.sender.clone(), job);
         }
+        due.shown
     }
     /// Moves a ticket's waiting rebase onto its branch and pushes it, unless an agent of the
     /// ticket is in a turn; then it waits for a later pass.

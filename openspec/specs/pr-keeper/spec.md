@@ -174,6 +174,27 @@ Each ticket SHALL record the keeper's last action on its branch: what it was, wh
 - **WHEN** the coordinator calls `workspace_context` after a rebase
 - **THEN** the ticket's entry names the rebase, its time, both commits and the base commit
 
+### Requirement: The ticket shows what the keeper did
+The ticket's card in the Team panel SHALL say in one line what the keeper last did, when, and for a rebase that the change is the same as the reviewed commit.
+
+A kept ticket's PR line SHALL end with the keeper's part (see pr-watch), one of these, the first that applies: "rebase in N min" while a rebase waits for the quiet period, with the minutes rounded up; "rebase waiting" while a result waits for the worktree to be free; "rebased N ago" when the PR's head is the keeper's own rebase of less than an hour ago; "up to date" when the PR's head contains the base's head. Parts that other requirements of this capability define SHALL come before these. A ticket whose PR is not kept, or whose branch the keeper may not change, SHALL show no such part.
+
+#### Scenario: Rebased a moment ago
+- **WHEN** the keeper rebased PR #143 one minute ago and its checks are running
+- **THEN** its row's second line reads "#143 · checks … · rebased 1 min ago", and its card says the keeper rebased it onto main and pushed, naming both commits
+
+#### Scenario: Waiting for the base to settle
+- **WHEN** the base moved 40 seconds ago and the quiet period is 2 minutes
+- **THEN** the PR line ends "rebase in 2 min"
+
+#### Scenario: Up to date
+- **WHEN** a kept ticket's PR #142 contains the base's head and the keeper has done nothing to it for a day
+- **THEN** its line reads "#142 · checks ✓ · up to date"
+
+#### Scenario: Not kept
+- **WHEN** a ticket's repository asks first
+- **THEN** its PR line has no keeper part
+
 ### Requirement: The Repositories page holds the triggers and says which repositories are kept
 The Repositories page SHALL show, under the owner list, a block titled "Keep pull requests up to date" with a tick box for each trigger the app offers and the quiet period beside the rebase trigger. The block SHALL say that the triggers apply only in repositories that open pull requests without asking, that they are off until ticked, and that Wiffletree never merges, approves, closes or comments on a pull request. The rebase trigger's text SHALL say that it replaces the branch on GitHub. While any trigger is on, each repository row SHALL say "kept" when the repository publishes without asking and "not kept" otherwise; with every trigger off the rows SHALL say neither. `workspace_context` SHALL say for each repository the project uses whether it is kept.
 
