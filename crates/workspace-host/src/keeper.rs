@@ -108,7 +108,8 @@ pub(crate) enum Rebased {
     /// the repository's checks run on it: the rebased commit, kept under `result_ref`, and how
     /// they ended.
     Changed(Option<(String, Checked)>),
-    /// Git could not merge these files.
+    /// Git could not merge these files: those of the rebase's first stop and, for a try, every
+    /// file Git's own merge could not merge.
     Conflict(Vec<String>),
     /// The fetched base is not the commit the quiet period was measured on.
     BaseMoved,
@@ -531,9 +532,20 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
             runtime::git_output(checkout, &["rebase", "--abort"])?;
         }
         ensure!(!files.is_empty(), "git rebase failed{}", answer.reason());
-        return Ok(Rebased::Conflict(
-            files.lines().map(str::to_owned).collect(),
-        ));
+        // The rebase stops one commit at a time; a try is judged against Git's own merge, whose
+        // conflicted files can be more than the first stop's, or none when a later commit
+        // undoes the conflicting change. A try names both.
+        let mut files: Vec<String> = files.lines().map(str::to_owned).collect();
+        if job.tries {
+            let (_, merged) = overlaps::merge(checkout, &job.base_commit, &job.head)?;
+            files = merged
+                .into_iter()
+                .chain(files)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
+        return Ok(Rebased::Conflict(files));
     }
     let result = worktrees::head(checkout)?;
     let patch = |commit| worktrees::patch_id(checkout, &job.base, commit);
@@ -1163,8 +1175,9 @@ impl Host {
         Ok(waiting.is_some())
     }
     /// Starts the keeper's one try at a conflict: a PR keeper agent working in the checkout
-    /// where the rebase stopped, sent one message naming the base, the head and the files Git
-    /// could not merge. A try that cannot start is thrown away.
+    /// where the rebase stopped, sent one message naming the base, the head, the stop's files
+    /// and every file Git's own merge could not merge, to which the gate holds the result. A
+    /// try that cannot start is thrown away.
     fn start_try(
         &mut self,
         ticket: &mut Ticket,
@@ -1175,7 +1188,7 @@ impl Host {
         let checks = self.ticket_repository(ticket)?.checks;
         let checks = checks.map_or(String::new(), |c| format!(" (`{}`)", c.command));
         let body = format!(
-            "{} conflicts with its base. Wiffletree started `git rebase {}` of its head {} in this folder, and Git stopped: it could not merge {}. Resolve the conflict in those files only, keeping what both sides meant, then `git add` them and run `git rebase --continue` until the rebase is done, changing nothing else. Then end your turn. Wiffletree then checks that the result differs from Git's own merge only in those files, runs the repository's checks{checks} and has it reviewed before anything is pushed.",
+            "{} conflicts with its base. Wiffletree started `git rebase {}` of its head {} in this folder, and Git stopped at a conflict. The files Git could not merge, at this stop or in its own merge of the head and the base, are {}. Resolve the conflicts in those files only, keeping what both sides meant, then `git add` them and run `git rebase --continue` until the rebase is done, as it may stop more than once, changing nothing else. Then end your turn. Wiffletree then checks that the result differs from Git's own merge only in those files, runs the repository's checks{checks} and has it reviewed before anything is pushed.",
             named(ticket),
             rebase.base,
             rebase.head,
@@ -4639,6 +4652,75 @@ pub(crate) mod tests {
         let tickets = context["tickets"].as_array().unwrap();
         let shown = tickets.iter().find(|t| t["id"] == ticket.id).unwrap();
         assert_eq!(shown["keeper"]["tries"][0]["problem"], "conflict");
+    }
+
+    #[test]
+    fn a_trys_message_names_every_file_gits_own_merge_could_not_merge() {
+        let (mut f, r) = reviewing("true");
+        move_base(&f, &r, "src/usage.rs", "on main\n");
+        let on_main = tree_lines().replace("line 5", "line 5 on main");
+        let base = move_base(&f, &r, "src/tree.rs", &on_main);
+        let mut job = due(&mut f, &base);
+        // A second commit on the PR conflicts too, past the rebase's first stop.
+        let scratch = tempfile::tempdir().unwrap();
+        let second = scratch.path().join("second");
+        let second = second.to_str().unwrap();
+        git(
+            &f.repository,
+            &["worktree", "add", "-q", "--detach", second, &job.head],
+        );
+        fs::write(Path::new(second).join("src/usage.rs"), "on the branch\n").unwrap();
+        git(Path::new(second), &["add", "."]);
+        git(Path::new(second), &["commit", "-q", "-m", "usage"]);
+        job.head = git(Path::new(second), &["rev-parse", "HEAD"]);
+        git(&f.repository, &["worktree", "remove", "--force", second]);
+
+        let outcome = rebase(&job, fetch(&r));
+        let stopped = ["diff", "--name-only", "--diff-filter=U"];
+        assert_eq!(
+            git(&job.checkout, &stopped),
+            "src/tree.rs",
+            "the first stop"
+        );
+        let Rebased::Conflict(files) = &outcome.result else {
+            panic!("no conflict");
+        };
+        assert_eq!(files, &["src/tree.rs", "src/usage.rs"]);
+        f.host.keeper_rebased(outcome).unwrap();
+        let agent = try_agent(&f).expect("a try agent");
+        let message = &f.host.messages(&agent.id, None, 100).unwrap()[0].body;
+        assert!(message.contains("src/tree.rs, src/usage.rs"), "{message}");
+    }
+
+    #[test]
+    fn a_try_names_the_stops_files_when_a_later_commit_undoes_the_conflict() {
+        let (mut f, r) = reviewing("true");
+        let on_main = tree_lines().replace("line 3", "line 3 on main");
+        let base = move_base(&f, &r, "src/tree.rs", &on_main);
+        let mut job = due(&mut f, &base);
+        // Line 3 changed by one commit and put back by the next: Git's own merge is clean.
+        let scratch = tempfile::tempdir().unwrap();
+        let undone = scratch.path().join("undone");
+        let undone = undone.to_str().unwrap();
+        git(
+            &f.repository,
+            &["worktree", "add", "-q", "--detach", undone, &job.head],
+        );
+        let tree = Path::new(undone).join("src/tree.rs");
+        let five = fs::read_to_string(&tree).unwrap();
+        fs::write(&tree, five.replace("line 3", "line three")).unwrap();
+        git(Path::new(undone), &["commit", "-qam", "three"]);
+        fs::write(&tree, &five).unwrap();
+        git(Path::new(undone), &["commit", "-qam", "back"]);
+        job.head = git(Path::new(undone), &["rev-parse", "HEAD"]);
+        git(&f.repository, &["worktree", "remove", "--force", undone]);
+        let (_, merged) = overlaps::merge(&f.repository, &base, &job.head).unwrap();
+        assert!(merged.is_empty());
+
+        let Rebased::Conflict(files) = rebase(&job, fetch(&r)).result else {
+            panic!("no conflict");
+        };
+        assert_eq!(files, ["src/tree.rs"]);
     }
 
     #[test]
