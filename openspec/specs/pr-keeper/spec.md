@@ -457,6 +457,100 @@ The keeper's settings SHALL hold the review level a fix is reviewed at. They SHA
 - **WHEN** the conflicts trigger is on with the level "Light" and the human removes "Light"
 - **THEN** the verification setting is refused and stays as it was
 
+### Requirement: One try per problem per head
+A try SHALL be one attempt by the keeper's model at one problem, a conflict with the base or failed checks, at one PR head. The ticket SHALL record every try: its problem, the PR head, the base commit, when it started and how it ended, pushed or thrown away with the reason. The keeper SHALL start a try only when the ticket records none for that problem at that head. There SHALL be no other limit on tries and no count per PR. A try that was running when the host stopped SHALL be recorded as thrown away at the next start and SHALL count as that head's try. A rebase with no model is not a try.
+
+#### Scenario: A second conflict at the same head
+- **WHEN** a try at a conflict at head `3daf610` was thrown away and the base moves again while the head is still `3daf610`
+- **THEN** no second try starts
+
+#### Scenario: A new head
+- **WHEN** an implementer's fix is published, so the PR's head is new, and the PR conflicts again later
+- **THEN** a try may start for the new head
+
+#### Scenario: Stopped mid-try
+- **WHEN** the host stops while a try's model is running and starts again
+- **THEN** the try is recorded as thrown away because the host stopped, the coordinator is told, and no new try starts for that head
+
+### Requirement: A try at a conflict runs in the keeper's checkout
+With the conflicts trigger on, when a rebase of a kept ticket is reported as a conflict, the repository has a checks command and no try is recorded for a conflict at that head, the keeper SHALL start one. It SHALL start the rebase itself in the keeper's checkout, and SHALL give a new PR keeper agent, whose working directory is that checkout, one message from Wiffletree naming the base, the PR head and the files Git could not merge. The try SHALL NOT use the ticket's worktree, and an agent of the ticket SHALL NOT be kept from starting a turn because a try is running. When the agent's turn ends, the host SHALL judge the checkout by the gate below, whatever the agent reported.
+
+#### Scenario: A try starts
+- **WHEN** PR #139's rebase conflicts in `src/sidebar.rs` and `src/tree.rs`, the trigger is on, the repository has a checks command and no try is recorded for its head
+- **THEN** a PR keeper agent starts in the keeper's checkout with a message naming those two files, and the ticket's worktree is untouched
+
+#### Scenario: The implementer is not held
+- **WHEN** the coordinator messages the ticket's implementer while a try is running
+- **THEN** the implementer's turn starts in the ticket's worktree
+
+#### Scenario: Trigger off
+- **WHEN** the conflicts trigger is off and a rebase conflicts
+- **THEN** no agent starts
+
+### Requirement: The gate keeps a conflict's fix within the conflicted files
+After a try at a conflict, the host SHALL throw the try away unless all of these hold, as the host itself reads them from the checkout: it has no uncommitted or untracked files and no rebase in progress; its HEAD contains the base commit; and every file that differs between the result and the tree Git's own merge of the base and the PR head produces is one of the files Git could not merge. What the agent reported SHALL NOT be used to decide any of them.
+
+#### Scenario: Only the conflicted files
+- **WHEN** a try's result differs from Git's own merge only in `src/sidebar.rs` and `src/tree.rs`, the two conflicted files
+- **THEN** the scope check passes
+
+#### Scenario: A file outside the conflict
+- **WHEN** the result also changes `src/usage.rs`, which Git merged cleanly
+- **THEN** the try is thrown away, naming `src/usage.rs`, and nothing about the ticket has changed
+
+#### Scenario: The rebase was not finished
+- **WHEN** the agent's turn ends with the rebase still in progress, and the agent reported it done
+- **THEN** the try is thrown away
+
+#### Scenario: Not on the base
+- **WHEN** the result does not contain the base commit
+- **THEN** the try is thrown away
+
+### Requirement: The gate runs the repository's checks
+After the scope check passes, the host itself SHALL run the repository's checks command in the keeper's checkout, at the result, and SHALL throw the try away unless the command exits with success within the repository's time limit. A command still running at the limit SHALL be stopped, with every process it started. An agent's statement that the checks pass SHALL NOT count.
+
+#### Scenario: Checks pass
+- **WHEN** the command exits 0 after 6 minutes under a 20 minute limit
+- **THEN** the try goes on to its review
+
+#### Scenario: Checks fail
+- **WHEN** the command exits 101
+- **THEN** the try is thrown away, saying the repository's checks failed, and the command's output is in no message
+
+#### Scenario: Checks run out of time
+- **WHEN** the command is still running after the repository's 20 minute limit
+- **THEN** it is stopped, and the try is thrown away, saying the checks did not finish in 20 minutes
+
+### Requirement: A fix is reviewed before it is pushed
+A result that passed the gate SHALL be moved onto the ticket's branch under the rule for moving a ticket's branch, and SHALL then be reviewed by a keeper review at the configured level (see ticket-verification) before anything is sent to GitHub. While an agent of the ticket is in a turn, the result SHALL wait. When the worktree is not clean or its HEAD has moved, the try SHALL be thrown away. When the review passes, the host SHALL push the commit through the keeper's publish and SHALL record the try as pushed. When it does not pass, or cannot start, the try SHALL be thrown away and nothing SHALL be pushed.
+
+#### Scenario: Reviewed, then pushed
+- **WHEN** a try's result passes the gate and the Light re-check passes at it
+- **THEN** the commit is pushed, the ticket's latest cycle is that re-check, marked as the keeper's, and the try is recorded as pushed
+
+#### Scenario: Nothing leaves before the review
+- **WHEN** a try's result has passed the gate and its review is still running
+- **THEN** GitHub's branch is unchanged
+
+#### Scenario: The review does not pass
+- **WHEN** the Light re-check finds an evidenced blocking finding
+- **THEN** nothing is pushed and the try is thrown away
+
+#### Scenario: The worktree moved before the move
+- **WHEN** the implementer committed while the try ran
+- **THEN** the try is thrown away and the implementer's commit is untouched
+
+### Requirement: A thrown-away try leaves the ticket as it was
+When a try is thrown away, the keeper's checkout and its result SHALL be removed, its agent SHALL be archived, and the ticket SHALL carry nothing of the try: its branch and worktree SHALL be at the commit before, its verification cycles SHALL be those before, its ledger SHALL hold no entry the try's review recorded, and its state SHALL be what it was, except as ticket-verification defines for a branch that cannot be put back. Decisions the coordinator recorded on other ledger entries while the try ran SHALL stay. The coordinator SHALL get one keeper message naming the problem, the PR head and why the try was thrown away: the file outside its scope, that the checks failed or ran out of time, that the review did not pass, that a verifier had no model chosen on the ticket, that the worktree changed, or that the host stopped. For a review that did not pass, the message SHALL also give each blocking finding's verifier, location and summary. It SHALL say that nothing was pushed and that the keeper will not try this head again.
+
+#### Scenario: Thrown away at the gate
+- **WHEN** a try is thrown away because it changed a file outside the conflict
+- **THEN** the ticket's worktree, branch, cycles and ledger are unchanged, and the coordinator gets one message naming the file
+
+#### Scenario: Thrown away at the review
+- **WHEN** a try is thrown away because its review found one blocking finding
+- **THEN** the coordinator's message names the verifier, the finding's location and its summary, and says nothing was pushed
+
 ### Requirement: A rebase whose patch changed is reviewed by the keeper
 With the conflicts trigger on, in a repository with a checks command, a rebase reported as a changed patch SHALL NOT be dropped. The host SHALL run the repository's checks on the rebased commit as the gate does, SHALL then move it onto the ticket's branch and review it with a keeper review, and SHALL push it when the review passes. No model SHALL be used to produce the commit, and it SHALL NOT count as a try. When the checks do not pass, the commit SHALL be dropped before the ticket's branch is moved. When the review does not pass, it SHALL be withdrawn and the branch put back exactly as ticket-verification defines for every keeper review, whether or not a model made the commit. In both cases the coordinator SHALL be told once for that head and base, with each blocking finding's verifier, location and summary after a review.
 

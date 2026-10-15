@@ -105,7 +105,7 @@ When a ticket's PR is first recorded as merged, the host SHALL send the ticket's
 - **THEN** the coordinator receives one message saying PR #150 was closed without merging, and the ticket's state is unchanged
 
 ### Requirement: Failed checks and conflicts wake the coordinator within a budget
-When an open PR's recorded checks become `failure`, the host SHALL send the ticket's coordinator one turn-starting message for that head SHA. When an open PR's recorded merge state becomes a conflict with its base, the host SHALL likewise send one message for that head SHA. These messages SHALL name the ticket, the PR number, the head and, for a conflict, the base. They SHALL say that a fix needs a new verification cycle before it is pushed. Together, they SHALL be limited to 3 per PR. The next one due after that SHALL be replaced by a single message saying the PR has used its automatic wakes, after which the PR SHALL wake nobody until it merges or closes. These messages SHALL go only to the coordinator, never to the implementer. PR comments SHALL wake nobody.
+When an open PR's recorded checks become `failure`, the host SHALL send the ticket's coordinator one turn-starting message for that head SHA. When an open PR's recorded merge state becomes a conflict with its base, the host SHALL likewise send one message for that head SHA. These messages SHALL name the ticket, the PR number, the head and, for a conflict, the base. They SHALL say that a fix needs a new verification cycle before it is pushed. Together, they SHALL be limited to 3 per PR. The next one due after that SHALL be replaced by a single message saying the PR has used its automatic wakes, after which the PR SHALL wake nobody until it merges or closes. These messages SHALL go only to the coordinator, never to the implementer. The host SHALL hold such a message back for a head while the PR keeper will try that problem at that head, and SHALL NOT send it once the keeper has started a try for it (see pr-keeper): the keeper's own message, sent only when its try is thrown away, takes its place. The host SHALL record each message it holds back, and SHALL send it, in the same words, on the first later pass at which the PR still has that problem at that head, no try for it has started and the keeper can no longer try it. A held message SHALL be dropped when the PR's head changes or the problem is gone. Keeper messages SHALL NOT count against the limit of 3. PR comments SHALL wake nobody.
 
 #### Scenario: Checks fail
 - **WHEN** PR #143's checks fail at head `9e03c1b`
@@ -126,6 +126,26 @@ When an open PR's recorded checks become `failure`, the host SHALL send the tick
 #### Scenario: New comment
 - **WHEN** a reviewer comments on a ticket's PR, or replies inside an existing unresolved review thread
 - **THEN** the recorded comment id of that kind changes and no agent is woken
+
+#### Scenario: The keeper will try the conflict
+- **WHEN** PR #139 conflicts with its base at head `3daf610`, the rebase and conflicts triggers are on, its repository is kept and has a checks command, its branch may be changed and no try is recorded for that head
+- **THEN** the coordinator receives no watcher message for that conflict
+
+#### Scenario: The keeper cannot try
+- **WHEN** PR #139 conflicts at head `3daf610` in a kept repository with no checks command
+- **THEN** the coordinator receives the watcher's message, as without the keeper
+
+#### Scenario: The keeper can no longer try
+- **WHEN** a conflict message was held back, and before a try starts the ticket's implementer commits in the worktree
+- **THEN** the next pass sends the held message, naming PR #139, its base and head `3daf610`
+
+#### Scenario: The try was thrown away
+- **WHEN** the keeper's try at that conflict was thrown away and the coordinator was told by the keeper
+- **THEN** no watcher message is sent for that head
+
+#### Scenario: The problem went away
+- **WHEN** a conflict message was held back and the keeper's fix is pushed, so the PR has a new head
+- **THEN** the held message is dropped and never sent
 
 ### Requirement: Watcher messages carry no PR text and come from Wiffletree
 Messages from the PR watcher SHALL contain only the ticket's title and id, PR numbers, base branch names, Git SHAs and fixed wording. They SHALL NOT include PR titles, descriptions, comments, review text, check names or author names. The coordinator's turn input SHALL name their sender as the Wiffletree PR watcher, and the conversation view SHALL show them as Wiffletree notices, not as messages from the human.
