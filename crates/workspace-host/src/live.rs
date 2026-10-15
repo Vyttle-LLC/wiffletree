@@ -53,6 +53,10 @@ impl Host {
         text(&profile.effort, 32)?;
         let mut session = self.session(id)?;
         ensure!(
+            session.role != Role::Keeper,
+            "A PR keeper agent keeps the model it was created with; choose the PR keeper's model in Models"
+        );
+        ensure!(
             session.status != Status::Working,
             "Stop the current turn before changing its runtime"
         );
@@ -233,6 +237,10 @@ impl Host {
         focus: Option<&str>,
     ) -> Result<Session> {
         text(instruction, MAX_TEXT_BYTES)?;
+        ensure!(
+            role != Role::Keeper,
+            "Only Wiffletree starts PR keeper agents"
+        );
         let mut ticket = self.ticket(ticket_id)?;
         let (session, created) = self.ticket_agent(&ticket, role, provider, focus)?;
         if !created {
@@ -757,6 +765,11 @@ impl Host {
                         || recipient.parent_id.as_deref() == Some(id),
                     "Messages must follow coordinator ownership"
                 );
+                ensure!(
+                    recipient.role != Role::Keeper,
+                    "{} is a PR keeper agent; only Wiffletree messages it",
+                    recipient.name
+                );
                 let message = self.send(
                     &format!("agent:{id}:{}", string("message_id")?),
                     Some(id),
@@ -808,6 +821,10 @@ impl Host {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
                 let role: Role = serde_json::from_value(args["role"].clone())?;
+                ensure!(
+                    role != Role::Keeper,
+                    "Only Wiffletree starts PR keeper agents"
+                );
                 let focus = args["focus"].as_str();
                 if let Some(existing) = self.existing_assignment(&ticket.id, role, focus)? {
                     return self.assignment_result(&existing);

@@ -136,6 +136,7 @@ pub fn suggest(detection: &Detection) -> Setup {
             } else {
                 starter_guide(&usable)
             },
+            keeper: None,
         },
         verification,
     }

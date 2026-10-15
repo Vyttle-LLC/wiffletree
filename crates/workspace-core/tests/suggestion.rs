@@ -136,6 +136,10 @@ fn one_signed_in_provider_takes_every_role_and_the_only_review() {
             );
             assert_eq!(roles(&setup).len(), PROVIDER_ROLES.len());
             assert_eq!(
+                setup.selection.keeper, None,
+                "only the human picks the PR keeper's model"
+            );
+            assert_eq!(
                 verifiers(&setup),
                 [
                     (Role::Tester, "Tests", None),

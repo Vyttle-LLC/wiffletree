@@ -27,6 +27,22 @@ pub(crate) struct Memory {
     diverged: HashMap<String, (String, String)>,
 }
 
+/// The two sessions a ticket's PR keeper may run. Each is its own agent, with its own focus, so
+/// neither is ever handed the other's conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeeperSession {
+    Try,
+    Sorting,
+}
+impl KeeperSession {
+    fn focus(self) -> &'static str {
+        match self {
+            Self::Try => "try",
+            Self::Sorting => "sorting",
+        }
+    }
+}
+
 /// One rebase, with everything it needs off the host thread.
 pub(crate) struct Job {
     pub ticket_id: String,
@@ -212,6 +228,36 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
 }
 
 impl Host {
+    /// The ticket's PR keeper agent for `kind`, created on first use as a child of the ticket's
+    /// coordinator working in `workdir`, and pinned to the keeper's model as saved then. Only
+    /// the host calls this; no agent tool reaches it.
+    pub fn keeper_agent(
+        &mut self,
+        ticket: &Ticket,
+        kind: KeeperSession,
+        workdir: &Path,
+    ) -> Result<Session> {
+        let profile = self
+            .model_selection()?
+            .keeper
+            .context("Choose the PR keeper's model in Models first")?;
+        self.atomically(|host| {
+            let (session, created) =
+                host.ticket_agent(ticket, Role::Keeper, profile.provider, Some(kind.focus()))?;
+            if created {
+                let mut runtime = host.session_runtime(&session.id)?;
+                runtime.workdir = Some(workdir.to_string_lossy().into());
+                host.save_runtime(&runtime)?;
+                host.pin(
+                    &session.id,
+                    profile,
+                    Chooser::Human,
+                    "The PR keeper's model",
+                )?;
+            }
+            Ok(session)
+        })
+    }
     /// Whether the keeper acts for the ticket's PR: the ticket is open, its coordinator is not
     /// archived, its project is not paused, its repository publishes without asking and its PR
     /// is open.

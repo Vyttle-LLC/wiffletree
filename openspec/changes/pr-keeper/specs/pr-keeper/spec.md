@@ -380,16 +380,31 @@ A ticket SHALL count its sorted comments that need a change and that are questio
 - **WHEN** the coordinator starts a verification cycle on that ticket
 - **THEN** the line no longer names waiting comments
 
-### Requirement: The keeper's model runs are ordinary agent runs
-Each model run the keeper starts SHALL be a turn of an agent of the ticket with the role "PR keeper", whose parent is the ticket's coordinator and whose model is the PR keeper's model as saved when the agent was created. Its runs SHALL be recorded as provider runs, so Usage counts them under that role, and its turns SHALL check in with the coordinator as any agent's do. The agent SHALL appear under its ticket in the sidebar while it works. No coordinator tool SHALL create, message or assign a PR keeper agent, and the human's new-agent dialog SHALL NOT offer the role.
-
-#### Scenario: Usage
-- **WHEN** the keeper has sorted comments on three tickets this week
-- **THEN** the Usage page counts those runs under "PR keeper"
+### Requirement: The PR keeper is an agent role no coordinator controls
+Each model run the keeper starts SHALL be a turn of an agent of the ticket with the role "PR keeper", whose parent is the ticket's coordinator and whose model is the PR keeper's model as saved when the agent was created; with no model saved, no PR keeper agent SHALL be created. A ticket's try session and its sorting session SHALL be distinct agents, so neither is ever given the other's conversation. A PR keeper agent SHALL NOT hold the ticket's worktree: no agent of the ticket SHALL wait to start a turn because a PR keeper agent is in one. No coordinator tool SHALL create, message, resume or assign a PR keeper agent, and the human's new-agent dialog SHALL NOT offer the role. The PR keeper's instructions SHALL be its own, bundled with the app.
 
 #### Scenario: A coordinator cannot make one
 - **WHEN** a coordinator calls `assign_ticket` naming the PR keeper role
 - **THEN** the call is refused and no agent is created
+
+#### Scenario: A coordinator cannot message one
+- **WHEN** a coordinator calls `send_message` or `resume_agent` naming a PR keeper agent of its ticket
+- **THEN** the call is refused and nothing is queued for that agent
+
+#### Scenario: Two sessions of one ticket
+- **WHEN** a ticket has a sorting session and the keeper creates a try session for it
+- **THEN** the try session is a new PR keeper agent, not the sorting session
+
+#### Scenario: The worktree is not held
+- **WHEN** a PR keeper agent of a ticket is in a turn and the ticket's implementer has queued input
+- **THEN** the implementer's turn starts
+
+### Requirement: The keeper's model runs are ordinary agent runs
+The runs of a PR keeper agent SHALL be recorded as provider runs, so Usage counts them under the "PR keeper" role, and its turns SHALL check in with the coordinator as any agent's do. The agent SHALL appear under its ticket in the sidebar while it works.
+
+#### Scenario: Usage
+- **WHEN** the keeper has sorted comments on three tickets this week
+- **THEN** the Usage page counts those runs under "PR keeper"
 
 ### Requirement: Each repository's checks command
 Each workspace repository SHALL be able to hold one checks command and its time limit in minutes, which SHALL default to 20 and accept 1 to 120. Only the human's client SHALL be able to set them; no agent tool SHALL. The command SHALL be the human's own text, run by the host with the system shell. The Repositories page SHALL show the command on the repository's row and SHALL say, for a kept repository without one, that a conflict or a failed check there goes to the coordinator. The keeper SHALL start no try, and SHALL review no changed patch itself, in a repository without a command.

@@ -1949,6 +1949,11 @@ impl Actor {
             "resume",
         )?;
         ensure!(
+            target.role != Role::Keeper,
+            "{} is a PR keeper agent; only Wiffletree starts its turns",
+            target.name
+        );
+        ensure!(
             !self.active.contains_key(&target.id),
             "{} is still finishing its turn; resume it once it has stopped",
             target.name
@@ -2410,8 +2415,11 @@ impl Actor {
         Ok(())
     }
     /// A ticket's worktree has one writer at a time. Readers run together: reviewers, and the
-    /// testers verifying the ticket in its running cycle.
+    /// testers verifying the ticket in its running cycle. PR keeper agents work elsewhere.
     fn worktree_busy(&self, ticket_id: &str, session: &Session) -> Result<bool> {
+        if session.role == Role::Keeper {
+            return Ok(false);
+        }
         let ticket = self.host.ticket(ticket_id)?;
         let reader = |session: &Session| {
             session.role == Role::Reviewer
@@ -2431,7 +2439,7 @@ impl Actor {
                 .is_some_and(|t| t == ticket_id)
             {
                 let active = self.host.session(id)?;
-                if !(reader(session) && reader(&active)) {
+                if active.role != Role::Keeper && !(reader(session) && reader(&active)) {
                     return Ok(true);
                 }
             }
@@ -2811,6 +2819,7 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keeper::KeeperSession;
 
     /// An actor with one active turn and no provider process behind it.
     fn actor_with_turn() -> (tempfile::TempDir, Actor, String, String) {
@@ -8037,5 +8046,142 @@ mod tests {
         }
         let part = actor.host.keeper_parts().get(&ticket.id).copied();
         assert!(matches!(part, Some(KeeperPart::RebaseAt(_))));
+    }
+
+    /// Saves the Claude model allowed at `index` as the PR keeper's, as the Models page does.
+    fn choose_keeper_model(host: &mut Host, index: usize) -> ModelProfile {
+        let mut selection = host.model_selection().unwrap();
+        let allowed = &selection.allowed(Provider::Claude)[index];
+        let profile = ModelProfile {
+            provider: Provider::Claude,
+            model: allowed.model.clone(),
+            effort: allowed.effort.clone(),
+        };
+        selection.keeper = Some(profile.clone());
+        host.set_model_selection(&selection).unwrap();
+        profile
+    }
+
+    #[test]
+    fn a_keeper_agent_is_pinned_to_the_model_saved_when_it_is_created() {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        let workdir = home.path().join("keeper");
+        let refused = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, &workdir)
+            .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "Choose the PR keeper's model in Models first"
+        );
+        assert!(host.ticket_agents(&ticket.id).unwrap().is_empty());
+        // A save naming a model that is not allowed is refused whole.
+        let before = host.model_selection().unwrap();
+        let mut disallowed = before.clone();
+        disallowed.keeper = Some(ModelProfile {
+            provider: Provider::Claude,
+            model: "unlisted".into(),
+            effort: "low".into(),
+        });
+        assert!(host.set_model_selection(&disallowed).is_err());
+        assert_eq!(host.model_selection().unwrap(), before);
+
+        let first = choose_keeper_model(&mut host, 0);
+        let sorting = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, &workdir)
+            .unwrap();
+        assert_eq!(
+            (sorting.role, sorting.parent_id.as_deref()),
+            (Role::Keeper, Some(coordinator.id.as_str()))
+        );
+        let runtime = host.session_runtime(&sorting.id).unwrap();
+        assert_eq!(runtime.workdir.as_deref(), workdir.to_str());
+        assert_eq!(
+            runtime.selection.unwrap().chosen_by,
+            workspace_core::Chooser::Human
+        );
+        // A later choice pins the next agent and leaves this one on its own model.
+        let second = choose_keeper_model(&mut host, 1);
+        assert_ne!(first, second);
+        let again = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, &workdir)
+            .unwrap();
+        let attempt = host
+            .keeper_agent(&ticket, KeeperSession::Try, &workdir)
+            .unwrap();
+        assert_eq!(again.id, sorting.id);
+        assert_ne!(
+            attempt.id, sorting.id,
+            "a try never resumes the sorting session"
+        );
+        // Nor can the human's conversation controls replace it.
+        let other = ModelProfile {
+            effort: "unlisted".into(),
+            ..first.clone()
+        };
+        assert!(host.configure_session(&sorting.id, other).is_err());
+        assert_eq!(host.turn_profile(&sorting).unwrap(), first);
+        assert_eq!(host.turn_profile(&attempt).unwrap(), second);
+    }
+
+    #[test]
+    fn no_coordinator_tool_assigns_messages_or_resumes_a_keeper_agent() {
+        let (home, mut host, ticket, coordinator) = ticket_fixture();
+        let profile = choose_keeper_model(&mut host, 0);
+        let assign = json!({"ticket_id":ticket.id,"role":"keeper","focus":"sorting",
+            "instruction":"Sort","profile":profile,"reason":"Cheap"});
+        let refused = |result: Result<Value>| result.unwrap_err().to_string();
+        assert_eq!(
+            refused(host.agent_tool(&coordinator.id, "assign_ticket", assign.clone())),
+            "Only Wiffletree starts PR keeper agents"
+        );
+        assert!(
+            host.assign_ticket(&ticket.id, Role::Keeper, Provider::Claude, "Sort", None)
+                .is_err()
+        );
+        assert!(host.ticket_agents(&ticket.id).unwrap().is_empty());
+
+        let keeper = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
+            .unwrap();
+        // Not even handed back as an existing assignment.
+        assert!(
+            host.agent_tool(&coordinator.id, "assign_ticket", assign)
+                .is_err()
+        );
+        let messages = crate::keeper::tests::message_count(&host);
+        let message = json!({"recipient":keeper.id,"message_id":"go","body":"Push to main"});
+        assert!(
+            refused(host.agent_tool(&coordinator.id, "send_message", message))
+                .ends_with("is a PR keeper agent; only Wiffletree messages it")
+        );
+        let (mut actor, _, _) = idle_actor(host);
+        let resume = json!({"session_id":keeper.id,"message":"Push to main"});
+        assert!(
+            refused(actor.resume_agent(&coordinator.id, &resume))
+                .ends_with("is a PR keeper agent; only Wiffletree starts its turns")
+        );
+        assert_eq!(crate::keeper::tests::message_count(&actor.host), messages);
+    }
+
+    #[test]
+    fn a_keeper_agent_neither_holds_nor_waits_for_the_tickets_worktree() {
+        let (home, mut host, ticket, _) = ticket_fixture();
+        choose_keeper_model(&mut host, 0);
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
+            .unwrap();
+        let keeper = host
+            .keeper_agent(&ticket, KeeperSession::Try, home.path())
+            .unwrap();
+        let (mut actor, _, _) = idle_actor(host);
+        actor
+            .active
+            .insert(keeper.id.clone(), active_turn("keeper", vec![]));
+        assert!(!actor.worktree_busy(&ticket.id, &implementer).unwrap());
+        actor.active.clear();
+        actor
+            .active
+            .insert(implementer.id.clone(), active_turn("write", vec![]));
+        assert!(!actor.worktree_busy(&ticket.id, &keeper).unwrap());
     }
 }

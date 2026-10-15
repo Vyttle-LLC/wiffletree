@@ -42,6 +42,7 @@ fn both() -> ModelSelection {
             .map(|r| (r, BTreeSet::from([Provider::Claude])))
             .collect(),
         guide: "Small change → sonnet.".into(),
+        keeper: None,
     }
 }
 
@@ -196,6 +197,36 @@ fn invalid_configurations_are_rejected() {
         .unwrap()
         .enabled = false;
     selection.validate().unwrap();
+}
+
+#[test]
+fn the_pr_keepers_model_must_be_allowed_on_this_machine() {
+    // A selection saved before the PR keeper decodes with no model chosen.
+    let stored: ModelSelection =
+        serde_json::from_value(serde_json::to_value(both()).unwrap()).unwrap();
+    assert_eq!(stored.keeper, None);
+    let mut selection = both();
+    selection.keeper = Some(profile(Provider::Claude, "sonnet", "high"));
+    selection.validate().unwrap();
+    // Removing it from the allowed models, or disabling its provider, names the PR keeper.
+    let mut removed = selection.clone();
+    removed.providers.get_mut(&Provider::Claude).unwrap().models = allowed(&[("opus", "high")]);
+    let mut disabled = selection.clone();
+    disabled.keeper = Some(profile(Provider::Codex, "gpt-6.1-sol", "high"));
+    disabled
+        .providers
+        .get_mut(&Provider::Codex)
+        .unwrap()
+        .enabled = false;
+    for refused in [removed, disabled] {
+        assert!(
+            refused
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .starts_with("The PR keeper uses ")
+        );
+    }
 }
 
 #[test]

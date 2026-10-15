@@ -844,6 +844,8 @@ impl Workspace {
             .runtime(&session.id)
             .is_some_and(|runtime| runtime.provider_session_id.is_some());
         let busy = session.status == Status::Working;
+        // A PR keeper agent keeps the model chosen in Models when it was created.
+        let fixed = busy || session.role == Role::Keeper;
         let mut models: BTreeMap<(Provider, String), String> = self
             .model_catalog
             .iter()
@@ -871,10 +873,12 @@ impl Workspace {
         let weak = cx.weak_entity();
         let model = button("chat-model")
             .ghost()
-            .disabled(busy)
+            .disabled(fixed)
             .label(label)
             .dropdown_caret(true)
-            .tooltip(if busy {
+            .tooltip(if session.role == Role::Keeper {
+                "The PR keeper's model is chosen in Models"
+            } else if busy {
                 "Pause the active turn to change the model"
             } else {
                 "Model for this agent only"
@@ -922,7 +926,7 @@ impl Workspace {
         let weak = cx.weak_entity();
         let effort = button("chat-effort")
             .ghost()
-            .disabled(busy)
+            .disabled(fixed)
             .label(effort_label(&profile.effort))
             .dropdown_caret(true)
             .tooltip("Reasoning effort for this agent only")

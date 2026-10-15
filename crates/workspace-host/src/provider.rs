@@ -118,6 +118,7 @@ pub fn skill(role: Role) -> String {
                 include_str!("../skills/main-coordinator.md")
             }
             Role::Implementer | Role::Maintenance => include_str!("../skills/implementer.md"),
+            Role::Keeper => include_str!("../skills/keeper.md"),
             Role::Tester => concat!(
                 include_str!("../skills/tester.md"),
                 "\n",

@@ -301,6 +301,23 @@ pub fn after_save(
     }
 }
 
+/// The PR keeper's choices: every allowed model of an enabled provider, in display order.
+pub fn keeper_choices(selection: &ModelSelection) -> Vec<ModelProfile> {
+    PROVIDERS
+        .into_iter()
+        .flat_map(|provider| {
+            selection
+                .allowed(provider)
+                .iter()
+                .map(move |m| ModelProfile {
+                    provider,
+                    model: m.model.clone(),
+                    effort: m.effort.clone(),
+                })
+        })
+        .collect()
+}
+
 /// A group of the human's model picker.
 pub struct PickerGroup {
     pub heading: String,
@@ -409,6 +426,7 @@ mod tests {
                 .map(|r| (r, BTreeSet::from([Provider::Claude])))
                 .collect(),
             guide: String::new(),
+            keeper: None,
         }
     }
 
@@ -703,6 +721,34 @@ mod tests {
         // The only provider gone: the role is left without one and Save must refuse.
         set_enabled(&mut selection, Provider::Claude, false);
         assert!(selection.validate().is_err());
+    }
+    #[test]
+    fn the_pr_keeper_picks_from_the_allowed_models_and_save_names_it_when_one_goes() {
+        let mut selection = selection();
+        assert_eq!(selection.keeper, None);
+        let choices: Vec<_> = keeper_choices(&selection)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            choices,
+            [
+                "claude · opus · high",
+                "claude · sonnet · high",
+                "codex · gpt-6.1-sol · high"
+            ]
+        );
+        selection.keeper = Some(keeper_choices(&selection).remove(2));
+        selection.validate().unwrap();
+        set_enabled(&mut selection, Provider::Codex, false);
+        assert_eq!(keeper_choices(&selection).len(), 2);
+        assert!(
+            selection
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .starts_with("The PR keeper uses codex · gpt-6.1-sol · high")
+        );
     }
     #[test]
     fn the_picker_lists_the_roles_providers_first_then_everything_else() {
