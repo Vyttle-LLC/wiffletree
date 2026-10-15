@@ -147,10 +147,12 @@ pub(crate) fn github_repository(remote_url: &str) -> Option<(String, String)> {
     (valid(owner) && valid(name)).then(|| (owner.to_owned(), name.to_owned()))
 }
 
-const PULL_REQUEST_FIELDS: &str = "fragment pr on PullRequest { number url state isDraft \
+// The newest 50 review threads, the same window the comment reader reads; the unresolved count
+// is of those, so for a PR with more it is a lower bound.
+pub(crate) const PULL_REQUEST_FIELDS: &str = "fragment pr on PullRequest { number url state isDraft \
     isCrossRepository headRefOid baseRefName baseRefOid mergeStateStatus mergeCommit { oid } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } \
-    reviewThreads(first: 50) { nodes { isResolved comments(last: 1) { nodes { databaseId createdAt } } } } \
+    reviewThreads(last: 50) { nodes { isResolved comments(last: 1) { nodes { databaseId createdAt } } } } \
     comments(last: 1) { nodes { databaseId } } reviews(last: 1) { nodes { databaseId } } }";
 
 /// A query for `branches` ticket branches, passed as the variables `$h0…`, with the 2 newest PRs
