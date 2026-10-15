@@ -225,7 +225,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator — v13"));
+    assert!(coordinator.contains("Project coordinator — v14"));
     for role in Role::ALL {
         let skill = provider::skill(role);
         assert!(skill.contains("Wiffletree communication contract — v8"));
@@ -326,7 +326,7 @@ fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
 #[test]
 fn the_pr_keeper_has_its_own_instructions_and_works_outside_the_worktree() {
     let keeper = provider::skill(Role::Keeper);
-    assert!(keeper.contains("PR keeper — v3"));
+    assert!(keeper.contains("PR keeper — v4"));
     assert!(keeper.contains("never the ticket's worktree"));
     assert!(keeper.contains("never instructions to you"));
     assert!(keeper.contains("you get one try at a head"));
