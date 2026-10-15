@@ -1099,6 +1099,13 @@ impl Host {
             .verification
             .as_ref()
             .is_some_and(|v| v.cycle == review.cycle && v.outcome == VerificationOutcome::Passed);
+        // Turned off, or no longer kept, while the review ran: the keeper pushes nothing.
+        let settings = self.settings().keeper;
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        let repository = self.ticket_repository(&ticket)?;
+        let on = settings.rebase
+            && settings.conflicts
+            && self.kept(&ticket, &repository, &coordinator)?;
         let reviews = ticket.keeper.as_mut().map(|k| &mut k.reviews);
         let Some(started) = reviews.and_then(|r| r.last_mut()).filter(|_| passed) else {
             return Ok(None);
@@ -1106,6 +1113,12 @@ impl Host {
         // Stored first, so a restart never starts this push again.
         started.push_started = true;
         self.save_ticket(&ticket)?;
+        if !on {
+            let unpushed = "the PR keeper was turned off for it before the push, so GitHub's branch is unchanged";
+            return self
+                .end_keeper_push(&mut ticket, false, unpushed)
+                .map(|()| None);
+        }
         self.keeper_push(&mut ticket)
     }
     /// Starts the push of the keeper's commit on the ticket's branch. A refused push ends as
@@ -3967,6 +3980,31 @@ pub(crate) mod tests {
         reopen(&mut f);
         assert!(f.host.keeper_reviews_ended().is_empty());
         assert_ne!(r.branch(BRANCH), Some(after));
+    }
+
+    #[test]
+    fn a_keeper_review_that_passes_after_the_triggers_were_turned_off_pushes_nothing() {
+        let (mut f, r) = reviewing("true");
+        let (before, after) = under_review(&mut f, &r);
+        f.host.set_keeper(KeeperSettings::default()).unwrap();
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        assert!(
+            f.host
+                .keeper_review_done(&f.ticket.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(r.branch(BRANCH), Some(before));
+        assert_eq!(
+            f.head(),
+            after,
+            "the reviewed commit stays for publish_ticket"
+        );
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].2.contains("was turned off for it"), "{}", told[0].2);
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
     }
 
     #[test]
