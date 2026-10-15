@@ -9,7 +9,7 @@ use workspace_core::*;
 use workspace_host::provider::{self, ProviderEvent, Turn, TurnKind};
 
 /// Fails unless it was started with no tools, MCP config, permission bypass, resume or
-/// workspace credentials, in an empty folder. It then reports the tools and MCP servers its
+/// workspace credentials or hooks, in an empty folder. It then reports the tools and MCP servers its
 /// input asks for (REPORT_SHELL, REPORT_MCP, TOOLS_NOT_A_LIST, NO_TOOLS), or reports its start
 /// never (NO_INIT) or only after its answer (INIT_LATE),
 /// writes the comments back as its own text and as streamed text, and answers `no_action` for
@@ -24,6 +24,7 @@ def fail(why):
 if 'WORKSPACE_TOKEN' in os.environ or 'WORKSPACE_SOCKET' in os.environ: fail('workspace credentials')
 if os.listdir('.'): fail('the folder is not empty')
 if args[args.index('--tools') + 1] != '': fail('tools')
+if json.loads(args[args.index('--settings') + 1]) != {'disableAllHooks': True}: fail('hooks')
 for flag in ['--mcp-config', '--dangerously-skip-permissions', '--resume', '--allowedTools']:
     if flag in args: fail(flag)
 comments = json.loads(sys.stdin.read())
