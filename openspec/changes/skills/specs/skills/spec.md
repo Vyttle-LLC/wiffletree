@@ -79,11 +79,15 @@ Saving rules, starting and saving a rewrite, marking it up to date, resetting an
 - **THEN** the save is accepted, and verifiers get the communication contract and the verifier core with no skill text
 
 ### Requirement: A rewrite replaces the stock text on purpose
-The human SHALL be able to start a rewrite of a skill, after a confirmation. The rewrite SHALL start as the stock text followed by the human's rules under their heading, when there are any. Starting it SHALL save the stock text as the rewrite's base and remove the human's separate rules. In Rewrite mode the rewrite SHALL be sent in place of the stock text, and no separate rules SHALL be sent.
+The human SHALL be able to start a rewrite of a skill, after a confirmation. The rewrite SHALL start as the stock text followed by the human's rules under their heading, when there are any. Starting it SHALL save the stock text as the rewrite's base and remove the human's separate rules. In Rewrite mode the rewrite SHALL be sent in place of the stock text, and no separate rules SHALL be sent. Reset to stock on a rewritten skill SHALL ask first, naming the rewrite as what stops applying, and SHALL remove the rewrite and its base.
 
 #### Scenario: Starting a rewrite with rules
 - **WHEN** Coordinating has two rules of the human's own and the human starts a rewrite
 - **THEN** the editor holds the stock text followed by the two rules, the base is the current stock text, and after saving the coordinator's next turn has the rewrite in place of the stock text and no separate rules section
+
+#### Scenario: Resetting a rewritten skill
+- **WHEN** Coordinating is rewritten and out of date, and the human chooses Reset to stock and confirms the question that names the rewrite
+- **THEN** the rewrite and its base are removed, Coordinating is at this release's stock text in Additions mode with no rules and no out-of-date mark, the coordinator's next turn has the stock text, and the history's previous entry still holds the rewrite
 
 ### Requirement: A rewrite is marked out of date by a new stock version
 A rewrite SHALL be out of date when its base is not this release's stock text, compared as text. An out-of-date rewrite SHALL keep being sent as written. The Skills page SHALL mark it, the sidebar's Skills row SHALL show a dot while any rewrite is out of date, and its page SHALL show the base's and the stock's versions and what changed between them, line by line. The human SHALL be able to mark it up to date, which records the current stock text as its base and changes nothing else, or reset it to stock. The host SHALL NOT change a rewrite's text when the stock text changes.
@@ -134,7 +138,7 @@ The host SHALL keep skills in a `skills` folder in its data folder, one folder p
 - **THEN** implementers get the stock text with no rules, and Implementing's page says its file could not be read
 
 ### Requirement: The Skills page
-The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · out of date"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app enforces whatever the text says. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
+The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · out of date"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
 
 #### Scenario: Opening the page
 - **WHEN** the human chooses Skills in the sidebar

@@ -193,7 +193,7 @@ code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;
         <div class="skill">
           <svg class="i"><use href="#book"/></svg><b>Coordinating</b>
           <span class="state"><span class="pill yellow">Rewritten · out of date</span></span>
-          <span class="what">How the coordinator plans, when it creates tickets and starts agents, which model and effort it picks, which review level it runs, and when it asks you.</span>
+          <span class="what">How the coordinator plans, when it creates tickets and starts agents, which model and effort it picks, when it stops chasing findings, and when it asks you.</span>
           <span class="who">Project coordinator</span>
         </div>
         <div class="skill">
@@ -270,7 +270,8 @@ Keep commits small, with messages in the imperative.<span class="caret"></span><
 
         <div class="enforced">
           <div><b><svg class="i"><use href="#shield"/></svg>The app enforces, whatever this says</b>
-            <ul><li>One ticket, in its own worktree and branch</li><li>“Ready for testing” is refused with uncommitted files</li><li>Nothing is pushed from the agent’s tools; publishing goes through Wiffletree</li><li>Only you merge</li></ul></div>
+            <ul><li>One ticket, in its own worktree and branch</li><li>“Ready for testing” is refused with uncommitted files</li><li>Wiffletree pushes and opens pull requests only through its publishing, which checks the review and the owners you allowed</li><li>Wiffletree has no tool that merges</li></ul>
+            <p class="small" style="margin:6px 0 0;color:var(--yellow)">Not enforced: an agent’s shell isn’t sandboxed, so it can still run <span class="mono">git push</span> with your credentials.</p></div>
           <div><b><svg class="i"><use href="#pen"/></svg>This text decides</b>
             <ul><li>How to work and which checks to run</li><li>How big a fix is</li><li>When to object to a finding</li><li>How to write commits and pull requests</li></ul></div>
         </div>
@@ -297,7 +298,7 @@ Keep commits small, with messages in the imperative.<span class="caret"></span><
         <div>
           <div class="label-row" style="margin-top:0"><b>What changed in the stock text</b><span class="hint">v1 → v2</span></div>
           <div class="diff">
-            <div class="ctx">Choose a review level by each level’s “Use it” line.</div>
+            <div class="ctx">Overrule an implementer’s objection only when its evidence holds.</div>
             <div class="del">After two or three rounds, remaining non-blocking findings become follow-up tickets or won’t-fix entries.</div>
             <div class="add">After two rounds, remaining non-blocking findings become follow-up tickets or won’t-fix entries.</div>
             <div class="ctx">Never start a fresh cycle to chase them.</div>
@@ -310,7 +311,7 @@ Keep commits small, with messages in the imperative.<span class="caret"></span><
           <div class="label-row" style="margin-top:0"><b>Your rewrite</b><span class="hint">sent in place of the stock text</span></div>
           <div class="editor">Clarify and plan the goal first. Create tickets only once I say go.
 …
-Choose a review level by each level’s “Use it” line. Use Light for docs-only tickets.
+Overrule an implementer’s objection only when its evidence holds. Use Light for docs-only tickets.
 <span class="mark">After two or three rounds, remaining non-blocking findings become follow-up tickets.</span> Never start a fresh cycle to chase them.
 …
 ## Your own rules for Coordinating
@@ -345,7 +346,7 @@ Keep commits small…</div>
           </div>
         </div>
       </div>
-      <p class="caption"><b>(e)</b> Reset asks first and says what you lose and how to get it back. For a rewrite it reads “Your rewrite stops applying”. Nothing you wrote is deleted.</p>
+      <p class="caption"><b>(e)</b> Reset asks first and says what you lose and how to get it back. For a rewrite it reads “Your rewrite stops applying”, and the rewrite and the stock text it was based on are removed. Nothing you wrote is deleted from the history.</p>
     </div>
 
     <div>
@@ -362,7 +363,7 @@ Keep commits small…</div>
           <span class="acts"><span>Hide</span></span>
           <span class="detail">Based on stock v1 · 4,880 characters</span>
           <div class="view"><div class="editor read">Clarify and plan the goal first. Create tickets only once I say go.
-Choose a review level by each level’s “Use it” line. Use Light for docs-only tickets.
+Overrule an implementer’s objection only when its evidence holds. Use Light for docs-only tickets.
 …</div></div>
         </div>
         <div class="entry">
@@ -430,7 +431,7 @@ Name every ticket after its outcome, not its files.</div>
 </div>
 
 <ul class="notes">
-  <li><b>What changes when you edit.</b> How agents work, from each one’s next turn. Not what they may do: tools, publishing, merging, review rules and limits are enforced by the app.</li>
+  <li><b>What changes when you edit.</b> How agents work, from each one’s next turn. Not what Wiffletree’s own tools allow: its publishing, review rules and limits are enforced by the app. An agent’s shell isn’t sandboxed, so it can still run <span class="mono">git push</span> whatever a skill says.</li>
   <li><b>Wiffletree doesn’t judge an edit.</b> Any text up to 32,000 characters is accepted, even an empty rewrite, because the fixed core reaches every agent either way.</li>
   <li><b>Where skills are kept.</b> In a <span class="mono">skills</span> folder in Wiffletree’s data folder, as plain text with one file per history entry, ready to move into a settings repository later. Agents’ shells can write that folder, as they can write the settings file.</li>
   <li><b>No model is used</b> for any of this. Showing what changed between stock versions is a plain line comparison.</li>
