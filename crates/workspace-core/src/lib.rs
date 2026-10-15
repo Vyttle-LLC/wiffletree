@@ -1080,12 +1080,48 @@ pub struct Keeper {
     /// The rebase of `rebased`, waiting for the ticket's worktree to be free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// The waiting rebase changed the patch and passed the repository's checks, so the
+    /// keeper reviews it before the push.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waiting_changed: bool,
     /// Commits Wiffletree did not make, taken from GitHub's branch; while set, nothing is
     /// pushed or accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreviewed: Option<Unreviewed>,
     #[serde(default)]
     pub comments: KeeperComments,
+    /// Every review the keeper started, oldest first; the last may be running.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<KeeperReview>,
+}
+/// A review the keeper started on a commit it moved onto the ticket's branch: everything a
+/// withdrawal restores, and once withdrawn, what it took away.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeeperReview {
+    pub cycle: u32,
+    /// The branch's commit before the keeper moved it, which was the PR's head.
+    pub before: String,
+    /// The keeper's commit under review.
+    pub after: String,
+    /// The base commit the keeper's commit sits on.
+    pub base: String,
+    /// The ticket's state when the review started.
+    pub state: String,
+    /// The keeper's last action before this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<KeeperAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<Withdrawn>,
+}
+/// A withdrawn keeper review: its cycle and the ledger entries it recorded, with any decision
+/// made on them, and whether the branch still waits to be put back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Withdrawn {
+    pub cycle: Verification,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<LedgerEntry>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub putting_back: bool,
 }
 /// The comments the keeper sorted on the ticket's PR: ids and classes, never their text.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1145,6 +1181,8 @@ pub struct KeeperAction {
 pub enum KeeperKind {
     /// A rebase with the same change as the reviewed commit.
     Rebase,
+    /// A rebase whose patch changed: checked and reviewed by the keeper before its push.
+    ReviewedRebase,
 }
 /// What the PR keeper is doing for a kept ticket whose branch it may change, as the host found
 /// it after the latest pass: the end of the ticket's PR line.
@@ -1265,6 +1303,25 @@ impl Ticket {
         self.pull_request
             .as_ref()
             .filter(|pr| pr.state != PrState::Open)
+    }
+    /// The keeper's reviews, oldest first.
+    pub fn keeper_reviews(&self) -> &[KeeperReview] {
+        self.keeper.as_ref().map_or(&[], |k| &k.reviews)
+    }
+    /// The next cycle's number: above every cycle, withdrawn ones included, since verifier
+    /// messages are keyed by it.
+    pub fn next_cycle(&self) -> u32 {
+        let withdrawn = self.keeper_reviews().iter().map(|r| r.cycle);
+        let latest = self.verification.as_ref().map(|v| v.cycle);
+        latest.into_iter().chain(withdrawn).max().unwrap_or(0) + 1
+    }
+    /// How many ledger entries withdrawn reviews took away. Their ids are never given again.
+    pub fn withdrawn_findings(&self) -> usize {
+        self.keeper_reviews()
+            .iter()
+            .filter_map(|r| r.withdrawn.as_ref())
+            .map(|w| w.entries.len())
+            .sum()
     }
     /// The commits the PR keeper adopted that no review has checked yet.
     pub fn unreviewed(&self) -> Option<&Unreviewed> {
@@ -1470,6 +1527,9 @@ pub struct Verification {
     /// round's verifiers have been chosen but sent nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_at: Option<i64>,
+    /// Started by the host for the PR keeper.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keeper: bool,
 }
 /// A level's name and kind as they were when a cycle started at it; later edits to the level do
 /// not change them.
@@ -1527,11 +1587,13 @@ impl Verification {
             .map(|run| run.focus.as_str())
             .collect()
     }
-    /// Such as "Cycle 2 · Light re-check", or "Cycle 1" for a cycle recorded without a level.
+    /// Such as "Cycle 2 · Light re-check by the PR keeper", or "Cycle 1" for a cycle recorded
+    /// without a level.
     pub fn cycle_label(&self, noun: &str) -> String {
+        let by = if self.keeper { " by the PR keeper" } else { "" };
         match &self.level {
-            Some(level) => format!("{noun} {} · {}", self.cycle, level.label()),
-            None => format!("{noun} {}", self.cycle),
+            Some(level) => format!("{noun} {} · {}{by}", self.cycle, level.label()),
+            None => format!("{noun} {}{by}", self.cycle),
         }
     }
     /// The verifiers whose latest result stands, such as "Tests, Correctness".
