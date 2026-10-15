@@ -1041,6 +1041,7 @@ impl Host {
             state: ticket.state.clone(),
             last: keeper.last.clone(),
             withdrawn: None,
+            push_started: false,
         };
         keeper.last = Some(KeeperAction {
             kind: match changed {
@@ -1098,10 +1099,14 @@ impl Host {
             .verification
             .as_ref()
             .is_some_and(|v| v.cycle == review.cycle && v.outcome == VerificationOutcome::Passed);
-        match passed {
-            true => self.keeper_push(&mut ticket),
-            false => Ok(None),
-        }
+        let reviews = ticket.keeper.as_mut().map(|k| &mut k.reviews);
+        let Some(started) = reviews.and_then(|r| r.last_mut()).filter(|_| passed) else {
+            return Ok(None);
+        };
+        // Stored first, so a restart never starts this push again.
+        started.push_started = true;
+        self.save_ticket(&ticket)?;
+        self.keeper_push(&mut ticket)
     }
     /// Starts the push of the keeper's commit on the ticket's branch. A refused push ends as
     /// one that failed.
@@ -1405,8 +1410,14 @@ impl Host {
             let id = notice_id(ticket, "push", &[&rebase.head, &rebase.base]);
             if !coordinator.archived && !self.message_exists(&id)? {
                 let body = format!(
-                    "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
+                    "{}: the PR keeper rebased its branch {moved}, {}, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
                     named(ticket),
+                    match last.kind {
+                        KeeperKind::Rebase => "the same change as the reviewed commit",
+                        KeeperKind::ReviewedRebase => {
+                            "a changed patch that passed the repository's checks and the PR keeper's re-check"
+                        }
+                    },
                     short_sha(&last.after)
                 );
                 self.send_publish_result(&id, &coordinator.id, &body)?;
@@ -1468,9 +1479,8 @@ impl Host {
                 self.save_ticket(&ticket)?;
             }
             // A keeper review that ended before the stop is pushed, or its branch put back,
-            // now. A push already started is publishing's to end.
-            let unpushed = ticket.keeper.as_ref().and_then(|k| k.last.as_ref());
-            let unpushed = unpushed.is_some_and(|l| !l.pushed) && ticket.publishing.is_none();
+            // now. A push once started is publishing's to end, as it ends any.
+            let latest = ticket.verification.as_ref();
             let ended =
                 ticket
                     .keeper_reviews()
@@ -1478,8 +1488,8 @@ impl Host {
                     .is_some_and(|review| match &review.withdrawn {
                         Some(withdrawn) => withdrawn.putting_back,
                         None => {
-                            unpushed
-                                && ticket.verification.as_ref().is_some_and(|v| {
+                            !review.push_started
+                                && latest.is_some_and(|v| {
                                     v.cycle == review.cycle
                                         && v.outcome == VerificationOutcome::Passed
                                 })
@@ -3849,14 +3859,14 @@ pub(crate) mod tests {
 
     #[test]
     fn the_keepers_review_starts_only_where_every_rule_for_a_level_holds() {
-        let refused = |change: fn(&mut Fixture)| {
+        let refused = |change: &dyn Fn(&mut Fixture)| {
             let (mut f, _r) = reviewing("true");
             change(&mut f);
             let ticket = f.ticket();
             format!("{:#}", f.host.keeper_review_ready(&ticket).unwrap_err())
         };
         // No model was ever chosen: Light runs Style, which never ran on the ticket.
-        let style = refused(|f| {
+        let style = refused(&|f| {
             let mut settings = f.host.settings().verification;
             settings.verifiers.push(VerifierConfig {
                 role: Role::Reviewer,
@@ -3872,7 +3882,7 @@ pub(crate) mod tests {
             "{style}"
         );
         // The chosen model is no longer allowed.
-        let removed = refused(|f| {
+        let removed = refused(&|f| {
             let mut selection = f.host.model_selection().unwrap();
             let chosen = selection.keeper.clone().unwrap();
             let access = selection.providers.get_mut(&chosen.provider).unwrap();
@@ -3896,19 +3906,26 @@ pub(crate) mod tests {
         });
         assert!(removed.contains("Reviewer · Correctness"), "{removed}");
         // The latest review did not pass.
-        let blocked = refused(|f| f.review(VerificationOutcome::Blocked));
+        let blocked = refused(&|f| f.review(VerificationOutcome::Blocked));
         assert!(blocked.contains("last review ended blocked"), "{blocked}");
         // A verifier with an open finding is left out, and any open entry.
         for focus in ["Regressions", "Correctness"] {
-            let open = refused(|f| {
+            let open = refused(&|f| {
                 let mut ticket = f.ticket();
                 ticket.ledger.push(LedgerEntry {
                     status: EntryStatus::Open,
+                    focus: focus.into(),
                     ..untriaged("F1")
                 });
                 f.host.save_ticket(&ticket).unwrap();
             });
-            assert!(open.contains("open"), "{focus}: {open}");
+            let why = match focus {
+                "Regressions" => {
+                    "Regressions has the open finding F1, and Light does not run Regressions"
+                }
+                _ => "the ticket has an open finding",
+            };
+            assert!(open.contains(why), "{focus}: {open}");
         }
         // Re-checks are not counted against the cycle cap.
         let (mut f, _r) = reviewing("true");
@@ -3946,7 +3963,39 @@ pub(crate) mod tests {
                 .contains("was pushing it when Wiffletree stopped")
         );
         drop(step);
+        // Ended, it is never started again.
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
         assert_ne!(r.branch(BRANCH), Some(after));
+    }
+
+    #[test]
+    fn a_refused_keeper_push_is_handed_to_the_coordinator_and_not_retried_after_a_restart() {
+        let (mut f, r) = reviewing("true");
+        let (before, _) = under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().state = PrState::Closed;
+        f.host.save_ticket(&ticket).unwrap();
+        assert!(
+            f.host
+                .keeper_review_done(&f.ticket.clone())
+                .unwrap()
+                .is_none()
+        );
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0]
+                .2
+                .contains("a changed patch that passed the repository's checks")
+                && !told[0].2.contains("the same change as the reviewed commit"),
+            "{}",
+            told[0].2
+        );
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+        assert_eq!(r.branch(BRANCH), Some(before));
     }
 
     #[test]

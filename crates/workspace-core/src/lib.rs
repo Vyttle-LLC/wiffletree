@@ -1112,6 +1112,9 @@ pub struct KeeperReview {
     pub last: Option<KeeperAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<Withdrawn>,
+    /// The push of the review that passed was started; how it ended is publishing's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub push_started: bool,
 }
 /// A withdrawn keeper review: its cycle and the ledger entries it recorded, with any decision
 /// made on them, and whether the branch still waits to be put back.
