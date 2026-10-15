@@ -426,3 +426,37 @@ The runs of a PR keeper agent SHALL be recorded as provider runs of a PR keeper 
 #### Scenario: Sorting turns are not counted
 - **WHEN** a ticket's sorting session has run more turns than the check-in threshold
 - **THEN** the coordinator gets no check-in for them
+
+### Requirement: The conflicts trigger needs a model and a re-check level
+The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the rebase trigger is on, the PR keeper's model is chosen and the review level names a configured level whose kind is re-check, and SHALL refuse to turn the rebase trigger off while the conflicts trigger is on: a conflict is found by the keeper's own rebase, so without the rebase trigger no try could ever start. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
+
+#### Scenario: No re-check level
+- **WHEN** the only review level is "Full" and the human ticks "Try to resolve conflicts"
+- **THEN** the save is refused, saying to add a re-check level in Models → Review
+
+#### Scenario: Without the rebase trigger
+- **WHEN** the rebase trigger is off and the human ticks "Try to resolve conflicts"
+- **THEN** the save is refused, saying it needs "Rebase when the base branch moves"
+
+#### Scenario: Turning the rebase trigger off
+- **WHEN** both triggers are on and the human unticks the rebase trigger alone
+- **THEN** the save is refused and both stay on
+
+#### Scenario: The level is removed later
+- **WHEN** the conflicts trigger is on with the level "Light" and the human removes "Light"
+- **THEN** the verification setting is refused and stays as it was
+
+### Requirement: A rebase whose patch changed is reviewed by the keeper
+With the conflicts trigger on, in a repository with a checks command, a rebase reported as a changed patch SHALL NOT be dropped. The host SHALL run the repository's checks on the rebased commit as the gate does, SHALL then move it onto the ticket's branch and review it with a keeper review, and SHALL push it when the review passes. No model SHALL be used to produce the commit, and it SHALL NOT count as a try. When the checks do not pass, the commit SHALL be dropped before the ticket's branch is moved. When the review does not pass, it SHALL be withdrawn and the branch put back exactly as ticket-verification defines for every keeper review, whether or not a model made the commit. In both cases the coordinator SHALL be told once for that head and base, with each blocking finding's verifier, location and summary after a review.
+
+#### Scenario: Changed patch, reviewed and pushed
+- **WHEN** a rebase is reported as a changed patch, the checks pass and the Light re-check passes
+- **THEN** the rebased commit is pushed, and no PR keeper agent ran
+
+#### Scenario: Changed patch whose review fails
+- **WHEN** the checks pass on a rebased commit `77b0c13` whose patch changed, the ticket's branch is moved from `3daf610` to it, and the Light re-check records a blocking finding
+- **THEN** that cycle is withdrawn, the branch and the worktree are back at `3daf610`, nothing was pushed, no try is recorded, and the coordinator gets one message naming the finding
+
+#### Scenario: Changed patch that fails its checks
+- **WHEN** the checks fail on the rebased commit
+- **THEN** nothing is moved or pushed, and the coordinator is told once
