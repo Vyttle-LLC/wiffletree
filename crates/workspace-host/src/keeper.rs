@@ -4143,8 +4143,14 @@ pub(crate) mod tests {
         let ran = runtime::run_limited(command, Duration::from_secs(1)).unwrap();
         assert!(ran.is_none(), "out of time");
         let child: libc::pid_t = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        // The killed child stays a zombie until launchd reaps it, which under load takes a
+        // moment; a child that was not killed would still be sleeping after these 5 seconds.
         // SAFETY: signal 0 only asks whether the process exists.
-        let alive = unsafe { libc::kill(child, 0) } == 0;
-        assert!(!alive, "the command's own child was stopped too");
+        let alive = || unsafe { libc::kill(child, 0) } == 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the command's own child was stopped too");
     }
 }
