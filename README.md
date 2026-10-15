@@ -13,16 +13,24 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-86C1BC"></a>
 </p>
 
-![The coordinator reporting a tested branch for the tidepool repository](docs/images/coordinator.png)
+![The Tide alerts coordinator reporting an accepted ticket, under a progress strip that reads 1 of 3 tickets accepted](docs/images/coordinator.png)
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/tickets.png" alt="A coordinator's tickets, with the branch and agents for each"></td>
-    <td width="50%"><img src="docs/images/models.png" alt="Default Claude and Codex models for each agent role"></td>
+    <td width="50%"><img src="docs/images/tickets.png" alt="The Crew panel beside the coordinator's chat, listing three tickets by stage with their agents, models and progress"></td>
+    <td width="50%"><img src="docs/images/models.png" alt="The Models page with the Claude and Codex models allowed on this machine, the providers for each role and the Full and Light review levels"></td>
   </tr>
   <tr>
-    <td align="center"><sub>A coordinator accepts a ticket after independent verification.</sub></td>
-    <td align="center"><sub>Any role can run on Claude or Codex.</sub></td>
+    <td align="center"><sub>Every ticket gets its own branch, implementer and independent reviewers.</sub></td>
+    <td align="center"><sub>You allow exact models; the coordinator picks one for each assignment.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/usage.png" alt="The Usage page with Claude and Codex 5-hour and weekly account limits above a week of daily Claude and Codex tokens"></td>
+    <td width="50%"><img src="docs/images/context.png" alt="An implementer's Context card showing how full its context window is, by category, with a Compact button"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Account limits from the providers, above the tokens your agents used each day.</sub></td>
+    <td align="center"><sub>See what fills an agent's context, and compact it when you choose.</sub></td>
   </tr>
 </table>
 
@@ -43,7 +51,7 @@ claude auth login
 codex login
 ```
 
-Then press **⌘N**, add a repository, and tell the coordinator what you want built. [Your first project](docs/DEVELOPMENT.md#first-project) walks through it step by step.
+The first time you open Wiffletree, a welcome screen lists the CLIs it found signed in and offers a model setup suggested from them. Review it on the Models page and press **Save**; no agent starts until a setup is saved. Then press **⌘N**, add a repository, and tell the coordinator what you want built. [Your first project](docs/DEVELOPMENT.md#first-project) walks through it step by step.
 
 **Updates are automatic.** The app checks hourly, downloads new versions in the background and shows a card in the sidebar with what changed. Click **Restart to update**, or just quit. To check right away, click the version number at the bottom of the sidebar.
 
@@ -70,17 +78,27 @@ Wiffletree has opinions about how agent work should be organized.
 
 **Tickets are small, isolated and tested by someone else.** Every ticket gets its own Git worktree and branch. An implementer builds it, and a separate tester checks it against the acceptance criteria. "The turn ended" never counts as "it works."
 
+**You decide how thorough a review is.** A review level is a named set of testers and reviewers, with a line telling the coordinator when to use it. A full review can be a ticket's only review. A re-check, such as the suggested "Light", runs only on a ticket whose last review passed, for example after a rebase or a small fix. You also cap the rounds in one review and the full reviews per ticket.
+
 **Blocked is not the same as needs-you.** Workers report blockers to the coordinator, which resolves most of them. Only the coordinator escalates to you, and it gathers its questions in one Inbox so you answer them once.
 
-**Any model can play any role.** Claude can coordinate Codex implementers, and Codex can coordinate Claude. You set a default model for each role, and you can override any single agent.
+**Any model can play any role, and the coordinator picks it.** Claude can coordinate Codex implementers, and Codex can coordinate Claude. On the Models page you list the exact models and efforts allowed on this machine, choose which providers each role may use, and write a short guide on picking a model by the size and risk of the work. For every assignment and every reviewer, the coordinator picks one allowed model and effort and gives a one-line reason, which is shown with that agent's conversation, just above the message box. Wiffletree refuses a choice outside the list and never falls back to another model. You can still change the model of any single agent yourself.
 
 **Messages are durable.** Agents talk through the app's message queue, not by typing into each other's terminals. Every message is saved before it is acknowledged, and an idle recipient wakes the moment one arrives. After a restart, each agent resumes its exact provider session, and the app never silently retries work that might have had side effects.
 
 **Software does the routine work; models do the thinking.** Git state, status, polling and usage tracking are ordinary deterministic code. Models are woken only for decisions that need reasoning, so coordinators sleep between events instead of polling.
 
+**You can see how far along the work is.** The app derives the progress bars from each agent's checklist, each ticket's stage and its review results. The coordinator's strip shows the project's phase, one segment per ticket and how many tickets are accepted. Its Crew panel lists every ticket with its agents, their models and their progress.
+
+**You can see what fills an agent's context.** Each agent's Overview has a Context card that shows how full its context window is and with what, measured after every turn without a model call. Claude reports its own categories; for Codex they are estimates. **Compact…** on the same card replaces a Claude or Codex agent's conversation with a summary when you choose, and for Claude you can say what to keep.
+
+**You can stop what agents leave running.** A dev server or watcher an agent starts keeps running between its turns. The Processes panel lists what each agent has running, or every agent's from the coordinator, with how long it has run and its CPU, and stops one or all of them. Wiffletree also stops them when an agent is stopped or archived and when the app quits.
+
+**Usage and limits stay in view.** The sidebar shows each provider's 5-hour and weekly limits, and the Usage page puts both accounts side by side. Those percentages come only from the providers' own telemetry: the Codex app server, and the rate-limit events Claude sends during live turns, so a Claude window reads **Unavailable** when Claude reports no percentage. Wiffletree never scrapes account pages or spends tokens to check. Below the limits, it charts the tokens its agents used by day and ranks them by coordinator, with project and provider filters.
+
 **Humans own integration.** Agents deliver tested branches. Once a ticket's review has ended, Wiffletree pushes its branch and opens its pull request itself: without asking for the GitHub owners you allow on the Repositories page, and only after you approve each step everywhere else. It never approves, merges, closes or comments on a pull request, so merging stays yours.
 
-**The PR keeper keeps pull requests current, if you ask it to.** It is off until you tick "Rebase when the base branch moves" on the Repositories page, and it acts only in repositories that open pull requests without asking. Once a pull request's base has been quiet for a couple of minutes, Wiffletree rebases the branch itself, with no model and no review, and replaces the branch on GitHub with a lease, only when the rebased change is the same as the reviewed one. Every commit id on the pull request changes. A rebase that conflicts or changes the patch is left to the coordinator. With "Sort new comments" ticked and a Claude model chosen for the PR keeper in Models, it also sorts new comments from people who can push to the repository into needs a change, a question or no action, with a model run that has every tool turned off, and sends the coordinator links to those that need something, never their text. It never replies, resolves or reacts on GitHub. It works only while Wiffletree is running.
+**The PR keeper keeps pull requests current, if you ask it to.** It is off until you tick "Rebase when the base branch moves" on the Repositories page, and it acts only in repositories that open pull requests without asking. Once a pull request's base has been quiet for a couple of minutes, Wiffletree rebases the branch itself, with no model and no review, and replaces the branch on GitHub with a lease, only when the rebased change is the same as the reviewed one. Every commit id on the pull request changes. A rebase that conflicts or changes the patch is left to the coordinator. With "Sort new comments" ticked and a Claude model chosen for the PR keeper in Models, it also sorts new comments from people who can push to the repository into needs a change, a question or no action, with a model run that has every tool and hook turned off, and sends the coordinator links to those that need something, never their text. It never replies, resolves or reacts on GitHub. It works only while Wiffletree is running.
 
 **It should feel instant.** Wiffletree is a native Rust app built on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), not a web view, and it stays light when idle.
 
@@ -104,6 +122,8 @@ cargo build --locked --release -p workspace-host -p workspace-desktop
 ./target/release/workspace-desktop \
   --data-dir /tmp/wiffletree-preview --demo-repository "$PWD"
 ```
+
+On a fresh store, save the suggested setup on the Models page and relaunch to get the demo project.
 
 [Development notes](docs/DEVELOPMENT.md) cover model configuration, headless commands, validation and releases. [Measured host timings](docs/performance/host-baseline.md) are kept separate from the desktop and provider performance targets, which are not yet verified.
 
