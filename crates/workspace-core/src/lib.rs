@@ -1246,6 +1246,10 @@ pub enum KeeperPart {
     Rebased(i64),
     /// The PR's head contains the base's head.
     UpToDate,
+    /// The keeper's model is trying to resolve the PR's conflict.
+    Resolving,
+    /// The keeper threw its try at the PR's head away and told the coordinator.
+    WithCoordinator,
 }
 /// One accepted `publish_ticket` call: everything the Inbox item shows and the host will send,
 /// frozen when the call passed its checks.
@@ -1376,6 +1380,18 @@ impl Ticket {
     pub fn running_try(&self) -> Option<&KeeperTry> {
         let last = self.keeper.as_ref()?.tries.last();
         last.filter(|t| t.ended.is_none())
+    }
+    /// The keeper's part for its try at the PR's head, which outranks every other part: read
+    /// from the ticket, so it shows as soon as a try starts or ends.
+    pub fn try_part(&self) -> Option<KeeperPart> {
+        let head = &self.open_pull_request()?.head;
+        let last = self.keeper.as_ref()?.tries.last()?;
+        match &last.ended {
+            _ if last.head != *head => None,
+            None => Some(KeeperPart::Resolving),
+            Some(TryEnd::ThrownAway(_)) => Some(KeeperPart::WithCoordinator),
+            Some(_) => None,
+        }
     }
     /// Whether the keeper tried `problem` at `head`, which it does once.
     pub fn tried(&self, problem: KeeperProblem, head: &str) -> bool {

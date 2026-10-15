@@ -115,6 +115,8 @@ pub enum Tone {
     Bad,
     Merged,
     Warn,
+    /// The keeper's model at work.
+    Busy,
 }
 #[derive(Debug, PartialEq)]
 pub struct PrPart {
@@ -172,7 +174,11 @@ pub fn pr_line(
             if let Some(keeper) =
                 keeper.filter(|k| comments.is_none() || *k != KeeperPart::UpToDate)
             {
-                parts.push(part(&keeper_words(keeper, now), Tone::Muted));
+                let tone = match keeper {
+                    KeeperPart::Resolving => Tone::Busy,
+                    _ => Tone::Muted,
+                };
+                parts.push(part(&keeper_words(keeper, now), tone));
             }
             if let Some(comments) = comments {
                 parts.extend(waiting_comments(comments).map(|(text, tone)| part(&text, tone)));
@@ -194,6 +200,8 @@ fn keeper_words(part: KeeperPart, now: i64) -> String {
         KeeperPart::Waiting => "rebase waiting".into(),
         KeeperPart::Rebased(at) => format!("rebased {}", rebased_ago(at, now)),
         KeeperPart::UpToDate => "up to date".into(),
+        KeeperPart::Resolving => "keeper resolving".into(),
+        KeeperPart::WithCoordinator => "with the coordinator".into(),
     }
 }
 
@@ -244,7 +252,8 @@ fn not_reviewed(unreviewed: &Unreviewed) -> String {
 }
 
 /// What the keeper last did to the ticket's branch, for its card: a line, and a detail line.
-/// Adopted commits no review has checked come first, since they hold the ticket.
+/// Adopted commits no review has checked come first, since they hold the ticket; then a try
+/// newer than the keeper's last action, which a try that was thrown away leaves as it was.
 pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
     if let Some(unreviewed) = ticket.unreviewed() {
         return Some((
@@ -255,36 +264,103 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
             ),
         ));
     }
-    let last = ticket.keeper.as_ref()?.last.as_ref()?;
+    let keeper = ticket.keeper.as_ref()?;
     let base = ticket
         .pull_request
         .as_ref()
         .map_or("its base", |pr| pr.base.as_str());
-    let pushed = match last.pushed {
-        true => "and pushed",
-        false => "but did not push it",
+    let now = crate::ui::now();
+    let last = keeper.last.as_ref();
+    if let Some(tried) = keeper
+        .tries
+        .last()
+        .filter(|t| last.is_none_or(|l| t.started >= l.at))
+    {
+        return try_lines(tried, base, now);
+    }
+    let last = last?;
+    // A changed patch or a try's result is on the branch while its review runs.
+    let review = ticket.running_cycle().filter(|v| v.keeper).is_some();
+    let reviewed = match review {
+        true => "being reviewed before the push",
+        false => "reviewed before the push",
     };
-    let change = match last.kind {
-        KeeperKind::Rebase => "the same change as the reviewed commit, so the passed review stands",
-        KeeperKind::ReviewedRebase => {
-            "a changed patch · the repository's checks passed · reviewed before the push"
-        }
-        KeeperKind::Resolved => {
-            "a conflict resolved by the PR keeper · the repository's checks passed · reviewed before the push"
-        }
+    let pushed = match (review, last.pushed) {
+        (true, _) => "and is having it reviewed",
+        (false, true) => "and pushed",
+        (false, false) => "but did not push it",
     };
-    Some((
-        format!(
-            "rebased onto {base} at {} {pushed}, {}",
-            short_sha(&last.base),
-            rebased_ago(last.at, crate::ui::now())
+    let ago = rebased_ago(last.at, now);
+    let files = keeper
+        .tries
+        .iter()
+        .rev()
+        .find(|t| t.head == last.before)
+        .map_or(&[][..], |t| &t.files);
+    let (line, detail) = match last.kind {
+        KeeperKind::Rebase => (
+            format!(
+                "rebased onto {base} at {} {pushed}, {ago}",
+                short_sha(&last.base)
+            ),
+            "the same change as the reviewed commit, so the passed review stands".into(),
         ),
-        format!(
-            "{} → {} · {change}",
-            short_sha(&last.before),
-            short_sha(&last.after)
+        KeeperKind::ReviewedRebase => (
+            format!(
+                "rebased onto {base} at {} {pushed}, {ago}",
+                short_sha(&last.base)
+            ),
+            format!("a changed patch · the repository's checks passed · {reviewed}"),
         ),
-    ))
+        KeeperKind::Resolved => (
+            format!(
+                "resolved a conflict with {base} in {} {pushed}, {ago}",
+                file_count(files.len())
+            ),
+            format!(
+                "changed only {} · the repository's checks passed · {reviewed}",
+                files.join(", ")
+            ),
+        ),
+    };
+    let commits = format!("{} → {}", short_sha(&last.before), short_sha(&last.after));
+    Some((line, format!("{commits} · {detail}")))
+}
+
+/// A running try, or one thrown away, for the card.
+fn try_lines(tried: &KeeperTry, base: &str, now: i64) -> Option<(String, String)> {
+    let head = short_sha(&tried.head);
+    let ago = rebased_ago(tried.started, now);
+    let files = tried.files.join(", ");
+    match &tried.ended {
+        None => Some((
+            format!("trying once to resolve a conflict with {base} at head {head}, {ago}"),
+            format!(
+                "in {files} · nothing is pushed unless only those files change, the repository's checks pass and a review passes"
+            ),
+        )),
+        Some(TryEnd::ThrownAway(why)) => Some((
+            format!("tried once at head {head} and threw the try away, {ago}"),
+            format!(
+                "{} Nothing was pushed. Handed to the coordinator; the keeper will not try this head again.",
+                sentence(why)
+            ),
+        )),
+        Some(TryEnd::Pushed | TryEnd::NotPushed) => None,
+    }
+}
+
+/// Such as "1 file" or "2 files".
+fn file_count(files: usize) -> String {
+    format!("{files} file{}", if files == 1 { "" } else { "s" })
+}
+
+/// `words` with a capital first letter, as a sentence.
+fn sentence(words: &str) -> String {
+    let mut chars = words.chars();
+    chars.next().map_or(String::new(), |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// Each keeper review that was withdrawn, newest first, for the card: kept on the keeper's
@@ -2124,6 +2200,130 @@ mod tests {
         assert_eq!(
             detail,
             "e21f0aa → 77b0c13 · a changed patch · the repository's checks passed · reviewed before the push"
+        );
+    }
+
+    #[test]
+    fn a_try_shows_on_the_pr_line_and_the_card_until_the_head_changes() {
+        let (_home, _host, _coordinator, mut ticket) = store();
+        let mut conflicted = pr(PrState::Open, CheckState::None, MergeState::Dirty);
+        conflicted.number = 139;
+        ticket.pull_request = Some(conflicted.clone());
+        let tried = KeeperTry {
+            problem: KeeperProblem::Conflict,
+            head: conflicted.head.clone(),
+            base: "4a1c2e9dd".into(),
+            files: vec!["src/sidebar.rs".into(), "src/tree.rs".into()],
+            started: crate::ui::now() - 90_000,
+            ended: None,
+        };
+        ticket.keeper = Some(Keeper {
+            tries: vec![tried],
+            ..Default::default()
+        });
+        // Being tried.
+        let part = ticket.try_part();
+        assert_eq!(
+            kept_line(&conflicted, part),
+            "#139 · conflict · keeper resolving"
+        );
+        assert_eq!(
+            pr_line(&conflicted, None, part, None, 0)[2].tone,
+            Tone::Busy
+        );
+        assert_eq!(
+            keeper_lines(&ticket).unwrap(),
+            (
+                "trying once to resolve a conflict with main at head 3daf610, 1 min ago".into(),
+                "in src/sidebar.rs, src/tree.rs · nothing is pushed unless only those files change, the repository's checks pass and a review passes".into()
+            )
+        );
+
+        // Handed over.
+        let thrown_away = TryEnd::ThrownAway("the Light review did not pass.".into());
+        ticket.keeper.as_mut().unwrap().tries[0].ended = Some(thrown_away);
+        conflicted.number = 140;
+        let part = ticket.try_part();
+        assert_eq!(
+            kept_line(&conflicted, part),
+            "#140 · conflict · with the coordinator"
+        );
+        assert_eq!(
+            keeper_lines(&ticket).unwrap(),
+            (
+                "tried once at head 3daf610 and threw the try away, 1 min ago".into(),
+                "The Light review did not pass. Nothing was pushed. Handed to the coordinator; the keeper will not try this head again.".into()
+            )
+        );
+
+        ticket.pull_request.as_mut().unwrap().head = "5f2e7a0bb".into();
+        assert_eq!(ticket.try_part(), None, "a new head");
+    }
+
+    #[test]
+    fn a_keeper_commit_reads_as_reviewed_only_once_its_review_ended() {
+        let (_home, _host, _coordinator, mut ticket) = store();
+        ticket.pull_request = Some(pr(PrState::Open, CheckState::Success, MergeState::Clean));
+        let at = crate::ui::now() - 90_000;
+        let tried = KeeperTry {
+            problem: KeeperProblem::Conflict,
+            head: "e21f0aa11".into(),
+            base: "4a1c2e9dd".into(),
+            files: vec!["src/sidebar.rs".into(), "src/tree.rs".into()],
+            started: at - MINUTE,
+            ended: None,
+        };
+        let last = KeeperAction {
+            kind: KeeperKind::Resolved,
+            at,
+            before: "e21f0aa11".into(),
+            after: "77b0c13ff".into(),
+            base: "4a1c2e9dd".into(),
+            pushed: false,
+        };
+        ticket.keeper = Some(Keeper {
+            last: Some(last),
+            tries: vec![tried.clone()],
+            ..Default::default()
+        });
+        ticket.verification = Some(Verification {
+            keeper: true,
+            ..verification(2, VerificationOutcome::Running, 1)
+        });
+        assert_eq!(
+            keeper_lines(&ticket).unwrap(),
+            (
+                "resolved a conflict with main in 2 files and is having it reviewed, 1 min ago".into(),
+                "e21f0aa → 77b0c13 · changed only src/sidebar.rs, src/tree.rs · the repository's checks passed · being reviewed before the push".into()
+            )
+        );
+        let keeper = ticket.keeper.as_mut().unwrap();
+        keeper.last.as_mut().unwrap().kind = KeeperKind::ReviewedRebase;
+        keeper.tries.clear();
+        let (line, detail) = keeper_lines(&ticket).unwrap();
+        assert_eq!(
+            line,
+            "rebased onto main at 4a1c2e9 and is having it reviewed, 1 min ago"
+        );
+        assert!(detail.ends_with(
+            "a changed patch · the repository's checks passed · being reviewed before the push"
+        ));
+
+        ticket.verification.as_mut().unwrap().outcome = VerificationOutcome::Passed;
+        let keeper = ticket.keeper.as_mut().unwrap();
+        keeper.last.as_mut().unwrap().pushed = true;
+        keeper.last.as_mut().unwrap().kind = KeeperKind::Resolved;
+        keeper.tries = vec![KeeperTry {
+            files: vec!["src/tree.rs".into()],
+            ended: Some(TryEnd::Pushed),
+            ..tried
+        }];
+        assert_eq!(
+            keeper_lines(&ticket).unwrap(),
+            (
+                "resolved a conflict with main in 1 file and pushed, 1 min ago".into(),
+                "e21f0aa → 77b0c13 · changed only src/tree.rs · the repository's checks passed · reviewed before the push".into()
+            )
         );
     }
 
