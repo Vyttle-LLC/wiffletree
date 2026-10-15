@@ -109,6 +109,12 @@ impl Host {
     /// Saves who verifies tickets. An invalid setting is refused and the saved one stays.
     pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
         verification.validate()?;
+        let keeper = self.settings().keeper;
+        check_conflicts(
+            &keeper,
+            self.model_selection()?.keeper.as_ref(),
+            &verification,
+        )?;
         let settings = HostSettings {
             verification,
             ..self.settings()
@@ -152,9 +158,11 @@ impl Host {
     /// Turning comment sorting on starts every PR's comments afresh at the next pass.
     pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
         keeper.validate()?;
+        let model = self.model_selection()?.keeper;
         if keeper.comments {
-            check_sorting_model(self.model_selection()?.keeper.as_ref())?;
+            check_sorting_model(model.as_ref())?;
         }
+        check_conflicts(&keeper, model.as_ref(), &self.settings().verification)?;
         if keeper.comments && !self.settings().keeper.comments {
             self.restart_comments()?;
         }
@@ -164,6 +172,25 @@ impl Host {
         };
         self.save_settings(&settings)?;
         Ok(settings)
+    }
+    /// Saves or removes a repository's checks command. The PR keeper reads it when it runs.
+    pub fn set_repository_checks(
+        &mut self,
+        repository_id: &str,
+        checks: Option<RepositoryChecks>,
+    ) -> Result<Repository> {
+        if let Some(checks) = &checks {
+            checks.validate()?;
+        }
+        let repository = Repository {
+            checks,
+            ..self.repository(repository_id)?
+        };
+        self.db.execute(
+            "UPDATE repositories SET data=?2 WHERE id=?1",
+            params![repository.id, encode(&repository)?],
+        )?;
+        Ok(repository)
     }
     pub fn set_workspaces_dir(&mut self, path: &str) -> Result<HostSettings> {
         text(path, 4096)?;
@@ -376,6 +403,7 @@ mod tests {
             rebase: true,
             quiet_minutes: 5,
             comments: false,
+            ..KeeperSettings::default()
         };
         host.execute(Command::SetKeeper { keeper: on.clone() })
             .unwrap();
@@ -384,6 +412,7 @@ mod tests {
                 rebase: true,
                 quiet_minutes,
                 comments: false,
+                ..KeeperSettings::default()
             };
             assert!(host.set_keeper(refused).is_err(), "{quiet_minutes}");
         }
@@ -401,9 +430,157 @@ mod tests {
         assert!(
             names
                 .iter()
-                .all(|name| !name.contains("keeper") && !name.contains("setting")),
+                .all(|name| !["keeper", "setting", "check", "repositor"]
+                    .iter()
+                    .any(|word| name.contains(word))),
             "{names:?}"
         );
+    }
+
+    /// A host whose keeper may rebase, with a keeper model chosen and only the level "Full".
+    fn rebasing() -> (tempfile::TempDir, Host) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let mut selection = host.model_selection().unwrap();
+        let allowed = selection.allowed(Provider::Claude)[0].clone();
+        selection.keeper = Some(ModelProfile {
+            provider: Provider::Claude,
+            model: allowed.model,
+            effort: allowed.effort,
+        });
+        host.set_model_selection(&selection).unwrap();
+        host.set_verification(VerificationSettings::default())
+            .unwrap();
+        let rebase = KeeperSettings {
+            rebase: true,
+            ..KeeperSettings::default()
+        };
+        host.set_keeper(rebase).unwrap();
+        (home, host)
+    }
+    fn with_light(host: &mut Host) {
+        let mut verification = host.settings().verification;
+        verification.levels.push(ReviewLevel {
+            name: "Light".into(),
+            kind: LevelKind::Recheck,
+            verifiers: vec!["Correctness".into()],
+            use_when: "after a small fix.".into(),
+        });
+        host.set_verification(verification).unwrap();
+    }
+    fn conflicts(level: &str) -> KeeperSettings {
+        KeeperSettings {
+            rebase: true,
+            conflicts: true,
+            review_level: Some(level.into()),
+            ..KeeperSettings::default()
+        }
+    }
+    fn refusal(result: Result<impl std::fmt::Debug>) -> String {
+        format!("{:#}", result.unwrap_err())
+    }
+
+    #[test]
+    fn the_conflicts_trigger_needs_the_rebase_trigger_a_keeper_model_and_a_re_check_level() {
+        let (_home, mut host) = rebasing();
+        let saved = host.settings();
+        let no_recheck = refusal(host.set_keeper(conflicts("Full")));
+        assert!(
+            no_recheck.contains("add one in Models → Review"),
+            "{no_recheck}"
+        );
+        with_light(&mut host);
+        let full = refusal(host.set_keeper(conflicts("Full")));
+        assert!(full.contains("choose Light"), "{full}");
+        let alone = KeeperSettings {
+            rebase: false,
+            ..conflicts("Light")
+        };
+        let alone = refusal(host.set_keeper(alone));
+        assert!(
+            alone.contains("needs \"Rebase when the base branch moves\""),
+            "{alone}"
+        );
+        assert_eq!(host.settings().keeper, saved.keeper);
+        host.set_keeper(conflicts("Light")).unwrap();
+        // Turning the rebase trigger off alone is refused, and both stay on.
+        let off = KeeperSettings {
+            rebase: false,
+            ..host.settings().keeper
+        };
+        assert!(host.set_keeper(off).is_err());
+        assert_eq!(host.settings().keeper, conflicts("Light"));
+        // Without a keeper model.
+        let mut selection = host.model_selection().unwrap();
+        selection.keeper = None;
+        let dropped = refusal(host.set_model_selection(&selection));
+        assert!(dropped.contains("needs a PR keeper model"), "{dropped}");
+        assert!(host.model_selection().unwrap().keeper.is_some());
+    }
+
+    #[test]
+    fn the_keepers_level_cannot_be_removed_or_made_a_full_review_while_the_trigger_needs_it() {
+        let (_home, mut host) = rebasing();
+        with_light(&mut host);
+        host.set_keeper(conflicts("Light")).unwrap();
+        let saved = host.settings().verification;
+        let mut removed = saved.clone();
+        removed.levels.retain(|level| level.name != "Light");
+        let refused = refusal(host.set_verification(removed));
+        assert!(
+            refused.contains("\"Try to resolve conflicts\""),
+            "{refused}"
+        );
+        let mut full = saved.clone();
+        full.levels[1].kind = LevelKind::FullReview;
+        assert!(host.set_verification(full).is_err());
+        assert_eq!(host.settings().verification, saved);
+    }
+
+    #[test]
+    fn a_repositorys_checks_command_is_saved_bounded_and_removed() {
+        let (home, mut host) = rebasing();
+        let repository = home.path().join("app");
+        fs::create_dir_all(&repository).unwrap();
+        let git = |args: &[&str]| runtime::git_output(&repository, args).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=F",
+            "-c",
+            "user.email=f@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "start",
+        ]);
+        let added = host
+            .add_repository(repository.to_str().unwrap(), "main")
+            .unwrap();
+        assert_eq!(added.checks, None);
+        let checks = |command: &str, minutes| RepositoryChecks {
+            command: command.into(),
+            minutes,
+        };
+        let set = |host: &mut Host, checks| {
+            host.execute(Command::SetRepositoryChecks {
+                repository_id: added.id.clone(),
+                checks,
+            })
+        };
+        set(&mut host, Some(checks("cargo test", 20))).unwrap();
+        for refused in [
+            checks("cargo test", 0),
+            checks("cargo test", 121),
+            checks("  ", 20),
+        ] {
+            assert!(set(&mut host, Some(refused)).is_err());
+        }
+        let saved = host.repository(&added.id).unwrap().checks;
+        assert_eq!(saved, Some(checks("cargo test", 20)));
+        set(&mut host, None).unwrap();
+        assert_eq!(host.repository(&added.id).unwrap().checks, None);
     }
 
     #[test]

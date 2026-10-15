@@ -1322,6 +1322,7 @@ pub(crate) mod tests {
             rebase: true,
             quiet_minutes: 2,
             comments: false,
+            ..KeeperSettings::default()
         };
         f.host.set_keeper(on).unwrap();
         (f, r)
@@ -1473,6 +1474,7 @@ pub(crate) mod tests {
             rebase: true,
             quiet_minutes: 2,
             comments: false,
+            ..KeeperSettings::default()
         };
         f.host.set_keeper(on).unwrap();
         let moved = move_base(&f, &r, "other.txt", "2\n");

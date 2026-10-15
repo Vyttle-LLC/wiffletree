@@ -152,6 +152,34 @@ pub struct Repository {
     /// push URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_problem: Option<String>,
+    /// The human's command that runs the repository's checks, for the PR keeper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<RepositoryChecks>,
+}
+/// A repository's checks: the human's own shell text, and how long it may run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryChecks {
+    pub command: String,
+    pub minutes: u32,
+}
+/// The time limits a checks command accepts, in minutes.
+pub const CHECKS_MINUTES: std::ops::RangeInclusive<u32> = 1..=120;
+impl RepositoryChecks {
+    pub const DEFAULT_MINUTES: u32 = 20;
+    pub fn validate(&self) -> Result<()> {
+        ensure!(!self.command.trim().is_empty(), "Enter the checks command");
+        ensure!(
+            self.command.len() <= 4096,
+            "The checks command is at most 4,096 bytes"
+        );
+        ensure!(
+            CHECKS_MINUTES.contains(&self.minutes),
+            "The checks may run for {}–{} minutes",
+            CHECKS_MINUTES.start(),
+            CHECKS_MINUTES.end()
+        );
+        Ok(())
+    }
 }
 /// The GitHub repository a workspace repository's `origin` names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,6 +684,12 @@ pub struct KeeperSettings {
     /// Sort new comments on a kept ticket's PR with the keeper's model, every tool off.
     #[serde(default)]
     pub comments: bool,
+    /// Check and review a rebase whose patch changed before pushing it.
+    #[serde(default)]
+    pub conflicts: bool,
+    /// The re-check level the keeper's reviews run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_level: Option<String>,
 }
 fn default_quiet_minutes() -> u32 {
     2
@@ -668,6 +702,8 @@ impl Default for KeeperSettings {
             rebase: false,
             quiet_minutes: default_quiet_minutes(),
             comments: false,
+            conflicts: false,
+            review_level: None,
         }
     }
 }
@@ -683,8 +719,46 @@ impl KeeperSettings {
     }
     /// Whether any trigger is on, so repositories are said to be kept or not.
     pub fn is_on(&self) -> bool {
-        self.rebase || self.comments
+        self.rebase || self.comments || self.conflicts
     }
+}
+/// Refuses the conflicts trigger unless the rebase trigger is on, the PR keeper's model is
+/// chosen and the review level names a configured re-check level: a conflict is found by the
+/// keeper's own rebase, and what the keeper makes is reviewed at that level.
+pub fn check_conflicts(
+    keeper: &KeeperSettings,
+    model: Option<&ModelProfile>,
+    verification: &VerificationSettings,
+) -> Result<()> {
+    if !keeper.conflicts {
+        return Ok(());
+    }
+    let trigger = "\"Try to resolve conflicts\"";
+    ensure!(
+        keeper.rebase,
+        "{trigger} needs \"Rebase when the base branch moves\""
+    );
+    ensure!(
+        model.is_some(),
+        "{trigger} needs a PR keeper model: choose one in Models first"
+    );
+    let rechecks: Vec<&str> = verification
+        .levels
+        .iter()
+        .filter(|l| l.kind == LevelKind::Recheck)
+        .map(|l| l.name.as_str())
+        .collect();
+    ensure!(
+        !rechecks.is_empty(),
+        "{trigger} needs a re-check level to review with: add one in Models → Review"
+    );
+    let named = keeper.review_level.as_deref().unwrap_or_default();
+    ensure!(
+        rechecks.iter().any(|name| same_name(name, named)),
+        "{trigger} reviews with a re-check level: choose {}",
+        or_list(&rechecks)
+    );
+    Ok(())
 }
 /// Refuses a PR keeper model that cannot sort comments: sorting runs with every tool turned
 /// off, which only Claude can be started with.
@@ -2048,6 +2122,12 @@ pub enum Command {
     /// human's client sends it.
     SetKeeper {
         keeper: KeeperSettings,
+    },
+    /// Saves or, with none, removes a repository's checks command; answers with the
+    /// `Repository`. Only the human's client sends it.
+    SetRepositoryChecks {
+        repository_id: String,
+        checks: Option<RepositoryChecks>,
     },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,
