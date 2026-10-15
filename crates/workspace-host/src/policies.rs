@@ -36,7 +36,7 @@ impl Host {
         if settings.keeper.comments {
             check_sorting_model(selection.keeper.as_ref())?;
         }
-        check_conflicts(
+        check_tries(
             &settings.keeper,
             selection.keeper.as_ref(),
             &settings.verification,

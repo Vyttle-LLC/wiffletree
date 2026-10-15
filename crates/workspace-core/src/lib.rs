@@ -687,6 +687,9 @@ pub struct KeeperSettings {
     /// Check and review a rebase whose patch changed before pushing it.
     #[serde(default)]
     pub conflicts: bool,
+    /// Try once to fix a kept ticket's PR whose checks failed, when they fail here too.
+    #[serde(default)]
+    pub checks: bool,
     /// The re-check level the keeper's reviews run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_level: Option<String>,
@@ -703,6 +706,7 @@ impl Default for KeeperSettings {
             quiet_minutes: default_quiet_minutes(),
             comments: false,
             conflicts: false,
+            checks: false,
             review_level: None,
         }
     }
@@ -719,45 +723,54 @@ impl KeeperSettings {
     }
     /// Whether any trigger is on, so repositories are said to be kept or not.
     pub fn is_on(&self) -> bool {
-        self.rebase || self.comments || self.conflicts
+        self.rebase || self.comments || self.conflicts || self.checks
+    }
+    /// Whether the trigger for tries at `problem` is on.
+    pub fn tries(&self, problem: KeeperProblem) -> bool {
+        match problem {
+            KeeperProblem::Conflict => self.conflicts,
+            KeeperProblem::Checks => self.checks,
+        }
     }
 }
-/// Refuses the conflicts trigger unless the rebase trigger is on, the PR keeper's model is
-/// chosen and the review level names a configured re-check level: a conflict is found by the
-/// keeper's own rebase, and what the keeper makes is reviewed at that level.
-pub fn check_conflicts(
+/// Refuses a trigger for tries unless the rebase trigger is on, the PR keeper's model is chosen
+/// and the review level names a configured re-check level: a try waits for the keeper's own
+/// rebase, and what the keeper makes is reviewed at that level.
+pub fn check_tries(
     keeper: &KeeperSettings,
     model: Option<&ModelProfile>,
     verification: &VerificationSettings,
 ) -> Result<()> {
-    if !keeper.conflicts {
-        return Ok(());
-    }
-    let trigger = "\"Try to resolve conflicts\"";
-    ensure!(
-        keeper.rebase,
-        "{trigger} needs \"Rebase when the base branch moves\""
-    );
-    ensure!(
-        model.is_some(),
-        "{trigger} needs a PR keeper model: choose one in Models first"
-    );
     let rechecks: Vec<&str> = verification
         .levels
         .iter()
         .filter(|l| l.kind == LevelKind::Recheck)
         .map(|l| l.name.as_str())
         .collect();
-    ensure!(
-        !rechecks.is_empty(),
-        "{trigger} needs a re-check level to review with: add one in Models → Review"
-    );
-    let named = keeper.review_level.as_deref().unwrap_or_default();
-    ensure!(
-        rechecks.iter().any(|name| same_name(name, named)),
-        "{trigger} reviews with a re-check level: choose {}",
-        or_list(&rechecks)
-    );
+    for problem in [KeeperProblem::Conflict, KeeperProblem::Checks] {
+        if !keeper.tries(problem) {
+            continue;
+        }
+        let trigger = format!("\"{}\"", problem.trigger());
+        ensure!(
+            keeper.rebase,
+            "{trigger} needs \"Rebase when the base branch moves\""
+        );
+        ensure!(
+            model.is_some(),
+            "{trigger} needs a PR keeper model: choose one in Models first"
+        );
+        ensure!(
+            !rechecks.is_empty(),
+            "{trigger} needs a re-check level to review with: add one in Models → Review"
+        );
+        let named = keeper.review_level.as_deref().unwrap_or_default();
+        ensure!(
+            rechecks.iter().any(|name| same_name(name, named)),
+            "{trigger} reviews with a re-check level: choose {}",
+            or_list(&rechecks)
+        );
+    }
     Ok(())
 }
 /// Refuses a PR keeper model that cannot sort comments: sorting runs with every tool turned
@@ -1096,15 +1109,25 @@ pub struct Keeper {
     /// Every try by the keeper's model, oldest first; the last may be running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tries: Vec<KeeperTry>,
-    /// The PR watcher's wake held back while the keeper may still try its problem.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held: Option<HeldWake>,
+    /// The PR watcher's wakes held back while the keeper may still try their problems.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_wakes: Vec<HeldWake>,
 }
 /// What a try by the keeper's model fixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeeperProblem {
     Conflict,
+    Checks,
+}
+impl KeeperProblem {
+    /// The trigger for tries at this problem, as the Repositories page names it.
+    pub fn trigger(self) -> &'static str {
+        match self {
+            Self::Conflict => "Try to resolve conflicts",
+            Self::Checks => "Try to fix failed checks",
+        }
+    }
 }
 /// One try by the keeper's model at one problem at one PR head.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1112,7 +1135,8 @@ pub struct KeeperTry {
     pub problem: KeeperProblem,
     pub head: String,
     pub base: String,
-    /// The files Git could not merge.
+    /// The files Git could not merge, or for failed checks the files the PR changes against its
+    /// base: the files the try may change.
     pub files: Vec<String>,
     pub started: i64,
     /// Unset while the try runs.
@@ -1232,6 +1256,8 @@ pub enum KeeperKind {
     ReviewedRebase,
     /// A conflict resolved by the keeper's model: checked and reviewed before its push.
     Resolved,
+    /// Failed checks fixed by the keeper's model: checked and reviewed before its push.
+    Fixed,
 }
 /// What the PR keeper is doing for a kept ticket whose branch it may change, as the host found
 /// it after the latest pass: the end of the ticket's PR line.
@@ -1248,6 +1274,8 @@ pub enum KeeperPart {
     UpToDate,
     /// The keeper's model is trying to resolve the PR's conflict.
     Resolving,
+    /// The keeper's model is trying to fix the PR's failed checks.
+    Fixing,
     /// The keeper threw its try at the PR's head away and told the coordinator.
     WithCoordinator,
 }
@@ -1388,6 +1416,7 @@ impl Ticket {
         let last = self.keeper.as_ref()?.tries.last()?;
         match &last.ended {
             _ if last.head != *head => None,
+            None if last.problem == KeeperProblem::Checks => Some(KeeperPart::Fixing),
             None => Some(KeeperPart::Resolving),
             Some(TryEnd::ThrownAway(_)) => Some(KeeperPart::WithCoordinator),
             Some(_) => None,

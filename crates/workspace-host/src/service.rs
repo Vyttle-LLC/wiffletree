@@ -396,6 +396,22 @@ fn spawn_keeper_gate(sender: Sender<Event>, job: keeper::Gate) {
         let _ = sender.send_blocking(Event::Gated(gated));
     });
 }
+/// Runs one reproduction of a PR's failed checks on its own thread and always reports back,
+/// even if it panics, so the ticket is never left marked as reproducing.
+fn spawn_keeper_reproduce(sender: Sender<Event>, job: keeper::Reproduce) {
+    std::thread::spawn(move || {
+        let reproduce = std::panic::AssertUnwindSafe(|| keeper::reproduce(&job));
+        let reproduced =
+            std::panic::catch_unwind(reproduce).unwrap_or_else(|_| keeper::Reproduced {
+                ticket_id: job.ticket_id.clone(),
+                base: job.base.clone(),
+                head: job.head.clone(),
+                checkout: job.checkout.clone(),
+                result: Err("the checks stopped unexpectedly".into()),
+            });
+        let _ = sender.send_blocking(Event::Reproduced(reproduced));
+    });
+}
 /// Runs one PR keeper fetch of GitHub's branch on its own thread and always reports back, even
 /// if it panics, so the ticket is never left marked as fetching.
 fn spawn_keeper_fetch(sender: Sender<Event>, job: keeper::Fetch, git: publish::GitTool) {
@@ -462,6 +478,8 @@ enum Event {
     Fetched(keeper::Fetched),
     /// A try's gate finished on its own thread.
     Gated(keeper::Gated),
+    /// A reproduction of a PR's failed checks finished on its own thread.
+    Reproduced(keeper::Reproduced),
     /// A read of a ticket's new PR comments finished on its own thread.
     CommentsRead(String, u64, Result<keeper::NewComments>),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
@@ -1254,6 +1272,13 @@ impl Actor {
                 }
                 true
             }
+            Event::Reproduced(reproduced) => {
+                let ticket = reproduced.ticket_id.clone();
+                if let Err(e) = self.host.keeper_reproduced(reproduced) {
+                    eprintln!("Workspace PR keeper: {ticket}: {e:#}");
+                }
+                true
+            }
             Event::Fetched(fetched) => {
                 let in_turn = self.ticket_in_turn(&fetched.ticket_id);
                 let git = &self.publish_tools.git;
@@ -1797,6 +1822,9 @@ impl Actor {
         }
         for job in due.rebases {
             spawn_keeper_rebase(self.sender.clone(), job);
+        }
+        for job in due.reproductions {
+            spawn_keeper_reproduce(self.sender.clone(), job);
         }
         for job in due.fetches {
             spawn_keeper_fetch(self.sender.clone(), job, self.publish_tools.git.clone());

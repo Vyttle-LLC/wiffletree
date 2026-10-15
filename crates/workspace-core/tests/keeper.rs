@@ -6,7 +6,8 @@ fn settings_and_tickets_stored_before_the_keeper_decode_with_everything_off() {
     let settings: HostSettings = serde_json::from_value(json!({"workspaces_dir": "/w"})).unwrap();
     assert_eq!(settings.keeper, KeeperSettings::default());
     assert!(!settings.keeper.rebase && !settings.keeper.is_on());
-    assert!(!settings.keeper.conflicts && settings.keeper.review_level.is_none());
+    assert!(!settings.keeper.conflicts && !settings.keeper.checks);
+    assert!(settings.keeper.review_level.is_none());
     assert_eq!(settings.keeper.quiet_minutes, 2);
     let ticket: Ticket = serde_json::from_value(json!({
         "id":"t","coordinator_id":"c","repository_id":"r","title":"T","brief":"B",
@@ -54,7 +55,7 @@ fn saving_the_keeper_is_a_client_command() {
     };
     assert_eq!(
         serde_json::to_value(&command).unwrap(),
-        json!({"type":"set_keeper","keeper":{"rebase":false,"quiet_minutes":2,"comments":false,"conflicts":false}})
+        json!({"type":"set_keeper","keeper":{"rebase":false,"quiet_minutes":2,"comments":false,"conflicts":false,"checks":false}})
     );
 }
 
