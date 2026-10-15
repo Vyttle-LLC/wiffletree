@@ -309,12 +309,13 @@ pub fn withdrawn_lines(ticket: &Ticket) -> Vec<(String, String)> {
                 .into_iter()
                 .map(|run| format!("{} {}", run.focus, run.result.label()));
             let findings = withdrawn.entries.iter().map(|entry| {
+                let decision = match &entry.reason {
+                    Some(reason) => format!("{} ({reason})", entry.status.label()),
+                    None => entry.status.label().into(),
+                };
                 format!(
-                    "{} {}: {} at {}",
-                    entry.id,
-                    entry.status.label(),
-                    entry.finding.summary,
-                    entry.finding.location
+                    "{} {decision}: {} at {}",
+                    entry.id, entry.finding.summary, entry.finding.location
                 )
             });
             let detail: Vec<String> = [branch]
@@ -2181,7 +2182,7 @@ mod tests {
             withdrawn_lines(&ticket),
             [(
                 "withdrew its Light re-check of 77b0c13, cycle 2: it did not pass".to_owned(),
-                "putting the branch back to 3daf610 · Correctness failed · F5 follow-up: Summary F5 at live.rs:398".to_owned()
+                "putting the branch back to 3daf610 · Correctness failed · F5 follow-up (Later): Summary F5 at live.rs:398".to_owned()
             )]
         );
         // Not among the ticket's cycles.
