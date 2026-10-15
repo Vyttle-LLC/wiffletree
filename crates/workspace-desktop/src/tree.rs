@@ -41,11 +41,15 @@ fn cycle_line(verification: &Verification) -> String {
         VerificationOutcome::Passed => "passed",
         VerificationOutcome::Blocked => "blocked",
     };
+    let rounds = verification.rounds.len();
+    // A keeper review has one round, so "of 1" says nothing.
+    let rounds = match verification.keeper {
+        true => format!("{rounds} round{}", if rounds == 1 { "" } else { "s" }),
+        false => format!("{rounds} of {} rounds", verification.max_rounds),
+    };
     format!(
-        "{}: {outcome}, {} of {} rounds",
-        verification.cycle_label("Verification cycle"),
-        verification.rounds.len(),
-        verification.max_rounds
+        "{}: {outcome}, {rounds}",
+        verification.cycle_label("Verification cycle")
     )
 }
 
@@ -260,6 +264,12 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
         true => "and pushed",
         false => "but did not push it",
     };
+    let change = match last.kind {
+        KeeperKind::Rebase => "the same change as the reviewed commit, so the passed review stands",
+        KeeperKind::ReviewedRebase => {
+            "a changed patch · the repository's checks passed · reviewed before the push"
+        }
+    };
     Some((
         format!(
             "rebased onto {base} at {} {pushed}, {}",
@@ -267,11 +277,61 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
             rebased_ago(last.at, crate::ui::now())
         ),
         format!(
-            "{} → {} · the same change as the reviewed commit, so the passed review stands",
+            "{} → {} · {change}",
             short_sha(&last.before),
             short_sha(&last.after)
         ),
     ))
+}
+
+/// Each keeper review that was withdrawn, newest first, for the card: kept on the keeper's
+/// record and not among the ticket's cycles, with its verdicts and its findings' decisions.
+pub fn withdrawn_lines(ticket: &Ticket) -> Vec<(String, String)> {
+    let withdrawn = ticket
+        .keeper_reviews()
+        .iter()
+        .rev()
+        .filter_map(|review| Some((review, review.withdrawn.as_ref()?)));
+    withdrawn
+        .map(|(review, withdrawn)| {
+            let level = withdrawn
+                .cycle
+                .level
+                .as_ref()
+                .map_or("re-check".into(), CycleLevel::label);
+            let branch = match withdrawn.putting_back {
+                true => format!("putting the branch back to {}", short_sha(&review.before)),
+                false => "nothing was pushed".into(),
+            };
+            let verdicts = withdrawn
+                .cycle
+                .latest_results()
+                .into_iter()
+                .map(|run| format!("{} {}", run.focus, run.result.label()));
+            let findings = withdrawn.entries.iter().map(|entry| {
+                format!(
+                    "{} {}: {} at {}",
+                    entry.id,
+                    entry.status.label(),
+                    entry.finding.summary,
+                    entry.finding.location
+                )
+            });
+            let detail: Vec<String> = [branch]
+                .into_iter()
+                .chain(verdicts)
+                .chain(findings)
+                .collect();
+            (
+                format!(
+                    "withdrew its {level} of {}, cycle {}: it did not pass",
+                    short_sha(&review.after),
+                    review.cycle
+                ),
+                detail.join(" · "),
+            )
+        })
+        .collect()
 }
 
 /// The PR in full words, for the row's tooltip and the ticket's card.
@@ -2053,6 +2113,85 @@ mod tests {
         assert_eq!(
             detail,
             "e21f0aa → 77b0c13 · the same change as the reviewed commit, so the passed review stands"
+        );
+        let keeper = ticket.keeper.as_mut().unwrap();
+        keeper.last.as_mut().unwrap().kind = KeeperKind::ReviewedRebase;
+        let (_, detail) = keeper_lines(&ticket).unwrap();
+        assert_eq!(
+            detail,
+            "e21f0aa → 77b0c13 · a changed patch · the repository's checks passed · reviewed before the push"
+        );
+    }
+
+    #[test]
+    fn a_keeper_review_reads_as_one_round_and_once_withdrawn_shows_on_the_keepers_record() {
+        let (_home, _host, _coordinator, mut ticket) = store();
+        let mut review = Verification {
+            level: Some(CycleLevel {
+                name: "Light".into(),
+                kind: LevelKind::Recheck,
+            }),
+            max_rounds: 1,
+            keeper: true,
+            ..verification(2, VerificationOutcome::Passed, 1)
+        };
+        ticket.verification = Some(review.clone());
+        assert_eq!(
+            verification_lines(&ticket)[0],
+            "Verification cycle 2 · Light re-check by the PR keeper: passed, 1 round"
+        );
+
+        review.outcome = VerificationOutcome::Blocked;
+        review.rounds[0].verifiers = vec![VerifierRun {
+            session_id: "v".into(),
+            role: Role::Reviewer,
+            focus: "Correctness".into(),
+            message_id: "m".into(),
+            result: VerifierResult::Failed,
+            report_id: None,
+            reason: None,
+        }];
+        ticket.verification = Some(verification(1, VerificationOutcome::Passed, 1));
+        let decided = entry(
+            "F5",
+            Severity::Blocking,
+            EntryStatus::FollowUp,
+            Some("Later"),
+        );
+        let mut withdrawn = Withdrawn {
+            cycle: review,
+            entries: vec![decided],
+            putting_back: true,
+        };
+        let record = |withdrawn: &Withdrawn| KeeperReview {
+            cycle: 2,
+            before: "3daf610aa".into(),
+            after: "77b0c13ff".into(),
+            base: "4a1c2e9dd".into(),
+            state: "passed".into(),
+            last: None,
+            withdrawn: Some(withdrawn.clone()),
+            push_started: false,
+        };
+        ticket.keeper = Some(Keeper {
+            reviews: vec![record(&withdrawn)],
+            ..Default::default()
+        });
+        assert_eq!(
+            withdrawn_lines(&ticket),
+            [(
+                "withdrew its Light re-check of 77b0c13, cycle 2: it did not pass".to_owned(),
+                "putting the branch back to 3daf610 · Correctness failed · F5 follow-up: Summary F5 at live.rs:398".to_owned()
+            )]
+        );
+        // Not among the ticket's cycles.
+        assert_eq!(verification_lines(&ticket).len(), 2);
+        withdrawn.putting_back = false;
+        ticket.keeper.as_mut().unwrap().reviews = vec![record(&withdrawn)];
+        assert!(
+            withdrawn_lines(&ticket)[0]
+                .1
+                .starts_with("nothing was pushed · ")
         );
     }
 
