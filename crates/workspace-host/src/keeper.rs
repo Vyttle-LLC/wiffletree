@@ -114,12 +114,17 @@ pub(crate) enum Checked {
     /// Still running at the repository's limit of this many minutes, and stopped.
     OutOfTime(u32),
 }
+/// A minute of the checks' limit; tests shorten it so that running out of time is quick.
+const CHECKS_MINUTE: Duration = match cfg!(test) {
+    true => Duration::from_secs(2),
+    false => Duration::from_secs(60),
+};
 /// Runs the repository's checks command with the system shell in `checkout`, stopped with
 /// everything it started at the repository's limit.
 pub(crate) fn run_checks(checks: &RepositoryChecks, checkout: &Path) -> Result<Checked> {
     let mut command = std::process::Command::new("/bin/sh");
     command.arg("-c").arg(&checks.command).current_dir(checkout);
-    let limit = Duration::from_secs(u64::from(checks.minutes) * 60);
+    let limit = CHECKS_MINUTE * checks.minutes;
     Ok(match runtime::run_limited(command, limit)? {
         Some(status) if status.success() => Checked::Passed,
         Some(_) => Checked::Failed,
@@ -928,7 +933,8 @@ impl Host {
                 let checks = match checked.map(|(_, checked)| checked) {
                     None => None,
                     Some(Checked::OutOfTime(minutes)) => {
-                        Some(format!("did not finish in {minutes} minutes"))
+                        let plural = if minutes == 1 { "" } else { "s" };
+                        Some(format!("did not finish in {minutes} minute{plural}"))
                     }
                     Some(_) => Some("failed".into()),
                 };
@@ -3732,6 +3738,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_coordinators_cycle_that_ends_blocked_stays_beside_the_keepers_record() {
+        let (mut f, _r) = withdrawn();
+        let mut ticket = f.ticket();
+        ticket.state = "ready_for_testing".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let record = ticket.keeper_reviews().to_vec();
+        let choice = VerifierChoice {
+            focus: "Correctness".into(),
+            profile: f.host.model_selection().unwrap().keeper.unwrap(),
+            reason: "Re-check".into(),
+        };
+        f.host
+            .verify_ticket(&f.ticket.clone(), "Light", &[choice])
+            .unwrap();
+        verdict(&mut f, "Correctness", "blocked", json!([]));
+        let ticket = f.ticket();
+        let cycle = ticket.verification.as_ref().unwrap();
+        assert_eq!(
+            (cycle.cycle, cycle.outcome),
+            (3, VerificationOutcome::Blocked)
+        );
+        assert!(!cycle.keeper);
+        assert_eq!(ticket.keeper_reviews(), record);
+        let withdrawals: i64 = f
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM activity WHERE kind='keeper_review_withdrawn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(withdrawals, 1, "only the keeper's own review was withdrawn");
+    }
+
+    #[test]
     fn a_decision_on_the_reviews_own_finding_leaves_the_ledger_with_it() {
         let (mut f, r) = reviewing("true");
         let mut settings = f.host.settings().verification;
@@ -3845,6 +3887,25 @@ pub(crate) mod tests {
             told[0].2
         );
         assert!(!told[0].2.contains("101"));
+    }
+
+    #[test]
+    fn a_changed_patch_whose_checks_run_out_of_time_is_dropped_and_the_coordinator_told_so() {
+        let (mut f, r) = reviewing("sleep 30");
+        let before = worktree(&f);
+        rebase_changed(&mut f, &r);
+        assert_eq!(worktree(&f), before);
+        assert!(!has_result_ref(&f));
+        assert_eq!(f.ticket().verification.unwrap().cycle, 1);
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0]
+                .2
+                .contains("The repository's checks did not finish in 1 minute on it"),
+            "{}",
+            told[0].2
+        );
     }
 
     #[test]
@@ -4073,6 +4134,7 @@ pub(crate) mod tests {
         let run = |command| run_checks(&checks(command), home.path()).unwrap();
         assert_eq!(run("test -d . && true"), Checked::Passed);
         assert_eq!(run("exit 101"), Checked::Failed);
+        assert_eq!(run("sleep 30"), Checked::OutOfTime(1));
         let pid = home.path().join("pid");
         let mut command = std::process::Command::new("/bin/sh");
         command
@@ -4081,8 +4143,14 @@ pub(crate) mod tests {
         let ran = runtime::run_limited(command, Duration::from_secs(1)).unwrap();
         assert!(ran.is_none(), "out of time");
         let child: libc::pid_t = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        // The killed child stays a zombie until launchd reaps it, which under load takes a
+        // moment; a child that was not killed would still be sleeping after these 5 seconds.
         // SAFETY: signal 0 only asks whether the process exists.
-        let alive = unsafe { libc::kill(child, 0) } == 0;
-        assert!(!alive, "the command's own child was stopped too");
+        let alive = || unsafe { libc::kill(child, 0) } == 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "the command's own child was stopped too");
     }
 }

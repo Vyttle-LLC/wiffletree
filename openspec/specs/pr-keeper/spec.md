@@ -427,6 +427,17 @@ The runs of a PR keeper agent SHALL be recorded as provider runs of a PR keeper 
 - **WHEN** a ticket's sorting session has run more turns than the check-in threshold
 - **THEN** the coordinator gets no check-in for them
 
+### Requirement: Each repository's checks command
+Each workspace repository SHALL be able to hold one checks command and its time limit in minutes, which SHALL default to 20 and accept 1 to 120. Only the human's client SHALL be able to set them; no agent tool SHALL. The command SHALL be the human's own text, run by the host with the system shell. The Repositories page SHALL show the command on the repository's row and SHALL say, for a kept repository without one, that a conflict or a failed check there goes to the coordinator. The keeper SHALL start no try, and SHALL review no changed patch itself, in a repository without a command.
+
+#### Scenario: No command
+- **WHEN** a kept repository has no checks command, the conflicts trigger is on and a rebase conflicts
+- **THEN** no model runs, and the coordinator hears of the conflict from the PR watcher, as before
+
+#### Scenario: An agent cannot set it
+- **WHEN** any agent calls any workspace tool
+- **THEN** no tool changes a repository's checks command
+
 ### Requirement: The conflicts trigger needs a model and a re-check level
 The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the rebase trigger is on, the PR keeper's model is chosen and the review level names a configured level whose kind is re-check, and SHALL refuse to turn the rebase trigger off while the conflicts trigger is on: a conflict is found by the keeper's own rebase, so without the rebase trigger no try could ever start. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
 

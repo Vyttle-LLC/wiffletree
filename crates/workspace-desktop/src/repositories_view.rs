@@ -1,6 +1,12 @@
 //! The workspace's repositories. Projects use all of them unless they choose their own set.
 use super::*;
-use gpui_component::{Disableable, Sizable, button::ButtonVariants, checkbox::Checkbox};
+use gpui_component::{
+    Disableable, Sizable,
+    button::ButtonVariants,
+    checkbox::Checkbox,
+    input::Input,
+    menu::{DropdownMenu, PopupMenuItem},
+};
 use ui::{age, banner, empty_state, from_now, hint, icon, mono, pill, section};
 
 const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
@@ -10,8 +16,18 @@ const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TI
 const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
 const KEEP: &str = "Only in the repositories ticked above · all off until you tick them.";
 const REBASE: &str = "Plain Git, no model and no review. Once the base has been quiet, replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).";
+// Until the keeper's model tries conflicts itself (slice 4b), the trigger reviews only a rebase
+// whose patch changed.
+const CONFLICTS: &str = "When a rebase changes the patch, the repository’s checks run on it and a re-check must pass before anything is pushed. If not, nothing is pushed and the coordinator is told. A conflict still goes to the coordinator. Needs the rebase trigger above and a checks command in the repository.";
+const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
 const SORT: &str = "Reads each new comment and sorts it: needs a change, a question, or no action. Tells the coordinator about the first two. Never replies, resolves or reacts.";
 const NEVER_KEEPER: &str = "Wiffletree never merges, approves, closes or comments on a pull request. The model is chosen in Models → PR keeper.";
+
+/// A repository's checks command being edited on its row, with the limit chosen so far.
+pub(super) struct ChecksEdit {
+    repository_id: String,
+    minutes: u32,
+}
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
 fn trigger(checkbox: Checkbox, name: &'static str, details: Vec<AnyElement>) -> Div {
@@ -88,14 +104,12 @@ impl Workspace {
                     .any(|t| t.repository_id == repository.id);
             let id = repository.id.clone();
             let missing = snapshot.missing_repositories.contains(&repository.id);
-            list = list.child(
-                div()
-                    .py_2()
+            let kept = kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper);
+            let checks = self.checks_field(repository, kept == Some("kept"), p, cx);
+            let row = div()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .border_b_1()
-                    .border_color(p.edge.opacity(0.25))
                     .child(icon("folder").text_color(p.subtle))
                     .child(
                         div()
@@ -133,11 +147,9 @@ impl Workspace {
                             p.subtle
                         },
                     ))
-                    .children(
-                        kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper).map(
-                            |label| pill(label, if label == "kept" { p.focus } else { p.subtle }),
-                        ),
-                    )
+                    .children(kept.map(|label| {
+                        pill(label, if label == "kept" { p.focus } else { p.subtle })
+                    }))
                     .child(pill(repository.base.clone(), p.subtle))
                     .child(
                         button(SharedString::from(format!("remove-repository-{id}")))
@@ -159,7 +171,15 @@ impl Workspace {
                                     c,
                                 )
                             })),
-                    ),
+                    );
+            // The checks line takes the row's whole width, in line with the name.
+            list = list.child(
+                div()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(p.edge.opacity(0.25))
+                    .child(row)
+                    .child(checks.pl(px(28.))),
             );
         }
         body.child(list)
@@ -232,8 +252,9 @@ impl Workspace {
     }
 
     /// The PR keeper's triggers, for the whole workspace: the rebase trigger and its quiet
-    /// period, and comment sorting.
+    /// period, the conflicts trigger and its review level, and comment sorting.
     fn keeper_block(&self, keeper: &KeeperSettings, p: Palette, cx: &mut Context<Self>) -> Div {
+        let picker = self.review_level_picker(keeper, cx);
         let save = |keeper: KeeperSettings| {
             cx.listener(move |v, _, w, c| {
                 v.request(
@@ -273,6 +294,23 @@ impl Workspace {
             };
             v.request(Command::SetKeeper { keeper }, w, c)
         });
+        let current = keeper.clone();
+        let conflicts = cx.listener(move |v, checked: &bool, w, c| {
+            let keeper = KeeperSettings {
+                conflicts: *checked,
+                ..current.clone()
+            };
+            v.request(Command::SetKeeper { keeper }, w, c)
+        });
+        let level = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(12.))
+            .text_color(p.subtle)
+            .child("Reviewed with")
+            .child(picker)
+            .child("a re-check level from Models → Review");
         let period = div()
             .flex()
             .items_center()
@@ -307,6 +345,16 @@ impl Workspace {
                 ],
             ))
             .child(trigger(
+                Checkbox::new("keeper-conflicts")
+                    .checked(keeper.conflicts)
+                    .on_click(conflicts),
+                "Try to resolve conflicts",
+                vec![
+                    hint(CONFLICTS, p).into_any_element(),
+                    level.into_any_element(),
+                ],
+            ))
+            .child(trigger(
                 Checkbox::new("keeper-comments")
                     .checked(keeper.comments)
                     .on_click(comments),
@@ -314,6 +362,190 @@ impl Workspace {
                 vec![hint(SORT, p).into_any_element()],
             ))
             .child(div().text_size(px(12.)).child(NEVER_KEEPER))
+    }
+
+    /// The repository's checks command and its limit, or its editor while the human edits it.
+    fn checks_field(
+        &self,
+        repository: &Repository,
+        kept: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let row = div()
+            .mt_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(11.5))
+            .text_color(p.subtle)
+            .child("Checks");
+        let id = repository.id.clone();
+        let Some(edit) = self
+            .checks_edit
+            .as_ref()
+            .filter(|edit| edit.repository_id == repository.id)
+        else {
+            let (command, note) = checks_summary(repository.checks.as_ref(), kept);
+            // A long command wraps, with its limit under it.
+            let command = command.map(|command| {
+                div()
+                    .font_family(".SystemMonoFont")
+                    .text_size(px(11.))
+                    .text_color(p.text)
+                    .child(command)
+            });
+            return row
+                .items_start()
+                .child(div().flex_1().min_w_0().children(command).child(note))
+                .child(
+                    button(SharedString::from(format!("edit-checks-{id}")))
+                        .ghost()
+                        .xsmall()
+                        .label("Edit")
+                        .on_click(cx.listener(move |v, _, w, c| v.begin_checks_edit(&id, w, c))),
+                );
+        };
+        let minutes = edit.minutes;
+        let step = |glyph: &'static str, minutes: u32| {
+            button(SharedString::from(format!("checks-minutes-{glyph}")))
+                .ghost()
+                .xsmall()
+                .label(glyph)
+                .disabled(!CHECKS_MINUTES.contains(&minutes))
+                .on_click(cx.listener(move |v, _, _, c| {
+                    if let Some(edit) = &mut v.checks_edit {
+                        edit.minutes = minutes;
+                        c.notify();
+                    }
+                }))
+        };
+        let remove = repository.checks.is_some().then(|| {
+            let id = id.clone();
+            button("remove-checks")
+                .ghost()
+                .xsmall()
+                .label("Remove")
+                .on_click(cx.listener(move |v, _, w, c| {
+                    let command = Command::SetRepositoryChecks {
+                        repository_id: id.clone(),
+                        checks: None,
+                    };
+                    v.request(command, w, c)
+                }))
+        });
+        row.child(Input::new(&self.checks_command).xsmall().flex_1().min_w_0())
+            .child("· stop after")
+            .child(step("−", minutes - 1))
+            .child(div().text_color(p.text).child(minutes.to_string()))
+            .child(step("+", minutes + 1))
+            .child("min")
+            .child(
+                button("save-checks")
+                    .primary()
+                    .xsmall()
+                    .label("Save")
+                    .on_click(cx.listener(|v, _, w, c| v.save_checks(w, c))),
+            )
+            .children(remove)
+            .child(
+                button("cancel-checks")
+                    .ghost()
+                    .xsmall()
+                    .label("Cancel")
+                    .on_click(cx.listener(|v, _, _, c| {
+                        v.checks_edit = None;
+                        c.notify();
+                    })),
+            )
+    }
+
+    fn begin_checks_edit(
+        &mut self,
+        repository_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let checks = self
+            .snapshot
+            .iter()
+            .flat_map(|s| &s.repositories)
+            .find(|r| r.id == repository_id)
+            .and_then(|r| r.checks.clone());
+        let command = checks
+            .as_ref()
+            .map_or("", |c| c.command.as_str())
+            .to_owned();
+        self.checks_command
+            .update(cx, |input, cx| input.set_value(command, window, cx));
+        self.checks_edit = Some(ChecksEdit {
+            repository_id: repository_id.to_owned(),
+            minutes: checks.map_or(RepositoryChecks::DEFAULT_MINUTES, |c| c.minutes),
+        });
+        cx.notify();
+    }
+
+    /// Saves the command as typed; the host refuses an empty one or a limit out of range.
+    fn save_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.checks_edit else {
+            return;
+        };
+        let checks = RepositoryChecks {
+            command: self.checks_command.read(cx).value().trim().to_owned(),
+            minutes: edit.minutes,
+        };
+        let command = Command::SetRepositoryChecks {
+            repository_id: edit.repository_id.clone(),
+            checks: Some(checks),
+        };
+        self.request(command, window, cx);
+    }
+
+    /// The re-check levels the keeper's reviews may run, from the saved verification setting;
+    /// the host refuses a choice the conflicts trigger cannot use.
+    fn review_level_picker(
+        &self,
+        keeper: &KeeperSettings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let rechecks: Vec<String> = self
+            .verifiers
+            .read(cx)
+            .verification()
+            .into_iter()
+            .flat_map(|v| &v.levels)
+            .filter(|level| level.kind == LevelKind::Recheck)
+            .map(|level| level.name.clone())
+            .collect();
+        let label = keeper
+            .review_level
+            .clone()
+            .unwrap_or_else(|| "No level chosen".into());
+        let current = keeper.clone();
+        let weak = cx.weak_entity();
+        button("keeper-review-level")
+            .xsmall()
+            .label(label)
+            .dropdown_caret(true)
+            .disabled(rechecks.is_empty())
+            .dropdown_menu(move |mut menu, _, _| {
+                for name in &rechecks {
+                    let keeper = KeeperSettings {
+                        review_level: Some(name.clone()),
+                        ..current.clone()
+                    };
+                    let checked = current.review_level.as_ref() == Some(name);
+                    let weak = weak.clone();
+                    menu = menu.item(PopupMenuItem::new(name.clone()).checked(checked).on_click(
+                        move |_, w, c| {
+                            let keeper = keeper.clone();
+                            let _ = weak
+                                .update(c, |v, c| v.request(Command::SetKeeper { keeper }, w, c));
+                        },
+                    ));
+                }
+                menu
+            })
     }
 
     /// One row of the owners block. `entry` is what its tick box allows; a repository that is
@@ -441,6 +673,19 @@ fn owners_heading(entries: &OwnerEntries, allowed: &[String]) -> String {
     format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {total} {owners} allowed")
 }
 
+/// The repository's checks command, if it has one, and the line that goes with it: its limit,
+/// or that none was entered and, in a kept repository, where a conflict or a failed check goes.
+fn checks_summary(checks: Option<&RepositoryChecks>, kept: bool) -> (Option<String>, String) {
+    match checks {
+        Some(checks) => (
+            Some(checks.command.clone()),
+            format!("stop after {} min", checks.minutes),
+        ),
+        None if kept => (None, NO_CHECKS.into()),
+        None => (None, "none entered".into()),
+    }
+}
+
 fn open_tickets<'a>(
     snapshot: &'a Snapshot,
     repository: &'a Repository,
@@ -505,8 +750,8 @@ fn pr_check_status(snapshot: &Snapshot, repository: &Repository) -> Option<(Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        FORKS, NEVER, NOT_ON_GITHUB, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, owners_heading,
-        pr_check_status, repository_counts,
+        FORKS, NEVER, NOT_ON_GITHUB, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary,
+        owners_heading, pr_check_status, repository_counts,
     };
     use crate::ui;
     use workspace_core::*;
@@ -630,6 +875,29 @@ mod tests {
             "1 project · 0 open tickets"
         );
         assert_eq!(pr_check_status(&snapshot, &repository), None);
+    }
+
+    #[test]
+    fn a_repository_row_shows_its_checks_or_where_problems_go_without_them() {
+        let checks = RepositoryChecks {
+            command: "cargo test --locked".into(),
+            minutes: 20,
+        };
+        assert_eq!(
+            checks_summary(Some(&checks), true),
+            (
+                Some("cargo test --locked".into()),
+                "stop after 20 min".into()
+            )
+        );
+        assert_eq!(
+            checks_summary(None, true),
+            (
+                None,
+                "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator".into()
+            )
+        );
+        assert_eq!(checks_summary(None, false), (None, "none entered".into()));
     }
 
     fn on_github(name_with_owner: &str, fork: bool, public: bool) -> Repository {
