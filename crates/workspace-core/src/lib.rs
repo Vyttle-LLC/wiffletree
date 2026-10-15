@@ -1017,9 +1017,10 @@ pub struct Keeper {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeeperComments {
-    /// Comments created up to this time are sorted or counted; unset until a pass with the
+    /// The creation time and id of the last comment read: comments are read in that order, so
+    /// one created in the same second as it still follows it. Unset until a pass with the
     /// comments trigger on starts it.
-    pub through: Option<i64>,
+    pub through: Option<(i64, String)>,
     /// The watcher's newest comments when they were last read in full.
     pub cursors: CommentCursors,
     /// Each sorted comment's id, such as `discussion_r4190331`, and its class.

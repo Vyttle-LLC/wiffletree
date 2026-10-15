@@ -445,6 +445,8 @@ fn run_turn(
     let _stop_reading = StopReading(output.clone());
     let compaction = matches!(turn.kind, TurnKind::Compaction(_));
     let sort = matches!(turn.kind, TurnKind::Sort);
+    // A sorting run's answer counts only after its start reported nothing to act with.
+    let mut attested = false;
     let mut terminal = false;
     let mut failure = None;
     let mut usage = Value::Null;
@@ -527,8 +529,9 @@ fn run_turn(
                 _ => {}
             },
             Provider::Claude => match value["type"].as_str().unwrap_or_default() {
-                // A compaction's requests are counted from its result record instead.
-                "stream_event" if !compaction => {
+                // A compaction's requests are counted from its result record instead, and a
+                // sorting run's too: its text could repeat a comment's.
+                "stream_event" if !compaction && !sort => {
                     if let Some(event) = requests.event(&value) {
                         emit(event);
                     }
@@ -545,14 +548,14 @@ fn run_turn(
                 }
                 // Anything a sorting run could act with ends it, and its answer with it.
                 "system" if sort && value["subtype"] == "init" => {
-                    let tools = value["tools"].as_array().cloned().unwrap_or_default();
                     ensure!(
-                        tools.iter().all(|t| t == "StructuredOutput")
+                        value["tools"] == json!(["StructuredOutput"])
                             && value["mcp_servers"].as_array().is_some_and(Vec::is_empty),
                         "The sorting run started with tools {} and MCP servers {}",
                         value["tools"],
                         value["mcp_servers"]
                     );
+                    attested = true;
                 }
                 "system" if value["subtype"] == "init" => {
                     if let Some(id) = value["session_id"].as_str() {
@@ -615,7 +618,10 @@ fn run_turn(
                             usage: usage.clone(),
                             complete: true,
                         });
-                        if value["is_error"] != true && value["structured_output"].is_object() {
+                        if attested
+                            && value["is_error"] != true
+                            && value["structured_output"].is_object()
+                        {
                             emit(ProviderEvent::Reply(value["structured_output"].to_string()));
                         }
                     } else {

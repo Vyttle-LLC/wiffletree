@@ -132,13 +132,13 @@ pub(crate) struct Due {
     pub shown: bool,
 }
 
-/// A read of a kept ticket's PR comments created after `through`.
+/// A read of a kept ticket's PR comments that follow `through`.
 pub(crate) struct Read {
     pub ticket_id: String,
     pub repository: PathBuf,
     pub base: String,
     pub number: u64,
-    pub through: i64,
+    pub through: (i64, String),
     /// The watcher's newest comments as the pass read them.
     pub cursors: CommentCursors,
 }
@@ -177,14 +177,14 @@ pub(crate) struct Sorted {
     pub sent: Vec<Sent>,
     /// Comments by people who cannot push: counted, never sent.
     pub outside: u32,
-    /// Comments created up to this time were read.
-    pub through: i64,
+    /// The creation time and id of the last comment read.
+    pub through: (i64, String),
     /// The watcher's newest comments, once no new comment is left for a later run.
     pub cursors: Option<CommentCursors>,
 }
 
 /// Reads the PR's comments, reviews and review-thread replies with one read-only query, and
-/// keeps those created after `through`: up to 20 by people who can push, each cut to 4,000
+/// keeps those that follow `through`, by creation time and id: up to 20 by people who can push, each cut to 4,000
 /// characters, with everyone else's counted.
 pub(crate) fn read_comments(
     job: &Read,
@@ -196,7 +196,7 @@ pub(crate) fn read_comments(
     let query = format!(
         "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ \
          pullRequest(number: {}) {{ comments(last: 100) {{ nodes {{ {fields} }} }} \
-         reviews(last: 100) {{ nodes {{ {fields} }} }} reviewThreads(last: 50) {{ nodes {{ path line \
+         reviews(last: 100) {{ nodes {{ {fields} }} }} reviewThreads(first: 50) {{ nodes {{ path line \
          comments(last: 50) {{ nodes {{ {fields} }} }} }} }} }} }} }}",
         job.number
     );
@@ -239,10 +239,11 @@ pub(crate) fn read_comments(
             .context("A comment has no time")?;
         let created = chrono::DateTime::parse_from_rfc3339(created)?.timestamp_millis();
         let body = node["body"].as_str().unwrap_or_default();
+        let id = format!("{anchor}{id}");
         // A review with no text of its own, such as a bare approval, says nothing to sort.
-        if created > job.through && !body.is_empty() {
+        if (created, &id) > (job.through.0, &job.through.1) && !body.is_empty() {
             let sent = Sent {
-                id: format!("{anchor}{id}"),
+                id: id.clone(),
                 kind,
                 path: thread["path"].as_str().map(str::to_owned),
                 line: thread["line"].as_u64(),
@@ -252,18 +253,18 @@ pub(crate) fn read_comments(
             new.push((created, id, pusher.then_some((sent, body))));
         }
     }
-    new.sort_by_key(|(created, id, _)| (*created, *id));
+    new.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let mut sorted = Sorted {
         ticket_id: job.ticket_id.clone(),
         sent: vec![],
         outside: 0,
-        through: job.through,
+        through: job.through.clone(),
         cursors: None,
     };
     let mut input = vec![];
     // The rest waits for a later run, so the cursors stay as they were.
     sorted.cursors = Some(job.cursors.clone());
-    for (created, _, comment) in new {
+    for (created, id, comment) in new {
         match comment {
             Some(_) if sorted.sent.len() == COMMENTS_PER_RUN => {
                 sorted.cursors = None;
@@ -277,7 +278,7 @@ pub(crate) fn read_comments(
             }
             None => sorted.outside += 1,
         }
-        sorted.through = created;
+        sorted.through = (created, id);
     }
     let input = serde_json::to_string(&input)?;
     Ok(NewComments { sorted, input })
@@ -529,7 +530,7 @@ impl Host {
         let Some(through) = record.through else {
             let mut ticket = ticket.clone();
             let record = &mut ticket.keeper.get_or_insert_default().comments;
-            record.through = Some(at);
+            record.through = Some((at, String::new()));
             record.cursors = pr.comments.clone();
             return self.save_ticket(&ticket);
         };
@@ -656,8 +657,9 @@ impl Host {
             pr.number
         );
         let id = format!("{KEEPER_NOTICE_PREFIX}{}:comments:{}", ticket.id, newest.id);
+        // Past the coordinator's queue cap, as the record already holds these comments.
         if !self.message_exists(&id)? {
-            self.send(&id, None, &ticket.coordinator_id, &body)?;
+            self.send_publish_result(&id, &ticket.coordinator_id, &body)?;
         }
         Ok(())
     }
@@ -2495,7 +2497,7 @@ pub(crate) mod tests {
         let (mut f, _r) = sorting();
         // Thirty comments are already on the PR: the first pass only starts the record.
         assert!(comments_pass(&mut f, inline(30), 10).is_empty());
-        assert_eq!(record(&f).through, Some(at(10)));
+        assert_eq!(record(&f).through, Some((at(10), String::new())));
         assert!(comments_pass(&mut f, inline(30), 11).is_empty());
         // A reviewer's new thread is read with one read-only request; only it is new.
         let mut reads = comments_pass(&mut f, inline(31), 12);
@@ -2513,6 +2515,8 @@ pub(crate) mod tests {
         assert_eq!(&call[..4], ["api", "graphql", "--hostname", "github.com"]);
         assert!(call[4..].chunks(2).all(|pair| pair[0] == "-f"), "{call:?}");
         assert!(call[5].starts_with("query=") && call[5].contains("pullRequest(number: 143)"));
+        // The threads the watcher follows, so no reply it saw is passed over.
+        assert!(call[5].contains("reviewThreads(first: 50)"));
         assert_eq!(&call[6..], ["-f", "owner=allowed-org", "-f", "name=app"]);
         let ids: Vec<&str> = read.sorted.sent.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["discussion_r31"]);
@@ -2552,7 +2556,7 @@ pub(crate) mod tests {
         let (_, first) = read_from(&job, answer(comments.clone(), vec![], vec![]));
         assert_eq!(first.sorted.sent.len(), 20);
         assert_eq!(first.sorted.sent[0].id, "issuecomment-1");
-        assert_eq!(first.sorted.through, at(30));
+        assert_eq!(first.sorted.through, (at(30), "issuecomment-20".into()));
         assert_eq!(first.sorted.cursors, None, "the rest wait for the next run");
         let bodies: Vec<Value> = serde_json::from_str(&first.input).unwrap();
         assert_eq!(bodies[0]["body"].as_str().unwrap().chars().count(), 4000);
@@ -2563,7 +2567,7 @@ pub(crate) mod tests {
             .unwrap();
         // The record keeps the watcher's old cursors, so the next pass reads the other ten.
         f.host.keeper_sorted(sort.sorted, None).unwrap();
-        assert_eq!(record(&f).through, Some(at(30)));
+        assert_eq!(record(&f).through.unwrap().0, at(30));
         let mut reads = comments_pass(&mut f, inline(1), 12);
         let (_, second) = read_from(&reads.remove(0), answer(comments, vec![], vec![]));
         assert_eq!(second.sorted.sent.len(), 10);
@@ -2595,7 +2599,7 @@ pub(crate) mod tests {
         assert!(read.input.contains("Member text"));
         // Only comments from outside: nothing runs, and the count grows.
         let job = Read {
-            through: at(15),
+            through: (at(15), "pullrequestreview-5".into()),
             ..job
         };
         let (_, read) = read_from(
@@ -2658,7 +2662,7 @@ pub(crate) mod tests {
             (&counted["needs_change"], &counted["questions"]),
             (&json!(1), &json!(1))
         );
-        assert_eq!(record.through, Some(at(13)));
+        assert_eq!(record.through.unwrap().0, at(13));
         assert_eq!(record.cursors, inline(1));
         let sorted: Vec<_> = record
             .sorted
@@ -2750,7 +2754,7 @@ pub(crate) mod tests {
                 .iter()
                 .all(|s| s.class == CommentClass::NotSorted)
         );
-        assert_eq!(record.through, Some(at(12)));
+        assert_eq!(record.through.unwrap().0, at(12));
         assert!(notices(&f.host)[0].2.contains("- 2 could not be sorted."));
         // The watcher's cursors are recorded, so the next pass reads nothing.
         assert!(comments_pass(&mut f, inline(1), 20).is_empty());
@@ -2817,7 +2821,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert!(comments_pass(&mut f, inline(5), 40).is_empty());
-        assert_eq!(record(&f).through, Some(at(40)));
+        assert_eq!(record(&f).through.unwrap().0, at(40));
     }
 
     #[test]
@@ -2845,5 +2849,50 @@ pub(crate) mod tests {
             .iter()
             .find(|c| c.id == f.coordinator.id);
         assert_eq!(coordinator.unwrap().workers.input, 100);
+    }
+
+    #[test]
+    fn comments_created_in_the_same_second_as_a_runs_last_are_left_for_the_next_run() {
+        // Thirty at one moment, as a review's inline comments can be: twenty, then ten.
+        let (mut f, _r) = sorting();
+        let job = read_due(&mut f);
+        let burst: Vec<Value> = (1..=30).map(|n| node(n, 11, "MEMBER", "Fix")).collect();
+        let (_, first) = read_from(&job, answer(burst.clone(), vec![], vec![]));
+        assert_eq!(first.sorted.sent.len(), 20);
+        let sort = f
+            .host
+            .keeper_read(&f.ticket.clone(), Ok(first))
+            .unwrap()
+            .unwrap();
+        f.host.keeper_sorted(sort.sorted, None).unwrap();
+        let mut reads = comments_pass(&mut f, inline(1), 12);
+        let (_, second) = read_from(&reads.remove(0), answer(burst, vec![], vec![]));
+        assert_eq!(second.sorted.sent.len(), 10);
+        let all: HashSet<String> = record(&f)
+            .sorted
+            .into_iter()
+            .map(|s| s.id)
+            .chain(second.sorted.sent.into_iter().map(|s| s.id))
+            .collect();
+        assert_eq!(all.len(), 30, "each comment is read once");
+    }
+
+    #[test]
+    fn the_coordinator_is_told_past_a_full_queue() {
+        let (mut f, _r) = sorting();
+        let sort = sort_of(&mut f, &["Fix the flag"]);
+        let coordinator = f.coordinator.id.clone();
+        // Fills the coordinator's queue to its cap.
+        let mut n = 0;
+        while f
+            .host
+            .send(&format!("busy-{n}"), None, &coordinator, "Busy")
+            .is_ok()
+        {
+            n += 1;
+        }
+        let answer = classes(&[("discussion_r1", "needs_change")]);
+        f.host.keeper_sorted(sort.sorted, Some(&answer)).unwrap();
+        assert_eq!(notices(&f.host).len(), 1);
     }
 }
