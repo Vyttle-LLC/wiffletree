@@ -112,7 +112,7 @@ fn read(query: &Query, gh: impl Fn(&Path, &[&str]) -> Result<String>) -> Result<
 }
 
 /// The GitHub owner and name of the base's remote, when the base is a remote ref on github.com.
-fn github_remote(repository: &Path, base: &str) -> Result<Option<(String, String)>> {
+pub(crate) fn github_remote(repository: &Path, base: &str) -> Result<Option<(String, String)>> {
     let Some((remote, _)) = base.split_once('/') else {
         return Ok(None);
     };
@@ -489,6 +489,9 @@ impl Host {
             new.number,
             PullRequest::changes(old.as_ref(), &new)
         );
+        if new.state != PrState::Open {
+            ticket.end_waiting_comments();
+        }
         ticket.pull_request = Some(new);
         self.save_ticket(&ticket)?;
         let project = self.session(&ticket.coordinator_id)?.project_id;

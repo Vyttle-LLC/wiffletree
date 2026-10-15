@@ -32,6 +32,9 @@ impl Host {
     /// Saves the whole configuration at the next revision. Existing agents keep their models.
     pub fn set_model_selection(&mut self, selection: &ModelSelection) -> Result<ModelSelection> {
         selection.validate()?;
+        if self.settings().keeper.comments {
+            check_sorting_model(selection.keeper.as_ref())?;
+        }
         let saved = ModelSelection {
             revision: self.model_selection()?.revision + 1,
             ..selection.clone()

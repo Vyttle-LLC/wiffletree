@@ -462,6 +462,8 @@ impl Host {
                 });
             }
             ticket.previous_cycles.extend(ticket.verification.take());
+            // The review now judges the work done in answer to the waiting comments.
+            ticket.end_waiting_comments();
             ticket.verification = Some(Verification {
                 cycle,
                 level: Some(CycleLevel {
