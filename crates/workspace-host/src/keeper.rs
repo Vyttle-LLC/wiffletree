@@ -1045,8 +1045,27 @@ impl Host {
         let repository = self.ticket_repository(ticket)?;
         Ok(self.keeps_branch(ticket, &repository)? && self.would_try(ticket, &repository))
     }
-    /// Sends the watcher's held wake once the keeper can no longer try its problem, and drops
-    /// it once a try started, the PR's head changed or the problem is gone.
+    /// Whether the watcher's conflict wake at the ticket's PR head waits for the keeper: it will
+    /// try there, and its rebase of that head onto the base it last saw has not ended without a
+    /// try, whether declined, clean, changed or failed outright.
+    pub(crate) fn holds_wake(&self, ticket: &Ticket) -> Result<bool> {
+        let Some(pr) = ticket.open_pull_request() else {
+            return Ok(false);
+        };
+        let key = (ticket.repository_id.clone(), pr.base.clone());
+        let ended = self.keeper.bases.get(&key).is_some_and(|(base, _)| {
+            let pair = KeeperRebase {
+                head: pr.head.clone(),
+                base: base.clone(),
+            };
+            let rebased = ticket.keeper.as_ref().and_then(|k| k.rebased.as_ref());
+            let failed = self.keeper.failures.get(&ticket.id).map(|(f, _)| f);
+            rebased == Some(&pair) || failed == Some(&pair)
+        });
+        Ok(!ended && self.will_try(ticket)?)
+    }
+    /// Sends the watcher's held wake once the keeper no longer holds it, and drops it once a
+    /// try started, the PR's head changed or the problem is gone.
     fn release_held(&mut self, ticket: &Ticket) -> Result<()> {
         let Some(held) = ticket.keeper.as_ref().and_then(|k| k.held.clone()) else {
             return Ok(());
@@ -1056,7 +1075,7 @@ impl Host {
             .filter(|pr| pr.head == held.head && pr.merge_state == MergeState::Dirty)
             .filter(|_| !ticket.tried(held.problem, &held.head));
         if let Some(pr) = pr {
-            if self.will_try(ticket)? {
+            if self.holds_wake(ticket)? {
                 return Ok(());
             }
             for (id, body) in self.budgeted(ticket, pr, vec![(held.id, held.body)])? {
@@ -1207,6 +1226,10 @@ impl Host {
         let checks = self.ticket_repository(&ticket)?.checks;
         let why = match (error, checks) {
             (Some(error), _) => format!("the keeper's model could not run: {error}."),
+            // The human's checks command runs only while they still want tries.
+            (None, _) if !self.settings().keeper.conflicts => {
+                "\"Try to resolve conflicts\" was turned off.".into()
+            }
             (None, None) => "the repository no longer has a checks command.".into(),
             (None, Some(checks)) => {
                 return Ok(Some(Gate {
@@ -1383,7 +1406,7 @@ impl Host {
         self.save_ticket(&ticket)?;
         if changed {
             if let Err(e) = self.keeper_review(ticket_id, &review) {
-                let why = format!("its review could not start: {e:#}");
+                let why = format!("its review could not start: {e:#}.");
                 self.put_back(&mut ticket, &review, &why)?;
             }
             return Ok(None);
@@ -5002,5 +5025,137 @@ pub(crate) mod tests {
         watched(&mut f, &base, &base, false, MINUTE);
         assert!(held(&f).is_none());
         assert!(super::tests::wakes(&f).is_empty());
+    }
+
+    #[test]
+    fn a_held_wake_is_sent_once_the_keepers_rebase_of_its_pair_ends_without_a_try() {
+        type End = (&'static str, fn(&mut Fixture, &Remote, Job));
+        let ends: [End; 3] = [
+            (
+                "declined, the trigger turned off and on again",
+                |f, r, job| {
+                    let on = f.host.settings().keeper;
+                    let outcome = rebase(&job, fetch(r));
+                    let rebase_only = KeeperSettings {
+                        rebase: true,
+                        ..KeeperSettings::default()
+                    };
+                    f.host.set_keeper(rebase_only).unwrap();
+                    f.host.keeper_rebased(outcome).unwrap();
+                    assert!(try_agent(f).is_none());
+                    f.host.set_keeper(on).unwrap();
+                },
+            ),
+            ("clean here while GitHub says it conflicts", |f, r, job| {
+                f.host.keeper_rebased(rebase(&job, fetch(r))).unwrap();
+            }),
+            ("failed outright", |f, _, job| {
+                let offline = |_: &Path, _: &str| -> Result<bool> { bail!("offline") };
+                f.host.keeper_rebased(rebase(&job, offline)).unwrap();
+            }),
+        ];
+        for (case, end) in ends {
+            let (mut f, r) = reviewing("true");
+            let base = match case.starts_with("clean") {
+                true => move_base(&f, &r, "other.txt", "1\n"),
+                false => {
+                    let on_main = tree_lines().replace("line 5", "line 5 on main");
+                    move_base(&f, &r, "src/tree.rs", &on_main)
+                }
+            };
+            let head = f.head();
+            watched(&mut f, &base, &head, true, 0);
+            assert!(held(&f).is_some(), "{case}");
+            let mut jobs = watched(&mut f, &base, &head, true, 2 * MINUTE).rebases;
+            assert!(held(&f).is_some(), "{case}: held while the rebase runs");
+            end(&mut f, &r, jobs.remove(0));
+            watched(&mut f, &base, &head, true, 3 * MINUTE);
+            assert!(held(&f).is_none(), "{case}");
+            assert_eq!(wakes(&f).len(), 1, "{case}");
+        }
+    }
+
+    #[test]
+    fn the_gate_runs_no_checks_once_the_conflicts_trigger_was_turned_off() {
+        let (mut f, r, agent, checkout) = trying("touch ran-the-checks");
+        let before = ticket_state(&f, &r);
+        resolve(&checkout, &[]);
+        let rebase_only = KeeperSettings {
+            rebase: true,
+            ..KeeperSettings::default()
+        };
+        f.host.set_keeper(rebase_only).unwrap();
+        assert!(f.host.keeper_try_ended(&agent, None).unwrap().is_none());
+        assert!(!checkout.exists(), "the checks never ran there");
+        assert_eq!(ticket_state(&f, &r), before);
+        assert!(thrown_away(&f).contains("was turned off"));
+        told(&f);
+    }
+
+    #[test]
+    fn the_scope_passes_a_fix_within_two_conflicted_files_and_nothing_more() {
+        let home = tempfile::tempdir().unwrap();
+        let repository = home.path().join("repository");
+        fs::create_dir_all(repository.join("src")).unwrap();
+        git(&repository, &["init", "-q", "-b", "main"]);
+        let write = |file: &str, line: &str| {
+            fs::write(repository.join(file), format!("a\n{line}\nc\n")).unwrap();
+        };
+        let commit = |message: &str| {
+            git(&repository, &["add", "."]);
+            git(&repository, &["commit", "-q", "-m", message]);
+            git(&repository, &["rev-parse", "HEAD"])
+        };
+        let files = ["src/sidebar.rs", "src/tree.rs", "src/usage.rs"];
+        for file in files {
+            write(file, "b");
+        }
+        commit("start");
+        git(&repository, &["checkout", "-q", "-b", "pr"]);
+        write(files[0], "pr");
+        write(files[1], "pr");
+        let head = commit("pr");
+        git(&repository, &["checkout", "-q", "main"]);
+        write(files[0], "main");
+        write(files[1], "main");
+        write(files[2], "main");
+        let base = commit("main");
+        for extra in [false, true] {
+            let checkout = home.path().join(format!("checkout-{extra}"));
+            let path = checkout.to_str().unwrap();
+            git(
+                &repository,
+                &["worktree", "add", "-q", "--detach", path, &head],
+            );
+            let stopped = runtime::git_answer(&checkout, &["rebase", "-q", &base]).unwrap();
+            assert!(!stopped.status.success(), "both files conflict");
+            for file in &files[..2] {
+                fs::write(checkout.join(file), "a\nboth\nc\n").unwrap();
+            }
+            if extra {
+                fs::write(checkout.join(files[2]), "a\nmine\nc\n").unwrap();
+            }
+            git(&checkout, &["add", "."]);
+            git(
+                &checkout,
+                &["-c", "core.editor=true", "rebase", "--continue"],
+            );
+            let job = Gate {
+                ticket_id: "t".into(),
+                repository: repository.clone(),
+                checkout: checkout.clone(),
+                base: base.clone(),
+                head: head.clone(),
+                checks: RepositoryChecks {
+                    command: "true".into(),
+                    minutes: 1,
+                },
+            };
+            match (gate(&job).result, extra) {
+                (Ok(_), false) => {}
+                (Err(why), true) => assert!(why.contains("src/usage.rs"), "{why}"),
+                (result, _) => panic!("{extra}: {result:?}"),
+            }
+        }
     }
 }

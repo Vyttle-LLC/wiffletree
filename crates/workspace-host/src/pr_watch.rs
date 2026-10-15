@@ -577,7 +577,7 @@ impl Host {
                             pr.base
                         ),
                     );
-                    match self.will_try(&seen)? {
+                    match self.holds_wake(&seen)? {
                         true => {
                             held = Some(HeldWake {
                                 problem: KeeperProblem::Conflict,
