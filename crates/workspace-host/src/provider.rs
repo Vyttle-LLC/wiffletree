@@ -220,6 +220,8 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
                 "--strict-mcp-config",
                 "--no-session-persistence",
             ])
+            // Hooks would receive the untrusted comments on stdin.
+            .args(["--settings", r#"{"disableAllHooks":true}"#])
             .args(["--output-format", "stream-json", "--verbose", "--no-chrome"])
             .args([
                 "--model",
@@ -809,6 +811,7 @@ mod tests {
         };
         assert_eq!(after("--tools"), "");
         assert_eq!(after("--json-schema"), keeper::ANSWER_SCHEMA);
+        assert_eq!(after("--settings"), r#"{"disableAllHooks":true}"#);
         assert_eq!(after("--system-prompt"), keeper::SORTING);
         assert_eq!(after("--model"), "m");
         for flag in ["-p", "--strict-mcp-config", "--no-session-persistence"] {
