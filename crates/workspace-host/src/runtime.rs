@@ -285,6 +285,36 @@ pub(crate) fn bounded_output(
     Ok((status, output, error))
 }
 
+/// Runs `command` in a process group of its own, with no input and its output discarded, for
+/// at most `limit`. Returns its exit status, or `None` when it ran out of time. Either way every
+/// process left in the group is killed, so nothing it started outlives it.
+pub(crate) fn run_limited(mut command: Command, limit: Duration) -> Result<Option<ExitStatus>> {
+    let mut child = command
+        .own_descriptors_only()
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let group = child.id() as libc::pid_t;
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // SAFETY: `killpg` only sends a signal; the group is the child's own.
+    unsafe { libc::killpg(group, libc::SIGKILL) };
+    if status.is_none() {
+        child.wait()?;
+    }
+    Ok(status)
+}
+
 #[derive(Clone, Debug)]
 pub struct ModelOption {
     pub provider: Provider,

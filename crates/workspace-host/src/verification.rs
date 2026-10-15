@@ -219,11 +219,13 @@ fn is_failing(ledger: &[LedgerEntry], reported: &ReportedFinding) -> bool {
 /// fixed, an open entry it reports again stays open with the new report, and new findings are
 /// added. A settled entry reported again is left alone.
 fn record_findings(
-    ledger: &mut Vec<LedgerEntry>,
+    ticket: &mut Ticket,
     focus: &str,
     (cycle, round): (u32, u32),
     findings: &[ReportedFinding],
 ) {
+    let withdrawn = ticket.withdrawn_findings();
+    let ledger = &mut ticket.ledger;
     let status = |finding: &Finding| {
         if finding.is_evidenced_blocking() {
             EntryStatus::Open
@@ -251,7 +253,7 @@ fn record_findings(
                 (entry.cycle, entry.round) = (cycle, round);
             }
             None => {
-                let id = format!("F{}", ledger.len() + 1);
+                let id = format!("F{}", ledger.len() + withdrawn + 1);
                 ledger.push(LedgerEntry {
                     id,
                     finding: reported.finding.clone(),
@@ -361,6 +363,13 @@ pub(crate) struct Slots {
     pub stalled: Vec<(Ticket, String)>,
 }
 
+/// Who starts a cycle: the coordinator with its choice of models, or the host for the PR keeper
+/// with what a withdrawal restores.
+enum Starter<'a> {
+    Coordinator(&'a [VerifierChoice]),
+    Keeper(&'a KeeperReview),
+}
+
 /// A coordinator's decision on one ledger entry.
 #[derive(Deserialize)]
 pub(crate) struct Triage {
@@ -385,7 +394,7 @@ impl Host {
         level: &str,
         choices: &[VerifierChoice],
     ) -> Result<Ticket> {
-        let mut ticket = self.ticket(ticket_id)?;
+        let ticket = self.ticket(ticket_id)?;
         if let Some(cycle) = ticket.running_cycle() {
             bail!("Verification cycle {} is already running", cycle.cycle);
         }
@@ -398,14 +407,100 @@ impl Host {
             "Ticket is {}; verify it once its implementer reports ready_for_testing",
             ticket.state
         );
+        self.start_cycle(ticket, level, Starter::Coordinator(choices))
+    }
+    /// Starts the PR keeper's review of the commit it moved onto the ticket's branch, at the
+    /// keeper's re-check level, with one round and the models the coordinator last chose for
+    /// those verifiers on the ticket. `review` is what a withdrawal restores.
+    pub(crate) fn keeper_review(
+        &mut self,
+        ticket_id: &str,
+        review: &KeeperReview,
+    ) -> Result<Ticket> {
+        let ticket = self.ticket(ticket_id)?;
+        let level = self.keeper_review_ready(&ticket)?;
+        self.start_cycle(ticket, &level, Starter::Keeper(review))
+    }
+    /// Whether the keeper's review could start on the ticket now, so nothing is spent on a
+    /// commit it could not review. Returns the level's name.
+    pub(crate) fn keeper_review_ready(&self, ticket: &Ticket) -> Result<String> {
+        let settings = self.settings();
+        let name = settings.keeper.review_level.clone().unwrap_or_default();
+        let (level, verifiers) = settings.verification.level(&name)?;
+        ensure!(
+            level.kind == LevelKind::Recheck,
+            "{} is not a re-check",
+            level.name
+        );
+        level_may_start(ticket, &settings.verification, level)?;
+        ensure!(
+            !ticket.ledger.iter().any(|e| e.status == EntryStatus::Open),
+            "the ticket has an open finding"
+        );
+        self.keeper_choices(ticket, &verifiers)?;
+        Ok(name)
+    }
+    /// Each verifier's model as the coordinator last chose it on this ticket: the profile of
+    /// the session that last ran its focus, still allowed for it. No model is ever substituted.
+    fn keeper_choices(
+        &self,
+        ticket: &Ticket,
+        verifiers: &[&VerifierConfig],
+    ) -> Result<Vec<(ModelProfile, String)>> {
+        let selection = self.model_selection()?;
+        let cycles: Vec<&Verification> = ticket
+            .previous_cycles
+            .iter()
+            .chain(&ticket.verification)
+            .collect();
+        let mut chosen = vec![];
+        for verifier in verifiers {
+            let label = verifier.role.agent_label(Some(&verifier.focus));
+            let last = cycles
+                .iter()
+                .rev()
+                .flat_map(|cycle| cycle.rounds.iter().rev())
+                .flat_map(|round| &round.verifiers)
+                .find(|run| run.focus.eq_ignore_ascii_case(verifier.focus.trim()));
+            let profile = last
+                .map(|run| self.session_runtime(&run.session_id))
+                .transpose()?
+                .and_then(|runtime| runtime.profile)
+                .with_context(|| format!("{label} has never run on this ticket, so the coordinator chose no model for it"))?;
+            selection
+                .permits_verifier(verifier, &profile)
+                .map_err(|rejection| anyhow::anyhow!("{label}: {rejection}"))?;
+            let reason = format!(
+                "The model the coordinator last chose for {label} on this ticket, for the PR keeper's review"
+            );
+            chosen.push((profile, reason));
+        }
+        Ok(chosen)
+    }
+    /// Starts a cycle at the level named `level` on a ticket with no running cycle; see
+    /// `verify_ticket` and `keeper_review`.
+    fn start_cycle(&mut self, mut ticket: Ticket, level: &str, by: Starter) -> Result<Ticket> {
         self.prepare_ticket_worktree(&ticket.id)?;
         ensure!(is_clean(&ticket)?, "{UNCOMMITTED}");
         let settings = self.settings().verification;
         let (level, level_verifiers) = settings.level(level)?;
         level_may_start(&ticket, &settings, level)?;
-        let cycle = ticket.verification.as_ref().map_or(1, |v| v.cycle + 1);
+        let cycle = ticket.next_cycle();
         let coordinator = self.session(&ticket.coordinator_id)?;
-        let chosen = self.verifier_choices(&coordinator, level, &level_verifiers, choices)?;
+        let (chosen, review) = match by {
+            Starter::Coordinator(choices) => (
+                self.verifier_choices(&coordinator, level, &level_verifiers, choices)?,
+                None,
+            ),
+            Starter::Keeper(review) => (
+                self.keeper_choices(&ticket, &level_verifiers)?,
+                Some(KeeperReview {
+                    cycle,
+                    ..review.clone()
+                }),
+            ),
+        };
+        let keeper = review.is_some();
         let commit = head(&ticket)?;
         // A cycle queues behind every slot holder and every cycle queued before it.
         let slots = self.verification_slots()?;
@@ -462,15 +557,18 @@ impl Host {
                 });
             }
             ticket.previous_cycles.extend(ticket.verification.take());
-            // The review now judges the work done in answer to the waiting comments.
-            ticket.end_waiting_comments();
+            match review.clone() {
+                Some(review) => ticket.keeper.get_or_insert_default().reviews.push(review),
+                // The review now judges the work done in answer to the waiting comments.
+                None => ticket.end_waiting_comments(),
+            }
             ticket.verification = Some(Verification {
                 cycle,
                 level: Some(CycleLevel {
                     name: level.name.clone(),
                     kind: level.kind,
                 }),
-                max_rounds: settings.max_rounds,
+                max_rounds: if keeper { 1 } else { settings.max_rounds },
                 outcome: VerificationOutcome::Running,
                 rounds: vec![VerificationRound {
                     round: 1,
@@ -478,6 +576,7 @@ impl Host {
                     verifiers,
                 }],
                 queued_at,
+                keeper,
             });
             let milestone = if queued_at.is_some() {
                 ticket.state = "verifying".into();
@@ -588,6 +687,10 @@ impl Host {
     /// Ends a cycle that cannot start or go on as blocked, and tells its coordinator why.
     fn end_unstartable(&mut self, ticket_id: &str, why: &str) -> Result<()> {
         let mut ticket = self.ticket(ticket_id)?;
+        if ticket.verification.as_ref().is_some_and(|v| v.keeper) {
+            eprintln!("Workspace PR keeper: {ticket_id}: the review cannot go on: {why}");
+            return self.withdraw_keeper_review(ticket);
+        }
         self.atomically(|host| {
             let verification = ticket.verification.as_mut().context("No verification")?;
             verification.outcome = VerificationOutcome::Blocked;
@@ -920,6 +1023,9 @@ impl Host {
                         host.record_verdict(ticket, &session.id, kind, &report_id, findings)?
                     }
                     Routing::Ready => host.next_round(ticket)?,
+                    Routing::Ends if ticket.verification.as_ref().is_some_and(|v| v.keeper) => {
+                        host.withdraw_keeper_review(ticket)?
+                    }
                     Routing::Ends => {
                         if let Some(verification) = &mut ticket.verification {
                             verification.outcome = VerificationOutcome::Blocked;
@@ -1014,7 +1120,7 @@ impl Host {
         // Only a completed check moves the ledger, and not once the coordinator has the cycle's
         // outcome.
         if running && untouched && kind != "blocked" {
-            record_findings(&mut ticket.ledger, &focus, source, findings);
+            record_findings(&mut ticket, &focus, source, findings);
         }
         self.save_ticket(&ticket)?;
         if ended && running {
@@ -1037,6 +1143,9 @@ impl Host {
             .verifiers
             .iter()
             .any(|v| v.result == VerifierResult::Blocked);
+        if verification.keeper && (blocked || !failed.is_empty()) {
+            return self.withdraw_keeper_review(ticket);
+        }
         let below_cap = round.round < verification.max_rounds;
         let implementer = self.ready_implementer(&ticket)?;
         if !blocked
@@ -1166,13 +1275,72 @@ impl Host {
             _ => "blocked",
         }
         .into();
+        let mut keeper = false;
         if let Some(verification) = &mut ticket.verification {
             verification.outcome = outcome;
+            keeper = verification.keeper;
         }
         ticket.end_unreviewed();
         self.save_ticket(&ticket)?;
-        self.send(&id, None, &coordinator, &summary)?;
+        // A keeper review that passed wakes the coordinator only to triage, and is pushed.
+        let untriaged = ticket
+            .ledger
+            .iter()
+            .any(|e| e.status == EntryStatus::Untriaged && e.cycle == cycle);
+        if !keeper || untriaged {
+            self.send(&id, None, &coordinator, &summary)?;
+        }
+        if keeper {
+            self.keeper_review_ended(&ticket.id);
+        }
         self.retire(&cycle_verifiers(&ticket))
+    }
+    /// Withdraws the keeper's review that is the ticket's latest cycle, in one store change:
+    /// the cycle before is the latest again, the ledger loses exactly the entries this cycle
+    /// recorded, and the ticket's state is what it was. Every other entry keeps its decision.
+    /// The cycle and its entries stay on the keeper's record of the review, whose number and
+    /// ids are never given again. The branch is put back afterwards, once the worktree is free.
+    fn withdraw_keeper_review(&mut self, mut ticket: Ticket) -> Result<()> {
+        let mut cycle = ticket
+            .verification
+            .take()
+            .filter(|v| v.keeper)
+            .context("The latest cycle is not the PR keeper's")?;
+        let review = ticket
+            .keeper_reviews()
+            .last()
+            .filter(|r| r.cycle == cycle.cycle && r.withdrawn.is_none())
+            .cloned()
+            .context("The PR keeper recorded no review of this cycle")?;
+        let (entries, ledger) = std::mem::take(&mut ticket.ledger)
+            .into_iter()
+            .partition(|e| e.cycle == cycle.cycle);
+        let verifiers: Vec<String> = cycle
+            .latest_results()
+            .into_iter()
+            .map(|run| run.session_id.clone())
+            .collect();
+        let detail = format!("{}; cycle {}", ticket.id, cycle.cycle);
+        cycle.outcome = VerificationOutcome::Blocked;
+        ticket.ledger = ledger;
+        ticket.verification = ticket.previous_cycles.pop();
+        ticket.state = review.state.clone();
+        let keeper = ticket.keeper.get_or_insert_default();
+        if let Some(recorded) = keeper.reviews.last_mut() {
+            recorded.withdrawn = Some(Withdrawn {
+                cycle,
+                entries,
+                putting_back: true,
+            });
+        }
+        self.atomically(|host| {
+            host.save_ticket(&ticket)?;
+            let project = host.session(&ticket.coordinator_id)?.project_id;
+            Self::event(&host.db, &project, None, "keeper_review_withdrawn", &detail)?;
+            host.retire(&verifiers)
+        })?;
+        self.keeper_review_ended(&ticket.id);
+        Ok(())
     }
     /// Archives verifiers the cycle no longer needs, keeping their conversations. Implementers
     /// are never retired here; they live until the ticket is accepted or closed.

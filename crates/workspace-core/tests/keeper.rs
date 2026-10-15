@@ -6,6 +6,7 @@ fn settings_and_tickets_stored_before_the_keeper_decode_with_everything_off() {
     let settings: HostSettings = serde_json::from_value(json!({"workspaces_dir": "/w"})).unwrap();
     assert_eq!(settings.keeper, KeeperSettings::default());
     assert!(!settings.keeper.rebase && !settings.keeper.is_on());
+    assert!(!settings.keeper.conflicts && settings.keeper.review_level.is_none());
     assert_eq!(settings.keeper.quiet_minutes, 2);
     let ticket: Ticket = serde_json::from_value(json!({
         "id":"t","coordinator_id":"c","repository_id":"r","title":"T","brief":"B",
@@ -13,6 +14,10 @@ fn settings_and_tickets_stored_before_the_keeper_decode_with_everything_off() {
     }))
     .unwrap();
     assert_eq!(ticket.keeper, None);
+    let repository: Repository =
+        serde_json::from_value(json!({"id":"r","name":"app","path":"/r","base":"origin/main"}))
+            .unwrap();
+    assert_eq!(repository.checks, None);
     assert!(
         serde_json::to_value(&ticket)
             .unwrap()
@@ -27,6 +32,7 @@ fn the_quiet_period_accepts_one_to_sixty_minutes() {
         rebase: true,
         quiet_minutes,
         comments: false,
+        ..KeeperSettings::default()
     };
     assert!(quiet(1).validate().is_ok() && quiet(60).validate().is_ok());
     assert!(quiet(0).validate().is_err() && quiet(61).validate().is_err());
@@ -48,7 +54,7 @@ fn saving_the_keeper_is_a_client_command() {
     };
     assert_eq!(
         serde_json::to_value(&command).unwrap(),
-        json!({"type":"set_keeper","keeper":{"rebase":false,"quiet_minutes":2,"comments":false}})
+        json!({"type":"set_keeper","keeper":{"rebase":false,"quiet_minutes":2,"comments":false,"conflicts":false}})
     );
 }
 
@@ -68,6 +74,7 @@ fn rows_say_kept_or_not_kept_only_while_a_trigger_is_on() {
         rebase: true,
         quiet_minutes: 2,
         comments: false,
+        ..KeeperSettings::default()
     };
     let (wiffletree, celadon) = (repository("Vyttle-LLC"), repository("celadon-theme"));
     assert_eq!(kept_label(&wiffletree, &allowed, &on), Some("kept"));

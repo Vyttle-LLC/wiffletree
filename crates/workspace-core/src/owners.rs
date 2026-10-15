@@ -246,6 +246,7 @@ mod tests {
                 problem: None,
             }),
             origin_problem: None,
+            checks: None,
         }
     }
     fn unanswered(owner: &str, name: &str) -> Repository {

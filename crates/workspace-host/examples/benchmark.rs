@@ -45,6 +45,7 @@ fn main() -> Result<()> {
                 base: "fixture-base".into(),
                 github: None,
                 origin_problem: None,
+                checks: None,
             };
             tx.execute(
                 "INSERT INTO repositories VALUES (?1,?2,?3)",

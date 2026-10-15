@@ -810,7 +810,8 @@ impl Actor {
 
     /// Handles one event, then starts what it made due.
     fn process(&mut self, event: Event) {
-        let dirty = self.handle(event);
+        let mut dirty = self.handle(event);
+        dirty |= self.end_keeper_reviews();
         if let Err(e) = self.schedule() {
             eprintln!("Workspace scheduler: {e:#}");
         }
@@ -1787,6 +1788,22 @@ impl Actor {
             Ok(step) => self.run_publish_step(step),
             Err(e) => eprintln!("Workspace PR keeper: {ticket_id}: {e:#}"),
         }
+    }
+    /// Pushes each keeper review that passed, or puts the branch back after one was
+    /// withdrawn, once no agent of its ticket is in a turn. Returns whether any ended.
+    fn end_keeper_reviews(&mut self) -> bool {
+        let mut ended = false;
+        for ticket in self.host.keeper_reviews_ended() {
+            if self.ticket_in_turn(&ticket) {
+                continue;
+            }
+            ended = true;
+            match self.host.keeper_review_done(&ticket) {
+                Ok(step) => self.run_publish_step(step),
+                Err(e) => eprintln!("Workspace PR keeper: {ticket}: {e:#}"),
+            }
+        }
+        ended
     }
     fn ticket_in_turn(&self, ticket_id: &str) -> bool {
         self.active.keys().any(|id| {
@@ -7415,6 +7432,7 @@ mod tests {
             level: None,
             max_rounds: 1,
             queued_at: None,
+            keeper: false,
             outcome: VerificationOutcome::Blocked,
             rounds: vec![VerificationRound {
                 round: 1,
@@ -8044,6 +8062,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_withdrawn_keeper_review_puts_the_branch_back_only_once_the_verifiers_turn_ends() {
+        let (mut f, r) = keeper::tests::reviewing("true");
+        let (before, after) = keeper::tests::under_review(&mut f, &r);
+        let verifier = f.ticket().verification.unwrap().rounds[0].verifiers[0]
+            .session_id
+            .clone();
+        let blocking = keeper::tests::finding("blocking", "Lost");
+        keeper::tests::verdict(&mut f, "Correctness", "failed", json!([blocking]));
+        let ticket = f.ticket.clone();
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        actor.active.insert(verifier, active_turn("run", vec![]));
+        let worktree = actor.host.ticket(&ticket).unwrap().worktree;
+        let head = || worktrees::head(Path::new(&worktree)).unwrap();
+        assert!(!actor.end_keeper_reviews());
+        assert_eq!(head(), after);
+        assert!(
+            keeper::tests::notices(&actor.host).is_empty(),
+            "told only once it is back"
+        );
+        actor.active.clear();
+        assert!(actor.end_keeper_reviews());
+        assert_eq!(head(), before);
+        assert_eq!(keeper::tests::notices(&actor.host).len(), 1);
+        drop(r);
+    }
     #[test]
     fn a_keeper_result_waits_while_an_agent_of_the_ticket_is_in_a_turn() {
         let (f, _remote, result) = keeper::tests::waiting();

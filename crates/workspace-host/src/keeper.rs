@@ -5,6 +5,7 @@
 //! comments are read read-only and sorted by the keeper's model with every tool off.
 use crate::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::time::Duration;
 
 const MINUTE: i64 = 60_000;
 /// How long a pushed rebase shows on the PR line.
@@ -41,6 +42,9 @@ pub(crate) struct Memory {
     sorting: HashMap<String, u64>,
     /// The number of the latest read.
     reads: u64,
+    /// Tickets whose keeper review ended, waiting for their worktree to be free to be pushed,
+    /// or put back after a withdrawal.
+    reviews_ended: BTreeSet<String>,
 }
 
 /// The two sessions a ticket's PR keeper may run. Each is its own agent, with its own focus, so
@@ -79,6 +83,9 @@ pub(crate) struct Job {
     /// The commit the ticket's latest cycle verified.
     pub verified: String,
     pub checkout: PathBuf,
+    /// The repository's checks, run on a rebase whose patch changed when the keeper could
+    /// review it.
+    pub checks: Option<RepositoryChecks>,
 }
 pub(crate) struct Outcome {
     pub ticket_id: String,
@@ -89,13 +96,35 @@ pub(crate) struct Outcome {
 pub(crate) enum Rebased {
     /// The rebased commit, the same change as the verified commit, kept under `result_ref`.
     Same(String),
-    /// Git rebased without conflict, but the patch differs from the verified commit's.
-    Changed,
+    /// Git rebased without conflict, but the patch differs from the verified commit's. With
+    /// the repository's checks run on it: the rebased commit, kept under `result_ref`, and how
+    /// they ended.
+    Changed(Option<(String, Checked)>),
     /// Git could not merge these files.
     Conflict(Vec<String>),
     /// The fetched base is not the commit the quiet period was measured on.
     BaseMoved,
     Failed(String),
+}
+/// How the repository's checks ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Checked {
+    Passed,
+    Failed,
+    /// Still running at the repository's limit of this many minutes, and stopped.
+    OutOfTime(u32),
+}
+/// Runs the repository's checks command with the system shell in `checkout`, stopped with
+/// everything it started at the repository's limit.
+pub(crate) fn run_checks(checks: &RepositoryChecks, checkout: &Path) -> Result<Checked> {
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg(&checks.command).current_dir(checkout);
+    let limit = Duration::from_secs(u64::from(checks.minutes) * 60);
+    Ok(match runtime::run_limited(command, limit)? {
+        Some(status) if status.success() => Checked::Passed,
+        Some(_) => Checked::Failed,
+        None => Checked::OutOfTime(checks.minutes),
+    })
 }
 /// A read-only fetch of GitHub's branch of a ticket whose PR has a head the worktree lacks.
 pub(crate) struct Fetch {
@@ -399,14 +428,20 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
     }
     let result = worktrees::head(checkout)?;
     let patch = |commit| worktrees::patch_id(checkout, &job.base, commit);
-    if patch(&result)? != patch(&job.verified)? {
-        return Ok(Rebased::Changed);
-    }
+    let same = patch(&result)? == patch(&job.verified)?;
+    let checked = match &job.checks {
+        _ if same => None,
+        None => return Ok(Rebased::Changed(None)),
+        Some(checks) => Some(run_checks(checks, checkout)?),
+    };
     runtime::git_output(
         checkout,
         &["update-ref", &result_ref(&job.ticket_id), &result],
     )?;
-    Ok(Rebased::Same(result))
+    Ok(match checked {
+        None => Rebased::Same(result),
+        Some(checked) => Rebased::Changed(Some((result, checked))),
+    })
 }
 
 impl Host {
@@ -753,7 +788,8 @@ impl Host {
         let busy = ticket.running_cycle().is_some()
             || ticket.publishing.is_some()
             || ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some())
-            || self.keeper.running.contains(&ticket.id);
+            || self.keeper.running.contains(&ticket.id)
+            || self.keeper.reviews_ended.contains(&ticket.id);
         let worktree = Path::new(&ticket.worktree);
         let Some(head) = verification::head(ticket).ok().filter(|_| !busy) else {
             return Ok(());
@@ -841,6 +877,15 @@ impl Host {
             .as_ref()
             .and_then(|v| v.verified_commit());
         let verified = verified.context("No verified commit")?;
+        let checks = repository.checks.clone().filter(|_| {
+            settings.keeper.conflicts
+                && self
+                    .keeper_review_ready(ticket)
+                    .inspect_err(|e| {
+                        eprintln!("Workspace PR keeper: {}: no review: {e:#}", ticket.id)
+                    })
+                    .is_ok()
+        });
         self.keeper.running.insert(ticket.id.clone());
         due.rebases.push(Job {
             ticket_id: ticket.id.clone(),
@@ -853,6 +898,7 @@ impl Host {
             checkout: Path::new(&settings.workspaces_dir)
                 .join("keeper")
                 .join(&ticket.id),
+            checks,
         });
         Ok(None)
     }
@@ -864,6 +910,7 @@ impl Host {
             head: outcome.head,
             base: outcome.base_commit,
         };
+        let mut changed = false;
         let waiting = match outcome.result {
             Rebased::BaseMoved => {
                 // The next pass reports the new commit; the wait begins again.
@@ -873,15 +920,30 @@ impl Host {
                 return Ok(false);
             }
             Rebased::Same(result) => Some(result),
-            Rebased::Changed => {
-                let pr = ticket.pull_request.as_ref().context("No PR")?;
-                let body = format!(
-                    "{} rebases onto {} at {} without conflict, but the rebased change no longer reads the same as the reviewed commit, so the PR keeper did not move or push it. It needs a rebase in the ticket's worktree and a re-check before it is pushed.",
-                    named(&ticket),
-                    pr.base,
-                    short_sha(&rebase.base)
-                );
-                self.keeper_notice(&ticket, "changed", &[&rebase.head, &rebase.base], &body)?;
+            Rebased::Changed(Some((result, Checked::Passed))) => {
+                changed = true;
+                Some(result)
+            }
+            Rebased::Changed(checked) => {
+                let checks = match checked.map(|(_, checked)| checked) {
+                    None => None,
+                    Some(Checked::OutOfTime(minutes)) => {
+                        Some(format!("did not finish in {minutes} minutes"))
+                    }
+                    Some(_) => Some("failed".into()),
+                };
+                let did = match checks {
+                    None => "The PR keeper did not move or push it.".into(),
+                    Some(ended) => {
+                        let repository = self.ticket_repository(&ticket)?;
+                        let drop_ref = ["update-ref", "-d", &result_ref(&ticket.id)];
+                        runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+                        format!(
+                            "The repository's checks {ended} on it, so the PR keeper did not move or push it."
+                        )
+                    }
+                };
+                self.changed_notice(&ticket, &rebase, &did)?;
                 None
             }
             Rebased::Conflict(files) => {
@@ -902,6 +964,7 @@ impl Host {
         let record = ticket.keeper.get_or_insert_default();
         record.rebased = Some(rebase);
         record.waiting = waiting.clone();
+        record.waiting_changed = changed;
         self.save_ticket(&ticket)?;
         Ok(waiting.is_some())
     }
@@ -941,8 +1004,16 @@ impl Host {
             return Ok(None);
         };
         let repository = self.ticket_repository(&ticket)?;
-        let may = self.settings().keeper.rebase && self.keeps_branch(&ticket, &repository)?;
+        let changed = record.waiting_changed;
+        let settings = self.settings().keeper;
+        let may = settings.rebase && self.keeps_branch(&ticket, &repository)?;
         let moved = match may {
+            true if changed && !settings.conflicts => Err(anyhow::anyhow!(
+                "\"Try to resolve conflicts\" was turned off"
+            )),
+            true if changed => self
+                .keeper_review_ready(&ticket)
+                .and_then(|_| self.keeper_adopt(&ticket, &rebase.head, &result, Move::Reset)),
             true => self.keeper_adopt(&ticket, &rebase.head, &result, Move::Reset),
             false => Err(anyhow::anyhow!(
                 "the keeper may no longer change the branch"
@@ -950,15 +1021,33 @@ impl Host {
         };
         let drop_ref = ["update-ref", "-d", &result_ref(ticket_id)];
         runtime::git_output(Path::new(&repository.path), &drop_ref)?;
-        let record = ticket.keeper.get_or_insert_default();
-        record.waiting = None;
+        let keeper = ticket.keeper.get_or_insert_default();
+        keeper.waiting = None;
+        keeper.waiting_changed = false;
         if let Err(e) = moved {
             eprintln!("Workspace PR keeper: {ticket_id}: rebase dropped: {e:#}");
             self.save_ticket(&ticket)?;
+            if changed {
+                let did = format!("The PR keeper did not move or push it: {e:#}.");
+                self.changed_notice(&ticket, &rebase, &did)?;
+            }
             return Ok(None);
         }
-        record.last = Some(KeeperAction {
-            kind: KeeperKind::Rebase,
+        let review = KeeperReview {
+            cycle: 0,
+            before: rebase.head.clone(),
+            after: result.clone(),
+            base: rebase.base.clone(),
+            state: ticket.state.clone(),
+            last: keeper.last.clone(),
+            withdrawn: None,
+            push_started: false,
+        };
+        keeper.last = Some(KeeperAction {
+            kind: match changed {
+                true => KeeperKind::ReviewedRebase,
+                false => KeeperKind::Rebase,
+            },
             at: now(),
             before: rebase.head,
             after: result,
@@ -966,10 +1055,147 @@ impl Host {
             pushed: false,
         });
         self.save_ticket(&ticket)?;
-        self.keeper_publish(ticket_id).or_else(|e| {
-            eprintln!("Workspace PR keeper: {ticket_id}: push refused: {e:#}");
-            self.keeper_published(&mut ticket, false).map(|()| None)
+        if changed {
+            if let Err(e) = self.keeper_review(ticket_id, &review) {
+                let why = format!("its review could not start: {e:#}");
+                self.put_back(&mut ticket, &review, &why)?;
+            }
+            return Ok(None);
+        }
+        self.keeper_push(&mut ticket)
+    }
+    /// Notes that the ticket's keeper review ended, so the actor pushes it or puts the branch
+    /// back once no agent of the ticket is in a turn.
+    pub(crate) fn keeper_review_ended(&mut self, ticket_id: &str) {
+        self.keeper.reviews_ended.insert(ticket_id.into());
+    }
+    /// The tickets whose keeper review ended and waits for their worktree.
+    pub(crate) fn keeper_reviews_ended(&self) -> Vec<String> {
+        self.keeper.reviews_ended.iter().cloned().collect()
+    }
+    /// Pushes the ticket's keeper review that passed, or puts its branch back after a
+    /// withdrawal and tells the coordinator. The actor calls it only while no agent of the
+    /// ticket is in a turn. Returns the push's first step.
+    pub(crate) fn keeper_review_done(&mut self, ticket_id: &str) -> Result<Option<publish::Job>> {
+        self.keeper.reviews_ended.remove(ticket_id);
+        let mut ticket = self.ticket(ticket_id)?;
+        let Some(review) = ticket.keeper_reviews().last().cloned() else {
+            return Ok(None);
+        };
+        if let Some(withdrawn) = review.withdrawn.as_ref().filter(|w| w.putting_back) {
+            let level = withdrawn
+                .cycle
+                .level
+                .as_ref()
+                .map_or("re-check".into(), CycleLevel::label);
+            let why = format!(
+                "its {level} did not pass:\n{}\n",
+                withdrawn_findings(withdrawn)
+            );
+            self.put_back(&mut ticket, &review, &why)?;
+            return Ok(None);
+        }
+        let passed = ticket
+            .verification
+            .as_ref()
+            .is_some_and(|v| v.cycle == review.cycle && v.outcome == VerificationOutcome::Passed);
+        // Turned off, or no longer kept, while the review ran: the keeper pushes nothing.
+        let settings = self.settings().keeper;
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        let repository = self.ticket_repository(&ticket)?;
+        let on = settings.rebase
+            && settings.conflicts
+            && self.kept(&ticket, &repository, &coordinator)?;
+        let reviews = ticket.keeper.as_mut().map(|k| &mut k.reviews);
+        let Some(started) = reviews.and_then(|r| r.last_mut()).filter(|_| passed) else {
+            return Ok(None);
+        };
+        // Stored first, so a restart never starts this push again.
+        started.push_started = true;
+        self.save_ticket(&ticket)?;
+        if !on {
+            let unpushed = "the PR keeper was turned off for it before the push, so GitHub's branch is unchanged";
+            return self
+                .end_keeper_push(&mut ticket, false, unpushed)
+                .map(|()| None);
+        }
+        self.keeper_push(&mut ticket)
+    }
+    /// Starts the push of the keeper's commit on the ticket's branch. A refused push ends as
+    /// one that failed.
+    fn keeper_push(&mut self, ticket: &mut Ticket) -> Result<Option<publish::Job>> {
+        self.keeper_publish(&ticket.id).or_else(|e| {
+            eprintln!("Workspace PR keeper: {}: push refused: {e:#}", ticket.id);
+            self.keeper_published(ticket, false).map(|()| None)
         })
+    }
+    /// Puts the ticket's branch back to the commit before the keeper's review, under the rule
+    /// for any move, and tells the coordinator once why the keeper's commit was thrown away.
+    /// A branch that cannot go back is left as it is, and the keeper's commit is recorded as
+    /// not reviewed.
+    fn put_back(&mut self, ticket: &mut Ticket, review: &KeeperReview, why: &str) -> Result<()> {
+        let back = self.keeper_adopt(ticket, &review.after, &review.before, Move::Reset);
+        let keeper = ticket.keeper.get_or_insert_default();
+        if let Some(withdrawn) = keeper.reviews.last_mut().and_then(|r| r.withdrawn.as_mut()) {
+            withdrawn.putting_back = false;
+        }
+        let outcome = match back {
+            Ok(()) => {
+                keeper.last = review.last.clone();
+                "Nothing was pushed, and the ticket's branch and review are as they were."
+                    .to_owned()
+            }
+            Err(e) => {
+                let range = format!("{}..{}", review.base, review.after);
+                let commits = runtime::git_output(
+                    Path::new(&ticket.worktree),
+                    &["rev-list", "--count", &range],
+                )?;
+                keeper.unreviewed = Some(Unreviewed {
+                    head: review.after.clone(),
+                    commits: commits.trim().parse()?,
+                    cycle: ticket.verification.as_ref().map_or(0, |v| v.cycle),
+                });
+                let now = verification::head(ticket)
+                    .map_or("a commit that could not be read".into(), |c| {
+                        short_sha(&c).to_owned()
+                    });
+                let verified = ticket
+                    .verification
+                    .as_ref()
+                    .and_then(|v| v.verified_commit())
+                    .unwrap_or_default();
+                format!(
+                    "Nothing was pushed, but the PR keeper could not put the branch back ({e:#}): the ticket's worktree is at {now}, and the verified commit is {}. {} is recorded as not reviewed, so nothing is pushed or accepted until a review that starts after this ends.",
+                    short_sha(verified),
+                    short_sha(&review.after)
+                )
+            }
+        };
+        self.save_ticket(ticket)?;
+        let rebase = KeeperRebase {
+            head: review.before.clone(),
+            base: review.base.clone(),
+        };
+        let did = format!(
+            "The repository's checks passed on it, and the PR keeper moved it onto the branch as {}, but {why} {outcome}",
+            short_sha(&review.after)
+        );
+        self.changed_notice(ticket, &rebase, &did)
+    }
+    /// Tells the coordinator once per head and base what became of a rebase whose patch
+    /// changed.
+    fn changed_notice(&mut self, ticket: &Ticket, rebase: &KeeperRebase, did: &str) -> Result<()> {
+        let base = ticket
+            .pull_request
+            .as_ref()
+            .map_or("", |pr| pr.base.as_str());
+        let body = format!(
+            "{} rebases onto {base} at {} without conflict, but the rebased change no longer reads the same as the reviewed commit. {did} It needs a rebase in the ticket's worktree and a re-check before it is pushed.",
+            named(ticket),
+            short_sha(&rebase.base)
+        );
+        self.keeper_notice(ticket, "changed", &[&rebase.head, &rebase.base], &body)
     }
     /// Moves the ticket's branch from `from` to the keeper's `to`, only while the worktree is on
     /// the ticket's branch at `from`, clean, and no cycle or publish request runs. Nothing is
@@ -1197,8 +1423,14 @@ impl Host {
             let id = notice_id(ticket, "push", &[&rebase.head, &rebase.base]);
             if !coordinator.archived && !self.message_exists(&id)? {
                 let body = format!(
-                    "{}: the PR keeper rebased its branch {moved}, the same change as the reviewed commit, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
+                    "{}: the PR keeper rebased its branch {moved}, {}, but {unpushed}. The ticket's worktree is at {}. Call publish_ticket to push it; its result says why if it is refused again.",
                     named(ticket),
+                    match last.kind {
+                        KeeperKind::Rebase => "the same change as the reviewed commit",
+                        KeeperKind::ReviewedRebase => {
+                            "a changed patch that passed the repository's checks and the PR keeper's re-check"
+                        }
+                    },
                     short_sha(&last.after)
                 );
                 self.send_publish_result(&id, &coordinator.id, &body)?;
@@ -1255,8 +1487,29 @@ impl Host {
             // A dropped result is no try: a later pass rebases that head and base again.
             if let Some(record) = ticket.keeper.as_mut().filter(|k| k.waiting.is_some()) {
                 record.waiting = None;
+                record.waiting_changed = false;
                 record.rebased = None;
                 self.save_ticket(&ticket)?;
+            }
+            // A keeper review that ended before the stop is pushed, or its branch put back,
+            // now. A push once started is publishing's to end, as it ends any.
+            let latest = ticket.verification.as_ref();
+            let ended =
+                ticket
+                    .keeper_reviews()
+                    .last()
+                    .is_some_and(|review| match &review.withdrawn {
+                        Some(withdrawn) => withdrawn.putting_back,
+                        None => {
+                            !review.push_started
+                                && latest.is_some_and(|v| {
+                                    v.cycle == review.cycle
+                                        && v.outcome == VerificationOutcome::Passed
+                                })
+                        }
+                    });
+            if ended {
+                self.keeper_review_ended(&ticket.id);
             }
         }
         Ok(())
@@ -1280,6 +1533,37 @@ pub(crate) enum Move<'a> {
     FastForward(&'a publish::GitTool),
 }
 
+/// What a withdrawn review found: each blocking finding's verifier, location and summary, and
+/// each verifier that did not check.
+fn withdrawn_findings(withdrawn: &Withdrawn) -> String {
+    let findings = withdrawn
+        .entries
+        .iter()
+        .filter(|e| e.status == EntryStatus::Open)
+        .map(|e| {
+            format!(
+                "- {}, blocking, {}: {}",
+                e.focus, e.finding.location, e.finding.summary
+            )
+        });
+    let unchecked = withdrawn
+        .cycle
+        .latest_results()
+        .into_iter()
+        .filter(|run| run.result != VerifierResult::Passed)
+        .filter(|run| {
+            !withdrawn
+                .entries
+                .iter()
+                .any(|e| e.focus == run.focus && e.status == EntryStatus::Open)
+        })
+        .map(|run| match (&run.reason, run.result) {
+            (Some(reason), _) => format!("- {}: {reason}", run.focus),
+            (None, VerifierResult::Pending) => format!("- {} never reported", run.focus),
+            (None, _) => format!("- {} could not check", run.focus),
+        });
+    findings.chain(unchecked).collect::<Vec<_>>().join("\n")
+}
 /// How keeper messages name a ticket's PR, as the watcher's do.
 fn named(ticket: &Ticket) -> String {
     let number = ticket.pull_request.as_ref().map_or(0, |pr| pr.number);
@@ -1322,6 +1606,7 @@ pub(crate) mod tests {
             rebase: true,
             quiet_minutes: 2,
             comments: false,
+            ..KeeperSettings::default()
         };
         f.host.set_keeper(on).unwrap();
         (f, r)
@@ -1473,6 +1758,7 @@ pub(crate) mod tests {
             rebase: true,
             quiet_minutes: 2,
             comments: false,
+            ..KeeperSettings::default()
         };
         f.host.set_keeper(on).unwrap();
         let moved = move_base(&f, &r, "other.txt", "2\n");
@@ -1534,7 +1820,10 @@ pub(crate) mod tests {
         let base = move_base(&f, &r, "src/tree.rs", &near);
         let job = due(&mut f, &base);
         let before = worktree(&f);
-        assert!(matches!(rebase(&job, fetch(&r)).result, Rebased::Changed));
+        assert!(matches!(
+            rebase(&job, fetch(&r)).result,
+            Rebased::Changed(None)
+        ));
         assert_eq!(worktree(&f), before);
         assert!(!has_result_ref(&f) && !job.checkout.exists());
 
@@ -3075,5 +3364,725 @@ pub(crate) mod tests {
         let answer = classes(&[("discussion_r1", "needs_change")]);
         f.host.keeper_sorted(sort.sorted, Some(&answer)).unwrap();
         assert_eq!(notices(&f.host).len(), 1);
+    }
+
+    /// A kept ticket whose PR changes line 5 of `src/tree.rs`, its first cycle a Full review
+    /// that passed with Correctness and Regressions on sessions the coordinator chose models
+    /// for, the re-check level Light running Correctness, the keeper's model chosen, the
+    /// conflicts trigger on and `checks` as the repository's checks command.
+    pub(crate) fn reviewing(checks: &str) -> (Fixture, Remote) {
+        let (mut f, r) = kept_editing_tree();
+        let mut selection = f.host.model_selection().unwrap();
+        let provider = selection.providers_for(Role::Reviewer)[0];
+        let allowed = selection.allowed(provider)[0].clone();
+        let profile = ModelProfile {
+            provider,
+            model: allowed.model,
+            effort: allowed.effort,
+        };
+        let reviewer = |focus: &str| VerifierConfig {
+            role: Role::Reviewer,
+            focus: focus.into(),
+            instruction: None,
+            provider: None,
+        };
+        let mut settings = VerificationSettings::one_level(
+            vec![reviewer("Correctness"), reviewer("Regressions")],
+            3,
+            2,
+        );
+        settings.levels.push(ReviewLevel {
+            name: "Light".into(),
+            kind: LevelKind::Recheck,
+            verifiers: vec!["Correctness".into()],
+            use_when: "after a small fix.".into(),
+        });
+        f.host.set_verification(settings).unwrap();
+        let mut ticket = f.ticket();
+        let coordinator = f.coordinator.clone();
+        let verifiers = ["Correctness", "Regressions"]
+            .map(|focus| {
+                let (agent, _) = f
+                    .host
+                    .ticket_agent(&ticket, Role::Reviewer, provider, Some(focus))
+                    .unwrap();
+                f.host
+                    .record_choice(&coordinator, &agent, profile.clone(), "First review")
+                    .unwrap();
+                // Retired when the cycle ended, as every verifier is.
+                f.host.set_archived(&agent.id, true).unwrap();
+                VerifierRun {
+                    session_id: agent.id,
+                    role: Role::Reviewer,
+                    focus: focus.into(),
+                    message_id: format!("verify:{}:1:1:{focus}", ticket.id),
+                    result: VerifierResult::Passed,
+                    report_id: None,
+                    reason: None,
+                }
+            })
+            .to_vec();
+        let verification = ticket.verification.as_mut().unwrap();
+        verification.cycle = 1;
+        verification.level = Some(CycleLevel {
+            name: "Full".into(),
+            kind: LevelKind::FullReview,
+        });
+        verification.rounds[0].verifiers = verifiers;
+        ticket.state = "passed".into();
+        f.host.save_ticket(&ticket).unwrap();
+        selection.keeper = Some(profile);
+        f.host.set_model_selection(&selection).unwrap();
+        f.host
+            .set_keeper(KeeperSettings {
+                rebase: true,
+                conflicts: true,
+                review_level: Some("Light".into()),
+                ..KeeperSettings::default()
+            })
+            .unwrap();
+        let checks = RepositoryChecks {
+            command: checks.into(),
+            minutes: 1,
+        };
+        f.host
+            .set_repository_checks(&ticket.repository_id, Some(checks))
+            .unwrap();
+        (f, r)
+    }
+    /// Moves the base two lines from the PR's line, so the rebase changes the patch, and runs
+    /// the rebase and its move as the actor does. Returns the rebase's job.
+    fn rebase_changed(f: &mut Fixture, r: &Remote) -> Job {
+        let near = tree_lines().replace("line 3", "line three");
+        let base = move_base(f, r, "src/tree.rs", &near);
+        let job = due(f, &base);
+        if f.host.keeper_rebased(rebase(&job, fetch(r))).unwrap() {
+            assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        }
+        job
+    }
+    /// The ticket's branch before a changed rebase whose review started, and the keeper's
+    /// commit it is at now.
+    pub(crate) fn under_review(f: &mut Fixture, r: &Remote) -> (String, String) {
+        let before = f.head();
+        rebase_changed(f, r);
+        assert_ne!(f.head(), before);
+        (before, f.head())
+    }
+    /// The running round's verifier of `focus`.
+    fn verifier_of(f: &Fixture, focus: &str) -> String {
+        let verification = f.ticket().verification.unwrap();
+        let round = verification.current_round().unwrap();
+        let run = round.verifiers.iter().find(|v| v.focus == focus).unwrap();
+        run.session_id.clone()
+    }
+    /// Reports `kind` with `findings` from within `session`'s turn, which first took its input.
+    fn report_as(f: &mut Fixture, session: &str, kind: &str, findings: Value) -> Result<Value> {
+        for message in f.host.messages(session, None, 100).unwrap() {
+            if message.receipt == Receipt::Queued {
+                f.host
+                    .advance_receipt(&message.id, Receipt::Delivered)
+                    .unwrap();
+            }
+        }
+        let id = format!("{kind}-{}", message_count(&f.host));
+        f.host.agent_tool(
+            session,
+            "report",
+            json!({"message_id":id,"kind":kind,"body":"evidence","findings":findings}),
+        )
+    }
+    pub(crate) fn verdict(f: &mut Fixture, focus: &str, kind: &str, findings: Value) {
+        let session = verifier_of(f, focus);
+        report_as(f, &session, kind, findings).unwrap();
+    }
+    pub(crate) fn finding(severity: &str, summary: &str) -> Value {
+        json!({"severity":severity,"location":"src/tree.rs:5","summary":summary,
+            "trigger":"Line 5 is read","evidence":"tree::line_five fails"})
+    }
+    /// Messages the ticket's coordinator got about its cycles' outcomes.
+    fn cycle_messages(f: &Fixture) -> Vec<String> {
+        let prefix = format!("verification:{}:", f.ticket);
+        f.host
+            .messages(&f.coordinator.id, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.id.starts_with(&prefix))
+            .map(|m| m.id)
+            .collect()
+    }
+    fn untriaged(id: &str) -> LedgerEntry {
+        LedgerEntry {
+            id: id.into(),
+            finding: serde_json::from_value(finding("non_blocking", "Earlier")).unwrap(),
+            focus: "Regressions".into(),
+            cycle: 1,
+            round: 1,
+            status: EntryStatus::Untriaged,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn a_changed_patch_that_passes_its_checks_and_review_is_pushed_and_no_model_made_it() {
+        let (mut f, r) = reviewing("test -f src/tree.rs");
+        let (before, after) = under_review(&mut f, &r);
+        let ticket = f.ticket();
+        let cycle = ticket.verification.clone().unwrap();
+        assert!(cycle.keeper && cycle.max_rounds == 1);
+        assert_eq!(cycle.cycle, 2);
+        assert_eq!(cycle.rounds[0].commit, after);
+        assert_eq!(
+            cycle.cycle_label("Verification cycle"),
+            "Verification cycle 2 · Light re-check by the PR keeper"
+        );
+        let first = &ticket.previous_cycles[0].rounds[0].verifiers[0];
+        let profile = |id: &str| f.host.session_runtime(id).unwrap().profile;
+        let correctness = verifier_of(&f, "Correctness");
+        assert_eq!(profile(&correctness), profile(&first.session_id));
+        assert_ne!(correctness, first.session_id);
+        let review = ticket.keeper_reviews().last().unwrap().clone();
+        assert_eq!(
+            (review.cycle, review.before, review.after, review.state),
+            (2, before.clone(), after.clone(), "passed".into())
+        );
+        // Nothing leaves before the review.
+        assert_eq!(r.branch(BRANCH), Some(before));
+
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let ticket = f.ticket();
+        assert_eq!(ticket.state, "passed");
+        assert_eq!(
+            ticket.verification.unwrap().outcome,
+            VerificationOutcome::Passed
+        );
+        assert!(cycle_messages(&f).is_empty(), "nothing to triage");
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(after));
+        let last = f.ticket().keeper.unwrap().last.unwrap();
+        assert!(last.kind == KeeperKind::ReviewedRebase && last.pushed);
+        let agents = f.host.ticket_agents(&f.ticket).unwrap();
+        assert!(agents.iter().all(|a| a.role != Role::Keeper));
+        assert!(notices(&f.host).is_empty());
+    }
+
+    #[test]
+    fn a_keeper_review_that_passes_with_a_non_blocking_finding_asks_the_coordinator_to_triage() {
+        let (mut f, r) = reviewing("true");
+        under_review(&mut f, &r);
+        verdict(
+            &mut f,
+            "Correctness",
+            "passed",
+            json!([finding("non_blocking", "Nit")]),
+        );
+        let ticket = f.ticket();
+        assert_eq!(ticket.ledger[0].status, EntryStatus::Untriaged);
+        let outcome = format!("verification:{}:2:outcome", f.ticket);
+        assert_eq!(cycle_messages(&f), vec![outcome.clone()]);
+        let body = f.host.message(&outcome).unwrap().body;
+        assert!(body.contains("Triage the untriaged findings"), "{body}");
+    }
+
+    #[test]
+    fn a_failed_keeper_review_is_withdrawn_keeping_the_coordinators_decisions_and_the_branch_goes_back()
+     {
+        let (mut f, r) = reviewing("true");
+        let mut ticket = f.ticket();
+        ticket.ledger.push(untriaged("F1"));
+        f.host.save_ticket(&ticket).unwrap();
+        let (before, after) = under_review(&mut f, &r);
+        let implementer_messages = f.host.messages(&f.implementer.id, None, 100).unwrap();
+        // The coordinator decides F1 while the review runs.
+        let decision = json!({"ticket_id":f.ticket,"decisions":[{"id":"F1","decision":"wont_fix","reason":"Out of scope"}]});
+        let coordinator = f.coordinator.id.clone();
+        f.host
+            .agent_tool(&coordinator, "triage_findings", decision)
+            .unwrap();
+        verdict(
+            &mut f,
+            "Correctness",
+            "failed",
+            json!([finding("blocking", "Line five is lost")]),
+        );
+
+        // The records are withdrawn at once; the worktree waits for the actor.
+        let ticket = f.ticket();
+        let latest = ticket.verification.clone().unwrap();
+        assert_eq!(
+            (latest.cycle, latest.outcome),
+            (1, VerificationOutcome::Passed)
+        );
+        assert!(ticket.previous_cycles.is_empty());
+        assert_eq!(ticket.state, "passed");
+        assert_eq!(ticket.ledger.len(), 1);
+        assert_eq!(
+            (ticket.ledger[0].status, ticket.ledger[0].reason.as_deref()),
+            (EntryStatus::WontFix, Some("Out of scope"))
+        );
+        let withdrawn = ticket.keeper_reviews()[0].withdrawn.clone().unwrap();
+        assert_eq!(withdrawn.cycle.cycle, 2);
+        let ids: Vec<&str> = withdrawn.entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["F2"]);
+        assert!(withdrawn.putting_back);
+        assert_eq!(f.head(), after);
+        assert!(cycle_messages(&f).is_empty() && notices(&f.host).is_empty());
+        assert_eq!(
+            f.host.messages(&f.implementer.id, None, 100).unwrap().len(),
+            implementer_messages.len(),
+            "nothing reaches the implementer"
+        );
+        let activity: i64 = f
+            .host
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM activity WHERE kind='keeper_review_withdrawn'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(activity, 1);
+
+        assert!(
+            f.host
+                .keeper_review_done(&f.ticket.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(f.head(), before);
+        assert_eq!(r.branch(BRANCH), Some(before.clone()));
+        let ticket = f.ticket();
+        assert!(
+            f.host.may_change_branch(&ticket),
+            "accepting and re-checking work as before"
+        );
+        assert!(ticket.unreviewed().is_none());
+        assert_eq!(
+            ticket.keeper.unwrap().last,
+            None,
+            "as before the keeper moved it"
+        );
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].0.contains(":changed:"), "{}", told[0].0);
+        assert!(
+            told[0]
+                .2
+                .contains("Correctness, blocking, src/tree.rs:5: Line five is lost")
+                && told[0].2.contains("Nothing was pushed"),
+            "{}",
+            told[0].2
+        );
+    }
+
+    /// A ticket whose keeper review was withdrawn with F2, after F1 was decided.
+    fn withdrawn() -> (Fixture, Remote) {
+        let (mut f, r) = reviewing("true");
+        let mut ticket = f.ticket();
+        ticket.ledger.push(untriaged("F1"));
+        f.host.save_ticket(&ticket).unwrap();
+        under_review(&mut f, &r);
+        verdict(
+            &mut f,
+            "Correctness",
+            "failed",
+            json!([finding("blocking", "Lost")]),
+        );
+        f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        (f, r)
+    }
+
+    #[test]
+    fn after_a_withdrawal_a_re_check_starts_as_cycle_three_and_finding_ids_go_on() {
+        let (mut f, _r) = withdrawn();
+        let mut ticket = f.ticket();
+        ticket.state = "ready_for_testing".into();
+        f.host.save_ticket(&ticket).unwrap();
+        let profile = f.host.model_selection().unwrap().keeper.unwrap();
+        let choice = VerifierChoice {
+            focus: "Correctness".into(),
+            profile,
+            reason: "Re-check".into(),
+        };
+        let started = f
+            .host
+            .verify_ticket(&f.ticket.clone(), "Light", &[choice])
+            .unwrap();
+        let cycle = started.verification.unwrap();
+        assert_eq!(cycle.cycle, 3);
+        assert!(!cycle.keeper);
+        let message = &cycle.rounds[0].verifiers[0].message_id;
+        assert!(
+            message.starts_with(&format!("verify:{}:3:1:", f.ticket)),
+            "{message}"
+        );
+        assert!(f.host.message(message).is_ok());
+        let cycles: Vec<u32> = started.previous_cycles.iter().map(|v| v.cycle).collect();
+        assert_eq!(cycles, [1]);
+        verdict(
+            &mut f,
+            "Correctness",
+            "failed",
+            json!([finding("blocking", "Again")]),
+        );
+        let ids: Vec<String> = f.ticket().ledger.into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["F1", "F3"], "F2 went with the withdrawn review");
+    }
+
+    #[test]
+    fn a_decision_on_the_reviews_own_finding_leaves_the_ledger_with_it() {
+        let (mut f, r) = reviewing("true");
+        let mut settings = f.host.settings().verification;
+        settings.levels[1].verifiers.push("Regressions".into());
+        f.host.set_verification(settings).unwrap();
+        under_review(&mut f, &r);
+        verdict(
+            &mut f,
+            "Correctness",
+            "passed",
+            json!([finding("non_blocking", "Nit")]),
+        );
+        let decision = json!({"ticket_id":f.ticket,"decisions":[{"id":"F1","decision":"follow_up","reason":"Later"}]});
+        let coordinator = f.coordinator.id.clone();
+        f.host
+            .agent_tool(&coordinator, "triage_findings", decision)
+            .unwrap();
+        verdict(
+            &mut f,
+            "Regressions",
+            "failed",
+            json!([finding("blocking", "Lost")]),
+        );
+        let ticket = f.ticket();
+        assert!(ticket.ledger.is_empty());
+        let entries = &ticket.keeper_reviews()[0]
+            .withdrawn
+            .as_ref()
+            .unwrap()
+            .entries;
+        assert_eq!(
+            (entries[0].status, entries[0].reason.as_deref()),
+            (EntryStatus::FollowUp, Some("Later"))
+        );
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn a_verifier_that_cannot_check_or_an_implementers_report_withdraws_the_review_too() {
+        let (mut f, r) = reviewing("true");
+        under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "blocked", json!([]));
+        assert_eq!(f.ticket().verification.unwrap().cycle, 1);
+        f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        assert!(
+            notices(&f.host)[0]
+                .2
+                .contains("- Correctness could not check")
+        );
+
+        let (mut f, r) = reviewing("true");
+        under_review(&mut f, &r);
+        let implementer = f.implementer.id.clone();
+        report_as(&mut f, &implementer, "blocked", json!([])).unwrap();
+        let ticket = f.ticket();
+        assert_eq!(ticket.verification.as_ref().unwrap().cycle, 1);
+        assert!(ticket.keeper_reviews()[0].withdrawn.is_some());
+    }
+
+    #[test]
+    fn a_branch_that_cannot_go_back_is_left_as_it_is_and_held_as_not_reviewed() {
+        type Disturb = fn(&mut Fixture);
+        let untracked: Disturb = |f| fs::write(f.worktree.join("notes.txt"), "x").unwrap();
+        let committed: Disturb = |f| drop(f.commit("c.txt", "three\n"));
+        for disturb in [untracked, committed] {
+            let (mut f, r) = reviewing("true");
+            let (before, after) = under_review(&mut f, &r);
+            verdict(
+                &mut f,
+                "Correctness",
+                "failed",
+                json!([finding("blocking", "Lost")]),
+            );
+            disturb(&mut f);
+            let worktree_before = worktree(&f);
+            f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+            assert_eq!(worktree(&f), worktree_before);
+            let ticket = f.ticket();
+            assert_eq!(ticket.unreviewed().unwrap().head, after);
+            let body = &notices(&f.host)[0].2;
+            let (now, verified) = (short_sha(&worktree_before.2), short_sha(&before));
+            assert!(
+                body.contains(&format!(
+                    "is at {now}, and the verified commit is {verified}"
+                )),
+                "{body}"
+            );
+            let (caller, id) = (f.coordinator.id.clone(), f.ticket.clone());
+            let refused = f.host.publish_ticket(&caller, &id, None, None).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains("commits no review has checked"),
+                "{refused:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_changed_patch_whose_checks_fail_is_dropped_before_the_branch_moves_and_told_once() {
+        let (mut f, r) = reviewing("exit 101");
+        let before = worktree(&f);
+        let job = rebase_changed(&mut f, &r);
+        assert!(job.checks.is_some());
+        assert_eq!(worktree(&f), before);
+        assert!(!has_result_ref(&f) && !job.checkout.exists());
+        assert_eq!(f.ticket().verification.unwrap().cycle, 1);
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0].2.contains("The repository's checks failed on it"),
+            "{}",
+            told[0].2
+        );
+        assert!(!told[0].2.contains("101"));
+    }
+
+    #[test]
+    fn no_checks_command_or_no_possible_review_leaves_a_changed_patch_to_the_coordinator() {
+        let (mut f, r) = reviewing("true");
+        let repository = f.ticket().repository_id;
+        f.host.set_repository_checks(&repository, None).unwrap();
+        let job = rebase_changed(&mut f, &r);
+        assert!(job.checks.is_none());
+        assert_eq!(f.ticket().verification.unwrap().cycle, 1);
+        assert!(notices(&f.host)[0].2.contains("did not move or push it"));
+
+        // An open finding keeps the keeper from reviewing, so its checks are not run.
+        let (mut f, r) = reviewing("true");
+        let mut ticket = f.ticket();
+        ticket.ledger.push(LedgerEntry {
+            status: EntryStatus::Open,
+            ..untriaged("F1")
+        });
+        f.host.save_ticket(&ticket).unwrap();
+        let job = rebase_changed(&mut f, &r);
+        assert!(job.checks.is_none());
+        assert_eq!(f.ticket().ledger, ticket.ledger);
+    }
+
+    #[test]
+    fn the_keepers_review_starts_only_where_every_rule_for_a_level_holds() {
+        let refused = |change: &dyn Fn(&mut Fixture)| {
+            let (mut f, _r) = reviewing("true");
+            change(&mut f);
+            let ticket = f.ticket();
+            format!("{:#}", f.host.keeper_review_ready(&ticket).unwrap_err())
+        };
+        // No model was ever chosen: Light runs Style, which never ran on the ticket.
+        let style = refused(&|f| {
+            let mut settings = f.host.settings().verification;
+            settings.verifiers.push(VerifierConfig {
+                role: Role::Reviewer,
+                focus: "Style".into(),
+                instruction: None,
+                provider: None,
+            });
+            settings.levels[1].verifiers = vec!["Style".into()];
+            f.host.set_verification(settings).unwrap();
+        });
+        assert!(
+            style.contains("Reviewer · Style has never run on this ticket"),
+            "{style}"
+        );
+        // The chosen model is no longer allowed.
+        let removed = refused(&|f| {
+            let mut selection = f.host.model_selection().unwrap();
+            let chosen = selection.keeper.clone().unwrap();
+            let access = selection.providers.get_mut(&chosen.provider).unwrap();
+            access
+                .models
+                .retain(|m| m.model != chosen.model || m.effort != chosen.effort);
+            selection.keeper = None;
+            f.host
+                .set_keeper(KeeperSettings {
+                    rebase: true,
+                    ..KeeperSettings::default()
+                })
+                .unwrap();
+            f.host.set_model_selection(&selection).unwrap();
+            f.host
+                .set_keeper(KeeperSettings {
+                    review_level: Some("Light".into()),
+                    ..f.host.settings().keeper
+                })
+                .unwrap();
+        });
+        assert!(removed.contains("Reviewer · Correctness"), "{removed}");
+        // The latest review did not pass.
+        let blocked = refused(&|f| f.review(VerificationOutcome::Blocked));
+        assert!(blocked.contains("last review ended blocked"), "{blocked}");
+        // A verifier with an open finding is left out, and any open entry.
+        for focus in ["Regressions", "Correctness"] {
+            let open = refused(&|f| {
+                let mut ticket = f.ticket();
+                ticket.ledger.push(LedgerEntry {
+                    status: EntryStatus::Open,
+                    focus: focus.into(),
+                    ..untriaged("F1")
+                });
+                f.host.save_ticket(&ticket).unwrap();
+            });
+            let why = match focus {
+                "Regressions" => {
+                    "Regressions has the open finding F1, and Light does not run Regressions"
+                }
+                _ => "the ticket has an open finding",
+            };
+            assert!(open.contains(why), "{focus}: {open}");
+        }
+        // Re-checks are not counted against the cycle cap.
+        let (mut f, _r) = reviewing("true");
+        let mut settings = f.host.settings().verification;
+        settings.max_cycles = 1;
+        f.host.set_verification(settings).unwrap();
+        assert_eq!(f.host.keeper_review_ready(&f.ticket()).unwrap(), "Light");
+    }
+
+    /// Stops the host and starts it again on the same store.
+    fn reopen(f: &mut Fixture) {
+        let (home, spare) = (f.host.home.clone(), tempfile::tempdir().unwrap());
+        drop(std::mem::replace(
+            &mut f.host,
+            Host::open(spare.path()).unwrap(),
+        ));
+        f.host = Host::open(home).unwrap();
+    }
+
+    #[test]
+    fn a_passed_keeper_review_waiting_to_be_pushed_is_pushed_after_a_restart() {
+        let (mut f, r) = reviewing("true");
+        let (_, after) = under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        reopen(&mut f);
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        // A push the stop cut short is publishing's to end: it tells the coordinator once.
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+        assert!(f.ticket().publishing.is_none());
+        assert!(
+            notices(&f.host)[0]
+                .2
+                .contains("was pushing it when Wiffletree stopped")
+        );
+        drop(step);
+        // Ended, it is never started again.
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+        assert_ne!(r.branch(BRANCH), Some(after));
+    }
+
+    #[test]
+    fn a_keeper_review_that_passes_after_the_triggers_were_turned_off_pushes_nothing() {
+        let (mut f, r) = reviewing("true");
+        let (before, after) = under_review(&mut f, &r);
+        f.host.set_keeper(KeeperSettings::default()).unwrap();
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        assert!(
+            f.host
+                .keeper_review_done(&f.ticket.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(r.branch(BRANCH), Some(before));
+        assert_eq!(
+            f.head(),
+            after,
+            "the reviewed commit stays for publish_ticket"
+        );
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].2.contains("was turned off for it"), "{}", told[0].2);
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+    }
+
+    #[test]
+    fn a_refused_keeper_push_is_handed_to_the_coordinator_and_not_retried_after_a_restart() {
+        let (mut f, r) = reviewing("true");
+        let (before, _) = under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().state = PrState::Closed;
+        f.host.save_ticket(&ticket).unwrap();
+        assert!(
+            f.host
+                .keeper_review_done(&f.ticket.clone())
+                .unwrap()
+                .is_none()
+        );
+        let told = notices(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0]
+                .2
+                .contains("a changed patch that passed the repository's checks")
+                && !told[0].2.contains("the same change as the reviewed commit"),
+            "{}",
+            told[0].2
+        );
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+        assert_eq!(r.branch(BRANCH), Some(before));
+    }
+
+    #[test]
+    fn a_keeper_review_passing_wakes_the_coordinator_only_for_its_own_untriaged_entries() {
+        let (mut f, r) = reviewing("true");
+        let mut ticket = f.ticket();
+        ticket.ledger.push(untriaged("F1"));
+        f.host.save_ticket(&ticket).unwrap();
+        under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        assert!(cycle_messages(&f).is_empty());
+    }
+
+    #[test]
+    fn a_withdrawal_whose_branch_waits_is_put_back_after_a_restart() {
+        let (mut f, r) = reviewing("true");
+        let (before, _) = under_review(&mut f, &r);
+        verdict(
+            &mut f,
+            "Correctness",
+            "failed",
+            json!([finding("blocking", "Lost")]),
+        );
+        reopen(&mut f);
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+        f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        assert_eq!(f.head(), before);
+    }
+
+    #[test]
+    fn the_repositorys_checks_run_with_the_shell_and_stop_everything_at_their_limit() {
+        let home = tempfile::tempdir().unwrap();
+        let checks = |command: &str| RepositoryChecks {
+            command: command.into(),
+            minutes: 1,
+        };
+        let run = |command| run_checks(&checks(command), home.path()).unwrap();
+        assert_eq!(run("test -d . && true"), Checked::Passed);
+        assert_eq!(run("exit 101"), Checked::Failed);
+        let pid = home.path().join("pid");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pid.display()));
+        let ran = runtime::run_limited(command, Duration::from_secs(1)).unwrap();
+        assert!(ran.is_none(), "out of time");
+        let child: libc::pid_t = fs::read_to_string(&pid).unwrap().trim().parse().unwrap();
+        // SAFETY: signal 0 only asks whether the process exists.
+        let alive = unsafe { libc::kill(child, 0) } == 0;
+        assert!(!alive, "the command's own child was stopped too");
     }
 }

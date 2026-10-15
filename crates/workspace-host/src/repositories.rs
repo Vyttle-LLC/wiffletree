@@ -541,6 +541,7 @@ impl Host {
                 base: base.into(),
                 github: None,
                 origin_problem: None,
+                checks: None,
             },
         };
         self.db.execute(
@@ -1061,6 +1062,7 @@ mod tests {
             base: "origin/main".into(),
             github: reading.repositories[1].github.clone(),
             origin_problem: None,
+            checks: None,
         };
         assert_eq!(owner_entry(&repository).as_deref(), Some("new-org"));
     }

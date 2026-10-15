@@ -1398,6 +1398,10 @@ impl Host {
                 serde_json::to_value(self.set_owner_allowed(&entry, allowed)?)?
             }
             Command::SetKeeper { keeper } => serde_json::to_value(self.set_keeper(keeper)?)?,
+            Command::SetRepositoryChecks {
+                repository_id,
+                checks,
+            } => serde_json::to_value(self.set_repository_checks(&repository_id, checks)?)?,
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?
