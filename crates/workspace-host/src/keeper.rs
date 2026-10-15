@@ -1131,7 +1131,15 @@ impl Host {
         record.waiting_changed = changed;
         self.save_ticket(&ticket)?;
         if let Some((files, checkout)) = tried {
-            self.start_try(&mut ticket, &rebase, files, &checkout)?;
+            // The trigger, the checks command or the branch may have changed while it rebased.
+            if self.will_try(&ticket)? {
+                self.start_try(&mut ticket, &rebase, files, &checkout)?;
+            } else {
+                let repository = self.ticket_repository(&ticket)?.path;
+                let checkout = checkout.to_string_lossy();
+                let remove = ["worktree", "remove", "--force", checkout.as_ref()];
+                runtime::git_output(Path::new(&repository), &remove)?;
+            }
         }
         Ok(waiting.is_some())
     }
@@ -1248,7 +1256,12 @@ impl Host {
             short_sha(&running.head),
             running.files.join(", ")
         );
-        self.keeper_notice(ticket, "conflict", &[&running.head], &body)
+        // Past the coordinator's queue cap: no later message says the try was thrown away.
+        let id = notice_id(ticket, "conflict", &[&running.head]);
+        if !self.message_exists(&id)? {
+            self.send_publish_result(&id, &ticket.coordinator_id, &body)?;
+        }
+        Ok(())
     }
     /// Ends the ticket's running try: removes its checkout and result, archives its agent and
     /// records how it ended.
@@ -4787,6 +4800,58 @@ pub(crate) mod tests {
         assert_eq!(f.ticket().verification.unwrap().cycle, 1);
         assert!(thrown_away(&f).contains("could not be moved"));
         assert!(!has_result_ref(&f));
+        told(&f);
+    }
+
+    #[test]
+    fn no_try_starts_when_the_trigger_or_the_checks_command_went_while_the_rebase_ran() {
+        let cases: [Change; 2] = [
+            ("trigger off", |f| {
+                let rebase_only = KeeperSettings {
+                    rebase: true,
+                    ..KeeperSettings::default()
+                };
+                f.host.set_keeper(rebase_only).unwrap();
+            }),
+            ("no checks command", |f| {
+                let repository = f.ticket().repository_id;
+                f.host.set_repository_checks(&repository, None).unwrap();
+            }),
+        ];
+        for (case, change) in cases {
+            let (mut f, r) = reviewing("true");
+            let on_main = tree_lines().replace("line 5", "line 5 on main");
+            let base = move_base(&f, &r, "src/tree.rs", &on_main);
+            let job = due(&mut f, &base);
+            assert!(job.tries, "{case}");
+            let outcome = rebase(&job, fetch(&r));
+            change(&mut f);
+            f.host.keeper_rebased(outcome).unwrap();
+            assert!(try_agent(&f).is_none(), "{case}");
+            assert!(f.ticket().keeper.unwrap().tries.is_empty(), "{case}");
+            assert!(!job.checkout.exists(), "{case}");
+            let worktrees = git(&f.repository, &["worktree", "list", "--porcelain"]);
+            assert_eq!(
+                worktrees.matches("worktree ").count(),
+                2,
+                "{case}: {worktrees}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thrown_away_try_is_told_past_a_full_queue() {
+        let (mut f, _r, agent, _checkout) = trying("true");
+        let coordinator = f.coordinator.id.clone();
+        let mut n = 0;
+        while f
+            .host
+            .send(&format!("busy-{n}"), None, &coordinator, "Busy")
+            .is_ok()
+        {
+            n += 1;
+        }
+        f.host.keeper_try_ended(&agent, Some("signed out")).unwrap();
         told(&f);
     }
 
