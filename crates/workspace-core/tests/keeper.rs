@@ -26,6 +26,7 @@ fn the_quiet_period_accepts_one_to_sixty_minutes() {
     let quiet = |quiet_minutes| KeeperSettings {
         rebase: true,
         quiet_minutes,
+        comments: false,
     };
     assert!(quiet(1).validate().is_ok() && quiet(60).validate().is_ok());
     assert!(quiet(0).validate().is_err() && quiet(61).validate().is_err());
@@ -47,7 +48,7 @@ fn saving_the_keeper_is_a_client_command() {
     };
     assert_eq!(
         serde_json::to_value(&command).unwrap(),
-        json!({"type":"set_keeper","keeper":{"rebase":false,"quiet_minutes":2}})
+        json!({"type":"set_keeper","keeper":{"rebase":false,"quiet_minutes":2,"comments":false}})
     );
 }
 
@@ -66,11 +67,39 @@ fn rows_say_kept_or_not_kept_only_while_a_trigger_is_on() {
     let on = KeeperSettings {
         rebase: true,
         quiet_minutes: 2,
+        comments: false,
     };
     let (wiffletree, celadon) = (repository("Vyttle-LLC"), repository("celadon-theme"));
     assert_eq!(kept_label(&wiffletree, &allowed, &on), Some("kept"));
     assert_eq!(kept_label(&celadon, &allowed, &on), Some("not kept"));
+    let sorting = KeeperSettings {
+        comments: true,
+        ..KeeperSettings::default()
+    };
+    assert_eq!(kept_label(&wiffletree, &allowed, &sorting), Some("kept"));
     let off = KeeperSettings::default();
     assert_eq!(kept_label(&wiffletree, &allowed, &off), None);
     assert_eq!(kept_label(&celadon, &allowed, &off), None);
+}
+
+#[test]
+fn sorting_needs_a_claude_model() {
+    let model = |provider| ModelProfile {
+        provider,
+        model: "m".into(),
+        effort: "low".into(),
+    };
+    let none = check_sorting_model(None).unwrap_err().to_string();
+    assert!(
+        none.contains("choose a Claude model in Models first"),
+        "{none}"
+    );
+    let codex = check_sorting_model(Some(&model(Provider::Codex)));
+    assert!(
+        codex
+            .unwrap_err()
+            .to_string()
+            .starts_with("Sorting comments needs a Claude model")
+    );
+    assert!(check_sorting_model(Some(&model(Provider::Claude))).is_ok());
 }

@@ -653,6 +653,9 @@ pub struct KeeperSettings {
     /// How long the base must stay at one commit before a rebase.
     #[serde(default = "default_quiet_minutes")]
     pub quiet_minutes: u32,
+    /// Sort new comments on a kept ticket's PR with the keeper's model, every tool off.
+    #[serde(default)]
+    pub comments: bool,
 }
 fn default_quiet_minutes() -> u32 {
     2
@@ -664,6 +667,7 @@ impl Default for KeeperSettings {
         Self {
             rebase: false,
             quiet_minutes: default_quiet_minutes(),
+            comments: false,
         }
     }
 }
@@ -679,8 +683,22 @@ impl KeeperSettings {
     }
     /// Whether any trigger is on, so repositories are said to be kept or not.
     pub fn is_on(&self) -> bool {
-        self.rebase
+        self.rebase || self.comments
     }
+}
+/// Refuses a PR keeper model that cannot sort comments: sorting runs with every tool turned
+/// off, which only Claude can be started with.
+pub fn check_sorting_model(keeper: Option<&ModelProfile>) -> Result<()> {
+    let provider = keeper.map(|k| k.provider);
+    ensure!(
+        provider.is_some(),
+        "Sorting comments needs a PR keeper model: choose a Claude model in Models first"
+    );
+    ensure!(
+        provider == Some(Provider::Claude),
+        "Sorting comments needs a Claude model: it runs with every tool turned off, and Codex cannot be started that way"
+    );
+    Ok(())
 }
 
 /// The highest verification round cap the settings accept.
@@ -992,6 +1010,39 @@ pub struct Keeper {
     /// pushed or accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreviewed: Option<Unreviewed>,
+    #[serde(default)]
+    pub comments: KeeperComments,
+}
+/// The comments the keeper sorted on the ticket's PR: ids and classes, never their text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeeperComments {
+    /// Comments created up to this time are sorted or counted; unset until a pass with the
+    /// comments trigger on starts it.
+    pub through: Option<i64>,
+    /// The watcher's newest comments when they were last read in full.
+    pub cursors: CommentCursors,
+    /// Each sorted comment's id, such as `discussion_r4190331`, and its class.
+    pub sorted: Vec<SortedComment>,
+    /// Comments by people who cannot push: counted, never sorted.
+    pub outside: u32,
+    /// The comments that need a change, and the questions, until the next review starts.
+    pub needs_change: u32,
+    pub questions: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortedComment {
+    pub id: String,
+    pub class: CommentClass,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentClass {
+    NeedsChange,
+    Question,
+    NoAction,
+    /// The run gave no class the host accepts, failed or was discarded.
+    NotSorted,
 }
 /// The head the keeper adopted, how many commits no review has checked, and the number of the
 /// ticket's latest cycle then: only a later cycle that ends clears the record.
@@ -1146,6 +1197,20 @@ impl Ticket {
     /// The commits the PR keeper adopted that no review has checked yet.
     pub fn unreviewed(&self) -> Option<&Unreviewed> {
         self.keeper.as_ref()?.unreviewed.as_ref()
+    }
+    /// The sorted comments that need a change, and the questions, waiting on the PR.
+    pub fn waiting_comments(&self) -> Option<&KeeperComments> {
+        self.keeper
+            .as_ref()
+            .map(|k| &k.comments)
+            .filter(|c| c.needs_change + c.questions > 0)
+    }
+    /// Stops counting waiting comments: a review has started, or the PR has ended.
+    pub fn end_waiting_comments(&mut self) {
+        if let Some(keeper) = &mut self.keeper {
+            keeper.comments.needs_change = 0;
+            keeper.comments.questions = 0;
+        }
     }
     /// Clears the record of adopted commits once a cycle that started after the adoption has
     /// ended, however it ended; that cycle's outcome then decides.
