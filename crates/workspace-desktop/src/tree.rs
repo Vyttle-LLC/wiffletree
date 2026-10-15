@@ -269,6 +269,9 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
         KeeperKind::ReviewedRebase => {
             "a changed patch · the repository's checks passed · reviewed before the push"
         }
+        KeeperKind::Resolved => {
+            "a conflict resolved by the PR keeper · the repository's checks passed · reviewed before the push"
+        }
     };
     Some((
         format!(
@@ -2171,6 +2174,7 @@ mod tests {
             base: "4a1c2e9dd".into(),
             state: "passed".into(),
             last: None,
+            problem: None,
             withdrawn: Some(withdrawn.clone()),
             push_started: false,
         };

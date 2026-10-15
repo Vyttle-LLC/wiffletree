@@ -16,6 +16,8 @@ const FAILURES_TOLD: u32 = 3;
 const PUSHERS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
 const COMMENTS_PER_RUN: usize = 20;
 const COMMENT_CHARS: usize = 4_000;
+/// What a thrown-away try left of the ticket.
+const AS_BEFORE: &str = "Nothing was pushed, and the ticket's branch and review are as they were.";
 /// The sorting run's instructions, and the one shape its answer can take.
 pub(crate) const SORTING: &str = concat!(
     include_str!("../skills/keeper.md"),
@@ -45,6 +47,8 @@ pub(crate) struct Memory {
     /// Tickets whose keeper review ended, waiting for their worktree to be free to be pushed,
     /// or put back after a withdrawal.
     reviews_ended: BTreeSet<String>,
+    /// Tickets whose running try reached its gate, so a later turn of its agent starts none.
+    gated: HashSet<String>,
 }
 
 /// The two sessions a ticket's PR keeper may run. Each is its own agent, with its own focus, so
@@ -86,12 +90,16 @@ pub(crate) struct Job {
     /// The repository's checks, run on a rebase whose patch changed when the keeper could
     /// review it.
     pub checks: Option<RepositoryChecks>,
+    /// A conflict gets a try: the rebase is left stopped in the checkout.
+    pub tries: bool,
 }
 pub(crate) struct Outcome {
     pub ticket_id: String,
     pub head: String,
     pub base_commit: String,
     pub result: Rebased,
+    /// The checkout left with the rebase stopped at a conflict, for a try.
+    pub stopped: Option<PathBuf>,
 }
 pub(crate) enum Rebased {
     /// The rebased commit, the same change as the verified commit, kept under `result_ref`.
@@ -113,6 +121,94 @@ pub(crate) enum Checked {
     Failed,
     /// Still running at the repository's limit of this many minutes, and stopped.
     OutOfTime(u32),
+}
+impl Checked {
+    /// How checks that did not pass ended, such as "did not finish in 20 minutes".
+    fn failure(self) -> Option<String> {
+        match self {
+            Self::Passed => None,
+            Self::Failed => Some("failed".into()),
+            Self::OutOfTime(minutes) => {
+                let plural = if minutes == 1 { "" } else { "s" };
+                Some(format!("did not finish in {minutes} minute{plural}"))
+            }
+        }
+    }
+}
+/// The gate of a try at a conflict, with everything it needs off the host thread.
+pub(crate) struct Gate {
+    pub ticket_id: String,
+    pub repository: PathBuf,
+    pub checkout: PathBuf,
+    pub base: String,
+    pub head: String,
+    pub checks: RepositoryChecks,
+}
+/// A try's result that passed the gate, kept under `result_ref`, or why it did not.
+pub(crate) struct Gated {
+    pub ticket_id: String,
+    pub result: Result<String, String>,
+}
+/// Judges what a try left in its checkout, whatever its agent reported, and removes the
+/// checkout.
+pub(crate) fn gate(job: &Gate) -> Gated {
+    let result = judge(job).unwrap_or_else(|e| Err(format!("the gate could not read it: {e:#}")));
+    let checkout = job.checkout.to_string_lossy();
+    let remove = ["worktree", "remove", "--force", checkout.as_ref()];
+    if let Err(e) = runtime::git_output(&job.repository, &remove) {
+        eprintln!("Workspace PR keeper: {}: {e:#}", job.ticket_id);
+    }
+    Gated {
+        ticket_id: job.ticket_id.clone(),
+        result,
+    }
+}
+/// The checkout is clean, its rebase finished on the base, it differs from Git's own merge of
+/// the base and the head only in the files Git could not merge, and the checks pass.
+fn judge(job: &Gate) -> Result<Result<String, String>> {
+    let checkout = &job.checkout;
+    for state in ["rebase-merge", "rebase-apply"] {
+        let path = runtime::git_output(checkout, &["rev-parse", "--git-path", state])?;
+        if checkout.join(path.trim()).exists() {
+            return Ok(Err("the rebase was not finished".into()));
+        }
+    }
+    if !worktrees::is_clean(checkout)? {
+        return Ok(Err("it left uncommitted or untracked files".into()));
+    }
+    let result = worktrees::head(checkout)?;
+    if !publish::is_ancestor(checkout, &job.base, &result) {
+        let base = short_sha(&job.base);
+        return Ok(Err(format!("its result is not on the base, {base}")));
+    }
+    let (merged, conflicted) = overlaps::merge(checkout, &job.base, &job.head)?;
+    let diff = [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        &merged,
+        &result,
+    ];
+    let changed = runtime::git_output(checkout, &diff)?;
+    let outside: Vec<&str> = changed
+        .split('\0')
+        .filter(|file| !file.is_empty() && !conflicted.iter().any(|c| c == file))
+        .collect();
+    if !outside.is_empty() {
+        let files = outside.join(", ");
+        return Ok(Err(format!(
+            "it changed {files}, which Git merged without a conflict"
+        )));
+    }
+    if let Some(ended) = run_checks(&job.checks, checkout)?.failure() {
+        return Ok(Err(format!("the repository's checks {ended}")));
+    }
+    runtime::git_output(
+        checkout,
+        &["update-ref", &result_ref(&job.ticket_id), &result],
+    )?;
+    Ok(Ok(result))
 }
 /// A minute of the checks' limit; tests shorten it so that running out of time is quick.
 const CHECKS_MINUTE: Duration = match cfg!(test) {
@@ -351,15 +447,20 @@ pub(crate) fn rebase(job: &Job, fetch: impl FnOnce(&Path, &str) -> Result<bool>)
         ];
         runtime::git_output(&job.repository, &add)?;
         let rebased = rebase_in_checkout(job);
+        if job.tries && matches!(rebased, Ok(Rebased::Conflict(_))) {
+            return rebased;
+        }
         let remove = ["worktree", "remove", "--force", checkout];
         runtime::git_output(&job.repository, &remove)?;
         rebased
     })();
+    let stopped = matches!(rebased, Ok(Rebased::Conflict(_))) && job.tries;
     Outcome {
         ticket_id: job.ticket_id.clone(),
         head: job.head.clone(),
         base_commit: job.base_commit.clone(),
         result: rebased.unwrap_or_else(|e: anyhow::Error| Rebased::Failed(format!("{e:#}"))),
+        stopped: stopped.then(|| job.checkout.clone()),
     }
 }
 
@@ -425,7 +526,10 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
     if !answer.status.success() {
         let conflicted = ["diff", "--name-only", "--diff-filter=U"];
         let files = runtime::git_output(checkout, &conflicted)?;
-        runtime::git_output(checkout, &["rebase", "--abort"])?;
+        // A try starts from the conflict where the rebase stopped.
+        if files.is_empty() || !job.tries {
+            runtime::git_output(checkout, &["rebase", "--abort"])?;
+        }
         ensure!(!files.is_empty(), "git rebase failed{}", answer.reason());
         return Ok(Rebased::Conflict(
             files.lines().map(str::to_owned).collect(),
@@ -463,7 +567,14 @@ impl Host {
             .model_selection()?
             .keeper
             .context("Choose the PR keeper's model in Models first")?;
-        self.atomically(|host| {
+        let mut replaced = vec![];
+        let agent = self.atomically(|host| {
+            // The keeper's model moved to another provider: the old agent keeps its model.
+            let existing =
+                host.existing_assignment(&ticket.id, Role::Keeper, Some(kind.focus()))?;
+            if let Some(old) = existing.filter(|old| old.provider != profile.provider) {
+                replaced = host.archive_in_change(&old.id, None)?;
+            }
             let (session, created) =
                 host.ticket_agent(ticket, Role::Keeper, profile.provider, Some(kind.focus()))?;
             if created {
@@ -478,7 +589,9 @@ impl Host {
                 )?;
             }
             Ok(session)
-        })
+        })?;
+        self.stop_archived(&replaced);
+        Ok(agent)
     }
     /// Whether the keeper acts for the ticket's PR: the ticket is open, its coordinator is not
     /// archived, its project is not paused, its repository publishes without asking and its PR
@@ -551,6 +664,9 @@ impl Host {
             due.shown |= shown != part;
             if let Err(e) = self.comments_due(&ticket, &repository, &settings, &mut due) {
                 eprintln!("Workspace PR keeper: {}: comments: {e:#}", ticket.id);
+            }
+            if let Err(e) = self.release_held(&ticket) {
+                eprintln!("Workspace PR keeper: {}: held wake: {e:#}", ticket.id);
             }
         }
         Ok(due)
@@ -793,6 +909,7 @@ impl Host {
         let busy = ticket.running_cycle().is_some()
             || ticket.publishing.is_some()
             || ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some())
+            || ticket.running_try().is_some()
             || self.keeper.running.contains(&ticket.id)
             || self.keeper.reviews_ended.contains(&ticket.id);
         let worktree = Path::new(&ticket.worktree);
@@ -870,7 +987,7 @@ impl Host {
         let tried = record
             .rebased
             .is_some_and(|r| r.head == pr.head && r.base == base);
-        if tried || self.keeper.running.contains(&ticket.id) {
+        if tried || ticket.running_try().is_some() || self.keeper.running.contains(&ticket.id) {
             return Ok(None);
         }
         let quiet_at = since + i64::from(settings.keeper.quiet_minutes) * MINUTE;
@@ -891,6 +1008,7 @@ impl Host {
                     })
                     .is_ok()
         });
+        let tries = self.would_try(ticket, repository);
         self.keeper.running.insert(ticket.id.clone());
         due.rebases.push(Job {
             ticket_id: ticket.id.clone(),
@@ -904,8 +1022,52 @@ impl Host {
                 .join("keeper")
                 .join(&ticket.id),
             checks,
+            tries,
         });
         Ok(None)
+    }
+    /// Whether a conflict at the PR's head would get a try: the conflicts trigger is on, the
+    /// repository has a checks command, the keeper's model is chosen, its review could start,
+    /// and no try at a conflict is recorded for that head.
+    fn would_try(&self, ticket: &Ticket, repository: &Repository) -> bool {
+        let settings = self.settings().keeper;
+        let head = ticket.open_pull_request().map(|pr| pr.head.as_str());
+        settings.rebase
+            && settings.conflicts
+            && repository.checks.is_some()
+            && head.is_some_and(|head| !ticket.tried(KeeperProblem::Conflict, head))
+            && self.model_selection().is_ok_and(|s| s.keeper.is_some())
+            && self.keeper_review_ready(ticket).is_ok()
+    }
+    /// Whether the keeper will try a conflict at the ticket's PR head: it keeps the ticket, may
+    /// change its branch and would try.
+    pub(crate) fn will_try(&self, ticket: &Ticket) -> Result<bool> {
+        let repository = self.ticket_repository(ticket)?;
+        Ok(self.keeps_branch(ticket, &repository)? && self.would_try(ticket, &repository))
+    }
+    /// Sends the watcher's held wake once the keeper can no longer try its problem, and drops
+    /// it once a try started, the PR's head changed or the problem is gone.
+    fn release_held(&mut self, ticket: &Ticket) -> Result<()> {
+        let Some(held) = ticket.keeper.as_ref().and_then(|k| k.held.clone()) else {
+            return Ok(());
+        };
+        let pr = ticket
+            .open_pull_request()
+            .filter(|pr| pr.head == held.head && pr.merge_state == MergeState::Dirty)
+            .filter(|_| !ticket.tried(held.problem, &held.head));
+        if let Some(pr) = pr {
+            if self.will_try(ticket)? {
+                return Ok(());
+            }
+            for (id, body) in self.budgeted(ticket, pr, vec![(held.id, held.body)])? {
+                if !self.message_exists(&id)? {
+                    self.send(&id, None, &ticket.coordinator_id, &body)?;
+                }
+            }
+        }
+        let mut ticket = ticket.clone();
+        ticket.keeper.get_or_insert_default().held = None;
+        self.save_ticket(&ticket)
     }
     /// Records a finished rebase. Returns whether its result waits to be moved onto the branch.
     pub(crate) fn keeper_rebased(&mut self, outcome: Outcome) -> Result<bool> {
@@ -916,6 +1078,7 @@ impl Host {
             base: outcome.base_commit,
         };
         let mut changed = false;
+        let mut tried = None;
         let waiting = match outcome.result {
             Rebased::BaseMoved => {
                 // The next pass reports the new commit; the wait begins again.
@@ -930,15 +1093,7 @@ impl Host {
                 Some(result)
             }
             Rebased::Changed(checked) => {
-                let checks = match checked.map(|(_, checked)| checked) {
-                    None => None,
-                    Some(Checked::OutOfTime(minutes)) => {
-                        let plural = if minutes == 1 { "" } else { "s" };
-                        Some(format!("did not finish in {minutes} minute{plural}"))
-                    }
-                    Some(_) => Some("failed".into()),
-                };
-                let did = match checks {
+                let did = match checked.and_then(|(_, checked)| checked.failure()) {
                     None => "The PR keeper did not move or push it.".into(),
                     Some(ended) => {
                         let repository = self.ticket_repository(&ticket)?;
@@ -953,12 +1108,15 @@ impl Host {
                 None
             }
             Rebased::Conflict(files) => {
-                // The PR watcher tells the coordinator, as without the keeper.
-                eprintln!(
-                    "Workspace PR keeper: {}: the rebase conflicts in {}",
-                    ticket.id,
-                    files.join(", ")
-                );
+                match outcome.stopped {
+                    Some(checkout) => tried = Some((files, checkout)),
+                    // The PR watcher tells the coordinator, as without the keeper.
+                    None => eprintln!(
+                        "Workspace PR keeper: {}: the rebase conflicts in {}",
+                        ticket.id,
+                        files.join(", ")
+                    ),
+                }
                 None
             }
             Rebased::Failed(error) => {
@@ -968,11 +1126,154 @@ impl Host {
         };
         self.keeper.failures.remove(&ticket.id);
         let record = ticket.keeper.get_or_insert_default();
-        record.rebased = Some(rebase);
+        record.rebased = Some(rebase.clone());
         record.waiting = waiting.clone();
         record.waiting_changed = changed;
         self.save_ticket(&ticket)?;
+        if let Some((files, checkout)) = tried {
+            self.start_try(&mut ticket, &rebase, files, &checkout)?;
+        }
         Ok(waiting.is_some())
+    }
+    /// Starts the keeper's one try at a conflict: a PR keeper agent working in the checkout
+    /// where the rebase stopped, sent one message naming the base, the head and the files Git
+    /// could not merge. A try that cannot start is thrown away.
+    fn start_try(
+        &mut self,
+        ticket: &mut Ticket,
+        rebase: &KeeperRebase,
+        files: Vec<String>,
+        checkout: &Path,
+    ) -> Result<()> {
+        let checks = self.ticket_repository(ticket)?.checks;
+        let checks = checks.map_or(String::new(), |c| format!(" (`{}`)", c.command));
+        let body = format!(
+            "{} conflicts with its base. Wiffletree started `git rebase {}` of its head {} in this folder, and Git stopped: it could not merge {}. Resolve the conflict in those files only, keeping what both sides meant, then `git add` them and run `git rebase --continue` until the rebase is done, changing nothing else. Then end your turn. Wiffletree then checks that the result differs from Git's own merge only in those files, runs the repository's checks{checks} and has it reviewed before anything is pushed.",
+            named(ticket),
+            rebase.base,
+            rebase.head,
+            files.join(", ")
+        );
+        ticket.keeper.get_or_insert_default().tries.push(KeeperTry {
+            problem: KeeperProblem::Conflict,
+            head: rebase.head.clone(),
+            base: rebase.base.clone(),
+            files,
+            started: now(),
+            ended: None,
+        });
+        // Stored first, so a stop from here on counts as this head's try.
+        self.save_ticket(ticket)?;
+        let started = self
+            .keeper_agent(ticket, KeeperSession::Try, checkout)
+            .and_then(|agent| {
+                let id = notice_id(ticket, "try", &[&rebase.head]);
+                self.send(&id, None, &agent.id, &body)
+            });
+        match started {
+            Ok(_) => Ok(()),
+            Err(e) => self.throw_away(ticket, &format!("it could not start: {e:#}."), AS_BEFORE),
+        }
+    }
+    /// The gate of the ticket's running try, once the turn of its agent `session` ended. A
+    /// turn that failed throws the try away; no other model is used. Any other turn of a PR
+    /// keeper agent has no gate.
+    pub(crate) fn keeper_try_ended(
+        &mut self,
+        session: &Session,
+        error: Option<&str>,
+    ) -> Result<Option<Gate>> {
+        let runtime = self.session_runtime(&session.id)?;
+        let (Some(ticket_id), Some(checkout)) = (runtime.ticket_id, runtime.workdir) else {
+            return Ok(None);
+        };
+        let mut ticket = self.ticket(&ticket_id)?;
+        let Some(running) = ticket.running_try().cloned() else {
+            return Ok(None);
+        };
+        if runtime.focus.as_deref() != Some(KeeperSession::Try.focus())
+            || !self.keeper.gated.insert(ticket_id.clone())
+        {
+            return Ok(None);
+        }
+        let checks = self.ticket_repository(&ticket)?.checks;
+        let why = match (error, checks) {
+            (Some(error), _) => format!("the keeper's model could not run: {error}."),
+            (None, None) => "the repository no longer has a checks command.".into(),
+            (None, Some(checks)) => {
+                return Ok(Some(Gate {
+                    ticket_id,
+                    repository: self.ticket_repository(&ticket)?.path.into(),
+                    checkout: checkout.into(),
+                    base: running.base,
+                    head: running.head,
+                    checks,
+                }));
+            }
+        };
+        self.throw_away(&mut ticket, &why, AS_BEFORE).map(|()| None)
+    }
+    /// Takes a try's gate: a result that passed waits to be moved onto the ticket's branch and
+    /// reviewed; any other is thrown away. Returns whether a result waits.
+    pub(crate) fn keeper_gated(&mut self, gated: Gated) -> Result<bool> {
+        let mut ticket = self.ticket(&gated.ticket_id)?;
+        let result = match gated.result {
+            Ok(result) => result,
+            Err(why) => {
+                return self
+                    .throw_away(&mut ticket, &format!("{why}."), AS_BEFORE)
+                    .map(|()| false);
+            }
+        };
+        let keeper = ticket.keeper.get_or_insert_default();
+        keeper.waiting = Some(result);
+        keeper.waiting_changed = true;
+        self.save_ticket(&ticket)?;
+        Ok(true)
+    }
+    /// Throws the ticket's running try away and tells the coordinator once: why, and what
+    /// became of the branch, `outcome`.
+    fn throw_away(&mut self, ticket: &mut Ticket, why: &str, outcome: &str) -> Result<()> {
+        let Some(running) = ticket.running_try().cloned() else {
+            return Ok(());
+        };
+        self.end_try(ticket, TryEnd::ThrownAway(why.trim().into()))?;
+        let base = ticket
+            .pull_request
+            .as_ref()
+            .map_or("", |pr| pr.base.as_str());
+        let body = format!(
+            "{} conflicts with {base} at {}. The PR keeper tried once to resolve it, in {}, and threw the try away: {why} {outcome} The keeper will not try this head again. Resolving it needs a rebase in the ticket's worktree and a new verification cycle before it is pushed.",
+            named(ticket),
+            short_sha(&running.head),
+            running.files.join(", ")
+        );
+        self.keeper_notice(ticket, "conflict", &[&running.head], &body)
+    }
+    /// Ends the ticket's running try: removes its checkout and result, archives its agent and
+    /// records how it ended.
+    fn end_try(&mut self, ticket: &mut Ticket, end: TryEnd) -> Result<()> {
+        self.keeper.gated.remove(&ticket.id);
+        let repository = Path::new(&self.ticket_repository(ticket)?.path).to_owned();
+        let checkout = Path::new(&self.settings().workspaces_dir)
+            .join("keeper")
+            .join(&ticket.id);
+        if checkout.exists() {
+            let checkout = checkout.to_string_lossy();
+            runtime::git_output(&repository, &["worktree", "remove", "--force", &checkout])?;
+        }
+        runtime::git_output(&repository, &["update-ref", "-d", &result_ref(&ticket.id)])?;
+        let focus = Some(KeeperSession::Try.focus());
+        if let Some(agent) = self.existing_assignment(&ticket.id, Role::Keeper, focus)? {
+            self.set_archived(&agent.id, true)?;
+        }
+        let keeper = ticket.keeper.get_or_insert_default();
+        keeper.waiting = None;
+        keeper.waiting_changed = false;
+        if let Some(running) = keeper.tries.last_mut() {
+            running.ended = Some(end);
+        }
+        self.save_ticket(ticket)
     }
     /// A rebase that failed outright, such as on a failed fetch, is not a try: the next pass
     /// tries that head and base again. When it keeps failing, the coordinator is told once.
@@ -1011,6 +1312,7 @@ impl Host {
         };
         let repository = self.ticket_repository(&ticket)?;
         let changed = record.waiting_changed;
+        let problem = ticket.running_try().map(|t| t.problem);
         let settings = self.settings().keeper;
         let may = settings.rebase && self.keeps_branch(&ticket, &repository)?;
         let moved = match may {
@@ -1033,7 +1335,10 @@ impl Host {
         if let Err(e) = moved {
             eprintln!("Workspace PR keeper: {ticket_id}: rebase dropped: {e:#}");
             self.save_ticket(&ticket)?;
-            if changed {
+            if problem.is_some() {
+                let why = format!("its result could not be moved onto the ticket's branch: {e:#}.");
+                self.throw_away(&mut ticket, &why, AS_BEFORE)?;
+            } else if changed {
                 let did = format!("The PR keeper did not move or push it: {e:#}.");
                 self.changed_notice(&ticket, &rebase, &did)?;
             }
@@ -1046,13 +1351,15 @@ impl Host {
             base: rebase.base.clone(),
             state: ticket.state.clone(),
             last: keeper.last.clone(),
+            problem,
             withdrawn: None,
             push_started: false,
         };
         keeper.last = Some(KeeperAction {
-            kind: match changed {
-                true => KeeperKind::ReviewedRebase,
-                false => KeeperKind::Rebase,
+            kind: match (problem, changed) {
+                (Some(_), _) => KeeperKind::Resolved,
+                (None, true) => KeeperKind::ReviewedRebase,
+                (None, false) => KeeperKind::Rebase,
             },
             at: now(),
             before: rebase.head,
@@ -1148,8 +1455,7 @@ impl Host {
         let outcome = match back {
             Ok(()) => {
                 keeper.last = review.last.clone();
-                "Nothing was pushed, and the ticket's branch and review are as they were."
-                    .to_owned()
+                AS_BEFORE.to_owned()
             }
             Err(e) => {
                 let range = format!("{}..{}", review.base, review.after);
@@ -1179,6 +1485,9 @@ impl Host {
             }
         };
         self.save_ticket(ticket)?;
+        if review.problem.is_some() {
+            return self.throw_away(ticket, why, &outcome);
+        }
         let rebase = KeeperRebase {
             head: review.before.clone(),
             base: review.base.clone(),
@@ -1436,6 +1745,9 @@ impl Host {
                         KeeperKind::ReviewedRebase => {
                             "a changed patch that passed the repository's checks and the PR keeper's re-check"
                         }
+                        KeeperKind::Resolved => {
+                            "a conflict the PR keeper resolved, which passed the repository's checks and its re-check"
+                        }
                     },
                     short_sha(&last.after)
                 );
@@ -1443,6 +1755,14 @@ impl Host {
             }
         }
         ticket.publishing = None;
+        if last.kind == KeeperKind::Resolved {
+            let end = if pushed {
+                TryEnd::Pushed
+            } else {
+                TryEnd::NotPushed
+            };
+            return self.end_try(ticket, end);
+        }
         self.save_ticket(ticket)
     }
     /// Sends the coordinator one message per ticket, kind, head and base, ever.
@@ -1489,6 +1809,15 @@ impl Host {
                 if checkout.exists() {
                     fs::remove_dir_all(&checkout)?;
                 }
+            }
+            // A try whose review has not started stopped with the host, and counts as its head's.
+            let reviewed = |head: &str| {
+                let review = ticket.keeper_reviews().last();
+                review.is_some_and(|r| r.problem.is_some() && r.before == head)
+            };
+            if ticket.running_try().is_some_and(|t| !reviewed(&t.head)) {
+                let why = "Wiffletree stopped while it ran.";
+                self.throw_away(&mut ticket, why, AS_BEFORE)?;
             }
             // A dropped result is no try: a later pass rebases that head and base again.
             if let Some(record) = ticket.keeper.as_mut().filter(|k| k.waiting.is_some()) {
@@ -4152,5 +4481,461 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(), "the command's own child was stopped too");
+    }
+
+    /// A kept ticket under review whose rebase stopped at a conflict in `src/tree.rs` and whose
+    /// try started, which left the ticket's worktree as it was. Returns the try's agent and its
+    /// checkout.
+    pub(crate) fn trying(checks: &str) -> (Fixture, Remote, Session, PathBuf) {
+        let (mut f, r) = reviewing(checks);
+        let on_main = tree_lines().replace("line 5", "line 5 on main");
+        let base = move_base(&f, &r, "src/tree.rs", &on_main);
+        let job = due(&mut f, &base);
+        assert!(job.tries);
+        let before = worktree(&f);
+        let outcome = rebase(&job, fetch(&r));
+        assert_eq!(outcome.stopped.as_deref(), Some(job.checkout.as_path()));
+        assert!(!f.host.keeper_rebased(outcome).unwrap());
+        assert_eq!(worktree(&f), before);
+        let agent = try_agent(&f).expect("a try agent");
+        (f, r, agent, job.checkout)
+    }
+    fn try_agent(f: &Fixture) -> Option<Session> {
+        let focus = Some(KeeperSession::Try.focus());
+        f.host
+            .existing_assignment(&f.ticket, Role::Keeper, focus)
+            .unwrap()
+    }
+    /// Resolves the conflict in the try's checkout as its agent would, also writing `extra`.
+    pub(crate) fn resolve(checkout: &Path, extra: &[(&str, &str)]) {
+        let resolved = tree_lines().replace("line 5", "line five on main");
+        fs::write(checkout.join("src/tree.rs"), resolved).unwrap();
+        for (file, content) in extra {
+            fs::write(checkout.join(file), content).unwrap();
+        }
+        git(checkout, &["add", "."]);
+        git(
+            checkout,
+            &["-c", "core.editor=true", "rebase", "--continue"],
+        );
+    }
+    /// Ends the try agent's turn and runs its gate. Returns whether its result waits.
+    fn gated(f: &mut Fixture, agent: &Session) -> bool {
+        let gate = f.host.keeper_try_ended(agent, None).unwrap().unwrap();
+        f.host.keeper_gated(super::gate(&gate)).unwrap()
+    }
+    fn last_try(f: &Fixture) -> KeeperTry {
+        f.ticket().keeper.unwrap().tries.last().unwrap().clone()
+    }
+    fn thrown_away(f: &Fixture) -> String {
+        match last_try(f).ended {
+            Some(TryEnd::ThrownAway(why)) => why,
+            ended => panic!("not thrown away: {ended:?}"),
+        }
+    }
+    /// What a thrown-away try must leave as it was: the worktree, GitHub's branch, the cycles,
+    /// the ledger and the state.
+    fn ticket_state(f: &Fixture, r: &Remote) -> impl PartialEq + std::fmt::Debug + use<> {
+        let ticket = f.ticket();
+        let cycles = (ticket.verification, ticket.previous_cycles);
+        (
+            worktree(f),
+            r.branch(BRANCH),
+            cycles,
+            ticket.ledger,
+            ticket.state,
+        )
+    }
+    /// The keeper's messages to the coordinator, as their id and body.
+    fn to_coordinator(f: &Fixture) -> Vec<(String, String)> {
+        let notices = notices(&f.host).into_iter();
+        let told = notices.filter(|(_, recipient, _)| *recipient == f.coordinator.id);
+        told.map(|(id, _, body)| (id, body)).collect()
+    }
+    /// The one keeper message the coordinator got, after a try was thrown away.
+    fn told(f: &Fixture) -> String {
+        let notices = to_coordinator(f);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let (id, body) = notices[0].clone();
+        assert!(id.contains(":conflict:"), "{id}");
+        for said in ["Nothing was pushed", "will not try this head again"] {
+            assert!(body.contains(said), "{body}");
+        }
+        body
+    }
+
+    #[test]
+    fn a_conflict_starts_one_try_in_the_keepers_checkout_with_one_message() {
+        let (f, r, agent, checkout) = trying("true");
+        let ticket = f.ticket();
+        let tried = last_try(&f);
+        let base = git(&f.repository, &["rev-parse", "main"]);
+        assert_eq!(
+            (tried.problem, &tried.head, &tried.base, &tried.files),
+            (
+                KeeperProblem::Conflict,
+                &f.head(),
+                &base,
+                &vec!["src/tree.rs".to_owned()]
+            )
+        );
+        assert!(tried.ended.is_none());
+        assert_eq!(agent.parent_id.as_ref(), Some(&f.coordinator.id));
+        let runtime = f.host.session_runtime(&agent.id).unwrap();
+        assert_eq!(runtime.workdir.as_deref(), checkout.to_str());
+        let keeper = f.host.model_selection().unwrap().keeper;
+        assert_eq!(runtime.profile, keeper);
+        let messages = f.host.messages(&agent.id, None, 100).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].sender.is_none());
+        for named in [&base, &tried.head, "src/tree.rs"] {
+            assert!(messages[0].body.contains(named), "{named}");
+        }
+        let rebasing = git(&checkout, &["rev-parse", "--git-path", "rebase-merge"]);
+        assert!(
+            checkout.join(rebasing).exists(),
+            "the rebase waits at the conflict"
+        );
+        assert_eq!(r.branch(BRANCH), Some(tried.head));
+        assert!(to_coordinator(&f).is_empty());
+        // The coordinator reads the try in its workspace_context.
+        let context = f.host.agent_context(&f.coordinator.id).unwrap();
+        let tickets = context["tickets"].as_array().unwrap();
+        let shown = tickets.iter().find(|t| t["id"] == ticket.id).unwrap();
+        assert_eq!(shown["keeper"]["tries"][0]["problem"], "conflict");
+    }
+
+    #[test]
+    fn no_try_starts_with_the_conflicts_trigger_off_or_no_checks_command() {
+        // The keeper's model cannot be removed while the conflicts trigger is on.
+        let cases: [Change; 2] = [
+            ("trigger off", |f| {
+                let rebase_only = KeeperSettings {
+                    rebase: true,
+                    ..KeeperSettings::default()
+                };
+                f.host.set_keeper(rebase_only).unwrap();
+            }),
+            ("no checks command", |f| {
+                let repository = f.ticket().repository_id;
+                f.host.set_repository_checks(&repository, None).unwrap();
+            }),
+        ];
+        for (case, change) in cases {
+            let (mut f, r) = reviewing("true");
+            change(&mut f);
+            let on_main = tree_lines().replace("line 5", "line 5 on main");
+            let base = move_base(&f, &r, "src/tree.rs", &on_main);
+            let job = due(&mut f, &base);
+            assert!(!job.tries, "{case}");
+            let outcome = rebase(&job, fetch(&r));
+            assert!(
+                outcome.stopped.is_none() && !job.checkout.exists(),
+                "{case}"
+            );
+            f.host.keeper_rebased(outcome).unwrap();
+            assert!(try_agent(&f).is_none(), "{case}");
+            assert!(f.ticket().keeper.unwrap().tries.is_empty(), "{case}");
+        }
+    }
+
+    #[test]
+    fn a_try_that_passes_its_gate_and_review_is_pushed_and_nothing_leaves_before() {
+        let (mut f, r, agent, checkout) = trying("grep -q 'line five on main' src/tree.rs");
+        let (before, pushed) = (f.head(), r.branch(BRANCH));
+        resolve(&checkout, &[]);
+        assert!(gated(&mut f, &agent));
+        assert!(!checkout.exists());
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        let after = f.head();
+        assert_ne!(after, before);
+        let ticket = f.ticket();
+        let review = ticket.keeper_reviews().last().unwrap();
+        assert_eq!(review.problem, Some(KeeperProblem::Conflict));
+        assert!(ticket.verification.as_ref().unwrap().keeper);
+        assert_eq!(r.branch(BRANCH), pushed, "nothing leaves before the review");
+
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(after));
+        let ticket = f.ticket();
+        let cycle = ticket.verification.as_ref().unwrap();
+        assert!(cycle.keeper && cycle.outcome == VerificationOutcome::Passed);
+        let last = ticket.keeper.as_ref().unwrap().last.clone().unwrap();
+        assert!(last.kind == KeeperKind::Resolved && last.pushed);
+        assert_eq!(last_try(&f).ended, Some(TryEnd::Pushed));
+        assert!(try_agent(&f).is_none(), "archived");
+        assert!(to_coordinator(&f).is_empty());
+    }
+
+    #[test]
+    fn a_try_that_changes_a_file_outside_the_conflict_is_thrown_away_at_the_gate() {
+        let (mut f, r, agent, checkout) = trying("true");
+        let before = ticket_state(&f, &r);
+        resolve(&checkout, &[("src/usage.rs", "fn usage() {}\n")]);
+        assert!(!gated(&mut f, &agent));
+        assert_eq!(ticket_state(&f, &r), before);
+        assert!(!checkout.exists() && !has_result_ref(&f));
+        assert!(try_agent(&f).is_none(), "archived");
+        assert!(thrown_away(&f).contains("src/usage.rs"));
+        assert!(told(&f).contains("src/usage.rs"));
+    }
+
+    #[test]
+    fn the_gate_judges_the_checkout_and_never_the_agents_report() {
+        type Leave = (&'static str, fn(&Path), &'static str);
+        let cases: [Leave; 3] = [
+            (
+                "the agent did nothing",
+                |_| {},
+                "the rebase was not finished",
+            ),
+            (
+                "the rebase was given up",
+                |checkout| {
+                    git(checkout, &["rebase", "--abort"]);
+                },
+                "not on the base",
+            ),
+            (
+                "a file was left behind",
+                |checkout| {
+                    resolve(checkout, &[]);
+                    fs::write(checkout.join("notes.txt"), "draft\n").unwrap();
+                },
+                "uncommitted or untracked",
+            ),
+        ];
+        for (case, leave, why) in cases {
+            let (mut f, r, agent, checkout) = trying("true");
+            let before = ticket_state(&f, &r);
+            leave(&checkout);
+            // The agent says it is done; its report is progress and moves nothing.
+            report_as(&mut f, &agent.id, "completed", json!([])).unwrap();
+            assert_eq!(f.ticket().state, "passed", "{case}");
+            let reported = f.host.messages(&f.coordinator.id, None, 100).unwrap();
+            assert!(
+                reported.last().unwrap().body.starts_with("[progress]"),
+                "{case}"
+            );
+            assert!(!gated(&mut f, &agent), "{case}");
+            assert_eq!(ticket_state(&f, &r), before, "{case}");
+            assert!(thrown_away(&f).contains(why), "{case}: {}", thrown_away(&f));
+            told(&f);
+        }
+    }
+
+    #[test]
+    fn a_try_whose_checks_fail_or_run_out_of_time_is_thrown_away_without_their_output() {
+        for (checks, why) in [
+            (
+                "echo CHECKS-OUTPUT; exit 101",
+                "the repository's checks failed",
+            ),
+            (
+                "sleep 5",
+                "the repository's checks did not finish in 1 minute",
+            ),
+        ] {
+            let (mut f, r, agent, checkout) = trying(checks);
+            let before = ticket_state(&f, &r);
+            resolve(&checkout, &[]);
+            assert!(!gated(&mut f, &agent), "{checks}");
+            assert_eq!(ticket_state(&f, &r), before, "{checks}");
+            assert!(thrown_away(&f).contains(why), "{checks}");
+            let body = told(&f);
+            assert!(
+                body.contains(why) && !body.contains("CHECKS-OUTPUT"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_try_whose_review_does_not_pass_is_thrown_away_with_the_review_and_its_findings_told() {
+        let (mut f, r, agent, checkout) = trying("true");
+        let before = ticket_state(&f, &r);
+        resolve(&checkout, &[]);
+        assert!(gated(&mut f, &agent));
+        f.host.keeper_move(&f.ticket.clone()).unwrap();
+        let blocking = finding("blocking", "Line 5 is lost");
+        verdict(&mut f, "Correctness", "failed", json!([blocking]));
+        assert!(
+            f.host
+                .keeper_review_done(&f.ticket.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(ticket_state(&f, &r), before);
+        assert!(thrown_away(&f).contains("did not pass"));
+        assert!(try_agent(&f).is_none(), "archived");
+        let body = told(&f);
+        for named in ["Correctness", "src/tree.rs:5", "Line 5 is lost"] {
+            assert!(body.contains(named), "{named}: {body}");
+        }
+    }
+
+    #[test]
+    fn a_try_is_thrown_away_when_the_implementer_committed_before_the_move() {
+        let (mut f, _r, agent, checkout) = trying("true");
+        resolve(&checkout, &[]);
+        assert!(gated(&mut f, &agent));
+        let mine = f.commit("c.txt", "mine\n");
+        assert!(f.host.keeper_move(&f.ticket.clone()).unwrap().is_none());
+        assert_eq!(f.head(), mine);
+        assert_eq!(f.ticket().verification.unwrap().cycle, 1);
+        assert!(thrown_away(&f).contains("could not be moved"));
+        assert!(!has_result_ref(&f));
+        told(&f);
+    }
+
+    #[test]
+    fn a_head_gets_one_try_and_a_new_head_another() {
+        let (mut f, r, agent, checkout) = trying("true");
+        resolve(&checkout, &[("src/usage.rs", "fn usage() {}\n")]);
+        assert!(!gated(&mut f, &agent));
+        // The base moves again while the head is the same: no second try.
+        let again = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &again);
+        assert!(!job.tries);
+        f.host.keeper_rebased(rebase(&job, fetch(&r))).unwrap();
+        assert_eq!(f.ticket().keeper.unwrap().tries.len(), 1);
+        assert!(try_agent(&f).is_none());
+        // An implementer's fix, reviewed and published, is a new head.
+        let fix = f.commit("c.txt", "fix\n");
+        let mut ticket = f.ticket();
+        ticket.verification.as_mut().unwrap().rounds[0].commit = fix;
+        f.host.save_ticket(&ticket).unwrap();
+        watch_open_pr(&mut f, NUMBER);
+        let newer = move_base(&f, &r, "other.txt", "2\n");
+        assert!(due(&mut f, &newer).tries);
+    }
+
+    #[test]
+    fn a_try_running_when_the_host_stopped_is_thrown_away_and_counts_as_its_heads() {
+        let (f, r, _agent, checkout) = trying("true");
+        let before = ticket_state(&f, &r);
+        let mut f = restart(f);
+        assert!(!checkout.exists() && !has_result_ref(&f));
+        assert_eq!(ticket_state(&f, &r), before);
+        assert!(thrown_away(&f).contains("Wiffletree stopped"));
+        assert!(try_agent(&f).is_none());
+        told(&f);
+        let again = move_base(&f, &r, "other.txt", "1\n");
+        assert!(!due(&mut f, &again).tries);
+    }
+
+    /// Records a pass that finds the PR at `head`, conflicting with its base or not, and the
+    /// keeper's work it makes due.
+    fn watched(f: &mut Fixture, base: &str, head: &str, dirty: bool, at: i64) -> Due {
+        let ticket = f.ticket();
+        let mut pr = ticket.pull_request.clone().unwrap();
+        pr.head = head.into();
+        pr.merge_state = if dirty {
+            MergeState::Dirty
+        } else {
+            MergeState::Clean
+        };
+        let found = pr_watch::Found {
+            ticket_id: ticket.id.clone(),
+            pull_request: pr,
+            base_head: base.into(),
+            worktree_head: None,
+        };
+        let rate_limit = pr_watch::RateLimit {
+            remaining: 4000,
+            reset_at: 0,
+        };
+        let outcome = pr_watch::Outcome::Read(pr_watch::Pass {
+            found: vec![found],
+            rate_limit,
+        });
+        let repository = ticket.repository_id;
+        f.host
+            .record_pull_requests(&repository, &outcome, at, at + MINUTE)
+            .unwrap();
+        if let pr_watch::Outcome::Read(pass) = &outcome {
+            f.host.note_bases(&repository, pass, at);
+        }
+        f.host.keeper_due(&repository, at).unwrap()
+    }
+    /// The PR watcher's messages to the coordinator.
+    fn wakes(f: &Fixture) -> Vec<(String, String)> {
+        let messages = f.host.messages(&f.coordinator.id, None, 100).unwrap();
+        let wakes = messages
+            .into_iter()
+            .filter(|m| m.id.starts_with(PR_NOTICE_PREFIX));
+        wakes.map(|m| (m.id, m.body)).collect()
+    }
+    fn held(f: &Fixture) -> Option<HeldWake> {
+        f.ticket().keeper.and_then(|k| k.held)
+    }
+    /// A ticket the keeper will try whose PR conflicts with its moved base.
+    fn conflicting() -> (Fixture, Remote, String) {
+        let (f, r) = reviewing("true");
+        let on_main = tree_lines().replace("line 5", "line 5 on main");
+        let base = move_base(&f, &r, "src/tree.rs", &on_main);
+        (f, r, base)
+    }
+
+    #[test]
+    fn the_watchers_conflict_wake_is_held_while_the_keeper_will_try_and_dropped_once_it_did() {
+        let (mut f, r, base) = conflicting();
+        let head = f.head();
+        assert!(watched(&mut f, &base, &head, true, 0).rebases.is_empty());
+        assert!(wakes(&f).is_empty());
+        assert_eq!(held(&f).unwrap().head, head);
+        let mut jobs = watched(&mut f, &base, &head, true, 2 * MINUTE).rebases;
+        f.host
+            .keeper_rebased(rebase(&jobs.remove(0), fetch(&r)))
+            .unwrap();
+        watched(&mut f, &base, &head, true, 3 * MINUTE);
+        assert!(held(&f).is_none() && wakes(&f).is_empty());
+        // Thrown away: the coordinator hears once, from the keeper.
+        let agent = try_agent(&f).unwrap();
+        f.host.keeper_try_ended(&agent, Some("signed out")).unwrap();
+        watched(&mut f, &base, &head, true, 4 * MINUTE);
+        assert!(wakes(&f).is_empty());
+        told(&f);
+    }
+
+    #[test]
+    fn a_conflict_the_keeper_cannot_try_wakes_the_coordinator_as_without_it() {
+        let (mut f, _r, base) = conflicting();
+        let repository = f.ticket().repository_id;
+        f.host.set_repository_checks(&repository, None).unwrap();
+        let head = f.head();
+        watched(&mut f, &base, &head, true, 0);
+        assert!(held(&f).is_none());
+        assert_eq!(wakes(&f).len(), 1);
+    }
+
+    #[test]
+    fn a_held_wake_is_sent_once_the_keeper_can_no_longer_try_and_dropped_once_the_head_changed() {
+        let (mut f, _r, base) = conflicting();
+        let head = f.head();
+        watched(&mut f, &base, &head, true, 0);
+        assert!(held(&f).is_some());
+        f.commit("c.txt", "mine\n");
+        watched(&mut f, &base, &head, true, MINUTE);
+        let wakes = wakes(&f);
+        assert_eq!(wakes.len(), 1);
+        let short = short_sha(&head);
+        for said in [
+            "PR #143",
+            &format!("conflicts with main at head {short}"),
+            "Automatic wake 1 of 3",
+        ] {
+            assert!(wakes[0].1.contains(said), "{said}: {}", wakes[0].1);
+        }
+        assert!(held(&f).is_none());
+
+        let (mut f, _r, base) = conflicting();
+        let head = f.head();
+        watched(&mut f, &base, &head, true, 0);
+        watched(&mut f, &base, &base, false, MINUTE);
+        assert!(held(&f).is_none());
+        assert!(super::tests::wakes(&f).is_empty());
     }
 }

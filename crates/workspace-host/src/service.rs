@@ -379,8 +379,21 @@ fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
             head: job.head.clone(),
             base_commit: job.base_commit.clone(),
             result: keeper::Rebased::Failed("The rebase stopped unexpectedly".into()),
+            stopped: None,
         });
         let _ = sender.send_blocking(Event::Kept(outcome));
+    });
+}
+/// Runs one try's gate on its own thread and always reports back, even if it panics, so the
+/// try is never left at its gate.
+fn spawn_keeper_gate(sender: Sender<Event>, job: keeper::Gate) {
+    std::thread::spawn(move || {
+        let gate = std::panic::AssertUnwindSafe(|| keeper::gate(&job));
+        let gated = std::panic::catch_unwind(gate).unwrap_or_else(|_| keeper::Gated {
+            ticket_id: job.ticket_id.clone(),
+            result: Err("the gate stopped unexpectedly".into()),
+        });
+        let _ = sender.send_blocking(Event::Gated(gated));
     });
 }
 /// Runs one PR keeper fetch of GitHub's branch on its own thread and always reports back, even
@@ -447,6 +460,8 @@ enum Event {
     Kept(keeper::Outcome),
     /// A PR keeper fetch of GitHub's branch finished on its own thread.
     Fetched(keeper::Fetched),
+    /// A try's gate finished on its own thread.
+    Gated(keeper::Gated),
     /// A read of a ticket's new PR comments finished on its own thread.
     CommentsRead(String, u64, Result<keeper::NewComments>),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
@@ -1229,6 +1244,15 @@ impl Actor {
                 }
                 true
             }
+            Event::Gated(gated) => {
+                let ticket = gated.ticket_id.clone();
+                match self.host.keeper_gated(gated) {
+                    Ok(true) => self.keeper_move(&ticket),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("Workspace PR keeper: {ticket}: {e:#}"),
+                }
+                true
+            }
             Event::Fetched(fetched) => {
                 let in_turn = self.ticket_in_turn(&fetched.ticket_id);
                 let git = &self.publish_tools.git;
@@ -1455,10 +1479,13 @@ impl Actor {
                     self.host.settle_pending_worktrees();
                 }
                 // A deliberately archived parent has no one to wake, and one that stopped
-                // the turn, or was told the human did, already knows. A sorting turn's result
+                // the turn, or was told the human did, already knows. A PR keeper turn's result
                 // reaches the coordinator only as the keeper's own message.
+                if session.role == Role::Keeper && !active.sort {
+                    self.try_ended(&session, error.as_deref());
+                }
                 if let Some(parent) = &session.parent_id
-                    && !active.sort
+                    && session.role != Role::Keeper
                     && !self.host.session(parent)?.archived
                     && stop_reason.is_none()
                     && !active.stopped_by_human
@@ -1804,6 +1831,14 @@ impl Actor {
             }
         }
         ended
+    }
+    /// Starts the gate of a try whose agent's turn ended.
+    fn try_ended(&mut self, session: &Session, error: Option<&str>) {
+        match self.host.keeper_try_ended(session, error) {
+            Ok(Some(gate)) => spawn_keeper_gate(self.sender.clone(), gate),
+            Ok(None) => {}
+            Err(e) => eprintln!("Workspace PR keeper: {}: {e:#}", session.id),
+        }
     }
     fn ticket_in_turn(&self, ticket_id: &str) -> bool {
         self.active.keys().any(|id| {
@@ -2676,6 +2711,9 @@ impl Actor {
         runtime.last_error = Some(format!("{error:#}"));
         self.host.save_runtime(&runtime)?;
         self.host.set_status(&session.id, Status::Disconnected)?;
+        if session.role == Role::Keeper {
+            self.try_ended(session, Some(&format!("{error:#}")));
+        }
         self.host.append_output(
             session,
             &format!("start-error:{}", message.id),
@@ -8327,6 +8365,108 @@ mod tests {
             .active
             .insert(implementer.id.clone(), active_turn("write", vec![]));
         assert!(!actor.worktree_busy(&ticket.id, &keeper).unwrap());
+    }
+
+    #[test]
+    fn a_keeper_agent_on_another_provider_is_replaced_when_the_keepers_model_moves() {
+        let (home, mut host, ticket, _) = ticket_fixture();
+        choose_keeper_model(&mut host, 0);
+        let first = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
+            .unwrap();
+        let mut selection = host.model_selection().unwrap();
+        let allowed = selection.allowed(Provider::Codex)[0].clone();
+        let codex = ModelProfile {
+            provider: Provider::Codex,
+            model: allowed.model,
+            effort: allowed.effort,
+        };
+        selection.keeper = Some(codex.clone());
+        host.set_model_selection(&selection).unwrap();
+        let moved = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
+            .unwrap();
+        assert_ne!(moved.id, first.id);
+        assert!(host.session(&first.id).unwrap().archived);
+        assert_eq!(host.turn_profile(&moved).unwrap(), codex);
+    }
+
+    /// A ticket whose try's agent resolved the conflict in its checkout.
+    fn try_in_turn() -> (
+        publish::tests::Fixture,
+        publish::tests::Remote,
+        Session,
+        PathBuf,
+    ) {
+        let (f, r, agent, checkout) = keeper::tests::trying("true");
+        keeper::tests::resolve(&checkout, &[]);
+        (f, r, agent, checkout)
+    }
+
+    #[test]
+    fn a_try_agents_turn_end_runs_its_gate_then_the_move_and_review_and_wakes_no_one() {
+        let (f, _remote, agent, _checkout) = try_in_turn();
+        let (ticket, coordinator, before) = (f.ticket.clone(), f.coordinator.id.clone(), f.head());
+        let worktree = f.worktree.clone();
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::unbounded();
+        actor.sender = sender;
+        let run = new_id();
+        actor
+            .host
+            .db
+            .execute(
+                "INSERT INTO provider_runs(id,session_id,messages,started_at,detail) VALUES (?1,?2,'[]',?3,'{}')",
+                params![run, agent.id, now()],
+            )
+            .unwrap();
+        actor
+            .active
+            .insert(agent.id.clone(), active_turn(&run, vec![]));
+        finish_turn(&mut actor, &agent, &run);
+        let event = events.recv_blocking().unwrap();
+        assert!(matches!(event, Event::Gated(_)));
+        actor.handle(event);
+        let ticket = actor.host.ticket(&ticket).unwrap();
+        assert!(
+            ticket.running_cycle().is_some_and(|v| v.keeper),
+            "its review runs"
+        );
+        assert_ne!(worktrees::head(&worktree).unwrap(), before);
+        let messages = actor.host.messages(&coordinator, None, 100).unwrap();
+        assert!(messages.iter().all(|m| !m.id.starts_with("turn-result:")));
+    }
+
+    #[test]
+    fn a_try_whose_model_cannot_run_is_thrown_away_and_no_other_model_runs() {
+        let (f, _remote, agent, _checkout) = try_in_turn();
+        let ticket = f.ticket.clone();
+        let pinned = f.host.session_runtime(&agent.id).unwrap().profile;
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        let message = actor.host.messages(&agent.id, None, 1).unwrap().remove(0);
+        let signed_out = anyhow::anyhow!("Claude is signed out");
+        actor.start_failed(&agent, &message, &signed_out).unwrap();
+        let mut record = actor.host.ticket(&ticket).unwrap().keeper.unwrap();
+        let ended = record.tries.pop().unwrap().ended;
+        assert!(
+            matches!(&ended, Some(TryEnd::ThrownAway(why)) if why.contains("signed out")),
+            "{ended:?}"
+        );
+        let agents = actor.host.ticket_agents(&ticket).unwrap();
+        let keepers: Vec<&Session> = agents.iter().filter(|a| a.role == Role::Keeper).collect();
+        assert_eq!(keepers.len(), 1);
+        assert!(keepers[0].archived);
+        assert_eq!(
+            actor.host.session_runtime(&agent.id).unwrap().profile,
+            pinned
+        );
+        assert!(actor.active.is_empty());
     }
 
     /// Every file under `dir` whose bytes contain `text`, the store's database and its log
