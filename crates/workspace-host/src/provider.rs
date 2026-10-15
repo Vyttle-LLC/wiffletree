@@ -62,6 +62,10 @@ pub enum TurnKind {
     /// A Codex thread compacted through `codex app-server`, which takes no note. `before` is
     /// the context total in the thread's record, when it gave one. Not a turn either.
     CodexCompaction { before: Option<u64> },
+    /// A PR keeper sorting turn: Claude with every tool off but the one that returns its
+    /// answer, no MCP server, workspace access, permission bypass, earlier conversation or
+    /// stored session. Its only reply is that answer.
+    Sort,
 }
 pub struct Turn {
     pub run_id: String,
@@ -190,6 +194,10 @@ fn input(turn: &Turn) -> Result<Vec<u8>> {
     Ok(line)
 }
 pub fn command(turn: &Turn) -> Result<ProcessCommand> {
+    ensure!(
+        !matches!(turn.kind, TurnKind::Sort) || turn.session.provider == Provider::Claude,
+        "Only Claude can sort comments: Codex cannot be started with every tool off"
+    );
     let mut cmd = ProcessCommand::new(executable(turn.session.provider)?);
     configure(&mut cmd, turn);
     Ok(cmd)
@@ -202,6 +210,27 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
+    if matches!(turn.kind, TurnKind::Sort) {
+        cmd.env_remove("WORKSPACE_SOCKET")
+            .env_remove("WORKSPACE_TOKEN")
+            .args([
+                "-p",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+            ])
+            .args(["--output-format", "stream-json", "--verbose", "--no-chrome"])
+            .args([
+                "--model",
+                &turn.profile.model,
+                "--effort",
+                &turn.profile.effort,
+            ])
+            .args(["--system-prompt", keeper::SORTING])
+            .args(["--json-schema", keeper::ANSWER_SCHEMA]);
+        return;
+    }
     // Credentials go to the MCP subprocess environment, never in the prompt.
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
         .env("WORKSPACE_TOKEN", &turn.token);
@@ -415,6 +444,9 @@ fn run_turn(
     let output = Output::spawn(stdout)?;
     let _stop_reading = StopReading(output.clone());
     let compaction = matches!(turn.kind, TurnKind::Compaction(_));
+    let sort = matches!(turn.kind, TurnKind::Sort);
+    // A sorting run's answer counts only after its start reported nothing to act with.
+    let mut attested = false;
     let mut terminal = false;
     let mut failure = None;
     let mut usage = Value::Null;
@@ -497,8 +529,9 @@ fn run_turn(
                 _ => {}
             },
             Provider::Claude => match value["type"].as_str().unwrap_or_default() {
-                // A compaction's requests are counted from its result record instead.
-                "stream_event" if !compaction => {
+                // A compaction's requests are counted from its result record instead, and a
+                // sorting run's too: its text could repeat a comment's.
+                "stream_event" if !compaction && !sort => {
                     if let Some(event) = requests.event(&value) {
                         emit(event);
                     }
@@ -512,6 +545,17 @@ fn run_turn(
                         reading.account = quota_account.clone();
                         emit(ProviderEvent::Quota(reading));
                     }
+                }
+                // Anything a sorting run could act with ends it, and its answer with it.
+                "system" if sort && value["subtype"] == "init" => {
+                    ensure!(
+                        value["tools"] == json!(["StructuredOutput"])
+                            && value["mcp_servers"].as_array().is_some_and(Vec::is_empty),
+                        "The sorting run started with tools {} and MCP servers {}",
+                        value["tools"],
+                        value["mcp_servers"]
+                    );
+                    attested = true;
                 }
                 "system" if value["subtype"] == "init" => {
                     if let Some(id) = value["session_id"].as_str() {
@@ -551,8 +595,9 @@ fn run_turn(
                         }));
                     }
                 }
-                // A compaction replays the summary as user records; they are not work steps.
-                "assistant" | "user" if !compaction => {
+                // A compaction replays the summary as user records; they are not work steps. A
+                // sorting run's steps are not kept: their text could repeat a comment's.
+                "assistant" | "user" if !compaction && !sort => {
                     claude
                         .event(&value)
                         .into_iter()
@@ -565,6 +610,20 @@ fn run_turn(
                         // The record's `usage` is zero for a compaction. These are Claude's
                         // totals for the session's whole life, kept as it reported them.
                         usage = json!({"modelUsage":value["modelUsage"],"total_cost_usd":value["total_cost_usd"]});
+                    } else if sort {
+                        usage = value["usage"].clone();
+                        emit(ProviderEvent::Usage {
+                            request_id: format!("turn:{}", turn.run_id),
+                            model: Some(turn.profile.model.clone()),
+                            usage: usage.clone(),
+                            complete: true,
+                        });
+                        if attested
+                            && value["is_error"] != true
+                            && value["structured_output"].is_object()
+                        {
+                            emit(ProviderEvent::Reply(value["structured_output"].to_string()));
+                        }
                     } else {
                         usage = value["usage"].clone();
                         if value["is_error"] != true
@@ -573,7 +632,9 @@ fn run_turn(
                             emit(ProviderEvent::Reply(reply));
                         }
                     }
-                    if value["is_error"] == true {
+                    if value["is_error"] == true && sort {
+                        failure = Some(format!("The sorting run failed: {}", value["subtype"]));
+                    } else if value["is_error"] == true {
                         failure = Some(
                             value["result"]
                                 .as_str()
@@ -731,6 +792,52 @@ mod tests {
         let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
         assert_eq!(args[denied + 1], "EnterWorktree,ExitWorktree");
         assert!(args.iter().any(|a| a == "--allowedTools"));
+    }
+
+    #[test]
+    fn a_sorting_run_has_no_tools_no_workspace_and_no_earlier_conversation() {
+        let sort = Turn {
+            kind: TurnKind::Sort,
+            ..turn(Provider::Claude, Some("earlier"), vec![])
+        };
+        let mut cmd = ProcessCommand::new("claude");
+        configure(&mut cmd, &sort);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into()).collect();
+        let after = |flag: &str| {
+            let at = args.iter().position(|a| a == flag).unwrap();
+            args[at + 1].clone()
+        };
+        assert_eq!(after("--tools"), "");
+        assert_eq!(after("--json-schema"), keeper::ANSWER_SCHEMA);
+        assert_eq!(after("--system-prompt"), keeper::SORTING);
+        assert_eq!(after("--model"), "m");
+        for flag in ["-p", "--strict-mcp-config", "--no-session-persistence"] {
+            assert!(args.iter().any(|a| a == flag), "{flag}");
+        }
+        for absent in [
+            "--mcp-config",
+            "--allowedTools",
+            "--dangerously-skip-permissions",
+            "--resume",
+            "--append-system-prompt",
+            "earlier",
+        ] {
+            assert!(!args.iter().any(|a| a == absent), "{absent}");
+        }
+        // The workspace's socket and token are taken out of the environment it inherits.
+        let envs: Vec<_> = cmd.get_envs().collect();
+        for name in ["WORKSPACE_SOCKET", "WORKSPACE_TOKEN"] {
+            assert!(envs.contains(&(std::ffi::OsStr::new(name), None)), "{name}");
+        }
+        let codex = Turn {
+            kind: TurnKind::Sort,
+            ..turn(Provider::Codex, None, vec![])
+        };
+        let refused = command(&codex).unwrap_err().to_string();
+        assert!(
+            refused.starts_with("Only Claude can sort comments"),
+            "{refused}"
+        );
     }
 
     fn turn(provider: Provider, resume: Option<&str>, attachments: Vec<Attachment>) -> Turn {

@@ -120,12 +120,13 @@ pub struct PrPart {
 
 /// A ticket row's PR line, such as "#142 · checks ✓ · 1 thread · behind", in parts. Only the
 /// parts that apply appear, and an open PR ends with the keeper's part: the commits it adopted
-/// that no review has checked, then what it is doing, if anything; a finished PR shows `merged`
-/// or `closed` instead of its checks.
+/// that no review has checked, what it is doing, if anything, and the sorted comments waiting,
+/// which replace "up to date"; a finished PR shows `merged` or `closed` instead of its checks.
 pub fn pr_line(
     pr: &PullRequest,
     unreviewed: Option<&Unreviewed>,
     keeper: Option<KeeperPart>,
+    comments: Option<&KeeperComments>,
     now: i64,
 ) -> Vec<PrPart> {
     let part = |text: &str, tone| PrPart {
@@ -164,8 +165,13 @@ pub fn pr_line(
             if let Some(unreviewed) = unreviewed {
                 parts.push(part(&not_reviewed(unreviewed), Tone::Warn));
             }
-            if let Some(keeper) = keeper {
+            if let Some(keeper) =
+                keeper.filter(|k| comments.is_none() || *k != KeeperPart::UpToDate)
+            {
                 parts.push(part(&keeper_words(keeper, now), Tone::Muted));
+            }
+            if let Some(comments) = comments {
+                parts.extend(waiting_comments(comments).map(|(text, tone)| part(&text, tone)));
             }
         }
     }
@@ -194,6 +200,38 @@ fn rebased_ago(at: i64, now: i64) -> String {
         elapsed if elapsed < 60 * MINUTE => format!("{} min ago", (elapsed / MINUTE).max(1)),
         _ => age(at).to_lowercase(),
     }
+}
+
+/// The sorted comments waiting on a PR, as "1 needs a change" and "2 questions".
+fn waiting_comments(comments: &KeeperComments) -> impl Iterator<Item = (String, Tone)> {
+    let plural = if comments.questions == 1 { "" } else { "s" };
+    [
+        (comments.needs_change > 0).then(|| {
+            (
+                format!("{} needs a change", comments.needs_change),
+                Tone::Warn,
+            )
+        }),
+        (comments.questions > 0).then(|| {
+            (
+                format!("{} question{plural}", comments.questions),
+                Tone::Muted,
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+/// The sorted comments waiting on the ticket's PR, for its card.
+pub fn comments_lines(ticket: &Ticket) -> Option<(String, String)> {
+    let words: Vec<String> = waiting_comments(ticket.waiting_comments()?)
+        .map(|(text, _)| text)
+        .collect();
+    Some((
+        format!("{} in new comments", words.join(" · ")),
+        "the coordinator was sent their links · counted until the next review starts".into(),
+    ))
 }
 
 fn not_reviewed(unreviewed: &Unreviewed) -> String {
@@ -1799,14 +1837,17 @@ mod tests {
     }
     /// The line of a PR with the keeper's part, a minute after the epoch.
     fn kept_line(pr: &PullRequest, keeper: Option<KeeperPart>) -> String {
-        pr_line(pr, None, keeper, MINUTE)
+        pr_line(pr, None, keeper, None, MINUTE)
             .iter()
             .map(|p| p.text.as_str())
             .collect::<Vec<_>>()
             .join(" · ")
     }
     fn tones(pr: &PullRequest) -> Vec<Tone> {
-        pr_line(pr, None, None, 0).iter().map(|p| p.tone).collect()
+        pr_line(pr, None, None, None, 0)
+            .iter()
+            .map(|p| p.tone)
+            .collect()
     }
     const MINUTE: i64 = 60_000;
 
@@ -1871,7 +1912,7 @@ mod tests {
             "#143 · checks … · rebased 1 min ago"
         );
         assert_eq!(
-            pr_line(&rebased, None, Some(K::Rebased(0)), 0)[2].text,
+            pr_line(&rebased, None, Some(K::Rebased(0)), None, 0)[2].text,
             "rebased 1 min ago",
             "a moment ago"
         );
@@ -1892,13 +1933,59 @@ mod tests {
             "#142 · checks ✓ · up to date"
         );
         assert_eq!(
-            pr_line(&current, None, Some(K::UpToDate), 0)[2].tone,
+            pr_line(&current, None, Some(K::UpToDate), None, 0)[2].tone,
             Tone::Muted
         );
         // Not kept: no part. A finished PR has none either.
         assert_eq!(kept_line(&current, None), "#142 · checks ✓");
         let merged = pr(S::Merged, C::Success, M::Unknown);
         assert_eq!(kept_line(&merged, Some(K::UpToDate)), "#142 · merged");
+    }
+
+    #[test]
+    fn sorted_comments_waiting_end_the_line_in_place_of_up_to_date() {
+        use {CheckState as C, KeeperPart as K, MergeState as M, PrState as S};
+        let mut waiting = pr(S::Open, C::Success, M::Clean);
+        (waiting.number, waiting.unresolved_threads) = (88, 1);
+        let comments = |needs_change, questions| KeeperComments {
+            needs_change,
+            questions,
+            ..KeeperComments::default()
+        };
+        let text = |keeper, comments: &KeeperComments| {
+            let parts = pr_line(&waiting, None, keeper, Some(comments), 0);
+            parts
+                .iter()
+                .map(|p| p.text.clone())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        assert_eq!(
+            text(Some(K::UpToDate), &comments(1, 1)),
+            "#88 · checks ✓ · 1 thread · 1 needs a change · 1 question"
+        );
+        assert_eq!(
+            text(Some(K::Waiting), &comments(0, 2)),
+            "#88 · checks ✓ · 1 thread · rebase waiting · 2 questions"
+        );
+        let parts = pr_line(&waiting, None, None, Some(&comments(1, 0)), 0);
+        assert_eq!(parts.last().unwrap().tone, Tone::Warn);
+        // Once the next review starts the ticket has none waiting, and the line names none.
+        let mut ticket: Ticket = serde_json::from_value(serde_json::json!({
+            "id":"t","coordinator_id":"c","repository_id":"r","title":"T","brief":"B",
+            "worktree":"/w","branch":"wiffletree/t","state":"ready_for_testing"
+        }))
+        .unwrap();
+        ticket.keeper = Some(Keeper {
+            comments: comments(1, 1),
+            ..Keeper::default()
+        });
+        assert_eq!(
+            comments_lines(&ticket).unwrap().0,
+            "1 needs a change · 1 question in new comments"
+        );
+        ticket.end_waiting_comments();
+        assert!(ticket.waiting_comments().is_none() && comments_lines(&ticket).is_none());
     }
 
     #[test]
@@ -1911,11 +1998,17 @@ mod tests {
         };
         let mut adopted = pr(S::Open, C::Pending, M::Clean);
         adopted.number = 141;
-        let parts = pr_line(&adopted, Some(&unreviewed(1)), None, MINUTE);
+        let parts = pr_line(&adopted, Some(&unreviewed(1)), None, None, MINUTE);
         let texts: Vec<&str> = parts.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(texts, ["#141", "checks …", "1 commit not reviewed"]);
         assert_eq!(parts[2].tone, Tone::Warn);
-        let parts = pr_line(&adopted, Some(&unreviewed(2)), Some(K::UpToDate), MINUTE);
+        let parts = pr_line(
+            &adopted,
+            Some(&unreviewed(2)),
+            Some(K::UpToDate),
+            None,
+            MINUTE,
+        );
         assert_eq!(parts[2].text, "2 commits not reviewed");
         assert_eq!(parts[3].text, "up to date");
         // The card says so first, whatever the keeper did before.

@@ -149,8 +149,15 @@ impl Host {
         Ok(settings)
     }
     /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.
+    /// Turning comment sorting on starts every PR's comments afresh at the next pass.
     pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
         keeper.validate()?;
+        if keeper.comments {
+            check_sorting_model(self.model_selection()?.keeper.as_ref())?;
+        }
+        if keeper.comments && !self.settings().keeper.comments {
+            self.restart_comments()?;
+        }
         let settings = HostSettings {
             keeper,
             ..self.settings()
@@ -368,6 +375,7 @@ mod tests {
         let on = KeeperSettings {
             rebase: true,
             quiet_minutes: 5,
+            comments: false,
         };
         host.execute(Command::SetKeeper { keeper: on.clone() })
             .unwrap();
@@ -375,6 +383,7 @@ mod tests {
             let refused = KeeperSettings {
                 rebase: true,
                 quiet_minutes,
+                comments: false,
             };
             assert!(host.set_keeper(refused).is_err(), "{quiet_minutes}");
         }
