@@ -1223,6 +1223,10 @@ impl Actor {
                 let Some(next_at) = self.pr_watch.finish(&repository, at, &outcome) else {
                     return false;
                 };
+                // Noted first, so a conflict wake is judged against the base this pass reports.
+                if let pr_watch::Outcome::Read(pass) = &outcome {
+                    self.host.note_bases(&repository, pass, at);
+                }
                 let recorded = self
                     .host
                     .record_pull_requests(&repository, &outcome, at, next_at)
@@ -1230,9 +1234,6 @@ impl Actor {
                         eprintln!("Workspace PR watch: {e:#}");
                         false
                     });
-                if let pr_watch::Outcome::Read(pass) = &outcome {
-                    self.host.note_bases(&repository, pass, at);
-                }
                 self.keep_pull_requests(&repository, at) || recorded
             }
             Event::Kept(outcome) => {

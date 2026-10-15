@@ -4939,13 +4939,14 @@ pub(crate) mod tests {
             found: vec![found],
             rate_limit,
         });
+        // In the actor's order: the base first, then the snapshot.
         let repository = ticket.repository_id;
-        f.host
-            .record_pull_requests(&repository, &outcome, at, at + MINUTE)
-            .unwrap();
         if let pr_watch::Outcome::Read(pass) = &outcome {
             f.host.note_bases(&repository, pass, at);
         }
+        f.host
+            .record_pull_requests(&repository, &outcome, at, at + MINUTE)
+            .unwrap();
         f.host.keeper_due(&repository, at).unwrap()
     }
     /// The PR watcher's messages to the coordinator.
@@ -5156,6 +5157,46 @@ pub(crate) mod tests {
                 (Err(why), true) => assert!(why.contains("src/usage.rs"), "{why}"),
                 (result, _) => panic!("{extra}: {result:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_conflict_with_a_new_base_is_held_after_the_head_was_rebased_onto_an_earlier_one() {
+        type Earlier = (&'static str, &'static str, fn(&Fixture, &Remote) -> String);
+        let earlier: [Earlier; 2] = [
+            ("failed outright", "true", |f, r| {
+                move_base(f, r, "other.txt", "1\n")
+            }),
+            ("a changed patch whose checks failed", "exit 101", |f, r| {
+                let near = tree_lines().replace("line 3", "line three");
+                move_base(f, r, "src/tree.rs", &near)
+            }),
+        ];
+        for (case, checks, move_first) in earlier {
+            let (mut f, r) = reviewing(checks);
+            let head = f.head();
+            let first = move_first(&f, &r);
+            watched(&mut f, &first, &head, false, 0);
+            let job = watched(&mut f, &first, &head, false, 2 * MINUTE)
+                .rebases
+                .remove(0);
+            let offline = |_: &Path, _: &str| -> Result<bool> { bail!("offline") };
+            let outcome = match case.starts_with("failed") {
+                true => rebase(&job, offline),
+                false => rebase(&job, fetch(&r)),
+            };
+            f.host.keeper_rebased(outcome).unwrap();
+            assert_eq!(f.head(), head, "{case}");
+            // The base moves, and the pass that first reports it says the PR conflicts.
+            let on_main = tree_lines().replace("line 5", "line 5 on main");
+            let second = move_base(&f, &r, "src/tree.rs", &on_main);
+            watched(&mut f, &second, &head, true, 3 * MINUTE);
+            assert!(held(&f).is_some(), "{case}");
+            let job = watched(&mut f, &second, &head, true, 5 * MINUTE)
+                .rebases
+                .remove(0);
+            assert!(job.tries, "{case}");
+            assert!(wakes(&f).is_empty(), "{case}");
         }
     }
 }
