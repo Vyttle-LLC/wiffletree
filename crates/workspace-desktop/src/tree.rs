@@ -175,7 +175,7 @@ pub fn pr_line(
                 keeper.filter(|k| comments.is_none() || *k != KeeperPart::UpToDate)
             {
                 let tone = match keeper {
-                    KeeperPart::Resolving => Tone::Busy,
+                    KeeperPart::Resolving | KeeperPart::Fixing => Tone::Busy,
                     _ => Tone::Muted,
                 };
                 parts.push(part(&keeper_words(keeper, now), tone));
@@ -201,6 +201,7 @@ fn keeper_words(part: KeeperPart, now: i64) -> String {
         KeeperPart::Rebased(at) => format!("rebased {}", rebased_ago(at, now)),
         KeeperPart::UpToDate => "up to date".into(),
         KeeperPart::Resolving => "keeper resolving".into(),
+        KeeperPart::Fixing => "keeper fixing".into(),
         KeeperPart::WithCoordinator => "with the coordinator".into(),
     }
 }
@@ -253,7 +254,8 @@ fn not_reviewed(unreviewed: &Unreviewed) -> String {
 
 /// What the keeper last did to the ticket's branch, for its card: a line, and a detail line.
 /// Adopted commits no review has checked come first, since they hold the ticket; then a try
-/// newer than the keeper's last action, which a try that was thrown away leaves as it was.
+/// newer than the keeper's last action, which a try that was thrown away leaves as it was,
+/// shown once thrown away only while the PR's head is the try's.
 pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
     if let Some(unreviewed) = ticket.unreviewed() {
         return Some((
@@ -271,10 +273,14 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
         .map_or("its base", |pr| pr.base.as_str());
     let now = crate::ui::now();
     let last = keeper.last.as_ref();
+    let head = ticket.pull_request.as_ref().map(|pr| pr.head.as_str());
     if let Some(tried) = keeper
         .tries
         .last()
         .filter(|t| last.is_none_or(|l| t.started >= l.at))
+        .filter(|t| {
+            !matches!(t.ended, Some(TryEnd::ThrownAway(_))) || head == Some(t.head.as_str())
+        })
     {
         return try_lines(tried, base, now);
     }
@@ -322,6 +328,12 @@ pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
                 files.join(", ")
             ),
         ),
+        KeeperKind::Fixed => (
+            format!("fixed failed checks {pushed}, {ago}"),
+            format!(
+                "only in files the pull request changes · the repository's checks passed · {reviewed}"
+            ),
+        ),
     };
     let commits = format!("{} → {}", short_sha(&last.before), short_sha(&last.after));
     Some((line, format!("{commits} · {detail}")))
@@ -333,6 +345,10 @@ fn try_lines(tried: &KeeperTry, base: &str, now: i64) -> Option<(String, String)
     let ago = rebased_ago(tried.started, now);
     let files = tried.files.join(", ");
     match &tried.ended {
+        None if tried.problem == KeeperProblem::Checks => Some((
+            format!("trying once to fix failed checks at head {head}, {ago}"),
+            "only in files the pull request changes · nothing is pushed unless the repository's checks pass and a review passes".into(),
+        )),
         None => Some((
             format!("trying once to resolve a conflict with {base} at head {head}, {ago}"),
             format!(
@@ -343,20 +359,18 @@ fn try_lines(tried: &KeeperTry, base: &str, now: i64) -> Option<(String, String)
             format!("tried once at head {head} and threw the try away, {ago}"),
             format!(
                 "{} Nothing was pushed. Handed to the coordinator; the keeper will not try this head again.",
-                sentence(why)
+                capitalize_first(why)
             ),
         )),
         Some(TryEnd::Pushed | TryEnd::NotPushed) => None,
     }
 }
 
-/// Such as "1 file" or "2 files".
 fn file_count(files: usize) -> String {
     format!("{files} file{}", if files == 1 { "" } else { "s" })
 }
 
-/// `words` with a capital first letter, as a sentence.
-fn sentence(words: &str) -> String {
+fn capitalize_first(words: &str) -> String {
     let mut chars = words.chars();
     chars.next().map_or(String::new(), |first| {
         first.to_uppercase().chain(chars).collect()
@@ -2258,6 +2272,56 @@ mod tests {
 
         ticket.pull_request.as_mut().unwrap().head = "5f2e7a0bb".into();
         assert_eq!(ticket.try_part(), None, "a new head");
+        assert_eq!(keeper_lines(&ticket), None, "a new head");
+    }
+
+    #[test]
+    fn a_try_at_failed_checks_reads_keeper_fixing_and_its_fix_reads_as_fixed() {
+        let (_home, _host, _coordinator, mut ticket) = store();
+        let failed = pr(PrState::Open, CheckState::Failure, MergeState::Clean);
+        ticket.pull_request = Some(failed.clone());
+        let at = crate::ui::now() - 90_000;
+        let tried = KeeperTry {
+            problem: KeeperProblem::Checks,
+            head: failed.head.clone(),
+            base: "4a1c2e9dd".into(),
+            files: vec!["src/tree.rs".into()],
+            started: at - MINUTE,
+            ended: None,
+        };
+        ticket.keeper = Some(Keeper {
+            tries: vec![tried],
+            ..Default::default()
+        });
+        let part = ticket.try_part();
+        assert_eq!(part, Some(KeeperPart::Fixing));
+        assert_eq!(kept_line(&failed, part), "#142 · checks ✗ · keeper fixing");
+        assert_eq!(pr_line(&failed, None, part, None, 0)[2].tone, Tone::Busy);
+        assert_eq!(
+            keeper_lines(&ticket).unwrap(),
+            (
+                "trying once to fix failed checks at head 3daf610, 2 min ago".into(),
+                "only in files the pull request changes · nothing is pushed unless the repository's checks pass and a review passes".into()
+            )
+        );
+
+        let keeper = ticket.keeper.as_mut().unwrap();
+        keeper.tries[0].ended = Some(TryEnd::Pushed);
+        keeper.last = Some(KeeperAction {
+            kind: KeeperKind::Fixed,
+            at,
+            before: failed.head.clone(),
+            after: "77b0c13ff".into(),
+            base: "4a1c2e9dd".into(),
+            pushed: true,
+        });
+        assert_eq!(
+            keeper_lines(&ticket).unwrap(),
+            (
+                "fixed failed checks and pushed, 1 min ago".into(),
+                "3daf610 → 77b0c13 · only in files the pull request changes · the repository's checks passed · reviewed before the push".into()
+            )
+        );
     }
 
     #[test]
