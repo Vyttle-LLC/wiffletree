@@ -565,3 +565,21 @@ With the conflicts trigger on, in a repository with a checks command, a rebase r
 #### Scenario: Changed patch that fails its checks
 - **WHEN** the checks fail on the rebased commit
 - **THEN** nothing is moved or pushed, and the coordinator is told once
+
+### Requirement: A try shows on the ticket
+While a try runs, the PR line's keeper part SHALL read "keeper resolving", before any other part, and a "PR keeper" agent SHALL show under the ticket. After a try was thrown away, the part SHALL read "with the coordinator" until the PR's head changes. The ticket's card SHALL say what the last try did: what it fixed, in which files, that the checks passed and that it was reviewed before the push; or that it was thrown away, why, and that nothing was pushed. The ticket's keeper record in `workspace_context` SHALL list its tries.
+
+#### Scenario: Being tried
+- **WHEN** a try at PR #139's conflict is running
+- **THEN** the PR line reads "#139 · conflict · keeper resolving"
+
+#### Scenario: Handed over
+- **WHEN** the try at PR #140's conflict was thrown away
+- **THEN** the PR line reads "#140 · conflict · with the coordinator", and the card says the try was thrown away, why, and that nothing was pushed
+
+### Requirement: The limit of a try is documented
+The README and the development notes SHALL say that the model making a fix runs, like every agent, with its provider's permission prompts bypassed, so its shell can run any command, including a push, with the human's credentials; that the app checks what the try leaves in its checkout, which files changed and whether the checks pass, and has it reviewed, but does not confine what the model runs; and that the checks command is run by the host as the human wrote it.
+
+#### Scenario: README
+- **WHEN** a reader opens the README's warning
+- **THEN** it says the keeper's model can still run any command, and that only what it leaves behind is checked
