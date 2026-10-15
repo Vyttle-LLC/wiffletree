@@ -1156,8 +1156,9 @@ impl Host {
             .join(ticket_id)
     }
     /// Whether `problem` at the PR's head would get a try: its trigger is on, the repository
-    /// has a checks command, the keeper's model is chosen, its review could start, and no try
-    /// at that problem is recorded for that head.
+    /// has a checks command, the keeper's model is chosen, its review could start, no try
+    /// at that problem is recorded for that head and the watcher has not woken the coordinator
+    /// for it, so the coordinator hears once, from whichever acts first.
     fn would_try(&self, ticket: &Ticket, repository: &Repository, problem: KeeperProblem) -> bool {
         let settings = self.settings().keeper;
         let head = ticket.open_pull_request().map(|pr| pr.head.as_str());
@@ -1167,6 +1168,7 @@ impl Host {
             && head.is_some_and(|head| !ticket.tried(problem, head))
             && self.model_selection().is_ok_and(|s| s.keeper.is_some())
             && self.keeper_review_ready(ticket).is_ok()
+            && self.wake_sent(ticket, problem).is_ok_and(|sent| !sent)
     }
     /// Whether the keeper will try `problem` at the ticket's PR head: it keeps the ticket, may
     /// change its branch and would try.
@@ -1488,6 +1490,11 @@ impl Host {
         let Some(running) = ticket.running_try().cloned() else {
             return Ok(());
         };
+        // A try that never got an agent, such as one whose reproduction could not run, ran no model.
+        let focus = Some(KeeperSession::Try.focus());
+        let ran = self
+            .existing_assignment(&ticket.id, Role::Keeper, focus)?
+            .is_some();
         self.end_try(ticket, TryEnd::ThrownAway(why.trim().into()))?;
         let pr = ticket.pull_request.as_ref();
         let (base, number) = pr.map_or(("", 0), |pr| (pr.base.as_str(), pr.number));
@@ -1503,7 +1510,12 @@ impl Host {
             KeeperProblem::Checks => (
                 "checks",
                 format!(
-                    "{named}: checks failed on GitHub at head {head}. The PR keeper tried once to fix them and threw the try away: {why} {outcome} The keeper will not try this head again. Run gh pr checks {number} in the ticket worktree for details. A fix needs a new verification cycle before it is pushed."
+                    "{named}: checks failed on GitHub at head {head}. {} {why} {outcome} The keeper will not try this head again. Run gh pr checks {number} in the ticket worktree for details. A fix needs a new verification cycle before it is pushed.",
+                    if ran {
+                        "The PR keeper tried once to fix them and threw the try away:"
+                    } else {
+                        "The PR keeper did not try to fix them, because no model ran:"
+                    }
                 ),
             ),
         };
@@ -5875,5 +5887,42 @@ pub(crate) mod tests {
         let wakes = wakes(&f);
         assert_eq!(wakes.len(), 1, "{wakes:?}");
         assert!(wakes[0].0.contains(":checks:") && wakes[0].1.contains("checks failed at head"));
+    }
+
+    #[test]
+    fn checks_that_could_not_be_run_here_are_not_called_a_try_of_the_keepers_model() {
+        let (mut f, _r, base) = checking(FIXED);
+        let due = checks_failed(&mut f, &base, 0);
+        let [job] = <[Reproduce; 1]>::try_from(due.reproductions)
+            .ok()
+            .expect("one");
+        let mut reproduced = super::reproduce(&job);
+        reproduced.result = Err("git worktree add failed".into());
+        f.host.keeper_reproduced(reproduced).unwrap();
+        assert!(try_agent(&f).is_none());
+        let told = to_coordinator(&f);
+        assert_eq!(told.len(), 1, "{told:?}");
+        let body = &told[0].1;
+        assert!(body.contains("git worktree add failed"), "{body}");
+        assert!(body.contains("did not try to fix them"), "{body}");
+        assert!(!body.contains("tried once"), "{body}");
+    }
+
+    #[test]
+    fn a_failed_checks_wake_the_watcher_sent_after_a_failed_rebase_is_not_followed_by_a_try() {
+        let (mut f, _r, base) = checking(FIXED);
+        let pair = KeeperRebase {
+            head: f.head(),
+            base: base.clone(),
+        };
+        f.host.keeper.failures.insert(f.ticket.clone(), (pair, 1));
+        // The rebase failed outright, so the wake goes out; the clean rebase after it must not
+        // reproduce the checks and try, which would tell the coordinator again.
+        let due = checks_failed(&mut f, &base, 0);
+        assert_eq!(wakes(&f).len(), 1);
+        assert!(due.reproductions.is_empty() && try_agent(&f).is_none());
+        let due = checks_failed(&mut f, &base, MINUTE);
+        assert!(due.reproductions.is_empty());
+        assert_eq!(wakes(&f).len(), 1);
     }
 }
