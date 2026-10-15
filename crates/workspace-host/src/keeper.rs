@@ -36,8 +36,11 @@ pub(crate) struct Memory {
     parts: BTreeMap<String, KeeperPart>,
     /// By ticket: GitHub's head and the worktree's HEAD last found diverged, not fetched again.
     diverged: HashMap<String, (String, String)>,
-    /// Tickets whose comments are being read or sorted.
-    sorting: HashSet<String>,
+    /// By ticket: the read of its comments being read or sorted. A read whose number is not
+    /// here, as after the trigger was turned on again, records nothing.
+    sorting: HashMap<String, u64>,
+    /// The number of the latest read.
+    reads: u64,
 }
 
 /// The two sessions a ticket's PR keeper may run. Each is its own agent, with its own focus, so
@@ -139,6 +142,8 @@ pub(crate) struct Read {
     pub repository: PathBuf,
     pub base: String,
     pub number: u64,
+    /// This read's number, which its result must still hold.
+    pub read: u64,
     pub known: Option<BTreeSet<String>>,
     /// The watcher's newest comments as the pass read them.
     pub cursors: CommentCursors,
@@ -175,6 +180,8 @@ pub(crate) struct Sort {
 #[derive(Clone)]
 pub(crate) struct Sorted {
     pub ticket_id: String,
+    /// The number of the read that found these comments.
+    pub read: u64,
     pub sent: Vec<Sent>,
     /// New comments by people who cannot push: counted, never sent.
     pub outside: Vec<String>,
@@ -236,6 +243,7 @@ pub(crate) fn read_comments(
     }
     let mut sorted = Sorted {
         ticket_id: job.ticket_id.clone(),
+        read: job.read,
         sent: vec![],
         outside: vec![],
         window: BTreeSet::new(),
@@ -530,7 +538,7 @@ impl Host {
             .iter()
             .any(|a| a.role == Role::Keeper && self.in_turn.contains(&a.id));
         if sorting
-            || self.keeper.sorting.contains(&ticket.id)
+            || self.keeper.sorting.contains_key(&ticket.id)
             || !self.kept(ticket, repository, &coordinator)?
         {
             return Ok(());
@@ -539,12 +547,16 @@ impl Host {
         if record.read.is_some() && record.cursors == pr.comments {
             return Ok(());
         }
-        self.keeper.sorting.insert(ticket.id.clone());
+        self.keeper.reads += 1;
+        self.keeper
+            .sorting
+            .insert(ticket.id.clone(), self.keeper.reads);
         due.reads.push(Read {
             ticket_id: ticket.id.clone(),
             repository: repository.path.clone().into(),
             base: repository.base.clone(),
             number: pr.number,
+            read: self.keeper.reads,
             known: record.read.map(|read| read.into_keys().collect()),
             cursors: pr.comments.clone(),
         });
@@ -567,10 +579,11 @@ impl Host {
     pub(crate) fn keeper_read(
         &mut self,
         ticket_id: &str,
+        number: u64,
         read: Result<NewComments>,
     ) -> Result<Option<Sort>> {
-        // The trigger was turned on again since the read started.
-        if !self.keeper.sorting.contains(ticket_id) {
+        // The trigger was turned on again since the read started, whatever started since.
+        if self.keeper.sorting.get(ticket_id) != Some(&number) {
             return Ok(None);
         }
         let NewComments { sorted, input } = read.inspect_err(|_| {
@@ -598,9 +611,10 @@ impl Host {
     /// A run started before the trigger was turned on again records nothing.
     pub(crate) fn keeper_sorted(&mut self, sorted: Sorted, answer: Option<&str>) -> Result<()> {
         use CommentClass::*;
-        if !self.keeper.sorting.remove(&sorted.ticket_id) {
+        if self.keeper.sorting.get(&sorted.ticket_id) != Some(&sorted.read) {
             return Ok(());
         }
+        self.keeper.sorting.remove(&sorted.ticket_id);
         let answer: Value = answer
             .and_then(|a| serde_json::from_str(a).ok())
             .unwrap_or_default();
@@ -2463,7 +2477,9 @@ pub(crate) mod tests {
     /// Reads `job` from GitHub's `answer` and returns the sorting run it starts, if any.
     fn run_of(f: &mut Fixture, job: &Read, answer: String) -> Option<Sort> {
         let (_, read) = read_from(job, answer);
-        f.host.keeper_read(&f.ticket.clone(), Ok(read)).unwrap()
+        f.host
+            .keeper_read(&f.ticket.clone(), read.sorted.read, Ok(read))
+            .unwrap()
     }
     /// The first pass's read, which records the comments of GitHub's `existing` answer as
     /// already there, then the read the next pass makes due.
@@ -2571,7 +2587,7 @@ pub(crate) mod tests {
         assert_eq!(&call[6..], ["-f", "owner=allowed-org", "-f", "name=app"]);
         let sort = f
             .host
-            .keeper_read(&f.ticket.clone(), Ok(read))
+            .keeper_read(&f.ticket.clone(), read.sorted.read, Ok(read))
             .unwrap()
             .unwrap();
         assert_eq!(sent_ids(&sort), ["discussion_r31"]);
@@ -2728,7 +2744,7 @@ pub(crate) mod tests {
             .collect();
         let (_, read) = read_from(&job, answer(rest, vec![], vec![first]));
         f.host
-            .keeper_read(&f.ticket.clone(), Ok(read))
+            .keeper_read(&f.ticket.clone(), read.sorted.read, Ok(read))
             .unwrap()
             .unwrap()
     }
@@ -2916,11 +2932,59 @@ pub(crate) mod tests {
         f.host.set_keeper(on).unwrap();
         assert!(
             f.host
-                .keeper_read(&f.ticket.clone(), Ok(read))
+                .keeper_read(&f.ticket.clone(), read.sorted.read, Ok(read))
                 .unwrap()
                 .is_none()
         );
         assert_eq!(record(&f).read, None);
+    }
+
+    #[test]
+    fn a_read_begun_before_the_trigger_was_reset_is_dropped_after_the_next_pass_starts_one() {
+        let (mut f, _r) = sorting();
+        let one = || node(1, 9, "MEMBER", "One");
+        let job_a = read_due_after(&mut f, answer(vec![one()], vec![], vec![]));
+        let on_github = vec![
+            one(),
+            node(2, 10, "NONE", "Two"),
+            node(4, 11, "MEMBER", "Four"),
+        ];
+        let (_, read_a) = read_from(&job_a, answer(on_github.clone(), vec![], vec![]));
+        let mut off = f.host.settings().keeper;
+        off.comments = false;
+        f.host.set_keeper(off.clone()).unwrap();
+        f.host
+            .set_keeper(KeeperSettings {
+                comments: true,
+                ..off
+            })
+            .unwrap();
+        // The next pass starts read B before read A returns.
+        let mut reads = comments_pass(&mut f, inline(4));
+        let job_b = reads.remove(0);
+        assert!(job_b.known.is_none());
+        let number = read_a.sorted.read;
+        assert!(
+            f.host
+                .keeper_read(&f.ticket.clone(), number, Ok(read_a))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(record(&f).read, None, "read A records nothing");
+        assert!(run_of(&mut f, &job_b, answer(on_github.clone(), vec![], vec![])).is_none());
+        let read = read_ids(&f);
+        assert_eq!(read.len(), 3);
+        assert!(
+            read.iter()
+                .all(|(_, class)| *class == CommentClass::Earlier)
+        );
+        // Only a comment posted after the trigger came back on is sorted.
+        let mut later = on_github;
+        later.push(node(3, 12, "MEMBER", "Three"));
+        let mut reads = comments_pass(&mut f, inline(5));
+        let sort = run_of(&mut f, &reads.remove(0), answer(later, vec![], vec![])).unwrap();
+        assert_eq!(sent_ids(&sort), ["issuecomment-3"]);
+        assert!(notices(&f.host).is_empty());
     }
 
     #[test]

@@ -403,7 +403,7 @@ fn spawn_comments_read(sender: Sender<Event>, job: keeper::Read) {
         let read = std::panic::AssertUnwindSafe(|| keeper::read_comments(&job, runtime::gh_output));
         let read = std::panic::catch_unwind(read)
             .unwrap_or_else(|_| Err(anyhow::anyhow!("The read stopped unexpectedly")));
-        let _ = sender.send_blocking(Event::CommentsRead(job.ticket_id, read));
+        let _ = sender.send_blocking(Event::CommentsRead(job.ticket_id, job.read, read));
     });
 }
 enum Event {
@@ -448,7 +448,7 @@ enum Event {
     /// A PR keeper fetch of GitHub's branch finished on its own thread.
     Fetched(keeper::Fetched),
     /// A read of a ticket's new PR comments finished on its own thread.
-    CommentsRead(String, Result<keeper::NewComments>),
+    CommentsRead(String, u64, Result<keeper::NewComments>),
     /// A wake-up armed for this time arrived; scheduling runs after every event.
     Wake(i64),
     Shutdown,
@@ -1236,17 +1236,19 @@ impl Actor {
                 }
                 true
             }
-            Event::CommentsRead(ticket, read) => match self.host.keeper_read(&ticket, read) {
-                Ok(Some(sort)) => {
-                    self.start_sort(sort);
-                    true
+            Event::CommentsRead(ticket, number, read) => {
+                match self.host.keeper_read(&ticket, number, read) {
+                    Ok(Some(sort)) => {
+                        self.start_sort(sort);
+                        true
+                    }
+                    Ok(None) => true,
+                    Err(e) => {
+                        eprintln!("Workspace PR keeper: {ticket}: comments: {e:#}");
+                        false
+                    }
                 }
-                Ok(None) => true,
-                Err(e) => {
-                    eprintln!("Workspace PR keeper: {ticket}: comments: {e:#}");
-                    false
-                }
-            },
+            }
             Event::GitHub(reading) => {
                 self.github_reading = false;
                 reading.is_some_and(|reading| {
