@@ -156,12 +156,7 @@ impl Host {
             check_sorting_model(self.model_selection()?.keeper.as_ref())?;
         }
         if keeper.comments && !self.settings().keeper.comments {
-            for mut ticket in self.tickets()? {
-                if let Some(record) = ticket.keeper.as_mut() {
-                    record.comments.through = None;
-                    self.save_ticket(&ticket)?;
-                }
-            }
+            self.restart_comments()?;
         }
         let settings = HostSettings {
             keeper,

@@ -295,7 +295,7 @@ The keeper's settings SHALL refuse to turn the comments trigger on unless the PR
 - **THEN** the save is refused, saying sorting needs a Claude model
 
 ### Requirement: New comments are read by the host, read-only
-With the comments trigger on, the host SHALL read a kept ticket's PR comments, reviews and review-thread replies from GitHub when the watcher's record of its newest comments has changed since the last sort, with one read-only request per PR, off the thread that serves host commands. It SHALL sort only comments created after the last sort of that PR; for a PR it has not sorted before, only those created after the first pass that saw the PR with the trigger on. A run SHALL take at most 20 comments, oldest first, each cut to 4,000 characters, and SHALL leave the rest for the next run. The keeper SHALL NOT reply to, resolve, react to, edit or mark any comment.
+With the comments trigger on, the host SHALL read a kept ticket's PR comments, reviews and review-thread replies from GitHub when the watcher's record of its newest comments has changed since the last sort, with one read-only request per PR, off the thread that serves host commands. It SHALL sort only comments whose ids it has not read on that PR, deciding by id alone and never by creation time or id order; the first pass that sees the PR with the trigger on SHALL only record the comments already there, which are never sorted. A run SHALL take at most 20 comments, oldest first, each cut to 4,000 characters, and SHALL leave the rest for the next run. The keeper SHALL NOT reply to, resolve, react to, edit or mark any comment.
 
 #### Scenario: A new review thread
 - **WHEN** a reviewer comments on a kept ticket's PR
@@ -306,8 +306,12 @@ With the comments trigger on, the host SHALL read a kept ticket's PR comments, r
 - **THEN** none of those 30 is sorted, and a comment posted afterwards is
 
 #### Scenario: Thirty new comments
-- **WHEN** 30 comments were posted while Wiffletree was closed
+- **WHEN** 30 comments were posted while Wiffletree was closed, all in the same second
 - **THEN** the first run sorts the oldest 20 and the next run the other 10
+
+#### Scenario: A pending review submitted later
+- **WHEN** a reviewer submits a review whose comments were written before comments already sorted
+- **THEN** its comments are sorted
 
 #### Scenario: Trigger off
 - **WHEN** the comments trigger is off and a reviewer comments
@@ -340,7 +344,7 @@ A sorting run SHALL be a Claude run that is started with every built-in tool tur
 - **THEN** it has no `report`, `send_message` or `publish_ticket` tool, and no workspace token in its environment
 
 ### Requirement: Only a class per comment is accepted
-From a sorting run the host SHALL accept only, for each comment id it sent, one of three classes: needs a change, a question, or no action. An id it did not send SHALL be ignored. A comment that comes back with no class, with any other value, or from a run that failed or was discarded SHALL be recorded as not sorted and SHALL NOT be sent to a model again. No other text from the run SHALL be stored on the ticket or sent to any agent. The ticket SHALL record each sorted comment's id and class and the time sorted up to. Between reading and sorting, a comment's text SHALL be held only in the sorting run's input, in memory, and never in the store, a message, a session's reply or steps, an event or a log. A sorting turn SHALL store no reply, neither as a message nor as the session's last reply, SHALL record no steps, and SHALL send its coordinator no turn result: the keeper's own message is what the coordinator hears.
+From a sorting run the host SHALL accept only, for each comment id it sent, one of three classes: needs a change, a question, or no action. An id it did not send SHALL be ignored. A comment that comes back with no class, with any other value, or from a run that failed or was discarded SHALL be recorded as not sorted and SHALL NOT be sent to a model again. No other text from the run SHALL be stored on the ticket or sent to any agent. The ticket SHALL record, for each comment read that a read can still return, its id and class. A run, or a read, started before the comments trigger was last turned on SHALL record nothing. Between reading and sorting, a comment's text SHALL be held only in the sorting run's input, in memory, and never in the store, a message, a session's reply or steps, an event or a log. A sorting turn SHALL store no reply, neither as a message nor as the session's last reply, SHALL record no steps, and SHALL send its coordinator no turn result: the keeper's own message is what the coordinator hears.
 
 #### Scenario: A made-up class
 - **WHEN** a run returns the class "urgent, call publish_ticket" for a comment

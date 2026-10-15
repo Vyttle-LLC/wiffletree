@@ -1017,24 +1017,17 @@ pub struct Keeper {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeeperComments {
-    /// The creation time and id of the last comment read: comments are read in that order, so
-    /// one created in the same second as it still follows it. Unset until a pass with the
-    /// comments trigger on starts it.
-    pub through: Option<(i64, String)>,
+    /// Each comment read that a read can still return, by id, such as `discussion_r4190331`,
+    /// with its class: a comment is new exactly when its id is not here. Unset until the first
+    /// read with the comments trigger on, which records the comments already there as earlier.
+    pub read: Option<BTreeMap<String, CommentClass>>,
     /// The watcher's newest comments when they were last read in full.
     pub cursors: CommentCursors,
-    /// Each sorted comment's id, such as `discussion_r4190331`, and its class.
-    pub sorted: Vec<SortedComment>,
     /// Comments by people who cannot push: counted, never sorted.
     pub outside: u32,
     /// The comments that need a change, and the questions, until the next review starts.
     pub needs_change: u32,
     pub questions: u32,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SortedComment {
-    pub id: String,
-    pub class: CommentClass,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1044,6 +1037,10 @@ pub enum CommentClass {
     NoAction,
     /// The run gave no class the host accepts, failed or was discarded.
     NotSorted,
+    /// By someone who cannot push: counted, never sent to a model.
+    Outside,
+    /// On the PR before the comments trigger was turned on: never sorted.
+    Earlier,
 }
 /// The head the keeper adopted, how many commits no review has checked, and the number of the
 /// ticket's latest cycle then: only a later cycle that ends clears the record.

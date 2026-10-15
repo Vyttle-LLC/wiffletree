@@ -8346,8 +8346,107 @@ mod tests {
         }
     }
 
+    /// Stands in for Claude in a sorting run: writes the comments on stderr and streams them
+    /// back as text. With FAIL in a comment it then exits with an error; otherwise it answers
+    /// with the comments' text where no id or class is accepted.
+    const STAND_IN: &str = r#"#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:2] != ['-p']: sys.exit(0)
+comments = json.loads(sys.stdin.read())
+bodies = [c['body'] for c in comments]
+text = ' '.join(bodies)
+def emit(value): print(json.dumps(value), flush=True)
+print(text, file=sys.stderr, flush=True)
+emit({'type': 'system', 'subtype': 'init', 'session_id': 's', 'tools': ['StructuredOutput'], 'mcp_servers': []})
+for event in [{'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}}, {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': text}}, {'type': 'content_block_stop', 'index': 0}]:
+    emit({'type': 'stream_event', 'event': event})
+emit({'type': 'assistant', 'message': {'id': 'm', 'role': 'assistant', 'content': [{'type': 'text', 'text': text}]}})
+if 'FAIL' in text: sys.exit(1)
+classes = [{'id': comments[0]['id'], 'class': 'needs_change'}, {'id': comments[1]['id'], 'class': bodies[0]}, {'id': bodies[1], 'class': 'question'}]
+emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text, 'structured_output': {'classes': classes}, 'usage': {'input_tokens': 10, 'output_tokens': 2}, 'modelUsage': {}})
+"#;
+
     #[test]
     fn no_sorted_comments_text_is_stored_or_sent_anywhere() {
+        // A provider is found through the environment, which only a process of its own may set:
+        // the test below runs again in one whose Claude is the stand-in.
+        let scratch = tempfile::tempdir().unwrap();
+        let claude = scratch.path().join("claude");
+        fs::write(&claude, STAND_IN).unwrap();
+        fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let test = "service::tests::sorting_through_the_real_launch_keeps_no_comment_text";
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--ignored", "--test-threads=1"])
+            .env("WORKSPACE_CLAUDE_BIN", &claude)
+            .env("WORKSPACE_CODEX_BIN", &claude)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&ran.stdout);
+        assert!(
+            ran.status.success() && out.contains("1 passed"),
+            "{out}{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run by no_sorted_comments_text_is_stored_or_sent_anywhere, with the stand-in as Claude"]
+    fn sorting_through_the_real_launch_keeps_no_comment_text() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        for failing in [false, true] {
+            let (mut f, _remote) = keeper::tests::sorting();
+            let bodies: &[&str] = if failing {
+                &[HOSTILE, ORDERS, "FAIL"]
+            } else {
+                &[HOSTILE, ORDERS]
+            };
+            let sort = keeper::tests::sort_of(&mut f, bodies);
+            let (ticket, session) = (f.ticket.clone(), sort.session.id.clone());
+            let publish::tests::Fixture { host, home, .. } = f;
+            let (mut actor, _, _) = idle_actor(host);
+            let (sender, events) = async_channel::unbounded();
+            actor.sender = sender;
+            actor.start_sort(sort);
+            assert!(actor.active.contains_key(&session), "the run started");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while actor.active.contains_key(&session) {
+                assert!(std::time::Instant::now() < deadline, "the run ended");
+                match events.try_recv() {
+                    Ok(event) => {
+                        actor.handle(event);
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+            let record = actor.host.ticket(&ticket).unwrap().keeper.unwrap().comments;
+            let runtime = actor.host.session_runtime(&session).unwrap();
+            if failing {
+                assert!(
+                    record
+                        .read
+                        .unwrap()
+                        .values()
+                        .all(|c| *c == CommentClass::NotSorted)
+                );
+                let error = runtime.last_error.unwrap();
+                assert!(
+                    error.starts_with("The sorting run failed or was discarded"),
+                    "{error}"
+                );
+            } else {
+                assert_eq!((record.needs_change, record.questions), (1, 0));
+                assert_eq!(keeper::tests::notices(&actor.host).len(), 1);
+            }
+            drop(actor);
+            assert_no_comment_text(&home);
+        }
+    }
+
+    #[test]
+    fn a_sorting_turn_keeps_no_text_its_provider_sends() {
         // Streamed text repeating the comments, as a provider could send it.
         let streamed = || {
             let mut step = update("s", StepKind::Narration, StepState::Running, HOSTILE);
@@ -8375,12 +8474,8 @@ mod tests {
             format!("Provider exited without a successful terminal result. {HOSTILE} {ORDERS}");
         let (home, ticket, actor) = sorting_run(vec![streamed()], Some(error));
         let record = actor.host.ticket(&ticket).unwrap().keeper.unwrap().comments;
-        assert!(
-            record
-                .sorted
-                .iter()
-                .all(|s| s.class == CommentClass::NotSorted)
-        );
+        let read = record.read.unwrap();
+        assert!(read.values().all(|class| *class == CommentClass::NotSorted));
         drop(actor);
         assert_no_comment_text(&home);
     }
