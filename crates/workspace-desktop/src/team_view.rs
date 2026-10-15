@@ -174,7 +174,8 @@ impl Workspace {
                         .as_ref()
                         .map(|pr| pr_block(&ticket.id, pr, tree::pr_checked(snapshot, ticket), p)),
                 )
-                .children(tree::keeper_lines(ticket).map(|lines| keeper_block(lines, p)));
+                .children(tree::keeper_lines(ticket).map(|lines| keeper_block(lines, p)))
+                .children(tree::comments_lines(ticket).map(|lines| keeper_block(lines, p)));
             let rounds = tree::verification_lines(ticket);
             if !rounds.is_empty() {
                 let mut list = div().flex().flex_col().gap_1();

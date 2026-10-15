@@ -10,8 +10,22 @@ const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TI
 const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
 const KEEP: &str = "Only in the repositories ticked above · all off until you tick them.";
 const REBASE: &str = "Plain Git, no model and no review. Once the base has been quiet, replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).";
-const NEVER_KEEPER: &str =
-    "Wiffletree never merges, approves, closes or comments on a pull request.";
+const SORT: &str = "Reads each new comment and sorts it: needs a change, a question, or no action. Tells the coordinator about the first two. Never replies, resolves or reacts.";
+const NEVER_KEEPER: &str = "Wiffletree never merges, approves, closes or comments on a pull request. The model is chosen in Models → PR keeper.";
+
+/// One of the PR keeper's triggers: its tick box beside its name and what it does.
+fn trigger(checkbox: Checkbox, name: &'static str, details: Vec<AnyElement>) -> Div {
+    div().flex().items_start().gap_3().child(checkbox).child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().font_weight(FontWeight::MEDIUM).child(name))
+            .children(details),
+    )
+}
 
 impl Workspace {
     pub(super) fn repositories_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -218,7 +232,7 @@ impl Workspace {
     }
 
     /// The PR keeper's triggers, for the whole workspace: the rebase trigger and its quiet
-    /// period.
+    /// period, and comment sorting.
     fn keeper_block(&self, keeper: &KeeperSettings, p: Palette, cx: &mut Context<Self>) -> Div {
         let save = |keeper: KeeperSettings| {
             cx.listener(move |v, _, w, c| {
@@ -251,6 +265,14 @@ impl Workspace {
             };
             v.request(Command::SetKeeper { keeper }, w, c)
         });
+        let current = keeper.clone();
+        let comments = cx.listener(move |v, checked: &bool, w, c| {
+            let keeper = KeeperSettings {
+                comments: *checked,
+                ..current.clone()
+            };
+            v.request(Command::SetKeeper { keeper }, w, c)
+        });
         let period = div()
             .flex()
             .items_center()
@@ -274,32 +296,23 @@ impl Workspace {
             .gap_2()
             .child(section("KEEP PULL REQUESTS UP TO DATE", p))
             .child(hint(KEEP, p))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    .child(
-                        Checkbox::new("keeper-rebase")
-                            .checked(keeper.rebase)
-                            .on_click(rebase),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child("Rebase when the base branch moves"),
-                            )
-                            .child(hint(REBASE, p))
-                            .child(period),
-                    ),
-            )
+            .child(trigger(
+                Checkbox::new("keeper-rebase")
+                    .checked(keeper.rebase)
+                    .on_click(rebase),
+                "Rebase when the base branch moves",
+                vec![
+                    hint(REBASE, p).into_any_element(),
+                    period.into_any_element(),
+                ],
+            ))
+            .child(trigger(
+                Checkbox::new("keeper-comments")
+                    .checked(keeper.comments)
+                    .on_click(comments),
+                "Sort new comments",
+                vec![hint(SORT, p).into_any_element()],
+            ))
             .child(div().text_size(px(12.)).child(NEVER_KEEPER))
     }
 

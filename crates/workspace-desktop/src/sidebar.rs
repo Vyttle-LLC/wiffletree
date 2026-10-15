@@ -1359,7 +1359,8 @@ impl Workspace {
                         .snapshot
                         .as_ref()
                         .and_then(|s| s.keeper_parts.get(&ticket.id));
-                    pr_line(pr, ticket.unreviewed(), keeper.copied(), p)
+                    let comments = ticket.waiting_comments();
+                    pr_line(pr, ticket.unreviewed(), keeper.copied(), comments, p)
                 }))
                 .children(waiting.map(|waiting| {
                     div()
@@ -1418,6 +1419,7 @@ fn pr_line(
     pr: &PullRequest,
     unreviewed: Option<&Unreviewed>,
     keeper: Option<KeeperPart>,
+    comments: Option<&KeeperComments>,
     p: Palette,
 ) -> Div {
     let glyph = if pr.state == PrState::Merged {
@@ -1434,7 +1436,7 @@ fn pr_line(
         .text_size(px(11.))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
-    for (i, part) in tree::pr_line(pr, unreviewed, keeper, now())
+    for (i, part) in tree::pr_line(pr, unreviewed, keeper, comments, now())
         .into_iter()
         .enumerate()
     {
