@@ -1074,10 +1074,9 @@ impl Host {
             .as_ref()
             .is_some_and(|r| r.head == pr.head && r.base == base);
         let busy = ticket.running_try().is_some() || self.keeper.running.contains(&ticket.id);
-        // A rebase comes first: failed checks are tried only at a head it has nothing to do for.
-        if (up_to_date || rebased)
-            && !busy
+        if !busy
             && pr.checks == CheckState::Failure
+            && self.no_rebase_due(ticket, repository)
             && self.would_try(ticket, repository, KeeperProblem::Checks)
         {
             self.keeper.running.insert(ticket.id.clone());
@@ -1134,6 +1133,21 @@ impl Host {
             tries,
         });
         Ok(None)
+    }
+    /// Whether the keeper has no rebase to do for the PR's head, which comes before a try at
+    /// failed checks: the head contains the base the keeper last saw, or that head and base
+    /// were rebased already.
+    fn no_rebase_due(&self, ticket: &Ticket, repository: &Repository) -> bool {
+        let Some(pr) = ticket.open_pull_request() else {
+            return false;
+        };
+        let key = (repository.id.clone(), pr.base.clone());
+        let Some((base, _)) = self.keeper.bases.get(&key) else {
+            return false;
+        };
+        let rebased = ticket.keeper.as_ref().and_then(|k| k.rebased.as_ref());
+        rebased.is_some_and(|r| r.head == pr.head && r.base == *base)
+            || publish::is_ancestor(Path::new(&repository.path), base, &pr.head)
     }
     /// The keeper's checkout for the ticket's rebase or try.
     fn checkout(&self, ticket_id: &str) -> PathBuf {
@@ -1340,8 +1354,11 @@ impl Host {
         let same_head = ticket
             .open_pull_request()
             .is_some_and(|pr| pr.head == reproduced.head);
-        // The trigger, the checks command or the branch may have changed while the checks ran.
-        let tries = same_head && self.will_try(&ticket, KeeperProblem::Checks)?;
+        // The trigger, the checks command, the branch or the base may have changed while the
+        // checks ran.
+        let tries = same_head
+            && self.no_rebase_due(&ticket, &repository)
+            && self.will_try(&ticket, KeeperProblem::Checks)?;
         let (Some(checks), true) = (repository.checks, tries) else {
             if reproduced.checkout.exists() {
                 let checkout = reproduced.checkout.to_string_lossy();
@@ -5668,6 +5685,54 @@ pub(crate) mod tests {
         assert_eq!(last_try(&f).ended, Some(TryEnd::Pushed));
         assert!(try_agent(&f).is_none(), "archived");
         assert!(to_coordinator(&f).is_empty());
+    }
+
+    #[test]
+    fn a_base_that_moved_while_the_checks_ran_here_is_rebased_before_any_try() {
+        let (mut f, r, base) = checking(FIXED);
+        let head = f.head();
+        let due = checks_failed(&mut f, &base, 0);
+        let moved = move_base(&f, &r, "other.txt", "1\n");
+        assert!(checks_failed(&mut f, &moved, MINUTE).rebases.is_empty());
+        let quiet = checks_failed(&mut f, &moved, 3 * MINUTE);
+        assert!(
+            quiet.rebases.is_empty(),
+            "held off while the checks run here"
+        );
+        let checkout = reproduce_due(&mut f, due);
+        assert!(!checkout.exists() && try_agent(&f).is_none());
+        assert!(!f.ticket().tried(KeeperProblem::Checks, &head));
+        let mut due = checks_failed(&mut f, &moved, 4 * MINUTE);
+        assert!(due.reproductions.is_empty());
+        assert_eq!(due.rebases.remove(0).head, head, "the rebase comes first");
+    }
+
+    #[test]
+    fn a_fix_is_not_pushed_over_an_earlier_tip_github_was_reset_to() {
+        let (mut f, r, agent, checkout) = fixing();
+        fix(&checkout, &[]);
+        assert!(gated(&mut f, &agent));
+        f.host.keeper_move(&f.ticket.clone()).unwrap();
+        let result = f.head();
+        // A tip the branch had before its rebase onto main, which the fix does not contain.
+        let reflog = git(&f.worktree, &["reflog", "--format=%H", BRANCH]);
+        let earlier = reflog
+            .lines()
+            .find(|tip| !publish::is_ancestor(&f.worktree, tip, &result))
+            .unwrap()
+            .to_owned();
+        let refspec = format!("{earlier}:refs/heads/{BRANCH}");
+        git(
+            &f.worktree,
+            &["push", "-q", "-f", r.bare.to_str().unwrap(), &refspec],
+        );
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(earlier));
+        let pushes = r.git_calls().into_iter().filter(|c| c[0] == "push");
+        assert!(pushes.flatten().all(|arg| !arg.starts_with("--force")));
+        assert_eq!(last_try(&f).ended, Some(TryEnd::NotPushed));
     }
 
     #[test]
