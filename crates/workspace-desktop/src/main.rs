@@ -126,6 +126,8 @@ struct Workspace {
     pending_project_selection: Option<String>,
     creating_project: bool,
     project_name: Entity<InputState>,
+    checks_command: Entity<InputState>,
+    checks_edit: Option<repositories_view::ChecksEdit>,
     project_edit: Option<project_name::NameEdit>,
     collapsed_projects: BTreeSet<String>,
     /// Collapsed project groups, by their first word in lowercase.
@@ -267,6 +269,10 @@ impl Workspace {
             creating_project: false,
             project_name,
             project_edit: None,
+            checks_command: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("The command that runs its checks")
+            }),
+            checks_edit: None,
             collapsed_projects: BTreeSet::new(),
             collapsed_groups: BTreeSet::new(),
             project_drag: None,
@@ -776,6 +782,10 @@ impl Workspace {
                     window,
                     cx,
                 );
+            }
+            Command::SetRepositoryChecks { .. } => {
+                self.checks_edit = None;
+                self.request(Command::Snapshot, window, cx);
             }
             _ => {
                 self.page = None;
