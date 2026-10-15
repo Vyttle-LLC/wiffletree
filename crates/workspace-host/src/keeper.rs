@@ -1467,12 +1467,25 @@ impl Host {
                 record.rebased = None;
                 self.save_ticket(&ticket)?;
             }
-            // A withdrawal whose branch the stop kept from going back puts it back now.
-            let withdrawn = ticket
-                .keeper_reviews()
-                .last()
-                .and_then(|r| r.withdrawn.as_ref());
-            if withdrawn.is_some_and(|w| w.putting_back) {
+            // A keeper review that ended before the stop is pushed, or its branch put back,
+            // now. A push already started is publishing's to end.
+            let unpushed = ticket.keeper.as_ref().and_then(|k| k.last.as_ref());
+            let unpushed = unpushed.is_some_and(|l| !l.pushed) && ticket.publishing.is_none();
+            let ended =
+                ticket
+                    .keeper_reviews()
+                    .last()
+                    .is_some_and(|review| match &review.withdrawn {
+                        Some(withdrawn) => withdrawn.putting_back,
+                        None => {
+                            unpushed
+                                && ticket.verification.as_ref().is_some_and(|v| {
+                                    v.cycle == review.cycle
+                                        && v.outcome == VerificationOutcome::Passed
+                                })
+                        }
+                    });
+            if ended {
                 self.keeper_review_ended(&ticket.id);
             }
         }
@@ -3905,6 +3918,48 @@ pub(crate) mod tests {
         assert_eq!(f.host.keeper_review_ready(&f.ticket()).unwrap(), "Light");
     }
 
+    /// Stops the host and starts it again on the same store.
+    fn reopen(f: &mut Fixture) {
+        let (home, spare) = (f.host.home.clone(), tempfile::tempdir().unwrap());
+        drop(std::mem::replace(
+            &mut f.host,
+            Host::open(spare.path()).unwrap(),
+        ));
+        f.host = Host::open(home).unwrap();
+    }
+
+    #[test]
+    fn a_passed_keeper_review_waiting_to_be_pushed_is_pushed_after_a_restart() {
+        let (mut f, r) = reviewing("true");
+        let (_, after) = under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        reopen(&mut f);
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        // A push the stop cut short is publishing's to end: it tells the coordinator once.
+        reopen(&mut f);
+        assert!(f.host.keeper_reviews_ended().is_empty());
+        assert!(f.ticket().publishing.is_none());
+        assert!(
+            notices(&f.host)[0]
+                .2
+                .contains("was pushing it when Wiffletree stopped")
+        );
+        drop(step);
+        assert_ne!(r.branch(BRANCH), Some(after));
+    }
+
+    #[test]
+    fn a_keeper_review_passing_wakes_the_coordinator_only_for_its_own_untriaged_entries() {
+        let (mut f, r) = reviewing("true");
+        let mut ticket = f.ticket();
+        ticket.ledger.push(untriaged("F1"));
+        f.host.save_ticket(&ticket).unwrap();
+        under_review(&mut f, &r);
+        verdict(&mut f, "Correctness", "passed", json!([]));
+        assert!(cycle_messages(&f).is_empty());
+    }
+
     #[test]
     fn a_withdrawal_whose_branch_waits_is_put_back_after_a_restart() {
         let (mut f, r) = reviewing("true");
@@ -3915,12 +3970,7 @@ pub(crate) mod tests {
             "failed",
             json!([finding("blocking", "Lost")]),
         );
-        let (home, spare) = (f.host.home.clone(), tempfile::tempdir().unwrap());
-        drop(std::mem::replace(
-            &mut f.host,
-            Host::open(spare.path()).unwrap(),
-        ));
-        f.host = Host::open(home).unwrap();
+        reopen(&mut f);
         assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
         f.host.keeper_review_done(&f.ticket.clone()).unwrap();
         assert_eq!(f.head(), before);

@@ -1286,7 +1286,7 @@ impl Host {
         let untriaged = ticket
             .ledger
             .iter()
-            .any(|e| e.status == EntryStatus::Untriaged);
+            .any(|e| e.status == EntryStatus::Untriaged && e.cycle == cycle);
         if !keeper || untriaged {
             self.send(&id, None, &coordinator, &summary)?;
         }

@@ -219,8 +219,9 @@ impl Host {
             mid_turn_reports: Default::default(),
         };
         host.recover()?;
-        host.end_interrupted_publishes()?;
+        // Before publishes end, so a keeper push the stop cut short is not started again.
         host.end_keeper_work()?;
+        host.end_interrupted_publishes()?;
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
         host.backfill_usage()?;
