@@ -437,6 +437,11 @@ fn spawn_comments_read(sender: Sender<Event>, job: keeper::Read) {
 }
 enum Event {
     Command(Command, Reply),
+    /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
+    SettingsRepositoryPrepared {
+        prepared: Result<sync::Prepared>,
+        reply: Reply,
+    },
     /// A root scan finished on its own thread; adding what it found is quick.
     Discovered {
         found: Vec<RepositoryCandidate>,
@@ -836,6 +841,32 @@ impl Actor {
                     });
                 });
             }
+            Command::CheckSettingsRepository { repository } => {
+                let (home, input, reply) =
+                    (self.host.home.clone(), repository.clone(), reply.clone());
+                let tools = self.publish_tools.clone();
+                std::thread::spawn(move || {
+                    let result = sync::check(&home, &input, &tools)
+                        .and_then(|check| Ok(serde_json::to_value(check)?))
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = reply.try_send(result);
+                });
+            }
+            Command::SetUpSettingsRepository { repository }
+            | Command::JoinSettingsRepository { repository, .. } => {
+                let with = match command {
+                    Command::JoinSettingsRepository { with, .. } => Some(*with),
+                    _ => None,
+                };
+                let (home, input, reply) =
+                    (self.host.home.clone(), repository.clone(), reply.clone());
+                let (sender, tools) = (self.sender.clone(), self.publish_tools.clone());
+                std::thread::spawn(move || {
+                    let prepared = sync::prepare(&home, &input, with, &tools);
+                    let _ =
+                        sender.send_blocking(Event::SettingsRepositoryPrepared { prepared, reply });
+                });
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -943,6 +974,15 @@ impl Actor {
 
     fn handle(&mut self, event: Event) -> bool {
         match event {
+            Event::SettingsRepositoryPrepared { prepared, reply } => {
+                let result = prepared
+                    .and_then(|prepared| self.host.adopt_settings_repository(prepared))
+                    .and_then(|settings| Ok(serde_json::to_value(settings)?))
+                    .map_err(|e| format!("{e:#}"));
+                let adopted = result.is_ok();
+                let _ = reply.try_send(result);
+                adopted
+            }
             Event::Discovered {
                 found,
                 warnings,

@@ -500,6 +500,9 @@ pub struct Snapshot {
     pub schedules: Vec<Schedule>,
     #[serde(default)]
     pub model_selection: ModelSelection,
+    /// The shared folder holds a guide, even an empty one, which a first setup keeps.
+    #[serde(default)]
+    pub guide_saved: bool,
     /// Sessions whose input has not reached a turn yet.
     #[serde(default)]
     pub undelivered: Vec<UndeliveredInput>,
@@ -528,6 +531,9 @@ pub struct Snapshot {
     pub keeper_parts: BTreeMap<String, KeeperPart>,
     #[serde(default)]
     pub skills: Vec<SkillState>,
+    /// What this machine still needs to run the shared settings, one line each.
+    #[serde(default)]
+    pub still_needs: Vec<String>,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -720,6 +726,65 @@ pub struct HostSettings {
     pub allowed_owners: Vec<String>,
     #[serde(default)]
     pub keeper: KeeperSettings,
+    /// The repository the shared folder is a clone of. Kept on this machine only.
+    #[serde(default)]
+    pub settings_repository: Option<SettingsRepository>,
+}
+/// A private GitHub repository the shared folder syncs with, as this machine recorded it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsRepository {
+    /// `owner/name`, as GitHub names it.
+    pub name: String,
+    /// The only URL sync pushes to.
+    pub push_url: String,
+    /// The repository's default branch, the only one sync pushes.
+    pub branch: String,
+}
+/// Who can read a private settings repository, as far as GitHub says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Readers {
+    /// Only its owner and the people given access.
+    Invited,
+    /// Every member of its organization, whose base permission is Read or more.
+    EveryMember,
+    /// Every member of its organization's enterprise: the repository is internal.
+    EnterpriseMembers,
+    /// GitHub did not report the organization's base permission.
+    MaybeMembers,
+}
+/// What checking a candidate settings repository found. Nothing was written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsRepositoryCheck {
+    pub repository: SettingsRepository,
+    pub organization: bool,
+    pub readers: Readers,
+    /// Set when the repository already holds shared settings: this machine joins it.
+    pub joining: Option<Joining>,
+}
+/// What a repository holds beside what this machine has, before joining it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Joining {
+    pub settings: Vec<SettingComparison>,
+    /// The machine the repository's last commit names, and that commit's time.
+    pub last_machine: String,
+    pub last_changed_at: i64,
+}
+/// One shared setting, as each side holds it, such as "Implementing": "3 of your rules".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingComparison {
+    pub setting: String,
+    pub repository: String,
+    pub this_machine: String,
+}
+/// Whose shared settings a joining machine keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinWith {
+    /// The repository's, with this machine's skill history added.
+    Repository,
+    /// This machine's, pushed over the repository's in one commit.
+    ThisMachine,
 }
 fn default_checkin_child_turns() -> u32 {
     25
@@ -741,6 +806,7 @@ impl HostSettings {
             checkin_human_turns: default_checkin_human_turns(),
             allowed_owners: vec![],
             keeper: KeeperSettings::default(),
+            settings_repository: None,
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -2395,6 +2461,24 @@ pub enum Command {
     RestoreSkill {
         skill: Skill,
         entry: String,
+    },
+    /// Asks GitHub, read-only, about a repository named as `owner/name` or by its `github.com`
+    /// URL, and checks this machine can read it; answers with `SettingsRepositoryCheck`. A
+    /// public repository is refused. Writes nothing.
+    CheckSettingsRepository {
+        repository: String,
+    },
+    /// Adds this machine's shared settings to a repository that has none, in one pushed commit,
+    /// and makes the shared folder its clone; answers with `HostSettings`. Only the human's
+    /// client sends it.
+    SetUpSettingsRepository {
+        repository: String,
+    },
+    /// Joins a repository that holds shared settings, keeping `with`'s; answers with
+    /// `HostSettings`. Only the human's client sends it, once the human confirms.
+    JoinSettingsRepository {
+        repository: String,
+        with: JoinWith,
     },
     /// Read-only: a skill's history, newest first, each entry with why it could not be read
     /// when it cannot.

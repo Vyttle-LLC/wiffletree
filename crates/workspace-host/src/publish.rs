@@ -12,16 +12,17 @@ pub(crate) type GitTool = Tool<runtime::GitAnswer>;
 #[derive(Clone)]
 pub(crate) struct Tools {
     pub gh: Tool<runtime::GhAnswer>,
-    /// `git ls-remote` and `git push`, and the PR keeper's read-only `git fetch` and the
-    /// fast-forward it takes adopted commits in with.
+    /// `git ls-remote` and `git push`, the PR keeper's read-only `git fetch` and the
+    /// fast-forward it takes adopted commits in with, and sync's Git in its clones.
     pub git: GitTool,
 }
 impl Default for Tools {
     fn default() -> Self {
         Self {
             gh: Arc::new(runtime::gh_answer),
+            // A push runs hooks, and sync's clone and access check wait on GitHub: minutes each.
             git: Arc::new(|path, args| match args.first() {
-                Some(&"push") => runtime::git_push(path, args),
+                Some(&"push" | &"clone" | &"ls-remote") => runtime::git_push(path, args),
                 _ => runtime::git_answer(path, args),
             }),
         }

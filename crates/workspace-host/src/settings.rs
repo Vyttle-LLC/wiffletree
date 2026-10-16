@@ -245,7 +245,7 @@ impl Host {
         Ok(settings)
     }
     /// Writes this machine's settings atomically and keeps fields this version does not know.
-    fn save_settings(&self, settings: &HostSettings) -> Result<()> {
+    pub(crate) fn save_settings(&self, settings: &HostSettings) -> Result<()> {
         let path = self.home.join(FILE);
         let mut saved = fs::read(&path)
             .ok()

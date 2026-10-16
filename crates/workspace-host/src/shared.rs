@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Map;
 use std::io::Write as _;
 
-const FOLDER: &str = "shared";
+pub(crate) const FOLDER: &str = "shared";
 const FORMAT: &str = "wiffletree.json";
 pub(crate) const REVIEW: &str = "settings/review.json";
 pub(crate) const GUIDE: &str = "settings/model-guide.md";
@@ -29,47 +29,53 @@ impl Default for CheckIns {
     }
 }
 
-pub struct SharedStore {
+pub(crate) struct SharedStore {
     root: PathBuf,
 }
 impl SharedStore {
-    /// The shared folder of the data folder `home`.
-    pub fn of(home: &Path) -> Self {
-        Self {
-            root: home.join(FOLDER),
-        }
+    pub(crate) fn at(root: PathBuf) -> Self {
+        Self { root }
     }
-    pub fn skills_folder(&self) -> PathBuf {
+    /// The shared folder of the data folder `home`.
+    pub(crate) fn of(home: &Path) -> Self {
+        Self::at(home.join(FOLDER))
+    }
+    /// Whether the folder names its format, as a set-up settings repository does.
+    pub(crate) fn holds_settings(&self) -> bool {
+        self.exists(FORMAT)
+    }
+    pub(crate) fn skills_folder(&self) -> PathBuf {
         self.root.join("skills")
     }
-    pub fn review(&self) -> VerificationSettings {
+    pub(crate) fn review(&self) -> VerificationSettings {
         self.read_json(REVIEW).unwrap_or_default()
     }
-    pub fn set_review(&self, review: &VerificationSettings) -> Result<()> {
+    pub(crate) fn set_review(&self, review: &VerificationSettings) -> Result<()> {
         self.write_json(REVIEW, review)
     }
     /// The agent and coordinator thresholds.
-    pub fn check_ins(&self) -> (u32, u32) {
+    pub(crate) fn check_ins(&self) -> (u32, u32) {
         let check_ins: CheckIns = self.read_json(CHECK_INS).unwrap_or_default();
         (check_ins.checkin_child_turns, check_ins.checkin_human_turns)
     }
-    pub fn set_check_ins(&self, child_turns: u32, human_turns: u32) -> Result<()> {
+    pub(crate) fn set_check_ins(&self, child_turns: u32, human_turns: u32) -> Result<()> {
         let check_ins = CheckIns {
             checkin_child_turns: child_turns,
             checkin_human_turns: human_turns,
         };
         self.write_json(CHECK_INS, &check_ins)
     }
-    pub fn keeper(&self) -> KeeperSettings {
+    pub(crate) fn keeper(&self) -> KeeperSettings {
         self.read_json(KEEPER).unwrap_or_default()
     }
-    pub fn set_keeper(&self, keeper: &KeeperSettings) -> Result<()> {
+    pub(crate) fn set_keeper(&self, keeper: &KeeperSettings) -> Result<()> {
         self.write_json(KEEPER, keeper)
     }
-    pub fn guide(&self) -> String {
-        fs::read_to_string(self.root.join(GUIDE)).unwrap_or_default()
+    /// `None` when no guide was saved; an empty guide is a saved one.
+    pub(crate) fn guide(&self) -> Option<String> {
+        fs::read_to_string(self.root.join(GUIDE)).ok()
     }
-    pub fn set_guide(&self, guide: &str) -> Result<()> {
+    pub(crate) fn set_guide(&self, guide: &str) -> Result<()> {
         self.write(GUIDE, guide.as_bytes())
     }
     /// Runs `save`; when it fails, `file` is put back as it was before.
@@ -123,14 +129,18 @@ impl SharedStore {
     }
 }
 impl Host {
-    pub fn shared(&self) -> SharedStore {
+    pub(crate) fn shared(&self) -> SharedStore {
         SharedStore::of(&self.home)
     }
     /// Copies each shared setting that has no file yet from where it was saved before the
-    /// shared folder, exactly as saved, and moves the skills folder in. Running it again
-    /// finishes a move that was cut short.
+    /// shared folder, exactly as saved, and moves the skills folder in. `wiffletree.json` is
+    /// written last, so running it again finishes a move that was cut short, and once it exists
+    /// nothing is copied.
     pub(crate) fn move_into_shared_folder(&self) -> Result<()> {
         let shared = self.shared();
+        if shared.exists(FORMAT) {
+            return Ok(());
+        }
         let saved: Map<String, Value> = fs::read(self.home.join("settings.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -162,10 +172,7 @@ impl Host {
             fs::create_dir_all(&shared.root)?;
             fs::rename(skills, shared.skills_folder())?;
         }
-        if !shared.exists(FORMAT) {
-            shared.write_json(FORMAT, &json!({"format": 1}))?;
-        }
-        Ok(())
+        shared.write_json(FORMAT, &json!({"format": 1}))
     }
 }
 
@@ -318,6 +325,32 @@ mod tests {
     }
 
     #[test]
+    fn once_the_move_is_done_a_missing_file_is_never_refilled_from_old_values() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("settings.json"),
+            r#"{"workspaces_dir":"/tmp/w","checkin_child_turns":10}"#,
+        )
+        .unwrap();
+        drop(Host::open(home.path()).unwrap());
+        fs::remove_file(home.path().join(FOLDER).join(CHECK_INS)).unwrap();
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(read(home.path(), CHECK_INS), None);
+        assert_eq!(host.settings().checkin_child_turns, 25);
+    }
+
+    #[test]
+    fn an_empty_guide_is_a_saved_guide() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        assert!(!host.snapshot().unwrap().guide_saved);
+        host.shared().set_guide("").unwrap();
+        let snapshot = host.snapshot().unwrap();
+        assert!(snapshot.guide_saved);
+        assert_eq!(snapshot.model_selection.guide, "");
+    }
+
+    #[test]
     fn skills_saved_before_the_shared_folder_move_in_unchanged() {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open(home.path()).unwrap();
@@ -328,9 +361,10 @@ mod tests {
         .unwrap();
         let history = host.skills().history(Skill::Implementing);
         drop(host);
-        // Put the skills where the release before the shared folder kept them.
+        // Put the skills where the release before the shared folder kept them, with no shared folder.
         let old = home.path().join("skills");
         fs::rename(home.path().join(FOLDER).join("skills"), &old).unwrap();
+        fs::remove_dir_all(home.path().join(FOLDER)).unwrap();
         let host = Host::open(home.path()).unwrap();
         assert!(!old.exists());
         assert_eq!(
