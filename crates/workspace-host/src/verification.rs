@@ -932,6 +932,11 @@ impl Host {
         findings: &[ReportedFinding],
     ) -> Result<Value> {
         ensure!(REPORT_KINDS.contains(&kind), "Unknown report kind");
+        // Wiffletree judges what a PR keeper agent leaves behind, never what it reports.
+        let kind = match session.role {
+            Role::Keeper => "progress",
+            _ => kind,
+        };
         check_findings(findings)?;
         ensure!(
             kind != "passed" || matches!(session.role, Role::Tester | Role::Reviewer),

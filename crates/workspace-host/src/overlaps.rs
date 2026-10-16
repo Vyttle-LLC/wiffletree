@@ -237,6 +237,12 @@ fn commits_ahead(repository: &Path, branch: &str, base: &str) -> Result<u32> {
 
 /// Files that would conflict when merging the two commits, without touching any checkout.
 fn conflicts(repository: &Path, ours: &str, theirs: &str) -> Result<Vec<String>> {
+    Ok(merge(repository, ours, theirs)?.1)
+}
+
+/// Git's own merge of the two commits, without touching any checkout: the tree it produces and
+/// the files it could not merge.
+pub(crate) fn merge(repository: &Path, ours: &str, theirs: &str) -> Result<(String, Vec<String>)> {
     let answer = runtime::git_answer(
         repository,
         &[
@@ -249,12 +255,15 @@ fn conflicts(repository: &Path, ours: &str, theirs: &str) -> Result<Vec<String>>
             theirs,
         ],
     )?;
-    match answer.status.code() {
-        Some(0) => Ok(vec![]),
-        // The first entry is the merged tree; conflicted files follow.
-        Some(1) => Ok(paths(&answer.output).into_iter().skip(1).collect()),
-        _ => bail!("git merge-tree failed{}", answer.reason()),
-    }
+    ensure!(
+        matches!(answer.status.code(), Some(0 | 1)),
+        "git merge-tree failed{}",
+        answer.reason()
+    );
+    // The first entry is the merged tree; conflicted files follow.
+    let mut paths = paths(&answer.output).into_iter();
+    let tree = paths.next().context("git merge-tree wrote no tree")?;
+    Ok((tree, paths.collect()))
 }
 
 fn paths(output: &str) -> Vec<String> {

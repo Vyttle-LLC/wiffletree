@@ -1093,6 +1093,47 @@ pub struct Keeper {
     /// Every review the keeper started, oldest first; the last may be running.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<KeeperReview>,
+    /// Every try by the keeper's model, oldest first; the last may be running.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tries: Vec<KeeperTry>,
+    /// The PR watcher's wake held back while the keeper may still try its problem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<HeldWake>,
+}
+/// What a try by the keeper's model fixes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeeperProblem {
+    Conflict,
+}
+/// One try by the keeper's model at one problem at one PR head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeeperTry {
+    pub problem: KeeperProblem,
+    pub head: String,
+    pub base: String,
+    /// The files Git could not merge.
+    pub files: Vec<String>,
+    pub started: i64,
+    /// Unset while the try runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<TryEnd>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TryEnd {
+    Pushed,
+    /// Reviewed and on the ticket's branch, but GitHub's branch is unchanged.
+    NotPushed,
+    ThrownAway(String),
+}
+/// A watcher's wake for `problem` at `head`, as the watcher would have sent it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldWake {
+    pub problem: KeeperProblem,
+    pub head: String,
+    pub id: String,
+    pub body: String,
 }
 /// A review the keeper started on a commit it moved onto the ticket's branch: everything a
 /// withdrawal restores, and once withdrawn, what it took away.
@@ -1110,6 +1151,9 @@ pub struct KeeperReview {
     /// The keeper's last action before this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<KeeperAction>,
+    /// The problem of the try whose result this reviews; none for a rebase whose patch changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<KeeperProblem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn: Option<Withdrawn>,
     /// The push of the review that passed was started; how it ended is publishing's.
@@ -1186,6 +1230,8 @@ pub enum KeeperKind {
     Rebase,
     /// A rebase whose patch changed: checked and reviewed by the keeper before its push.
     ReviewedRebase,
+    /// A conflict resolved by the keeper's model: checked and reviewed before its push.
+    Resolved,
 }
 /// What the PR keeper is doing for a kept ticket whose branch it may change, as the host found
 /// it after the latest pass: the end of the ticket's PR line.
@@ -1325,6 +1371,16 @@ impl Ticket {
             .filter_map(|r| r.withdrawn.as_ref())
             .map(|w| w.entries.len())
             .sum()
+    }
+    /// The keeper's try that has not ended.
+    pub fn running_try(&self) -> Option<&KeeperTry> {
+        let last = self.keeper.as_ref()?.tries.last();
+        last.filter(|t| t.ended.is_none())
+    }
+    /// Whether the keeper tried `problem` at `head`, which it does once.
+    pub fn tried(&self, problem: KeeperProblem, head: &str) -> bool {
+        let tries = self.keeper.as_ref().map_or(&[][..], |k| &k.tries);
+        tries.iter().any(|t| t.problem == problem && t.head == head)
     }
     /// The commits the PR keeper adopted that no review has checked yet.
     pub fn unreviewed(&self) -> Option<&Unreviewed> {

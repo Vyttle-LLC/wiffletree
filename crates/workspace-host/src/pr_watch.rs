@@ -16,6 +16,9 @@ const BRANCHES_PER_QUERY: usize = 50;
 /// Automatic wakes on failed checks and conflicts, per PR.
 const WAKE_BUDGET: usize = 3;
 
+/// A message's id and body.
+type Notice = (String, String);
+
 /// One repository's open tickets, gathered on the host thread and read off it.
 pub(crate) struct Query {
     pub repository: PathBuf,
@@ -473,9 +476,9 @@ impl Host {
         }
         // Sent before saving: after a crash in between, the next pass sees the same change
         // and skips each message whose id exists.
-        for (id, body) in
-            self.pull_request_notices(&ticket, &new, found.worktree_head.as_deref())?
-        {
+        let (notices, held) =
+            self.pull_request_notices(&ticket, &new, found.worktree_head.as_deref())?;
+        for (id, body) in notices {
             if let Err(e) = self.send(&id, None, &ticket.coordinator_id, &body) {
                 eprintln!("Workspace PR watch: {id}: {e:#}");
                 // An archived coordinator takes no messages. Any other failure, such as a full
@@ -494,19 +497,23 @@ impl Host {
         if new.state != PrState::Open {
             ticket.end_waiting_comments();
         }
+        if held.is_some() {
+            ticket.keeper.get_or_insert_default().held = held;
+        }
         ticket.pull_request = Some(new);
         self.save_ticket(&ticket)?;
         let project = self.session(&ticket.coordinator_id)?.project_id;
         Self::event(&self.db, &project, None, "pull_request", &detail).map(|_| true)
     }
-    /// The coordinator messages a PR's new snapshot calls for that were never sent. Wakes on
-    /// failed checks and conflicts share a budget per PR, after which one budget message is due.
+    /// The coordinator messages a PR's new snapshot calls for that were never sent, and a
+    /// conflict wake held back because the PR keeper will try that conflict. Wakes on failed
+    /// checks and conflicts share a budget per PR, after which one budget message is due.
     fn pull_request_notices(
         &self,
         ticket: &Ticket,
         pr: &PullRequest,
         worktree_head: Option<&str>,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<(Vec<Notice>, Option<HeldWake>)> {
         let named = format!(
             "PR #{} for ticket \"{}\" ({})",
             pr.number, ticket.title, ticket.id
@@ -514,6 +521,7 @@ impl Host {
         let prefix = format!("{PR_NOTICE_PREFIX}{}", ticket.id);
         let head = short_sha(&pr.head);
         let mut due = vec![];
+        let mut held = None;
         match pr.state {
             PrState::Merged => {
                 let merged = match &pr.merge_commit {
@@ -547,6 +555,9 @@ impl Host {
                 let checks = format!("{prefix}:checks:{}:", pr.number);
                 let conflict = format!("{prefix}:conflict:{}:", pr.number);
                 let mut wakes = vec![];
+                // The keeper's own message about its try takes the place of a conflict wake.
+                let mut seen = ticket.clone();
+                seen.pull_request = Some(pr.clone());
                 if pr.checks == CheckState::Failure {
                     wakes.push((
                         format!("{checks}{}", pr.head),
@@ -556,35 +567,29 @@ impl Host {
                         ),
                     ));
                 }
-                if pr.merge_state == MergeState::Dirty {
-                    wakes.push((
+                if pr.merge_state == MergeState::Dirty
+                    && !seen.tried(KeeperProblem::Conflict, &pr.head)
+                {
+                    let (id, body) = (
                         format!("{conflict}{}", pr.head),
                         format!(
                             "{named} conflicts with {} at head {head}. Resolving it needs a rebase or merge in the worktree and a new verification cycle before it is pushed.",
                             pr.base
                         ),
-                    ));
-                }
-                let mut sent = self.count_messages(&checks)? + self.count_messages(&conflict)?;
-                for (id, body) in wakes {
-                    if self.message_exists(&id)? {
-                        continue;
+                    );
+                    match self.holds_wake(&seen)? {
+                        true => {
+                            held = Some(HeldWake {
+                                problem: KeeperProblem::Conflict,
+                                head: pr.head.clone(),
+                                id,
+                                body,
+                            })
+                        }
+                        false => wakes.push((id, body)),
                     }
-                    if sent >= WAKE_BUDGET {
-                        due.push((
-                            format!("{prefix}:budget:{}", pr.number),
-                            format!(
-                                "{named} has used its {WAKE_BUDGET} automatic wakes. Further failed checks and conflicts show only on the ticket row and in workspace_context."
-                            ),
-                        ));
-                        break;
-                    }
-                    sent += 1;
-                    due.push((
-                        id,
-                        format!("{body} Automatic wake {sent} of {WAKE_BUDGET} for this PR."),
-                    ));
                 }
+                due = self.budgeted(ticket, pr, wakes)?;
             }
         }
         let mut unsent = vec![];
@@ -593,7 +598,42 @@ impl Host {
                 unsent.push((id, body));
             }
         }
-        Ok(unsent)
+        Ok((unsent, held))
+    }
+    /// The PR's wakes not sent before, each counted against its budget, or the one budget
+    /// message once the budget is used.
+    pub(crate) fn budgeted(
+        &self,
+        ticket: &Ticket,
+        pr: &PullRequest,
+        wakes: Vec<Notice>,
+    ) -> Result<Vec<Notice>> {
+        let prefix = format!("{PR_NOTICE_PREFIX}{}", ticket.id);
+        let checks = format!("{prefix}:checks:{}:", pr.number);
+        let conflict = format!("{prefix}:conflict:{}:", pr.number);
+        let mut sent = self.count_messages(&checks)? + self.count_messages(&conflict)?;
+        let mut due = vec![];
+        for (id, body) in wakes {
+            if self.message_exists(&id)? {
+                continue;
+            }
+            if sent >= WAKE_BUDGET {
+                due.push((
+                    format!("{prefix}:budget:{}", pr.number),
+                    format!(
+                        "PR #{} for ticket \"{}\" ({}) has used its {WAKE_BUDGET} automatic wakes. Further failed checks and conflicts show only on the ticket row and in workspace_context.",
+                        pr.number, ticket.title, ticket.id
+                    ),
+                ));
+                break;
+            }
+            sent += 1;
+            due.push((
+                id,
+                format!("{body} Automatic wake {sent} of {WAKE_BUDGET} for this PR."),
+            ));
+        }
+        Ok(due)
     }
     pub(crate) fn message_exists(&self, id: &str) -> Result<bool> {
         Ok(self
