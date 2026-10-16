@@ -74,6 +74,8 @@ pub struct Host {
     pub(crate) sync_passes: std::sync::Arc<std::sync::Mutex<()>>,
     /// What the latest sync pass did; see `sync`.
     pub(crate) sync: sync::Synced,
+    /// By skill, in `Skill::ALL`'s order, a newer stock version another machine recorded.
+    newer_stock: Vec<Option<String>>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -232,6 +234,7 @@ impl Host {
             shared_writes: Default::default(),
             sync_passes: Default::default(),
             sync: Default::default(),
+            newer_stock: vec![],
         };
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -246,6 +249,7 @@ impl Host {
         if let Err(error) = host.skills().record_new_stock_versions() {
             eprintln!("Recording new stock versions of skills: {error:#}");
         }
+        host.find_newer_stock_versions();
         Ok(host)
     }
     /// A session shows as working while its turn runs, even after reporting `blocked` or
@@ -1451,6 +1455,7 @@ impl Host {
                 self.sync_now(&publish::Tools::default())?;
                 Value::Null
             }
+            Command::StopSettingsSync => serde_json::to_value(self.stop_settings_sync()?)?,
             Command::SettlePausedFile { path, settle } => {
                 self.settle_paused(&path, settle)?;
                 Value::Null

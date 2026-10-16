@@ -11,6 +11,7 @@ use ui::{age, banner, empty_state, from_now, hint, icon, mono, pill, section};
 
 const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
 const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
+const HELD: &str = "A trigger held here can be turned off only on a Mac that runs it.";
 const UNTIL_GITHUB_ANSWERS: &str = "Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has answered for a repository, it asks first, whatever is ticked. Wiffletree asks GitHub again the next time you come back.";
 const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TICK";
 const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
@@ -352,6 +353,7 @@ impl Workspace {
                 held.iter()
                     .map(|line| hint(line.clone(), p).text_color(p.yellow)),
             )
+            .when(!held.is_empty(), |d| d.child(hint(HELD, p)))
             .child(trigger(
                 Checkbox::new("keeper-rebase")
                     .checked(keeper.rebase)

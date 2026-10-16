@@ -101,10 +101,10 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
         }
         KEEPER => serde_json::from_str::<KeeperSettings>(text)?.validate(),
         FORMAT => {
-            let format: Value = serde_json::from_str(text)?;
+            let format = format(content)?;
             ensure!(
-                format["format"] == 1,
-                "it names a format this release does not know"
+                format == 1,
+                "it names format {format}, which this release does not know"
             );
             Ok(())
         }
@@ -115,6 +115,12 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
         _ if skills::is_edited_text(path) => skills::check_text("The text", text),
         _ => Ok(()),
     }
+}
+/// The format a `wiffletree.json` names.
+pub(crate) fn format(content: &[u8]) -> Result<u64> {
+    let names: Value = serde_json::from_slice(content)?;
+    let format = names["format"].as_u64().filter(|&format| format > 0);
+    format.context("it names no format")
 }
 /// Notes each write the host makes to the shared folder in sync's record, and that one was made.
 #[derive(Clone)]

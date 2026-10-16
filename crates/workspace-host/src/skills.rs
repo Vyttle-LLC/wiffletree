@@ -488,11 +488,23 @@ impl Host {
     }
     pub(crate) fn skill_states(&self) -> Vec<SkillState> {
         let store = self.skills();
-        let state = |skill| SkillState {
-            newer_stock_version: store.newer_stock_version(skill),
+        let state = |(skill, newer): (Skill, &Option<String>)| SkillState {
+            newer_stock_version: newer.clone(),
             ..store.state(skill)
         };
-        Skill::ALL.map(state).into()
+        Skill::ALL
+            .into_iter()
+            .zip(&self.newer_stock)
+            .map(state)
+            .collect()
+    }
+    /// Reads each skill's history for a stock version newer than this release's, at start and
+    /// whenever the history may have gained another machine's entries.
+    pub(crate) fn find_newer_stock_versions(&mut self) {
+        let store = self.skills();
+        self.newer_stock = Skill::ALL
+            .map(|skill| store.newer_stock_version(skill))
+            .into();
     }
 }
 

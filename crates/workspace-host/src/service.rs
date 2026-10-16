@@ -899,19 +899,22 @@ impl Actor {
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
-        self.refresh_settings_sync(now());
-        self.signal(dirty);
+        let syncing = self.refresh_settings_sync(now());
+        self.signal(dirty || syncing);
     }
 
-    /// Starts a sync pass when one is due, off the host thread, and arms a wake-up for the next.
-    fn refresh_settings_sync(&mut self, at: i64) {
+    /// Starts a sync pass when one is due, off the host thread, and arms a wake-up for the next;
+    /// `true` when a pass started, which the sync status shows.
+    fn refresh_settings_sync(&mut self, at: i64) -> bool {
         if self.host.shared_written.take() {
             self.sync_pace.wrote(at);
         }
+        let mut started = false;
         if self.sync_pace.start(at) {
             match self.host.sync_pass() {
                 Ok(Some(pass)) => {
-                    spawn_sync_pass(self.sender.clone(), pass, self.publish_tools.clone())
+                    spawn_sync_pass(self.sender.clone(), pass, self.publish_tools.clone());
+                    started = true;
                 }
                 Ok(None) => self.sync_pace.finish(at, true),
                 Err(e) => {
@@ -921,9 +924,11 @@ impl Actor {
             }
         }
         self.host.sync.next_pull_at = self.sync_pace.next_due();
+        self.host.sync.syncing = self.sync_pace.running();
         if let Some(due) = self.sync_pace.next_due() {
             self.wake(due);
         }
+        started
     }
 
     /// Starts a PR pass for each due repository, one per repository at a time, and arms a
@@ -3824,6 +3829,8 @@ mod tests {
             let (reply, replies) = async_channel::bounded(1);
             actor.process(Event::Command(Command::SyncNow, reply));
             assert_eq!(replies.try_recv().unwrap(), Ok(Value::Null));
+            let running = actor.host.snapshot().unwrap().settings_sync.unwrap();
+            assert!(running.syncing);
             let synced = loop {
                 match events.recv_blocking().unwrap() {
                     Event::Wake(_) => {}
@@ -3835,6 +3842,7 @@ mod tests {
         }
         let status = first.host.snapshot().unwrap().settings_sync.unwrap();
         assert_eq!((status.pushed, status.waiting, status.error), (1, 0, None));
+        assert!(!status.syncing);
         assert!(status.next_pull_at.unwrap() > now() + 4 * 60_000);
         assert_eq!(second.host.settings().checkin_human_turns, 400);
         assert_eq!(

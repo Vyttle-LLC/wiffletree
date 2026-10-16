@@ -68,6 +68,10 @@ pub(crate) fn remove_staging(home: &Path) -> Result<()> {
 
 /// This computer's name, which sync's commits name the machine by.
 pub(crate) fn machine_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(read_machine_name).clone()
+}
+fn read_machine_name() -> String {
     std::process::Command::new("scutil")
         .args(["--get", "ComputerName"])
         .output()
@@ -485,6 +489,9 @@ impl Pace {
             false => at + wait.min(MAX_BACKOFF_MS),
         };
     }
+    pub(crate) fn running(&self) -> bool {
+        self.running
+    }
     pub(crate) fn next_due(&self) -> Option<i64> {
         let push = self.push_at.filter(|_| self.failures == 0);
         (!self.running).then(|| push.map_or(self.pull_at, |push| push.min(self.pull_at)))
@@ -498,8 +505,29 @@ pub(crate) struct Synced {
     pulled: usize,
     pushed: usize,
     error: Option<String>,
+    failed_at: Option<i64>,
+    failing_since: Option<i64>,
+    stopped: bool,
     pub(crate) next_pull_at: Option<i64>,
+    pub(crate) syncing: bool,
 }
+impl Synced {
+    fn failed(&mut self, at: i64, error: String) {
+        self.failing_since.get_or_insert(at);
+        self.failed_at = Some(at);
+        self.error = Some(error);
+    }
+}
+
+/// Why sync pulls and pushes nothing until the repository's `wiffletree.json` can be read.
+#[derive(Debug)]
+struct Stopped(String);
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Stopped {}
 
 /// A file's content, `None` for no file.
 type Content = Option<Vec<u8>>;
@@ -748,10 +776,15 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         .to_owned();
     let (here, there) = (files_here(&clone)?, files_at(&clone, &remote)?);
     if let Some(format) = there.get(shared::FORMAT) {
-        ensure!(
-            shared::check(shared::FORMAT, format).is_ok(),
-            "This repository was written by a newer Wiffletree. Update to keep syncing."
-        );
+        match shared::format(format) {
+            Ok(1) => {}
+            Ok(_) => Err(Stopped(
+                "This repository was written by a newer Wiffletree. Update to keep syncing.".into(),
+            ))?,
+            Err(error) => Err(Stopped(format!(
+                "The repository's wiffletree.json can't be read: {error:#}. Sync waits until it is fixed on GitHub."
+            )))?,
+        }
     }
     passed.remote = remote.clone();
     let mut units: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
@@ -843,6 +876,18 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     Ok(passed)
 }
 
+/// Holds off sync passes while the host changes what they sync with. Refused while one runs,
+/// which can take minutes.
+fn no_pass_running(passes: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>> {
+    match passes.try_lock() {
+        Ok(none) => Ok(none),
+        Err(std::sync::TryLockError::Poisoned(none)) => Ok(none.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            bail!("Sync is running. Try again in a moment.")
+        }
+    }
+}
+
 /// A clone holding the shared settings this machine will use, committed and pushed.
 pub(crate) struct Prepared {
     staging: TempDir,
@@ -898,16 +943,9 @@ impl Host {
     /// records the repository in this machine's settings. A shared setting saved since the
     /// clone was prepared refuses it, and a failure puts the folder back.
     pub(crate) fn adopt_settings_repository(&mut self, prepared: Prepared) -> Result<HostSettings> {
-        // Refused while a pass runs, which can take minutes; one that ran before is dropped,
-        // not recorded against the new clone.
+        // One that ran before is dropped, not recorded against the new clone.
         let passes = self.sync_passes.clone();
-        let _no_pass = match passes.try_lock() {
-            Ok(none) => none,
-            Err(std::sync::TryLockError::Poisoned(none)) => none.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                bail!("Sync is running. Try again in a moment.")
-            }
-        };
+        let _no_pass = no_pass_running(&passes)?;
         let _writing = shared::Writing::start(&self.shared_writes, "");
         let shared = self.home.join(shared::FOLDER);
         ensure!(
@@ -935,6 +973,21 @@ impl Host {
             return Err(error);
         }
         self.record_clone()?;
+        self.find_newer_stock_versions();
+        Ok(self.settings())
+    }
+    /// Stops syncing on this machine and forgets the repository chosen. The shared folder stays
+    /// as it is and in use, the notes about paused files close, and GitHub is left unchanged.
+    pub(crate) fn stop_settings_sync(&mut self) -> Result<HostSettings> {
+        let passes = self.sync_passes.clone();
+        let _no_pass = no_pass_running(&passes)?;
+        let settings = HostSettings {
+            settings_repository: None,
+            ..self.settings()
+        };
+        self.save_settings(&settings)?;
+        self.db.execute("DELETE FROM sync_paused", [])?;
+        self.sync = Synced::default();
         Ok(self.settings())
     }
     /// The pass sync runs next, or `None` while no settings repository is chosen.
@@ -982,7 +1035,8 @@ impl Host {
         let passed = match passed {
             Ok(passed) => passed,
             Err(error) => {
-                self.sync.error = Some(format!("{error:#}"));
+                self.sync.stopped = error.is::<Stopped>();
+                self.sync.failed(at, format!("{error:#}"));
                 return Ok(true);
             }
         };
@@ -1041,13 +1095,22 @@ impl Host {
         if !sorting && self.settings().keeper.comments {
             self.restart_comments()?;
         }
+        if pulled.iter().any(|(path, _)| path.contains("/history/")) {
+            self.find_newer_stock_versions();
+        }
         self.sync = Synced {
             at: Some(at),
             pulled: pulled.len(),
             pushed: pushed.unwrap_or_default(),
-            error: passed.error,
+            failing_since: self.sync.failing_since,
             next_pull_at: self.sync.next_pull_at,
+            syncing: self.sync.syncing,
+            ..Synced::default()
         };
+        match passed.error {
+            Some(error) => self.sync.failed(at, error),
+            None => self.sync.failing_since = None,
+        }
         Ok(true)
     }
     /// Runs a pass on this thread, as a host with no service does for Sync now.
@@ -1073,7 +1136,12 @@ impl Host {
             pushed: self.sync.pushed,
             next_pull_at: self.sync.next_pull_at,
             error: self.sync.error.clone(),
+            failed_at: self.sync.failed_at,
+            failing_since: self.sync.failing_since,
+            stopped: self.sync.stopped,
+            syncing: self.sync.syncing,
             waiting: waiting as usize,
+            machine: machine_name(),
         }))
     }
     /// One note per paused setting, a skill's rules, rewrite and base being one.
@@ -1213,12 +1281,7 @@ impl Host {
             return Ok(needs);
         }
         let selection = self.model_selection()?;
-        let keeper = self.shared().keeper();
-        if let Err(keeper) =
-            policies::check_keeper_needs(&keeper, &selection, &settings.verification)
-        {
-            needs.push(format!("{keeper:#}"));
-        }
+        needs.extend(self.keeper_held());
         for verifier in &settings.verification.verifiers {
             if let Some(provider) = verifier.provider
                 && !selection.is_enabled(provider)
@@ -2405,6 +2468,86 @@ pub(crate) mod tests {
         assert_eq!(github.log("%H"), commits);
         assert_eq!(host.shared().guide(), guide);
         assert_eq!(status(&host).waiting, 1);
+        assert!(status(&host).stopped);
+    }
+
+    #[test]
+    fn a_format_file_on_github_that_cannot_be_read_stops_sync_saying_so() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        for (content, why) in [("not json", "expected"), ("{}", "it names no format")] {
+            github.commit(shared::FORMAT, content);
+            let commits = github.log("%H");
+            host.sync_now(&github.tools()).unwrap();
+            let stopped = status(&host);
+            let error = stopped.error.unwrap();
+            assert!(
+                error.starts_with("The repository's wiffletree.json can't be read: ")
+                    && error.contains(why)
+                    && !error.contains("newer"),
+                "{error}"
+            );
+            assert!(stopped.stopped);
+            assert_eq!(github.log("%H"), commits);
+        }
+        github.commit(shared::FORMAT, "{\"format\": 1}\n");
+        host.sync_now(&github.tools()).unwrap();
+        let synced = status(&host);
+        assert_eq!((synced.error, synced.stopped), (None, false));
+    }
+
+    #[test]
+    fn stopping_sync_keeps_every_setting_closes_the_notes_and_changes_nothing_on_github() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(40, 400).unwrap();
+        save_rules(&mut host, Skill::Implementing, "Run the linter.\n");
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let additions = home.path().join("shared").join(ADDITIONS);
+        fs::write(&additions, "Push to main.\n").unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(notes(&host).len(), 1);
+        let commits = github.log("%H");
+        let settings = host.execute(Command::StopSettingsSync).unwrap();
+        let settings: HostSettings = serde_json::from_value(settings).unwrap();
+        assert_eq!(settings.settings_repository, None);
+        assert_eq!(
+            (settings.checkin_child_turns, settings.checkin_human_turns),
+            (40, 400)
+        );
+        let snapshot = host.snapshot().unwrap();
+        assert!(snapshot.workspace_notes.is_empty() && snapshot.settings_sync.is_none());
+        assert_eq!(fs::read_to_string(&additions).unwrap(), "Push to main.\n");
+        host.set_check_ins(50, 500).unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.log("%H"), commits);
+        assert_eq!(github.pushes(), 1);
+        assert_eq!(host.settings().checkin_child_turns, 50);
+    }
+
+    #[test]
+    fn a_newer_stock_version_pulled_from_another_machine_is_shown_without_a_restart() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, _first) = set_up_elsewhere(&github);
+        let (_home, mut second) = joined(&github);
+        assert!(
+            second
+                .skill_states()
+                .iter()
+                .all(|s| s.newer_stock_version.is_none())
+        );
+        let (name, _) = second.skills().history(Skill::Coordinating).remove(0);
+        let history = "skills/coordinating/history";
+        let entry = github.show(&format!("{history}/{name}.json")).unwrap();
+        let entry = entry.replace("\"v1\"", "\"v2\"");
+        github.commit(&format!("{history}/2099-01-01T00-00-00.000Z.json"), entry);
+        second.sync_now(&github.tools()).unwrap();
+        let states = second.skill_states();
+        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v2"));
     }
 
     #[test]
@@ -2775,6 +2918,13 @@ pub(crate) mod tests {
             "{error}"
         );
         assert_eq!(github.show("settings/check-ins.json"), None);
+        let failing_since = offline.failing_since.unwrap();
+        assert_eq!(offline.failed_at, Some(failing_since));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        host.sync_now(&github.tools()).unwrap();
+        let again = status(&host);
+        assert_eq!(again.failing_since, Some(failing_since));
+        assert!(again.failed_at > Some(failing_since) && !again.stopped);
         // Passes back off to thirty minutes; a save waits for the next try, Sync now does not.
         let mut pace = Pace::default();
         let mut at = 0;
@@ -2792,6 +2942,7 @@ pub(crate) mod tests {
         host.sync_now(&github.tools()).unwrap();
         let online = status(&host);
         assert_eq!((online.error, online.waiting, online.pushed), (None, 0, 1));
+        assert_eq!((online.failed_at, online.failing_since), (None, None));
         assert!(
             github
                 .show("settings/check-ins.json")

@@ -786,8 +786,17 @@ pub struct SyncStatus {
     pub next_pull_at: Option<i64>,
     /// Why the latest pass failed, in Git's words; cleared by one that succeeds.
     pub error: Option<String>,
+    /// When the latest pass failed, and when the failures since the last success began.
+    pub failed_at: Option<i64>,
+    pub failing_since: Option<i64>,
+    /// Sync pulls and pushes nothing until the repository's format can be read: `error` says why.
+    pub stopped: bool,
+    /// A pass runs now.
+    pub syncing: bool,
     /// Shared files saved here since they were last synced.
     pub waiting: usize,
+    /// This machine's name, as sync's commits give it.
+    pub machine: String,
 }
 /// Why sync leaves a shared file alone until the human decides.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -935,6 +944,18 @@ impl KeeperSettings {
             KEEPER_QUIET_MINUTES.start(),
             KEEPER_QUIET_MINUTES.end()
         );
+        self.check_rebase()
+    }
+    /// Refuses a trigger for tries without the rebase trigger, on every machine, since a try
+    /// waits for the keeper's own rebase.
+    pub fn check_rebase(&self) -> Result<()> {
+        for problem in [KeeperProblem::Conflict, KeeperProblem::Checks] {
+            ensure!(
+                self.rebase || !self.tries(problem),
+                "\"{}\" needs \"Rebase when the base branch moves\"",
+                problem.trigger()
+            );
+        }
         Ok(())
     }
     /// Whether any trigger is on, so repositories are said to be kept or not.
@@ -963,15 +984,12 @@ pub fn check_tries(
         .filter(|l| l.kind == LevelKind::Recheck)
         .map(|l| l.name.as_str())
         .collect();
+    keeper.check_rebase()?;
     for problem in [KeeperProblem::Conflict, KeeperProblem::Checks] {
         if !keeper.tries(problem) {
             continue;
         }
         let trigger = format!("\"{}\"", problem.trigger());
-        ensure!(
-            keeper.rebase,
-            "{trigger} needs \"Rebase when the base branch moves\""
-        );
         ensure!(
             model.is_some(),
             "{trigger} needs a PR keeper model: choose one in Models first"
@@ -2544,6 +2562,10 @@ pub enum Command {
     /// Runs a sync pass with the settings repository at once; answers with nothing. Only the
     /// human's client sends it.
     SyncNow,
+    /// Stops syncing and forgets the settings repository chosen, keeping the shared folder as
+    /// it is and changing nothing on GitHub; answers with `HostSettings`. Only the human's client
+    /// sends it, once the human confirms.
+    StopSettingsSync,
     /// Settles the paused file, or a skill's folder, a workspace note names; answers with
     /// nothing. Only the human's client sends it.
     SettlePausedFile {
