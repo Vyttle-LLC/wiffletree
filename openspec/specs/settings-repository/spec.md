@@ -31,6 +31,46 @@ The host SHALL keep the shared settings in `<data folder>/shared/`, with or with
 - **WHEN** the move stopped after writing `settings/review.json` and before the other files
 - **THEN** the next start writes the missing files and leaves `settings/review.json` as it is
 
+### Requirement: The human chooses the settings repository on each machine
+The Settings window SHALL have a Settings repository section after Check-ins. The human SHALL name a repository on `github.com` as `owner/name` or as an HTTPS or SSH URL. Before anything is written, the host SHALL ask GitHub, read-only, for the repository's visibility, its owner and whether the owner is an organization, and an organization's base permission for members where GitHub reports it, and SHALL check with `git ls-remote` that this machine can read the repository. A public repository SHALL be refused. The section SHALL say who can read the repository: for a user's repository, only the user and the people they invite; for an organization whose base permission is Read or more, in yellow, that every member of that organization can read it; and where GitHub does not report the base permission, that members may be able to read it. Setting up a repository without `wiffletree.json` SHALL ask first, SHALL add `wiffletree.json`, `settings/` and `skills/` from this machine's shared folder in one commit on the repository's default branch, push it, and SHALL NOT change or remove any other file. The host SHALL NOT create repositories on GitHub. The choice, its push URL and its branch SHALL be saved in this machine's host settings and SHALL NOT be synced. Only the human's client SHALL change it; no agent tool SHALL.
+
+#### Scenario: A user's private repository
+- **WHEN** the human checks `MHohlios/wiffletree-storage`, a private repository of the user MHohlios
+- **THEN** the section says only MHohlios and the people they invite can read it, and offers Set up
+
+#### Scenario: An organization that lets members read
+- **WHEN** the human checks `Sage-Social/wiffletree-storage` and GitHub reports Sage-Social's base permission as Read
+- **THEN** the section says in yellow that every member of Sage-Social can read it
+
+#### Scenario: A public repository
+- **WHEN** the human checks a public repository
+- **THEN** it is refused, saying the skills and settings would be public, and nothing is written
+
+#### Scenario: Setting up beside a README
+- **WHEN** the human sets up a repository whose only commit adds `README.md`
+- **THEN** one commit adds `wiffletree.json`, `settings/` and `skills/`, `README.md` is unchanged, and the commit is pushed to the default branch
+
+#### Scenario: An agent cannot choose a repository
+- **WHEN** any agent calls any workspace tool
+- **THEN** no tool reads or changes the shared folder or the settings repository chosen
+
+
+### Requirement: Sync pushes only to the settings repository's branch
+Choosing the settings repository on a machine SHALL be what allows the host to push to it, and the confirmation SHALL say so, naming the repository, its branch and who can read it. The allowed owners SHALL NOT grant or be needed for that push, and allowing an owner SHALL NOT allow sync to push to any repository of that owner. The host SHALL push only the recorded default branch, to the recorded push URL, with no tags and no submodules. It SHALL push only a commit that contains the remote branch's head, and SHALL NOT force a push. A commit SHALL hold changes only to `wiffletree.json`, `settings/` and `skills/`. The host SHALL push only files it would accept when reading them. Commits SHALL use the human's Git identity, and their messages SHALL name what changed and the machine.
+
+#### Scenario: An owner allowed for pull requests
+- **WHEN** `Sage-Social` is allowed and no settings repository is chosen
+- **THEN** sync pushes nothing to any Sage-Social repository
+
+#### Scenario: The remote moved first
+- **WHEN** another machine pushed after this machine's last pull, and this machine pushes
+- **THEN** GitHub refuses the push, nothing is overwritten, and the next pass pulls the other machine's commit before pushing again
+
+#### Scenario: Other files in the repository
+- **WHEN** the repository also has a `README.md` the human edits on GitHub
+- **THEN** sync pulls the edit and never commits a change to `README.md`
+
+
 ### Requirement: Sync runs automatically
 With a settings repository chosen, the host SHALL pull at launch, every 5 minutes and when the human chooses Sync now, and SHALL push 5 seconds after the last change to a shared setting, so that a burst of saves is one commit. A pass SHALL run off the thread that serves host commands. When GitHub cannot be reached, passes SHALL back off up to 30 minutes, Sync now SHALL try at once, and this machine SHALL keep using its own changes until they are pushed. A pass SHALL compare each file whole against the version this machine last synced: a file changed only here SHALL be pushed, a file changed only on the remote SHALL be written here, and a file changed on both sides to the same content SHALL need nothing. Pulled changes SHALL apply where each setting is next read.
 

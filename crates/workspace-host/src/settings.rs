@@ -206,7 +206,7 @@ impl Host {
     /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.
     /// Turning comment sorting on starts every PR's comments afresh at the next pass. A trigger
     /// held off on this machine stays on in the file unless the save turns it on, which is
-    /// checked as any other.
+    /// checked as any other, and still needs the rebase trigger.
     pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
         keeper.validate()?;
         let model = self.model_selection()?.keeper;
@@ -222,6 +222,8 @@ impl Host {
         for (switch, _) in self.held(&self.shared().keeper(), &settings.verification) {
             *switch(&mut saved) = true;
         }
+        (saved.check_rebase())
+            .map_err(|e| anyhow::anyhow!("{e:#}, and is on from another machine that runs it"))?;
         self.shared().set_keeper(&saved)?;
         Ok(self.settings())
     }
@@ -753,5 +755,28 @@ mod tests {
         selection.keeper = None;
         let removed = refusal(host.set_model_selection(&selection));
         assert!(removed.contains("PR keeper model"), "{removed}");
+    }
+
+    #[test]
+    fn a_held_trigger_still_needs_the_rebase_trigger() {
+        let (home, mut host) = held_by_another_machine();
+        let file = home.path().join("shared/settings/pr-keeper.json");
+        let before = fs::read(&file).unwrap();
+        let rebase_off = KeeperSettings {
+            rebase: false,
+            ..host.settings().keeper
+        };
+        let refused = refusal(host.set_keeper(rebase_off));
+        assert!(
+            refused.contains(
+                "needs \"Rebase when the base branch moves\", and is on from another machine"
+            ),
+            "{refused}"
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+        // Nor is such a file pulled from another machine.
+        let pulled = br#"{"rebase": false, "conflicts": true, "quiet_minutes": 2}"#;
+        let refused = format!("{:#}", shared::check(shared::KEEPER, pulled).unwrap_err());
+        assert!(refused.contains("needs \"Rebase"), "{refused}");
     }
 }

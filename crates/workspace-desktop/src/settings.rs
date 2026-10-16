@@ -1,7 +1,10 @@
-//! The Settings window: this client's appearance, the host's workspace folder and its check-in
-//! thresholds.
+//! The Settings window: this client's appearance, the host's workspace folder, its check-in
+//! thresholds and the settings repository.
+mod repository;
+
 use super::*;
 use gpui_component::{ActiveTheme, Disableable};
+use repository::Confirm;
 use ui::{hint, icon, mono, section, segment, setting};
 
 /// The open Settings window, so ⌘, focuses it instead of opening a second one.
@@ -15,6 +18,13 @@ pub(super) struct Settings {
     folder_error: Option<String>,
     check_in_error: Option<String>,
     choosing_folder: bool,
+    repository_input: Entity<InputState>,
+    /// The repository as the human named it, and what checking it found.
+    checked: Option<(String, SettingsRepositoryCheck)>,
+    repository_error: Option<String>,
+    /// A repository request is waiting for the host.
+    asking: bool,
+    confirming: Option<Confirm>,
 }
 
 /// The agent check-in presets; the host accepts any value in `CHECKIN_CHILD_TURNS`.
@@ -32,7 +42,7 @@ impl Settings {
         {
             return;
         }
-        let bounds = Bounds::centered(None, size(px(560.), px(580.)), cx);
+        let bounds = Bounds::centered(None, size(px(560.), px(820.)), cx);
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -43,6 +53,9 @@ impl Settings {
             },
             |window, cx| {
                 window.set_window_title("Settings");
+                let repository_input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("owner/name or a GitHub URL")
+                });
                 let view = cx.new(|cx| {
                     let mut view = Self {
                         bridge,
@@ -50,6 +63,11 @@ impl Settings {
                         folder_error: None,
                         check_in_error: None,
                         choosing_folder: false,
+                        repository_input,
+                        checked: None,
+                        repository_error: None,
+                        asking: false,
+                        confirming: None,
                     };
                     view.ask_host(Command::Settings, cx);
                     view
@@ -309,18 +327,39 @@ impl Render for Settings {
                         .child("Settings"),
                 ),
             )
-            .child(
-                div()
-                    .flex_1()
+            .child({
+                let rule = || div().h(px(1.)).bg(p.edge.opacity(0.25));
+                let body = div()
+                    .id("settings-body")
+                    .size_full()
+                    .overflow_y_scroll()
                     .p_5()
                     .flex()
                     .flex_col()
                     .gap_4()
                     .child(self.appearance_section(p, cx))
-                    .child(div().h(px(1.)).bg(p.edge.opacity(0.25)))
+                    .child(rule())
                     .child(self.folder_section(p, cx))
-                    .child(div().h(px(1.)).bg(p.edge.opacity(0.25)))
-                    .child(self.check_in_section(p, cx)),
-            )
+                    .child(rule())
+                    .child(self.check_in_section(p, cx))
+                    .child(rule())
+                    .child(self.repository_section(p, cx));
+                let dialog =
+                    (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
+                let shown = div().flex_1().min_h_0().relative();
+                match dialog {
+                    Some(dialog) => shown.child(body.opacity(0.35)).child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .occlude()
+                            .flex()
+                            .justify_center()
+                            .pt(px(120.))
+                            .child(dialog),
+                    ),
+                    None => shown.child(body),
+                }
+            })
     }
 }

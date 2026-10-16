@@ -205,6 +205,30 @@ const DRAWINGS: &[(&str, &str)] = &[
         r#"<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"/>"#,
     ),
     (
+        "lock",
+        r#"<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#,
+    ),
+    (
+        "people",
+        r#"<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5a5 5 0 0 1 4.5 5"/>"#,
+    ),
+    (
+        "laptop",
+        r#"<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>"#,
+    ),
+    (
+        "share",
+        r#"<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8 15.8 6.2M8.2 13.2l7.6 4.6"/>"#,
+    ),
+    (
+        "ban",
+        r#"<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6 18.4 18.4"/>"#,
+    ),
+    (
+        "alert",
+        r#"<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h0"/>"#,
+    ),
+    (
         "monitor",
         r#"<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8m-4-4v4"/>"#,
     ),
