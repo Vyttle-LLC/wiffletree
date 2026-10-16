@@ -51,7 +51,7 @@ impl Workspace {
         if !snapshot.repositories.is_empty() {
             body = body
                 .child(self.owners_block(snapshot, p, cx))
-                .child(self.keeper_block(&snapshot.keeper, p, cx));
+                .child(self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx));
         }
         body = body.child(
             section(
@@ -252,8 +252,14 @@ impl Workspace {
 
     /// The PR keeper's triggers, for the whole workspace: the rebase trigger and its quiet
     /// period, the conflicts trigger and its review level, the checks trigger, and comment
-    /// sorting.
-    fn keeper_block(&self, keeper: &KeeperSettings, p: Palette, cx: &mut Context<Self>) -> Div {
+    /// sorting, with a line for each trigger on from another machine that this one cannot run.
+    fn keeper_block(
+        &self,
+        keeper: &KeeperSettings,
+        held: &[String],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let picker = self.review_level_picker(keeper, cx);
         let save = |keeper: KeeperSettings| {
             cx.listener(move |v, _, w, c| {
@@ -342,6 +348,10 @@ impl Workspace {
             .gap_2()
             .child(section("KEEP PULL REQUESTS UP TO DATE", p))
             .child(hint(KEEP, p))
+            .children(
+                held.iter()
+                    .map(|line| hint(line.clone(), p).text_color(p.yellow)),
+            )
             .child(trigger(
                 Checkbox::new("keeper-rebase")
                     .checked(keeper.rebase)

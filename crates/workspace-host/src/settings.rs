@@ -106,9 +106,13 @@ fn wiffletree_branches(repository: &Path) -> Result<Vec<String>> {
     Ok(refs)
 }
 
+/// A keeper trigger's switch.
+type Switch = fn(&mut KeeperSettings) -> &mut bool;
+
 impl Host {
     /// The saved settings: each shared one from its file, the rest from `settings.json`. A file
-    /// that is missing, unreadable or invalid gives its defaults.
+    /// that is missing, unreadable or invalid gives its defaults. A keeper trigger this machine
+    /// cannot run is off, and stays on in the file.
     pub fn settings(&self) -> HostSettings {
         let local = fs::read(self.home.join(FILE))
             .ok()
@@ -116,13 +120,52 @@ impl Host {
             .unwrap_or_else(|| HostSettings::new(default_workspaces_dir()));
         let shared = self.shared();
         let (checkin_child_turns, checkin_human_turns) = shared.check_ins();
+        let (verification, mut keeper) = (shared.review(), shared.keeper());
+        for (switch, _) in self.held(&keeper, &verification) {
+            *switch(&mut keeper) = false;
+        }
         HostSettings {
-            verification: shared.review(),
+            verification,
             checkin_child_turns,
             checkin_human_turns,
-            keeper: shared.keeper(),
+            keeper,
             ..local
         }
+    }
+    /// The triggers on in `keeper` that this machine's PR keeper model and review settings
+    /// cannot run, as turned on from another machine, each with why.
+    fn held(
+        &self,
+        keeper: &KeeperSettings,
+        verification: &VerificationSettings,
+    ) -> Vec<(Switch, String)> {
+        let saved = self.saved_selection().ok().flatten();
+        let model = saved.and_then(|selection| selection.keeper);
+        let switches: [Switch; 3] = [|k| &mut k.comments, |k| &mut k.conflicts, |k| &mut k.checks];
+        let alone = |switch: Switch| {
+            let mut alone = KeeperSettings {
+                comments: false,
+                conflicts: false,
+                checks: false,
+                ..keeper.clone()
+            };
+            *switch(&mut alone) = *switch(&mut keeper.clone());
+            alone
+        };
+        let needs = |alone: KeeperSettings| match alone.comments {
+            true => check_sorting_model(model.as_ref()),
+            false => check_tries(&alone, model.as_ref(), verification),
+        };
+        (switches.into_iter())
+            .filter_map(|switch| Some((switch, format!("{:#}", needs(alone(switch)).err()?))))
+            .collect()
+    }
+    /// What the Repositories page says about each trigger held off on this machine.
+    pub(crate) fn keeper_held(&self) -> Vec<String> {
+        let shared = self.shared();
+        let held = self.held(&shared.keeper(), &shared.review());
+        let line = |(_, why)| format!("On from another machine, off on this Mac: {why}");
+        held.into_iter().map(line).collect()
     }
     /// Saves who verifies tickets. An invalid setting is refused and the saved one stays.
     pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
@@ -161,18 +204,25 @@ impl Host {
         Ok(self.settings())
     }
     /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.
-    /// Turning comment sorting on starts every PR's comments afresh at the next pass.
+    /// Turning comment sorting on starts every PR's comments afresh at the next pass. A trigger
+    /// held off on this machine stays on in the file unless the save turns it on, which is
+    /// checked as any other.
     pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
         keeper.validate()?;
         let model = self.model_selection()?.keeper;
         if keeper.comments {
             check_sorting_model(model.as_ref())?;
         }
-        check_tries(&keeper, model.as_ref(), &self.settings().verification)?;
-        if keeper.comments && !self.settings().keeper.comments {
+        let settings = self.settings();
+        check_tries(&keeper, model.as_ref(), &settings.verification)?;
+        if keeper.comments && !settings.keeper.comments {
             self.restart_comments()?;
         }
-        self.shared().set_keeper(&keeper)?;
+        let mut saved = keeper;
+        for (switch, _) in self.held(&self.shared().keeper(), &settings.verification) {
+            *switch(&mut saved) = true;
+        }
+        self.shared().set_keeper(&saved)?;
         Ok(self.settings())
     }
     /// Saves or removes a repository's checks command. The PR keeper reads it when it runs.
@@ -635,5 +685,73 @@ mod tests {
         let taken = ["notes", "notes-2"];
         assert_eq!(unused("notes", |c| taken.contains(&c)), "notes-3");
         assert_eq!(unused("other", |c| taken.contains(&c)), "other");
+    }
+    /// A host with no PR keeper model whose shared file turns on every trigger, as a pass
+    /// would pull it from another machine.
+    fn held_by_another_machine() -> (tempfile::TempDir, Host) {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        with_light(&mut host);
+        let pulled = KeeperSettings {
+            checks: true,
+            comments: true,
+            ..conflicts("Light")
+        };
+        shared::SharedStore::of(home.path())
+            .set_keeper(&pulled)
+            .unwrap();
+        (home, host)
+    }
+
+    #[test]
+    fn triggers_on_from_another_machine_are_held_off_here_until_a_keeper_model_is_chosen() {
+        let (home, mut host) = held_by_another_machine();
+        let file = home.path().join("shared/settings/pr-keeper.json");
+        let saved = || serde_json::from_slice::<KeeperSettings>(&fs::read(&file).unwrap()).unwrap();
+        let keeper = host.settings().keeper;
+        assert!(keeper.rebase && !keeper.conflicts && !keeper.checks && !keeper.comments);
+        let held = host.snapshot().unwrap().keeper_held;
+        assert_eq!(held.len(), 3);
+        for line in &held {
+            assert!(
+                line.starts_with("On from another machine, off on this Mac: ")
+                    && line.contains("PR keeper model"),
+                "{line}"
+            );
+        }
+        // Every save that runs the keeper's checks counts the held triggers as off, and the
+        // file keeps them on.
+        let mut selection = host.model_selection().unwrap();
+        host.set_model_selection(&selection).unwrap();
+        let review = host.settings().verification;
+        host.set_setup(&selection, Some(review.clone())).unwrap();
+        host.set_verification(review).unwrap();
+        let quiet = KeeperSettings {
+            quiet_minutes: 5,
+            ..host.settings().keeper
+        };
+        host.set_keeper(quiet).unwrap();
+        let kept = saved();
+        assert!(kept.conflicts && kept.checks && kept.comments && kept.quiet_minutes == 5);
+        let on = KeeperSettings {
+            checks: true,
+            ..host.settings().keeper
+        };
+        let refused = refusal(host.set_keeper(on));
+        assert!(refused.contains("needs a PR keeper model"), "{refused}");
+        assert_eq!(saved(), kept);
+        let allowed = selection.allowed(Provider::Claude)[0].clone();
+        selection.keeper = Some(ModelProfile {
+            provider: Provider::Claude,
+            model: allowed.model,
+            effort: allowed.effort,
+        });
+        host.set_model_selection(&selection).unwrap();
+        let keeper = host.settings().keeper;
+        assert!(keeper.conflicts && keeper.checks && keeper.comments);
+        assert!(host.snapshot().unwrap().keeper_held.is_empty());
+        selection.keeper = None;
+        let removed = refusal(host.set_model_selection(&selection));
+        assert!(removed.contains("PR keeper model"), "{removed}");
     }
 }

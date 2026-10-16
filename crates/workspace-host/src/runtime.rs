@@ -152,18 +152,35 @@ fn git_command(path: &Path, args: &[&str]) -> Command {
 
 fn git_run(command: Command, timeout: Duration, input: Option<Vec<u8>>) -> Result<GitAnswer> {
     let (status, output, error) = bounded_output(command, timeout, input)?;
-    let error = String::from_utf8_lossy(&error);
-    let lines = || error.lines().map(str::trim).filter(|l| !l.is_empty());
-    let error = lines()
-        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
-        .or_else(|| lines().next_back())
-        .unwrap_or_default()
-        .to_owned();
     Ok(GitAnswer {
         status,
         output: String::from_utf8(output)?,
-        error,
+        error: error_line(&error),
     })
+}
+
+/// A Git query's output as bytes, as file contents are, with `input` on its standard input.
+pub fn git_bytes(path: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    let mut command = git_command(path, args);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
+    let (status, output, error) = bounded_output(command, GIT_TIMEOUT, Some(input.to_vec()))?;
+    ensure!(
+        status.success(),
+        "git {} failed: {}",
+        args[0],
+        error_line(&error)
+    );
+    Ok(output)
+}
+
+fn error_line(error: &[u8]) -> String {
+    let error = String::from_utf8_lossy(error);
+    let lines = || error.lines().map(str::trim).filter(|l| !l.is_empty());
+    lines()
+        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+        .or_else(|| lines().next_back())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Runs GitHub's `gh` in `path` without prompts and returns its output, or its last error line.

@@ -6,6 +6,7 @@ use crate::skills::SkillStore;
 use crate::*;
 use publish::{GitTool, Tools};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// The only paths a sync commit may change, as decision 2 lays them out.
@@ -185,10 +186,9 @@ fn joining(held: &SharedStore, mine: &SharedStore, clone: &Path) -> Result<Joini
     let mut fields = last.trim_end().splitn(3, '\0');
     let at = fields.next().unwrap_or_default().parse::<i64>()? * 1000;
     let author = fields.next().unwrap_or_default();
-    let machine = fields.next().and_then(|subject| subject.rsplit_once(" · "));
     Ok(Joining {
         settings,
-        last_machine: machine.map_or(author, |(_, machine)| machine).to_owned(),
+        last_machine: named(author, fields.next().unwrap_or_default()).to_owned(),
         last_changed_at: at,
     })
 }
@@ -366,13 +366,6 @@ fn shared_paths(clone: &Path) -> Result<Vec<String>> {
 /// Commits `paths` as the clone holds them, with the human's Git identity; `false` when nothing
 /// changed.
 fn commit(clone: &Path, paths: &[String], message: &str, git: &GitTool) -> Result<bool> {
-    let identity = ["user.name", "user.email"].map(|key| run(git, clone, &["config", key]));
-    ensure!(
-        identity
-            .iter()
-            .all(|value| value.as_ref().is_ok_and(|v| !v.trim().is_empty())),
-        "Git has no name and email set. Set user.name and user.email with git config --global, then try again."
-    );
     let literal: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
     let literal: Vec<&str> = literal.iter().map(String::as_str).collect();
     run(
@@ -380,6 +373,18 @@ fn commit(clone: &Path, paths: &[String], message: &str, git: &GitTool) -> Resul
         clone,
         &[&["add", "--all", "--"], &literal[..]].concat(),
     )?;
+    commit_staged(clone, message, git)
+}
+
+/// Commits what is staged, with the human's Git identity; `false` when nothing is.
+fn commit_staged(clone: &Path, message: &str, git: &GitTool) -> Result<bool> {
+    let identity = ["user.name", "user.email"].map(|key| run(git, clone, &["config", key]));
+    ensure!(
+        identity
+            .iter()
+            .all(|value| value.as_ref().is_ok_and(|v| !v.trim().is_empty())),
+        "Git has no name and email set. Set user.name and user.email with git config --global, then try again."
+    );
     if runtime::git_answer(clone, &["diff", "--cached", "--quiet"])?
         .status
         .success()
@@ -499,12 +504,19 @@ pub(crate) struct Synced {
 /// A file's content, `None` for no file.
 type Content = Option<Vec<u8>>;
 
-/// A pass's input from the host thread: the clone, its repository and sync's record.
+/// A pass's input from the host thread: the clone, its repository, sync's record, and the
+/// host's writes, counted at `since`.
 pub(crate) struct Pass {
     clone: PathBuf,
     repository: SettingsRepository,
     commit: String,
     synced: BTreeMap<String, Content>,
+    written: BTreeMap<String, Content>,
+    /// The files paused as changed on two machines, which stay paused until settled or alike.
+    two_machines: Vec<String>,
+    writes: shared::SharedWrites,
+    since: u64,
+    running: Arc<Mutex<()>>,
 }
 
 /// What a pass did, for the host thread to write and record.
@@ -518,8 +530,11 @@ pub(crate) struct Passed {
     /// Each file both sides now hold alike: changed the same on both, or committed here.
     alike: Vec<(String, Content)>,
     committed: Vec<(String, Content)>,
+    /// Each file left alone, with why and GitHub's content.
+    paused: Vec<(String, Paused, Content)>,
     /// Why committing or pushing failed; what was pulled still applies.
     error: Option<String>,
+    since: u64,
 }
 
 /// Sync's files: the shared paths, without hidden files such as `.DS_Store` or a write's
@@ -570,13 +585,8 @@ fn files_at(clone: &Path, commit: &str) -> Result<BTreeMap<String, Vec<u8>>> {
         }
     }
     let ids: String = blobs.iter().map(|(_, id)| format!("{id}\n")).collect();
-    let batch = runtime::git_answer_with_input(clone, &["cat-file", "--batch"], &ids)?;
-    ensure!(
-        batch.status.success(),
-        "git cat-file failed{}",
-        batch.reason()
-    );
-    let mut rest = batch.output.as_bytes();
+    let batch = runtime::git_bytes(clone, &["cat-file", "--batch"], ids.as_bytes())?;
+    let mut rest = batch.as_slice();
     let mut files = BTreeMap::new();
     for (path, _) in blobs {
         let header = rest
@@ -620,6 +630,54 @@ fn take_other_files(clone: &Path, previous: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
+/// The files paused and settled together: a skill's rules, rewrite and base, as its folder, or
+/// one file.
+fn unit(path: &str) -> &str {
+    let mut parts = path.splitn(3, '/');
+    match [(); 3].map(|()| parts.next()) {
+        [Some("skills"), Some(skill), Some(file)] if skills::CURRENT.contains(&file) => {
+            &path[..skill.len() + "skills//".len()]
+        }
+        _ => path,
+    }
+}
+
+/// Stages exactly the content a pass read, so no file written since reaches the commit.
+fn stage(clone: &Path, files: &[(String, Content)]) -> Result<()> {
+    let mut index = vec![];
+    for (path, content) in files {
+        let entry = match content {
+            Some(content) => {
+                let id = runtime::git_bytes(clone, &["hash-object", "-w", "--stdin"], content)?;
+                format!("100644 {}\t{path}\0", String::from_utf8(id)?.trim())
+            }
+            None => format!("0 {}\t{path}\0", "0".repeat(40)),
+        };
+        index.extend(entry.into_bytes());
+    }
+    runtime::git_bytes(clone, &["update-index", "-z", "--index-info"], &index)?;
+    Ok(())
+}
+
+/// The machine a commit names after its " · ", or else its author.
+fn named<'a>(author: &'a str, subject: &'a str) -> &'a str {
+    subject
+        .rsplit_once(" · ")
+        .map_or(author, |(_, machine)| machine)
+}
+
+/// The machine that last changed `paths` on GitHub.
+fn changed_by(clone: &Path, remote: &str, paths: &[&String]) -> String {
+    let literal: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
+    let mut args = vec!["log", "-1", "--format=%an%x00%s", remote, "--"];
+    args.extend(literal.iter().map(String::as_str));
+    let line = runtime::git_output(clone, &args).unwrap_or_default();
+    match line.trim_end().split_once('\0') {
+        Some((author, subject)) => named(author, subject).to_owned(),
+        None => "another machine".into(),
+    }
+}
+
 /// The settings `paths` hold, as the Settings window names them.
 fn names(paths: &[String]) -> String {
     let mut names: Vec<&str> = vec![];
@@ -642,15 +700,42 @@ fn names(paths: &[String]) -> String {
 }
 
 /// Fetches the branch, compares each file whole with the version last synced, and commits this
-/// machine's changes on GitHub's head and pushes them. A file changed on both sides is left
-/// out of the commit and kept here. Files to pull are returned for the host thread to write.
+/// machine's changes on GitHub's head and pushes them. A skill's rules, rewrite and base are
+/// compared as one. What changed on both sides, changed outside Wiffletree, or arrived in a
+/// form this machine refuses is paused and kept here. What the host wrote while the pass ran is
+/// left for the next one. Files to pull are returned for the host thread to write.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
         clone,
         repository,
         commit: previous,
         synced,
+        written,
+        two_machines,
+        writes,
+        since,
+        running,
     } = pass;
+    // Held for the whole pass, so no clone is adopted in its place until the pass is done. A
+    // pass the host started before an adoption changes nothing, and the host drops it.
+    let _running = running
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut passed = Passed {
+        repository,
+        remote: previous.clone(),
+        pushed: None,
+        pulled: vec![],
+        alike: vec![],
+        committed: vec![],
+        paused: vec![],
+        error: None,
+        since,
+    };
+    if shared::lock(&writes).touched("", since) {
+        return Ok(passed);
+    }
+    let repository = &passed.repository;
     let branch = format!("refs/heads/{}", repository.branch);
     let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
     run(
@@ -662,60 +747,99 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         .trim()
         .to_owned();
     let (here, there) = (files_here(&clone)?, files_at(&clone, &remote)?);
-    let mut passed = Passed {
-        repository,
-        remote: remote.clone(),
-        pushed: None,
-        pulled: vec![],
-        alike: vec![],
-        committed: vec![],
-        error: None,
-    };
-    let paths: std::collections::BTreeSet<&String> = synced
-        .keys()
-        .chain(here.keys())
-        .chain(there.keys())
-        .collect();
-    for path in paths {
-        let base = synced.get(path).and_then(Option::as_ref);
-        let (mine, theirs) = (here.get(path), there.get(path));
-        if mine == theirs {
-            if mine != base {
-                passed.alike.push((path.clone(), mine.cloned()));
+    if let Some(format) = there.get(shared::FORMAT) {
+        ensure!(
+            shared::check(shared::FORMAT, format).is_ok(),
+            "This repository was written by a newer Wiffletree. Update to keep syncing."
+        );
+    }
+    passed.remote = remote.clone();
+    let mut units: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for path in synced.keys().chain(here.keys()).chain(there.keys()) {
+        let paths = units.entry(unit(path)).or_default();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    let version = |map: &BTreeMap<String, Content>, path: &String| map.get(path).cloned().flatten();
+    for paths in units.into_values() {
+        let files: Vec<_> = (paths.iter())
+            .map(|&path| {
+                let (base, mine) = (version(&synced, path), here.get(path).cloned());
+                (path, base, mine, there.get(path).cloned())
+            })
+            .collect();
+        let outside = (files.iter())
+            .any(|(path, base, mine, _)| mine != base && *mine != version(&written, path));
+        let refused = (files.iter())
+            .filter(|(_, base, _, theirs)| theirs != base)
+            .find_map(|(path, _, _, theirs)| shared::check(path, theirs.as_ref()?).err());
+        let changed_here = files.iter().any(|(_, base, mine, _)| mine != base);
+        let changed_there = files.iter().any(|(_, base, _, theirs)| theirs != base);
+        let was_paused = paths.iter().any(|path| two_machines.contains(path));
+        let paused = match () {
+            _ if files.iter().all(|(_, _, mine, theirs)| mine == theirs) => None,
+            _ if outside => Some(Paused::OutsideWiffletree),
+            _ => match refused {
+                Some(reason) => Some(Paused::CannotBeRead {
+                    machine: changed_by(&clone, &remote, &paths),
+                    reason: format!("{reason:#}"),
+                }),
+                None if changed_here && changed_there || was_paused => Some(Paused::TwoMachines {
+                    machine: changed_by(&clone, &remote, &paths),
+                }),
+                None => None,
+            },
+        };
+        for (path, base, mine, theirs) in files {
+            let path = path.clone();
+            match &paused {
+                Some(why) => passed.paused.push((path, why.clone(), theirs)),
+                None if mine == theirs && mine != base => passed.alike.push((path, mine)),
+                None if mine == theirs => {}
+                None if mine == base => passed.pulled.push((path, mine, theirs)),
+                None => passed.committed.push((path, mine)),
             }
-        } else if mine == base {
-            passed
-                .pulled
-                .push((path.clone(), mine.cloned(), theirs.cloned()));
-        } else if theirs == base {
-            passed.committed.push((path.clone(), mine.cloned()));
         }
     }
     take_other_files(&clone, &previous, &remote)?;
     runtime::git_output(&clone, &["reset", "--quiet", &remote])?;
+    {
+        let writes = shared::lock(&writes);
+        let read = |path: &String| !writes.touched(path, since);
+        passed.pulled.retain(|(path, ..)| read(path));
+        passed.alike.retain(|(path, _)| read(path));
+        passed.committed.retain(|(path, _)| read(path));
+        passed.paused.retain(|(path, ..)| read(path));
+    }
+    let mut refused = None;
+    passed.committed.retain(|(path, content)| {
+        let Some(Err(error)) = content.as_deref().map(|c| shared::check(path, c)) else {
+            return true;
+        };
+        refused = Some(format!(
+            "{path} was not pushed: this Mac would refuse it: {error:#}"
+        ));
+        false
+    });
     let paths: Vec<String> = passed.committed.iter().map(|(p, _)| p.clone()).collect();
     if !paths.is_empty() {
         let message = format!("{} · {}", names(&paths), machine_name());
-        let pushed = commit(&clone, &paths, &message, &tools.git).and_then(|made| {
-            if made {
-                push(&clone, &passed.repository, &tools.git)?;
-            }
-            let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
-            Ok(made.then(|| head.trim().to_owned()))
-        });
-        match pushed {
-            Ok(Some(head)) => {
-                // A save made during the pass can be what was committed: record that.
-                let pushed = files_at(&clone, &head)?;
-                for (path, content) in &mut passed.committed {
-                    *content = pushed.get(path).cloned();
+        let pushed = stage(&clone, &passed.committed)
+            .and_then(|()| commit_staged(&clone, &message, &tools.git))
+            .and_then(|made| {
+                if made {
+                    push(&clone, &passed.repository, &tools.git)?;
                 }
-                passed.pushed = Some(head);
-            }
-            Ok(None) => {}
+                let head = runtime::git_output(&clone, &["rev-parse", "HEAD"])?;
+                Ok(made.then(|| head.trim().to_owned()))
+            });
+        match pushed {
+            Ok(head) => passed.pushed = head,
             Err(error) => passed.error = Some(format!("{error:#}")),
         }
     }
+    passed.error = passed.error.or(refused);
     Ok(passed)
 }
 
@@ -774,6 +898,17 @@ impl Host {
     /// records the repository in this machine's settings. A shared setting saved since the
     /// clone was prepared refuses it, and a failure puts the folder back.
     pub(crate) fn adopt_settings_repository(&mut self, prepared: Prepared) -> Result<HostSettings> {
+        // Refused while a pass runs, which can take minutes; one that ran before is dropped,
+        // not recorded against the new clone.
+        let passes = self.sync_passes.clone();
+        let _no_pass = match passes.try_lock() {
+            Ok(none) => none,
+            Err(std::sync::TryLockError::Poisoned(none)) => none.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                bail!("Sync is running. Try again in a moment.")
+            }
+        };
+        let _writing = shared::Writing::start(&self.shared_writes, "");
         let shared = self.home.join(shared::FOLDER);
         ensure!(
             contents(&shared)? == prepared.read_from,
@@ -812,22 +947,37 @@ impl Host {
             // A repository chosen before sync's record existed.
             self.record_clone()?;
         }
-        let mut synced: BTreeMap<String, Content> = self
+        let rows: Vec<(String, Content, Content)> = self
             .db
-            .prepare("SELECT path,synced FROM sync_record")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .prepare("SELECT path,synced,written FROM sync_record")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        let mut synced: BTreeMap<String, Content> = BTreeMap::new();
+        let mut written = BTreeMap::new();
+        for (path, content, wrote) in rows {
+            written.insert(path.clone(), wrote);
+            synced.insert(path, content);
+        }
         let commit = synced.remove("").flatten().map(String::from_utf8);
         Ok(Some(Pass {
             clone: self.home.join(shared::FOLDER),
             repository,
             commit: commit.transpose()?.context("Sync's record has no commit")?,
             synced,
+            written,
+            two_machines: (self.db.prepare(
+                "SELECT path FROM sync_paused WHERE json_extract(why,'$.kind')='two_machines'",
+            )?)
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+            writes: self.shared_writes.clone(),
+            since: shared::lock(&self.shared_writes).ended(),
+            running: self.sync_passes.clone(),
         }))
     }
-    /// Writes what a pass pulled and records what it synced; `true` when the status or a
-    /// setting changed. A file saved here during the pass is not overwritten: the next pass
-    /// finds it changed on both sides.
+    /// Writes what a pass pulled and records what it synced and paused; `true` when the status
+    /// or a setting changed. What the host wrote or settled during the pass is left for the
+    /// next one, and a pass that started before a clone was adopted is dropped.
     pub(crate) fn finish_sync(&mut self, at: i64, passed: Result<Passed>) -> Result<bool> {
         let passed = match passed {
             Ok(passed) => passed,
@@ -836,14 +986,22 @@ impl Host {
                 return Ok(true);
             }
         };
-        if self.settings().settings_repository.as_ref() != Some(&passed.repository) {
+        let writes = self.shared_writes.clone();
+        let touched = |path: &str| shared::lock(&writes).touched(path, passed.since);
+        if self.settings().settings_repository.as_ref() != Some(&passed.repository) || touched("") {
             return Ok(false);
         }
+        let sorting = self.settings().keeper.comments;
         let shared = self.home.join(shared::FOLDER);
+        // A skill's rules, rewrite and base are pulled together or not at all.
+        let skipped: std::collections::BTreeSet<String> = (passed.pulled.iter())
+            .filter(|(path, here, _)| fs::read(shared.join(path)).ok() != *here || touched(path))
+            .map(|(path, ..)| unit(path).to_owned())
+            .collect();
         let mut pulled = vec![];
-        for (path, here, there) in passed.pulled {
+        for (path, _, there) in passed.pulled {
             let file = shared.join(&path);
-            if fs::read(&file).ok() != here {
+            if skipped.contains(unit(&path)) {
                 continue;
             }
             match &there {
@@ -867,7 +1025,22 @@ impl Host {
                 )?;
             }
         }
+        let paused: Vec<String> = (tx.prepare("SELECT path FROM sync_paused")?)
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for path in paused.iter().filter(|path| !touched(path)) {
+            tx.execute("DELETE FROM sync_paused WHERE path=?1", [path])?;
+        }
+        for (path, why, theirs) in passed.paused.iter().filter(|(path, ..)| !touched(path)) {
+            tx.execute(
+                "INSERT OR REPLACE INTO sync_paused(path,why,theirs) VALUES (?1,?2,?3)",
+                params![path, serde_json::to_string(why)?, theirs],
+            )?;
+        }
         tx.commit()?;
+        if !sorting && self.settings().keeper.comments {
+            self.restart_comments()?;
+        }
         self.sync = Synced {
             at: Some(at),
             pulled: pulled.len(),
@@ -889,7 +1062,7 @@ impl Host {
             return Ok(None);
         };
         let waiting: i64 = self.db.query_row(
-            "SELECT COUNT(*) FROM sync_record WHERE path<>'' AND written IS NOT synced",
+            "SELECT COUNT(*) FROM sync_record WHERE path<>'' AND written IS NOT synced AND path NOT IN (SELECT path FROM sync_paused)",
             [],
             |r| r.get(0),
         )?;
@@ -903,6 +1076,110 @@ impl Host {
             waiting: waiting as usize,
         }))
     }
+    /// One note per paused setting, a skill's rules, rewrite and base being one.
+    pub(crate) fn workspace_notes(&self) -> Result<Vec<WorkspaceNote>> {
+        let rows: Vec<(String, String)> = (self.db.prepare("SELECT path,why FROM sync_paused")?)
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut notes = BTreeMap::new();
+        for (path, why) in rows {
+            let path = unit(&path).to_owned();
+            let paused: Paused = serde_json::from_str(&why)?;
+            let setting = self.setting(&path);
+            let text = match &paused {
+                Paused::TwoMachines { machine } => format!(
+                    "{setting} changed on this Mac and on {machine}. This Mac keeps its own until you choose."
+                ),
+                Paused::OutsideWiffletree => {
+                    format!("{setting} was changed outside Wiffletree on this Mac.")
+                }
+                Paused::CannotBeRead { machine, reason } => {
+                    format!("{setting} from {machine} can't be used here: {reason}.")
+                }
+            };
+            let note = WorkspaceNote {
+                path: path.clone(),
+                setting,
+                paused,
+                text,
+            };
+            notes.insert(path, note);
+        }
+        Ok(notes.into_values().collect())
+    }
+    /// A paused file as the app names it, such as "Implementing · your rules".
+    fn setting(&self, path: &str) -> String {
+        let name = names(&[path.to_owned()]);
+        let rewritten = self.home.join(shared::FOLDER).join(path).join("rewrite.md");
+        match path {
+            _ if path.contains("/history/") => format!("{name} · a history entry"),
+            _ if !path.ends_with('/') => name,
+            _ if rewritten.exists() => format!("{name} · your rewrite"),
+            _ => format!("{name} · your rules"),
+        }
+    }
+    /// Settles a paused file, or a skill's rules, rewrite and base together, as its note offers.
+    /// The next pass, due five seconds later, pushes or pulls what the choice leaves.
+    pub(crate) fn settle_paused(&self, path: &str, settle: Settle) -> Result<()> {
+        let mut rows: Vec<(String, String, Content, Content)> = (self.db.prepare(
+            "SELECT p.path,p.why,p.theirs,r.synced FROM sync_paused p LEFT JOIN sync_record r USING(path)",
+        )?)
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+        rows.retain(|(file, ..)| unit(file) == path);
+        let (_, why, ..) = rows.first().context("That setting is not paused")?;
+        let offered = match serde_json::from_str(why)? {
+            Paused::TwoMachines { .. } => [Settle::KeepThisMachines, Settle::UseTheOthers],
+            Paused::OutsideWiffletree => [Settle::SyncThisVersion, Settle::PutBackSynced],
+            Paused::CannotBeRead { .. } => [Settle::KeepThisMachines; 2],
+        };
+        ensure!(
+            offered.contains(&settle),
+            "That note does not offer this choice"
+        );
+        let _writing = shared::Writing::start(&self.shared_writes, path);
+        let shared = self.home.join(shared::FOLDER);
+        let mine = |file: &str| fs::read(shared.join(file)).ok();
+        if settle == Settle::SyncThisVersion {
+            for (file, ..) in &rows {
+                if let Some(content) = mine(file) {
+                    shared::check(file, &content)
+                        .with_context(|| format!("{file} can't be synced"))?;
+                }
+            }
+        }
+        let recorder = self.recorder();
+        // `rewrite.md` decides a skill's mode, so it changes last.
+        rows.sort_by_key(|(file, ..)| file.ends_with("/rewrite.md"));
+        for (file, _, theirs, synced) in rows {
+            let at = shared.join(&file);
+            let (written, synced) = match settle {
+                Settle::KeepThisMachines => (None, Some(theirs)),
+                Settle::UseTheOthers => (Some(theirs.clone()), Some(theirs)),
+                Settle::SyncThisVersion => (Some(mine(&file)), Some(theirs)),
+                Settle::PutBackSynced => (Some(synced), None),
+            };
+            if let Some(content) = written {
+                if settle != Settle::SyncThisVersion {
+                    match &content {
+                        Some(content) => shared::write_atomically(&at, content)?,
+                        None => drop(fs::remove_file(&at)),
+                    }
+                }
+                recorder.wrote(&at, content.as_deref())?;
+            }
+            if let Some(synced) = synced {
+                self.db.execute(
+                    "INSERT INTO sync_record(path,synced) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET synced=excluded.synced",
+                    params![file, synced],
+                )?;
+            }
+            self.db
+                .execute("DELETE FROM sync_paused WHERE path=?1", [&file])?;
+        }
+        self.shared_written.set(true);
+        Ok(())
+    }
     /// Starts sync's record afresh from the clone: each file as its head holds it is synced, and
     /// as the folder holds it written, so a change not yet committed waits to be pushed.
     fn record_clone(&mut self) -> Result<()> {
@@ -914,6 +1191,7 @@ impl Host {
             synced.keys().chain(written.keys()).collect();
         let tx = self.db.transaction()?;
         tx.execute("DELETE FROM sync_record", [])?;
+        tx.execute("DELETE FROM sync_paused", [])?;
         tx.execute(
             "INSERT INTO sync_record(path,synced) VALUES ('',?1)",
             [head.as_bytes()],
@@ -935,8 +1213,9 @@ impl Host {
             return Ok(needs);
         }
         let selection = self.model_selection()?;
+        let keeper = self.shared().keeper();
         if let Err(keeper) =
-            policies::check_keeper_needs(&settings.keeper, &selection, &settings.verification)
+            policies::check_keeper_needs(&keeper, &selection, &settings.verification)
         {
             needs.push(format!("{keeper:#}"));
         }
@@ -1090,7 +1369,7 @@ pub(crate) mod tests {
                 .then(|| String::from_utf8(output.stdout).unwrap())
         }
         /// A commit made on GitHub, as the human would in its web editor.
-        fn commit(&self, file: &str, content: &str) {
+        fn commit(&self, file: &str, content: impl AsRef<[u8]>) {
             commit_on(&self.bare, file, content);
         }
         fn pushes(&self) -> usize {
@@ -1103,7 +1382,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn commit_on(bare: &Path, file: &str, content: &str) {
+    fn commit_on(bare: &Path, file: &str, content: impl AsRef<[u8]>) {
         let work = tempfile::tempdir().unwrap();
         git(work.path(), &["clone", "-q", bare.to_str().unwrap(), "."]);
         let path = work.path().join(file);
@@ -1867,7 +2146,6 @@ pub(crate) mod tests {
                 format!("Review · {machine}")
             ]
         );
-        // The status names the repository and what the last pass moved.
         let status = status(&first);
         assert_eq!(
             (
@@ -1906,42 +2184,543 @@ pub(crate) mod tests {
         assert_eq!(status(&host).error, None);
     }
 
+    fn notes(host: &Host) -> Vec<WorkspaceNote> {
+        host.snapshot().unwrap().workspace_notes
+    }
+
+    fn settle(host: &mut Host, path: &str, settle: Settle) {
+        let path = path.into();
+        host.execute(Command::SettlePausedFile { path, settle })
+            .unwrap();
+    }
+
+    const ADDITIONS: &str = "skills/implementing/additions.md";
+
     #[test]
-    fn a_file_changed_on_both_sides_is_kept_here_and_left_out_of_the_commit() {
+    fn both_machines_edit_implementings_rules_and_keeping_this_macs_pushes_it() {
         let folder = tempfile::tempdir().unwrap();
         let github = Arc::new(GitHub::new(folder.path(), true));
         let (_first_home, mut first) = set_up_elsewhere(&github);
         let (_second_home, mut second) = joined(&github);
         let tools = github.tools();
-        let additions = "skills/implementing/additions.md";
-        fs::write(first.home.join("shared").join(additions), "From the first.").unwrap();
-        fs::write(
-            second.home.join("shared").join(additions),
-            "From the second.",
-        )
-        .unwrap();
+        save_rules(&mut first, Skill::Implementing, "From the first.");
+        save_rules(&mut second, Skill::Implementing, "From the second.");
         second.set_check_ins(40, 400).unwrap();
         first.sync_now(&tools).unwrap();
-        for _ in 0..2 {
-            second.sync_now(&tools).unwrap();
-        }
+        second.sync_now(&tools).unwrap();
         let rules = |host: &Host| host.skills().state(Skill::Implementing).rules;
         assert_eq!(rules(&second), "From the second.");
-        assert_eq!(github.show(additions).unwrap(), "From the first.");
-        assert!(
-            github
-                .show("settings/check-ins.json")
-                .unwrap()
-                .contains("400")
+        assert_eq!(github.show(ADDITIONS).unwrap(), "From the first.");
+        assert!(github.show(shared::CHECK_INS).unwrap().contains("400"));
+        let machine = machine_name();
+        assert_eq!(
+            notes(&second),
+            [WorkspaceNote {
+                path: "skills/implementing/".into(),
+                setting: "Implementing · your rules".into(),
+                paused: Paused::TwoMachines {
+                    machine: machine.clone()
+                },
+                text: format!(
+                    "Implementing · your rules changed on this Mac and on {machine}. This Mac keeps its own until you choose."
+                ),
+            }]
         );
+        assert_eq!(status(&second).waiting, 0);
+        assert_eq!(second.skills().history(Skill::Implementing).len(), 3);
+        save_rules(&mut second, Skill::Implementing, "From the second, again.");
+        second.sync_now(&tools).unwrap();
+        assert_eq!(github.show(ADDITIONS).unwrap(), "From the first.");
+        assert_eq!(notes(&second).len(), 1);
         first.sync_now(&tools).unwrap();
-        assert_eq!(rules(&first), "From the first.");
         assert_eq!(first.settings().checkin_human_turns, 400);
+        assert!(notes(&first).is_empty());
+        settle(
+            &mut second,
+            "skills/implementing/",
+            Settle::KeepThisMachines,
+        );
+        assert!(notes(&second).is_empty());
+        second.sync_now(&tools).unwrap();
+        assert_eq!(github.show(ADDITIONS).unwrap(), "From the second, again.");
+        first.sync_now(&tools).unwrap();
+        assert_eq!(rules(&first), "From the second, again.");
+        let earlier = git(
+            &github.bare,
+            &["log", "--format=%H", "main", "--", ADDITIONS],
+        );
+        let earlier = earlier.lines().nth(1).unwrap();
+        let kept = git(&github.bare, &["show", &format!("{earlier}:{ADDITIONS}")]);
+        assert_eq!(kept, "From the first.");
+        for host in [&first, &second] {
+            assert_eq!((status(host).waiting, notes(host).len()), (0, 0));
+        }
+    }
+
+    #[test]
+    fn using_the_other_machines_version_writes_it_here() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, mut first) = set_up_elsewhere(&github);
+        let (_second_home, mut second) = joined(&github);
+        let tools = github.tools();
+        first.set_check_ins(40, 400).unwrap();
+        second.set_check_ins(50, 500).unwrap();
+        first.sync_now(&tools).unwrap();
+        second.sync_now(&tools).unwrap();
+        assert_eq!(notes(&second)[0].setting, "Check-ins");
+        settle(&mut second, shared::CHECK_INS, Settle::UseTheOthers);
+        assert_eq!(second.settings().checkin_human_turns, 400);
+        second.sync_now(&tools).unwrap();
+        let synced = status(&second);
+        assert_eq!((synced.waiting, synced.pushed), (0, 0));
+        assert!(notes(&second).is_empty());
+    }
+
+    #[test]
+    fn a_rewrite_on_one_machine_and_new_rules_on_the_other_pause_the_skill_as_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, mut first) = set_up_elsewhere(&github);
+        let (_second_home, mut second) = joined(&github);
+        let tools = github.tools();
+        let skill = Skill::Implementing;
+        first.execute(Command::StartSkillRewrite { skill }).unwrap();
+        first.sync_now(&tools).unwrap();
+        save_rules(&mut second, skill, "- New rule.");
+        second.sync_now(&tools).unwrap();
+        let state = second.skills().state(skill);
+        assert_eq!((state.rules.as_str(), state.rewrite), ("- New rule.", None));
+        let folder = second.home.join("shared/skills/implementing");
+        assert!(!folder.join("rewrite.md").exists() && !folder.join("base.md").exists());
+        let notes = notes(&second);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].setting, "Implementing · your rules");
+        assert!(github.show("skills/implementing/rewrite.md").is_some());
+    }
+
+    #[test]
+    fn an_agents_shell_edit_is_paused_until_this_version_is_synced() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        save_rules(&mut host, Skill::Implementing, "Run the linter.\n");
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let additions = home.path().join("shared").join(ADDITIONS);
+        let appended = "Run the linter.\nPush to main.\n";
+        fs::write(&additions, appended).unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.show(ADDITIONS).unwrap(), "Run the linter.\n");
+        let note = notes(&host).remove(0);
+        assert_eq!(note.paused, Paused::OutsideWiffletree);
+        assert_eq!(
+            note.text,
+            "Implementing · your rules was changed outside Wiffletree on this Mac."
+        );
+        assert!(host.instructions(Role::Implementer).ends_with(appended));
+        settle(&mut host, "skills/implementing/", Settle::SyncThisVersion);
+        assert_eq!(status(&host).waiting, 1);
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.show(ADDITIONS).unwrap(), appended);
+        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+        fs::write(&additions, "Something else.\n").unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        settle(&mut host, "skills/implementing/", Settle::PutBackSynced);
+        assert_eq!(fs::read_to_string(&additions).unwrap(), appended);
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+    }
+
+    #[test]
+    fn an_invalid_file_arrives_and_this_machine_keeps_its_last_good_version() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_verification(VerificationSettings::default())
+            .unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let before = host.settings().verification;
+        let mut twice = serde_json::to_value(&before).unwrap();
+        let tester = twice["verifiers"][0].clone();
+        twice["verifiers"].as_array_mut().unwrap().push(tester);
+        github.commit(shared::REVIEW, twice.to_string());
+        github.commit(ADDITIONS, b"\xff\xfe not text");
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(status(&host).error, None);
+        assert_eq!(host.settings().verification, before);
+        assert!(!home.path().join("shared").join(ADDITIONS).exists());
+        let notes = notes(&host);
+        let reasons: Vec<&Paused> = notes.iter().map(|n| &n.paused).collect();
+        let machine = "F".to_owned();
+        let reason = format!(
+            "Two verifiers share the focus \"{}\"",
+            before.verifiers[0].focus
+        );
+        assert_eq!(
+            reasons,
+            [
+                &Paused::CannotBeRead {
+                    machine: machine.clone(),
+                    reason
+                },
+                &Paused::CannotBeRead {
+                    machine,
+                    reason: "it is not UTF-8 text".into()
+                },
+            ]
+        );
+        assert!(
+            notes[0]
+                .text
+                .starts_with("Review from F can't be used here")
+        );
+        settle(&mut host, shared::REVIEW, Settle::KeepThisMachines);
+        host.sync_now(&github.tools()).unwrap();
+        let pushed: VerificationSettings =
+            serde_json::from_str(&github.show(shared::REVIEW).unwrap()).unwrap();
+        assert_eq!(pushed, before);
+        github.commit(ADDITIONS, "Readable.");
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(host.skills().state(Skill::Implementing).rules, "Readable.");
+        assert!(self::notes(&host).is_empty());
+    }
+
+    #[test]
+    fn a_newer_format_stops_sync_and_nothing_is_pulled_or_pushed() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let guide = host.shared().guide();
+        github.commit(shared::GUIDE, "From a newer release.");
+        github.commit(shared::FORMAT, "{\"format\": 2}\n");
+        host.set_check_ins(40, 400).unwrap();
+        let commits = github.log("%H");
+        host.sync_now(&github.tools()).unwrap();
+        let error = status(&host).error.unwrap();
+        assert!(
+            error.contains("written by a newer Wiffletree. Update"),
+            "{error}"
+        );
+        assert_eq!(github.log("%H"), commits);
+        assert_eq!(host.shared().guide(), guide);
+        assert_eq!(status(&host).waiting, 1);
+    }
+
+    #[test]
+    fn a_save_made_during_a_pass_waits_for_the_next() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, mut first) = set_up_elsewhere(&github);
+        let (_second_home, mut second) = joined(&github);
+        let tools = github.tools();
+        first.set_check_ins(30, 300).unwrap();
+        let pass = first.sync_pass().unwrap().unwrap();
+        first.set_check_ins(40, 400).unwrap();
+        let commits = github.log("%H");
+        let passed = self::pass(pass, &tools);
+        first.finish_sync(now(), passed).unwrap();
+        assert_eq!(github.log("%H"), commits);
+        assert_eq!((status(&first).waiting, notes(&first).len()), (1, 0));
+        first.sync_now(&tools).unwrap();
+        assert!(github.show(shared::CHECK_INS).unwrap().contains("400"));
+        assert_eq!(status(&first).waiting, 0);
+        // A later change made only on the other machine is pulled, not taken for a conflict.
+        second.sync_now(&tools).unwrap();
+        second.set_check_ins(50, 500).unwrap();
+        second.sync_now(&tools).unwrap();
+        first.sync_now(&tools).unwrap();
+        assert_eq!(first.settings().checkin_human_turns, 500);
+        assert_eq!(status(&first).pulled, 1);
+    }
+
+    #[test]
+    fn a_skill_caught_mid_change_by_a_pass_is_left_for_the_next() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        save_rules(&mut host, Skill::Implementing, "Rule one.");
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        save_rules(&mut host, Skill::Implementing, "Rule two.");
+        // Mid-pass, a change has moved the rules aside and not yet put its new file in place.
+        let additions = home.path().join("shared").join(ADDITIONS);
+        let aside = home.path().join("aside.md");
+        let changing = Arc::new(Mutex::new(None));
+        let (writes, slot) = (host.shared_writes.clone(), changing.clone());
+        let (from, to) = (additions.clone(), aside.clone());
+        *github.before.lock().unwrap() = Some((
+            "fetch",
+            Box::new(move || {
+                let writing = shared::Writing::start(&writes, "skills/implementing/");
+                fs::rename(from, to).unwrap();
+                *slot.lock().unwrap() = Some(writing);
+            }),
+        ));
+        let pass = host.sync_pass().unwrap().unwrap();
+        let passed = self::pass(pass, &github.tools());
+        fs::rename(&aside, &additions).unwrap();
+        changing.lock().unwrap().take();
+        assert!(host.finish_sync(now(), passed).unwrap());
+        assert_eq!(github.show(ADDITIONS).unwrap(), "Rule one.");
+        assert!(notes(&host).is_empty());
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.show(ADDITIONS).unwrap(), "Rule two.");
+        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+    }
+
+    #[test]
+    fn a_pass_that_started_before_a_clone_was_adopted_is_dropped_unrecorded() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, _first) = set_up_elsewhere(&github);
+        let (_home, mut host) = joined(&github);
+        host.set_check_ins(40, 400).unwrap();
+        let pass = host.sync_pass().unwrap().unwrap();
+        let commits = github.log("%H");
+        host.choose_settings_repository(NAME, Some(JoinWith::ThisMachine), &github.tools())
+            .unwrap();
+        let rejoined = github.log("%H");
+        assert_eq!(rejoined.len(), commits.len() + 1);
+        // GitHub moves on, removing a file the adopted clone holds.
+        let work = tempfile::tempdir().unwrap();
+        git(
+            work.path(),
+            &["clone", "-q", github.bare.to_str().unwrap(), "."],
+        );
+        git(work.path(), &["rm", "-q", "README.md"]);
+        git(work.path(), &["commit", "-q", "-m", "No README"]);
+        git(work.path(), &["push", "-q", "origin", "main"]);
+        let passed = self::pass(pass, &github.tools());
+        assert!(!host.finish_sync(now(), passed).unwrap());
+        assert_eq!(github.log("%H")[1..], rejoined);
+        let clone = host.home.join("shared");
+        assert!(clone.join("README.md").exists());
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]), rejoined[0]);
+        let status = status(&host);
+        assert_eq!((status.synced_at, status.waiting), (None, 0));
+    }
+
+    #[test]
+    fn a_trigger_pulled_without_a_keeper_model_here_is_held_and_a_first_setup_saves() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, _first) = set_up_elsewhere(&github);
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        host.choose_settings_repository(NAME, Some(JoinWith::Repository), &github.tools())
+            .unwrap();
+        let keeper = r#"{"checks": true, "rebase": true, "review_level": "Light"}"#;
+        github.commit(shared::KEEPER, keeper);
+        host.sync_now(&github.tools()).unwrap();
+        assert!(host.settings().keeper.rebase && !host.settings().keeper.checks);
+        let held = host.snapshot().unwrap().keeper_held;
+        assert!(
+            held[0].contains("\"Try to fix failed checks\" needs"),
+            "{held:?}"
+        );
+        let file = home.path().join("shared").join(shared::KEEPER);
+        assert_eq!(fs::read_to_string(&file).unwrap(), keeper);
+        let suggested = Host::open_set_up(folder.path().join("suggested")).unwrap();
+        let selection = ModelSelection {
+            guide: host.model_selection().unwrap().guide,
+            ..suggested.model_selection().unwrap()
+        };
+        assert_eq!(selection.keeper, None);
+        let review = host.settings().verification;
+        host.set_setup(&selection, Some(review)).unwrap();
+        assert!(host.model_selection().unwrap().is_saved());
+        assert_eq!(fs::read_to_string(&file).unwrap(), keeper);
+    }
+
+    #[test]
+    fn syncing_an_outside_edit_pushes_it_over_a_remote_change() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(30, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let shared = home.path().join("shared");
+        let outside = "{\n  \"checkin_child_turns\": 40,\n  \"checkin_human_turns\": 400\n}\n";
+        fs::write(shared.join(shared::CHECK_INS), outside).unwrap();
+        github.commit(shared::CHECK_INS, outside.replace('4', "5"));
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(notes(&host)[0].paused, Paused::OutsideWiffletree);
+        settle(&mut host, shared::CHECK_INS, Settle::SyncThisVersion);
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.show(shared::CHECK_INS).unwrap(), outside);
+        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+    }
+
+    #[test]
+    fn a_format_file_this_release_would_refuse_is_never_synced() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        fs::write(home.path().join("shared").join(shared::FORMAT), "not json").unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        let settle = Command::SettlePausedFile {
+            path: shared::FORMAT.into(),
+            settle: Settle::SyncThisVersion,
+        };
+        let refused = format!("{:#}", host.execute(settle).unwrap_err());
+        assert!(
+            refused.contains("wiffletree.json can't be synced"),
+            "{refused}"
+        );
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(
+            github.show(shared::FORMAT).unwrap(),
+            "{\n  \"format\": 1\n}\n"
+        );
+        assert_eq!((status(&host).error, notes(&host).len()), (None, 1));
+    }
+
+    #[test]
+    fn a_file_paused_on_two_machines_stays_paused_when_the_remote_reverts() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(30, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let synced = github.show(shared::CHECK_INS).unwrap();
+        host.set_check_ins(40, 400).unwrap();
+        github.commit(shared::CHECK_INS, synced.replace('3', "5"));
+        host.sync_now(&github.tools()).unwrap();
+        assert!(matches!(notes(&host)[0].paused, Paused::TwoMachines { .. }));
+        github.commit(shared::CHECK_INS, &synced);
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(github.show(shared::CHECK_INS).unwrap(), synced);
+        assert!(matches!(notes(&host)[0].paused, Paused::TwoMachines { .. }));
+        assert_eq!(host.settings().checkin_human_turns, 400);
+    }
+
+    #[test]
+    fn joining_another_repository_is_refused_while_a_pass_runs_and_leaves_the_first_alone() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let github = Arc::new(GitHub::new(one.path(), true));
+        let other = Arc::new(GitHub::new(two.path(), true));
+        let (_other_home, _other_host) = set_up_elsewhere(&other);
+        let (home, mut host) = host();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        host.set_check_ins(40, 400).unwrap();
+        let before = github.log("%H");
+        let (at_push, reached) = std::sync::mpsc::channel();
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        *github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || {
+                at_push.send(()).unwrap();
+                gate.recv().unwrap();
+            }),
+        ));
+        let pass = host.sync_pass().unwrap().unwrap();
+        let tools = github.tools();
+        let running = std::thread::spawn(move || self::pass(pass, &tools));
+        reached.recv().unwrap();
+        let data = host.home.clone();
+        let join = || prepare(&data, NAME, Some(JoinWith::Repository), &other.tools());
+        let refused = host.adopt_settings_repository(join().unwrap());
+        assert_eq!(
+            format!("{:#}", refused.unwrap_err()),
+            "Sync is running. Try again in a moment."
+        );
+        go.send(()).unwrap();
+        let passed = running.join().unwrap();
+        assert_eq!(passed.as_ref().map(|p| p.error.clone()).unwrap(), None);
+        let pushed = github.log("%H");
+        assert_eq!(pushed[1..], before);
+        let changed = git(&github.bare, &["show", "--format=", "--name-only", "main"]);
+        assert_eq!(changed, shared::CHECK_INS);
+        assert!(host.finish_sync(now(), passed).unwrap());
+        let joined = host.adopt_settings_repository(join().unwrap()).unwrap();
+        assert!(joined.settings_repository.is_some());
+        let shared = home.path().join("shared");
+        assert_eq!(git(&shared, &["rev-parse", "HEAD"]), other.log("%H")[0]);
+        assert_eq!(github.log("%H"), pushed);
+    }
+
+    #[test]
+    fn an_adoption_refused_while_a_pass_runs_changes_nothing() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let github = Arc::new(GitHub::new(one.path(), true));
+        let other = Arc::new(GitHub::new(two.path(), true));
+        let (_other_home, _other_host) = set_up_elsewhere(&other);
+        let (home, mut host) = host();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let shared = home.path().join("shared");
+        let before = (listing(&shared), git(&shared, &["rev-parse", "HEAD"]));
+        let (settings, record) = (host.settings(), status(&host));
+        let joining = prepare(&host.home, NAME, Some(JoinWith::Repository), &other.tools());
+        let passes = host.sync_passes.clone();
+        let running = passes.lock().unwrap();
+        assert!(host.adopt_settings_repository(joining.unwrap()).is_err());
+        drop(running);
+        assert_eq!(
+            (listing(&shared), git(&shared, &["rev-parse", "HEAD"])),
+            before
+        );
+        assert_eq!((host.settings(), status(&host)), (settings, record));
+        let left = listing(home.path());
+        assert!(
+            !left.iter().any(|name| name.starts_with("shared-staging-")),
+            "{left:?}"
+        );
+        assert_eq!(listing(&home.path().join("backups")).len(), 1);
+    }
+
+    #[test]
+    fn a_skills_rules_rewrite_and_base_are_pulled_together_or_not_at_all() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, mut first) = set_up_elsewhere(&github);
+        let (_second_home, mut second) = joined(&github);
+        let tools = github.tools();
+        let skill = Skill::Implementing;
+        first.execute(Command::StartSkillRewrite { skill }).unwrap();
+        first.sync_now(&tools).unwrap();
+        let pass = second.sync_pass().unwrap().unwrap();
+        let passed = self::pass(pass, &tools);
+        let additions = second.home.join("shared").join(ADDITIONS);
+        let edited = "Edited while the pass ran.\n";
+        fs::write(&additions, edited).unwrap();
+        second.finish_sync(now(), passed).unwrap();
+        let folder = second.home.join("shared/skills/implementing");
+        assert!(!folder.join("rewrite.md").exists() && !folder.join("base.md").exists());
+        assert_eq!(second.skills().state(skill).rules, edited);
+    }
+
+    #[test]
+    fn joining_another_repository_closes_the_notes_about_the_old_one() {
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let github = Arc::new(GitHub::new(one.path(), true));
+        let other = Arc::new(GitHub::new(two.path(), true));
+        let (_other_home, _other_host) = set_up_elsewhere(&other);
+        let (_home, mut host) = host();
+        host.set_check_ins(30, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        let synced = github.show(shared::CHECK_INS).unwrap();
+        host.set_check_ins(40, 400).unwrap();
+        github.commit(shared::CHECK_INS, synced.replace('3', "5"));
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(notes(&host).len(), 1);
+        host.choose_settings_repository(NAME, Some(JoinWith::Repository), &other.tools())
+            .unwrap();
+        assert!(notes(&host).is_empty());
+        let settle = Command::SettlePausedFile {
+            path: shared::CHECK_INS.into(),
+            settle: Settle::UseTheOthers,
+        };
+        let refused = format!("{:#}", host.execute(settle).unwrap_err());
+        assert_eq!(refused, "That setting is not paused");
+        assert_eq!(host.settings().checkin_human_turns, 300);
     }
 
     #[test]
     fn a_rule_saved_twice_within_five_seconds_is_one_commit_the_other_machine_pulls() {
-        // A pass is due five seconds after the last of two saves.
         let mut pace = Pace::default();
         assert!(pace.start(0));
         pace.finish(0, true);
@@ -2085,36 +2864,6 @@ pub(crate) mod tests {
         Host::open(home.path()).unwrap();
         assert!(!staging.exists());
         assert!(home.path().join("shared/wiffletree.json").exists());
-    }
-
-    #[test]
-    fn a_save_made_during_a_pass_is_recorded_as_what_was_pushed() {
-        let folder = tempfile::tempdir().unwrap();
-        let github = Arc::new(GitHub::new(folder.path(), true));
-        let (_first_home, mut first) = set_up_elsewhere(&github);
-        let (_second_home, mut second) = joined(&github);
-        let tools = github.tools();
-        first.set_check_ins(30, 300).unwrap();
-        // The pass has read 30 and 300 when the human saves 40 and 400.
-        let shared = first.home.join("shared");
-        *github.before.lock().unwrap() = Some((
-            "config",
-            Box::new(move || SharedStore::at(shared).set_check_ins(40, 400).unwrap()),
-        ));
-        first.sync_now(&tools).unwrap();
-        assert!(
-            github
-                .show("settings/check-ins.json")
-                .unwrap()
-                .contains("400")
-        );
-        // A later change made only on the other machine is pulled, not taken for a conflict.
-        second.sync_now(&tools).unwrap();
-        second.set_check_ins(50, 500).unwrap();
-        second.sync_now(&tools).unwrap();
-        first.sync_now(&tools).unwrap();
-        assert_eq!(first.settings().checkin_human_turns, 500);
-        assert_eq!(status(&first).pulled, 1);
     }
 
     #[test]

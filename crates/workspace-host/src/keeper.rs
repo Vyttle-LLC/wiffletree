@@ -3881,6 +3881,32 @@ pub(crate) mod tests {
         assert_eq!(record(&f).read, None);
     }
 
+    #[test]
+    fn a_comments_trigger_held_for_want_of_a_keeper_model_starts_afresh_once_one_is_chosen() {
+        let (mut f, _r) = sorting();
+        let sort = sort_of(&mut f, &["Fix the flag"]);
+        turn_comments_off(&mut f);
+        let mut selection = f.host.model_selection().unwrap();
+        let model = selection.keeper.take();
+        f.host.set_model_selection(&selection).unwrap();
+        let pulled = KeeperSettings {
+            comments: true,
+            ..f.host.settings().keeper
+        };
+        shared::SharedStore::of(&f.host.home)
+            .set_keeper(&pulled)
+            .unwrap();
+        assert!(!f.host.settings().keeper.comments);
+        selection.keeper = model;
+        f.host.set_model_selection(&selection).unwrap();
+        assert!(f.host.settings().keeper.comments);
+        let answer_needs_change = classes(&[("discussion_r1", "needs_change")]);
+        f.host
+            .keeper_sorted(sort.sorted, Some(&answer_needs_change))
+            .unwrap();
+        assert_eq!(record(&f).read, None);
+    }
+
     fn turn_comments_off(f: &mut Fixture) {
         let mut off = f.host.settings().keeper;
         off.comments = false;

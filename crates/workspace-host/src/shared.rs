@@ -4,10 +4,12 @@ use crate::*;
 use serde::Deserialize;
 use serde_json::Map;
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::io::Write as _;
+use std::sync::{Arc, Mutex};
 
 pub(crate) const FOLDER: &str = "shared";
-const FORMAT: &str = "wiffletree.json";
+pub(crate) const FORMAT: &str = "wiffletree.json";
 pub(crate) const REVIEW: &str = "settings/review.json";
 pub(crate) const GUIDE: &str = "settings/model-guide.md";
 pub(crate) const CHECK_INS: &str = "settings/check-ins.json";
@@ -30,14 +32,102 @@ impl Default for CheckIns {
     }
 }
 
+/// The host's writes to the shared folder, each under a key naming a file or, ending in `/`,
+/// a folder, so a sync pass running off the host thread leaves alone what was written while it
+/// ran. The key `""` names the whole folder.
+#[derive(Default)]
+pub(crate) struct Writes {
+    ended: u64,
+    running: BTreeMap<String, usize>,
+    ended_at: BTreeMap<String, u64>,
+}
+pub(crate) type SharedWrites = Arc<Mutex<Writes>>;
+impl Writes {
+    /// How many writes have ended, which a pass compares against.
+    pub(crate) fn ended(&self) -> u64 {
+        self.ended
+    }
+    /// Whether a write under a key covering `path` runs now or ended after `since`.
+    pub(crate) fn touched(&self, path: &str, since: u64) -> bool {
+        self.running
+            .keys()
+            .any(|key| path.starts_with(key.as_str()))
+            || (self.ended_at.iter()).any(|(key, &at)| at > since && path.starts_with(key.as_str()))
+    }
+}
+/// A write to the shared folder, running until dropped.
+pub(crate) struct Writing {
+    writes: SharedWrites,
+    key: String,
+}
+impl Writing {
+    pub(crate) fn start(writes: &SharedWrites, key: &str) -> Self {
+        *lock(writes).running.entry(key.into()).or_default() += 1;
+        Self {
+            writes: writes.clone(),
+            key: key.into(),
+        }
+    }
+}
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let mut writes = lock(&self.writes);
+        writes.ended += 1;
+        let ended = writes.ended;
+        writes.ended_at.insert(self.key.clone(), ended);
+        if let Some(running) = writes.running.get_mut(&self.key) {
+            *running -= 1;
+            if *running == 0 {
+                writes.running.remove(&self.key);
+            }
+        }
+    }
+}
+pub(crate) fn lock(writes: &SharedWrites) -> std::sync::MutexGuard<'_, Writes> {
+    writes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+/// Refuses a shared file this release would refuse to save, so sync neither applies nor
+/// pushes it.
+pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(content).map_err(|_| anyhow::anyhow!("it is not UTF-8 text"))?;
+    match path {
+        REVIEW => serde_json::from_str::<VerificationSettings>(text)?.validate(),
+        CHECK_INS => {
+            let check_ins: CheckIns = serde_json::from_str(text)?;
+            let (child, human) = (check_ins.checkin_child_turns, check_ins.checkin_human_turns);
+            HostSettings::validate_check_ins(child, human)
+        }
+        KEEPER => serde_json::from_str::<KeeperSettings>(text)?.validate(),
+        FORMAT => {
+            let format: Value = serde_json::from_str(text)?;
+            ensure!(
+                format["format"] == 1,
+                "it names a format this release does not know"
+            );
+            Ok(())
+        }
+        GUIDE => {
+            ensure!(text.len() <= MAX_GUIDE_BYTES, "the guide is over 32 KB");
+            Ok(())
+        }
+        _ if skills::is_edited_text(path) => skills::check_text("The text", text),
+        _ => Ok(()),
+    }
+}
 /// Notes each write the host makes to the shared folder in sync's record, and that one was made.
 #[derive(Clone)]
 pub(crate) struct Recorder<'a> {
     db: &'a Connection,
     root: PathBuf,
     wrote: &'a Cell<bool>,
+    writes: &'a SharedWrites,
 }
 impl Recorder<'_> {
+    pub(crate) fn writing(&self, key: &str) -> Writing {
+        Writing::start(self.writes, key)
+    }
     /// `None` for a file removed.
     pub(crate) fn wrote(&self, path: &Path, content: Option<&[u8]>) -> Result<()> {
         let file = path.strip_prefix(&self.root)?.to_str();
@@ -139,11 +229,13 @@ impl SharedStore<'_> {
     }
     fn write(&self, file: &str, bytes: &[u8]) -> Result<()> {
         let path = self.root.join(file);
+        let _writing = self.recorder.as_ref().map(|r| r.writing(file));
         write_atomically(&path, bytes)?;
         self.recorded(&path, Some(bytes))
     }
     fn remove(&self, file: &str) -> Result<()> {
         let path = self.root.join(file);
+        let _writing = self.recorder.as_ref().map(|r| r.writing(file));
         fs::remove_file(&path)?;
         self.recorded(&path, None)
     }
@@ -166,6 +258,7 @@ impl Host {
             db: &self.db,
             root: self.home.join(FOLDER),
             wrote: &self.shared_written,
+            writes: &self.shared_writes,
         }
     }
     /// Runs `save`; when it fails, the shared `file` is put back as it was before.

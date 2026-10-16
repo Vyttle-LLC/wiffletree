@@ -9,6 +9,8 @@ use std::io::{ErrorKind, Write as _};
 const RULES: &str = "additions.md";
 const REWRITE: &str = "rewrite.md";
 const BASE: &str = "base.md";
+/// A skill's current state, which sync compares and pauses as one.
+pub(crate) const CURRENT: [&str; 3] = [RULES, REWRITE, BASE];
 const HISTORY: &str = "history";
 /// How a file written at a time is named, as a history entry's "2026-10-16T09-30-00.000Z".
 const TIME: &str = "%Y-%m-%dT%H-%M-%S%.3fZ";
@@ -28,6 +30,27 @@ pub fn stock_version(skill: Skill) -> &'static str {
 pub fn version(text: &str) -> &str {
     let first = text.lines().next().unwrap_or_default();
     first.rsplit_once(" — ").map_or("", |(_, version)| version)
+}
+/// A stock version's number, as 2 for "v2".
+fn number(version: &str) -> Option<u32> {
+    version.strip_prefix('v')?.parse().ok()
+}
+/// Refuses rules or a rewrite over the limit; `what` names it, as "Your rules".
+pub(crate) fn check_text(what: &str, text: &str) -> Result<()> {
+    ensure!(
+        text.chars().count() <= MAX_SKILL_TEXT,
+        "{what} can be at most 32,000 characters"
+    );
+    Ok(())
+}
+/// The text the human edits in a skill's folder of the shared folder: rules or a rewrite.
+pub(crate) fn is_edited_text(path: &str) -> bool {
+    let mut parts = path.split('/');
+    let parts = [(); 4].map(|()| parts.next());
+    matches!(
+        parts,
+        [Some("skills"), Some(_), Some(RULES | REWRITE), None]
+    )
 }
 /// What the human has written for a skill: rules in Additions mode, or a rewrite.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,13 +163,11 @@ impl SkillStore<'_> {
                 base,
             }),
             unreadable,
+            newer_stock_version: None,
         }
     }
     pub fn save_rules(&self, skill: Skill, rules: &str) -> Result<()> {
-        ensure!(
-            rules.chars().count() <= MAX_SKILL_TEXT,
-            "Your rules can be at most 32,000 characters"
-        );
+        check_text("Your rules", rules)?;
         self.readable(skill)?;
         let edits = Edits {
             rules: rules.into(),
@@ -174,10 +195,7 @@ impl SkillStore<'_> {
         self.change(skill, Change::StartedRewrite, edits)
     }
     pub fn save_rewrite(&self, skill: Skill, text: &str) -> Result<()> {
-        ensure!(
-            text.chars().count() <= MAX_SKILL_TEXT,
-            "Your rewrite can be at most 32,000 characters"
-        );
+        check_text("Your rewrite", text)?;
         self.change_rewrite(skill, Change::SavedRewrite, |rewrite| {
             rewrite.text = text.into()
         })
@@ -232,16 +250,21 @@ impl SkillStore<'_> {
         edit(rewrite);
         self.change(skill, change, edits)
     }
-    /// At start, an entry for each skill whose latest entry recorded another stock version.
-    /// A skill with no history gets none, and one whose files cannot be read waits for a start
-    /// when they can, so no entry records a state it could not see.
+    /// At start, an entry for each skill whose history records only older stock versions, so
+    /// machines on different releases sharing a history do not add one back and forth. A skill
+    /// with no history gets none, and one whose files cannot be read waits for a start when
+    /// they can, so no entry records a state it could not see.
     pub fn record_new_stock_versions(&self) -> Result<()> {
         for skill in Skill::ALL {
-            let Some((_, latest)) = self.history(skill).pop() else {
+            let history = self.history(skill);
+            let Some((_, latest)) = history.last().cloned() else {
                 continue;
             };
+            let this_release = number(stock_version(skill));
+            let all_older = (history.iter()).all(|(_, e)| number(&e.stock_version) < this_release);
+            let _writing = self.writing(skill);
             let (edits, unreadable) = self.read(skill);
-            if latest.stock_version != stock_version(skill) && unreadable.is_none() {
+            if all_older && unreadable.is_none() {
                 let change = Change::NewStockVersion {
                     previous: latest.stock_version,
                 };
@@ -298,6 +321,7 @@ impl SkillStore<'_> {
     /// `rewrite.md` decides the mode, so it changes last. The other mode's file is ignored in
     /// this one, so it is removed afterwards when it can be.
     fn change(&self, skill: Skill, change: Change, edits: Edits) -> Result<()> {
+        let _writing = self.writing(skill);
         let (files, leftover) = match &edits.rewrite {
             Some(Rewritten { text, base }) => (
                 [(BASE, Some(base.as_str())), (REWRITE, Some(text.as_str()))],
@@ -357,6 +381,24 @@ impl SkillStore<'_> {
             Some(recorder) => recorder.wrote(path, content),
             None => Ok(()),
         }
+    }
+    /// Marks the skill's folder as being written, so no sync pass reads it mid-change.
+    fn writing(&self, skill: Skill) -> Option<shared::Writing> {
+        let key = format!("skills/{}/", skill.folder());
+        self.recorder
+            .as_ref()
+            .map(|recorder| recorder.writing(&key))
+    }
+    /// The newest stock version the history records, when it is newer than this release's.
+    fn newer_stock_version(&self, skill: Skill) -> Option<String> {
+        let history = self
+            .history(skill)
+            .into_iter()
+            .map(|(_, e)| e.stock_version);
+        let this_release = number(stock_version(skill));
+        history
+            .filter(|version| number(version) > this_release)
+            .max_by_key(|version| number(version))
     }
     /// One file per entry, named by its time, never replacing another; answers with the entry's
     /// path and content.
@@ -446,7 +488,11 @@ impl Host {
     }
     pub(crate) fn skill_states(&self) -> Vec<SkillState> {
         let store = self.skills();
-        Skill::ALL.map(|skill| store.state(skill)).into()
+        let state = |skill| SkillState {
+            newer_stock_version: store.newer_stock_version(skill),
+            ..store.state(skill)
+        };
+        Skill::ALL.map(state).into()
     }
 }
 
@@ -756,6 +802,27 @@ mod tests {
         drop(host);
         let host = Host::open(home.path()).unwrap();
         assert_eq!(changes(&host, Skill::Reviewing).len(), 2);
+    }
+
+    #[test]
+    fn two_machines_on_different_releases_write_no_entry_back_and_forth() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        host.skills()
+            .save_rules(Skill::Coordinating, "Rule")
+            .unwrap();
+        // The other machine, on v2, recorded its new stock version in the shared history.
+        let (name, _) = host.skills().history(Skill::Coordinating).remove(0);
+        let history = host.shared().skills_folder().join("coordinating/history");
+        let entry = fs::read_to_string(history.join(format!("{name}.json"))).unwrap();
+        let entry = entry.replace("\"v1\"", "\"v2\"");
+        fs::write(history.join("2099-01-01T00-00-00.000Z.json"), entry).unwrap();
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(host.skills().history(Skill::Coordinating).len(), 2);
+        let states = host.skill_states();
+        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v2"));
+        assert_eq!(states[1].newer_stock_version, None);
     }
 
     fn coordinating(host: &Host, file: &str) -> PathBuf {

@@ -45,3 +45,26 @@ With a settings repository chosen, the host SHALL pull at launch, every 5 minute
 #### Scenario: Different settings on two machines
 - **WHEN** one machine changes the review levels and the other the check-in thresholds before either pulls
 - **THEN** both changes reach both machines and nothing is paused
+
+### Requirement: What this machine cannot use is held, not refused
+A pulled file the host cannot read, such as invalid JSON, a value out of range or a text over its limit, SHALL NOT be applied. This machine SHALL keep its last good version, and the file SHALL be paused with the reason. Its workspace note SHALL offer Compare and Keep this Mac's, which pushes this machine's version, and SHALL close when a version this machine can read arrives. When `wiffletree.json` names a format this release does not know, sync SHALL stop on this machine, saying to update Wiffletree, and SHALL pull and push nothing until then. A pulled setting that this machine cannot run with its own settings SHALL NOT be rewritten. Keeper triggers that need a PR keeper model this machine does not have, or a review level the review settings no longer have, SHALL be off on this machine, and the Repositories page SHALL say they are on from the other machine and what this machine needs. The checks that tie the keeper's triggers to the keeper's model and to a review level SHALL count a trigger held off on this machine as off, for every save on this machine, unless that save turns the trigger on. A trigger this machine runs SHALL be checked as before.
+
+#### Scenario: Triggers without a keeper model
+- **WHEN** another machine turns on "Try to resolve conflicts" and this machine has no PR keeper model
+- **THEN** the keeper tries nothing on this machine, the Repositories page says the trigger is on from the other machine and needs a PR keeper model here, and the trigger runs once one is chosen
+
+#### Scenario: A joined machine saves its first setup
+- **WHEN** a machine with no saved model selection joins a repository whose `settings/pr-keeper.json` has "Try to resolve conflicts" on, and the human saves the suggested setup without a PR keeper model
+- **THEN** the setup is saved, the trigger is held off on this machine, and `settings/pr-keeper.json` is unchanged
+
+#### Scenario: Turning a held trigger on here
+- **WHEN** "Try to fix failed checks" is held off on this machine because it has no PR keeper model, and the human turns it on in Repositories
+- **THEN** the save is refused as before, naming the missing PR keeper model
+
+#### Scenario: An invalid file arrives
+- **WHEN** a pulled `settings/review.json` has two verifiers with the focus Tests
+- **THEN** this machine keeps its previous review settings, and the file is paused with that reason
+
+#### Scenario: A newer format
+- **WHEN** `wiffletree.json` names format 2 and this release knows format 1
+- **THEN** sync stops on this machine, saying to update Wiffletree, and nothing is pulled or pushed
