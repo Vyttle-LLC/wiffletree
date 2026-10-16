@@ -6,7 +6,7 @@ The human decided on October 12, 2026 that "a skill is a named way of working Wi
 
 ## What Changes
 
-- **A fixed core and four skills.** Today's seven files are split by one rule: a sentence the app depends on goes into the **fixed core**, and a sentence about a way of working goes into a **skill**. The four skills are **Coordinating** (when to create tickets and start agents, which model and effort, when to ask the human), **Implementing**, **Reviewing** and **Keeping a PR**. design.md places every paragraph of today's files, and every sentence of the coordinator's, in one or the other. The split changes no behavior: with every skill at stock, each role is told what it is told today.
+- **A fixed core and four skills.** Today's seven files are split by one rule: a sentence the app depends on goes into the **fixed core**, and a sentence about a way of working goes into a **skill**. The four skills are **Coordinating** (when to create tickets and start agents, which model and effort, when to ask the human), **Implementing**, **Reviewing** and **Keeping a PR**. design.md places every paragraph of today's files, and every sentence of the coordinator's, in one or the other. The split changes almost no behavior: with every skill at stock, each role is told what it is told today, except that testers and reviewers each also get the other role's paragraph.
 - **Authority stays in the app.** The fixed core holds every tool name, report and findings format, and every rule about messages, publishing and the worktree. What Wiffletree's own tools allow does not depend on skill text. As today, an agent's shell is not sandboxed: it can still run `git push` whatever any text says. Where the app enforces one policy, such as how many review rounds run or that its publishing asks first, editing a skill changes nothing, and the skill's page says so.
 - **Additions, the default.** The stock text stays untouched, and the human's own rules sit after it, under a heading that says they win where the two disagree. A new stock version never clashes with them.
 - **Rewrite, on purpose.** The human may replace a skill's stock text with their own. Wiffletree keeps the stock text the rewrite started from. When a new release changes that stock text, the skill is marked **out of date**, its page shows what changed, and the rewrite keeps running exactly as written until the human resets it or marks it up to date. Merging stock changes into a rewrite is change 6.
@@ -37,18 +37,18 @@ The human decided on October 12, 2026 that "a skill is a named way of working Wi
 - Docs: `README.md`, `docs/PRD.md` ("Agent communication and shared context") and `docs/DEVELOPMENT.md`.
 - Built in six slices, each its own PR of about 300 production lines or less; see tasks.md.
 
-## Open questions
+## Decided questions
 
-Each has a recommendation; "approve with the recommended answers" settles all of them.
+The human approved the proposal on October 16, 2026 with every recommended answer:
 
-1. **Where does the Skills page sit?** Recommended: (a) its own page in the sidebar's Workspace section, after Models. Options: (b) a card on the Models page; (c) a tab in the app's preferences window. *Why (a):* skills are as central as models and repositories, and the page needs room for long text.
-2. **Where does the model guide live?** Today the coordinator reads which model and effort to pick from "the guide" on the Models page. Recommended: (a) leave it in Models; Coordinating's stock text says to follow it, and its page links to it. Options: (b) move the guide into the Coordinating skill. *Why (a):* the guide is written for the models allowed on this machine, and the plan already lists it as its own item for change 5.
-3. **Where do the review levels' "Use it" lines live?** The plan says the Reviewing text says when to use each level; change 2 built that as each level's "Use it" line on the Models page. Recommended: (a) leave them there, and show them read-only on the Reviewing page with a link. Options: (b) move them into the Reviewing skill text. *Why (a):* each line belongs to the level it describes, and removing a level should remove its line.
-4. **What happens to the human's own rules when they start a rewrite?** Recommended: (a) they are copied to the end of the rewrite, under their heading, so nothing is lost and one text is edited. Options: (b) keep them separate and still add them after the rewrite. *Why (a):* two texts on top of each other, both the human's, is one more thing to reason about.
-5. **What runs while a rewrite is out of date?** Recommended: (a) the rewrite, as written, with the skill marked out of date on the Skills page and the sidebar's Skills row. Options: (b) the new stock text, until the human marks the rewrite up to date; (c) hold that role's agents until the human decides. *Why (a):* the human chose to rewrite, the core still reaches every agent, and (c) would stop work over a text change.
-6. **Is the human told when a stock skill changes?** Recommended: (a) a history entry for every skill, and for an out-of-date rewrite also its mark on the Skills page and a dot on the sidebar's Skills row. No Inbox item. Options: (b) an Inbox item for every stock change; (c) an Inbox item only for an out-of-date rewrite. *Why (a):* Additions never clash with a new stock version, so only a rewrite needs the human, and it keeps running meanwhile.
-7. **One Reviewing skill for testers and reviewers?** Recommended: (a) one text, given to both, with a paragraph for each role as today. Options: (b) two skills, "Testing" and "Reviewing". *Why (a):* the plan names four skills, and most of the text applies to both.
-8. **Size limit.** Recommended: 32,000 characters for the human's rules and for a rewrite, each. Options: a different limit, or none. *Why:* the text goes on every turn's command line and into every turn's context.
-9. **How much history?** Recommended: (a) every entry, kept until the human resets the history, which this change does not offer. Options: (b) the last 50 entries per skill. *Why (a):* entries are small text files, and change 5 will hold them in Git anyway.
-10. **Edits made outside the app.** The skills folder is a plain folder, and an agent's shell can write it as it can write `settings.json`. Recommended: (a) state it as a limit and detect nothing. Options: (b) mark a skill "changed outside Wiffletree" when its files differ from its latest history entry. *Why (a):* change 5's sync will write the same files from another machine, so detection belongs with it.
-11. **Order against the PR keeper stack.** Slice 1 splits `keeper.md` as PR keeper slices 4b and 5 (#77–#79) leave it. Recommended: (a) start slice 1 after #79 merges. Options: (b) start now from main and split the keeper's try text when #77–#79 land. *Why (a):* one split of one text.
+1. **The Skills page** is its own page in the sidebar's Workspace section, after Models.
+2. **The model guide** stays in Models; Coordinating's stock text says to follow it, and its page links to it.
+3. **The review levels' "Use it" lines** stay in Models, shown read-only on the Reviewing page with a link.
+4. **Starting a rewrite** copies the human's own rules to its end, under their heading.
+5. **An out-of-date rewrite** keeps running as written, marked on the Skills page and on the sidebar's Skills row.
+6. **A stock change** writes a history entry for every skill; an out-of-date rewrite also gets its mark and the sidebar's dot. No Inbox item.
+7. **One Reviewing skill** for testers and reviewers, with a paragraph for each role, so each now also gets the other role's paragraph.
+8. **The size limit** is 32,000 characters for the human's rules and for a rewrite, each.
+9. **All history** is kept, until the human resets it, which this change does not offer.
+10. **Edits made outside the app** are stated as a limit and not detected.
+11. **Slice 1 starts after #79 merges.** It did: slice 1 splits `keeper.md` as main has it.
