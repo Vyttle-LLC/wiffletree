@@ -369,6 +369,14 @@ fn spawn_publish_step(sender: Sender<Event>, job: publish::Job, tools: publish::
         let _ = sender.send_blocking(Event::Published(outcome));
     });
 }
+fn spawn_sync_pass(sender: Sender<Event>, pass: sync::Pass, tools: publish::Tools) {
+    std::thread::spawn(move || {
+        let run = std::panic::AssertUnwindSafe(|| sync::pass(pass, &tools));
+        let passed = std::panic::catch_unwind(run)
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("The sync pass stopped unexpectedly")));
+        let _ = sender.send_blocking(Event::Synced(passed));
+    });
+}
 /// Runs one PR keeper rebase on its own thread and always reports back, even if it panics, so
 /// the ticket is never left marked as rebasing.
 fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
@@ -437,6 +445,8 @@ fn spawn_comments_read(sender: Sender<Event>, job: keeper::Read) {
 }
 enum Event {
     Command(Command, Reply),
+    /// A sync pass finished on its own thread.
+    Synced(Result<sync::Passed>),
     /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
     SettingsRepositoryPrepared {
         prepared: Result<sync::Prepared>,
@@ -630,6 +640,7 @@ struct Actor {
     github_reading: bool,
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
+    sync_pace: sync::Pace,
 }
 impl Service {
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
@@ -739,6 +750,7 @@ impl Service {
                     pr_tickets_due_at: 0,
                     github_reading: false,
                     publish_tools: publish::Tools::default(),
+                    sync_pace: sync::Pace::default(),
                 };
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
@@ -747,6 +759,7 @@ impl Service {
                 actor.refresh_overlaps(now());
                 actor.refresh_pull_requests(now(), true);
                 actor.refresh_github();
+                actor.refresh_settings_sync(now());
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
@@ -804,7 +817,8 @@ impl Service {
 impl Actor {
     /// Repository scans run Git once per new repository, so they leave the host thread free
     /// for agents and send back only what the store needs. The Files panel's Git reads leave
-    /// it the same way, after the store has answered which files the agents touched.
+    /// it the same way, after the store has answered which files the agents touched. Sync now
+    /// makes a sync pass due, which `refresh_settings_sync` starts.
     fn scan_in_background(&mut self, command: &Command, reply: &Reply) -> Result<bool> {
         match command {
             Command::Files {
@@ -867,6 +881,10 @@ impl Actor {
                         sender.send_blocking(Event::SettingsRepositoryPrepared { prepared, reply });
                 });
             }
+            Command::SyncNow => {
+                self.sync_pace.sync_now();
+                let _ = reply.try_send(Ok(Value::Null));
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -881,7 +899,31 @@ impl Actor {
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
+        self.refresh_settings_sync(now());
         self.signal(dirty);
+    }
+
+    /// Starts a sync pass when one is due, off the host thread, and arms a wake-up for the next.
+    fn refresh_settings_sync(&mut self, at: i64) {
+        if self.host.shared_written.take() {
+            self.sync_pace.wrote(at);
+        }
+        if self.sync_pace.start(at) {
+            match self.host.sync_pass() {
+                Ok(Some(pass)) => {
+                    spawn_sync_pass(self.sender.clone(), pass, self.publish_tools.clone())
+                }
+                Ok(None) => self.sync_pace.finish(at, true),
+                Err(e) => {
+                    self.sync_pace.finish(at, false);
+                    eprintln!("Workspace sync: {e:#}");
+                }
+            }
+        }
+        self.host.sync.next_pull_at = self.sync_pace.next_due();
+        if let Some(due) = self.sync_pace.next_due() {
+            self.wake(due);
+        }
     }
 
     /// Starts a PR pass for each due repository, one per repository at a time, and arms a
@@ -982,6 +1024,14 @@ impl Actor {
                 let adopted = result.is_ok();
                 let _ = reply.try_send(result);
                 adopted
+            }
+            Event::Synced(passed) => {
+                let at = now();
+                self.sync_pace.finish(at, passed.is_ok());
+                self.host.finish_sync(at, passed).unwrap_or_else(|e| {
+                    eprintln!("Workspace sync: {e:#}");
+                    false
+                })
             }
             Event::Discovered {
                 found,
@@ -3119,6 +3169,7 @@ mod tests {
             pr_tickets_due_at: 0,
             github_reading: false,
             publish_tools: publish::Tools::default(),
+            sync_pace: sync::Pace::default(),
         };
         (actor, changes, step_changes)
     }
@@ -3691,6 +3742,106 @@ mod tests {
             json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
         );
         assert_eq!(status.unwrap()["status"], "publishing");
+    }
+
+    /// An actor on a new data folder whose Git and `gh` reach `github`, a local stand-in, and
+    /// whose events arrive on the receiver.
+    fn settings_actor(
+        github: &Arc<sync::tests::GitHub>,
+    ) -> (tempfile::TempDir, Actor, Receiver<Event>) {
+        let home = tempfile::tempdir().unwrap();
+        let (mut actor, _, _) = idle_actor(Host::open_set_up(home.path()).unwrap());
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        actor.publish_tools = github.tools();
+        (home, actor, events)
+    }
+
+    /// Sends a command through `process`, as the host thread does, and returns the reply once
+    /// any work it started off the thread has reported back. Wake-ups are left unhandled.
+    fn settings_command(
+        actor: &mut Actor,
+        events: &Receiver<Event>,
+        command: Command,
+    ) -> std::result::Result<Value, String> {
+        let (reply, replies) = async_channel::bounded(1);
+        actor.process(Event::Command(command, reply));
+        loop {
+            if let Ok(reply) = replies.try_recv() {
+                return reply;
+            }
+            match events.try_recv() {
+                Ok(event @ Event::SettingsRepositoryPrepared { .. }) => actor.process(event),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    }
+
+    #[test]
+    fn the_settings_repository_is_checked_set_up_joined_and_synced_off_the_host_thread() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(sync::tests::GitHub::new(folder.path(), true));
+        let name = sync::tests::NAME.to_owned();
+        let (_first_home, mut first, first_events) = settings_actor(&github);
+        let checked = settings_command(
+            &mut first,
+            &first_events,
+            Command::CheckSettingsRepository {
+                repository: name.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(checked["repository"]["name"], name);
+        assert!(checked["joining"].is_null());
+        // A prepared clone that failed is answered with the reason, and nothing is chosen.
+        let join = |with| Command::JoinSettingsRepository {
+            repository: name.clone(),
+            with,
+        };
+        let refused = settings_command(&mut first, &first_events, join(JoinWith::Repository));
+        assert!(refused.unwrap_err().contains("set it up"));
+        assert_eq!(first.host.settings().settings_repository, None);
+        let set_up = Command::SetUpSettingsRepository {
+            repository: name.clone(),
+        };
+        let settings = settings_command(&mut first, &first_events, set_up).unwrap();
+        assert_eq!(settings["settings_repository"]["name"], name);
+        let (_second_home, mut second, second_events) = settings_actor(&github);
+        settings_command(&mut second, &second_events, join(JoinWith::Repository)).unwrap();
+        assert!(second.host.settings().settings_repository.is_some());
+        // A shared save makes a pass due five seconds later.
+        first.sync_pace.finish(now(), true);
+        let saved_at = now();
+        let check_ins = Command::SetCheckIns {
+            child_turns: 40,
+            human_turns: 400,
+        };
+        settings_command(&mut first, &first_events, check_ins).unwrap();
+        let due = first.host.sync.next_pull_at.unwrap();
+        assert!((saved_at + 5_000..=now() + 5_000).contains(&due), "{due}");
+        // Sync now runs a pass on its own thread; the host thread records it.
+        for (actor, events) in [(&mut first, &first_events), (&mut second, &second_events)] {
+            let (reply, replies) = async_channel::bounded(1);
+            actor.process(Event::Command(Command::SyncNow, reply));
+            assert_eq!(replies.try_recv().unwrap(), Ok(Value::Null));
+            let synced = loop {
+                match events.recv_blocking().unwrap() {
+                    Event::Wake(_) => {}
+                    event => break event,
+                }
+            };
+            assert!(matches!(synced, Event::Synced(Ok(_))));
+            actor.process(synced);
+        }
+        let status = first.host.snapshot().unwrap().settings_sync.unwrap();
+        assert_eq!((status.pushed, status.waiting, status.error), (1, 0, None));
+        assert!(status.next_pull_at.unwrap() > now() + 4 * 60_000);
+        assert_eq!(second.host.settings().checkin_human_turns, 400);
+        assert_eq!(
+            github.log("%s")[0],
+            format!("Check-ins · {}", sync::machine_name())
+        );
     }
 
     /// Every message to `session` whose id starts with `prefix`.

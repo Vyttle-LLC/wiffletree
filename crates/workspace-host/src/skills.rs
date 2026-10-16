@@ -42,12 +42,16 @@ pub enum Change {
         previous: String,
     },
 }
-pub struct SkillStore {
+pub struct SkillStore<'a> {
     root: PathBuf,
+    recorder: Option<shared::Recorder<'a>>,
 }
-impl SkillStore {
+impl SkillStore<'_> {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            recorder: None,
+        }
     }
     fn folder(&self, skill: Skill) -> PathBuf {
         self.root.join(skill.folder())
@@ -137,14 +141,20 @@ impl SkillStore {
         if rules.is_empty() {
             return match fs::remove_file(folder.join(RULES)) {
                 Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
-                _ => Ok(()),
+                _ => self.recorded(&folder.join(RULES), None),
             };
         }
         fs::create_dir_all(&folder)?;
         let mut staged = tempfile::NamedTempFile::new_in(&folder)?;
         staged.write_all(rules.as_bytes())?;
         staged.persist(folder.join(RULES))?;
-        Ok(())
+        self.recorded(&folder.join(RULES), Some(rules.as_bytes()))
+    }
+    fn recorded(&self, path: &Path, content: Option<&[u8]>) -> Result<()> {
+        match &self.recorder {
+            Some(recorder) => recorder.wrote(path, content),
+            None => Ok(()),
+        }
     }
     /// One file per entry, named by its time, never replacing another.
     fn record(&self, skill: Skill, change: Change, rules: &str) -> Result<()> {
@@ -155,13 +165,14 @@ impl SkillStore {
             stock_version: stock_version(skill).into(),
             rules: rules.into(),
         };
+        let bytes = serde_json::to_vec_pretty(&entry)?;
         let mut staged = tempfile::NamedTempFile::new_in(&folder)?;
-        serde_json::to_writer_pretty(&mut staged, &entry)?;
+        staged.write_all(&bytes)?;
         let mut at = chrono::Utc::now();
         loop {
             let name = format!("{}.json", at.format("%Y-%m-%dT%H-%M-%S%.3fZ"));
-            match staged.persist_noclobber(folder.join(name)) {
-                Ok(_) => return Ok(()),
+            match staged.persist_noclobber(folder.join(&name)) {
+                Ok(_) => return self.recorded(&folder.join(name), Some(&bytes)),
                 Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
                     staged = error.file;
                     at += chrono::TimeDelta::milliseconds(1);
@@ -172,8 +183,11 @@ impl SkillStore {
     }
 }
 impl Host {
-    pub fn skills(&self) -> SkillStore {
-        SkillStore::new(self.shared().skills_folder())
+    pub fn skills(&self) -> SkillStore<'_> {
+        SkillStore {
+            recorder: Some(self.recorder()),
+            ..SkillStore::new(self.shared().skills_folder())
+        }
     }
     /// What a role's next turn is sent, read from the store each time.
     pub fn instructions(&self, role: Role) -> String {

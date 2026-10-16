@@ -3,14 +3,15 @@
 use crate::*;
 use serde::Deserialize;
 use serde_json::Map;
+use std::cell::Cell;
 use std::io::Write as _;
 
 pub(crate) const FOLDER: &str = "shared";
 const FORMAT: &str = "wiffletree.json";
 pub(crate) const REVIEW: &str = "settings/review.json";
 pub(crate) const GUIDE: &str = "settings/model-guide.md";
-const CHECK_INS: &str = "settings/check-ins.json";
-const KEEPER: &str = "settings/pr-keeper.json";
+pub(crate) const CHECK_INS: &str = "settings/check-ins.json";
+pub(crate) const KEEPER: &str = "settings/pr-keeper.json";
 
 /// The check-in thresholds as `settings/check-ins.json` holds them.
 #[derive(Serialize, Deserialize)]
@@ -29,12 +30,45 @@ impl Default for CheckIns {
     }
 }
 
-pub(crate) struct SharedStore {
+/// Notes each write the host makes to the shared folder in sync's record, and that one was made.
+#[derive(Clone)]
+pub(crate) struct Recorder<'a> {
+    db: &'a Connection,
     root: PathBuf,
+    wrote: &'a Cell<bool>,
 }
-impl SharedStore {
+impl Recorder<'_> {
+    /// `None` for a file removed.
+    pub(crate) fn wrote(&self, path: &Path, content: Option<&[u8]>) -> Result<()> {
+        let file = path.strip_prefix(&self.root)?.to_str();
+        self.db.execute(
+            "INSERT INTO sync_record(path,written) VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET written=excluded.written",
+            params![file.context("A shared file's path is not UTF-8")?, content],
+        )?;
+        self.wrote.set(true);
+        Ok(())
+    }
+}
+
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let folder = path.parent().context("A shared file is in a folder")?;
+    fs::create_dir_all(folder)?;
+    let mut staged = tempfile::NamedTempFile::new_in(folder)?;
+    staged.write_all(bytes)?;
+    staged.persist(path)?;
+    Ok(())
+}
+
+pub(crate) struct SharedStore<'a> {
+    root: PathBuf,
+    recorder: Option<Recorder<'a>>,
+}
+impl SharedStore<'_> {
     pub(crate) fn at(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            recorder: None,
+        }
     }
     /// The shared folder of the data folder `home`.
     pub(crate) fn of(home: &Path) -> Self {
@@ -78,21 +112,6 @@ impl SharedStore {
     pub(crate) fn set_guide(&self, guide: &str) -> Result<()> {
         self.write(GUIDE, guide.as_bytes())
     }
-    /// Runs `save`; when it fails, `file` is put back as it was before.
-    pub(crate) fn put_back_on_error<T>(
-        &self,
-        file: &str,
-        save: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        let path = self.root.join(file);
-        let previous = fs::read(&path).ok();
-        save().inspect_err(|_| {
-            let _ = match &previous {
-                Some(bytes) => self.write(file, bytes),
-                None => fs::remove_file(&path).map_err(Into::into),
-            };
-        })
-    }
     fn exists(&self, file: &str) -> bool {
         self.root.join(file).exists()
     }
@@ -120,17 +139,49 @@ impl SharedStore {
     }
     fn write(&self, file: &str, bytes: &[u8]) -> Result<()> {
         let path = self.root.join(file);
-        let folder = path.parent().context("A shared file is in a folder")?;
-        fs::create_dir_all(folder)?;
-        let mut staged = tempfile::NamedTempFile::new_in(folder)?;
-        staged.write_all(bytes)?;
-        staged.persist(&path)?;
-        Ok(())
+        write_atomically(&path, bytes)?;
+        self.recorded(&path, Some(bytes))
+    }
+    fn remove(&self, file: &str) -> Result<()> {
+        let path = self.root.join(file);
+        fs::remove_file(&path)?;
+        self.recorded(&path, None)
+    }
+    fn recorded(&self, path: &Path, content: Option<&[u8]>) -> Result<()> {
+        match &self.recorder {
+            Some(recorder) => recorder.wrote(path, content),
+            None => Ok(()),
+        }
     }
 }
 impl Host {
-    pub(crate) fn shared(&self) -> SharedStore {
-        SharedStore::of(&self.home)
+    pub(crate) fn shared(&self) -> SharedStore<'_> {
+        SharedStore {
+            recorder: Some(self.recorder()),
+            ..SharedStore::of(&self.home)
+        }
+    }
+    pub(crate) fn recorder(&self) -> Recorder<'_> {
+        Recorder {
+            db: &self.db,
+            root: self.home.join(FOLDER),
+            wrote: &self.shared_written,
+        }
+    }
+    /// Runs `save`; when it fails, the shared `file` is put back as it was before.
+    pub(crate) fn put_back_on_error<T>(
+        &mut self,
+        file: &str,
+        save: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let previous = fs::read(self.shared().root.join(file)).ok();
+        save(self).inspect_err(|_| {
+            let shared = self.shared();
+            let _ = match &previous {
+                Some(bytes) => shared.write(file, bytes),
+                None => shared.remove(file),
+            };
+        })
     }
     /// Copies each shared setting that has no file yet from where it was saved before the
     /// shared folder, exactly as saved, and moves the skills folder in. `wiffletree.json` is
