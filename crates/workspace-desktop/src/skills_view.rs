@@ -183,8 +183,17 @@ fn reset_question(state: &SkillState) -> [String; 3] {
     ]
 }
 
-/// Rewrite's question: what happens to the human's rules, and what a rewrite costs.
-fn rewrite_question(state: &SkillState) -> [String; 3] {
+/// Rewrite's question: what happens to the human's rules, and what a rewrite costs. A rewrite
+/// copies only saved rules, so while the editor holds unsaved ones it asks to save or discard
+/// them first.
+fn rewrite_question(state: &SkillState, unsaved: bool) -> [String; 3] {
+    if unsaved {
+        return [
+            "Save or discard your rules first".into(),
+            "Your rules have changes you haven't saved, and a rewrite copies only your saved rules.".into(),
+            "Save or discard them, then start the rewrite.".into(),
+        ];
+    }
     let copied = match rule_count(&state.rules) {
         0 => String::new(),
         1 => ", and your 1 rule is copied to its end so nothing is lost".into(),
@@ -197,11 +206,23 @@ fn rewrite_question(state: &SkillState) -> [String; 3] {
     ]
 }
 
+/// A rewrite's base, as "stock v1", or "an unknown stock version" when the base has none, as
+/// when base.md is missing.
+fn based_on(base_version: &str) -> String {
+    if base_version.is_empty() {
+        "an unknown stock version".into()
+    } else {
+        format!("stock {base_version}")
+    }
+}
+
 /// "Written against Coordinating v1. This release has v2.", or that this release changed the
 /// text without changing its version.
 fn out_of_date_title(state: &SkillState, base_version: &str) -> String {
     let (name, stock) = (state.skill.name(), &state.stock_version);
-    if base_version == stock {
+    if base_version.is_empty() {
+        format!("Written against an unknown version of {name}. This release has {stock}.")
+    } else if base_version == stock {
         format!("Written against an earlier {name} {stock}. This release changed it.")
     } else {
         format!("Written against {name} {base_version}. This release has {stock}.")
@@ -253,7 +274,6 @@ fn is_live(entry: &Entry, state: &SkillState) -> bool {
     state.unreadable.is_none() && entry.edits.rules == state.rules && rewrite == state.rewrite
 }
 
-/// What the host's answer to a save says.
 pub(super) fn saved_toast(command: &Command) -> &'static str {
     match command {
         Command::SaveSkillRewrite { .. } => "Your rewrite is saved",
@@ -303,7 +323,7 @@ fn entry_title(entry: &Entry) -> String {
 fn entry_detail(entry: &Entry) -> String {
     if let Some(Rewritten { text, base }) = &entry.edits.rewrite {
         let length = grouped(text.chars().count());
-        return format!("Based on stock {} · {length} characters", version(base));
+        return format!("Based on {} · {length} characters", based_on(version(base)));
     }
     let rules = match rule_count(&entry.edits.rules) {
         0 => "No rules of your own".into(),
@@ -641,10 +661,10 @@ impl Workspace {
                 .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
         ];
         let roles = about(skill).roles;
-        let based_on = match &state.rewrite {
+        let basis = match &state.rewrite {
             Some(rewrite) => format!(
-                "{roles} · your rewrite, based on stock {}",
-                rewrite.base_version
+                "{roles} · your rewrite, based on {}",
+                based_on(&rewrite.base_version)
             ),
             None => format!("{roles} · stock {}", state.stock_version),
         };
@@ -658,7 +678,7 @@ impl Workspace {
                     .child(div().flex_1())
                     .children(actions),
             )
-            .child(hint(based_on, p))
+            .child(hint(basis, p))
             .child(Self::modes(state, p, cx));
         let page = match &state.rewrite {
             Some(rewrite) if rewrite.out_of_date => page
@@ -681,6 +701,7 @@ impl Workspace {
         let Some(confirm) = self.confirming else {
             return page;
         };
+        let unsaved = self.skill_draft(cx) != saved_text(state);
         div().relative().child(page.opacity(0.35)).child(
             div()
                 .absolute()
@@ -689,7 +710,7 @@ impl Workspace {
                 .flex()
                 .justify_center()
                 .pt(px(120.))
-                .child(Self::confirm_dialog(state, confirm, p, cx)),
+                .child(Self::confirm_dialog(state, confirm, unsaved, p, cx)),
         )
     }
 
@@ -760,10 +781,12 @@ impl Workspace {
         )
     }
 
-    /// Reset and Rewrite ask first; Cancel sends nothing.
+    /// Reset and Rewrite ask first; Cancel sends nothing. A rewrite doesn't start over unsaved
+    /// rules.
     fn confirm_dialog(
         state: &SkillState,
         confirm: Confirm,
+        unsaved: bool,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -771,7 +794,7 @@ impl Workspace {
         let ([ask, what, kept], command) = match confirm {
             Confirm::Reset => (reset_question(state), Command::ResetSkill { skill }),
             Confirm::Rewrite => (
-                rewrite_question(state),
+                rewrite_question(state, unsaved),
                 Command::StartSkillRewrite { skill },
             ),
         };
@@ -785,7 +808,7 @@ impl Workspace {
         }));
         let act = match confirm {
             Confirm::Reset => act.danger().label("Reset to stock"),
-            Confirm::Rewrite => act.primary().label("Start rewrite"),
+            Confirm::Rewrite => act.primary().label("Start rewrite").disabled(unsaved),
         };
         div().w(px(380.)).h_full().flex().flex_col().child(
             div()
@@ -823,7 +846,6 @@ impl Workspace {
         )
     }
 
-    /// The versions, Mark as up to date and Reset to stock.
     fn out_of_date_banner(
         &self,
         state: &SkillState,
@@ -892,6 +914,11 @@ impl Workspace {
                     .child(format!("⋯ {count} lines unchanged ⋯")),
             }
         });
+        let base_version = if base_version.is_empty() {
+            "unknown"
+        } else {
+            base_version
+        };
         let versions = format!("{base_version} → {}", state.stock_version);
         div()
             .flex_1()
@@ -1225,7 +1252,7 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CORE, Shown, core_tab, entry_detail, entry_title, grouped, is_live, out_of_date,
+        CORE, Shown, based_on, core_tab, entry_detail, entry_title, grouped, is_live, out_of_date,
         out_of_date_title, reset_question, rewrite_question, saved_text, shown_changes,
         state_label, when, written_at,
     };
@@ -1410,12 +1437,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open(home.path()).unwrap();
         let skill = Skill::Coordinating;
-        let [ask, copied, _] = rewrite_question(&host.skills().state(skill));
+        let [ask, copied, _] = rewrite_question(&host.skills().state(skill), false);
         assert_eq!(ask, "Rewrite Coordinating's stock text?");
         assert_eq!(copied, "You'll edit the stock text itself.");
         let rules = "Create tickets only once I say go.\nName every ticket after its outcome.";
         host.skills().save_rules(skill, rules).unwrap();
-        let [_, copied, _] = rewrite_question(&host.skills().state(skill));
+        let [_, copied, _] = rewrite_question(&host.skills().state(skill), false);
         assert_eq!(
             copied,
             "You'll edit the stock text itself, and your 2 rules are copied to its end so nothing is lost."
@@ -1439,6 +1466,48 @@ mod tests {
         let instructions = host.instructions(Role::ProjectOrchestrator);
         assert!(instructions.ends_with(saved_text(&saved)));
         assert!(!instructions.contains("## Your own rules"));
+    }
+
+    #[test]
+    fn a_rewrite_waits_for_unsaved_rules_to_be_saved_or_discarded() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        host.skills()
+            .save_rules(Skill::Coordinating, "Rule")
+            .unwrap();
+        let state = host.skills().state(Skill::Coordinating);
+        assert_eq!(
+            rewrite_question(&state, true),
+            [
+                "Save or discard your rules first",
+                "Your rules have changes you haven't saved, and a rewrite copies only your saved rules.",
+                "Save or discard them, then start the rewrite.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewrite_whose_base_is_missing_names_an_unknown_version() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        let skill = Skill::Coordinating;
+        state(&mut host, Command::StartSkillRewrite { skill });
+        std::fs::remove_file(home.path().join("skills/coordinating/base.md")).unwrap();
+        let text = "My way".to_owned();
+        let saved = state(&mut host, Command::SaveSkillRewrite { skill, text });
+        let base_version = &saved.rewrite.as_ref().unwrap().base_version;
+        assert!(out_of_date(&saved));
+        assert_eq!(
+            out_of_date_title(&saved, base_version),
+            "Written against an unknown version of Coordinating. This release has v1."
+        );
+        assert_eq!(based_on(base_version), "an unknown stock version");
+        assert_eq!(based_on("v1"), "stock v1");
+        let history = listing(&mut host, skill);
+        assert_eq!(
+            entry_detail(history[0].entry.as_ref().unwrap()),
+            "Based on an unknown stock version · 6 characters"
+        );
     }
 
     #[test]

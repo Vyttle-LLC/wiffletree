@@ -141,6 +141,7 @@ impl SkillStore {
             rules.chars().count() <= MAX_SKILL_TEXT,
             "Your rules can be at most 32,000 characters"
         );
+        self.readable(skill)?;
         let edits = Edits {
             rules: rules.into(),
             rewrite: None,
@@ -284,40 +285,45 @@ impl SkillStore {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
-    /// Makes the files hold `edits` and records the change. `rewrite.md` decides the mode, so it
-    /// changes last and a write that fails before it leaves the previous state in effect. The
-    /// other mode's file is ignored in this one, so it is removed afterwards when it can be.
+    /// Makes the files hold `edits` and records the change, all or nothing: the new files are
+    /// staged first, then each file the change touches is moved aside and its new one renamed
+    /// into place, and a failure at any step, the record's included, puts back what was moved.
+    /// `rewrite.md` decides the mode, so it changes last. The other mode's file is ignored in
+    /// this one, so it is removed afterwards when it can be.
     fn change(&self, skill: Skill, change: Change, edits: Edits) -> Result<()> {
-        let leftover = match &edits.rewrite {
-            Some(Rewritten { text, base }) => {
-                self.write(skill, BASE, Some(base))?;
-                self.write(skill, REWRITE, Some(text))?;
-                RULES
-            }
+        let (files, leftover) = match &edits.rewrite {
+            Some(Rewritten { text, base }) => (
+                [(BASE, Some(base.as_str())), (REWRITE, Some(text.as_str()))],
+                RULES,
+            ),
             None => {
                 let rules = Some(edits.rules.as_str()).filter(|rules| !rules.is_empty());
-                self.write(skill, RULES, rules)?;
-                self.write(skill, REWRITE, None)?;
-                BASE
+                ([(RULES, rules), (REWRITE, None)], BASE)
             }
         };
-        self.record(skill, change, edits)?;
-        let _ = self.write(skill, leftover, None);
-        Ok(())
-    }
-    /// Atomically, like `save_settings`; none means no file.
-    fn write(&self, skill: Skill, file: &str, text: Option<&str>) -> Result<()> {
         let folder = self.folder(skill);
-        let Some(text) = text else {
-            return match fs::remove_file(folder.join(file)) {
-                Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
-                _ => Ok(()),
-            };
-        };
         fs::create_dir_all(&folder)?;
-        let mut staged = tempfile::NamedTempFile::new_in(&folder)?;
-        staged.write_all(text.as_bytes())?;
-        staged.persist(folder.join(file))?;
+        let staged = (files.into_iter())
+            .map(|(file, text)| {
+                let staged = text.map(|text| stage(&folder, text)).transpose()?;
+                Ok((folder.join(file), staged))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut moved = vec![];
+        let replace = || -> Result<()> {
+            for (path, staged) in staged {
+                moved.push(Moved::aside(&folder, path.clone())?);
+                if let Some(staged) = staged {
+                    staged.persist(&path)?;
+                }
+            }
+            self.record(skill, change, edits)
+        };
+        if let Err(error) = replace() {
+            moved.into_iter().rev().for_each(Moved::put_back);
+            return Err(error);
+        }
+        let _ = fs::remove_file(folder.join(leftover));
         Ok(())
     }
     /// One file per entry, named by its time, never replacing another.
@@ -343,6 +349,40 @@ impl SkillStore {
                 Err(error) => return Err(error.error.into()),
             }
         }
+    }
+}
+/// A file's new text, written beside it to be renamed into place.
+fn stage(folder: &Path, text: &str) -> Result<tempfile::NamedTempFile> {
+    let mut staged = tempfile::NamedTempFile::new_in(folder)?;
+    staged.write_all(text.as_bytes())?;
+    Ok(staged)
+}
+/// A file a change moved aside, none when there was no file. It is deleted once the change is
+/// recorded, or put back when the change fails.
+struct Moved {
+    path: PathBuf,
+    previous: Option<tempfile::TempPath>,
+}
+impl Moved {
+    fn aside(folder: &Path, path: PathBuf) -> Result<Self> {
+        let previous = tempfile::NamedTempFile::new_in(folder)?.into_temp_path();
+        match fs::rename(&path, &previous) {
+            Ok(()) => Ok(Self {
+                path,
+                previous: Some(previous),
+            }),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self {
+                path,
+                previous: None,
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn put_back(self) {
+        let _ = match self.previous {
+            Some(previous) => previous.persist(&self.path).map_err(|error| error.error),
+            None => fs::remove_file(&self.path),
+        };
     }
 }
 /// The store of the host whose data folder is `home`.
@@ -980,6 +1020,7 @@ mod tests {
             changes(&host, Skill::Coordinating),
             [Change::StartedRewrite, Change::ResetToStock]
         );
+        assert_eq!(coordinating_files(&host), ["base.md", "history"]);
         // A base that cannot be written leaves the rules in effect.
         host.skills()
             .save_rules(Skill::Coordinating, "Rule")
@@ -987,6 +1028,132 @@ mod tests {
         assert!(host.skills().start_rewrite(Skill::Coordinating).is_err());
         let state = host.skills().state(Skill::Coordinating);
         assert_eq!((state.rules.as_str(), state.rewrite), ("Rule", None));
+    }
+
+    /// The names in Coordinating's folder, so a failed change is seen to leave nothing behind.
+    fn coordinating_files(host: &Host) -> Vec<String> {
+        let files = fs::read_dir(host.home.join("skills/coordinating")).unwrap();
+        let mut names: Vec<_> = (files.map(|file| file.unwrap().file_name()))
+            .map(|name| name.into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Runs `act` while `file` is locked, as `chflags uchg` locks it on macOS.
+    fn while_locked<T>(file: &Path, act: impl FnOnce() -> T) -> T {
+        let chflags = |flag: &str| {
+            let status = std::process::Command::new("chflags")
+                .arg(flag)
+                .arg(file)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        chflags("uchg");
+        let result = act();
+        chflags("nouchg");
+        result
+    }
+
+    /// Runs `act` while no history entry can be written.
+    fn while_the_history_is_read_only<T>(host: &Host, act: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt as _;
+        let history = coordinating(host, "history");
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = act();
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o755)).unwrap();
+        result
+    }
+
+    #[test]
+    fn marking_up_to_date_with_a_locked_rewrite_changes_nothing() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        based_on_an_earlier_release(&host, "# Coordinating — v0\n");
+        let marked = while_locked(&coordinating(&host, "rewrite.md"), || {
+            host.skills().mark_up_to_date(Skill::Coordinating)
+        });
+        assert!(marked.is_err());
+        let base = fs::read_to_string(coordinating(&host, "base.md")).unwrap();
+        assert_eq!(base, "# Coordinating — v0\n");
+        let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
+        assert!(rewrite.out_of_date);
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite]
+        );
+        assert_eq!(
+            coordinating_files(&host),
+            ["base.md", "history", "rewrite.md"]
+        );
+    }
+
+    #[test]
+    fn a_rewrite_save_that_cannot_be_recorded_puts_the_rewrite_back() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        let saved = while_the_history_is_read_only(&host, || {
+            host.skills().save_rewrite(Skill::Coordinating, "My way")
+        });
+        assert!(saved.is_err());
+        let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
+        assert_eq!(rewrite.text, stock(Skill::Coordinating));
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite]
+        );
+        assert_eq!(
+            coordinating_files(&host),
+            ["base.md", "history", "rewrite.md"]
+        );
+    }
+
+    #[test]
+    fn a_reset_that_cannot_be_recorded_keeps_the_rewrite() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        host.skills()
+            .save_rewrite(Skill::Coordinating, "My way")
+            .unwrap();
+        let reset =
+            while_the_history_is_read_only(&host, || host.skills().reset(Skill::Coordinating));
+        assert!(reset.is_err());
+        let state = host.skills().state(Skill::Coordinating);
+        assert_eq!(state.rewrite.unwrap().text, "My way");
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite, Change::SavedRewrite]
+        );
+        assert_eq!(
+            coordinating_files(&host),
+            ["base.md", "history", "rewrite.md"]
+        );
+    }
+
+    #[test]
+    fn rules_are_not_saved_while_the_rewrite_cannot_be_read() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        fs::write(coordinating(&host, "rewrite.md"), b"\xff not text").unwrap();
+        assert_eq!(host.skills().state(Skill::Coordinating).rewrite, None);
+        let refused = host
+            .skills()
+            .save_rules(Skill::Coordinating, "Rule")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("rewrite.md could not be read"),
+            "{refused}"
+        );
+        assert_eq!(
+            coordinating_files(&host),
+            ["base.md", "history", "rewrite.md"]
+        );
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite]
+        );
     }
 
     #[test]
