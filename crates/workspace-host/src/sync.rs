@@ -2,7 +2,7 @@
 //! set up elsewhere, and the one push sync makes. Git and `gh` run through `Tools`, off the
 //! host's command thread; only putting a prepared clone in place runs on it.
 use crate::shared::SharedStore;
-use crate::skills::SkillStore;
+use crate::skills::{Line, SkillStore};
 use crate::*;
 use publish::{GitTool, Tools};
 use std::collections::BTreeMap;
@@ -175,9 +175,28 @@ pub(crate) fn check(home: &Path, input: &str, tools: &Tools) -> Result<SettingsR
 }
 
 fn joining(held: &SharedStore, mine: &SharedStore, clone: &Path) -> Result<Joining> {
-    let settings = summaries(held)
+    let committed = runtime::git_output(clone, &["log", "-1", "--format=%ct", "--", shared::GUIDE]);
+    let committed = (committed.ok()).and_then(|at| Some(at.trim().parse::<i64>().ok()? * 1000));
+    let same_guide = held.guide() == mine.guide();
+    let saved = if same_guide {
+        committed
+    } else {
+        mine.guide_saved_at()
+    };
+    let guide = |store: &SharedStore, at: Option<i64>, format: &str| {
+        let at = at.and_then(chrono::DateTime::from_timestamp_millis);
+        let edited = at.map(|at| at.with_timezone(&chrono::Local).format(format).to_string());
+        guide_summary(store.guide(), edited)
+    };
+    // Two guides edited on one day read apart by the time.
+    let day = "Edited %-d %b";
+    let format = match !same_guide && guide(held, committed, day) == guide(mine, saved, day) {
+        true => "Edited %-d %b %H:%M",
+        false => day,
+    };
+    let settings = summaries(held, guide(held, committed, format))
         .into_iter()
-        .zip(summaries(mine))
+        .zip(summaries(mine, guide(mine, saved, format)))
         .map(
             |((setting, repository), (_, this_machine))| SettingComparison {
                 setting,
@@ -197,14 +216,24 @@ fn joining(held: &SharedStore, mine: &SharedStore, clone: &Path) -> Result<Joini
     })
 }
 
-/// Each shared setting in a word or two, in the order the Settings window lists them.
-fn summaries(store: &SharedStore) -> Vec<(String, String)> {
-    let levels: Vec<String> = store.review().levels.into_iter().map(|l| l.name).collect();
-    let guide = match store.guide() {
-        None => "none".to_owned(),
-        Some(guide) if guide.trim().is_empty() => "empty".to_owned(),
-        Some(guide) => format!("{} lines", guide.lines().count()),
+/// A guide other than a starter one reads as when it was `edited`.
+fn guide_summary(guide: Option<String>, edited: Option<String>) -> String {
+    let starter = |guide: &str| {
+        let choices = [&PROVIDERS[..], &PROVIDERS[..1], &PROVIDERS[1..]];
+        choices
+            .into_iter()
+            .any(|providers| starter_guide(providers) == guide)
     };
+    match guide {
+        Some(guide) if !starter(&guide) => edited.unwrap_or_else(|| "Edited".into()),
+        _ => "Starter guide".into(),
+    }
+}
+
+/// Each shared setting in a word or two, in the order the Settings window lists them, with the
+/// guide as `guide_summary` gives it.
+fn summaries(store: &SharedStore, guide: String) -> Vec<(String, String)> {
+    let levels: Vec<String> = store.review().levels.into_iter().map(|l| l.name).collect();
     let (child, human) = store.check_ins();
     let keeper = store.keeper();
     let triggers = [
@@ -658,6 +687,9 @@ fn take_other_files(clone: &Path, previous: &str, remote: &str) -> Result<()> {
     Ok(())
 }
 
+/// A paused file, with GitHub's content and the content last synced.
+type PausedFile = (String, Content, Content);
+
 /// The files paused and settled together: a skill's rules, rewrite and base, as its folder, or
 /// one file.
 fn unit(path: &str) -> &str {
@@ -706,8 +738,8 @@ fn changed_by(clone: &Path, remote: &str, paths: &[&String]) -> String {
     }
 }
 
-/// The settings `paths` hold, as the Settings window names them.
-fn names(paths: &[String]) -> String {
+/// The settings `paths` hold, each once, as the Settings window names them.
+fn names(paths: &[String]) -> Vec<String> {
     let mut names: Vec<&str> = vec![];
     for path in paths {
         let name = match path.as_str() {
@@ -724,7 +756,7 @@ fn names(paths: &[String]) -> String {
             names.push(name);
         }
     }
-    names.join(", ")
+    names.into_iter().map(str::to_owned).collect()
 }
 
 /// Fetches the branch, compares each file whole with the version last synced, and commits this
@@ -857,7 +889,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     });
     let paths: Vec<String> = passed.committed.iter().map(|(p, _)| p.clone()).collect();
     if !paths.is_empty() {
-        let message = format!("{} · {}", names(&paths), machine_name());
+        let message = format!("{} · {}", names(&paths).join(", "), machine_name());
         let pushed = stage(&clone, &passed.committed)
             .and_then(|()| commit_staged(&clone, &message, &tools.git))
             .and_then(|made| {
@@ -1131,11 +1163,11 @@ impl Host {
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };
-        let waiting: i64 = self.db.query_row(
-            "SELECT COUNT(*) FROM sync_record WHERE path<>'' AND written IS NOT synced AND path NOT IN (SELECT path FROM sync_paused)",
-            [],
-            |r| r.get(0),
-        )?;
+        let waiting: Vec<String> = (self.db.prepare(
+            "SELECT path FROM sync_record WHERE path<>'' AND written IS NOT synced AND path NOT IN (SELECT path FROM sync_paused) ORDER BY path",
+        )?)
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
         Ok(Some(SyncStatus {
             repository,
             synced_at: self.sync.at,
@@ -1147,11 +1179,12 @@ impl Host {
             failing_since: self.sync.failing_since,
             stopped: self.sync.stopped,
             syncing: self.sync.syncing,
-            waiting: waiting as usize,
+            waiting: names(&waiting),
             machine: machine_name(),
         }))
     }
-    /// One note per paused setting, a skill's rules, rewrite and base being one.
+    /// One note per paused setting, a skill's rules, rewrite and base being one: two machines'
+    /// changes first, then edits made outside Wiffletree, then what this machine cannot read.
     pub(crate) fn workspace_notes(&self) -> Result<Vec<WorkspaceNote>> {
         let rows: Vec<(String, String)> = (self.db.prepare("SELECT path,why FROM sync_paused")?)
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -1161,16 +1194,20 @@ impl Host {
             let path = unit(&path).to_owned();
             let paused: Paused = serde_json::from_str(&why)?;
             let setting = self.setting(&path);
+            // "rules" or "rewrite" for a skill.
+            let own = setting
+                .rsplit_once(" · your ")
+                .map_or("version", |(_, own)| own);
             let text = match &paused {
                 Paused::TwoMachines { machine } => format!(
-                    "{setting} changed on this Mac and on {machine}. This Mac keeps its own until you choose."
+                    "{setting} changed on this Mac and on {machine} since they last synced. This Mac keeps using its own {own}. Other settings keep syncing."
                 ),
-                Paused::OutsideWiffletree => {
-                    format!("{setting} was changed outside Wiffletree on this Mac.")
-                }
-                Paused::CannotBeRead { machine, reason } => {
-                    format!("{setting} from {machine} can't be used here: {reason}.")
-                }
+                Paused::OutsideWiffletree => format!(
+                    "{setting} was changed outside Wiffletree on this Mac, by an editor, a script or an agent’s shell. It isn’t sent to your other Macs until you choose. This Mac uses it as it is now."
+                ),
+                Paused::CannotBeRead { machine, reason } => format!(
+                    "{setting} from {machine} can’t be used here: {reason}. This Mac keeps its own {own}."
+                ),
             };
             let note = WorkspaceNote {
                 path: path.clone(),
@@ -1180,11 +1217,17 @@ impl Host {
             };
             notes.insert(path, note);
         }
-        Ok(notes.into_values().collect())
+        let mut notes: Vec<WorkspaceNote> = notes.into_values().collect();
+        notes.sort_by_key(|note| match note.paused {
+            Paused::TwoMachines { .. } => 0,
+            Paused::OutsideWiffletree => 1,
+            Paused::CannotBeRead { .. } => 2,
+        });
+        Ok(notes)
     }
     /// A paused file as the app names it, such as "Implementing · your rules".
     fn setting(&self, path: &str) -> String {
-        let name = names(&[path.to_owned()]);
+        let name = names(&[path.to_owned()]).join("");
         let rewritten = self.home.join(shared::FOLDER).join(path).join("rewrite.md");
         match path {
             _ if path.contains("/history/") => format!("{name} · a history entry"),
@@ -1193,9 +1236,8 @@ impl Host {
             _ => format!("{name} · your rules"),
         }
     }
-    /// Settles a paused file, or a skill's rules, rewrite and base together, as its note offers.
-    /// The next pass, due five seconds later, pushes or pulls what the choice leaves.
-    pub(crate) fn settle_paused(&self, path: &str, settle: Settle) -> Result<()> {
+    /// Why the file, or a skill's folder, a note names is paused, and each of its files.
+    fn paused_unit(&self, path: &str) -> Result<(Paused, Vec<PausedFile>)> {
         let mut rows: Vec<(String, String, Content, Content)> = (self.db.prepare(
             "SELECT p.path,p.why,p.theirs,r.synced FROM sync_paused p LEFT JOIN sync_record r USING(path)",
         )?)
@@ -1203,7 +1245,39 @@ impl Host {
         .collect::<rusqlite::Result<_>>()?;
         rows.retain(|(file, ..)| unit(file) == path);
         let (_, why, ..) = rows.first().context("That setting is not paused")?;
-        let offered = match serde_json::from_str(why)? {
+        let paused = serde_json::from_str(why)?;
+        let files = rows
+            .into_iter()
+            .map(|(file, _, theirs, synced)| (file, theirs, synced));
+        Ok((paused, files.collect()))
+    }
+    /// This machine's version beside the other, line by line, as a note's Compare shows them.
+    pub(crate) fn compare_paused(&self, path: &str) -> Result<Vec<Line>> {
+        let (paused, files) = self.paused_unit(path)?;
+        let shared = self.home.join(shared::FOLDER);
+        // A skill's agents get its rewrite, or else its rules; `base.md` is never theirs to read.
+        let text = |version: &dyn Fn(&PausedFile) -> Content| {
+            let read = |rewrite: bool| {
+                let file = files.iter().find(|(file, ..)| {
+                    file.ends_with("/rewrite.md") == rewrite && !file.ends_with("/base.md")
+                });
+                file.and_then(version)
+            };
+            let content = read(true).or_else(|| read(false)).unwrap_or_default();
+            String::from_utf8_lossy(&content).into_owned()
+        };
+        let mine = text(&|(file, ..)| fs::read(shared.join(file)).ok());
+        let other = text(&|(_, theirs, synced)| match paused {
+            Paused::OutsideWiffletree => synced.clone(),
+            _ => theirs.clone(),
+        });
+        Ok(skills::line_diff(&mine, &other))
+    }
+    /// Settles a paused file, or a skill's rules, rewrite and base together, as its note offers.
+    /// The next pass, due five seconds later, pushes or pulls what the choice leaves.
+    pub(crate) fn settle_paused(&self, path: &str, settle: Settle) -> Result<()> {
+        let (paused, mut rows) = self.paused_unit(path)?;
+        let offered = match paused {
             Paused::TwoMachines { .. } => [Settle::KeepThisMachines, Settle::UseTheOthers],
             Paused::OutsideWiffletree => [Settle::SyncThisVersion, Settle::PutBackSynced],
             Paused::CannotBeRead { .. } => [Settle::KeepThisMachines; 2],
@@ -1226,7 +1300,7 @@ impl Host {
         let recorder = self.recorder();
         // `rewrite.md` decides a skill's mode, so it changes last.
         rows.sort_by_key(|(file, ..)| file.ends_with("/rewrite.md"));
-        for (file, _, theirs, synced) in rows {
+        for (file, theirs, synced) in rows {
             let at = shared.join(&file);
             let (written, synced) = match settle {
                 Settle::KeepThisMachines => (None, Some(theirs)),
@@ -1281,11 +1355,12 @@ impl Host {
         Ok(())
     }
     /// What this machine lacks to run the settings it shares through a repository, one line each.
-    pub(crate) fn still_needs(&self) -> Result<Vec<String>> {
+    /// Every line is about this machine's models, which Models chooses.
+    pub(crate) fn still_needs(&self) -> Result<Vec<StillNeed>> {
         let settings = self.settings();
         let mut needs = vec![];
         if settings.settings_repository.is_none() {
-            return Ok(needs);
+            return Ok(vec![]);
         }
         let selection = self.model_selection()?;
         needs.extend(self.keeper_held());
@@ -1300,7 +1375,10 @@ impl Host {
                 ));
             }
         }
-        Ok(needs)
+        let page = WorkspacePage::Models;
+        Ok((needs.into_iter())
+            .map(|text| StillNeed { text, page })
+            .collect())
     }
 }
 
@@ -1954,7 +2032,12 @@ pub(crate) mod tests {
     fn joining_with_the_repositorys_settings_keeps_both_histories_and_backs_up_the_folder() {
         let folder = tempfile::tempdir().unwrap();
         let github = Arc::new(GitHub::new(folder.path(), true));
-        let (_first, first) = set_up_elsewhere(&github);
+        let (_first, mut first) = set_up_elsewhere(&github);
+        first
+            .shared()
+            .set_guide("Prefer Opus for migrations.\n")
+            .unwrap();
+        first.sync_now(&github.tools()).unwrap();
         let (home, mut host) = host();
         host.set_workspaces_dir(home.path().join("work").to_str().unwrap())
             .unwrap();
@@ -1982,6 +2065,14 @@ pub(crate) mod tests {
         assert_eq!(
             (&*reviewing.repository, &*reviewing.this_machine),
             ("rewritten", "stock")
+        );
+        let guide = (joining.settings.iter())
+            .find(|row| row.setting == "Model guide")
+            .unwrap();
+        let today = chrono::Local::now().format("Edited %-d %b").to_string();
+        assert_eq!(
+            (&*guide.repository, &*guide.this_machine),
+            (&*today, "Starter guide")
         );
         let check_ins = joining
             .settings
@@ -2096,14 +2187,18 @@ pub(crate) mod tests {
         host.choose_settings_repository(NAME, Some(JoinWith::Repository), &github.tools())
             .unwrap();
         let needs = host.snapshot().unwrap().still_needs;
-        assert!(needs[0].contains("needs a PR keeper model"), "{needs:?}");
+        assert!(
+            needs[0].text.contains("needs a PR keeper model"),
+            "{needs:?}"
+        );
         assert!(
             needs[1..]
                 .iter()
-                .all(|n| n.contains("Codex, which is not enabled")),
+                .all(|n| n.text.contains("Codex, which is not enabled")),
             "{needs:?}"
         );
         assert!(needs.len() > 1);
+        assert!(needs.iter().all(|n| n.page == WorkspacePage::Models));
     }
 
     #[test]
@@ -2194,7 +2289,7 @@ pub(crate) mod tests {
         review.levels[0].use_when = "Every ticket.".into();
         first.set_verification(review.clone()).unwrap();
         second.set_check_ins(40, 400).unwrap();
-        assert_eq!(status(&second).waiting, 1);
+        assert_eq!(status(&second).waiting.len(), 1);
         first.sync_now(&tools).unwrap();
         second.sync_now(&tools).unwrap();
         first.sync_now(&tools).unwrap();
@@ -2206,7 +2301,7 @@ pub(crate) mod tests {
                 (40, 400)
             );
             let status = status(host);
-            assert_eq!((status.error, status.waiting), (None, 0));
+            assert_eq!((status.error, status.waiting.len()), (None, 0));
         }
         let machine = machine_name();
         assert_eq!(
@@ -2258,6 +2353,12 @@ pub(crate) mod tests {
         host.snapshot().unwrap().workspace_notes
     }
 
+    fn compare(host: &mut Host, path: &str) -> Vec<Line> {
+        let path = path.into();
+        let lines = host.execute(Command::ComparePausedFile { path }).unwrap();
+        serde_json::from_value(lines).unwrap()
+    }
+
     fn settle(host: &mut Host, path: &str, settle: Settle) {
         let path = path.into();
         host.execute(Command::SettlePausedFile { path, settle })
@@ -2292,16 +2393,23 @@ pub(crate) mod tests {
                     machine: machine.clone()
                 },
                 text: format!(
-                    "Implementing · your rules changed on this Mac and on {machine}. This Mac keeps its own until you choose."
+                    "Implementing · your rules changed on this Mac and on {machine} since they last synced. This Mac keeps using its own rules. Other settings keep syncing."
                 ),
             }]
         );
-        assert_eq!(status(&second).waiting, 0);
+        assert_eq!(status(&second).waiting.len(), 0);
         assert_eq!(second.skills().history(Skill::Implementing).len(), 3);
         save_rules(&mut second, Skill::Implementing, "From the second, again.");
         second.sync_now(&tools).unwrap();
         assert_eq!(github.show(ADDITIONS).unwrap(), "From the first.");
         assert_eq!(notes(&second).len(), 1);
+        assert_eq!(
+            compare(&mut second, "skills/implementing/"),
+            [
+                Line::Removed("From the second, again.".into()),
+                Line::Added("From the first.".into())
+            ]
+        );
         first.sync_now(&tools).unwrap();
         assert_eq!(first.settings().checkin_human_turns, 400);
         assert!(notes(&first).is_empty());
@@ -2323,7 +2431,7 @@ pub(crate) mod tests {
         let kept = git(&github.bare, &["show", &format!("{earlier}:{ADDITIONS}")]);
         assert_eq!(kept, "From the first.");
         for host in [&first, &second] {
-            assert_eq!((status(host).waiting, notes(host).len()), (0, 0));
+            assert_eq!((status(host).waiting.len(), notes(host).len()), (0, 0));
         }
     }
 
@@ -2343,7 +2451,7 @@ pub(crate) mod tests {
         assert_eq!(second.settings().checkin_human_turns, 400);
         second.sync_now(&tools).unwrap();
         let synced = status(&second);
-        assert_eq!((synced.waiting, synced.pushed), (0, 0));
+        assert_eq!((synced.waiting.len(), synced.pushed), (0, 0));
         assert!(notes(&second).is_empty());
     }
 
@@ -2383,22 +2491,30 @@ pub(crate) mod tests {
         assert_eq!(github.show(ADDITIONS).unwrap(), "Run the linter.\n");
         let note = notes(&host).remove(0);
         assert_eq!(note.paused, Paused::OutsideWiffletree);
+        assert!(
+            (note.text).starts_with(
+                "Implementing · your rules was changed outside Wiffletree on this Mac"
+            )
+        );
         assert_eq!(
-            note.text,
-            "Implementing · your rules was changed outside Wiffletree on this Mac."
+            compare(&mut host, "skills/implementing/"),
+            [
+                Line::Unchanged("Run the linter.".into()),
+                Line::Removed("Push to main.".into())
+            ]
         );
         assert!(host.instructions(Role::Implementer).ends_with(appended));
         settle(&mut host, "skills/implementing/", Settle::SyncThisVersion);
-        assert_eq!(status(&host).waiting, 1);
+        assert_eq!(status(&host).waiting.len(), 1);
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(github.show(ADDITIONS).unwrap(), appended);
-        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+        assert_eq!((status(&host).waiting.len(), notes(&host).len()), (0, 0));
         fs::write(&additions, "Something else.\n").unwrap();
         host.sync_now(&github.tools()).unwrap();
         settle(&mut host, "skills/implementing/", Settle::PutBackSynced);
         assert_eq!(fs::read_to_string(&additions).unwrap(), appended);
         host.sync_now(&github.tools()).unwrap();
-        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+        assert_eq!((status(&host).waiting.len(), notes(&host).len()), (0, 0));
     }
 
     #[test]
@@ -2442,7 +2558,7 @@ pub(crate) mod tests {
         assert!(
             notes[0]
                 .text
-                .starts_with("Review from F can't be used here")
+                .starts_with("Review from F can’t be used here")
         );
         settle(&mut host, shared::REVIEW, Settle::KeepThisMachines);
         host.sync_now(&github.tools()).unwrap();
@@ -2474,7 +2590,7 @@ pub(crate) mod tests {
         );
         assert_eq!(github.log("%H"), commits);
         assert_eq!(host.shared().guide(), guide);
-        assert_eq!(status(&host).waiting, 1);
+        assert_eq!(status(&host).waiting.len(), 1);
         assert!(status(&host).stopped);
     }
 
@@ -2571,10 +2687,10 @@ pub(crate) mod tests {
         let passed = self::pass(pass, &tools);
         first.finish_sync(now(), passed).unwrap();
         assert_eq!(github.log("%H"), commits);
-        assert_eq!((status(&first).waiting, notes(&first).len()), (1, 0));
+        assert_eq!((status(&first).waiting.len(), notes(&first).len()), (1, 0));
         first.sync_now(&tools).unwrap();
         assert!(github.show(shared::CHECK_INS).unwrap().contains("400"));
-        assert_eq!(status(&first).waiting, 0);
+        assert_eq!(status(&first).waiting.len(), 0);
         // A later change made only on the other machine is pulled, not taken for a conflict.
         second.sync_now(&tools).unwrap();
         second.set_check_ins(50, 500).unwrap();
@@ -2615,7 +2731,7 @@ pub(crate) mod tests {
         assert!(notes(&host).is_empty());
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(github.show(ADDITIONS).unwrap(), "Rule two.");
-        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+        assert_eq!((status(&host).waiting.len(), notes(&host).len()), (0, 0));
     }
 
     #[test]
@@ -2647,7 +2763,7 @@ pub(crate) mod tests {
         assert!(clone.join("README.md").exists());
         assert_eq!(git(&clone, &["rev-parse", "HEAD"]), rejoined[0]);
         let status = status(&host);
-        assert_eq!((status.synced_at, status.waiting), (None, 0));
+        assert_eq!((status.synced_at, status.waiting.len()), (None, 0));
     }
 
     #[test]
@@ -2714,7 +2830,7 @@ pub(crate) mod tests {
         settle(&mut host, shared::CHECK_INS, Settle::SyncThisVersion);
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(github.show(shared::CHECK_INS).unwrap(), outside);
-        assert_eq!((status(&host).waiting, notes(&host).len()), (0, 0));
+        assert_eq!((status(&host).waiting.len(), notes(&host).len()), (0, 0));
     }
 
     #[test]
@@ -2934,7 +3050,7 @@ pub(crate) mod tests {
         assert_eq!(host.settings().checkin_child_turns, 40);
         host.sync_now(&github.tools()).unwrap();
         let offline = status(&host);
-        assert_eq!(offline.waiting, 1);
+        assert_eq!(offline.waiting, ["Check-ins"]);
         let error = offline.error.unwrap();
         assert!(
             error.contains("Could not resolve host: github.com"),
@@ -2964,7 +3080,10 @@ pub(crate) mod tests {
         github.offline.store(false, Ordering::Relaxed);
         host.sync_now(&github.tools()).unwrap();
         let online = status(&host);
-        assert_eq!((online.error, online.waiting, online.pushed), (None, 0, 1));
+        assert_eq!(
+            (online.error, online.waiting.len(), online.pushed),
+            (None, 0, 1)
+        );
         assert_eq!((online.failed_at, online.failing_since), (None, None));
         assert!(
             github
@@ -2992,7 +3111,7 @@ pub(crate) mod tests {
         host.sync_now(&github.tools()).unwrap();
         let refused = status(&host);
         assert!(refused.error.unwrap().contains("git push failed"));
-        assert_eq!(refused.waiting, 1);
+        assert_eq!(refused.waiting.len(), 1);
         assert_eq!(refused.synced_at, reached, "a refused push is not a sync");
         assert_eq!(github.log("%s")[0], "skills/reviewing/additions.md");
         host.sync_now(&github.tools()).unwrap();
@@ -3009,7 +3128,7 @@ pub(crate) mod tests {
         );
         let synced = status(&host);
         assert!(synced.synced_at > reached);
-        assert_eq!((synced.error, synced.waiting), (None, 0));
+        assert_eq!((synced.error, synced.waiting.len()), (None, 0));
     }
 
     #[test]
@@ -3063,7 +3182,10 @@ pub(crate) mod tests {
                 .contains("400")
         );
         let synced = status(&host);
-        assert_eq!((synced.pushed, synced.waiting, synced.error), (1, 0, None));
+        assert_eq!(
+            (synced.pushed, synced.waiting.len(), synced.error),
+            (1, 0, None)
+        );
         github.commit(
             "settings/check-ins.json",
             "{\n  \"checkin_child_turns\": 50,\n  \"checkin_human_turns\": 500\n}\n",
@@ -3084,7 +3206,7 @@ pub(crate) mod tests {
         let text = "My own way of implementing.".to_owned();
         host.execute(Command::SaveSkillRewrite { skill, text })
             .unwrap();
-        assert!(status(&host).waiting >= 4);
+        assert_eq!(status(&host).waiting, ["Implementing"]);
         host.sync_now(&github.tools()).unwrap();
         let folder = "skills/implementing";
         assert_eq!(
@@ -3108,6 +3230,6 @@ pub(crate) mod tests {
             format!("Implementing · {}", machine_name())
         );
         let synced = status(&host);
-        assert_eq!((synced.waiting, synced.error), (0, None));
+        assert_eq!((synced.waiting.len(), synced.error), (0, None));
     }
 }

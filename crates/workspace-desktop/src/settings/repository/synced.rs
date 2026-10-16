@@ -1,6 +1,7 @@
 //! The chosen repository: sync's status, the paused settings, Sync now and Stop syncing, and
 //! the sync mark the sidebar footer shows.
 use super::*;
+use crate::workspace_notes::{self, NoteAction, OnNote};
 use chrono::{DateTime, Local};
 use ui::banner;
 
@@ -11,7 +12,7 @@ const AN_HOUR_MS: i64 = 60 * 60_000;
 pub(crate) struct SyncShown {
     pub(super) status: Option<SyncStatus>,
     pub(super) notes: Vec<WorkspaceNote>,
-    pub(super) still_needs: Vec<String>,
+    pub(super) still_needs: Vec<StillNeed>,
     pub(super) owners_allowed: bool,
 }
 impl Global for SyncShown {}
@@ -38,6 +39,8 @@ pub(crate) enum Mark {
     Paused(usize),
     Syncing,
     Waiting,
+    /// Chosen, and no pass has run since: joining waits for the next pull.
+    NotYet,
     Synced,
 }
 impl Mark {
@@ -49,6 +52,7 @@ impl Mark {
             _ if paused > 0 => Self::Paused(paused),
             _ if status.syncing => Self::Syncing,
             _ if status.error.is_some() => Self::Waiting,
+            _ if status.synced_at.is_none() => Self::NotYet,
             _ => Self::Synced,
         }
     }
@@ -57,7 +61,7 @@ impl Mark {
             Self::Stopped => "alert",
             Self::Failing | Self::Waiting => "cloud-off",
             Self::Paused(_) => "pause",
-            Self::Syncing => "refresh",
+            Self::Syncing | Self::NotYet => "refresh",
             Self::Synced => "check",
         }
     }
@@ -79,10 +83,11 @@ impl Mark {
             }
             Self::Paused(n) => format!("{} paused", count(*n, "setting")),
             Self::Syncing => "Syncing".into(),
-            Self::Waiting if status.waiting > 0 => {
-                format!("{} waiting", count(status.waiting, "change"))
+            Self::Waiting if !status.waiting.is_empty() => {
+                format!("{} waiting", count(status.waiting.len(), "change"))
             }
             Self::Waiting => "Waiting to reach GitHub".into(),
+            Self::NotYet => "Not synced yet".into(),
             Self::Synced => "Synced".into(),
         }
     }
@@ -95,13 +100,16 @@ impl Mark {
                 clock(status.failed_at),
                 clock(status.next_pull_at)
             ),
-            (Self::Paused(_), [note]) => paused_reason(note),
-            (Self::Paused(n), _) => format!("{n} settings wait for you to choose."),
+            (Self::Paused(_), [note]) => format!("{} See your Inbox.", paused_reason(note)),
+            (Self::Paused(n), _) => format!("{n} settings wait for you to choose. See your Inbox."),
             (Self::Syncing, _) => format!("Syncing settings with {name}"),
-            (Self::Synced, _) => match status.synced_at {
-                Some(at) => format!("Settings synced at {} with {name}", clock(Some(at))),
-                None => format!("Settings sync with {name}"),
-            },
+            (Self::NotYet, _) => format!(
+                "Settings sync with {name} from the next pull, at {}",
+                clock(status.next_pull_at)
+            ),
+            (Self::Synced, _) => {
+                format!("Settings synced at {} with {name}", clock(status.synced_at))
+            }
         }
     }
     /// The section's heading names the state rather than what waits.
@@ -143,7 +151,7 @@ impl Settings {
         let mark = Mark::of(status, shown.notes.len(), now);
         let color = match mark {
             Mark::Synced => p.green,
-            Mark::Syncing => p.subtle,
+            Mark::Syncing | Mark::NotYet => p.subtle,
             Mark::Failing => p.red,
             _ => p.yellow,
         };
@@ -163,7 +171,7 @@ impl Settings {
                     .map(|error| error_banner(error, status, p)),
             )
             .child(rows(status, p))
-            .children(shown.notes.iter().map(|note| paused_row(note, p)))
+            .children(shown.notes.iter().map(|note| self.paused_row(note, p, cx)))
             .when(!shown.notes.is_empty(), |d| {
                 d.child(hint("Every other setting keeps syncing.", p))
             });
@@ -235,15 +243,7 @@ fn rows(status: &SyncStatus, p: Palette) -> Div {
             format!("{next} · tries less often while GitHub is out of reach"),
         ),
     };
-    let waiting = (status.waiting > 0).then(|| {
-        let uses = if status.waiting == 1 { "it" } else { "them" };
-        let changes = count(status.waiting, "change");
-        row(
-            "Waiting",
-            format!("{changes} to push. This Mac already uses {uses}."),
-            p,
-        )
-    });
+    let waiting = (!status.waiting.is_empty()).then(|| row("Waiting", waiting(status), p));
     div()
         .flex()
         .flex_col()
@@ -254,6 +254,17 @@ fn rows(status: &SyncStatus, p: Palette) -> Div {
         .children(waiting)
         .child(row(next.0, next.1, p))
         .child(row("This Mac", status.machine.clone(), p))
+}
+
+/// "1 change: Check-ins. This Mac already uses it."
+fn waiting(status: &SyncStatus) -> String {
+    let settings = &status.waiting;
+    let changes = count(settings.len(), "change");
+    let uses = if settings.len() == 1 { "it" } else { "them" };
+    format!(
+        "{changes}: {}. This Mac already uses {uses}.",
+        settings.join(", ")
+    )
 }
 
 fn row(label: &'static str, value: String, p: Palette) -> Div {
@@ -271,21 +282,128 @@ fn row(label: &'static str, value: String, p: Palette) -> Div {
         .child(div().flex_1().min_w_0().child(value))
 }
 
-/// A paused setting and why, in the note's words.
-fn paused_row(note: &WorkspaceNote, p: Palette) -> Div {
-    div()
-        .p_2()
-        .flex()
-        .items_start()
-        .gap_2()
-        .rounded_lg()
-        .border_1()
-        .border_color(p.yellow.opacity(0.4))
-        .bg(p.yellow.opacity(0.07))
-        .text_size(px(12.))
-        .child(icon("pause").size(px(14.)).mt(px(2.)).text_color(p.yellow))
-        // The note's text names the setting, so the row says it once.
-        .child(div().flex_1().min_w_0().child(note.text.clone()))
+impl Settings {
+    /// A paused setting and why; Compare opens both versions and the note's choices.
+    fn paused_row(&self, note: &WorkspaceNote, p: Palette, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity().downgrade();
+        let on: OnNote = Rc::new(move |path, action, _, cx| {
+            let _ = view.update(cx, |view, cx| view.note_action(path, action, cx));
+        });
+        let (icon_name, why, compare) = match &note.paused {
+            Paused::TwoMachines { machine } => (
+                "pause",
+                format!("Changed on this Mac and on {machine}. This Mac uses its own."),
+                "Compare",
+            ),
+            Paused::OutsideWiffletree => (
+                "pencil",
+                "Changed outside Wiffletree on this Mac.".into(),
+                "Compare",
+            ),
+            Paused::CannotBeRead { machine, reason } => (
+                "alert",
+                format!(
+                    "The version from {machine} can’t be used here: {reason}. This Mac keeps its own."
+                ),
+                "Details",
+            ),
+        };
+        let compared = &self.compared;
+        let comparison = workspace_notes::comparison(note, compared, p);
+        let open = comparison.is_some();
+        div()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(p.yellow.opacity(0.4))
+            .bg(p.yellow.opacity(0.07))
+            .text_size(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        icon(icon_name)
+                            .size(px(14.))
+                            .mt(px(2.))
+                            .text_color(p.yellow),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(note.setting.clone()),
+                            )
+                            .child(hint(why, p).text_size(px(11.5))),
+                    )
+                    .child(workspace_notes::compare_link(
+                        note, compare, "Hide", compared, &on,
+                    )),
+            )
+            .children(comparison)
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .children(workspace_notes::settle_buttons(note, &on)),
+                )
+            })
+            .children(
+                (workspace_notes::kept_note(note, compared))
+                    .map(|kept| hint(kept, p).text_size(px(11.))),
+            )
+    }
+
+    /// Opens or hides a paused setting's comparison, or settles it as its note would.
+    fn note_action(&mut self, path: String, action: NoteAction, cx: &mut Context<Self>) {
+        let command = match action {
+            NoteAction::Compare => workspace_notes::toggle_compare(&mut self.compared, path),
+            NoteAction::Settle(settle) => Some(Command::SettlePausedFile { path, settle }),
+        };
+        cx.notify();
+        let Some(command) = command else {
+            return;
+        };
+        self.repository_error = None;
+        let receiver = match self.bridge.request(command.clone()) {
+            Ok(receiver) => receiver,
+            Err(error) => return self.repository_error = Some(error),
+        };
+        cx.spawn(async move |this, cx| {
+            let answer =
+                (receiver.recv().await).unwrap_or_else(|_| Err("Host disconnected".into()));
+            let _ = this.update(cx, |view, cx| {
+                let shown = answer.and_then(|value| match command {
+                    Command::ComparePausedFile { path } => {
+                        let lines = serde_json::from_value(value).map_err(|e| e.to_string())?;
+                        workspace_notes::compared_arrived(&mut view.compared, &path, lines);
+                        Ok(())
+                    }
+                    _ => {
+                        view.compared = None;
+                        view.refresh_sync(cx);
+                        Ok(())
+                    }
+                });
+                if let Err(error) = shown {
+                    view.repository_error = Some(error);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 fn paused_reason(note: &WorkspaceNote) -> String {
@@ -369,7 +487,7 @@ mod tests {
             failing_since: None,
             stopped: false,
             syncing: false,
-            waiting: 0,
+            waiting: vec![],
             machine: "Mike’s MacBook Pro".into(),
         }
     }
@@ -380,6 +498,14 @@ mod tests {
         let p = palette(false);
         let synced = status();
         assert_eq!(Mark::of(&synced, 0, now), Mark::Synced);
+        let joined = SyncStatus {
+            synced_at: None,
+            ..status()
+        };
+        assert_eq!(
+            Mark::of(&joined, 0, now).label(&joined, now),
+            "Not synced yet"
+        );
         assert_eq!(Mark::of(&synced, 0, now).tint(p), None);
         let paused = Mark::of(&synced, 1, now);
         assert_eq!(
@@ -389,7 +515,7 @@ mod tests {
         let waiting = SyncStatus {
             error: Some("Could not resolve host: github.com".into()),
             failing_since: Some(now - 20 * 60_000),
-            waiting: 1,
+            waiting: vec!["Check-ins".into()],
             ..status()
         };
         let mark = Mark::of(&waiting, 0, now);
@@ -425,6 +551,9 @@ mod tests {
             text: String::new(),
         };
         let tooltip = Mark::Paused(1).tooltip(&status(), &[note]);
-        assert_eq!(tooltip, "Implementing · your rules changed on both Macs.");
+        assert_eq!(
+            tooltip,
+            "Implementing · your rules changed on both Macs. See your Inbox."
+        );
     }
 }

@@ -29,6 +29,8 @@ pub(super) struct Settings {
     /// A repository request is waiting for the host.
     asking: bool,
     confirming: Option<Confirm>,
+    /// The paused setting open in Compare.
+    compared: crate::workspace_notes::Compared,
 }
 
 /// The agent check-in presets; the host accepts any value in `CHECKIN_CHILD_TURNS`.
@@ -85,6 +87,7 @@ impl Settings {
                         repository_error: None,
                         asking: false,
                         confirming: None,
+                        compared: None,
                     };
                     view.ask_host(Command::Settings, cx);
                     view.refresh_sync(cx);

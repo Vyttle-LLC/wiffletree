@@ -225,6 +225,22 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
 }
 
 #[test]
+fn the_readme_says_what_the_settings_repository_shares_and_who_it_lets_change_agents() {
+    let readme = include_str!("../../../README.md");
+    for stated in [
+        "the skills with your rules, rewrites and their history, the review settings, the model guide, the check-in thresholds and the PR keeper's triggers",
+        "What belongs to one Mac stays there",
+        "Choosing the repository on a Mac is what lets Wiffletree push to it",
+        "whoever can push to the repository can change how your agents work on every Mac",
+        "an organization's members may be able to read a private repository",
+        "An agent's shell can still write the shared folder and push to the repository with your credentials",
+        "it does not spread an edit it did not make",
+    ] {
+        assert!(readme.contains(stated), "{stated}");
+    }
+}
+
+#[test]
 fn bundled_instructions_describe_the_flat_hierarchy() {
     for role in Role::ALL {
         let skill = provider::skill(role).to_lowercase();

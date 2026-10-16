@@ -33,6 +33,7 @@ mod update;
 mod usage_view;
 mod verifiers;
 mod welcome;
+mod workspace_notes;
 use bridge::Bridge;
 use creation::{Creation, CreationForm};
 use gpui::{prelude::*, *};
@@ -127,6 +128,8 @@ struct Workspace {
     viewed_entry: Option<String>,
     /// What changed from the open rewrite's base to this release's stock text.
     stock_changes: Vec<workspace_host::skills::Line>,
+    /// The workspace note open in Compare in the Inbox.
+    compared: workspace_notes::Compared,
     verifiers: Entity<verifiers::VerifierEditor>,
     /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
     detection: Detection,
@@ -294,6 +297,7 @@ impl Workspace {
             skill_history: vec![],
             viewed_entry: None,
             stock_changes: vec![],
+            compared: None,
             verifiers,
             detection: Detection::new(),
             suggested: None,
@@ -461,6 +465,10 @@ impl Workspace {
             .flat_map(|s| &s.attention)
             .filter(|a| Some(&a.project_id) == project.as_ref())
             .collect()
+    }
+    /// The notes about the whole workspace, which every project's Inbox lists first.
+    fn workspace_notes(&self) -> &[WorkspaceNote] {
+        self.snapshot.as_ref().map_or(&[], |s| &s.workspace_notes)
     }
     fn toast(&self, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
         window.push_notification(Notification::success(message), cx);
@@ -871,6 +879,14 @@ impl Workspace {
                 Ok(lines) => self.stock_changes_arrived(skill, lines),
                 Err(error) => eprintln!("Skill stock changes: {error}"),
             },
+            Command::ComparePausedFile { path } => match serde_json::from_value(value) {
+                Ok(lines) => workspace_notes::compared_arrived(&mut self.compared, &path, lines),
+                Err(error) => eprintln!("Compare paused file: {error}"),
+            },
+            Command::SettlePausedFile { .. } => {
+                self.compared = None;
+                self.request(Command::Snapshot, window, cx);
+            }
             Command::SetRepositoryChecks { .. } => {
                 self.checks_edit = None;
                 self.request(Command::Snapshot, window, cx);
@@ -1684,7 +1700,9 @@ actions!(
         NewProject,
         About,
         OpenSettings,
-        CheckForUpdates
+        CheckForUpdates,
+        OpenModels,
+        OpenRepositories
     ]
 );
 
@@ -1824,8 +1842,9 @@ fn main() -> anyhow::Result<()> {
                                 });
                             });
                         });
+                        let check_for_updates = workspace.clone();
                         cx.on_action(move |_: &CheckForUpdates, cx| {
-                            let workspace = workspace.clone();
+                            let workspace = check_for_updates.clone();
                             cx.defer(move |cx| {
                                 let _ = handle.update(cx, |_, window, cx| {
                                     workspace.update(cx, |view, cx| {
@@ -1834,6 +1853,20 @@ fn main() -> anyhow::Result<()> {
                                 });
                             });
                         });
+                        // Settings opens these pages in the main window, which comes forward.
+                        let open = move |page: Page, cx: &mut App| {
+                            let workspace = workspace.clone();
+                            cx.defer(move |cx| {
+                                let _ = handle.update(cx, |_, window, cx| {
+                                    window.activate_window();
+                                    workspace
+                                        .update(cx, |view, cx| view.open_page(page, window, cx))
+                                });
+                            });
+                        };
+                        let open_models = open.clone();
+                        cx.on_action(move |_: &OpenModels, cx| open_models(Page::Models, cx));
+                        cx.on_action(move |_: &OpenRepositories, cx| open(Page::Repositories, cx));
                         cx.new(|cx| Root::new(view, window, cx))
                     },
                 )

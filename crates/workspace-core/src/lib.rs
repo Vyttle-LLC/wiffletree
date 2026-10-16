@@ -536,7 +536,7 @@ pub struct Snapshot {
     pub skills: Vec<SkillState>,
     /// What this machine still needs to run the shared settings, one line each.
     #[serde(default)]
-    pub still_needs: Vec<String>,
+    pub still_needs: Vec<StillNeed>,
     /// Set while a settings repository is chosen.
     #[serde(default)]
     pub settings_sync: Option<SyncStatus>,
@@ -793,10 +793,23 @@ pub struct SyncStatus {
     pub stopped: bool,
     /// A pass runs now.
     pub syncing: bool,
-    /// Shared files saved here since they were last synced.
-    pub waiting: usize,
+    /// The settings saved here since they were last synced, each named once.
+    pub waiting: Vec<String>,
     /// This machine's name, as sync's commits give it.
     pub machine: String,
+}
+/// Something this machine lacks to run the shared settings, and the page that provides it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StillNeed {
+    pub text: String,
+    pub page: WorkspacePage,
+}
+/// A page of the main window about the whole workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspacePage {
+    Models,
+    Repositories,
 }
 /// Why sync leaves a shared file alone until the human decides.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -817,6 +830,7 @@ pub struct WorkspaceNote {
     /// As the app names it, such as "Implementing · your rules".
     pub setting: String,
     pub paused: Paused,
+    /// What happened and what this machine does meanwhile, starting with `setting`.
     pub text: String,
 }
 /// How the human settles a paused file.
@@ -2571,6 +2585,12 @@ pub enum Command {
     SettlePausedFile {
         path: String,
         settle: Settle,
+    },
+    /// Read-only: this machine's version of a paused file beside the other one, line by line,
+    /// the other being the last synced version for an edit made outside Wiffletree. For a
+    /// skill, its rewrite or else its rules. Answers with lines as `SkillStockChanges` does.
+    ComparePausedFile {
+        path: String,
     },
     /// Read-only: a skill's history, newest first, each entry with why it could not be read
     /// when it cannot.

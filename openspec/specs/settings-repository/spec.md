@@ -101,6 +101,28 @@ With a settings repository chosen, the host SHALL pull at launch, every 5 minute
 - **WHEN** one machine changes the review levels and the other the check-in thresholds before either pulls
 - **THEN** both changes reach both machines and nothing is paused
 
+### Requirement: A file changed on two machines is paused
+When a pass finds a file that this machine and the remote both changed, to different content, since this machine last synced it, the host SHALL pause that file: this machine SHALL keep using its own version, the host SHALL NOT push it or write the remote's version over it, and every other file SHALL keep syncing. The host SHALL raise one workspace note naming the setting and the machines that changed it. The note SHALL be shown at the top of every project's Inbox with a "Workspace" label, counted in each, and settled once for all. It SHALL offer Compare, showing both versions as a line diff; Keep this Mac's, which pushes this machine's version; and Use the other machine's, which writes the remote's version here. A skill's `additions.md`, `rewrite.md` and `base.md` SHALL be compared and paused as one unit: when any of them would pause, all three SHALL pause, and this machine SHALL keep using its own three, while the skill's history entries keep syncing. While paused, later edits here SHALL stay here, and a newer remote version SHALL replace the one compared against. The note SHALL close when the human chooses a side or when the two versions become equal.
+
+#### Scenario: Both machines edit Implementing's rules
+- **WHEN** the human saves different rules for Implementing on two machines before either syncs
+- **THEN** each machine keeps using its own rules, the second to sync shows a workspace note naming Implementing · your rules and both machines, and the other shared settings keep syncing
+
+#### Scenario: A rewrite on one machine, new rules on the other
+- **WHEN** Implementing is in Additions mode on both machines, one machine starts a rewrite and syncs, and the other saves new rules before it pulls
+- **THEN** the second machine keeps Implementing in Additions mode with its own new rules, does not take the rewrite or its base, and shows one workspace note for Implementing
+
+#### Scenario: Keeping this Mac's
+- **WHEN** the human chooses Keep this Mac's on that note
+- **THEN** this machine's rules are pushed, the other machine gets them at its next pull, the note closes in every project's Inbox, and the other version stays in the repository's history
+
+### Requirement: A file changed outside Wiffletree is paused
+A file in the shared folder whose content is neither what the host last wrote nor what it last synced SHALL be paused, with a workspace note saying it was changed outside Wiffletree on this machine. This machine SHALL use the file as it is. The note SHALL offer Sync this version, which pushes it if the host accepts it when reading it, and Put back the synced version.
+
+#### Scenario: An agent's shell edits a skill
+- **WHEN** a command in an agent's shell appends a line to `skills/implementing/additions.md`
+- **THEN** the file is not pushed, and a workspace note says Implementing · your rules was changed outside Wiffletree on this machine
+
 ### Requirement: What this machine cannot use is held, not refused
 A pulled file the host cannot read, such as invalid JSON, a value out of range or a text over its limit, SHALL NOT be applied. This machine SHALL keep its last good version, and the file SHALL be paused with the reason. Its workspace note SHALL offer Compare and Keep this Mac's, which pushes this machine's version, and SHALL close when a version this machine can read arrives. When `wiffletree.json` names a format this release does not know, sync SHALL stop on this machine, saying to update Wiffletree, and SHALL pull and push nothing until then. A pulled setting that this machine cannot run with its own settings SHALL NOT be rewritten. Keeper triggers that need a PR keeper model this machine does not have, or a review level the review settings no longer have, SHALL be off on this machine, and the Repositories page SHALL say they are on from the other machine and what this machine needs. The checks that tie the keeper's triggers to the keeper's model and to a review level SHALL count a trigger held off on this machine as off, for every save on this machine, unless that save turns the trigger on. A trigger this machine runs SHALL be checked as before.
 
@@ -141,3 +163,10 @@ Stop syncing SHALL ask first. It SHALL leave the shared folder as it is and keep
 #### Scenario: Stop syncing
 - **WHEN** the human stops syncing and confirms
 - **THEN** every setting keeps its current value, nothing is pulled or pushed, and the repository on GitHub is unchanged
+
+### Requirement: The limits of the settings repository are documented
+The README SHALL say which settings are shared and which stay on each machine; that choosing the repository is what allows Wiffletree to push to it; that whoever can push to the repository can change every machine's agents' instructions; that an organization's members may be able to read a private repository; and that an agent's shell can write the shared folder and push to the repository with the human's credentials, which sync does not prevent but does not spread.
+
+#### Scenario: README
+- **WHEN** a reader looks up the settings repository in the README
+- **THEN** it lists what is shared, says who can change the agents' instructions through it, and says what agents' shells can still do

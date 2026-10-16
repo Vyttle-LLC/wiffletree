@@ -3841,7 +3841,10 @@ mod tests {
             actor.process(synced);
         }
         let status = first.host.snapshot().unwrap().settings_sync.unwrap();
-        assert_eq!((status.pushed, status.waiting, status.error), (1, 0, None));
+        assert_eq!(
+            (status.pushed, status.waiting.len(), status.error),
+            (1, 0, None)
+        );
         assert!(!status.syncing);
         assert!(status.next_pull_at.unwrap() > now() + 4 * 60_000);
         assert_eq!(second.host.settings().checkin_human_turns, 400);
