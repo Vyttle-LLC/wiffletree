@@ -716,7 +716,11 @@ impl Workspace {
                     .max_h(px(280.))
                     .overflow_y_scrollbar()
                     .id(SharedString::from(format!("question-{id}")))
-                    .child(markdown(&format!("attention-{id}"), &item.prompt)),
+                    .child(markdown(
+                        &format!("attention-{id}"),
+                        &item.prompt,
+                        &self.link_bases(&item.session_id),
+                    )),
             )
             .when(!item.options.is_empty(), |d| d.child(choices));
         if answering {
