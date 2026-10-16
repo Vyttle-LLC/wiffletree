@@ -8676,6 +8676,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "libc",
+ "markdown",
  "objc",
  "rusqlite",
  "serde",
