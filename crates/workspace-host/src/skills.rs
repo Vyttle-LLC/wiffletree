@@ -10,6 +10,8 @@ const RULES: &str = "additions.md";
 const REWRITE: &str = "rewrite.md";
 const BASE: &str = "base.md";
 const HISTORY: &str = "history";
+/// How a file written at a time is named, as a history entry's "2026-10-16T09-30-00.000Z".
+const TIME: &str = "%Y-%m-%dT%H-%M-%S%.3fZ";
 
 pub fn stock(skill: Skill) -> &'static str {
     match skill {
@@ -320,8 +322,17 @@ impl SkillStore {
             self.record(skill, change, edits)
         };
         if let Err(error) = replace() {
-            moved.into_iter().rev().for_each(Moved::put_back);
-            return Err(error);
+            let kept: Vec<_> = (moved.into_iter().rev())
+                .filter_map(Moved::put_back)
+                .map(|kept| kept.display().to_string())
+                .collect();
+            if kept.is_empty() {
+                return Err(error);
+            }
+            bail!(
+                "{error:#}. What was there before could not be put back, so it is kept at {}",
+                kept.join(" and ")
+            );
         }
         let _ = fs::remove_file(folder.join(leftover));
         Ok(())
@@ -339,7 +350,7 @@ impl SkillStore {
         serde_json::to_writer_pretty(&mut staged, &entry)?;
         let mut at = chrono::Utc::now();
         loop {
-            let name = format!("{}.json", at.format("%Y-%m-%dT%H-%M-%S%.3fZ"));
+            let name = format!("{}.json", at.format(TIME));
             match staged.persist_noclobber(folder.join(name)) {
                 Ok(_) => return Ok(()),
                 Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
@@ -358,7 +369,7 @@ fn stage(folder: &Path, text: &str) -> Result<tempfile::NamedTempFile> {
     Ok(staged)
 }
 /// A file a change moved aside, none when there was no file. It is deleted once the change is
-/// recorded, or put back when the change fails.
+/// recorded, or put back when the change fails, and kept beside it when it cannot be.
 struct Moved {
     path: PathBuf,
     previous: Option<tempfile::TempPath>,
@@ -378,11 +389,21 @@ impl Moved {
             Err(error) => Err(error.into()),
         }
     }
-    fn put_back(self) {
-        let _ = match self.previous {
-            Some(previous) => previous.persist(&self.path).map_err(|error| error.error),
-            None => fs::remove_file(&self.path),
+    /// Where the file is kept, as `rewrite.md.kept-<time>`, when it cannot be put back.
+    fn put_back(self) -> Option<PathBuf> {
+        let Some(previous) = self.previous else {
+            let _ = fs::remove_file(&self.path);
+            return None;
         };
+        let Err(error) = previous.persist(&self.path) else {
+            return None;
+        };
+        let mut kept = self.path.into_os_string();
+        kept.push(format!(".kept-{}", chrono::Utc::now().format(TIME)));
+        match error.path.persist(&kept) {
+            Ok(()) => Some(kept.into()),
+            Err(error) => error.path.keep().ok(),
+        }
     }
 }
 /// The store of the host whose data folder is `home`.
@@ -1154,6 +1175,19 @@ mod tests {
             changes(&host, Skill::Coordinating),
             [Change::StartedRewrite]
         );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_put_back_is_kept_beside_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let rewrite = folder.path().join("rewrite.md");
+        fs::write(&rewrite, "My way").unwrap();
+        let moved = Moved::aside(folder.path(), rewrite.clone()).unwrap();
+        fs::create_dir(&rewrite).unwrap();
+        let kept = moved.put_back().unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "My way");
+        let name = kept.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("rewrite.md.kept-"), "{name}");
     }
 
     #[test]

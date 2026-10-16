@@ -183,9 +183,8 @@ fn reset_question(state: &SkillState) -> [String; 3] {
     ]
 }
 
-/// Rewrite's question: what happens to the human's rules, and what a rewrite costs. A rewrite
-/// copies only saved rules, so while the editor holds unsaved ones it asks to save or discard
-/// them first.
+/// Rewrite's question: what happens to the human's rules, and what a rewrite costs, or to save
+/// or discard unsaved rules first.
 fn rewrite_question(state: &SkillState, unsaved: bool) -> [String; 3] {
     if unsaved {
         return [
@@ -206,8 +205,7 @@ fn rewrite_question(state: &SkillState, unsaved: bool) -> [String; 3] {
     ]
 }
 
-/// A rewrite's base, as "stock v1", or "an unknown stock version" when the base has none, as
-/// when base.md is missing.
+/// A base has no version when base.md is missing.
 fn based_on(base_version: &str) -> String {
     if base_version.is_empty() {
         "an unknown stock version".into()
@@ -781,8 +779,7 @@ impl Workspace {
         )
     }
 
-    /// Reset and Rewrite ask first; Cancel sends nothing. A rewrite doesn't start over unsaved
-    /// rules.
+    /// Reset and Rewrite ask first; Cancel sends nothing.
     fn confirm_dialog(
         state: &SkillState,
         confirm: Confirm,
