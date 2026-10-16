@@ -17,6 +17,7 @@ const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
 const KEEP: &str = "Only in the repositories ticked above · all off until you tick them.";
 const REBASE: &str = "Plain Git, no model and no review. Once the base has been quiet, replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).";
 const CONFLICTS: &str = "The PR keeper’s model tries once. Its result must change only the conflicted files, pass the repository’s checks and pass a review at the level below before anything is pushed. If not, the try is thrown away and the coordinator is told. A rebase that changes the patch is checked and reviewed the same way. Needs the rebase trigger above and a checks command in the repository.";
+const CHECKS: &str = "Only when the checks also fail on this machine. One try, the same gate and review, and only in files the pull request already changes. Needs the rebase trigger above and a checks command in the repository.";
 const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
 const SORT: &str = "Reads each new comment and sorts it: needs a change, a question, or no action. Tells the coordinator about the first two. Never replies, resolves or reacts.";
 const NEVER_KEEPER: &str = "Wiffletree never merges, approves, closes or comments on a pull request. The model is chosen in Models → PR keeper.";
@@ -250,7 +251,8 @@ impl Workspace {
     }
 
     /// The PR keeper's triggers, for the whole workspace: the rebase trigger and its quiet
-    /// period, the conflicts trigger and its review level, and comment sorting.
+    /// period, the conflicts trigger and its review level, the checks trigger, and comment
+    /// sorting.
     fn keeper_block(&self, keeper: &KeeperSettings, p: Palette, cx: &mut Context<Self>) -> Div {
         let picker = self.review_level_picker(keeper, cx);
         let save = |keeper: KeeperSettings| {
@@ -296,6 +298,14 @@ impl Workspace {
         let conflicts = cx.listener(move |v, checked: &bool, w, c| {
             let keeper = KeeperSettings {
                 conflicts: *checked,
+                ..current.clone()
+            };
+            v.request(Command::SetKeeper { keeper }, w, c)
+        });
+        let current = keeper.clone();
+        let checks = cx.listener(move |v, checked: &bool, w, c| {
+            let keeper = KeeperSettings {
+                checks: *checked,
                 ..current.clone()
             };
             v.request(Command::SetKeeper { keeper }, w, c)
@@ -351,6 +361,13 @@ impl Workspace {
                     hint(CONFLICTS, p).into_any_element(),
                     level.into_any_element(),
                 ],
+            ))
+            .child(trigger(
+                Checkbox::new("keeper-checks")
+                    .checked(keeper.checks)
+                    .on_click(checks),
+                "Try to fix failed checks",
+                vec![hint(CHECKS, p).into_any_element()],
             ))
             .child(trigger(
                 Checkbox::new("keeper-comments")

@@ -110,7 +110,7 @@ impl Host {
     pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
         verification.validate()?;
         let keeper = self.settings().keeper;
-        check_conflicts(
+        check_tries(
             &keeper,
             self.model_selection()?.keeper.as_ref(),
             &verification,
@@ -162,7 +162,7 @@ impl Host {
         if keeper.comments {
             check_sorting_model(model.as_ref())?;
         }
-        check_conflicts(&keeper, model.as_ref(), &self.settings().verification)?;
+        check_tries(&keeper, model.as_ref(), &self.settings().verification)?;
         if keeper.comments && !self.settings().keeper.comments {
             self.restart_comments()?;
         }
@@ -516,6 +516,50 @@ mod tests {
         let dropped = refusal(host.set_model_selection(&selection));
         assert!(dropped.contains("needs a PR keeper model"), "{dropped}");
         assert!(host.model_selection().unwrap().keeper.is_some());
+    }
+
+    #[test]
+    fn the_checks_trigger_needs_a_keeper_model_and_what_the_conflicts_trigger_needs() {
+        let (_home, mut host) = rebasing();
+        with_light(&mut host);
+        let mut selection = host.model_selection().unwrap();
+        selection.keeper = None;
+        host.set_model_selection(&selection).unwrap();
+        let checks = |rebase| KeeperSettings {
+            rebase,
+            checks: true,
+            review_level: Some("Light".into()),
+            ..KeeperSettings::default()
+        };
+        // No model.
+        let no_model = refusal(host.set_keeper(checks(true)));
+        assert!(
+            no_model.contains(
+                "\"Try to fix failed checks\" needs a PR keeper model: choose one in Models first"
+            ),
+            "{no_model}"
+        );
+        let (_home, mut host) = rebasing();
+        with_light(&mut host);
+        let alone = refusal(host.set_keeper(checks(false)));
+        assert!(
+            alone.contains("needs \"Rebase when the base branch moves\""),
+            "{alone}"
+        );
+        let full = refusal(host.set_keeper(KeeperSettings {
+            review_level: Some("Full".into()),
+            ..checks(true)
+        }));
+        assert!(full.contains("choose Light"), "{full}");
+        host.set_keeper(checks(true)).unwrap();
+        assert!(
+            host.set_keeper(checks(false)).is_err(),
+            "the rebase trigger stays on"
+        );
+        let mut selection = host.model_selection().unwrap();
+        selection.keeper = None;
+        assert!(host.set_model_selection(&selection).is_err());
+        assert_eq!(host.settings().keeper, checks(true));
     }
 
     #[test]

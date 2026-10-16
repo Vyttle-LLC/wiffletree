@@ -68,6 +68,9 @@ pub(crate) struct Job {
     pub repository: Repository,
     /// The commit the host last pushed to the ticket's branch.
     pub pushed: Option<String>,
+    /// The push may only fast-forward GitHub's branch, as for the keeper's fix of failed
+    /// checks, which adds commits on top of the PR's head.
+    pub fast_forward: bool,
 }
 
 /// What a publish of the ticket would send now, read from its worktree and its repository.
@@ -227,6 +230,10 @@ fn remote_branch(job: &Job, tools: &Tools) -> Result<RemoteBranch> {
     Ok(match head {
         Some(head) if head == request.commit => RemoteBranch::Current,
         Some(head) if is_ancestor(&job.worktree, head, &request.commit) => RemoteBranch::Behind,
+        Some(_) if job.fast_forward => bail!(
+            "GitHub's {} is not part of the fix, which is pushed only as a fast-forward",
+            request.branch
+        ),
         Some(head)
             if job.pushed.as_deref() == Some(head)
                 || was_branch_tip(&job.worktree, &reference, head) =>
@@ -508,8 +515,10 @@ impl Host {
     }
 
     fn job(&self, ticket: &Ticket, request: PublishRequest, repository: &Repository) -> Job {
+        let last = ticket.keeper.as_ref().and_then(|k| k.last.as_ref());
         Job {
             ticket_id: ticket.id.clone(),
+            fast_forward: request.keeper && last.is_some_and(|l| l.kind == KeeperKind::Fixed),
             request,
             worktree: ticket.worktree.clone().into(),
             store: self.home.join(STORE_FILE),

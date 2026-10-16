@@ -497,23 +497,27 @@ impl Host {
         if new.state != PrState::Open {
             ticket.end_waiting_comments();
         }
-        if held.is_some() {
-            ticket.keeper.get_or_insert_default().held = held;
+        if !held.is_empty() {
+            let record = ticket.keeper.get_or_insert_default();
+            record
+                .held_wakes
+                .retain(|old| held.iter().all(|new| new.problem != old.problem));
+            record.held_wakes.extend(held);
         }
         ticket.pull_request = Some(new);
         self.save_ticket(&ticket)?;
         let project = self.session(&ticket.coordinator_id)?.project_id;
         Self::event(&self.db, &project, None, "pull_request", &detail).map(|_| true)
     }
-    /// The coordinator messages a PR's new snapshot calls for that were never sent, and a
-    /// conflict wake held back because the PR keeper will try that conflict. Wakes on failed
-    /// checks and conflicts share a budget per PR, after which one budget message is due.
+    /// The coordinator messages a PR's new snapshot calls for that were never sent, and the
+    /// wakes held back because the PR keeper will try their problem. Wakes on failed checks and
+    /// conflicts share a budget per PR, after which one budget message is due.
     fn pull_request_notices(
         &self,
         ticket: &Ticket,
         pr: &PullRequest,
         worktree_head: Option<&str>,
-    ) -> Result<(Vec<Notice>, Option<HeldWake>)> {
+    ) -> Result<(Vec<Notice>, Vec<HeldWake>)> {
         let named = format!(
             "PR #{} for ticket \"{}\" ({})",
             pr.number, ticket.title, ticket.id
@@ -521,7 +525,7 @@ impl Host {
         let prefix = format!("{PR_NOTICE_PREFIX}{}", ticket.id);
         let head = short_sha(&pr.head);
         let mut due = vec![];
-        let mut held = None;
+        let mut held = vec![];
         match pr.state {
             PrState::Merged => {
                 let merged = match &pr.merge_commit {
@@ -555,11 +559,12 @@ impl Host {
                 let checks = format!("{prefix}:checks:{}:", pr.number);
                 let conflict = format!("{prefix}:conflict:{}:", pr.number);
                 let mut wakes = vec![];
-                // The keeper's own message about its try takes the place of a conflict wake.
+                // The keeper's own message about its try takes the place of the wake.
                 let mut seen = ticket.clone();
                 seen.pull_request = Some(pr.clone());
                 if pr.checks == CheckState::Failure {
                     wakes.push((
+                        KeeperProblem::Checks,
                         format!("{checks}{}", pr.head),
                         format!(
                             "{named}: checks failed at head {head}. Run gh pr checks {} in the ticket worktree for details. A fix needs a new verification cycle before it is pushed.",
@@ -567,29 +572,32 @@ impl Host {
                         ),
                     ));
                 }
-                if pr.merge_state == MergeState::Dirty
-                    && !seen.tried(KeeperProblem::Conflict, &pr.head)
-                {
-                    let (id, body) = (
+                if pr.merge_state == MergeState::Dirty {
+                    wakes.push((
+                        KeeperProblem::Conflict,
                         format!("{conflict}{}", pr.head),
                         format!(
                             "{named} conflicts with {} at head {head}. Resolving it needs a rebase or merge in the worktree and a new verification cycle before it is pushed.",
                             pr.base
                         ),
-                    );
-                    match self.holds_wake(&seen)? {
-                        true => {
-                            held = Some(HeldWake {
-                                problem: KeeperProblem::Conflict,
-                                head: pr.head.clone(),
-                                id,
-                                body,
-                            })
-                        }
-                        false => wakes.push((id, body)),
+                    ));
+                }
+                let mut sending = vec![];
+                for (problem, id, body) in wakes {
+                    if seen.tried(problem, &pr.head) {
+                        continue;
+                    }
+                    match self.holds_wake(&seen, problem)? {
+                        true => held.push(HeldWake {
+                            problem,
+                            head: pr.head.clone(),
+                            id,
+                            body,
+                        }),
+                        false => sending.push((id, body)),
                     }
                 }
-                due = self.budgeted(ticket, pr, wakes)?;
+                due = self.budgeted(ticket, pr, sending)?;
             }
         }
         let mut unsent = vec![];

@@ -583,3 +583,40 @@ The README and the development notes SHALL say that the model making a fix runs,
 #### Scenario: README
 - **WHEN** a reader opens the README's warning
 - **THEN** it says the keeper's model can still run any command, and that only what it leaves behind is checked
+
+### Requirement: The checks trigger needs what the conflicts trigger needs
+The keeper's settings SHALL refuse to turn the checks trigger on unless the PR keeper's model is chosen and the review level names a configured re-check level, as for the conflicts trigger.
+
+#### Scenario: No model
+- **WHEN** the human ticks "Try to fix failed checks" with no PR keeper model chosen
+- **THEN** the save is refused, saying to choose a model in Models first
+
+### Requirement: Failed checks are reproduced before a try
+With the checks trigger on, when a kept ticket's PR records failed checks at its head, the ticket's branch may be changed, no rebase is due or waiting for it, the repository has a checks command and no try is recorded for failed checks at that head, the keeper SHALL first run the repository's checks in the keeper's checkout at the PR's head. When they pass, no model SHALL run; the try SHALL be recorded as thrown away because the failure could not be reproduced, and the coordinator SHALL be told once. Only when they fail SHALL a PR keeper agent be started in that checkout, with a message from Wiffletree naming the PR number and the checks command.
+
+#### Scenario: Not reproduced
+- **WHEN** PR #145's checks failed on GitHub at `9e03c1b` and the repository's checks pass on this machine
+- **THEN** no model runs, and the coordinator gets one message saying the failure could not be reproduced here
+
+#### Scenario: Reproduced
+- **WHEN** the repository's checks also fail in the keeper's checkout
+- **THEN** a PR keeper agent starts there
+
+#### Scenario: A rebase comes first
+- **WHEN** a PR has failed checks and a rebase is due for it
+- **THEN** the rebase runs, and no try at the checks starts for the old head
+
+### Requirement: A try at failed checks stays within the PR's files
+After a try at failed checks, the host SHALL throw the try away unless the checkout is clean, its HEAD contains the PR's head, so that commits were only added, and every file that differs between the PR's head and the result is a file the PR already changes against its base. The result SHALL then pass the gate's checks and the keeper's review, and SHALL be pushed without a force, as any fix is. While such a try runs, the PR line's keeper part SHALL read "keeper fixing".
+
+#### Scenario: Within the PR's files
+- **WHEN** the PR changes `src/a.rs` and `tests/a.rs`, and the try's result changes only `tests/a.rs`
+- **THEN** the scope check passes
+
+#### Scenario: A file the PR does not change
+- **WHEN** the result changes `Cargo.toml`, which the PR does not change
+- **THEN** the try is thrown away, naming `Cargo.toml`
+
+#### Scenario: History was rewritten
+- **WHEN** the result does not contain the PR's head
+- **THEN** the try is thrown away
