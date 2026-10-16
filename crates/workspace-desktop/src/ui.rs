@@ -654,6 +654,7 @@ impl Render for Workspace {
                     )
                     .when(session_tools, |d| d.child(self.inspector_rail(p, cx))),
             )
+            .children(file_links::link_menu(cx))
     }
 }
 
