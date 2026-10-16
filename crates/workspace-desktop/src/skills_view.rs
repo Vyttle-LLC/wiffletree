@@ -246,6 +246,7 @@ fn is_live(entry: &Entry, state: &SkillState) -> bool {
         .as_ref()
         .map(|Rewritten { text, base }| Rewrite {
             text: text.clone(),
+            base: base.clone(),
             base_version: version(base).into(),
             out_of_date: *base != state.stock,
         });
@@ -1561,6 +1562,13 @@ mod tests {
         .unwrap();
         host.skills().save_rewrite(skill, "My way").unwrap();
         assert!(live(&host));
+        // A base edited outside the app, at the same version, is not what the entry holds.
+        std::fs::write(
+            home.path().join("skills/implementing/base.md"),
+            "# Implementing — v0\nEdited outside the app\n",
+        )
+        .unwrap();
+        assert!(!live(&host));
         let entry = newest();
         assert_eq!(entry_title(&entry), "Saved your rewrite");
         assert_eq!(entry_detail(&entry), "Based on stock v0 · 6 characters");

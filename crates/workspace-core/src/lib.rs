@@ -156,6 +156,8 @@ pub struct SkillState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rewrite {
     pub text: String,
+    /// The stock text the rewrite started from, or was last marked up to date against.
+    pub base: String,
     /// The version on the first line of the stock text the rewrite is based on.
     pub base_version: String,
     /// Its base is not this release's stock text, compared as text.

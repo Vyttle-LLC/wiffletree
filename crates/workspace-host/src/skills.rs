@@ -124,6 +124,7 @@ impl SkillStore {
                 text,
                 base_version: version(&base).into(),
                 out_of_date: base != stock(skill),
+                base,
             }),
             unreadable,
         }
