@@ -1101,7 +1101,12 @@ impl Host {
             self.find_newer_stock_versions();
         }
         self.sync = Synced {
-            at: Some(at),
+            // A pass that ended in an error is not a sync: the last one that reached GitHub stays.
+            at: if passed.error.is_none() {
+                Some(at)
+            } else {
+                self.sync.at
+            },
             pulled: pulled.len(),
             pushed: pushed.unwrap_or_default(),
             failing_since: self.sync.failing_since,
@@ -2975,6 +2980,9 @@ pub(crate) mod tests {
         let github = Arc::new(GitHub::new(home.path(), true));
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        let reached = status(&host).synced_at;
+        std::thread::sleep(std::time::Duration::from_millis(2));
         host.set_check_ins(40, 400).unwrap();
         let bare = github.bare.clone();
         *github.before.lock().unwrap() = Some((
@@ -2985,6 +2993,7 @@ pub(crate) mod tests {
         let refused = status(&host);
         assert!(refused.error.unwrap().contains("git push failed"));
         assert_eq!(refused.waiting, 1);
+        assert_eq!(refused.synced_at, reached, "a refused push is not a sync");
         assert_eq!(github.log("%s")[0], "skills/reviewing/additions.md");
         host.sync_now(&github.tools()).unwrap();
         assert_eq!(
@@ -2999,6 +3008,7 @@ pub(crate) mod tests {
             ]
         );
         let synced = status(&host);
+        assert!(synced.synced_at > reached);
         assert_eq!((synced.error, synced.waiting), (None, 0));
     }
 

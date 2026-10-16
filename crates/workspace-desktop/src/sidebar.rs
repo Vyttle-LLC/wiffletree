@@ -384,15 +384,13 @@ impl Workspace {
                         .into_any_element(),
                     None => div()
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
                         .flex()
                         .items_center()
                         .gap_2()
                         .text_size(px(11.))
                         .text_color(p.subtle)
-                        .child(div().size(px(6.)).rounded_full().bg(p.green))
-                        .child("Local workspace")
+                        .child(div().flex_none().size(px(6.)).rounded_full().bg(p.green))
+                        .child(div().min_w_0().truncate().child("Local workspace"))
                         .into_any_element(),
                 },
             )

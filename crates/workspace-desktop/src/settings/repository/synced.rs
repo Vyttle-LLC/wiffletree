@@ -271,7 +271,7 @@ fn row(label: &'static str, value: String, p: Palette) -> Div {
         .child(div().flex_1().min_w_0().child(value))
 }
 
-/// A paused setting and why.
+/// A paused setting and why, in the note's words.
 fn paused_row(note: &WorkspaceNote, p: Palette) -> Div {
     div()
         .p_2()
@@ -284,19 +284,8 @@ fn paused_row(note: &WorkspaceNote, p: Palette) -> Div {
         .bg(p.yellow.opacity(0.07))
         .text_size(px(12.))
         .child(icon("pause").size(px(14.)).mt(px(2.)).text_color(p.yellow))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(note.setting.clone()),
-                )
-                .child(hint(note.text.clone(), p)),
-        )
+        // The note's text names the setting, so the row says it once.
+        .child(div().flex_1().min_w_0().child(note.text.clone()))
 }
 
 fn paused_reason(note: &WorkspaceNote) -> String {
