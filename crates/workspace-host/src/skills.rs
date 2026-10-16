@@ -81,12 +81,16 @@ pub enum Line {
     Removed(String),
     Added(String),
 }
-pub struct SkillStore {
+pub struct SkillStore<'a> {
     root: PathBuf,
+    recorder: Option<shared::Recorder<'a>>,
 }
-impl SkillStore {
+impl SkillStore<'_> {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            recorder: None,
+        }
     }
     fn folder(&self, skill: Skill) -> PathBuf {
         self.root.join(skill.folder())
@@ -241,7 +245,8 @@ impl SkillStore {
                 let change = Change::NewStockVersion {
                     previous: latest.stock_version,
                 };
-                self.record(skill, change, edits)?;
+                let (path, entry) = self.record(skill, change, edits)?;
+                self.recorded(&path, Some(&entry))?;
             }
         }
         Ok(())
@@ -312,33 +317,50 @@ impl SkillStore {
             })
             .collect::<Result<Vec<_>>>()?;
         let mut moved = vec![];
-        let replace = || -> Result<()> {
+        let replace = || -> Result<(PathBuf, Vec<u8>)> {
             for (path, staged) in staged {
                 moved.push(Moved::aside(&folder, path.clone())?);
                 if let Some(staged) = staged {
                     staged.persist(&path)?;
                 }
             }
-            self.record(skill, change, edits)
+            self.record(skill, change, edits.clone())
         };
-        if let Err(error) = replace() {
-            let kept: Vec<_> = (moved.into_iter().rev())
-                .filter_map(Moved::put_back)
-                .map(|kept| kept.display().to_string())
-                .collect();
-            if kept.is_empty() {
-                return Err(error);
+        let entry = match replace() {
+            Ok(entry) => entry,
+            Err(error) => {
+                let kept: Vec<_> = (moved.into_iter().rev())
+                    .filter_map(Moved::put_back)
+                    .map(|kept| kept.display().to_string())
+                    .collect();
+                if kept.is_empty() {
+                    return Err(error);
+                }
+                bail!(
+                    "{error:#}. What was there before could not be put back, so it is kept at {}",
+                    kept.join(" and ")
+                );
             }
-            bail!(
-                "{error:#}. What was there before could not be put back, so it is kept at {}",
-                kept.join(" and ")
-            );
+        };
+        // Sync's record notes the change only once it holds.
+        for (file, text) in files {
+            self.recorded(&folder.join(file), text.map(str::as_bytes))?;
         }
-        let _ = fs::remove_file(folder.join(leftover));
-        Ok(())
+        self.recorded(&entry.0, Some(&entry.1))?;
+        match fs::remove_file(folder.join(leftover)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Ok(()),
+            _ => self.recorded(&folder.join(leftover), None),
+        }
     }
-    /// One file per entry, named by its time, never replacing another.
-    fn record(&self, skill: Skill, change: Change, edits: Edits) -> Result<()> {
+    fn recorded(&self, path: &Path, content: Option<&[u8]>) -> Result<()> {
+        match &self.recorder {
+            Some(recorder) => recorder.wrote(path, content),
+            None => Ok(()),
+        }
+    }
+    /// One file per entry, named by its time, never replacing another; answers with the entry's
+    /// path and content.
+    fn record(&self, skill: Skill, change: Change, edits: Edits) -> Result<(PathBuf, Vec<u8>)> {
         let folder = self.folder(skill).join(HISTORY);
         fs::create_dir_all(&folder)?;
         let entry = Entry {
@@ -346,13 +368,14 @@ impl SkillStore {
             stock_version: stock_version(skill).into(),
             edits,
         };
+        let bytes = serde_json::to_vec_pretty(&entry)?;
         let mut staged = tempfile::NamedTempFile::new_in(&folder)?;
-        serde_json::to_writer_pretty(&mut staged, &entry)?;
+        staged.write_all(&bytes)?;
         let mut at = chrono::Utc::now();
         loop {
             let name = format!("{}.json", at.format(TIME));
-            match staged.persist_noclobber(folder.join(name)) {
-                Ok(_) => return Ok(()),
+            match staged.persist_noclobber(folder.join(&name)) {
+                Ok(_) => return Ok((folder.join(name), bytes)),
                 Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
                     staged = error.file;
                     at += chrono::TimeDelta::milliseconds(1);
@@ -407,12 +430,15 @@ impl Moved {
     }
 }
 /// The store of the host whose data folder is `home`.
-pub fn store(home: &Path) -> SkillStore {
+pub fn store(home: &Path) -> SkillStore<'static> {
     SkillStore::new(shared::SharedStore::of(home).skills_folder())
 }
 impl Host {
-    pub fn skills(&self) -> SkillStore {
-        store(&self.home)
+    pub fn skills(&self) -> SkillStore<'_> {
+        SkillStore {
+            recorder: Some(self.recorder()),
+            ..store(&self.home)
+        }
     }
     /// What a role's next turn is sent, read from the store each time.
     pub fn instructions(&self, role: Role) -> String {
@@ -1114,10 +1140,23 @@ mod tests {
     fn a_rewrite_save_that_cannot_be_recorded_puts_the_rewrite_back() {
         let (_home, host) = host();
         host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        let record = || -> Vec<(String, Option<Vec<u8>>)> {
+            let mut rows = host
+                .db
+                .prepare("SELECT path,written FROM sync_record ORDER BY path")
+                .unwrap();
+            let rows = rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let recorded = record();
+        host.shared_written.take();
         let saved = while_the_history_is_read_only(&host, || {
             host.skills().save_rewrite(Skill::Coordinating, "My way")
         });
         assert!(saved.is_err());
+        // Sync's record notes nothing of a change that was put back.
+        assert_eq!(record(), recorded);
+        assert!(!host.shared_written.get());
         let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
         assert_eq!(rewrite.text, stock(Skill::Coordinating));
         assert_eq!(

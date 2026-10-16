@@ -67,6 +67,10 @@ pub struct Host {
     pub(crate) in_turn: std::collections::HashSet<String>,
     /// By ticket, the report that last set its state from a running turn; see `shown_ticket`.
     pub(crate) mid_turn_reports: std::collections::HashMap<String, MidTurnReport>,
+    /// The host wrote a shared setting since sync last took this; see `sync`.
+    pub(crate) shared_written: std::cell::Cell<bool>,
+    /// What the latest sync pass did; see `sync`.
+    pub(crate) sync: sync::Synced,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -200,6 +204,7 @@ impl Host {
         db.execute_batch(include_str!("steps.sql"))?;
         db.execute_batch(include_str!("schedules.sql"))?;
         db.execute_batch(include_str!("selection.sql"))?;
+        db.execute_batch(include_str!("sync.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
@@ -220,6 +225,8 @@ impl Host {
             progress: Default::default(),
             in_turn: Default::default(),
             mid_turn_reports: Default::default(),
+            shared_written: Default::default(),
+            sync: Default::default(),
         };
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -229,6 +236,7 @@ impl Host {
         // After the selection's migration, which may write the guide; nothing has read a shared
         // setting yet.
         host.move_into_shared_folder()?;
+        sync::remove_staging(&host.home)?;
         host.backfill_usage()?;
         if let Err(error) = host.skills().record_new_stock_versions() {
             eprintln!("Recording new stock versions of skills: {error:#}");
@@ -348,7 +356,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states(), still_needs: self.still_needs()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states(), still_needs: self.still_needs()?, settings_sync: self.sync_status()? })
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
@@ -1433,6 +1441,10 @@ impl Host {
                     Some(with),
                     &publish::Tools::default(),
                 )?)?
+            }
+            Command::SyncNow => {
+                self.sync_now(&publish::Tools::default())?;
+                Value::Null
             }
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
             Command::StartSkillRewrite { skill } => {

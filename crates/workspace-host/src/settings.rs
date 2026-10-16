@@ -149,10 +149,9 @@ impl Host {
         };
         verification.validate()?;
         policies::check_keeper_needs(&self.settings().keeper, selection, &verification)?;
-        let shared = self.shared();
-        shared.put_back_on_error(shared::REVIEW, || {
-            shared.set_review(&verification)?;
-            self.set_model_selection(selection)
+        self.put_back_on_error(shared::REVIEW, |host| {
+            host.shared().set_review(&verification)?;
+            host.set_model_selection(selection)
         })
     }
     /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.

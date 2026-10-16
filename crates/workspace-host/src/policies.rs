@@ -63,10 +63,9 @@ impl Host {
             guide: row.guide,
             ..saved.clone()
         };
-        let shared = self.shared();
-        shared.put_back_on_error(shared::GUIDE, || {
-            shared.set_guide(&saved.guide)?;
-            self.db.execute(
+        self.put_back_on_error(shared::GUIDE, |host| {
+            host.shared().set_guide(&saved.guide)?;
+            host.db.execute(
                 "INSERT INTO model_selection VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
                 [encode(&unchanged_guide)?],
             )?;

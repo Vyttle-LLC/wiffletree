@@ -30,3 +30,18 @@ The host SHALL keep the shared settings in `<data folder>/shared/`, with or with
 #### Scenario: An interrupted move
 - **WHEN** the move stopped after writing `settings/review.json` and before the other files
 - **THEN** the next start writes the missing files and leaves `settings/review.json` as it is
+
+### Requirement: Sync runs automatically
+With a settings repository chosen, the host SHALL pull at launch, every 5 minutes and when the human chooses Sync now, and SHALL push 5 seconds after the last change to a shared setting, so that a burst of saves is one commit. A pass SHALL run off the thread that serves host commands. When GitHub cannot be reached, passes SHALL back off up to 30 minutes, Sync now SHALL try at once, and this machine SHALL keep using its own changes until they are pushed. A pass SHALL compare each file whole against the version this machine last synced: a file changed only here SHALL be pushed, a file changed only on the remote SHALL be written here, and a file changed on both sides to the same content SHALL need nothing. Pulled changes SHALL apply where each setting is next read.
+
+#### Scenario: A rule saved on one machine
+- **WHEN** the human saves a rule for Implementing on one machine, and the other machine pulls 5 minutes later
+- **THEN** the first machine pushed one commit naming Implementing and itself, and implementers on the second machine get the rule from their next turn
+
+#### Scenario: Offline
+- **WHEN** GitHub cannot be reached and the human changes the check-in thresholds
+- **THEN** the new thresholds apply on this machine at once, the status says one change waits to be pushed, and it is pushed at the first pass that reaches GitHub
+
+#### Scenario: Different settings on two machines
+- **WHEN** one machine changes the review levels and the other the check-in thresholds before either pulls
+- **THEN** both changes reach both machines and nothing is paused

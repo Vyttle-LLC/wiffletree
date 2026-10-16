@@ -534,6 +534,9 @@ pub struct Snapshot {
     /// What this machine still needs to run the shared settings, one line each.
     #[serde(default)]
     pub still_needs: Vec<String>,
+    /// Set while a settings repository is chosen.
+    #[serde(default)]
+    pub settings_sync: Option<SyncStatus>,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -739,9 +742,11 @@ pub struct SettingsRepository {
     pub push_url: String,
     /// The repository's default branch, the only one sync pushes.
     pub branch: String,
+    #[serde(default)]
+    pub readers: Readers,
 }
 /// Who can read a private settings repository, as far as GitHub says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Readers {
     /// Only its owner and the people given access.
@@ -751,6 +756,7 @@ pub enum Readers {
     /// Every member of its organization's enterprise: the repository is internal.
     EnterpriseMembers,
     /// GitHub did not report the organization's base permission.
+    #[default]
     MaybeMembers,
 }
 /// What checking a candidate settings repository found. Nothing was written.
@@ -758,9 +764,22 @@ pub enum Readers {
 pub struct SettingsRepositoryCheck {
     pub repository: SettingsRepository,
     pub organization: bool,
-    pub readers: Readers,
     /// Set when the repository already holds shared settings: this machine joins it.
     pub joining: Option<Joining>,
+}
+/// Sync with the settings repository chosen on this machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub repository: SettingsRepository,
+    /// When a pass last reached GitHub, and how many files it pulled and pushed.
+    pub synced_at: Option<i64>,
+    pub pulled: usize,
+    pub pushed: usize,
+    pub next_pull_at: Option<i64>,
+    /// Why the latest pass failed, in Git's words; cleared by one that succeeds.
+    pub error: Option<String>,
+    /// Shared files saved here since they were last synced.
+    pub waiting: usize,
 }
 /// What a repository holds beside what this machine has, before joining it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2480,6 +2499,9 @@ pub enum Command {
         repository: String,
         with: JoinWith,
     },
+    /// Runs a sync pass with the settings repository at once; answers with nothing. Only the
+    /// human's client sends it.
+    SyncNow,
     /// Read-only: a skill's history, newest first, each entry with why it could not be read
     /// when it cannot.
     SkillHistory {
