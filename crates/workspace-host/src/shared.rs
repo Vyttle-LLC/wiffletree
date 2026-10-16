@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Map;
 use std::io::Write as _;
 
-const FOLDER: &str = "shared";
+pub(crate) const FOLDER: &str = "shared";
 const FORMAT: &str = "wiffletree.json";
 pub(crate) const REVIEW: &str = "settings/review.json";
 pub(crate) const GUIDE: &str = "settings/model-guide.md";
@@ -33,6 +33,17 @@ pub(crate) struct SharedStore {
     root: PathBuf,
 }
 impl SharedStore {
+    pub(crate) fn at(root: PathBuf) -> Self {
+        Self { root }
+    }
+    /// The shared folder of the data folder `home`.
+    pub(crate) fn of(home: &Path) -> Self {
+        Self::at(home.join(FOLDER))
+    }
+    /// Whether the folder names its format, as a set-up settings repository does.
+    pub(crate) fn holds_settings(&self) -> bool {
+        self.exists(FORMAT)
+    }
     pub(crate) fn skills_folder(&self) -> PathBuf {
         self.root.join("skills")
     }
@@ -119,9 +130,7 @@ impl SharedStore {
 }
 impl Host {
     pub(crate) fn shared(&self) -> SharedStore {
-        SharedStore {
-            root: self.home.join(FOLDER),
-        }
+        SharedStore::of(&self.home)
     }
     /// Copies each shared setting that has no file yet from where it was saved before the
     /// shared folder, exactly as saved, and moves the skills folder in. `wiffletree.json` is

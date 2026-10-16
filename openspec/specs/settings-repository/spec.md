@@ -5,6 +5,13 @@ Keeps the settings the human chose to share in one folder on every machine, so a
 
 ## Requirements
 
+### Requirement: Shared settings and settings that stay on this machine
+The shared settings SHALL be: the skills, with the human's rules, rewrites, their bases and their history; the verification setting, with its verifiers, review levels, rounds per review and reviews per ticket; the model guide; the two check-in thresholds; and the PR keeper's triggers, quiet period and review level. Every other setting SHALL stay on this machine, including the providers and their allowed models, the providers per role, the PR keeper's model, the workspace folder, the allowed owners, the settings repository chosen, the repositories and their checks commands, and appearance. Credentials, the database, conversations, projects and tickets SHALL NOT be shared, and the host SHALL NOT write them to the shared folder.
+
+#### Scenario: What a second machine receives
+- **WHEN** a machine joins a settings repository set up by another machine that allows `Sage-Social` and has Codex enabled
+- **THEN** it gets the other machine's review levels, guide, check-in thresholds, keeper triggers and skills, and its own allowed owners, providers, models and workspace folder are unchanged
+
 ### Requirement: Shared settings live in one folder on every machine
 The host SHALL keep the shared settings in `<data folder>/shared/`, with or without a settings repository: `wiffletree.json` naming the folder's format, `settings/review.json`, `settings/model-guide.md`, `settings/check-ins.json`, `settings/pr-keeper.json`, and `skills/` in the skills layout. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. JSON files SHALL be written with sorted keys, and a write SHALL keep fields this release does not know. A missing file SHALL mean that setting's default. At the first start of this release, the host SHALL copy each shared setting that has no file yet from where it was saved, exactly as saved, and SHALL move `<data folder>/skills/` into the shared folder. It SHALL leave the old values in place, no longer read. Nothing SHALL create `logs/` or `tickets/`.
 
