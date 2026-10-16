@@ -19,6 +19,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = 
 gpui-component = { version = "=0.7.1", features = ["tree-sitter-languages"] }
 async-channel = "2.5"
 libc = "0.2"
+# The Markdown parser gpui-component renders with, to find file references in messages.
+markdown = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 objc = "0.2"
 sha2 = "0.11"
