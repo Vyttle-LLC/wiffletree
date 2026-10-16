@@ -398,6 +398,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
+                    .children(self.sync_mark(p))
                     .child(
                         div()
                             .id("version")
@@ -417,6 +418,37 @@ impl Workspace {
                     )
                     .child(self.appearance_menu(cx)),
             )
+    }
+
+    /// While a settings repository is chosen, how sync is doing; it opens Settings at its section.
+    fn sync_mark(&self, p: Palette) -> Option<Stateful<Div>> {
+        let snapshot = self.snapshot.as_ref()?;
+        let status = snapshot.settings_sync.as_ref()?;
+        let (notes, now) = (&snapshot.workspace_notes, now());
+        let mark = settings::Mark::of(status, notes.len(), now);
+        let tint = mark.tint(p);
+        let tooltip = mark.tooltip(status, notes);
+        let bridge = self.bridge.clone();
+        Some(
+            div()
+                .id("sync-mark")
+                .flex()
+                .items_center()
+                .gap_1()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(tint.unwrap_or(p.subtle))
+                .when_some(tint, |d, tint| d.bg(tint.opacity(0.12)))
+                .child(icon(mark.icon()).size(px(13.)))
+                .child(mark.label(status, now))
+                .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
+                .on_click(move |_, _, cx| {
+                    settings::Settings::open_at_repository(bridge.clone(), cx)
+                }),
+        )
     }
 
     /// What the downloaded release brings, with its changelog and the restart that installs it.

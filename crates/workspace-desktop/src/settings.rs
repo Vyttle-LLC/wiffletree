@@ -5,11 +5,12 @@ mod repository;
 use super::*;
 use gpui_component::{ActiveTheme, Disableable};
 use repository::Confirm;
+pub(super) use repository::{Mark, share_sync};
 use ui::{hint, icon, mono, section, segment, setting};
 
 /// The open Settings window, so ⌘, focuses it instead of opening a second one.
-#[derive(Clone, Copy)]
-struct SettingsWindow(WindowHandle<Root>);
+#[derive(Clone)]
+struct SettingsWindow(WindowHandle<Root>, WeakEntity<Settings>);
 impl Global for SettingsWindow {}
 
 pub(super) struct Settings {
@@ -18,9 +19,12 @@ pub(super) struct Settings {
     folder_error: Option<String>,
     check_in_error: Option<String>,
     choosing_folder: bool,
+    scroll: ScrollHandle,
     repository_input: Entity<InputState>,
     /// The repository as the human named it, and what checking it found.
     checked: Option<(String, SettingsRepositoryCheck)>,
+    /// The machine whose settings this Mac took when it joined, while the window stays open.
+    joined_from: Option<String>,
     repository_error: Option<String>,
     /// A repository request is waiting for the host.
     asking: bool,
@@ -35,14 +39,25 @@ const COORDINATOR_TURNS: [u32; 5] = [50, 100, 250, 500, 1000];
 impl Settings {
     /// Focuses the Settings window, opening it first if none is open.
     pub(super) fn open(bridge: Bridge, cx: &mut App) {
-        if let Some(SettingsWindow(handle)) = cx.try_global::<SettingsWindow>().copied()
+        Self::open_at(bridge, false, cx);
+    }
+    /// Opens Settings scrolled to the Settings repository section, as the sync mark does.
+    pub(super) fn open_at_repository(bridge: Bridge, cx: &mut App) {
+        Self::open_at(bridge, true, cx);
+    }
+    fn open_at(bridge: Bridge, at_repository: bool, cx: &mut App) {
+        if let Some(SettingsWindow(handle, view)) = cx.try_global::<SettingsWindow>().cloned()
             && handle
                 .update(cx, |_, window, _| window.activate_window())
                 .is_ok()
         {
+            if at_repository {
+                let _ = view.update(cx, |view, cx| view.show_repository(cx));
+            }
             return;
         }
         let bounds = Bounds::centered(None, size(px(560.), px(820.)), cx);
+        let mut settings = None;
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -63,22 +78,37 @@ impl Settings {
                         folder_error: None,
                         check_in_error: None,
                         choosing_folder: false,
+                        scroll: ScrollHandle::new(),
                         repository_input,
                         checked: None,
+                        joined_from: None,
                         repository_error: None,
                         asking: false,
                         confirming: None,
                     };
                     view.ask_host(Command::Settings, cx);
+                    view.refresh_sync(cx);
+                    cx.observe_global::<repository::SyncShown>(|_, cx| cx.notify())
+                        .detach();
+                    if at_repository {
+                        view.show_repository(cx);
+                    }
                     view
                 });
+                settings = Some(view.downgrade());
                 cx.new(|cx| Root::new(view, window, cx))
             },
         );
-        match opened {
-            Ok(handle) => cx.set_global(SettingsWindow(handle)),
-            Err(error) => eprintln!("Opening Settings: {error:#}"),
+        match (opened, settings) {
+            (Ok(handle), Some(view)) => cx.set_global(SettingsWindow(handle, view)),
+            (Err(error), _) => eprintln!("Opening Settings: {error:#}"),
+            (Ok(_), None) => {}
         }
+    }
+
+    fn show_repository(&mut self, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_top_of_item(repository::SECTION);
+        cx.notify();
     }
 
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -333,6 +363,7 @@ impl Render for Settings {
                     .id("settings-body")
                     .size_full()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .p_5()
                     .flex()
                     .flex_col()

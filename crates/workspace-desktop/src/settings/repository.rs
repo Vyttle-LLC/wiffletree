@@ -1,14 +1,23 @@
-//! The Settings repository section: naming a repository and setting it up.
+//! The Settings repository section: naming a repository and setting it up or joining it, sync's
+//! status and stopping it, and the sync mark the sidebar footer shows.
 mod choose;
+mod join;
+mod synced;
 
 use super::*;
 use gpui_component::button::ButtonVariants;
+pub(crate) use synced::{Mark, SyncShown, share_sync};
 use ui::pill;
+
+/// The section's place among the scrolled body's children: three sections and their rules.
+pub(super) const SECTION: usize = 6;
 
 /// What asks first; Cancel sends nothing.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Confirm {
     SetUp,
+    Replace,
+    Stop,
 }
 
 fn owner(repository: &SettingsRepository) -> &str {
@@ -47,7 +56,7 @@ fn who_can_read(repository: &SettingsRepository) -> (String, bool) {
 }
 
 /// The question, then what it means. Choosing a repository is what lets Wiffletree push to it,
-/// so this names it, its branch and who can read it.
+/// so both ways of choosing one name it, its branch and who can read it.
 fn confirmation(confirm: Confirm, repository: &SettingsRepository) -> Vec<String> {
     let (name, branch) = (&repository.name, &repository.branch);
     let then =
@@ -63,19 +72,34 @@ fn confirmation(confirm: Confirm, repository: &SettingsRepository) -> Vec<String
             only,
             readers,
         ],
+        Confirm::Replace => vec![
+            format!("Replace the settings in {name} with this Mac’s?"),
+            format!(
+                "Wiffletree pushes this Mac’s shared settings over the repository’s to {branch} in one commit, and the repository’s stay in its history. It {then}"
+            ),
+            only,
+            readers,
+        ],
+        Confirm::Stop => vec![
+            format!("Stop syncing with {name}?"),
+            "This Mac keeps every setting as it is and stops pulling and pushing. Nothing changes on GitHub.".into(),
+            "The notes about paused settings close. To sync again, name the repository and join it.".into(),
+        ],
     }
 }
 
 impl Settings {
     pub(super) fn repository_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let shown = cx.try_global::<SyncShown>().cloned().unwrap_or_default();
         let chosen = (self.host.as_ref()).and_then(|h| h.settings_repository.as_ref());
         let section = div().flex().flex_col().gap_2();
-        let section = match chosen {
-            Some(repository) => section.child(heading("Syncing", p.subtle, p)).child(mono(
-                format!("{} · {}", repository.name, repository.branch),
-                p,
-            )),
-            None => self.choose_view(section, p, cx),
+        let section = match (chosen, &shown.status, &self.checked) {
+            (Some(_), Some(status), _) => self.synced_view(section, status, &shown, p, cx),
+            (Some(_), None, _) => section.child(heading("…", p.subtle, p)),
+            (None, _, Some((_, check))) if check.joining.is_some() => {
+                self.join_view(section, check, p, cx)
+            }
+            (None, ..) => self.choose_view(section, p, cx),
         };
         section
             .children((self.repository_error.clone()).map(|error| hint(error, p).text_color(p.red)))
@@ -83,7 +107,14 @@ impl Settings {
 
     /// Asks the host about the repository, or acts on it, and shows its answer or error.
     fn ask_repository(&mut self, command: Command, cx: &mut Context<Self>) {
+        let joined_from = match (&command, &self.checked) {
+            (Command::JoinSettingsRepository { .. }, Some((_, check))) => {
+                (check.joining.as_ref()).map(|joining| joining.last_machine.clone())
+            }
+            _ => None,
+        };
         let checking = matches!(command, Command::CheckSettingsRepository { .. });
+        let answers_settings = !checking && !matches!(command, Command::SyncNow);
         self.repository_error = None;
         let receiver = match self.bridge.request(command) {
             Ok(receiver) => receiver,
@@ -100,15 +131,18 @@ impl Settings {
                     if checking {
                         let check = serde_json::from_value(value).map_err(|e| e.to_string())?;
                         view.checked = Some((input, check));
-                    } else {
+                    } else if answers_settings {
                         let settings = serde_json::from_value(value).map_err(|e| e.to_string())?;
                         view.host = Some(settings);
                         view.checked = None;
+                        view.joined_from = joined_from;
                     }
                     Ok(())
                 });
-                if let Err(error) = shown {
-                    view.repository_error = Some(error);
+                match shown {
+                    Ok(()) if !checking => view.refresh_sync(cx),
+                    Ok(()) => {}
+                    Err(error) => view.repository_error = Some(error),
                 }
                 cx.notify();
             });
@@ -128,16 +162,31 @@ impl Settings {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let (input, check) = self.checked.as_ref()?;
+        let act = button("confirm-repository");
         let (repository, command, act) = match confirm {
-            Confirm::SetUp => (
-                &check.repository,
-                Command::SetUpSettingsRepository {
-                    repository: input.clone(),
-                },
-                button("confirm-repository")
-                    .primary()
-                    .label("Set up and sync"),
+            Confirm::SetUp | Confirm::Replace => {
+                let (input, check) = self.checked.as_ref()?;
+                let repository = input.clone();
+                match confirm {
+                    Confirm::SetUp => (
+                        &check.repository,
+                        Command::SetUpSettingsRepository { repository },
+                        act.primary().label("Set up and sync"),
+                    ),
+                    _ => (
+                        &check.repository,
+                        Command::JoinSettingsRepository {
+                            repository,
+                            with: JoinWith::ThisMachine,
+                        },
+                        act.danger().label("Replace and sync"),
+                    ),
+                }
+            }
+            Confirm::Stop => (
+                self.host.as_ref()?.settings_repository.as_ref()?,
+                Command::StopSettingsSync,
+                act.danger().label("Stop syncing"),
             ),
         };
         let mut text = confirmation(confirm, repository).into_iter();
@@ -262,16 +311,18 @@ mod tests {
             branch: "main".into(),
             readers: Readers::Invited,
         };
-        let text = confirmation(Confirm::SetUp, &repository).join(" ");
-        for said in [
-            "MHohlios/wiffletree-storage",
-            "to main",
-            "pushes there by itself",
-            "only to this repository’s main branch",
-            "Owners you allowed for pull requests aren’t affected, and don’t cover this.",
-            "Only you and people you invite can read",
-        ] {
-            assert!(text.contains(said), "{said} in {text}");
+        for confirm in [Confirm::SetUp, Confirm::Replace] {
+            let text = confirmation(confirm, &repository).join(" ");
+            for said in [
+                "MHohlios/wiffletree-storage",
+                "to main",
+                "pushes there by itself",
+                "only to this repository’s main branch",
+                "Owners you allowed for pull requests aren’t affected, and don’t cover this.",
+                "Only you and people you invite can read",
+            ] {
+                assert!(text.contains(said), "{said} in {text}");
+            }
         }
         repository.name = "Sage-Social/wiffletree-storage".into();
         repository.readers = Readers::EveryMember;

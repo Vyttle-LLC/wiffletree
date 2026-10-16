@@ -213,6 +213,10 @@ const DRAWINGS: &[(&str, &str)] = &[
         r#"<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5a5 5 0 0 1 4.5 5"/>"#,
     ),
     (
+        "cloud-off",
+        r#"<path d="M3 3l18 18"/><path d="M8 8a5 5 0 0 0-1 9.9h10M20 16.5A4 4 0 0 0 17 10h-1A6 6 0 0 0 10.6 6.2"/>"#,
+    ),
+    (
         "laptop",
         r#"<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>"#,
     ),
