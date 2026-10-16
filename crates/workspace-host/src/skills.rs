@@ -16,9 +16,12 @@ pub fn stock(skill: Skill) -> &'static str {
         Skill::KeepingAPr => include_str!("../skills/stock/keeping-a-pr.md"),
     }
 }
-/// The version on the stock text's first line, as "v1" in "# Implementing — v1".
 pub fn stock_version(skill: Skill) -> &'static str {
-    let first = stock(skill).lines().next().unwrap_or_default();
+    version(stock(skill))
+}
+/// The version on a bundled text's first line, as "v1" in "# Implementing — v1".
+pub fn version(text: &str) -> &str {
+    let first = text.lines().next().unwrap_or_default();
     first.rsplit_once(" — ").map_or("", |(_, version)| version)
 }
 /// What a history entry records: the skill's whole state after a change, and the change.

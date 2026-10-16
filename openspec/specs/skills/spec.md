@@ -78,3 +78,14 @@ The host SHALL keep skills in a `skills` folder in its data folder, one folder p
 #### Scenario: A file that cannot be read
 - **WHEN** Implementing's rules file is not valid UTF-8
 - **THEN** implementers get the stock text with no rules, and Implementing's page says its file could not be read
+
+### Requirement: The Skills page
+The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · out of date"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
+
+#### Scenario: Opening the page
+- **WHEN** the human chooses Skills in the sidebar
+- **THEN** the page lists Coordinating, Implementing, Reviewing and Keeping a PR with their states, and the fixed core marked read-only
+
+#### Scenario: The fixed core
+- **WHEN** the human opens the fixed core
+- **THEN** its text is shown with no editor and no Reset
