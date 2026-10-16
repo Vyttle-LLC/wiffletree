@@ -2384,6 +2384,11 @@ pub enum Command {
         skill: Skill,
         entry: String,
     },
+    /// Read-only: a skill's history, newest first, each entry with why it could not be read
+    /// when it cannot.
+    SkillHistory {
+        skill: Skill,
+    },
     /// Saves or, with none, removes a repository's checks command; answers with the
     /// `Repository`. Only the human's client sends it.
     SetRepositoryChecks {

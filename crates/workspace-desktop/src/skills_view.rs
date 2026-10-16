@@ -1,16 +1,23 @@
 //! The Skills page: the four skills and the fixed core, and each skill's page, where the human
-//! adds their own rules after the stock text. No agent tool reaches what this page changes.
+//! adds their own rules after the stock text, resets it to stock and restores an earlier
+//! version from its history. No agent tool reaches what this page changes.
 use super::*;
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
 use ui::{card, eyebrow, hint, icon, pill};
-use workspace_host::{provider::CORE, skills::version};
+use workspace_host::{
+    provider::CORE,
+    skills::{Change, Entry, Recorded, version},
+};
 
-/// What the Skills page shows: the list, the fixed core at one of its parts, or one skill.
+/// What the Skills page shows: the list, the fixed core at one of its parts, one skill or its
+/// history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SkillView {
     List,
     Core(usize),
     Skill(Skill),
+    History(Skill),
 }
 
 const CORE_NAMES: [&str; 5] = [
@@ -32,6 +39,8 @@ const NOT_ENFORCED: &str = "Not enforced: an agent's shell isn't sandboxed, so i
 /// whatever its text says, and what its text decides.
 struct About {
     roles: &'static str,
+    /// Who is left with the stock text once the human's rules stop applying.
+    gets: &'static str,
     enforced: &'static [&'static str],
     decides: &'static [&'static str],
 }
@@ -40,6 +49,7 @@ fn about(skill: Skill) -> About {
     match skill {
         Skill::Coordinating => About {
             roles: "Project coordinator",
+            gets: "The project coordinator gets",
             enforced: &[
                 "Only the models allowed on this machine",
                 "Every verifier of the chosen level runs, and all must pass",
@@ -57,6 +67,7 @@ fn about(skill: Skill) -> About {
         },
         Skill::Implementing => About {
             roles: "Implementers and maintenance agents",
+            gets: "Implementers and maintenance agents get",
             enforced: &[
                 "One ticket, in its own worktree and branch",
                 "\u{201c}Ready for testing\u{201d} is refused with uncommitted files",
@@ -72,6 +83,7 @@ fn about(skill: Skill) -> About {
         },
         Skill::Reviewing => About {
             roles: "Testers and reviewers",
+            gets: "Testers and reviewers get",
             enforced: &[
                 "Every verifier of the chosen level runs, and all must pass",
                 "Findings carry a severity, a location, a trigger and evidence",
@@ -86,6 +98,7 @@ fn about(skill: Skill) -> About {
         },
         Skill::KeepingAPr => About {
             roles: "PR keeper",
+            gets: "The PR keeper gets",
             enforced: &[
                 "Only the conflicted files, or the PR's files, change",
                 "The repository's checks and a review run before a push",
@@ -97,14 +110,14 @@ fn about(skill: Skill) -> About {
     }
 }
 
-/// "Stock", or "Stock and N of your rules", counting each line with text as a rule.
+/// Each line with text is a rule, so rules of blank lines alone are none.
+fn rule_count(rules: &str) -> usize {
+    rules.lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+/// "Stock", or "Stock and N of your rules".
 fn state_label(state: &SkillState) -> String {
-    match state
-        .rules
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
-    {
+    match rule_count(&state.rules) {
         0 => "Stock".into(),
         rules => format!("Stock and {rules} of your rules"),
     }
@@ -112,12 +125,72 @@ fn state_label(state: &SkillState) -> String {
 
 /// Grey at stock, in the focus color once the human has rules.
 fn state_pill(state: &SkillState, p: Palette) -> Div {
-    let color = if state.rules.is_empty() {
-        p.subtle
-    } else {
-        p.focus
+    let color = match rule_count(&state.rules) {
+        0 => p.subtle,
+        _ => p.focus,
     };
     pill(state_label(state), color)
+}
+
+/// Reset to stock's question, what stops applying, and that it stays in the history.
+fn reset_question(state: &SkillState) -> [String; 3] {
+    let skill = state.skill;
+    let rules = match rule_count(&state.rules) {
+        0 => "Your rules stop".into(),
+        1 => "Your 1 rule stops".into(),
+        count => format!("Your {count} rules stop"),
+    };
+    [
+        format!("Reset {} to stock?", skill.name()),
+        format!(
+            "{rules} applying from each agent's next turn. {} the stock text only.",
+            about(skill).gets
+        ),
+        "Your rules stay in the history, where you can restore them.".into(),
+    ]
+}
+
+/// When a history entry was written, from its name.
+fn written_at(name: &str) -> Option<DateTime<Local>> {
+    let at = NaiveDateTime::parse_from_str(name, "%Y-%m-%dT%H-%M-%S%.3fZ").ok()?;
+    Some(at.and_utc().with_timezone(&Local))
+}
+
+/// "14 Oct 09:12", or the entry's name when it is not a time.
+fn entry_time(name: &str) -> String {
+    written_at(name).map_or(name.into(), |at| at.format("%-d %b %H:%M").to_string())
+}
+
+/// "Today 08:00", "Yesterday 17:30" or "13 Oct 10:15".
+fn when(at: DateTime<Local>, today: NaiveDate) -> String {
+    let time = at.format("%H:%M");
+    match at.date_naive() {
+        day if day == today => format!("Today {time}"),
+        day if Some(day) == today.pred_opt() => format!("Yesterday {time}"),
+        _ => at.format("%-d %b %H:%M").to_string(),
+    }
+}
+
+/// What happened, as "New stock version v1 → v2".
+fn entry_title(entry: &Entry) -> String {
+    match &entry.change {
+        Change::SavedRules => "Saved your rules".into(),
+        Change::ResetToStock => "Reset to stock".into(),
+        Change::Restored { entry } => format!("Restored the version of {}", entry_time(entry)),
+        Change::NewStockVersion { previous } => {
+            format!("New stock version {previous} → {}", entry.stock_version)
+        }
+    }
+}
+
+/// The state the entry holds, as "2 rules · stock v1".
+fn entry_detail(entry: &Entry) -> String {
+    let rules = match rule_count(&entry.rules) {
+        0 => "No rules of your own".into(),
+        1 => "1 rule".into(),
+        count => format!("{count} rules"),
+    };
+    format!("{rules} · stock {}", entry.stock_version)
 }
 
 /// A count with its thousands grouped, as "40,000".
@@ -160,9 +233,52 @@ impl Workspace {
                 input.set_value(rules.unwrap_or_default(), window, cx)
             });
             self.stock_unfolded = false;
+            self.confirming_reset = false;
+        }
+        if let SkillView::History(skill) = view {
+            self.skill_history.clear();
+            self.viewed_entry = None;
+            self.request(Command::SkillHistory { skill }, window, cx);
         }
         self.skill_view = view;
         cx.notify();
+    }
+
+    fn shows_skill(&self, skill: Skill) -> bool {
+        matches!(self.skill_view, SkillView::Skill(s) | SkillView::History(s) if s == skill)
+    }
+
+    /// The host's answer to a reset or a restore: the editor takes the skill's new rules, and an
+    /// open history gains the entry.
+    pub(super) fn skill_replaced(
+        &mut self,
+        state: SkillState,
+        command: &Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let skill = state.skill;
+        if self.shows_skill(skill) {
+            let rules = state.rules.clone();
+            (self.skill_rules).update(cx, |input, cx| input.set_value(rules, window, cx));
+        }
+        self.skill_saved(state);
+        let done = match command {
+            Command::RestoreSkill { entry, .. } => {
+                format!("Restored the version of {}", entry_time(entry))
+            }
+            _ => format!("{} is back to stock", skill.name()),
+        };
+        self.toast(done, window, cx);
+        if self.skill_view == SkillView::History(skill) {
+            self.request(Command::SkillHistory { skill }, window, cx);
+        }
+    }
+
+    pub(super) fn history_arrived(&mut self, skill: Skill, history: Vec<Recorded>) {
+        if self.skill_view == SkillView::History(skill) {
+            self.skill_history = history;
+        }
     }
 
     /// Before `snapshot` replaces the current one: an editor without unsaved edits follows the
@@ -207,6 +323,7 @@ impl Workspace {
                 Some(state) => self.skill_page(state, p, cx),
                 None => self.skills_list(p, cx),
             },
+            SkillView::History(skill) => self.history_page(skill, p, cx),
             SkillView::List => self.skills_list(p, cx),
         }
     }
@@ -280,22 +397,30 @@ impl Workspace {
             .child(hint(who, p).text_size(px(11.)))
     }
 
-    /// "Skills · <name>", where Skills goes back to the list.
+    /// "Skills · <name>", where Skills goes back to the list, or "Skills · <skill> · History",
+    /// where the skill goes back to its page.
     fn skills_crumb(&self, name: &'static str, p: Palette, cx: &mut Context<Self>) -> Div {
-        div()
+        let link = |id: &'static str, view: SkillView, label: &'static str| {
+            div()
+                .id(id)
+                .text_color(p.focus)
+                .cursor_pointer()
+                .on_click(cx.listener(move |v, _, w, c| v.open_skill(view, w, c)))
+                .child(label)
+        };
+        let crumb = div()
             .flex()
             .gap_1()
             .text_size(px(11.))
             .text_color(p.subtle)
-            .child(
-                div()
-                    .id("skills-crumb")
-                    .text_color(p.focus)
-                    .cursor_pointer()
-                    .on_click(cx.listener(|v, _, w, c| v.open_skill(SkillView::List, w, c)))
-                    .child("Skills"),
-            )
-            .child(format!("· {name}"))
+            .child(link("skills-crumb", SkillView::List, "Skills"));
+        match self.skill_view {
+            SkillView::History(skill) => crumb
+                .child("·")
+                .child(link("skill-crumb", SkillView::Skill(skill), name))
+                .child("· History"),
+            _ => crumb.child(format!("· {name}")),
+        }
     }
 
     fn skill_heading(glyph: &'static str, name: &'static str, state: Div) -> Div {
@@ -362,12 +487,31 @@ impl Workspace {
         let order = format!(
             "Each agent gets the contract, then its role's core, then {name}'s stock text, then your own rules."
         );
-        div()
+        // Nothing to reset: no rules, and no file that could not be read.
+        let at_stock = state.rules.is_empty() && state.unreadable.is_none();
+        let actions = [
+            button("skill-history").ghost().label("History").on_click(
+                cx.listener(move |v, _, w, c| v.open_skill(SkillView::History(skill), w, c)),
+            ),
+            button("reset-skill")
+                .ghost()
+                .label("Reset to stock")
+                .disabled(at_stock)
+                .on_click(cx.listener(|v, _, _, c| {
+                    v.confirming_reset = true;
+                    c.notify();
+                })),
+        ];
+        let page = div()
             .flex()
             .flex_col()
             .gap_3()
             .child(self.skills_crumb(name, p, cx))
-            .child(Self::skill_heading("book", name, state_pill(state, p)))
+            .child(
+                Self::skill_heading("book", name, state_pill(state, p))
+                    .child(div().flex_1())
+                    .children(actions),
+            )
             .child(hint(format!("{} · stock {version}", about(skill).roles), p))
             .child(
                 div()
@@ -388,7 +532,199 @@ impl Workspace {
                 d.child(hint(PR_RULES_HINT, p))
             })
             .child(hint(order, p))
-            .child(Self::enforced_boxes(skill, p))
+            .child(Self::enforced_boxes(skill, p));
+        if !self.confirming_reset {
+            return page;
+        }
+        div().relative().child(page.opacity(0.35)).child(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .justify_center()
+                .pt(px(120.))
+                .child(Self::reset_dialog(state, p, cx)),
+        )
+    }
+
+    /// Reset asks first; Cancel sends nothing.
+    fn reset_dialog(state: &SkillState, p: Palette, cx: &mut Context<Self>) -> Div {
+        let skill = state.skill;
+        let [ask, stops, kept] = reset_question(state);
+        let close = |v: &mut Self, c: &mut Context<Self>| {
+            v.confirming_reset = false;
+            c.notify();
+        };
+        div().w(px(380.)).h_full().flex().flex_col().child(
+            div()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded_xl()
+                .border_1()
+                .border_color(p.edge)
+                .bg(p.surface)
+                .shadow_lg()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(ask),
+                )
+                .child(hint(stops, p))
+                .child(hint(kept, p))
+                .child(
+                    div()
+                        .pt_2()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            button("cancel-reset")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(cx.listener(move |v, _, _, c| close(v, c))),
+                        )
+                        .child(
+                            button("confirm-reset")
+                                .danger()
+                                .label("Reset to stock")
+                                .on_click(cx.listener(move |v, _, w, c| {
+                                    close(v, c);
+                                    v.request(Command::ResetSkill { skill }, w, c);
+                                })),
+                        ),
+                ),
+        )
+    }
+
+    /// Newest first, each entry with View and, before the current one, Restore.
+    fn history_page(&self, skill: Skill, p: Palette, cx: &mut Context<Self>) -> Div {
+        let today = Local::now().date_naive();
+        let crumb = self.skills_crumb(skill.name(), p, cx);
+        let entries: Vec<_> = (self.skill_history.iter().enumerate())
+            .map(|(index, recorded)| {
+                let at =
+                    written_at(&recorded.name).map_or(recorded.name.clone(), |at| when(at, today));
+                self.history_entry(skill, recorded, at, index == 0, p, cx)
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(crumb)
+            .child(Self::skill_heading(
+                "history",
+                "History",
+                hint("newest first", p),
+            ))
+            .when(self.skill_history.is_empty(), |d| {
+                d.child(hint(
+                    "No changes yet. Each save, reset and restore adds an entry.",
+                    p,
+                ))
+            })
+            .child(div().flex().flex_col().children(entries))
+    }
+
+    fn history_entry(
+        &self,
+        skill: Skill,
+        recorded: &Recorded,
+        at: String,
+        current: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let name = recorded.name.clone();
+        let viewed = self.viewed_entry.as_ref() == Some(&name);
+        let action = |id: &str, label: &'static str| {
+            div()
+                .id(SharedString::from(format!("{id}-{name}")))
+                .text_color(p.focus)
+                .cursor_pointer()
+                .child(label)
+        };
+        let (title, detail, actions, text) = match &recorded.entry {
+            Ok(entry) => {
+                let shown = name.clone();
+                let view = action("view-entry", if viewed { "Hide" } else { "View" }).on_click(
+                    cx.listener(move |v, _, _, c| {
+                        v.viewed_entry = (!viewed).then(|| shown.clone());
+                        c.notify();
+                    }),
+                );
+                let entry_name = name.clone();
+                let restore =
+                    action("restore-entry", "Restore").on_click(cx.listener(move |v, _, w, c| {
+                        let entry = entry_name.clone();
+                        v.request(Command::RestoreSkill { skill, entry }, w, c);
+                    }));
+                let text = match entry.rules.as_str() {
+                    "" => "No rules of your own: agents got the stock text alone.".into(),
+                    rules => rules.to_owned(),
+                };
+                (
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(entry_title(entry)),
+                        )
+                        .when(current, |d| d.child(pill("current", p.focus))),
+                    hint(entry_detail(entry), p),
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(view)
+                        .when(!current, |d| d.child(restore)),
+                    viewed.then_some(text),
+                )
+            }
+            Err(error) => (
+                div().text_color(p.red).child("Could not be read"),
+                hint(format!("{name}.json: {error}"), p),
+                div(),
+                None,
+            ),
+        };
+        div()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .border_t_1()
+            .border_color(p.edge.opacity(0.3))
+            .text_size(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(104.))
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(p.subtle)
+                            .child(at),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(title)
+                            .child(detail),
+                    )
+                    .child(actions),
+            )
+            .children(text.map(|text| Self::read_only_text(text, p)))
     }
 
     /// The human's rules with Save and Discard, as on the Models page. The host refuses a text
@@ -487,7 +823,7 @@ impl Workspace {
         let (title, from, lines) = match skill {
             Skill::Reviewing => {
                 let levels =
-                    (self.verifiers.read(cx).verification()).map_or(&[][..], |v| &v.levels);
+                    (self.verifiers.read(cx).saved_verification()).map_or(&[][..], |v| &v.levels);
                 let lines = levels.iter().map(|level| {
                     format!(
                         "{} · {} · {}",
@@ -541,9 +877,113 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{CORE, core_tab, grouped, state_label};
+    use super::{
+        CORE, core_tab, entry_title, grouped, reset_question, state_label, when, written_at,
+    };
+    use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{Command, Role, Skill, SkillState};
-    use workspace_host::Host;
+    use workspace_host::{
+        Host,
+        skills::{Change, Entry, Recorded},
+    };
+
+    fn listing(host: &mut Host, skill: Skill) -> Vec<Recorded> {
+        serde_json::from_value(host.execute(Command::SkillHistory { skill }).unwrap()).unwrap()
+    }
+
+    fn titles(history: &[Recorded]) -> Vec<String> {
+        let title = |r: &Recorded| entry_title(r.entry.as_ref().unwrap());
+        history.iter().map(title).collect()
+    }
+
+    #[test]
+    fn rules_of_blank_lines_alone_are_stock() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        host.skills()
+            .save_rules(Skill::Implementing, "\n  \n\t\n")
+            .unwrap();
+        let state = host.skills().state(Skill::Implementing);
+        assert_eq!(state_label(&state), "Stock");
+    }
+
+    #[test]
+    fn resetting_from_the_page_names_the_rules_and_restoring_brings_them_back() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        let rules = "Write PR descriptions with a Summary and a Testing section\nRun clippy\nKeep commits small";
+        host.skills()
+            .save_rules(Skill::Implementing, rules)
+            .unwrap();
+        let state = host.skills().state(Skill::Implementing);
+        assert_eq!(
+            reset_question(&state),
+            [
+                "Reset Implementing to stock?",
+                "Your 3 rules stop applying from each agent's next turn. Implementers and maintenance agents get the stock text only.",
+                "Your rules stay in the history, where you can restore them.",
+            ]
+        );
+
+        let reset = Command::ResetSkill {
+            skill: Skill::Implementing,
+        };
+        let state: SkillState = serde_json::from_value(host.execute(reset).unwrap()).unwrap();
+        assert_eq!(state_label(&state), "Stock");
+        assert!(
+            !host
+                .instructions(Role::Implementer)
+                .contains("Keep commits small")
+        );
+        let history = listing(&mut host, Skill::Implementing);
+        assert_eq!(titles(&history), ["Reset to stock", "Saved your rules"]);
+        assert_eq!(history[1].entry.as_ref().unwrap().rules, rules);
+
+        // Restoring the entry from before the reset, as its Restore does.
+        let entry = history[1].name.clone();
+        let restore = Command::RestoreSkill {
+            skill: Skill::Implementing,
+            entry: entry.clone(),
+        };
+        host.execute(restore).unwrap();
+        assert!(host.instructions(Role::Implementer).ends_with(rules));
+        let history = listing(&mut host, Skill::Implementing);
+        let restored = format!("Restored the version of {}", super::entry_time(&entry));
+        assert_eq!(
+            titles(&history),
+            [restored.as_str(), "Reset to stock", "Saved your rules"]
+        );
+    }
+
+    #[test]
+    fn an_update_reads_as_a_new_stock_version_naming_both() {
+        let update = Entry {
+            change: Change::NewStockVersion {
+                previous: "v1".into(),
+            },
+            stock_version: "v2".into(),
+            rules: "Read the tests first".into(),
+        };
+        assert_eq!(entry_title(&update), "New stock version v1 → v2");
+    }
+
+    #[test]
+    fn entries_are_dated_today_yesterday_or_by_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 16).unwrap();
+        let at = |day, hour, minute| {
+            Local
+                .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+                .unwrap()
+        };
+        assert_eq!(when(at(16, 8, 0), today), "Today 08:00");
+        assert_eq!(when(at(15, 17, 30), today), "Yesterday 17:30");
+        assert_eq!(when(at(13, 10, 15), today), "13 Oct 10:15");
+        let written = written_at("2026-10-15T14-03-22.481Z").unwrap();
+        assert_eq!(
+            written.to_utc().to_rfc3339(),
+            "2026-10-15T14:03:22.481+00:00"
+        );
+    }
 
     #[test]
     fn opening_the_page_lists_the_four_skills_with_their_states() {

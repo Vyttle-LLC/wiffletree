@@ -144,6 +144,10 @@ impl VerifierEditor {
     pub(super) fn verification(&self) -> Option<&VerificationSettings> {
         self.verification.as_ref()
     }
+    /// The setting the host has saved; none while it is part of an unsaved setup.
+    pub(super) fn saved_verification(&self) -> Option<&VerificationSettings> {
+        self.verification.as_ref().filter(|_| !self.unsaved)
+    }
     /// Shows `verification` as an unsaved draft, which the page's Save sends.
     pub(super) fn hold_draft(
         &mut self,

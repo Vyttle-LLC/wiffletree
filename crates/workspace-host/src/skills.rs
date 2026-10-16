@@ -45,6 +45,12 @@ pub enum Change {
         previous: String,
     },
 }
+/// A history entry by its name, the time it was written, or why it could not be read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recorded {
+    pub name: String,
+    pub entry: Result<Entry, String>,
+}
 pub struct SkillStore {
     root: PathBuf,
 }
@@ -120,13 +126,25 @@ impl SkillStore {
     pub fn instructions(&self, role: Role) -> String {
         provider::role_instructions(role, &self.state(Skill::for_role(role)))
     }
-    /// Oldest first, each entry with its name, the time it was written. A history or an entry
-    /// that cannot be read counts as none.
+    /// Oldest first, the entries that can be read, each with its name, the time it was written.
     pub fn history(&self, skill: Skill) -> Vec<(String, Entry)> {
-        let Ok(entries) = fs::read_dir(self.folder(skill).join(HISTORY)) else {
+        (self.entries(skill).into_iter())
+            .filter_map(|Recorded { name, entry }| Some((name, entry.ok()?)))
+            .collect()
+    }
+    /// Newest first, as the skill's page lists them.
+    pub fn listing(&self, skill: Skill) -> Vec<Recorded> {
+        let mut entries = self.entries(skill);
+        entries.reverse();
+        entries
+    }
+    /// Oldest first, an entry that cannot be read with why. A history that cannot be read
+    /// counts as none.
+    fn entries(&self, skill: Skill) -> Vec<Recorded> {
+        let Ok(files) = fs::read_dir(self.folder(skill).join(HISTORY)) else {
             return vec![];
         };
-        let mut history = entries
+        let mut entries = files
             .filter_map(|file| {
                 let path = file.ok()?.path();
                 let name = path
@@ -134,11 +152,16 @@ impl SkillStore {
                     .to_str()?
                     .strip_suffix(".json")?
                     .to_owned();
-                Some((name, serde_json::from_slice(&fs::read(&path).ok()?).ok()?))
+                let entry = fs::read(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+                    });
+                Some(Recorded { name, entry })
             })
             .collect::<Vec<_>>();
-        history.sort_by(|a, b| a.0.cmp(&b.0));
-        history
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
     }
     /// Atomically, like `save_settings`; no rules means no file.
     fn write_rules(&self, skill: Skill, rules: &str) -> Result<()> {
@@ -378,6 +401,37 @@ mod tests {
             entry: "../../settings".into(),
         };
         assert!(host.execute(unknown).is_err());
+    }
+
+    #[test]
+    fn the_history_lists_newest_first_and_keeps_an_entry_that_cannot_be_read() {
+        let (_home, mut host) = host();
+        host.skills()
+            .save_rules(Skill::Implementing, "Rule")
+            .unwrap();
+        host.skills().reset(Skill::Implementing).unwrap();
+        let history = host.home.join("skills/implementing/history");
+        fs::write(history.join("2000-01-01T00-00-00.000Z.json"), "not json").unwrap();
+        let listed: Vec<Recorded> = serde_json::from_value(
+            host.execute(Command::SkillHistory {
+                skill: Skill::Implementing,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let changes: Vec<_> = (listed.iter())
+            .map(|recorded| recorded.entry.as_ref().map(|entry| entry.change.clone()))
+            .collect();
+        assert!(
+            matches!(
+                &changes[..],
+                [Ok(Change::ResetToStock), Ok(Change::SavedRules), Err(_)]
+            ),
+            "{changes:?}"
+        );
+        assert_eq!(listed[2].name, "2000-01-01T00-00-00.000Z");
+        // Restoring and the update check still read only the entries that can be read.
+        assert_eq!(host.skills().history(Skill::Implementing).len(), 2);
     }
 
     /// Rewrites the skill's one history entry as a release whose stock was v0 wrote it.

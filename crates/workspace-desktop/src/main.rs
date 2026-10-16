@@ -114,6 +114,11 @@ struct Workspace {
     /// The open skill's rules as the human is editing them.
     skill_rules: Entity<TextareaState>,
     stock_unfolded: bool,
+    /// Reset to stock is asking for confirmation on the open skill's page.
+    confirming_reset: bool,
+    /// The open history, newest first, and the entry whose text is shown.
+    skill_history: Vec<workspace_host::skills::Recorded>,
+    viewed_entry: Option<String>,
     verifiers: Entity<verifiers::VerifierEditor>,
     /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
     detection: Detection,
@@ -274,6 +279,9 @@ impl Workspace {
             skill_view: skills_view::SkillView::List,
             skill_rules,
             stock_unfolded: false,
+            confirming_reset: false,
+            skill_history: vec![],
+            viewed_entry: None,
             verifiers,
             detection: Detection::new(),
             suggested: None,
@@ -812,6 +820,17 @@ impl Workspace {
                 self.toast("Your rules are saved", window, cx);
                 self.request(Command::Snapshot, window, cx);
             }
+            Command::ResetSkill { .. } | Command::RestoreSkill { .. } => {
+                match serde_json::from_value(value) {
+                    Ok(state) => self.skill_replaced(state, &command, window, cx),
+                    Err(error) => eprintln!("Reset or restored skill: {error}"),
+                }
+                self.request(Command::Snapshot, window, cx);
+            }
+            Command::SkillHistory { skill } => match serde_json::from_value(value) {
+                Ok(history) => self.history_arrived(skill, history),
+                Err(error) => eprintln!("Skill history: {error}"),
+            },
             Command::SetRepositoryChecks { .. } => {
                 self.checks_edit = None;
                 self.request(Command::Snapshot, window, cx);
