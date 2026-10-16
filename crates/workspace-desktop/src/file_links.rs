@@ -2,6 +2,7 @@
 //! `crates/foo/src/bar.rs:63`, becomes a link that opens the file in its default app, and a
 //! Markdown link to a local path opens the same way. Web links keep opening in the browser.
 use super::*;
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
@@ -224,11 +225,13 @@ enum LinkAction {
     Browse,
     /// Open the local file the target names.
     Open(String),
+    /// Offer the file menu for the target at this point.
+    Menu(String, Point<Pixels>),
     Nothing,
 }
 
 /// A left or middle click, keyboard activation or a tap opens the link, as the text view does by
-/// default. Anything else does nothing.
+/// default. A right-click on a file link offers its menu. Anything else does nothing.
 fn link_action(url: &str, event: &ClickEvent) -> LinkAction {
     let opens = match event {
         ClickEvent::Mouse(click) => {
@@ -237,10 +240,13 @@ fn link_action(url: &str, event: &ClickEvent) -> LinkAction {
         ClickEvent::Keyboard(_) => true,
         ClickEvent::Touch(tap) => !tap.long_press,
     };
-    if !opens {
-        return LinkAction::Nothing;
+    match (local_target(url), event) {
+        (target, _) if opens => target.map_or(LinkAction::Browse, LinkAction::Open),
+        (Some(target), ClickEvent::Mouse(click)) if click.up.button == MouseButton::Right => {
+            LinkAction::Menu(target, click.up.position)
+        }
+        _ => LinkAction::Nothing,
     }
-    local_target(url).map_or(LinkAction::Browse, LinkAction::Open)
 }
 
 /// Whether opening `path` would run it instead of showing it: an executable, or a script
@@ -268,8 +274,9 @@ fn open_file(path: &Path, cx: &App) {
     }
 }
 
-/// Opens a clicked link: a local file in its default app, anything else in the browser. A file
-/// that is gone by now, such as one in a removed worktree, says so.
+/// Opens a clicked link: a local file in its default app, anything else in the browser. A
+/// right-click on a file offers Open, Reveal in Finder and Copy path instead. A file that is
+/// gone by now, such as one in a removed worktree, says so.
 pub(super) fn open_link(
     url: &str,
     event: &ClickEvent,
@@ -277,16 +284,18 @@ pub(super) fn open_link(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let target = match link_action(url, event) {
+    let (target, menu_at) = match link_action(url, event) {
         LinkAction::Browse => return cx.open_url(url),
         LinkAction::Nothing => return,
-        LinkAction::Open(target) => target,
+        LinkAction::Open(target) => (target, None),
+        LinkAction::Menu(target, position) => (target, Some(position)),
     };
     let reference = without_location(&target);
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    match resolve(reference, bases, home.as_deref()) {
-        Some(path) => open_file(&path, cx),
-        None => {
+    match (resolve(reference, bases, home.as_deref()), menu_at) {
+        (Some(path), Some(position)) => show_menu(path, position, window, cx),
+        (Some(path), None) => open_file(&path, cx),
+        (None, _) => {
             struct FileMissing;
             let name = Path::new(reference)
                 .file_name()
@@ -300,13 +309,65 @@ pub(super) fn open_link(
     }
 }
 
+/// The menu of the right-clicked file link. The text view only reports the click, so the
+/// workspace draws the menu, through [`link_menu`].
+#[derive(Default)]
+struct LinkMenu {
+    open: Option<(Entity<PopupMenu>, Point<Pixels>)>,
+    /// Closes the menu on dismiss; replaced with the next menu.
+    _dismissed: Option<Subscription>,
+}
+impl Global for LinkMenu {}
+
+fn show_menu(path: PathBuf, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    let menu = PopupMenu::build(window, cx, |menu, _, _| {
+        let (open, reveal, copy) = (path.clone(), path.clone(), path);
+        menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| open_file(&open, cx)))
+            .item(
+                PopupMenuItem::new("Reveal in Finder")
+                    .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+            )
+            .separator()
+            .item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    copy.to_string_lossy().into_owned(),
+                ))
+            }))
+    });
+    let dismissed = window.subscribe(&menu, cx, |_, _: &DismissEvent, window, cx| {
+        cx.default_global::<LinkMenu>().open = None;
+        window.refresh();
+    });
+    menu.focus_handle(cx).focus(window, cx);
+    cx.set_global(LinkMenu {
+        open: Some((menu, position)),
+        _dismissed: Some(dismissed),
+    });
+    window.refresh();
+}
+
+/// The open file-link menu, at the pointer and above everything else.
+pub(super) fn link_menu(cx: &App) -> Option<impl IntoElement> {
+    let (menu, position) = cx.try_global::<LinkMenu>()?.open.clone()?;
+    Some(
+        deferred(
+            anchored()
+                .position(position)
+                .snap_to_window_with_margin(px(8.))
+                .child(menu),
+        )
+        .with_priority(1),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         LinkAction, link_action, link_code, local_target, reference, resolve, runs_when_opened,
     };
     use gpui::{
-        ClickEvent, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseUpEvent, TouchClickEvent,
+        ClickEvent, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseUpEvent,
+        TouchClickEvent, point, px,
     };
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
@@ -314,6 +375,7 @@ mod tests {
         ClickEvent::Mouse(MouseClickEvent {
             up: MouseUpEvent {
                 button,
+                position: point(px(4.), px(8.)),
                 ..Default::default()
             },
             ..Default::default()
@@ -481,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn left_middle_keyboard_and_tap_open_and_nothing_else_does() {
+    fn clicks_open_right_clicks_offer_the_menu_for_files_only() {
         let file = "src/lib.rs:12";
         let web = "https://example.com";
         let open = LinkAction::Open(file.into());
@@ -501,7 +563,7 @@ mod tests {
         );
         assert_eq!(
             link_action(file, &mouse(MouseButton::Right)),
-            LinkAction::Nothing
+            LinkAction::Menu(file.into(), point(px(4.), px(8.)))
         );
         assert_eq!(
             link_action(web, &mouse(MouseButton::Right)),
