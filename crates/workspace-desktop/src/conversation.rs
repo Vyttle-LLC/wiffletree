@@ -43,6 +43,12 @@ pub(super) fn transcript_overlap(
     Some((dropped, unchanged))
 }
 
+/// Forgets the minimized card of every project that has no open decision, so the next one it
+/// brings starts expanded. A decision that merely arrives or changes leaves the card as it is.
+pub(super) fn forget_settled(minimized: &mut BTreeSet<String>, open: &[Attention]) {
+    minimized.retain(|project| open.iter().any(|item| &item.project_id == project));
+}
+
 /// Agent reports arrive as `[kind] sender name\nbody`, and timer fires as `[timer] label\nbody`;
 /// returns the kind and body.
 fn report(body: &str) -> Option<(&str, &str)> {
@@ -836,6 +842,10 @@ impl Workspace {
             .and_then(|id| items.iter().position(|item| &item.id == id))
             .unwrap_or(0);
         let item = items.get(position)?;
+        let project = item.project_id.clone();
+        if self.minimized_decisions.contains(&project) {
+            return Some(self.minimized_decision(item, position, items.len(), p, cx));
+        }
         let step = |offset: usize| {
             let id = items[(position + offset) % items.len()].id.clone();
             cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))
@@ -882,6 +892,17 @@ impl Workspace {
                     .small()
                     .label("Open inbox")
                     .on_click(cx.listener(|v, _, w, c| v.show_panel(Panel::Attention, w, c))),
+            )
+            .child(
+                button("minimize-decision")
+                    .ghost()
+                    .small()
+                    .icon(icon("chevron-down"))
+                    .tooltip("Minimize")
+                    .on_click(cx.listener(move |v, _, _, c| {
+                        v.minimized_decisions.insert(project.clone());
+                        c.notify();
+                    })),
             );
         Some(
             div()
@@ -895,6 +916,58 @@ impl Workspace {
                     self.attention_card(item, true, p, cx)
                         .border_color(p.yellow.opacity(0.45)),
                 ),
+        )
+    }
+
+    fn minimized_decision(
+        &self,
+        item: &Attention,
+        position: usize,
+        total: usize,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let project = item.project_id.clone();
+        let expand = move |v: &mut Self, _: &ClickEvent, _: &mut Window, c: &mut Context<Self>| {
+            v.minimized_decisions.remove(&project);
+            c.notify();
+        };
+        div().w_full().max_w(px(COLUMN)).child(
+            div()
+                .id("minimized-decision")
+                .flex()
+                .items_center()
+                .gap_2()
+                .pl_3()
+                .pr_2()
+                .py_1p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(p.yellow.opacity(0.45))
+                .bg(p.surface)
+                .cursor_pointer()
+                .child(div().size(px(7.)).flex_none().rounded_full().bg(p.yellow))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_size(px(12.5))
+                        .child(first_line(&item.prompt, 200)),
+                )
+                .when(total > 1, |d| {
+                    d.child(hint(format!("{} of {total}", position + 1), p).flex_none())
+                })
+                .child(
+                    button("expand-decision")
+                        .ghost()
+                        .small()
+                        .icon(icon("chevron-up"))
+                        .tooltip("Expand"),
+                )
+                .on_click(cx.listener(expand)),
         )
     }
 
@@ -1523,10 +1596,11 @@ impl Workspace {
 mod tests {
     use super::{
         Placement::{Alone, Folded, Heads},
-        compaction_line, first_line, from_human, peer_line, placements, report, run_heading,
-        run_troubles, transcript_overlap,
+        compaction_line, first_line, forget_settled, from_human, peer_line, placements, report,
+        run_heading, run_troubles, transcript_overlap,
     };
-    use workspace_core::{Message, Receipt};
+    use std::collections::BTreeSet;
+    use workspace_core::{Attention, Message, Receipt};
 
     #[test]
     fn reports_split_into_kind_and_body() {
@@ -1789,5 +1863,33 @@ mod tests {
             run_heading(3, &senders),
             "3 agent messages · Implementer, Tester"
         );
+    }
+
+    fn decision(id: &str, project: &str) -> Attention {
+        Attention {
+            id: id.to_owned(),
+            project_id: project.to_owned(),
+            session_id: "s".to_owned(),
+            host: String::new(),
+            operation_id: String::new(),
+            prompt: "Which way?".to_owned(),
+            options: Vec::new(),
+            answer: None,
+        }
+    }
+
+    #[test]
+    fn a_minimized_card_survives_another_decision_arriving() {
+        let mut minimized = BTreeSet::from(["p1".to_owned()]);
+        forget_settled(&mut minimized, &[decision("a", "p1")]);
+        forget_settled(&mut minimized, &[decision("a", "p1"), decision("b", "p1")]);
+        assert!(minimized.contains("p1"));
+    }
+
+    #[test]
+    fn the_last_decision_settling_expands_the_next() {
+        let mut minimized = BTreeSet::from(["p1".to_owned(), "p2".to_owned()]);
+        forget_settled(&mut minimized, &[decision("b", "p2")]);
+        assert_eq!(minimized, BTreeSet::from(["p2".to_owned()]));
     }
 }

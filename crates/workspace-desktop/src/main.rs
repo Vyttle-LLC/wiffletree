@@ -107,6 +107,8 @@ struct Workspace {
     brain_path: Entity<InputState>,
     answer: Entity<TextareaState>,
     answering: Option<String>,
+    /// Projects whose decision card is folded to one row. Kept in memory only.
+    minimized_decisions: BTreeSet<String>,
     /// The Models page's draft and the host's saved copy.
     model_selection: ModelSelection,
     saved_model_selection: ModelSelection,
@@ -255,6 +257,7 @@ impl Workspace {
             }),
             answer,
             answering: None,
+            minimized_decisions: BTreeSet::new(),
             model_selection: ModelSelection::default(),
             saved_model_selection: ModelSelection::default(),
             guide_input,
@@ -822,6 +825,7 @@ impl Workspace {
             self.verifiers
                 .update(cx, |editor, cx| editor.setup_saved(cx));
         }
+        conversation::forget_settled(&mut self.minimized_decisions, &snapshot.attention);
         self.snapshot = Some(snapshot);
         // A store with no saved setup checks the CLIs at once, so the welcome and the Models
         // page share one result. A saved store waits for its Models page, as before.
