@@ -262,9 +262,10 @@ pub struct Offer {
 }
 /// What a detection pass suggests for a store with no saved setup; `None` on a saved store,
 /// before every provider is detected, or when `shown` already is that suggestion. A draft the
-/// human edited is kept, and so is a guide already in the shared folder.
+/// human edited is kept, and so is a guide already in the shared folder, even an empty one.
 pub fn offer(
     saved: &ModelSelection,
+    guide_saved: bool,
     shown: Option<&Setup>,
     selection: &ModelSelection,
     verification: Option<&VerificationSettings>,
@@ -274,7 +275,7 @@ pub fn offer(
         return None;
     }
     let mut suggested = suggest(detection);
-    if !saved.guide.is_empty() {
+    if guide_saved {
         suggested.selection.guide = saved.guide.clone();
     }
     if shown == Some(&suggested) {
@@ -505,6 +506,7 @@ mod tests {
     ) -> Option<Offer> {
         offer(
             saved,
+            false,
             shown,
             &draft.selection,
             Some(&draft.verification),
@@ -520,6 +522,7 @@ mod tests {
         assert_eq!(
             offer(
                 &unsaved,
+                false,
                 None,
                 &unsaved,
                 None,
@@ -564,24 +567,29 @@ mod tests {
         }
         // Half a detection pass suggests nothing yet.
         let half: Detection = detected(&PROVIDERS).into_iter().take(1).collect();
-        assert_eq!(offer(&unsaved, None, &unsaved, None, &half), None);
+        assert_eq!(offer(&unsaved, false, None, &unsaved, None, &half), None);
     }
     #[test]
-    fn a_guide_from_another_machine_is_kept_in_the_suggestion() {
-        let unsaved = ModelSelection {
-            guide: "Opus for anything touching auth.".into(),
-            ..ModelSelection::default()
-        };
-        let offered = offer(&unsaved, None, &unsaved, None, &detected(&PROVIDERS)).unwrap();
-        assert_eq!(offered.suggested.selection.guide, unsaved.guide);
+    fn a_guide_from_another_machine_is_kept_in_the_suggestion_even_when_empty() {
         let starter = suggest(&detected(&PROVIDERS)).selection;
-        assert_eq!(
-            offered.suggested.selection,
-            ModelSelection {
-                guide: unsaved.guide.clone(),
-                ..starter
-            }
-        );
+        for guide in ["Opus for anything touching auth.", ""] {
+            let unsaved = ModelSelection {
+                guide: guide.into(),
+                ..ModelSelection::default()
+            };
+            let offered = offer(&unsaved, true, None, &unsaved, None, &detected(&PROVIDERS));
+            assert_eq!(
+                offered.unwrap().suggested.selection,
+                ModelSelection {
+                    guide: guide.into(),
+                    ..starter.clone()
+                }
+            );
+        }
+        // With no guide saved, the starter guide is offered.
+        let unsaved = ModelSelection::default();
+        let offered = offer(&unsaved, false, None, &unsaved, None, &detected(&PROVIDERS));
+        assert_eq!(offered.unwrap().suggested.selection, starter);
     }
     #[test]
     fn a_saved_store_is_never_offered_a_suggestion() {
@@ -597,6 +605,7 @@ mod tests {
         assert_eq!(
             offer(
                 &saved,
+                false,
                 None,
                 &draft,
                 Some(&both.verification),

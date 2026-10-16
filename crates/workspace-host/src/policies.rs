@@ -37,7 +37,7 @@ impl Host {
     /// This machine's selection with the shared guide.
     pub fn model_selection(&self) -> Result<ModelSelection> {
         Ok(ModelSelection {
-            guide: self.shared().guide(),
+            guide: self.shared().guide().unwrap_or_default(),
             ..self.saved_selection()?.unwrap_or_default()
         })
     }

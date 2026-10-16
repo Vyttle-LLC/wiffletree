@@ -488,6 +488,9 @@ pub struct Snapshot {
     pub schedules: Vec<Schedule>,
     #[serde(default)]
     pub model_selection: ModelSelection,
+    /// The shared folder holds a guide, even an empty one, which a first setup keeps.
+    #[serde(default)]
+    pub guide_saved: bool,
     /// Sessions whose input has not reached a turn yet.
     #[serde(default)]
     pub undelivered: Vec<UndeliveredInput>,

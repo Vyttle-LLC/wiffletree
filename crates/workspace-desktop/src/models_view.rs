@@ -62,6 +62,7 @@ impl Workspace {
         }
         let Some(offer) = models::offer(
             &self.saved_model_selection,
+            self.snapshot.as_ref().is_some_and(|s| s.guide_saved),
             self.suggested.as_ref(),
             &self.model_selection,
             self.verifiers.read(cx).verification(),
