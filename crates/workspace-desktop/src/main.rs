@@ -25,6 +25,7 @@ mod project_name;
 mod repositories_view;
 mod settings;
 mod sidebar;
+mod skills_view;
 mod team_view;
 mod tree;
 mod ui;
@@ -75,6 +76,7 @@ enum Page {
     Conversation,
     Usage,
     Models,
+    Skills,
     Repositories,
 }
 
@@ -114,6 +116,10 @@ struct Workspace {
     model_selection: ModelSelection,
     saved_model_selection: ModelSelection,
     guide_input: Entity<TextareaState>,
+    skill_view: skills_view::SkillView,
+    /// The open skill's rules as the human is editing them.
+    skill_rules: Entity<TextareaState>,
+    stock_unfolded: bool,
     verifiers: Entity<verifiers::VerifierEditor>,
     /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
     detection: Detection,
@@ -207,6 +213,18 @@ impl Workspace {
             }
         })
         .detach();
+        let skill_rules = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(6, 24).placeholder(
+                "One rule per line, e.g. Run the repository's checks before reporting ready.",
+            )
+        });
+        // Save and Discard follow the draft.
+        cx.subscribe(&skill_rules, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let verifiers = cx.new(|cx| verifiers::VerifierEditor::new(bridge.clone(), window, cx));
         // The Save bar follows the verifiers while they are part of an unsaved setup.
         cx.observe(&verifiers, |_, _, cx| cx.notify()).detach();
@@ -262,6 +280,9 @@ impl Workspace {
             model_selection: ModelSelection::default(),
             saved_model_selection: ModelSelection::default(),
             guide_input,
+            skill_view: skills_view::SkillView::List,
+            skill_rules,
+            stock_unfolded: false,
             verifiers,
             detection: Detection::new(),
             suggested: None,
@@ -812,6 +833,14 @@ impl Workspace {
                     cx,
                 );
             }
+            Command::SaveSkillRules { .. } => {
+                match serde_json::from_value(value) {
+                    Ok(saved) => self.skill_saved(saved),
+                    Err(error) => eprintln!("Saved skill rules: {error}"),
+                }
+                self.toast("Your rules are saved", window, cx);
+                self.request(Command::Snapshot, window, cx);
+            }
             Command::SetRepositoryChecks { .. } => {
                 self.checks_edit = None;
                 self.request(Command::Snapshot, window, cx);
@@ -842,6 +871,7 @@ impl Workspace {
                 .map(|s| s.id.clone());
         }
         self.sync_model_selection(&snapshot.model_selection, window, cx);
+        self.follow_saved_rules(&snapshot, window, cx);
         if snapshot.model_selection.is_saved() {
             self.verifiers
                 .update(cx, |editor, cx| editor.setup_saved(cx));
@@ -1126,6 +1156,7 @@ impl Workspace {
             }
             Page::Models if !self.catalog_loaded => self.refresh_models(window, cx),
             Page::Repositories => self.refresh_repositories(true, window, cx),
+            Page::Skills => self.open_skill(skills_view::SkillView::List, window, cx),
             _ => {}
         }
         cx.notify();

@@ -334,6 +334,7 @@ impl Workspace {
             (Page::Repositories, "Repositories", "folder"),
             (Page::Usage, "Usage and limits", "activity"),
             (Page::Models, "Models", "settings"),
+            (Page::Skills, "Skills", "book"),
         ] {
             let selected = self.view == page;
             nav = nav.child(

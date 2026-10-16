@@ -26,11 +26,11 @@ About 260 production lines. Requirements. `skills`: "Additions are the default w
 
 About 290 production lines. Requirements. `skills`: "The Skills page".
 
-- [ ] 3.1 Add `Page::Skills` (`main.rs:73`) and the Skills row after Models in `sidebar.rs::workspace_nav` (`:322`). Verify "Opening the page".
-- [ ] 3.2 Add `workspace-desktop/src/skills_view.rs`: the list of the four skills with what each is for, its roles and its state, and the fixed core marked read-only; the fixed core's page with its text and no editor or Reset. Verify "The fixed core".
-- [ ] 3.3 A skill's page in Additions mode: the stock text read-only and folded, the editor for the human's rules with Save and Discard as on the Models page, "Applies from each agent's next turn", and the box of what the app enforces (design decision 4). The Reviewing page shows each review level's "Use it" line read-only with a link to Models; the Coordinating page links to the model guide; the Implementing page's hint suggests putting PR rules in the human's own rules. A refused save shows the host's error toast. Verify "Saving rules" end to end and "A text too long" on the page.
-- [ ] 3.4 Compare by eye with `design/mockups/current/skills.html` in Tidal Light and Tidal Dark on a throwaway store: panels (a), (b), (c) and (h). List every difference in the ready_for_testing report.
-- [ ] 3.5 Add the Skills page to `README.md`, with the limits of "The limits of skills are documented" that hold so far and that a Codex agent gets a change from its next new session. Run the checks of 1.6 and sync this slice's requirement.
+- [x] 3.1 Add `Page::Skills` (`main.rs:73`) and the Skills row after Models in `sidebar.rs::workspace_nav` (`:322`). Verify "Opening the page".
+- [x] 3.2 Add `workspace-desktop/src/skills_view.rs`: the list of the four skills with what each is for, its roles and its state, and the fixed core marked read-only; the fixed core's page with its text and no editor or Reset. Verify "The fixed core".
+- [x] 3.3 A skill's page in Additions mode: the stock text read-only and folded, the editor for the human's rules with Save and Discard as on the Models page, "Applies from each agent's next turn", and the box of what the app enforces (design decision 4). The Reviewing page shows each review level's "Use it" line read-only with a link to Models; the Coordinating page links to the model guide; the Implementing page's hint suggests putting PR rules in the human's own rules. A refused save shows the host's error toast. Verify "Saving rules" end to end and "A text too long" on the page.
+- [x] 3.4 Compare by eye with `design/mockups/current/skills.html` in Tidal Light and Tidal Dark on a throwaway store: panels (a), (b), (c) and (h). List every difference in the ready_for_testing report.
+- [x] 3.5 Add the Skills page to `README.md`, with the limits of "The limits of skills are documented" that hold so far and that a Codex agent gets a change from its next new session. Run the checks of 1.6 and sync this slice's requirement.
 
 ## 4. Slice 4: Reset to stock and the history on the page
 
