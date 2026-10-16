@@ -584,6 +584,14 @@ impl Render for Workspace {
                 p,
                 cx,
             ),
+            Page::Skills => self.page(
+                "Skills",
+                "How your agents work",
+                self.skills_page(p, cx),
+                None,
+                p,
+                cx,
+            ),
             Page::Repositories => self.page(
                 "Repositories",
                 "Repositories every project can use",

@@ -106,7 +106,7 @@ impl Workspace {
             .child(hint(note, p))
     }
 
-    fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
+    pub(super) fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
         div()
             .flex()
             .items_baseline()

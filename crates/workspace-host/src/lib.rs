@@ -238,7 +238,9 @@ impl Host {
         host.move_into_shared_folder()?;
         sync::remove_staging(&host.home)?;
         host.backfill_usage()?;
-        host.skills().record_new_stock_versions()?;
+        if let Err(error) = host.skills().record_new_stock_versions() {
+            eprintln!("Recording new stock versions of skills: {error:#}");
+        }
         Ok(host)
     }
     /// A session shows as working while its turn runs, even after reporting `blocked` or
@@ -1443,6 +1445,22 @@ impl Host {
             Command::SyncNow => {
                 self.sync_now(&publish::Tools::default())?;
                 Value::Null
+            }
+            Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
+            Command::StartSkillRewrite { skill } => {
+                self.skills().start_rewrite(skill)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
+            Command::SaveSkillRewrite { skill, text } => {
+                self.skills().save_rewrite(skill, &text)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
+            Command::MarkSkillUpToDate { skill } => {
+                self.skills().mark_up_to_date(skill)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
+            Command::SkillStockChanges { skill } => {
+                serde_json::to_value(self.skills().stock_changes(skill))?
             }
             Command::SetRepositoryChecks {
                 repository_id,

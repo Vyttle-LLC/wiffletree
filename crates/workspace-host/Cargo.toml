@@ -22,6 +22,7 @@ libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 chrono-tz = "0.10"
+similar = "3.2"
 
 [[bin]]
 name = "workspace-host"

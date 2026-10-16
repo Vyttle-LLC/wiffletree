@@ -114,16 +114,35 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
 pub fn check() -> Value {
     json!({"claude":executable(Provider::Claude).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"codex":executable(Provider::Codex).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"authentication":"Uses existing CLI sign-in; first live turn verifies access"})
 }
+/// The fixed core's parts, each with who gets it: the contract, then each role's core.
+pub const CORE: [(&str, &str); 5] = [
+    (
+        "every agent",
+        include_str!("../skills/core/communication.md"),
+    ),
+    (
+        "coordinators",
+        include_str!("../skills/core/coordinator.md"),
+    ),
+    (
+        "implementers",
+        include_str!("../skills/core/implementer.md"),
+    ),
+    (
+        "testers and reviewers",
+        include_str!("../skills/core/verifier.md"),
+    ),
+    ("the PR keeper", include_str!("../skills/core/keeper.md")),
+];
 /// The part of a role's instructions the app depends on, which no skill text changes.
 fn core(role: Role) -> &'static str {
-    match role {
-        Role::ProjectOrchestrator | Role::TaskOrchestrator => {
-            include_str!("../skills/core/coordinator.md")
-        }
-        Role::Implementer | Role::Maintenance => include_str!("../skills/core/implementer.md"),
-        Role::Tester | Role::Reviewer => include_str!("../skills/core/verifier.md"),
-        Role::Keeper => include_str!("../skills/core/keeper.md"),
-    }
+    let part = match role {
+        Role::ProjectOrchestrator | Role::TaskOrchestrator => 1,
+        Role::Implementer | Role::Maintenance => 2,
+        Role::Tester | Role::Reviewer => 3,
+        Role::Keeper => 4,
+    };
+    CORE[part].1
 }
 /// Part of the fixed core: it says, in Wiffletree's words, that the human's rules win.
 pub(crate) const RULES_SENTENCE: &str = "These are the human's own rules for this skill. Where they disagree with the skill above, follow them.";
@@ -131,23 +150,25 @@ pub(crate) const RULES_SENTENCE: &str = "These are the human's own rules for thi
 pub fn skill(role: Role) -> String {
     instructions(role, skills::stock(Skill::for_role(role)), "")
 }
-/// What a role's turns are sent, with its skill as the human left it.
+/// What a role's turns are sent, with its skill as the human left it: a rewrite in place of the
+/// stock text, or the stock text and the human's rules.
 pub fn role_instructions(role: Role, skill: &SkillState) -> String {
-    instructions(role, &skill.stock, &skill.rules)
+    match &skill.rewrite {
+        Some(rewrite) => instructions(role, &rewrite.text, ""),
+        None => instructions(role, &skill.stock, &skill.rules),
+    }
+}
+/// The heading the human's own rules follow, as "## Your own rules for Implementing".
+pub fn rules_heading(skill: Skill) -> String {
+    format!("## Your own rules for {}", skill.name())
 }
 /// The communication contract, the role's core, the skill's text, stock or the human's
 /// rewrite, and the human's own rules for that skill, if any, under a heading of Wiffletree's.
 pub fn instructions(role: Role, skill_text: &str, rules: &str) -> String {
-    let mut text = format!(
-        "{}\n{}\n{skill_text}",
-        include_str!("../skills/core/communication.md"),
-        core(role)
-    );
+    let mut text = format!("{}\n{}\n{skill_text}", CORE[0].1, core(role));
     if !rules.is_empty() {
-        let skill = Skill::for_role(role).name();
-        text.push_str(&format!(
-            "\n## Your own rules for {skill}\n{RULES_SENTENCE}\n{rules}"
-        ));
+        let heading = rules_heading(Skill::for_role(role));
+        text.push_str(&format!("\n{heading}\n{RULES_SENTENCE}\n{rules}"));
     }
     text
 }

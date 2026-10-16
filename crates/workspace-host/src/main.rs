@@ -21,7 +21,17 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    if let [command, provider, role, model, session, directory] = args.as_slice()
+    if let [
+        flag,
+        data_dir,
+        command,
+        provider,
+        role,
+        model,
+        session,
+        directory,
+    ] = args.as_slice()
+        && flag == "--data-dir"
         && command == "probe-context"
     {
         let profile = ModelProfile {
@@ -34,14 +44,14 @@ fn main() -> Result<()> {
             profile: &profile,
             provider_session: session,
             directory: std::path::Path::new(directory),
-            instructions: &workspace_host::provider::skill(role),
+            instructions: &workspace_host::skills::store(data_dir.as_ref()).instructions(role),
         })?;
         println!("{usage:#?}");
         return Ok(());
     }
     if args.len() != 2 || args[0] != "--data-dir" {
         eprintln!(
-            "Usage: workspace-host --data-dir <directory>\nReads version-1 JSON-line commands on stdin; writes correlated responses on stdout.\n       workspace-host probe-codex  (model discovery, no inference)\n       workspace-host probe-quota  (Codex account limits, no inference)\n       workspace-host probe-context <claude|codex> <role> <model> <provider-session> <directory>  (context window use, no inference)"
+            "Usage: workspace-host --data-dir <directory>\nReads version-1 JSON-line commands on stdin; writes correlated responses on stdout.\n       workspace-host probe-codex  (model discovery, no inference)\n       workspace-host probe-quota  (Codex account limits, no inference)\n       workspace-host --data-dir <directory> probe-context <claude|codex> <role> <model> <provider-session> <directory>  (context window use, no inference)"
         );
         return Ok(());
     }
