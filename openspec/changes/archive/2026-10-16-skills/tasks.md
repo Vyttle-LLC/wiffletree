@@ -44,17 +44,17 @@ About 200 production lines. Requirements. `skills`: "Every skill can be reset to
 
 About 200 production lines. Requirements. `skills`: "Only the human changes a skill" (its last commands) and "Every skill has a history" (restoring a rewrite). It also builds the host part of "A rewrite replaces the stock text on purpose" and "A rewrite is marked out of date by a new stock version".
 
-- [ ] 5.1 Add `Command::StartSkillRewrite`, `SaveSkillRewrite` and `MarkSkillUpToDate` to `SkillStore`: starting writes `rewrite.md` as the stock text followed by the human's rules under their heading, `base.md` as the stock text, and removes `additions.md`; `Host::instructions` sends the rewrite in place of the stock text. Restoring a rewrite entry restores its base. Verify "Starting a rewrite with rules", "An empty rewrite" (the skills scenario) and "Restoring an old rewrite".
-- [ ] 5.2 Compare `base.md` with the stock text to set the snapshot's out-of-date flag, and answer a request for what changed with a line diff of the base and the stock text, adding the `similar` crate to `workspace-host`, since the workspace has no line diff (none at 9abbd5f). Verify "A release changes Coordinating" with a stand-in stock text, "Marking it up to date" and "A stock change without a new version".
-- [ ] 5.3 Make `ResetSkill` on a rewritten skill remove `rewrite.md` and `base.md` with `additions.md`, clear the out-of-date flag and write one entry. Verify "Resetting a rewritten skill" on the host: the files are gone, the next turn's instructions have the stock text, and the previous entry holds the rewrite and its base.
-- [ ] 5.4 Run the checks of 1.6 and sync this slice's two requirements.
+- [x] 5.1 Add `Command::StartSkillRewrite`, `SaveSkillRewrite` and `MarkSkillUpToDate` to `SkillStore`: starting writes `rewrite.md` as the stock text followed by the human's rules under their heading, `base.md` as the stock text, and removes `additions.md`; `Host::instructions` sends the rewrite in place of the stock text. Restoring a rewrite entry restores its base. Verify "Starting a rewrite with rules", "An empty rewrite" (the skills scenario) and "Restoring an old rewrite".
+- [x] 5.2 Compare `base.md` with the stock text to set the snapshot's out-of-date flag, and answer a request for what changed with a line diff of the base and the stock text, adding the `similar` crate to `workspace-host`, since the workspace has no line diff (none at 9abbd5f). Verify "A release changes Coordinating" with a stand-in stock text, "Marking it up to date" and "A stock change without a new version".
+- [x] 5.3 Make `ResetSkill` on a rewritten skill remove `rewrite.md` and `base.md` with `additions.md`, clear the out-of-date flag and write one entry. Verify "Resetting a rewritten skill" on the host: the files are gone, the next turn's instructions have the stock text, and the previous entry holds the rewrite and its base.
+- [x] 5.4 Run the checks of 1.6 and sync this slice's two requirements.
 
 ## 6. Slice 6: Rewrite on the page
 
 About 260 production lines. Requirements. `skills`: "A rewrite replaces the stock text on purpose", "A rewrite is marked out of date by a new stock version", "The limits of skills are documented".
 
-- [ ] 6.1 Add "Rewrite the stock text…" to a skill's page with its confirmation, and the Rewrite mode page: the editor holding the rewrite, Save and Discard, Reset to stock and History. Verify "Starting a rewrite with rules" from the page, and "Resetting a rewritten skill" from the page: the confirmation names the rewrite, and Cancel sends nothing.
-- [ ] 6.2 Add the out-of-date mark to the list, the dot on the sidebar's Skills row, and the banner with both versions, what changed as added and removed lines, Mark as up to date and Reset to stock. Verify "A release changes Coordinating" and "Marking it up to date" on the page.
-- [ ] 6.3 Complete `README.md` and `docs/DEVELOPMENT.md`: a rewrite is not updated by new releases, and agents' shells can write the skills folder. Verify "README".
-- [ ] 6.4 Compare by eye with the mockup in both themes: panels (d) and (g), and (a)'s out-of-date row and the dot on the Skills row. List every difference.
-- [ ] 6.5 Run the checks of 1.6, sync this slice's three requirements, and archive the change.
+- [x] 6.1 Add "Rewrite the stock text…" to a skill's page with its confirmation, and the Rewrite mode page: the editor holding the rewrite, Save and Discard, Reset to stock and History. Verify "Starting a rewrite with rules" from the page, and "Resetting a rewritten skill" from the page: the confirmation names the rewrite, and Cancel sends nothing.
+- [x] 6.2 Add the out-of-date mark to the list, the dot on the sidebar's Skills row, and the banner with both versions, what changed as added and removed lines, Mark as up to date and Reset to stock. Verify "A release changes Coordinating" and "Marking it up to date" on the page.
+- [x] 6.3 Complete `README.md` and `docs/DEVELOPMENT.md`: a rewrite is not updated by new releases, and agents' shells can write the skills folder. Verify "README".
+- [x] 6.4 Compare by eye with the mockup in both themes: panels (d) and (g), and (a)'s out-of-date row and the dot on the Skills row. List every difference.
+- [x] 6.5 Run the checks of 1.6, sync this slice's three requirements, and archive the change.

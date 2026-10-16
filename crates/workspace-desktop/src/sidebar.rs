@@ -350,7 +350,12 @@ impl Workspace {
                     // Until a setup is saved, Models is where to go next.
                     .when(page == Page::Models && !self.offers_new_project(), |d| {
                         d.child(div().size(px(6.)).rounded_full().bg(p.accent))
-                    }),
+                    })
+                    // A rewrite out of date waits on the Skills page.
+                    .when(
+                        page == Page::Skills && self.a_rewrite_is_out_of_date(),
+                        |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
+                    ),
             );
         }
         nav

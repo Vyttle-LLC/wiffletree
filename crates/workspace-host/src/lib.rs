@@ -1415,6 +1415,21 @@ impl Host {
                 serde_json::to_value(self.skills().state(skill))?
             }
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
+            Command::StartSkillRewrite { skill } => {
+                self.skills().start_rewrite(skill)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
+            Command::SaveSkillRewrite { skill, text } => {
+                self.skills().save_rewrite(skill, &text)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
+            Command::MarkSkillUpToDate { skill } => {
+                self.skills().mark_up_to_date(skill)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
+            Command::SkillStockChanges { skill } => {
+                serde_json::to_value(self.skills().stock_changes(skill))?
+            }
             Command::SetRepositoryChecks {
                 repository_id,
                 checks,
