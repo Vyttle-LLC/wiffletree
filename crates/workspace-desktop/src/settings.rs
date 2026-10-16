@@ -91,7 +91,7 @@ impl Settings {
                     };
                     view.ask_host(Command::Settings, cx);
                     view.refresh_sync(cx);
-                    cx.observe_global::<repository::SyncShown>(|_, cx| cx.notify())
+                    cx.observe_global::<repository::SyncShown>(|view, cx| view.sync_shown(cx))
                         .detach();
                     if at_repository {
                         view.show_repository(cx);

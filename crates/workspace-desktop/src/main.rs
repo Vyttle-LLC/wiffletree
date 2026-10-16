@@ -924,7 +924,15 @@ impl Workspace {
         }
         conversation::forget_settled(&mut self.minimized_decisions, &snapshot.attention);
         settings::share_sync(&snapshot, cx);
+        let synced = |s: &Snapshot| (s.settings_sync.clone(), s.workspace_notes.clone());
+        let resynced = self.snapshot.as_ref().map(synced) != Some(synced(&snapshot));
+        let recompare = resynced
+            .then(|| workspace_notes::recompare(&mut self.compared, &snapshot.workspace_notes))
+            .flatten();
         self.snapshot = Some(snapshot);
+        if let Some(command) = recompare {
+            self.request(command, window, cx);
+        }
         // A store with no saved setup checks the CLIs at once, so the welcome and the Models
         // page share one result. A saved store waits for its Models page, as before.
         if !self.saved_model_selection.is_saved() && !self.catalog_loaded {

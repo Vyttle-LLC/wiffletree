@@ -29,6 +29,18 @@ pub(crate) fn toggle_compare(compared: &mut Compared, path: String) -> Option<Co
     Some(Command::ComparePausedFile { path })
 }
 
+/// After a sync pass or a change to the notes, asks again for the open comparison, since either
+/// version may have changed and settling uses the newest; closes it once its note is gone.
+pub(crate) fn recompare(compared: &mut Compared, notes: &[WorkspaceNote]) -> Option<Command> {
+    let (path, lines) = compared.as_mut()?;
+    if !notes.iter().any(|note| note.path == *path) {
+        *compared = None;
+        return None;
+    }
+    *lines = None;
+    Some(Command::ComparePausedFile { path: path.clone() })
+}
+
 /// Keeps lines that answer the note still open.
 pub(crate) fn compared_arrived(compared: &mut Compared, path: &str, lines: Vec<Line>) {
     if let Some((open, shown)) = compared
@@ -193,8 +205,9 @@ pub(crate) fn kept_note(note: &WorkspaceNote, compared: &Compared) -> Option<Str
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{choices, kept_note, short};
+    use super::{choices, kept_note, recompare, short};
     use workspace_core::*;
+    use workspace_host::skills::Line;
 
     fn note(paused: Paused) -> WorkspaceNote {
         WorkspaceNote {
@@ -251,5 +264,18 @@ mod tests {
         );
         assert_eq!(kept_note(&two, &None), None);
         assert_eq!(kept_note(&note(Paused::OutsideWiffletree), &open), None);
+    }
+
+    #[test]
+    fn a_sync_asks_again_for_the_open_comparison_and_closes_it_with_its_note() {
+        let two = note(Paused::TwoMachines {
+            machine: "Mike’s MacBook Air".into(),
+        });
+        let mut compared = Some((two.path.clone(), Some(vec![Line::Added("Older.".into())])));
+        let asked = recompare(&mut compared, std::slice::from_ref(&two));
+        assert!(matches!(asked, Some(Command::ComparePausedFile { path }) if path == two.path));
+        assert_eq!(compared, Some((two.path.clone(), None)));
+        assert!(recompare(&mut compared, &[]).is_none());
+        assert_eq!(compared, None);
     }
 }

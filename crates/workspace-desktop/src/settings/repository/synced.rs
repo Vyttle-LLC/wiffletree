@@ -365,6 +365,15 @@ impl Settings {
             )
     }
 
+    /// Redraws for a new sync status, asking again for an open comparison it may have changed.
+    pub(in crate::settings) fn sync_shown(&mut self, cx: &mut Context<Self>) {
+        let notes = (cx.try_global::<SyncShown>()).map_or(vec![], |shown| shown.notes.clone());
+        if let Some(command) = workspace_notes::recompare(&mut self.compared, &notes) {
+            self.ask_note(command, cx);
+        }
+        cx.notify();
+    }
+
     /// Opens or hides a paused setting's comparison, or settles it as its note would.
     fn note_action(&mut self, path: String, action: NoteAction, cx: &mut Context<Self>) {
         let command = match action {
@@ -372,9 +381,13 @@ impl Settings {
             NoteAction::Settle(settle) => Some(Command::SettlePausedFile { path, settle }),
         };
         cx.notify();
-        let Some(command) = command else {
-            return;
-        };
+        if let Some(command) = command {
+            self.ask_note(command, cx);
+        }
+    }
+
+    /// Asks the host for a comparison's lines or to settle a note, and shows its answer.
+    fn ask_note(&mut self, command: Command, cx: &mut Context<Self>) {
         self.repository_error = None;
         let receiver = match self.bridge.request(command.clone()) {
             Ok(receiver) => receiver,
