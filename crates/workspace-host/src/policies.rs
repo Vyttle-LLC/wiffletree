@@ -5,6 +5,18 @@ const UNPINNED: &str = "This agent has no pinned model. Choose one from its mode
 pub(crate) const NO_SETUP: &str = "No model setup is saved on this machine yet. Open Models, review the suggested setup and press Save. Agents cannot start until a setup is saved.";
 use std::collections::{BTreeMap, BTreeSet};
 
+/// What the keeper's triggers need from a selection and review settings about to be saved.
+pub(crate) fn check_keeper_needs(
+    keeper: &KeeperSettings,
+    selection: &ModelSelection,
+    verification: &VerificationSettings,
+) -> Result<()> {
+    if keeper.comments {
+        check_sorting_model(selection.keeper.as_ref())?;
+    }
+    check_tries(keeper, selection.keeper.as_ref(), verification)
+}
+
 impl Host {
     /// Opens a store and, when it has no saved setup, saves the one suggested with both
     /// providers signed in. Tests, benchmarks and scripted stores start from it; the app only
@@ -22,34 +34,44 @@ impl Host {
         }
         Ok(host)
     }
+    /// This machine's selection with the shared guide.
     pub fn model_selection(&self) -> Result<ModelSelection> {
+        Ok(ModelSelection {
+            guide: self.shared().guide(),
+            ..self.saved_selection()?.unwrap_or_default()
+        })
+    }
+    /// The database row, whose guide is the one saved before the shared folder.
+    pub(crate) fn saved_selection(&self) -> Result<Option<ModelSelection>> {
         Ok(self
             .db
             .query_row("SELECT data FROM model_selection", [], |r| decode(r, 0))
-            .optional()?
-            .unwrap_or_default())
+            .optional()?)
     }
-    /// Saves the whole configuration at the next revision. Existing agents keep their models.
+    /// Saves the whole configuration at the next revision, the guide in the shared folder.
+    /// Existing agents keep their models.
     pub fn set_model_selection(&mut self, selection: &ModelSelection) -> Result<ModelSelection> {
         selection.validate()?;
         let settings = self.settings();
-        if settings.keeper.comments {
-            check_sorting_model(selection.keeper.as_ref())?;
-        }
-        check_tries(
-            &settings.keeper,
-            selection.keeper.as_ref(),
-            &settings.verification,
-        )?;
+        check_keeper_needs(&settings.keeper, selection, &settings.verification)?;
+        let row = self.saved_selection()?.unwrap_or_default();
         let saved = ModelSelection {
-            revision: self.model_selection()?.revision + 1,
+            revision: row.revision + 1,
             ..selection.clone()
         };
-        self.db.execute(
-            "INSERT INTO model_selection VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-            [encode(&saved)?],
-        )?;
-        Ok(saved)
+        let unchanged_guide = ModelSelection {
+            guide: row.guide,
+            ..saved.clone()
+        };
+        let shared = self.shared();
+        shared.put_back_on_error(shared::GUIDE, || {
+            shared.set_guide(&saved.guide)?;
+            self.db.execute(
+                "INSERT INTO model_selection VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                [encode(&unchanged_guide)?],
+            )?;
+            Ok(saved)
+        })
     }
     /// Pins a session's model and records how it was chosen.
     pub(crate) fn pin(

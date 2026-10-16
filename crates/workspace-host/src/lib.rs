@@ -24,6 +24,7 @@ pub(crate) mod schedules;
 pub use schedules::TimerPass;
 pub mod service;
 mod settings;
+pub mod shared;
 pub mod skills;
 mod steps;
 mod stream;
@@ -224,6 +225,9 @@ impl Host {
         host.end_keeper_work()?;
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
+        // After the selection's migration, which may write the guide; nothing has read a shared
+        // setting yet.
+        host.move_into_shared_folder()?;
         host.backfill_usage()?;
         host.skills().record_new_stock_versions()?;
         Ok(host)

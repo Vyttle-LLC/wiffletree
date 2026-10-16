@@ -1,5 +1,5 @@
-//! The human's own rules for each skill, as plain files in `<data folder>/skills`, one folder per
-//! skill with a history file for every change. Only the human's commands write here; no agent
+//! The human's own rules for each skill, as plain files in the shared folder's `skills`, one
+//! folder per skill with a history file for every change. Only the human's commands write here; no agent
 //! tool reaches it. A missing file means no rules, so a fresh install or an update needs nothing.
 use crate::*;
 use serde::Deserialize;
@@ -173,7 +173,7 @@ impl SkillStore {
 }
 impl Host {
     pub fn skills(&self) -> SkillStore {
-        SkillStore::new(self.home.join("skills"))
+        SkillStore::new(self.shared().skills_folder())
     }
     /// What a role's next turn is sent, read from the store each time.
     pub fn instructions(&self, role: Role) -> String {
@@ -203,13 +203,13 @@ mod tests {
     }
 
     fn rules_file(host: &Host) -> PathBuf {
-        host.home.join("skills/implementing/additions.md")
+        host.home.join("shared/skills/implementing/additions.md")
     }
 
     #[test]
     fn a_fresh_install_is_at_stock_and_writes_nothing() {
         let (_home, host) = host();
-        assert!(!host.home.join("skills").exists());
+        assert!(!host.shared().skills_folder().exists());
         for state in host.skill_states() {
             assert_eq!((state.rules.as_str(), &state.unreadable), ("", &None));
             assert_eq!(state.stock_version, "v1");
@@ -298,7 +298,7 @@ mod tests {
             .save_rules(Skill::Implementing, "Rule")
             .unwrap();
         drop(host);
-        let folder = home.path().join("skills/implementing");
+        let folder = home.path().join("shared/skills/implementing");
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
         let host = Host::open(home.path()).unwrap();
         let state = host.skills().state(Skill::Implementing);
@@ -378,7 +378,7 @@ mod tests {
         let (name, _) = host.skills().history(Skill::Reviewing).remove(0);
         let path = host
             .home
-            .join(format!("skills/reviewing/history/{name}.json"));
+            .join(format!("shared/skills/reviewing/history/{name}.json"));
         let entry = fs::read_to_string(&path)
             .unwrap()
             .replace("\"v1\"", "\"v0\"");
@@ -402,7 +402,7 @@ mod tests {
             host.instructions(Role::Tester),
             provider::instructions(Role::Tester, stock(Skill::Reviewing), &reviewing.rules)
         );
-        assert!(!host.home.join("skills/implementing").exists());
+        assert!(!host.home.join("shared/skills/implementing").exists());
         drop(host);
         let host = Host::open(home.path()).unwrap();
         assert_eq!(changes(&host, Skill::Reviewing).len(), 2);
