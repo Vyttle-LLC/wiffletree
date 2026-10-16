@@ -3810,7 +3810,6 @@ mod tests {
         let (_second_home, mut second, second_events) = settings_actor(&github);
         settings_command(&mut second, &second_events, join(JoinWith::Repository)).unwrap();
         assert!(second.host.settings().settings_repository.is_some());
-        // A shared save makes a pass due five seconds later.
         first.sync_pace.finish(now(), true);
         let saved_at = now();
         let check_ins = Command::SetCheckIns {

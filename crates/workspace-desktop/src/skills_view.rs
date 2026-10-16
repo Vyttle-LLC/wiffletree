@@ -1114,6 +1114,13 @@ impl Workspace {
             )
             .text_color(p.red)
         });
+        let newer = (state.newer_stock_version.as_ref()).map(|version| {
+            let skill = state.skill.name();
+            hint(
+                format!("Another machine runs a newer Wiffletree: {skill} {version}."),
+                p,
+            )
+        });
         let (title, note) = if rewriting {
             ("Your rewrite", "sent in place of the stock text")
         } else {
@@ -1128,6 +1135,7 @@ impl Workspace {
             .gap_2()
             .child(Self::card_title(title, note, p))
             .children(unreadable)
+            .children(newer)
             .child(Textarea::new(&self.skill_text).w_full())
             .child(
                 div()

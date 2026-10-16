@@ -63,14 +63,19 @@ impl Host {
             guide: row.guide,
             ..saved.clone()
         };
-        self.put_back_on_error(shared::GUIDE, |host| {
+        let saved = self.put_back_on_error(shared::GUIDE, |host| {
             host.shared().set_guide(&saved.guide)?;
             host.db.execute(
                 "INSERT INTO model_selection VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
                 [encode(&unchanged_guide)?],
             )?;
             Ok(saved)
-        })
+        })?;
+        // A comments trigger held off for want of a keeper model starts afresh, as turning it on does.
+        if !settings.keeper.comments && self.settings().keeper.comments {
+            self.restart_comments()?;
+        }
+        Ok(saved)
     }
     /// Pins a session's model and records how it was chosen.
     pub(crate) fn pin(

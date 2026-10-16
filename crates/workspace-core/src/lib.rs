@@ -152,6 +152,9 @@ pub struct SkillState {
     pub rewrite: Option<Rewrite>,
     /// Why the skill's files could not be read; until they can, they count as missing.
     pub unreadable: Option<String>,
+    /// A stock version newer than this release's, recorded in the history by another machine.
+    #[serde(default)]
+    pub newer_stock_version: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rewrite {
@@ -537,6 +540,11 @@ pub struct Snapshot {
     /// Set while a settings repository is chosen.
     #[serde(default)]
     pub settings_sync: Option<SyncStatus>,
+    #[serde(default)]
+    pub workspace_notes: Vec<WorkspaceNote>,
+    /// Why each keeper trigger the shared settings turn on is off on this machine.
+    #[serde(default)]
+    pub keeper_held: Vec<String>,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -780,6 +788,40 @@ pub struct SyncStatus {
     pub error: Option<String>,
     /// Shared files saved here since they were last synced.
     pub waiting: usize,
+}
+/// Why sync leaves a shared file alone until the human decides.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Paused {
+    /// This machine and `machine` both changed it since it was last synced.
+    TwoMachines { machine: String },
+    /// Its content here is neither what the host last wrote nor what it last synced.
+    OutsideWiffletree,
+    /// The version `machine` pushed is one this machine would refuse to save, for `reason`.
+    CannotBeRead { machine: String, reason: String },
+}
+/// A note about the whole workspace, listed for every project: a shared setting sync paused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceNote {
+    /// The paused file, or for a skill's rules, rewrite and base, the skill's folder.
+    pub path: String,
+    /// As the app names it, such as "Implementing · your rules".
+    pub setting: String,
+    pub paused: Paused,
+    pub text: String,
+}
+/// How the human settles a paused file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settle {
+    /// Pushes this machine's version over the other machine's.
+    KeepThisMachines,
+    /// Writes the other machine's version here.
+    UseTheOthers,
+    /// Pushes a version changed outside Wiffletree, once the host accepts it.
+    SyncThisVersion,
+    /// Puts back the version last synced.
+    PutBackSynced,
 }
 /// What a repository holds beside what this machine has, before joining it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2502,6 +2544,12 @@ pub enum Command {
     /// Runs a sync pass with the settings repository at once; answers with nothing. Only the
     /// human's client sends it.
     SyncNow,
+    /// Settles the paused file, or a skill's folder, a workspace note names; answers with
+    /// nothing. Only the human's client sends it.
+    SettlePausedFile {
+        path: String,
+        settle: Settle,
+    },
     /// Read-only: a skill's history, newest first, each entry with why it could not be read
     /// when it cannot.
     SkillHistory {

@@ -69,6 +69,9 @@ pub struct Host {
     pub(crate) mid_turn_reports: std::collections::HashMap<String, MidTurnReport>,
     /// The host wrote a shared setting since sync last took this; see `sync`.
     pub(crate) shared_written: std::cell::Cell<bool>,
+    pub(crate) shared_writes: shared::SharedWrites,
+    /// Held by a running sync pass, and by adopting a clone, so the two never overlap.
+    pub(crate) sync_passes: std::sync::Arc<std::sync::Mutex<()>>,
     /// What the latest sync pass did; see `sync`.
     pub(crate) sync: sync::Synced,
 }
@@ -226,6 +229,8 @@ impl Host {
             in_turn: Default::default(),
             mid_turn_reports: Default::default(),
             shared_written: Default::default(),
+            shared_writes: Default::default(),
+            sync_passes: Default::default(),
             sync: Default::default(),
         };
         host.recover()?;
@@ -356,7 +361,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states(), still_needs: self.still_needs()?, settings_sync: self.sync_status()? })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, workspace_notes: self.workspace_notes()?, keeper_held: self.keeper_held() })
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
@@ -1444,6 +1449,10 @@ impl Host {
             }
             Command::SyncNow => {
                 self.sync_now(&publish::Tools::default())?;
+                Value::Null
+            }
+            Command::SettlePausedFile { path, settle } => {
+                self.settle_paused(&path, settle)?;
                 Value::Null
             }
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
