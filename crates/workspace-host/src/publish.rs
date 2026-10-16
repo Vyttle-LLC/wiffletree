@@ -20,8 +20,9 @@ impl Default for Tools {
     fn default() -> Self {
         Self {
             gh: Arc::new(runtime::gh_answer),
+            // A push runs hooks, and sync's clone and access check wait on GitHub: minutes each.
             git: Arc::new(|path, args| match args.first() {
-                Some(&"push") => runtime::git_push(path, args),
+                Some(&"push" | &"clone" | &"ls-remote") => runtime::git_push(path, args),
                 _ => runtime::git_answer(path, args),
             }),
         }

@@ -87,6 +87,7 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
     );
     let organization = facts["owner"]["type"] == "Organization";
     let readers = match organization {
+        _ if facts["visibility"] == "internal" => Readers::EnterpriseMembers,
         false => Readers::Invited,
         // GitHub reports an organization's base permission only to some of its members.
         true => match gh_json(tools, home, &format!("orgs/{owner}"))
@@ -130,6 +131,9 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
             staging.path(),
             &["symbolic-ref", "HEAD", &branch],
         )?;
+    }
+    for path in SHARED_PATHS {
+        refuse_links(staging.path(), Path::new(path))?;
     }
     let held = SharedStore::at(staging.path().into());
     let joining = match held.holds_settings() {
@@ -219,9 +223,34 @@ fn summaries(store: &SharedStore) -> Vec<(String, String)> {
     rows
 }
 
-/// Copies `from` to `to`; with `kept`, the clone's root, a file already in the clone is refused.
+/// Refuses a symbolic link at or under `path` in the clone, so sync never follows one.
+fn refuse_links(clone: &Path, path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(clone.join(path)) else {
+        return Ok(());
+    };
+    ensure!(
+        !metadata.is_symlink(),
+        "The repository's {} is a symbolic link, which sync never follows",
+        path.display()
+    );
+    if metadata.is_dir() {
+        for entry in fs::read_dir(clone.join(path))? {
+            refuse_links(clone, &path.join(entry?.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies `from` to `to`, refusing a symbolic link; with `kept`, the clone's root, a file
+/// already in the clone is refused.
 fn copy_tree(from: &Path, to: &Path, kept: Option<&Path>) -> Result<()> {
-    if from.is_dir() {
+    let metadata = fs::symlink_metadata(from)?;
+    ensure!(
+        !metadata.is_symlink(),
+        "{} is a symbolic link, which sync never follows",
+        from.display()
+    );
+    if metadata.is_dir() {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
@@ -247,7 +276,7 @@ fn put_this_machines(clone: &Path, mine: &Path, replace: bool) -> Result<()> {
             false if replace && to.exists() => fs::remove_file(&to)?,
             _ => {}
         }
-        if from.exists() {
+        if fs::symlink_metadata(&from).is_ok() {
             copy_tree(&from, &to, (!replace).then_some(clone))?;
         }
     }
@@ -258,10 +287,11 @@ fn put_this_machines(clone: &Path, mine: &Path, replace: bool) -> Result<()> {
 fn contents(folder: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     let mut files = BTreeMap::new();
     for entry in fs::read_dir(folder)? {
-        let path = entry?.path();
-        if path.is_dir() && !path.ends_with(".git") {
+        let entry = entry?;
+        let (path, kind) = (entry.path(), entry.file_type()?);
+        if kind.is_dir() && !path.ends_with(".git") {
             files.extend(contents(&path)?);
-        } else if path.is_file() {
+        } else if kind.is_file() {
             files.insert(path.clone(), fs::read(&path)?);
         }
     }
@@ -277,7 +307,11 @@ fn add_missing_history(clone: &Path, mine: &Path) -> Result<()> {
         };
         fs::create_dir_all(clone.join(&history))?;
         for entry in entries {
-            let from = entry?.path();
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let from = entry.path();
             let entry = fs::read(&from)?;
             let stem = from.file_stem().context("A history entry has a name")?;
             // Two machines can write an entry in the same millisecond; both are kept.
@@ -844,6 +878,71 @@ mod tests {
             (0, "{}\n".into())
         );
         assert!(!home.path().join("shared/.git").exists());
+    }
+
+    #[test]
+    fn a_symbolic_link_in_the_shared_paths_is_refused_and_never_followed() {
+        for (link, target) in [("settings", "other"), ("skills/implementing", "../other")] {
+            let (home, mut host) = host();
+            let github = Arc::new(GitHub::new(home.path(), true));
+            github.commit("other/README.md", "Unrelated.\n");
+            let work = tempfile::tempdir().unwrap();
+            git(
+                work.path(),
+                &["clone", "-q", github.bare.to_str().unwrap(), "."],
+            );
+            let at = work.path().join(link);
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, &at).unwrap();
+            git(work.path(), &["add", "--all"]);
+            git(work.path(), &["commit", "-q", "-m", "Link"]);
+            git(work.path(), &["push", "-q", "origin", "main"]);
+            host.set_check_ins(10, 300).unwrap();
+            for result in [
+                check(&host.home, NAME, &github.tools()).map(drop),
+                host.choose_settings_repository(NAME, None, &github.tools())
+                    .map(drop),
+            ] {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(
+                    error.contains(&format!("{link} is a symbolic link")),
+                    "{error}"
+                );
+            }
+            assert_eq!(
+                (github.pushes(), github.show("other/check-ins.json")),
+                (0, None)
+            );
+            assert!(!home.path().join("shared/.git").exists());
+        }
+        // A link in this machine's shared folder is refused, not followed.
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        let outside = home.path().join("outside.md");
+        fs::write(&outside, "Not a setting.").unwrap();
+        let guide = home.path().join("shared/settings/model-guide.md");
+        fs::create_dir_all(guide.parent().unwrap()).unwrap();
+        let _ = fs::remove_file(&guide);
+        std::os::unix::fs::symlink(&outside, &guide).unwrap();
+        let error = host
+            .choose_settings_repository(NAME, None, &github.tools())
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is a symbolic link"),
+            "{error:#}"
+        );
+        assert_eq!(github.pushes(), 0);
+    }
+
+    #[test]
+    fn an_internal_repository_is_readable_by_every_member_of_its_enterprise() {
+        let (home, host) = host();
+        let mut github = GitHub::new(home.path(), true);
+        github.repository["visibility"] = json!("internal");
+        github.repository["owner"] = json!({"login": "Sage-Social", "type": "Organization"});
+        github.organization = Some(json!({"default_repository_permission": "none"}));
+        let check = check(&host.home, NAME, &Arc::new(github).tools()).unwrap();
+        assert_eq!(check.readers, Readers::EnterpriseMembers);
     }
 
     #[test]

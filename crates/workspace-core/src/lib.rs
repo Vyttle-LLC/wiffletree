@@ -736,6 +736,8 @@ pub enum Readers {
     Invited,
     /// Every member of its organization, whose base permission is Read or more.
     EveryMember,
+    /// Every member of its organization's enterprise: the repository is internal.
+    EnterpriseMembers,
     /// GitHub did not report the organization's base permission.
     MaybeMembers,
 }
