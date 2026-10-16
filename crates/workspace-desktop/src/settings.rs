@@ -4,7 +4,7 @@ mod repository;
 
 use super::*;
 use gpui_component::{ActiveTheme, Disableable};
-use repository::Confirm;
+use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
 use ui::{hint, icon, mono, section, segment, setting};
 
@@ -23,8 +23,8 @@ pub(super) struct Settings {
     repository_input: Entity<InputState>,
     /// The repository as the human named it, and what checking it found.
     checked: Option<(String, SettingsRepositoryCheck)>,
-    /// The machine whose settings this Mac took when it joined, while the window stays open.
-    joined_from: Option<String>,
+    /// How this Mac joined, while the window stays open.
+    joined: Option<Joined>,
     repository_error: Option<String>,
     /// A repository request is waiting for the host.
     asking: bool,
@@ -81,7 +81,7 @@ impl Settings {
                         scroll: ScrollHandle::new(),
                         repository_input,
                         checked: None,
-                        joined_from: None,
+                        joined: None,
                         repository_error: None,
                         asking: false,
                         confirming: None,

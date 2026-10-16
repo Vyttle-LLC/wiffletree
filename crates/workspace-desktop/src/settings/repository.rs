@@ -6,6 +6,7 @@ mod synced;
 
 use super::*;
 use gpui_component::button::ButtonVariants;
+pub(crate) use join::Joined;
 pub(crate) use synced::{Mark, SyncShown, share_sync};
 use ui::pill;
 
@@ -107,9 +108,14 @@ impl Settings {
 
     /// Asks the host about the repository, or acts on it, and shows its answer or error.
     fn ask_repository(&mut self, command: Command, cx: &mut Context<Self>) {
-        let joined_from = match (&command, &self.checked) {
-            (Command::JoinSettingsRepository { .. }, Some((_, check))) => {
-                (check.joining.as_ref()).map(|joining| joining.last_machine.clone())
+        let joined = match (&command, &self.checked) {
+            (Command::JoinSettingsRepository { with, .. }, Some((_, check))) => {
+                (check.joining.as_ref()).map(|joining| match with {
+                    JoinWith::Repository => Joined::Repository {
+                        from: joining.last_machine.clone(),
+                    },
+                    JoinWith::ThisMachine => Joined::ThisMac,
+                })
             }
             _ => None,
         };
@@ -135,7 +141,7 @@ impl Settings {
                         let settings = serde_json::from_value(value).map_err(|e| e.to_string())?;
                         view.host = Some(settings);
                         view.checked = None;
-                        view.joined_from = joined_from;
+                        view.joined = joined;
                     }
                     Ok(())
                 });

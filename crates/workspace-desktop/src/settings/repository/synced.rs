@@ -148,11 +148,11 @@ impl Settings {
             _ => p.yellow,
         };
         let section = section
-            .when(self.joined_from.is_some(), |d| d.child(join::steps(3, p)))
+            .when(self.joined.is_some(), |d| d.child(join::steps(3, p)))
             .child(heading(mark.heading(status, now), color, p))
             .children(
-                (self.joined_from.as_deref())
-                    .map(|from| self.joined(from, shown, p))
+                (self.joined.as_ref())
+                    .map(|how| self.joined(how, shown, p))
                     .into_iter()
                     .flatten(),
             )

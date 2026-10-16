@@ -4,6 +4,14 @@ use super::*;
 use chrono::{DateTime, Local};
 
 const STEPS: [&str; 3] = ["1 · Name it", "2 · Compare", "3 · What this Mac needs"];
+/// How this Mac joined, which says whose settings are in use.
+pub(crate) enum Joined {
+    /// With the repository's settings, which the machine `from` last changed.
+    Repository { from: String },
+    /// With this Mac's, which replaced the repository's.
+    ThisMac,
+}
+
 const KEPT: &str = "This Mac’s current settings are kept in a backup, and its skill history is added to the repository’s, so nothing is lost.";
 
 impl Settings {
@@ -82,15 +90,24 @@ impl Settings {
         }
     }
 
-    /// Whose settings this Mac took, and what it still needs to run them.
-    pub(super) fn joined(&self, machine: &str, shown: &SyncShown, p: Palette) -> Vec<Div> {
+    /// Whose settings are in use after joining, and what this Mac still needs to run them.
+    pub(super) fn joined(&self, how: &Joined, shown: &SyncShown, p: Palette) -> Vec<Div> {
         let needs = needs(shown);
-        let in_use = match needs.is_empty() {
-            true => format!("Your settings from {machine} are in use."),
-            false => format!("Your settings from {machine} are in use. This Mac still needs:"),
-        };
+        let in_use = in_use(how, !needs.is_empty());
         let needs = (needs.into_iter()).map(|(icon_name, what, why)| need(icon_name, what, why, p));
         [hint(in_use, p)].into_iter().chain(needs).collect()
+    }
+}
+
+/// Whose settings are in use, and that this Mac still needs something when it does.
+fn in_use(how: &Joined, needs_more: bool) -> String {
+    let in_use = match how {
+        Joined::Repository { from } => format!("Your settings from {from} are in use."),
+        Joined::ThisMac => "This Mac’s settings are now the repository’s.".into(),
+    };
+    match needs_more {
+        true => format!("{in_use} This Mac still needs:"),
+        false => in_use,
     }
 }
 
@@ -189,7 +206,7 @@ fn need(icon_name: &str, what: String, why: Option<&'static str>, p: Palette) ->
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{SyncShown, day_and_time, needs};
+    use super::{Joined, SyncShown, day_and_time, in_use, needs};
 
     #[test]
     fn after_joining_the_section_lists_what_this_mac_still_needs() {
@@ -213,5 +230,20 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         assert!(day_and_time(now).starts_with("today "));
         assert!(!day_and_time(now - 3 * 24 * 60 * 60_000).starts_with("today "));
+    }
+
+    #[test]
+    fn replacing_the_repositorys_settings_does_not_say_the_other_macs_are_in_use() {
+        let from = Joined::Repository {
+            from: "Mike’s MacBook Pro".into(),
+        };
+        assert_eq!(
+            in_use(&from, false),
+            "Your settings from Mike’s MacBook Pro are in use."
+        );
+        assert_eq!(
+            in_use(&Joined::ThisMac, true),
+            "This Mac’s settings are now the repository’s. This Mac still needs:"
+        );
     }
 }
