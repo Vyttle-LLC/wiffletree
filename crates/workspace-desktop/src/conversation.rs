@@ -51,6 +51,113 @@ fn report(body: &str) -> Option<(&str, &str)> {
         .then(|| (kind, rest.split_once('\n').map_or("", |(_, text)| text)))
 }
 
+/// A peer message is coordination traffic rather than conversation: anything another session
+/// sent this one (reports and verdicts, turn results, check-ins, direct messages, a
+/// coordinator's assignments) and this session's own timer fires. The human's messages,
+/// Wiffletree's notices and the session's own replies, errors and compaction lines are not.
+fn peer_message(message: &Message, session_id: &str) -> bool {
+    message.sender.as_deref().is_some_and(|sender| {
+        (sender != session_id && host_notice(&message.id).is_none())
+            || message.id.starts_with("timer:")
+    })
+}
+
+/// Where a message sits in the transcript. Every message keeps its own list row, so the list's
+/// splices stay one row per message; a run of peer messages draws as one row at its head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Placement {
+    Alone,
+    /// Heads a run of this many consecutive peer messages.
+    Heads(usize),
+    /// Drawn by the run above it; its own row is empty.
+    Folded,
+}
+
+pub(super) fn placements(messages: &[Message], session_id: &str) -> Vec<Placement> {
+    let mut placements = Vec::with_capacity(messages.len());
+    let mut head = None;
+    for (row, message) in messages.iter().enumerate() {
+        if !peer_message(message, session_id) {
+            head = None;
+            placements.push(Placement::Alone);
+        } else if let Some(head) = head {
+            if let Placement::Heads(count) = &mut placements[head] {
+                *count += 1;
+            }
+            placements.push(Placement::Folded);
+        } else {
+            head = Some(row);
+            placements.push(Placement::Heads(1));
+        }
+    }
+    placements
+}
+
+/// A peer message as one line of its run: its kind, its text and what went wrong, if anything.
+#[derive(Debug, PartialEq, Eq)]
+struct PeerLine<'a> {
+    kind: Option<&'a str>,
+    text: &'a str,
+    trouble: Option<&'static str>,
+}
+
+fn peer_line(message: &Message) -> PeerLine<'_> {
+    let body = message.body.as_str();
+    let (kind, text) = if let Some((kind, text)) = report(body) {
+        (Some(kind), text)
+    } else if let Some(text) = body.strip_prefix("[check-in] ") {
+        (Some("check_in"), text)
+    } else if message.id.starts_with("turn-result:") {
+        (Some("turn_result"), body)
+    } else {
+        (None, body)
+    };
+    let trouble = match kind {
+        Some("failed") => Some("failed"),
+        Some("blocked") => Some("blocked"),
+        Some("turn_result") if body.contains(" stopped with an error: ") => Some("error"),
+        _ => None,
+    };
+    PeerLine {
+        kind,
+        text,
+        trouble,
+    }
+}
+
+/// "1 failed", "2 blocked", "1 error": what went wrong across a run, for its row.
+fn run_troubles(run: &[Message]) -> Vec<String> {
+    ["failed", "blocked", "error"]
+        .into_iter()
+        .filter_map(|trouble| {
+            let count = run
+                .iter()
+                .filter(|m| peer_line(m).trouble == Some(trouble))
+                .count();
+            match (count, trouble) {
+                (0, _) => None,
+                (1, _) | (_, "failed" | "blocked") => Some(format!("{count} {trouble}")),
+                _ => Some(format!("{count} {trouble}s")),
+            }
+        })
+        .collect()
+}
+
+/// "3 agent messages · Implementer, Tester", the start of a run's row.
+fn run_heading(count: usize, senders: &[String]) -> String {
+    let mut names: Vec<&str> = vec![];
+    for sender in senders {
+        if !names.contains(&sender.as_str()) {
+            names.push(sender);
+        }
+    }
+    format!(
+        "{count} agent message{} · {}",
+        if count == 1 { "" } else { "s" },
+        names.join(", ")
+    )
+}
+
 pub(super) fn first_line(text: &str, limit: usize) -> String {
     let line = text.lines().next().unwrap_or_default();
     if line.chars().count() > limit {
@@ -291,7 +398,199 @@ fn agent_message(message: &Message, sender: Option<&Session>, own: bool, p: Pale
         )
 }
 
+/// The peer-message runs and lines the human opened, by the run's first message id and by
+/// message id. Kept in memory only.
+#[derive(Clone, Default)]
+pub(super) struct OpenPeers {
+    runs: BTreeSet<String>,
+    lines: BTreeSet<String>,
+}
+
+/// Who sent a peer message: the sending agent, or a timer's label.
+fn peer_sender(message: &Message, sessions: &[Session]) -> String {
+    let timer = message
+        .body
+        .strip_prefix("[timer] ")
+        .filter(|_| message.id.starts_with("timer:"))
+        .and_then(|body| body.lines().next());
+    match timer {
+        Some(label) => label.to_owned(),
+        None => sessions
+            .iter()
+            .find(|s| Some(&s.id) == message.sender.as_ref())
+            .map_or("Agent".to_owned(), |s| s.name.clone()),
+    }
+}
+
+/// A run of peer messages as one line where a turn summary would be. Opened, it lists a line
+/// per message, and an opened line shows that message in full.
+fn peer_run(
+    run: &[Message],
+    sessions: &[Session],
+    open: &OpenPeers,
+    p: Palette,
+    view: WeakEntity<Workspace>,
+) -> Div {
+    let head = run[0].id.clone();
+    let senders: Vec<String> = run.iter().map(|m| peer_sender(m, sessions)).collect();
+    let (first, last) = (age(run[0].created_at), age(run[run.len() - 1].created_at));
+    let span = if first == last {
+        first
+    } else {
+        format!("{first} – {last}")
+    };
+    let opened = open.runs.contains(&head);
+    let toggle = {
+        let (view, head) = (view.clone(), head.clone());
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let _ = view.update(cx, |view, cx| view.toggle_peers(&head, None, cx));
+        }
+    };
+    div()
+        .ml(px(38.))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_size(px(11.5))
+        .text_color(p.subtle)
+        .child(
+            div()
+                .id(SharedString::from(format!("peer-run-{head}")))
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .hover(|style| style.text_color(p.text))
+                .child(
+                    icon(if opened {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    })
+                    .size(px(12.))
+                    .flex_none(),
+                )
+                .child(icon("arrows-left-right").size(px(12.)).flex_none())
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .child(run_heading(run.len(), &senders)),
+                )
+                // Long sender names give way, never the counts or the time.
+                .children(run_troubles(run).into_iter().map(|trouble| {
+                    div()
+                        .flex_none()
+                        .text_color(p.red)
+                        .child(format!("· {trouble}"))
+                }))
+                .child(div().flex_none().child(format!("· {span}")))
+                .on_click(toggle),
+        )
+        .when(opened, |d| {
+            d.child(
+                div()
+                    .ml(px(18.))
+                    .pl(px(10.))
+                    .border_l_2()
+                    .border_color(p.overlay)
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .children(run.iter().zip(senders).map(|(message, sender)| {
+                        peer_line_row(message, sender, &head, open, p, view.clone())
+                    })),
+            )
+        })
+}
+
+/// One message of an opened run: sender, kind, first line and time; opened, its full text.
+fn peer_line_row(
+    message: &Message,
+    sender: String,
+    head: &str,
+    open: &OpenPeers,
+    p: Palette,
+    view: WeakEntity<Workspace>,
+) -> Div {
+    let line = peer_line(message);
+    let toggle = {
+        let (head, id) = (head.to_owned(), message.id.clone());
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let _ = view.update(cx, |view, cx| view.toggle_peers(&head, Some(&id), cx));
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .id(SharedString::from(format!("peer-line-{}", message.id)))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .hover(|style| style.text_color(p.text))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(px(160.))
+                        .text_ellipsis()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.text)
+                        .child(sender),
+                )
+                .when_some(line.kind, |d, kind| {
+                    let color = if line.trouble.is_some() {
+                        p.red
+                    } else {
+                        p.focus
+                    };
+                    d.child(pill(humanize(kind), color))
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .child(first_line(line.text, 160)),
+                )
+                .child(div().flex_none().child(age(message.created_at)))
+                .on_click(toggle),
+        )
+        .when(open.lines.contains(&message.id), |d| {
+            d.child(
+                div()
+                    .mt_1()
+                    .mb(px(6.))
+                    .px(px(10.))
+                    .py_2()
+                    .rounded_md()
+                    .bg(p.overlay.opacity(0.5))
+                    .text_color(p.text)
+                    .child(markdown(&message.id, line.text).text_size(px(12.5))),
+            )
+        })
+}
+
 impl Workspace {
+    /// Opens or closes a peer-message run, or one line within it, and measures its row again.
+    pub(super) fn toggle_peers(&mut self, head: &str, line: Option<&str>, cx: &mut Context<Self>) {
+        let (open, id) = match line {
+            Some(line) => (&mut self.open_peers.lines, line),
+            None => (&mut self.open_peers.runs, head),
+        };
+        if !open.remove(id) {
+            open.insert(id.to_owned());
+        }
+        if let Some(row) = self.messages.iter().position(|m| m.id == head)
+            && row < self.list.item_count()
+        {
+            self.list.remeasure_items(row..row + 1);
+        }
+        cx.notify();
+    }
+
     fn waiting_messages(&self) -> usize {
         self.messages
             .iter()
@@ -726,20 +1025,28 @@ impl Workspace {
             .map(|s| s.sessions.clone())
             .unwrap_or_default();
         let current = session.clone();
+        let placements = self.placements.clone();
+        let open = Rc::new(self.open_peers.clone());
         let transcript = list(self.list.clone(), move |ix, _, _| {
-            let content = match messages.get(ix) {
-                Some(message) if from_human(message) => human_message(message, p),
-                Some(message) if message.sender.is_none() => notice_message(message, p),
-                Some(message) if compaction_line(message).is_some() => {
+            let placement = placements.get(ix).copied().unwrap_or(Placement::Alone);
+            let content = match (placement, messages.get(ix)) {
+                // A run draws in its head's row; the rest of its rows stay empty.
+                (Placement::Folded, _) => return div().into_any_element(),
+                (Placement::Heads(count), _) => {
+                    let run = &messages[ix..(ix + count).min(messages.len())];
+                    peer_run(run, &sessions, &open, p, view.clone())
+                }
+                (_, Some(message)) if from_human(message) => human_message(message, p),
+                (_, Some(message)) if message.sender.is_none() => notice_message(message, p),
+                (_, Some(message)) if compaction_line(message).is_some() => {
                     compaction_line(message).map_or_else(div, |line| compaction_message(line, p))
                 }
-                Some(message) => {
+                (_, Some(message)) => {
                     let sender = sessions
                         .iter()
                         .find(|s| Some(&s.id) == message.sender.as_ref());
-                    // A timer fire is addressed to the session by itself but is input, not a reply.
-                    let own = message.sender.as_ref() == Some(&current.id)
-                        && !message.id.starts_with("timer:");
+                    // Timer fires, also sent by the session itself, are drawn in a peer run.
+                    let own = message.sender.as_ref() == Some(&current.id);
                     let reply = agent_message(message, sender, own, p);
                     // A reply whose turn did something shows how long and how much, above it.
                     let summary = message
@@ -758,7 +1065,7 @@ impl Workspace {
                     }
                 }
                 // The row after the last message appears only while the agent works.
-                None => div()
+                (_, None) => div()
                     .w_full()
                     .flex()
                     .gap_3()
@@ -1214,7 +1521,11 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{compaction_line, first_line, from_human, report, transcript_overlap};
+    use super::{
+        Placement::{Alone, Folded, Heads},
+        compaction_line, first_line, from_human, peer_line, placements, report, run_heading,
+        run_troubles, transcript_overlap,
+    };
     use workspace_core::{Message, Receipt};
 
     #[test]
@@ -1332,5 +1643,151 @@ mod tests {
         let shown = [message("c", "3")];
         assert_eq!(transcript_overlap(&shown, &[message("a", "1")]), None);
         assert_eq!(transcript_overlap(&shown, &[]), None);
+    }
+
+    /// A message in session `me`'s transcript from `sender`; `None` is the human or Wiffletree.
+    fn from(sender: Option<&str>, id: &str, body: &str) -> Message {
+        let mut sent = message(id, body);
+        sent.sender = sender.map(Into::into);
+        sent
+    }
+
+    #[test]
+    fn a_run_of_peer_messages_folds_under_its_first() {
+        let transcript = [
+            from(None, "m1", "Go ahead and build it."),
+            from(
+                Some("impl"),
+                "report:impl:1",
+                "[ready_for_testing] Implementer\nCommit 3f2a91c",
+            ),
+            from(
+                Some("tester"),
+                "report:tester:1",
+                "[passed] Tester\nNo findings",
+            ),
+            from(Some("impl"), "agent:impl:2", "Which branch?"),
+            from(Some("me"), "output:r1", "Accepted."),
+            from(None, "m2", "Thanks"),
+        ];
+        assert_eq!(
+            placements(&transcript, "me"),
+            [Alone, Heads(3), Folded, Folded, Alone, Alone]
+        );
+    }
+
+    #[test]
+    fn a_single_peer_message_still_folds_into_a_row() {
+        let transcript = [
+            from(Some("me"), "output:r1", "Assigned."),
+            from(Some("coordinator"), "assignment:me", "Ticket: Fix the list"),
+        ];
+        assert_eq!(placements(&transcript, "me"), [Alone, Heads(1)]);
+        assert_eq!(
+            run_heading(1, &["Coordinator".into()]),
+            "1 agent message · Coordinator"
+        );
+    }
+
+    #[test]
+    fn the_sessions_own_reply_ends_a_run() {
+        let transcript = [
+            from(
+                Some("tester"),
+                "report:tester:1",
+                "[failed] Tester\nBlocking",
+            ),
+            from(Some("me"), "output:r1", "Routing the finding."),
+            from(
+                Some("impl"),
+                "report:impl:2",
+                "[ready_for_testing] Implementer\nFixed",
+            ),
+        ];
+        assert_eq!(placements(&transcript, "me"), [Heads(1), Alone, Heads(1)]);
+    }
+
+    #[test]
+    fn timers_and_check_ins_are_peer_messages_but_own_output_is_not() {
+        let transcript = [
+            from(
+                Some("me"),
+                "timer:s1:100",
+                "[timer] Watch CI\nYour timer s1 fired.",
+            ),
+            from(
+                Some("impl"),
+                "check-in:r9:30",
+                "[check-in] Implementer has been in one turn for 30 minutes.",
+            ),
+            from(Some("me"), "error:r2", "The provider stopped."),
+            from(Some("me"), "compaction:r3", "Context compacted · 812k → 5k"),
+            from(Some("me"), "stopped:r4", "Stopped by your coordinator."),
+        ];
+        assert_eq!(
+            placements(&transcript, "me"),
+            [Heads(2), Folded, Alone, Alone, Alone]
+        );
+        let check_in = peer_line(&transcript[1]);
+        assert_eq!(check_in.kind, Some("check_in"));
+        assert_eq!(
+            check_in.text,
+            "Implementer has been in one turn for 30 minutes."
+        );
+    }
+
+    #[test]
+    fn wiffletree_notices_and_the_humans_messages_break_a_run() {
+        let transcript = [
+            from(
+                Some("impl"),
+                "report:impl:1",
+                "[progress] Implementer\nHalfway",
+            ),
+            from(None, "pr:t:merged:141", "PR #141 merged."),
+            from(
+                Some("impl"),
+                "report:impl:2",
+                "[completed] Implementer\nDone",
+            ),
+            from(None, "m1", "Nice"),
+        ];
+        assert_eq!(
+            placements(&transcript, "me"),
+            [Heads(1), Alone, Heads(1), Alone]
+        );
+    }
+
+    #[test]
+    fn a_run_counts_what_failed_was_blocked_or_errored() {
+        let run = [
+            from(Some("a"), "report:a:1", "[failed] Reviewer\nBlocking: x"),
+            from(Some("b"), "report:b:1", "[failed] Tester\nBlocking: y"),
+            from(
+                Some("c"),
+                "report:c:1",
+                "[blocked] Implementer\nWhich base?",
+            ),
+            from(Some("c"), "report:c:2", "[passed] Implementer\nfine"),
+            from(
+                Some("c"),
+                "turn-result:r1",
+                "Implementer stopped with an error: provider exited. Inspect its worktree.",
+            ),
+            from(Some("c"), "turn-result:r2", "Implementer finished a turn."),
+        ];
+        assert_eq!(run_troubles(&run), ["2 failed", "1 blocked", "1 error"]);
+        assert_eq!(run_troubles(&run[3..4]), Vec::<String>::new());
+        assert_eq!(peer_line(&run[4]).trouble, Some("error"));
+        assert_eq!(peer_line(&run[5]).trouble, None);
+    }
+
+    #[test]
+    fn a_runs_heading_names_each_sender_once() {
+        let senders = ["Implementer", "Tester", "Implementer"].map(String::from);
+        assert_eq!(
+            run_heading(3, &senders),
+            "3 agent messages · Implementer, Tester"
+        );
     }
 }

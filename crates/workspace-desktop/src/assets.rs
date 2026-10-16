@@ -102,6 +102,10 @@ const DRAWINGS: &[(&str, &str)] = &[
     ),
     ("check", r#"<path d="m5 12 4 4L19 6"/>"#),
     ("arrow-up", r#"<path d="M12 19V5m-6 6 6-6 6 6"/>"#),
+    (
+        "arrows-left-right",
+        r#"<path d="M4 8h15m-4-4 4 4-4 4M20 16H5m4-4-4 4 4 4"/>"#,
+    ),
     ("pause", r#"<path d="M8 5v14M16 5v14"/>"#),
     ("play", r#"<path d="m8 4 12 8-12 8Z"/>"#),
     (

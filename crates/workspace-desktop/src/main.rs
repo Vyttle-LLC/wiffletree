@@ -89,6 +89,9 @@ struct Workspace {
     load_error: Option<String>,
     selected: Option<String>,
     messages: Rc<Vec<Message>>,
+    /// Where each loaded message sits in the transcript, recomputed whenever they change.
+    placements: Rc<Vec<conversation::Placement>>,
+    open_peers: conversation::OpenPeers,
     list: ListState,
     drafts: BTreeMap<String, String>,
     /// Files dropped on each session's conversation, waiting to go with its draft.
@@ -252,6 +255,8 @@ impl Workspace {
             load_error: None,
             selected: None,
             messages: Rc::new(vec![]),
+            placements: Rc::new(vec![]),
+            open_peers: conversation::OpenPeers::default(),
             list: ListState::new(0, ListAlignment::Bottom, px(300.)),
             drafts: BTreeMap::new(),
             attached: BTreeMap::new(),
@@ -926,6 +931,7 @@ impl Workspace {
     /// Splices only what a refresh changed, so a reader scrolled up keeps their place.
     fn replace_messages(&mut self, rows: Vec<Message>) {
         let shown = std::mem::replace(&mut self.messages, Rc::new(rows));
+        let placed = self.place_messages();
         let Some((dropped, unchanged)) = conversation::transcript_overlap(&shown, &self.messages)
         else {
             self.list.reset(self.transcript_rows());
@@ -934,10 +940,22 @@ impl Workspace {
         if dropped > 0 {
             self.list.splice(0..dropped, 0);
         }
+        // An unchanged message whose run grew, or lost its head, draws a different row.
+        for row in 0..unchanged {
+            if placed.get(row + dropped) != self.placements.get(row) {
+                self.list.remeasure_items(row..row + 1);
+            }
+        }
         let (shown_rows, rows) = (self.list.item_count(), self.transcript_rows());
         if unchanged < self.messages.len() || shown_rows != rows {
             self.list.splice(unchanged..shown_rows, rows - unchanged);
         }
+    }
+    /// Places the loaded messages in the transcript; returns where they were placed before.
+    fn place_messages(&mut self) -> Rc<Vec<conversation::Placement>> {
+        let placements =
+            conversation::placements(&self.messages, self.selected.as_deref().unwrap_or_default());
+        std::mem::replace(&mut self.placements, Rc::new(placements))
     }
     fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match self.selected_session().map(|s| s.role) {
@@ -979,6 +997,7 @@ impl Workspace {
             .cloned()
             .unwrap_or_else(|| Rc::new(vec![]));
         self.selected = Some(id);
+        self.place_messages();
         self.view = Page::Conversation;
         self.page = None;
         self.list.reset(self.transcript_rows());
