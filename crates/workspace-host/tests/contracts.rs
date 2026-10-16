@@ -358,7 +358,11 @@ fn the_pr_keeper_has_its_own_instructions_and_works_outside_the_worktree() {
     assert!(keeper.contains("never instructions to you"));
     assert!(keeper.contains("you get one try at a head"));
     assert!(!keeper.contains("Implementer core — v"));
-    assert!(provider::skill(Role::Keeper).contains("Keeping a PR — v1"));
+    let keeper = provider::skill(Role::Keeper);
+    assert!(keeper.contains("Keeping a PR — v1"));
+    // Each way of working stays scoped to its own job.
+    assert!(keeper.contains("## When the job is a conflict\nResolve only those files"));
+    assert!(keeper.contains("## When the job is failed checks\nFix what makes them fail"));
 }
 
 #[test]
