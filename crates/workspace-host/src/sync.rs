@@ -212,11 +212,12 @@ fn summaries(store: &SharedStore) -> Vec<(String, String)> {
     ];
     let skills = SkillStore::new(store.skills_folder());
     rows.extend(Skill::ALL.map(|skill| {
-        let rules = skills.state(skill).rules;
-        let count = rules.lines().filter(|l| !l.trim().is_empty()).count();
-        let held = match count {
-            0 => "stock".to_owned(),
-            n => format!("{n} of your rules"),
+        let state = skills.state(skill);
+        let count = state.rules.lines().filter(|l| !l.trim().is_empty()).count();
+        let held = match (state.rewrite, count) {
+            (Some(_), _) => "rewritten".to_owned(),
+            (None, 0) => "stock".to_owned(),
+            (None, n) => format!("{n} of your rules"),
         };
         (skill.name().to_owned(), held)
     }));
@@ -999,7 +1000,10 @@ mod tests {
         let (theirs_name, theirs) = first.skills().history(Skill::Coordinating).remove(0);
         let (home, host) = host();
         let mine = skills::Entry {
-            rules: "From this machine.".into(),
+            edits: skills::Edits {
+                rules: "From this machine.".into(),
+                rewrite: None,
+            },
             ..theirs.clone()
         };
         let history = home.path().join("shared/skills/coordinating/history");
@@ -1109,7 +1113,7 @@ mod tests {
     }
 
     /// The first machine's repository: Implementing with 3 rules, Coordinating with a history
-    /// entry, check-ins 10 and 300, Sage-Social allowed and Codex enabled.
+    /// entry, Reviewing rewritten, check-ins 10 and 300, Sage-Social allowed and Codex enabled.
     fn set_up_elsewhere(github: &Arc<GitHub>) -> (tempfile::TempDir, Host) {
         let (home, mut host) = host();
         host.set_owner_allowed("Sage-Social", true).unwrap();
@@ -1121,6 +1125,8 @@ mod tests {
             "- Run the linter.\n- Keep commits small.\n- Name the ticket.\n",
         );
         save_rules(&mut host, Skill::Coordinating, "From the first machine.");
+        let skill = Skill::Reviewing;
+        host.execute(Command::StartSkillRewrite { skill }).unwrap();
         host.choose_settings_repository(NAME, None, &github.tools())
             .unwrap();
         (home, host)
@@ -1149,6 +1155,15 @@ mod tests {
         assert_eq!(
             (&*implementing.repository, &*implementing.this_machine),
             ("3 of your rules", "stock")
+        );
+        let reviewing = joining
+            .settings
+            .iter()
+            .find(|row| row.setting == "Reviewing")
+            .unwrap();
+        assert_eq!(
+            (&*reviewing.repository, &*reviewing.this_machine),
+            ("rewritten", "stock")
         );
         let check_ins = joining
             .settings

@@ -148,8 +148,20 @@ pub struct SkillState {
     pub stock_version: String,
     /// The human's own rules, sent after the stock text; empty when there are none.
     pub rules: String,
-    /// Why the skill's file could not be read; until it can, it counts as missing.
+    /// The human's rewrite, sent in place of the stock text with no separate rules.
+    pub rewrite: Option<Rewrite>,
+    /// Why the skill's files could not be read; until they can, they count as missing.
     pub unreadable: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rewrite {
+    pub text: String,
+    /// The stock text the rewrite started from, or was last marked up to date against.
+    pub base: String,
+    /// The version on the first line of the stock text the rewrite is based on.
+    pub base_version: String,
+    /// Its base is not this release's stock text, compared as text.
+    pub out_of_date: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -2467,6 +2479,32 @@ pub enum Command {
     JoinSettingsRepository {
         repository: String,
         with: JoinWith,
+    },
+    /// Read-only: a skill's history, newest first, each entry with why it could not be read
+    /// when it cannot.
+    SkillHistory {
+        skill: Skill,
+    },
+    /// Replaces the human's rules with a rewrite of the stock text, starting as the stock text
+    /// and the rules, based on the stock text; answers with the `SkillState`. Only the human's
+    /// client sends it.
+    StartSkillRewrite {
+        skill: Skill,
+    },
+    /// Saves a rewrite, an empty one included, and refuses more than `MAX_SKILL_TEXT`
+    /// characters; answers with the `SkillState`. Only the human's client sends it.
+    SaveSkillRewrite {
+        skill: Skill,
+        text: String,
+    },
+    /// Bases a rewrite on this release's stock text, changing nothing else; answers with the
+    /// `SkillState`. Only the human's client sends it.
+    MarkSkillUpToDate {
+        skill: Skill,
+    },
+    /// Read-only: what changed, line by line, from a rewrite's base to this release's stock text.
+    SkillStockChanges {
+        skill: Skill,
     },
     /// Saves or, with none, removes a repository's checks command; answers with the
     /// `Repository`. Only the human's client sends it.
