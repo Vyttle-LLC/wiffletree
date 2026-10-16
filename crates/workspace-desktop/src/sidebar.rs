@@ -383,6 +383,9 @@ impl Workspace {
                         .on_click(cx.listener(|v, _, w, c| v.restart_to_update(w, c)))
                         .into_any_element(),
                     None => div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .flex()
                         .items_center()
                         .gap_2()
@@ -395,6 +398,7 @@ impl Workspace {
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_1()

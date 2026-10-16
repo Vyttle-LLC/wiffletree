@@ -115,7 +115,7 @@ pub(super) fn steps(current: usize, p: Palette) -> Div {
 
 /// "today 14:41", or "12 Oct 14:41" on another day.
 fn day_and_time(at: i64) -> String {
-    let Some(at) = DateTime::from_timestamp(at, 0).map(|at| at.with_timezone(&Local)) else {
+    let Some(at) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
         return String::new();
     };
     match at.date_naive() == Local::now().date_naive() {
@@ -178,6 +178,7 @@ fn need(icon_name: &str, what: String, why: Option<&'static str>, p: Palette) ->
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .child(div().font_weight(FontWeight::MEDIUM).child(what))
@@ -188,7 +189,7 @@ fn need(icon_name: &str, what: String, why: Option<&'static str>, p: Palette) ->
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{SyncShown, needs};
+    use super::{SyncShown, day_and_time, needs};
 
     #[test]
     fn after_joining_the_section_lists_what_this_mac_still_needs() {
@@ -205,5 +206,12 @@ mod tests {
             ..shown
         };
         assert_eq!(needs(&allowed).len(), 1);
+    }
+
+    #[test]
+    fn the_repositorys_last_change_is_a_time_in_milliseconds() {
+        let now = chrono::Utc::now().timestamp_millis();
+        assert!(day_and_time(now).starts_with("today "));
+        assert!(!day_and_time(now - 3 * 24 * 60 * 60_000).starts_with("today "));
     }
 }

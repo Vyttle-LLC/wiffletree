@@ -293,7 +293,7 @@ fn repository_card(
                         .mt(px(2.))
                         .text_color(icon_color),
                 )
-                .child(div().flex_1().child(who)),
+                .child(div().flex_1().min_w_0().child(who)),
         )
 }
 

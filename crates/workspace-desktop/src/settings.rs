@@ -385,6 +385,7 @@ impl Render for Settings {
                             .inset_0()
                             .occlude()
                             .flex()
+                            .items_start()
                             .justify_center()
                             .pt(px(120.))
                             .child(dialog),

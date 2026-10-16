@@ -201,11 +201,19 @@ fn error_banner(error: &str, status: &SyncStatus, p: Palette) -> Div {
         clock(status.failed_at)
     );
     banner(p.red).child(
-        div().flex().flex_col().gap_1().child(reached).child(
-            mono(error.to_owned(), p)
-                .text_color(p.text)
-                .whitespace_normal(),
-        ),
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(reached)
+            .child(
+                div()
+                    .font_family(".SystemMonoFont")
+                    .text_size(px(11.))
+                    .child(error.to_owned()),
+            ),
     )
 }
 
@@ -279,6 +287,7 @@ fn paused_row(note: &WorkspaceNote, p: Palette) -> Div {
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .child(
