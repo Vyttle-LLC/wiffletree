@@ -1489,7 +1489,7 @@ mod tests {
         let mut host = Host::open(home.path()).unwrap();
         let skill = Skill::Coordinating;
         state(&mut host, Command::StartSkillRewrite { skill });
-        std::fs::remove_file(home.path().join("skills/coordinating/base.md")).unwrap();
+        std::fs::remove_file(home.path().join("shared/skills/coordinating/base.md")).unwrap();
         let text = "My way".to_owned();
         let saved = state(&mut host, Command::SaveSkillRewrite { skill, text });
         let base_version = &saved.rewrite.as_ref().unwrap().base_version;
@@ -1536,7 +1536,7 @@ mod tests {
         // A stand-in for the stock text of the release the rewrite was written against.
         let body = stock(skill).split_once('\n').unwrap().1;
         let base = format!("# Coordinating — v0\n{body}A line v1 removed.\n");
-        std::fs::write(home.path().join("skills/coordinating/base.md"), base).unwrap();
+        std::fs::write(home.path().join("shared/skills/coordinating/base.md"), base).unwrap();
 
         let snapshot = host.snapshot().unwrap();
         let coordinating = &snapshot.skills[0];
@@ -1611,7 +1611,7 @@ mod tests {
         };
         let live = |host: &Host| is_live(&newest(), &host.skills().state(skill));
         assert!(live(&host));
-        let rules = home.path().join("skills/implementing/additions.md");
+        let rules = home.path().join("shared/skills/implementing/additions.md");
         std::fs::write(&rules, "Rule\nEdited outside the app").unwrap();
         assert!(!live(&host));
         std::fs::write(&rules, b"\xff not text").unwrap();
@@ -1621,7 +1621,7 @@ mod tests {
         // A rewrite whose base is out of date is current while it is what agents get.
         host.skills().start_rewrite(skill).unwrap();
         std::fs::write(
-            home.path().join("skills/implementing/base.md"),
+            home.path().join("shared/skills/implementing/base.md"),
             "# Implementing — v0\n",
         )
         .unwrap();
@@ -1629,7 +1629,7 @@ mod tests {
         assert!(live(&host));
         // A base edited outside the app, at the same version, is not what the entry holds.
         std::fs::write(
-            home.path().join("skills/implementing/base.md"),
+            home.path().join("shared/skills/implementing/base.md"),
             "# Implementing — v0\nEdited outside the app\n",
         )
         .unwrap();

@@ -827,12 +827,13 @@ mod tests {
     #[test]
     fn an_existing_setup_opens_as_one_full_level_with_every_verifier_ticked() {
         let directory = tempfile::tempdir().unwrap();
-        let host = Host::open_set_up(directory.path()).unwrap();
+        // Saved by a release before levels, then updated.
         std::fs::write(
             directory.path().join("settings.json"),
             r#"{"workspaces_dir":"/tmp/w","verification":{"verifiers":[{"role":"tester","focus":"Tests"},{"role":"reviewer","focus":"Claude"},{"role":"reviewer","focus":"Codex"},{"role":"reviewer","focus":"Style"}],"max_rounds":2,"max_cycles":3}}"#,
         )
         .unwrap();
+        let host = Host::open_set_up(directory.path()).unwrap();
 
         let shown = host.settings().verification;
 

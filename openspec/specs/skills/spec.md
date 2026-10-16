@@ -140,11 +140,15 @@ Each change to a skill SHALL write a history entry holding the skill's whole sta
 - **THEN** Reviewing's history gains one "New stock version" entry naming both versions
 
 ### Requirement: Skills are stored in a folder that can move
-The host SHALL keep skills in a `skills` folder in its data folder, one folder per skill, holding the human's rules, the rewrite and its base as plain text files, and one file per history entry. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. A missing file SHALL mean no state for it. A file the host cannot read SHALL count as missing for the instructions, and the skill's page SHALL say it could not be read. Credentials, the database and conversations SHALL NOT be stored there.
+The host SHALL keep skills in the `skills` folder of the shared folder (see settings-repository), one folder per skill, holding the human's rules, the rewrite and its base as plain text files, and one file per history entry. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. A missing file SHALL mean no state for it. A file the host cannot read SHALL count as missing for the instructions, and the skill's page SHALL say it could not be read. Credentials, the database and conversations SHALL NOT be stored there. A skills folder from before the shared folder SHALL be moved into it unchanged at start.
 
 #### Scenario: A file that cannot be read
 - **WHEN** Implementing's rules file is not valid UTF-8
 - **THEN** implementers get the stock text with no rules, and Implementing's page says its file could not be read
+
+#### Scenario: Skills saved before the shared folder
+- **WHEN** Wiffletree starts after an update with rules for Implementing in `<data folder>/skills/`
+- **THEN** they are in the shared folder's `skills/implementing/`, the history is unchanged, and implementers keep getting the rules
 
 ### Requirement: The Skills page
 The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · out of date"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.

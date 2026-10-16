@@ -1,7 +1,7 @@
-//! The human's own rules or rewrite for each skill, as plain files in `<data folder>/skills`, one
-//! folder per skill with a history file for every change. Only the human's commands write here;
-//! no agent tool reaches it. A missing file means none, so a fresh install or an update needs
-//! nothing.
+//! The human's own rules or rewrite for each skill, as plain files in the shared folder's
+//! `skills`, one folder per skill with a history file for every change. Only the human's commands
+//! write here; no agent tool reaches it. A missing file means none, so a fresh install or an
+//! update needs nothing.
 use crate::*;
 use serde::Deserialize;
 use std::io::{ErrorKind, Write as _};
@@ -408,7 +408,7 @@ impl Moved {
 }
 /// The store of the host whose data folder is `home`.
 pub fn store(home: &Path) -> SkillStore {
-    SkillStore::new(home.join("skills"))
+    SkillStore::new(shared::SharedStore::of(home).skills_folder())
 }
 impl Host {
     pub fn skills(&self) -> SkillStore {
@@ -442,13 +442,13 @@ mod tests {
     }
 
     fn rules_file(host: &Host) -> PathBuf {
-        host.home.join("skills/implementing/additions.md")
+        host.home.join("shared/skills/implementing/additions.md")
     }
 
     #[test]
     fn a_fresh_install_is_at_stock_and_writes_nothing() {
         let (_home, host) = host();
-        assert!(!host.home.join("skills").exists());
+        assert!(!host.shared().skills_folder().exists());
         for state in host.skill_states() {
             assert_eq!((state.rules.as_str(), &state.unreadable), ("", &None));
             assert_eq!(state.stock_version, "v1");
@@ -540,7 +540,7 @@ mod tests {
             .save_rules(Skill::Implementing, "Rule")
             .unwrap();
         drop(host);
-        let folder = home.path().join("skills/implementing");
+        let folder = home.path().join("shared/skills/implementing");
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
         let host = Host::open(home.path()).unwrap();
         let state = host.skills().state(Skill::Implementing);
@@ -616,7 +616,7 @@ mod tests {
             .save_rules(Skill::Implementing, "Rule")
             .unwrap();
         host.skills().reset(Skill::Implementing).unwrap();
-        let history = host.home.join("skills/implementing/history");
+        let history = host.home.join("shared/skills/implementing/history");
         fs::write(history.join("2000-01-01T00-00-00.000Z.json"), "not json").unwrap();
         let listed: Vec<Recorded> = serde_json::from_value(
             host.execute(Command::SkillHistory {
@@ -643,8 +643,8 @@ mod tests {
     /// Rewrites the skill's one history entry as a release whose stock was v0 wrote it.
     fn written_by_v0(host: &Host, skill: Skill) {
         let (name, _) = host.skills().history(skill).remove(0);
-        let path =
-            (host.home.join("skills").join(skill.folder())).join(format!("history/{name}.json"));
+        let path = (host.shared().skills_folder().join(skill.folder()))
+            .join(format!("history/{name}.json"));
         let entry = fs::read_to_string(&path).unwrap();
         fs::write(&path, entry.replace("\"v1\"", "\"v0\"")).unwrap();
     }
@@ -680,7 +680,7 @@ mod tests {
         host.skills().save_rules(Skill::Reviewing, "Rule").unwrap();
         written_by_v0(&host, Skill::Reviewing);
         drop(host);
-        let history = home.path().join("skills/reviewing/history");
+        let history = home.path().join("shared/skills/reviewing/history");
         fs::set_permissions(&history, fs::Permissions::from_mode(0o555)).unwrap();
         let opened = Host::open(home.path());
         fs::set_permissions(&history, fs::Permissions::from_mode(0o755)).unwrap();
@@ -726,14 +726,14 @@ mod tests {
             host.instructions(Role::Tester),
             provider::instructions(Role::Tester, stock(Skill::Reviewing), &reviewing.rules)
         );
-        assert!(!host.home.join("skills/implementing").exists());
+        assert!(!host.home.join("shared/skills/implementing").exists());
         drop(host);
         let host = Host::open(home.path()).unwrap();
         assert_eq!(changes(&host, Skill::Reviewing).len(), 2);
     }
 
     fn coordinating(host: &Host, file: &str) -> PathBuf {
-        host.home.join("skills/coordinating").join(file)
+        host.home.join("shared/skills/coordinating").join(file)
     }
 
     /// Bases Coordinating's rewrite on a stand-in for an earlier stock text, as if it had been
@@ -1053,7 +1053,7 @@ mod tests {
 
     /// The names in Coordinating's folder, so a failed change is seen to leave nothing behind.
     fn coordinating_files(host: &Host) -> Vec<String> {
-        let files = fs::read_dir(host.home.join("skills/coordinating")).unwrap();
+        let files = fs::read_dir(host.home.join("shared/skills/coordinating")).unwrap();
         let mut names: Vec<_> = (files.map(|file| file.unwrap().file_name()))
             .map(|name| name.into_string().unwrap())
             .collect();

@@ -1,7 +1,15 @@
-//! Host settings in `settings.json`, and the readable folder layout they choose for new work.
+//! Host settings: this machine's in `settings.json`, the shared ones through `SharedStore`, and
+//! the readable folder layout they choose for new work.
 use crate::*;
 
 const FILE: &str = "settings.json";
+/// The fields `settings.json` held before the shared folder. They stay there, unread and unwritten.
+const MOVED_FIELDS: [&str; 4] = [
+    "verification",
+    "checkin_child_turns",
+    "checkin_human_turns",
+    "keeper",
+];
 const SLUG_LIMIT: usize = 48;
 
 /// `~/wiffletree`, or `~/wiffletree-beta` for a beta build so the two never share folders.
@@ -99,12 +107,22 @@ fn wiffletree_branches(repository: &Path) -> Result<Vec<String>> {
 }
 
 impl Host {
-    /// The saved settings, or the defaults when the file is missing, unreadable or invalid.
+    /// The saved settings: each shared one from its file, the rest from `settings.json`. A file
+    /// that is missing, unreadable or invalid gives its defaults.
     pub fn settings(&self) -> HostSettings {
-        fs::read(self.home.join(FILE))
+        let local = fs::read(self.home.join(FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(|| HostSettings::new(default_workspaces_dir()))
+            .unwrap_or_else(|| HostSettings::new(default_workspaces_dir()));
+        let shared = self.shared();
+        let (checkin_child_turns, checkin_human_turns) = shared.check_ins();
+        HostSettings {
+            verification: shared.review(),
+            checkin_child_turns,
+            checkin_human_turns,
+            keeper: shared.keeper(),
+            ..local
+        }
     }
     /// Saves who verifies tickets. An invalid setting is refused and the saved one stays.
     pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
@@ -115,15 +133,11 @@ impl Host {
             self.model_selection()?.keeper.as_ref(),
             &verification,
         )?;
-        let settings = HostSettings {
-            verification,
-            ..self.settings()
-        };
-        self.save_settings(&settings)?;
-        Ok(settings)
+        self.shared().set_review(&verification)?;
+        Ok(self.settings())
     }
     /// Saves a model selection with the verifiers sent with it, or neither: both are checked
-    /// first, and a failed selection write puts the settings file back as it was.
+    /// together first, and a failed selection write puts the review settings back as they were.
     pub fn set_setup(
         &mut self,
         selection: &ModelSelection,
@@ -133,26 +147,19 @@ impl Host {
         let Some(verification) = verification else {
             return self.set_model_selection(selection);
         };
-        let path = self.home.join(FILE);
-        let previous = fs::read(&path).ok();
-        self.set_verification(verification)?;
-        self.set_model_selection(selection).inspect_err(|_| {
-            let _ = match &previous {
-                Some(bytes) => fs::write(&path, bytes),
-                None => fs::remove_file(&path),
-            };
+        verification.validate()?;
+        policies::check_keeper_needs(&self.settings().keeper, selection, &verification)?;
+        let shared = self.shared();
+        shared.put_back_on_error(shared::REVIEW, || {
+            shared.set_review(&verification)?;
+            self.set_model_selection(selection)
         })
     }
     /// Saves the check-in thresholds. An invalid pair is refused and the saved one stays.
     pub fn set_check_ins(&mut self, child_turns: u32, human_turns: u32) -> Result<HostSettings> {
         HostSettings::validate_check_ins(child_turns, human_turns)?;
-        let settings = HostSettings {
-            checkin_child_turns: child_turns,
-            checkin_human_turns: human_turns,
-            ..self.settings()
-        };
-        self.save_settings(&settings)?;
-        Ok(settings)
+        self.shared().set_check_ins(child_turns, human_turns)?;
+        Ok(self.settings())
     }
     /// Saves the PR keeper's settings. An invalid setting is refused and the saved one stays.
     /// Turning comment sorting on starts every PR's comments afresh at the next pass.
@@ -166,12 +173,8 @@ impl Host {
         if keeper.comments && !self.settings().keeper.comments {
             self.restart_comments()?;
         }
-        let settings = HostSettings {
-            keeper,
-            ..self.settings()
-        };
-        self.save_settings(&settings)?;
-        Ok(settings)
+        self.shared().set_keeper(&keeper)?;
+        Ok(self.settings())
     }
     /// Saves or removes a repository's checks command. The PR keeper reads it when it runs.
     pub fn set_repository_checks(
@@ -241,7 +244,7 @@ impl Host {
         self.save_settings(&settings)?;
         Ok(settings)
     }
-    /// Writes atomically and keeps fields this version does not know.
+    /// Writes this machine's settings atomically and keeps fields this version does not know.
     fn save_settings(&self, settings: &HostSettings) -> Result<()> {
         let path = self.home.join(FILE);
         let mut saved = fs::read(&path)
@@ -249,7 +252,8 @@ impl Host {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
-        if let Value::Object(fields) = serde_json::to_value(settings)? {
+        if let Value::Object(mut fields) = serde_json::to_value(settings)? {
+            fields.retain(|field, _| !MOVED_FIELDS.contains(&field.as_str()));
             saved.as_object_mut().unwrap().extend(fields);
         }
         let mut staged = tempfile::NamedTempFile::new_in(&self.home)?;

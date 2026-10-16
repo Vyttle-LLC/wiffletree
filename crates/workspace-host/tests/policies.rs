@@ -112,7 +112,8 @@ fn current(role: Role) -> Value {
 }
 
 /// Opens a store as it was before model selection: `setup` adds sessions on a fresh host, then
-/// each role gets its legacy row and pins and migrations are forgotten.
+/// each role gets its legacy row, pins and migrations are forgotten, and the shared folder,
+/// which came later, is removed.
 fn seed(home: &Path, rows: impl Fn(Role) -> Value, setup: impl FnOnce(&mut Host)) -> Host {
     let mut host = Host::open_set_up(home).unwrap();
     setup(&mut host);
@@ -135,6 +136,7 @@ fn seed(home: &Path, rows: impl Fn(Role) -> Value, setup: impl FnOnce(&mut Host)
     )
     .unwrap();
     drop(db);
+    std::fs::remove_dir_all(home.join("shared")).unwrap();
     Host::open(home).unwrap()
 }
 fn git_repo() -> std::path::PathBuf {
@@ -590,30 +592,69 @@ fn a_refused_first_save_keeps_the_verifiers_unsaved_too() {
     let mut setup = suggest(&detected(&PROVIDERS));
     setup.selection.role_providers.clear();
     assert!(save(&mut host, &setup).is_err());
-    assert!(!home.path().join("settings.json").exists());
+    assert!(!home.path().join("shared/settings/review.json").exists());
 }
 
-#[test]
-fn a_first_save_whose_selection_write_fails_leaves_the_settings_file_as_it_was() {
-    let home = tempfile::tempdir().unwrap();
-    let mut host = Host::open(home.path()).unwrap();
-    Connection::open(home.path().join("workspace.sqlite3"))
+fn refuse_selection_writes(home: &Path) {
+    Connection::open(home.join("workspace.sqlite3"))
         .unwrap()
         .execute_batch(
             "CREATE TRIGGER refuse BEFORE INSERT ON model_selection
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         )
         .unwrap();
-    let setup = suggest(&detected(&PROVIDERS));
-    let settings = home.path().join("settings.json");
-    assert!(save(&mut host, &setup).is_err());
+}
+
+#[test]
+fn a_first_save_whose_selection_write_fails_writes_no_shared_file() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open(home.path()).unwrap();
+    refuse_selection_writes(home.path());
+    assert!(save(&mut host, &suggest(&detected(&PROVIDERS))).is_err());
     assert!(!host.model_selection().unwrap().is_saved());
-    assert!(!settings.exists());
-    // Settings saved earlier, such as the check-ins, come back byte for byte.
-    host.set_check_ins(30, 200).unwrap();
-    let before = std::fs::read(&settings).unwrap();
-    assert!(save(&mut host, &suggest(&detected(&[Provider::Claude]))).is_err());
-    assert_eq!(std::fs::read(&settings).unwrap(), before);
+    for file in ["review.json", "model-guide.md"] {
+        assert!(!home.path().join("shared/settings").join(file).exists());
+    }
+}
+
+#[test]
+fn a_combined_save_whose_selection_write_fails_puts_the_review_settings_and_guide_back() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    host.set_verification(VerificationSettings::default())
+        .unwrap();
+    let files = || {
+        ["review.json", "model-guide.md"]
+            .map(|file| std::fs::read(home.path().join("shared/settings").join(file)).unwrap())
+    };
+    let before = (files(), host.model_selection().unwrap());
+    refuse_selection_writes(home.path());
+    let mut setup = suggest(&detected(&[Provider::Claude]));
+    setup.selection.guide = "A new guide.".into();
+    setup.verification.max_rounds += 1;
+    assert!(save(&mut host, &setup).is_err());
+    assert_eq!((files(), host.model_selection().unwrap()), before);
+}
+
+#[test]
+fn a_combined_save_refused_for_the_keeper_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(home.path()).unwrap();
+    let mut selection = host.model_selection().unwrap();
+    selection.keeper = Some(claude("sonnet", "medium"));
+    host.set_model_selection(&selection).unwrap();
+    host.set_keeper(KeeperSettings {
+        comments: true,
+        ..KeeperSettings::default()
+    })
+    .unwrap();
+    let before = (host.settings(), host.model_selection().unwrap());
+    let mut setup = suggest(&detected(&PROVIDERS));
+    setup.selection.guide = "A new guide.".into();
+    setup.verification.max_rounds += 1;
+    let refused = save(&mut host, &setup).unwrap_err().to_string();
+    assert!(refused.contains("PR keeper model"), "{refused}");
+    assert_eq!((host.settings(), host.model_selection().unwrap()), before);
 }
 
 #[test]
@@ -643,6 +684,7 @@ fn saving_validates_the_whole_selection_and_bumps_the_revision() {
     let saved = host.model_selection().unwrap();
     let mut invalid = saved.clone();
     invalid.role_providers.insert(Role::Tester, BTreeSet::new());
+    invalid.guide = "A guide that is not saved.".into();
     assert!(host.set_model_selection(&invalid).is_err());
     assert_eq!(host.model_selection().unwrap(), saved);
     let next = host.set_model_selection(&saved).unwrap();

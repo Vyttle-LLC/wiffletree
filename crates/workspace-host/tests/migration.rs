@@ -599,6 +599,8 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
     )
     .unwrap();
     drop(db);
+    // A store from before the shared folder, too.
+    std::fs::remove_dir_all(f.home.join("shared")).unwrap();
 
     let host = Host::open_set_up(&f.home).unwrap();
     assert_eq!(version(&f.home), 7);

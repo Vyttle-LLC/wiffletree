@@ -2384,9 +2384,9 @@ fn the_choices_must_be_exactly_the_levels_verifiers() {
 fn a_level_whose_verifier_is_not_configured_is_refused() {
     let mut f = leveled(2);
     // Only a hand-edited settings file can hold this: the host refuses to save it.
-    let file = f.host.home.join("settings.json");
+    let file = f.host.home.join("shared/settings/review.json");
     let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    saved["verification"]["levels"][2]["verifiers"] = json!(["Prose"]);
+    saved["levels"][2]["verifiers"] = json!(["Prose"]);
     std::fs::write(&file, saved.to_string()).unwrap();
 
     let refused = f.refused_at("Docs", &["Style"]);
@@ -2400,9 +2400,8 @@ fn a_level_whose_verifier_is_not_configured_is_refused() {
 #[test]
 fn a_setting_saved_before_levels_and_the_default_both_verify_at_full() {
     let mut f = Fixture::ready(three_verifiers(), 3);
-    let file = f.host.home.join("settings.json");
-    let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    saved["verification"] = json!({"max_rounds":2,"verifiers":[
+    let file = f.host.home.join("shared/settings/review.json");
+    let saved = json!({"max_rounds":2,"verifiers":[
         {"role":"reviewer","focus":"Claude","provider":"claude"},
         {"role":"reviewer","focus":"Codex","provider":"codex"}]});
     std::fs::write(&file, saved.to_string()).unwrap();
@@ -2420,10 +2419,7 @@ fn a_setting_saved_before_levels_and_the_default_both_verify_at_full() {
 
     // With no saved verification setting at all, Full is the three default verifiers.
     let mut f = Fixture::ready(three_verifiers(), 3);
-    let file = f.host.home.join("settings.json");
-    let mut saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    saved.as_object_mut().unwrap().remove("verification");
-    std::fs::write(&file, saved.to_string()).unwrap();
+    std::fs::remove_file(f.host.home.join("shared/settings/review.json")).unwrap();
 
     let cycle = f.verify().unwrap().verification.unwrap();
 

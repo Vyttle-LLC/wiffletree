@@ -152,7 +152,7 @@ The Settings window SHALL have a Check-ins section under the workspace folder wi
 - **THEN** the host saves `checkin_child_turns` 50 with `checkin_human_turns` unchanged, and 50 is highlighted
 
 #### Scenario: Hand-edited value
-- **WHEN** `settings.json` holds `checkin_human_turns` 300
+- **WHEN** the shared folder's `settings/check-ins.json` holds `checkin_human_turns` 300
 - **THEN** the section opens with no coordinator preset highlighted, and the host uses 300
 
 ### Requirement: Questions waiting beside an agent's status

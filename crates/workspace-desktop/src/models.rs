@@ -262,7 +262,7 @@ pub struct Offer {
 }
 /// What a detection pass suggests for a store with no saved setup; `None` on a saved store,
 /// before every provider is detected, or when `shown` already is that suggestion. A draft the
-/// human edited is kept.
+/// human edited is kept, and so is a guide already in the shared folder.
 pub fn offer(
     saved: &ModelSelection,
     shown: Option<&Setup>,
@@ -273,7 +273,10 @@ pub fn offer(
     if saved.is_saved() || !PROVIDERS.iter().all(|p| detection.contains_key(p)) {
         return None;
     }
-    let suggested = suggest(detection);
+    let mut suggested = suggest(detection);
+    if !saved.guide.is_empty() {
+        suggested.selection.guide = saved.guide.clone();
+    }
     if shown == Some(&suggested) {
         return None;
     }
@@ -562,6 +565,23 @@ mod tests {
         // Half a detection pass suggests nothing yet.
         let half: Detection = detected(&PROVIDERS).into_iter().take(1).collect();
         assert_eq!(offer(&unsaved, None, &unsaved, None, &half), None);
+    }
+    #[test]
+    fn a_guide_from_another_machine_is_kept_in_the_suggestion() {
+        let unsaved = ModelSelection {
+            guide: "Opus for anything touching auth.".into(),
+            ..ModelSelection::default()
+        };
+        let offered = offer(&unsaved, None, &unsaved, None, &detected(&PROVIDERS)).unwrap();
+        assert_eq!(offered.suggested.selection.guide, unsaved.guide);
+        let starter = suggest(&detected(&PROVIDERS)).selection;
+        assert_eq!(
+            offered.suggested.selection,
+            ModelSelection {
+                guide: unsaved.guide.clone(),
+                ..starter
+            }
+        );
     }
     #[test]
     fn a_saved_store_is_never_offered_a_suggestion() {
