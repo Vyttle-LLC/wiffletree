@@ -173,12 +173,17 @@ pub(super) fn first_line(text: &str, limit: usize) -> String {
     }
 }
 
-pub(super) fn markdown(id: &str, body: &str) -> TextView {
+/// Renders a message's Markdown. Relative file references resolve against `bases` in order.
+pub(super) fn markdown(id: &str, body: &str, bases: &[PathBuf]) -> TextView {
+    let link_bases = bases.to_vec();
     TextView::markdown(
         SharedString::from(format!("message-markdown-{id}")),
-        body.to_owned(),
+        file_links::linkify(body, bases),
     )
     .selectable(true)
+    .on_link_click(move |url, event, window, cx| {
+        file_links::open_link(url, event, &link_bases, window, cx)
+    })
     .code_block_actions(|block, _, _| {
         let code = block.code();
         button("copy-code")
@@ -222,7 +227,7 @@ fn receipt_color(receipt: Receipt, p: Palette) -> Hsla {
 }
 
 /// The human's own message: a right-aligned bubble and its files, with its delivery state.
-fn human_message(message: &Message, p: Palette) -> Div {
+fn human_message(message: &Message, bases: &[PathBuf], p: Palette) -> Div {
     div()
         .w_full()
         .flex()
@@ -237,7 +242,7 @@ fn human_message(message: &Message, p: Palette) -> Div {
                     .py_2()
                     .rounded_xl()
                     .bg(p.overlay)
-                    .child(markdown(&message.id, &message.body)),
+                    .child(markdown(&message.id, &message.body, bases)),
             )
         })
         .when(!message.attachments.is_empty(), |row| {
@@ -261,7 +266,7 @@ fn from_human(message: &Message) -> bool {
 }
 
 /// A notice from Wiffletree itself, such as the PR watcher's.
-fn notice_message(message: &Message, p: Palette) -> Div {
+fn notice_message(message: &Message, bases: &[PathBuf], p: Palette) -> Div {
     div()
         .w_full()
         .flex()
@@ -293,7 +298,7 @@ fn notice_message(message: &Message, p: Palette) -> Div {
                         )
                         .child(meta(age(message.created_at), p)),
                 )
-                .child(markdown(&message.id, &message.body)),
+                .child(markdown(&message.id, &message.body, bases)),
         )
 }
 
@@ -350,7 +355,13 @@ fn compaction_message(line: (&str, &str, Option<&str>, bool), p: Palette) -> Div
 }
 
 /// A message written by an agent: this session's own reply, or another agent's report.
-fn agent_message(message: &Message, sender: Option<&Session>, own: bool, p: Palette) -> Div {
+fn agent_message(
+    message: &Message,
+    sender: Option<&Session>,
+    own: bool,
+    bases: &[PathBuf],
+    p: Palette,
+) -> Div {
     let (kind, body) = match report(&message.body) {
         Some((kind, body)) if !own => (Some(kind), body),
         _ => (None, message.body.as_str()),
@@ -399,7 +410,7 @@ fn agent_message(message: &Message, sender: Option<&Session>, own: bool, p: Pale
                         .child(meta(age(message.created_at), p)),
                 )
                 .when(!body.trim().is_empty(), |d| {
-                    d.child(markdown(&message.id, body))
+                    d.child(markdown(&message.id, body, bases))
                 }),
         )
 }
@@ -428,12 +439,29 @@ fn peer_sender(message: &Message, sessions: &[Session]) -> String {
     }
 }
 
+/// Where relative file references in a message resolve: under its sender's directories, or the
+/// selected session's for messages from the human and Wiffletree.
+struct LinkBases {
+    senders: BTreeMap<String, Vec<PathBuf>>,
+    current: Vec<PathBuf>,
+}
+impl LinkBases {
+    fn of(&self, message: &Message) -> &[PathBuf] {
+        message
+            .sender
+            .as_ref()
+            .and_then(|id| self.senders.get(id))
+            .unwrap_or(&self.current)
+    }
+}
+
 /// A run of peer messages as one line where a turn summary would be. Opened, it lists a line
 /// per message, and an opened line shows that message in full.
 fn peer_run(
     run: &[Message],
     sessions: &[Session],
     open: &OpenPeers,
+    links: &LinkBases,
     p: Palette,
     view: WeakEntity<Workspace>,
 ) -> Div {
@@ -504,7 +532,15 @@ fn peer_run(
                     .flex_col()
                     .gap(px(3.))
                     .children(run.iter().zip(senders).map(|(message, sender)| {
-                        peer_line_row(message, sender, &head, open, p, view.clone())
+                        peer_line_row(
+                            message,
+                            sender,
+                            &head,
+                            open,
+                            links.of(message),
+                            p,
+                            view.clone(),
+                        )
                     })),
             )
         })
@@ -516,6 +552,7 @@ fn peer_line_row(
     sender: String,
     head: &str,
     open: &OpenPeers,
+    bases: &[PathBuf],
     p: Palette,
     view: WeakEntity<Workspace>,
 ) -> Div {
@@ -574,7 +611,7 @@ fn peer_line_row(
                     .rounded_md()
                     .bg(p.overlay.opacity(0.5))
                     .text_color(p.text)
-                    .child(markdown(&message.id, line.text).text_size(px(12.5))),
+                    .child(markdown(&message.id, line.text, bases).text_size(px(12.5))),
             )
         })
 }
@@ -1100,6 +1137,16 @@ impl Workspace {
         let current = session.clone();
         let placements = self.placements.clone();
         let open = Rc::new(self.open_peers.clone());
+        let links = LinkBases {
+            senders: messages
+                .iter()
+                .filter_map(|m| m.sender.as_ref())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|id| (id.clone(), self.link_bases(id)))
+                .collect(),
+            current: self.link_bases(&current.id),
+        };
         let transcript = list(self.list.clone(), move |ix, _, _| {
             let placement = placements.get(ix).copied().unwrap_or(Placement::Alone);
             let content = match (placement, messages.get(ix)) {
@@ -1107,10 +1154,14 @@ impl Workspace {
                 (Placement::Folded, _) => return div().into_any_element(),
                 (Placement::Heads(count), _) => {
                     let run = &messages[ix..(ix + count).min(messages.len())];
-                    peer_run(run, &sessions, &open, p, view.clone())
+                    peer_run(run, &sessions, &open, &links, p, view.clone())
                 }
-                (_, Some(message)) if from_human(message) => human_message(message, p),
-                (_, Some(message)) if message.sender.is_none() => notice_message(message, p),
+                (_, Some(message)) if from_human(message) => {
+                    human_message(message, links.of(message), p)
+                }
+                (_, Some(message)) if message.sender.is_none() => {
+                    notice_message(message, links.of(message), p)
+                }
                 (_, Some(message)) if compaction_line(message).is_some() => {
                     compaction_line(message).map_or_else(div, |line| compaction_message(line, p))
                 }
@@ -1120,7 +1171,7 @@ impl Workspace {
                         .find(|s| Some(&s.id) == message.sender.as_ref());
                     // Timer fires, also sent by the session itself, are drawn in a peer run.
                     let own = message.sender.as_ref() == Some(&current.id);
-                    let reply = agent_message(message, sender, own, p);
+                    let reply = agent_message(message, sender, own, links.of(message), p);
                     // A reply whose turn did something shows how long and how much, above it.
                     let summary = message
                         .id

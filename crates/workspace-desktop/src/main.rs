@@ -8,6 +8,7 @@ mod conversation;
 mod creation;
 mod crew_panel;
 mod data_dir;
+mod file_links;
 mod files_view;
 mod history_sheet;
 mod inspector;
@@ -397,6 +398,26 @@ impl Workspace {
             .runtimes
             .iter()
             .find(|runtime| runtime.session_id == session_id)
+    }
+    /// Where a session's relative file references resolve: its ticket worktree or directory,
+    /// then its project's home.
+    fn link_bases(&self, session_id: &str) -> Vec<PathBuf> {
+        let runtime = self.runtime(session_id);
+        let directory = runtime.and_then(|r| r.workdir.as_ref().or(r.directory.as_ref()));
+        let home = self.session(session_id).and_then(|session| {
+            self.snapshot
+                .as_ref()?
+                .projects
+                .iter()
+                .find(|project| project.id == session.project_id)?
+                .home
+                .as_ref()
+        });
+        directory
+            .into_iter()
+            .chain(home)
+            .map(PathBuf::from)
+            .collect()
     }
     fn project_id(&self) -> Option<String> {
         self.selected_session().map(|s| s.project_id.clone())
@@ -1577,7 +1598,7 @@ fn apply_theme(cx: &mut App) {
         // A tint of the text so it shows on the base, panels and message bubbles alike.
         theme.colors.accent = p.text.opacity(0.12);
         theme.colors.accent_foreground = p.text;
-        theme.colors.link = p.focus;
+        theme.colors.link = p.blue;
         theme.colors.table_head_foreground = p.text;
         theme.colors.selection = p.focus.opacity(0.3);
         theme.colors.muted = p.surface;
