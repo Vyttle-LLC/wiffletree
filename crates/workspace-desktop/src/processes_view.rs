@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(reading(None, shown, Some("tester")), None);
         assert_eq!(reading(Some(Panel::Processes), shown, None), None);
         // A workspace page hides the inspector, panel and all.
-        for page in [Page::Models, Page::Usage, Page::Repositories] {
+        for page in [Page::Models, Page::Skills, Page::Usage, Page::Repositories] {
             assert_eq!(reading(Some(Panel::Processes), page, Some("tester")), None);
         }
     }

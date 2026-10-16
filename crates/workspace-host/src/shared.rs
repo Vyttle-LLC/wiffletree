@@ -33,6 +33,12 @@ pub struct SharedStore {
     root: PathBuf,
 }
 impl SharedStore {
+    /// The shared folder of the data folder `home`.
+    pub fn of(home: &Path) -> Self {
+        Self {
+            root: home.join(FOLDER),
+        }
+    }
     pub fn skills_folder(&self) -> PathBuf {
         self.root.join("skills")
     }
@@ -118,9 +124,7 @@ impl SharedStore {
 }
 impl Host {
     pub fn shared(&self) -> SharedStore {
-        SharedStore {
-            root: self.home.join(FOLDER),
-        }
+        SharedStore::of(&self.home)
     }
     /// Copies each shared setting that has no file yet from where it was saved before the
     /// shared folder, exactly as saved, and moves the skills folder in. Running it again

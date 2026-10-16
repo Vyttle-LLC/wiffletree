@@ -72,6 +72,73 @@ A saved change to a skill SHALL apply to every Claude agent of the skill's roles
 - **WHEN** the human saves rules for Implementing while a Codex implementer's session exists
 - **THEN** its resumed turns keep the instructions its session started with, and a new Codex implementer's first turn has the rules
 
+### Requirement: Only the human changes a skill
+Saving rules, starting and saving a rewrite, marking it up to date, resetting and restoring SHALL be commands only the human's client sends. No agent tool SHALL read or change the skills folder. The host SHALL accept any text of up to 32,000 characters for the human's rules and for a rewrite, including an empty one, and SHALL refuse a longer text with the previous state kept. The host SHALL NOT judge what the text says.
+
+#### Scenario: An agent cannot edit a skill
+- **WHEN** any agent calls any workspace tool
+- **THEN** no skill changes
+
+#### Scenario: A text too long
+- **WHEN** the human saves 40,000 characters of rules
+- **THEN** the save is refused with the limit named, and the previous rules stay in effect
+
+#### Scenario: An empty rewrite
+- **WHEN** the human rewrites Reviewing to an empty text and saves
+- **THEN** the save is accepted, and verifiers get the communication contract and the verifier core with no skill text
+
+### Requirement: A rewrite replaces the stock text on purpose
+The human SHALL be able to start a rewrite of a skill, after a confirmation. The rewrite SHALL start as the stock text followed by the human's rules under their heading, when there are any. Starting it SHALL save the stock text as the rewrite's base and remove the human's separate rules. In Rewrite mode the rewrite SHALL be sent in place of the stock text, and no separate rules SHALL be sent. Reset to stock on a rewritten skill SHALL ask first, naming the rewrite as what stops applying, and SHALL remove the rewrite and its base.
+
+#### Scenario: Starting a rewrite with rules
+- **WHEN** Coordinating has two rules of the human's own and the human starts a rewrite
+- **THEN** the editor holds the stock text followed by the two rules, the base is the current stock text, and after saving the coordinator's next turn has the rewrite in place of the stock text and no separate rules section
+
+#### Scenario: Resetting a rewritten skill
+- **WHEN** Coordinating is rewritten and out of date, and the human chooses Reset to stock and confirms the question that names the rewrite
+- **THEN** the rewrite and its base are removed, Coordinating is at this release's stock text in Additions mode with no rules and no out-of-date mark, the coordinator's next turn has the stock text, and the history's previous entry still holds the rewrite
+
+### Requirement: A rewrite is marked out of date by a new stock version
+A rewrite SHALL be out of date when its base is not this release's stock text, compared as text. An out-of-date rewrite SHALL keep being sent as written. The Skills page SHALL mark it, the sidebar's Skills row SHALL show a dot while any rewrite is out of date, and its page SHALL show the base's and the stock's versions and what changed between them, line by line. The human SHALL be able to mark it up to date, which records the current stock text as its base and changes nothing else, or reset it to stock. The host SHALL NOT change a rewrite's text when the stock text changes.
+
+#### Scenario: A release changes Coordinating
+- **WHEN** Coordinating is rewritten against v1 and an update brings v2
+- **THEN** the coordinator keeps getting the rewrite as written, the Skills page shows "Rewritten · out of date", and the page shows what changed from v1 to v2
+
+#### Scenario: Marking it up to date
+- **WHEN** the human edits the rewrite to take in part of v2's change and chooses Mark as up to date
+- **THEN** its base becomes v2, the mark and the dot go, and the rewrite is sent as saved
+
+#### Scenario: A stock change without a new version
+- **WHEN** a release changes a stock text and forgets to change its version
+- **THEN** a rewrite based on the old text is still marked out of date
+
+### Requirement: Every skill can be reset to stock
+Each skill's page SHALL offer Reset to stock, which SHALL ask first, naming what stops applying and that it stays in the history. Reset SHALL return the skill to Additions mode with no rules of the human's own, and SHALL write a history entry.
+
+#### Scenario: Resetting a skill with rules
+- **WHEN** the human chooses Reset to stock on Implementing with three rules, and confirms
+- **THEN** Implementing is at stock, implementers' next turns have no rules section, and the history's previous entry still holds the three rules
+
+#### Scenario: Cancelling
+- **WHEN** the human chooses Reset to stock and then Cancel
+- **THEN** nothing changes and no history entry is written
+
+### Requirement: Every skill has a history
+Each change to a skill SHALL write a history entry holding the skill's whole state after it, the stock version, the time and what happened. At start, the host SHALL write a "New stock version" entry for each skill with a history whose stock version differs from the one its latest entry recorded. The skill's page SHALL list the entries newest first, each viewable read-only and restorable. Restoring SHALL make the entry's state current and write a new entry, and SHALL delete none. Restoring a rewrite SHALL restore its base, so it may be out of date at once.
+
+#### Scenario: Restoring earlier rules
+- **WHEN** the human restores the entry from before a reset
+- **THEN** those rules apply from each agent's next turn, and the history keeps the reset and gains a "Restored" entry
+
+#### Scenario: Restoring an old rewrite
+- **WHEN** the human restores a rewrite saved against v1 while this release has v2
+- **THEN** the rewrite is current and marked out of date
+
+#### Scenario: An update
+- **WHEN** Wiffletree starts after an update that changed Reviewing's stock version, and the human had edited Reviewing before
+- **THEN** Reviewing's history gains one "New stock version" entry naming both versions
+
 ### Requirement: Skills are stored in a folder that can move
 The host SHALL keep skills in the `skills` folder of the shared folder (see settings-repository), one folder per skill, holding the human's rules, the rewrite and its base as plain text files, and one file per history entry. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. A missing file SHALL mean no state for it. A file the host cannot read SHALL count as missing for the instructions, and the skill's page SHALL say it could not be read. Credentials, the database and conversations SHALL NOT be stored there. A skills folder from before the shared folder SHALL be moved into it unchanged at start.
 
@@ -82,3 +149,21 @@ The host SHALL keep skills in the `skills` folder of the shared folder (see sett
 #### Scenario: Skills saved before the shared folder
 - **WHEN** Wiffletree starts after an update with rules for Implementing in `<data folder>/skills/`
 - **THEN** they are in the shared folder's `skills/implementing/`, the history is unchanged, and implementers keep getting the rules
+
+### Requirement: The Skills page
+The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · out of date"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
+
+#### Scenario: Opening the page
+- **WHEN** the human chooses Skills in the sidebar
+- **THEN** the page lists Coordinating, Implementing, Reviewing and Keeping a PR with their states, and the fixed core marked read-only
+
+#### Scenario: The fixed core
+- **WHEN** the human opens the fixed core
+- **THEN** its text is shown with no editor and no Reset
+
+### Requirement: The limits of skills are documented
+The README SHALL say that skills change how agents work but not what they may do, which the app enforces; that the human's rules win over the stock text; that a rewrite is not updated by new releases; and that an agent's shell can write the skills folder, as it can write the settings file.
+
+#### Scenario: README
+- **WHEN** a reader looks up skills in the README
+- **THEN** it says where they are edited, that authority is not in them, and that agents' shells can write their folder
