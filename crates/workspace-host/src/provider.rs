@@ -112,29 +112,97 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
 pub fn check() -> Value {
     json!({"claude":executable(Provider::Claude).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"codex":executable(Provider::Codex).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"authentication":"Uses existing CLI sign-in; first live turn verifies access"})
 }
-pub fn skill(role: Role) -> String {
-    format!(
-        "{}\n{}",
-        include_str!("../skills/communication.md"),
+/// A named way of working that Wiffletree runs, with a stock text the human can read and alter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skill {
+    Coordinating,
+    Implementing,
+    Reviewing,
+    KeepingAPr,
+}
+impl Skill {
+    pub const ALL: [Self; 4] = [
+        Self::Coordinating,
+        Self::Implementing,
+        Self::Reviewing,
+        Self::KeepingAPr,
+    ];
+    /// The skill a role's instructions end with. The PR keeper's comment sorting is not a role's
+    /// turn and gets none.
+    pub fn for_role(role: Role) -> Self {
         match role {
             // Retired repository coordinators never run again; their archived sessions remain.
-            Role::ProjectOrchestrator | Role::TaskOrchestrator => {
-                include_str!("../skills/main-coordinator.md")
-            }
-            Role::Implementer | Role::Maintenance => include_str!("../skills/implementer.md"),
-            Role::Keeper => include_str!("../skills/keeper.md"),
-            Role::Tester => concat!(
-                include_str!("../skills/tester.md"),
-                "\n",
-                include_str!("../skills/tester-role.md")
-            ),
-            Role::Reviewer => concat!(
-                include_str!("../skills/tester.md"),
-                "\n",
-                include_str!("../skills/reviewer-role.md")
-            ),
+            Role::ProjectOrchestrator | Role::TaskOrchestrator => Self::Coordinating,
+            Role::Implementer | Role::Maintenance => Self::Implementing,
+            Role::Tester | Role::Reviewer => Self::Reviewing,
+            Role::Keeper => Self::KeepingAPr,
         }
-    )
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Coordinating => "Coordinating",
+            Self::Implementing => "Implementing",
+            Self::Reviewing => "Reviewing",
+            Self::KeepingAPr => "Keeping a PR",
+        }
+    }
+    pub fn purpose(self) -> &'static str {
+        match self {
+            Self::Coordinating => {
+                "How the coordinator plans, when it creates tickets and starts agents, which model and effort it picks, when it stops chasing findings, and when it asks you."
+            }
+            Self::Implementing => {
+                "How an implementer works on its ticket, runs checks and answers review findings."
+            }
+            Self::Reviewing => {
+                "What testers and reviewers run and read, and what counts as a blocking finding."
+            }
+            Self::KeepingAPr => {
+                "How the PR keeper's model resolves a conflict or fixes failed checks in its one try."
+            }
+        }
+    }
+    pub fn stock(self) -> &'static str {
+        match self {
+            Self::Coordinating => include_str!("../skills/stock/coordinating.md"),
+            Self::Implementing => include_str!("../skills/stock/implementing.md"),
+            Self::Reviewing => include_str!("../skills/stock/reviewing.md"),
+            Self::KeepingAPr => include_str!("../skills/stock/keeping-a-pr.md"),
+        }
+    }
+}
+/// The part of a role's instructions the app depends on, which no skill text changes.
+fn core(role: Role) -> &'static str {
+    match role {
+        Role::ProjectOrchestrator | Role::TaskOrchestrator => {
+            include_str!("../skills/core/coordinator.md")
+        }
+        Role::Implementer | Role::Maintenance => include_str!("../skills/core/implementer.md"),
+        Role::Tester | Role::Reviewer => include_str!("../skills/core/verifier.md"),
+        Role::Keeper => include_str!("../skills/core/keeper.md"),
+    }
+}
+/// Part of the fixed core: it says, in Wiffletree's words, that the human's rules win.
+const RULES_SENTENCE: &str = "These are the human's own rules for this skill. Where they disagree with the skill above, follow them.";
+/// A role's bundled instructions: the fixed core and its skill's stock text.
+pub fn skill(role: Role) -> String {
+    instructions(role, Skill::for_role(role).stock(), "")
+}
+/// The communication contract, the role's core, the skill's text, stock or the human's
+/// rewrite, and the human's own rules for that skill, if any, under a heading of Wiffletree's.
+pub fn instructions(role: Role, skill_text: &str, rules: &str) -> String {
+    let mut text = format!(
+        "{}\n{}\n{skill_text}",
+        include_str!("../skills/core/communication.md"),
+        core(role)
+    );
+    if !rules.is_empty() {
+        let skill = Skill::for_role(role).name();
+        text.push_str(&format!(
+            "\n## Your own rules for {skill}\n{RULES_SENTENCE}\n{rules}"
+        ));
+    }
+    text
 }
 /// Lists every attachment's absolute path, to follow the message body in the prompt.
 pub fn attachment_list(attachments: &[Attachment]) -> String {
@@ -794,6 +862,14 @@ mod tests {
         let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
         assert_eq!(args[denied + 1], "EnterWorktree,ExitWorktree");
         assert!(args.iter().any(|a| a == "--allowedTools"));
+    }
+
+    #[test]
+    fn the_sorting_run_gets_the_keeper_core_and_no_skill() {
+        assert!(keeper::SORTING.starts_with(core(Role::Keeper)));
+        for line in Skill::KeepingAPr.stock().lines().filter(|l| !l.is_empty()) {
+            assert!(!keeper::SORTING.contains(line), "{line}");
+        }
     }
 
     #[test]

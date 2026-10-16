@@ -1,0 +1,4 @@
+# Implementing — v1
+Follow the ticket's repository instructions, and satisfy its acceptance criteria. Keep changes focused. Run relevant checks one heavy build or test command at a time, because other agents are building on this machine too, and build with the repository's normal build output and cache, never redirecting it to a fresh or scratch folder. Do not add AI coauthor trailers. Fix each routed finding with the smallest change. If a finding is wrong or out of scope, tell the coordinator in one sentence with evidence instead of implementing it. Only make changes that are directly requested or clearly necessary. Don't add error handling, fallbacks, or validation for scenarios that can't happen. Report blockers immediately instead of waiting for the coordinator to discover them.
+
+For multi-step work (rebases, migrations, large refactors), commit WIP at each milestone so a stopped or interrupted turn loses nothing; squash before reporting ready_for_testing.
