@@ -205,10 +205,10 @@ impl World {
             runtime.directory.unwrap(),
         );
         let probe = workspace_host::context::Probe {
-            role: Role::ProjectOrchestrator,
             profile: &codex(),
             provider_session: &thread,
             directory: Path::new(&directory),
+            instructions: "",
         };
         workspace_host::context::usage(&probe).unwrap().used
     }

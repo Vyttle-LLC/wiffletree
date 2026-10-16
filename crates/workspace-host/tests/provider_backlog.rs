@@ -90,6 +90,7 @@ fn run(home: &Path, prompt: &str, hold_until_closed: bool) -> Outcome {
         socket: home.join("unused"),
         token: String::new(),
         helper: home.join("provider"),
+        instructions: String::new(),
     };
     let mut outcome = Outcome {
         steps: 0,

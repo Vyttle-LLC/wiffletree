@@ -1,8 +1,8 @@
 //! The tools and role instructions agents see describe the two-level hierarchy only.
 use serde_json::json;
-use workspace_core::Role;
-use workspace_host::mcp;
-use workspace_host::provider::{self, Skill};
+use workspace_core::{Role, Skill};
+use workspace_host::provider;
+use workspace_host::{mcp, skills};
 
 const RETIRED: [&str; 3] = [
     "repository coordinator",
@@ -417,9 +417,7 @@ fn there_are_four_versioned_stock_skills_and_none_opens_a_pull_request() {
     assert_eq!(Skill::ALL.len(), 4);
     for skill in Skill::ALL {
         assert!(
-            skill
-                .stock()
-                .starts_with(&format!("# {} — v", skill.name())),
+            skills::stock(skill).starts_with(&format!("# {} — v", skill.name())),
             "{skill:?}"
         );
         let about = format!("{} {}", skill.name(), skill.purpose()).to_lowercase();
@@ -435,7 +433,7 @@ fn the_humans_own_rules_come_last_as_written_and_leave_the_core_as_it_is() {
         "Follow my open-pr skill.",
     ] {
         let implementer =
-            provider::instructions(Role::Implementer, Skill::Implementing.stock(), rules);
+            provider::instructions(Role::Implementer, skills::stock(Skill::Implementing), rules);
         assert!(implementer.starts_with(&stock));
         assert!(implementer.ends_with(&format!(
             "## Your own rules for Implementing\nThese are the human's own rules for this skill. Where they disagree with the skill above, follow them.\n{rules}"
@@ -590,4 +588,10 @@ fn every_skill_at_stock_says_everything_each_role_was_told_before() {
             "{old}"
         );
     }
+}
+
+#[test]
+fn no_agent_tool_reads_or_changes_a_skill() {
+    let tools = mcp::tools().to_string().to_lowercase();
+    assert!(!tools.contains("skill"));
 }

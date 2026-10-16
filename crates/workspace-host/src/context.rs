@@ -2,7 +2,7 @@
 //!
 //! Claude reports its own categories through `/context`. Codex reports only how full the window
 //! is, so its categories are estimated from the sizes of the items in its session record.
-use crate::provider::{executable, skill};
+use crate::provider::executable;
 use crate::runtime::{LowPriority as _, OwnDescriptors as _};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::Value;
@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use workspace_core::{ModelProfile, Provider, Role};
+use workspace_core::{ModelProfile, Provider};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextCategory {
@@ -35,10 +35,11 @@ pub struct ContextUsage {
 
 /// The session to inspect, as the host last ran it.
 pub struct Probe<'a> {
-    pub role: Role,
     pub profile: &'a ModelProfile,
     pub provider_session: &'a str,
     pub directory: &'a Path,
+    /// The instructions the session's turns are sent.
+    pub instructions: &'a str,
 }
 
 pub fn usage(probe: &Probe) -> Result<ContextUsage> {
@@ -70,7 +71,8 @@ fn claude(probe: &Probe) -> Result<ContextUsage> {
         .args(["--resume", probe.provider_session])
         .arg("--no-session-persistence")
         .args(["--model", &probe.profile.model])
-        .args(["--append-system-prompt", &skill(probe.role)])
+        .args(["--append-system-prompt", probe.instructions])
+        .args(["--system-prompt-snapshot", "off"])
         .args([
             "--strict-mcp-config",
             "--mcp-config",

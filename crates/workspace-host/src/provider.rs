@@ -80,6 +80,8 @@ pub struct Turn {
     pub socket: PathBuf,
     pub token: String,
     pub helper: PathBuf,
+    /// The role's instructions as the store held them when the turn was built.
+    pub instructions: String,
 }
 pub fn executable(provider: Provider) -> Result<PathBuf> {
     let name = match provider {
@@ -112,65 +114,6 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
 pub fn check() -> Value {
     json!({"claude":executable(Provider::Claude).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"codex":executable(Provider::Codex).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"authentication":"Uses existing CLI sign-in; first live turn verifies access"})
 }
-/// A named way of working that Wiffletree runs, with a stock text the human can read and alter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Skill {
-    Coordinating,
-    Implementing,
-    Reviewing,
-    KeepingAPr,
-}
-impl Skill {
-    pub const ALL: [Self; 4] = [
-        Self::Coordinating,
-        Self::Implementing,
-        Self::Reviewing,
-        Self::KeepingAPr,
-    ];
-    /// The skill a role's instructions end with. The PR keeper's comment sorting is not a role's
-    /// turn and gets none.
-    pub fn for_role(role: Role) -> Self {
-        match role {
-            // Retired repository coordinators never run again; their archived sessions remain.
-            Role::ProjectOrchestrator | Role::TaskOrchestrator => Self::Coordinating,
-            Role::Implementer | Role::Maintenance => Self::Implementing,
-            Role::Tester | Role::Reviewer => Self::Reviewing,
-            Role::Keeper => Self::KeepingAPr,
-        }
-    }
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Coordinating => "Coordinating",
-            Self::Implementing => "Implementing",
-            Self::Reviewing => "Reviewing",
-            Self::KeepingAPr => "Keeping a PR",
-        }
-    }
-    pub fn purpose(self) -> &'static str {
-        match self {
-            Self::Coordinating => {
-                "How the coordinator plans, when it creates tickets and starts agents, which model and effort it picks, when it stops chasing findings, and when it asks you."
-            }
-            Self::Implementing => {
-                "How an implementer works on its ticket, runs checks and answers review findings."
-            }
-            Self::Reviewing => {
-                "What testers and reviewers run and read, and what counts as a blocking finding."
-            }
-            Self::KeepingAPr => {
-                "How the PR keeper's model resolves a conflict or fixes failed checks in its one try."
-            }
-        }
-    }
-    pub fn stock(self) -> &'static str {
-        match self {
-            Self::Coordinating => include_str!("../skills/stock/coordinating.md"),
-            Self::Implementing => include_str!("../skills/stock/implementing.md"),
-            Self::Reviewing => include_str!("../skills/stock/reviewing.md"),
-            Self::KeepingAPr => include_str!("../skills/stock/keeping-a-pr.md"),
-        }
-    }
-}
 /// The part of a role's instructions the app depends on, which no skill text changes.
 fn core(role: Role) -> &'static str {
     match role {
@@ -183,10 +126,14 @@ fn core(role: Role) -> &'static str {
     }
 }
 /// Part of the fixed core: it says, in Wiffletree's words, that the human's rules win.
-const RULES_SENTENCE: &str = "These are the human's own rules for this skill. Where they disagree with the skill above, follow them.";
+pub(crate) const RULES_SENTENCE: &str = "These are the human's own rules for this skill. Where they disagree with the skill above, follow them.";
 /// A role's bundled instructions: the fixed core and its skill's stock text.
 pub fn skill(role: Role) -> String {
-    instructions(role, Skill::for_role(role).stock(), "")
+    instructions(role, skills::stock(Skill::for_role(role)), "")
+}
+/// What a role's turns are sent, with its skill as the human left it.
+pub fn role_instructions(role: Role, skill: &SkillState) -> String {
+    instructions(role, &skill.stock, &skill.rules)
 }
 /// The communication contract, the role's core, the skill's text, stock or the human's
 /// rewrite, and the human's own rules for that skill, if any, under a heading of Wiffletree's.
@@ -304,12 +251,14 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
     // Credentials go to the MCP subprocess environment, never in the prompt.
     cmd.env("WORKSPACE_SOCKET", &turn.socket)
         .env("WORKSPACE_TOKEN", &turn.token);
-    let instructions = skill(turn.session.role);
+    let instructions = &turn.instructions;
     match turn.session.provider {
         Provider::Claude => {
             cmd.args(["-p","--output-format","stream-json","--verbose","--include-partial-messages","--strict-mcp-config","--no-chrome"])
                 .args(["--model",&turn.profile.model,"--effort",&turn.profile.effort])
-                .args(["--append-system-prompt",&instructions])
+                .args(["--append-system-prompt",instructions])
+                // Otherwise a resumed session is sent its first turn's instructions.
+                .args(["--system-prompt-snapshot","off"])
                 .args(["--mcp-config",&json!({"mcpServers":{"agent_workspace":{"command":turn.helper,"args":["agent-mcp"]}}}).to_string()])
                 .args(["--allowedTools","mcp__agent_workspace__*"])
                 // Agents work only in the directory Wiffletree assigned them.
@@ -855,6 +804,7 @@ mod tests {
             socket: PathBuf::new(),
             token: String::new(),
             helper: PathBuf::new(),
+            instructions: String::new(),
         };
         let mut cmd = ProcessCommand::new("claude");
         configure(&mut cmd, &turn);
@@ -865,9 +815,30 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_turn_is_sent_the_instructions_it_was_built_with() {
+        let mut claude = turn(Provider::Claude, Some("earlier"), vec![]);
+        claude.instructions = "Changed instructions".into();
+        let mut cmd = ProcessCommand::new("claude");
+        configure(&mut cmd, &claude);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        let after = |flag: &str| &args[args.iter().position(|a| a == flag).unwrap() + 1];
+        assert_eq!(after("--append-system-prompt"), "Changed instructions");
+        assert_eq!(after("--system-prompt-snapshot"), "off");
+        let mut codex = turn(Provider::Codex, Some("earlier"), vec![]);
+        codex.instructions = "Changed instructions".into();
+        let mut cmd = ProcessCommand::new("codex");
+        configure(&mut cmd, &codex);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        assert!(args.contains(&r#"developer_instructions="Changed instructions""#.into()));
+    }
+
+    #[test]
     fn the_sorting_run_gets_the_keeper_core_and_no_skill() {
         assert!(keeper::SORTING.starts_with(core(Role::Keeper)));
-        for line in Skill::KeepingAPr.stock().lines().filter(|l| !l.is_empty()) {
+        for line in skills::stock(Skill::KeepingAPr)
+            .lines()
+            .filter(|l| !l.is_empty())
+        {
             assert!(!keeper::SORTING.contains(line), "{line}");
         }
     }
@@ -946,6 +917,7 @@ mod tests {
             socket: "/tmp/socket".into(),
             token: "t".into(),
             helper: "/tmp/helper".into(),
+            instructions: skill(Role::ProjectOrchestrator),
         }
     }
 

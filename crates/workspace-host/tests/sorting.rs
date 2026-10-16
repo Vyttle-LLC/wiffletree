@@ -72,6 +72,7 @@ fn sort(folder: &std::path::Path, body: &str) -> (Vec<ProviderEvent>, anyhow::Re
         socket: "/tmp/socket".into(),
         token: "token".into(),
         helper: "/tmp/helper".into(),
+        instructions: String::new(),
     };
     let mut events = vec![];
     let ran = provider::run(turn, Arc::new(AtomicBool::new(false)), |e| events.push(e));

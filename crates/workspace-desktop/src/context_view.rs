@@ -318,10 +318,15 @@ impl Workspace {
         let runtime = self.runtime(&session.id).cloned().unwrap_or_default();
         self.context_seen
             .insert(session.id.clone(), Measured::of(&runtime));
-        let (Some(provider_session), Some(directory), Some(profile)) = (
+        let skill = Skill::for_role(session.role);
+        let instructions = (self.snapshot.as_ref())
+            .and_then(|snapshot| snapshot.skills.iter().find(|s| s.skill == skill))
+            .map(|state| workspace_host::provider::role_instructions(session.role, state));
+        let (Some(provider_session), Some(directory), Some(profile), Some(instructions)) = (
             runtime.provider_session_id,
             runtime.directory,
             self.selected_profile(),
+            instructions,
         ) else {
             self.context.insert(
                 session.id,
@@ -331,13 +336,12 @@ impl Workspace {
         };
         self.context_pending.insert(session.id.clone());
         let (send, receive) = async_channel::bounded(1);
-        let role = session.role;
         std::thread::spawn(move || {
             let probe = Probe {
-                role,
                 profile: &profile,
                 provider_session: &provider_session,
                 directory: std::path::Path::new(&directory),
+                instructions: &instructions,
             };
             let usage = workspace_host::context::usage(&probe).map_err(|e| format!("{e:#}"));
             let _ = send.send_blocking(usage);
