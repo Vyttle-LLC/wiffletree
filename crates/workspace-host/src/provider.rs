@@ -150,19 +150,25 @@ pub(crate) const RULES_SENTENCE: &str = "These are the human's own rules for thi
 pub fn skill(role: Role) -> String {
     instructions(role, skills::stock(Skill::for_role(role)), "")
 }
-/// What a role's turns are sent, with its skill as the human left it.
+/// What a role's turns are sent, with its skill as the human left it: a rewrite in place of the
+/// stock text, or the stock text and the human's rules.
 pub fn role_instructions(role: Role, skill: &SkillState) -> String {
-    instructions(role, &skill.stock, &skill.rules)
+    match &skill.rewrite {
+        Some(rewrite) => instructions(role, &rewrite.text, ""),
+        None => instructions(role, &skill.stock, &skill.rules),
+    }
+}
+/// The heading the human's own rules follow, as "## Your own rules for Implementing".
+pub fn rules_heading(skill: Skill) -> String {
+    format!("## Your own rules for {}", skill.name())
 }
 /// The communication contract, the role's core, the skill's text, stock or the human's
 /// rewrite, and the human's own rules for that skill, if any, under a heading of Wiffletree's.
 pub fn instructions(role: Role, skill_text: &str, rules: &str) -> String {
     let mut text = format!("{}\n{}\n{skill_text}", CORE[0].1, core(role));
     if !rules.is_empty() {
-        let skill = Skill::for_role(role).name();
-        text.push_str(&format!(
-            "\n## Your own rules for {skill}\n{RULES_SENTENCE}\n{rules}"
-        ));
+        let heading = rules_heading(Skill::for_role(role));
+        text.push_str(&format!("\n{heading}\n{RULES_SENTENCE}\n{rules}"));
     }
     text
 }

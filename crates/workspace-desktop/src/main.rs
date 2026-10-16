@@ -111,14 +111,16 @@ struct Workspace {
     saved_model_selection: ModelSelection,
     guide_input: Entity<TextareaState>,
     skill_view: skills_view::SkillView,
-    /// The open skill's rules as the human is editing them.
-    skill_rules: Entity<TextareaState>,
+    /// The open skill's rules or rewrite as the human is editing them.
+    skill_text: Entity<TextareaState>,
     stock_unfolded: bool,
-    /// Reset to stock is asking for confirmation on the open skill's page.
-    confirming_reset: bool,
+    /// What the open skill's page is asking to confirm.
+    confirming: Option<skills_view::Confirm>,
     /// The open history, newest first, and the entry whose text is shown.
     skill_history: Vec<workspace_host::skills::Recorded>,
     viewed_entry: Option<String>,
+    /// What changed from the open rewrite's base to this release's stock text.
+    stock_changes: Vec<workspace_host::skills::Line>,
     verifiers: Entity<verifiers::VerifierEditor>,
     /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
     detection: Detection,
@@ -212,13 +214,13 @@ impl Workspace {
             }
         })
         .detach();
-        let skill_rules = cx.new(|cx| {
+        let skill_text = cx.new(|cx| {
             TextareaState::new(window, cx).auto_grow(6, 24).placeholder(
                 "One rule per line, e.g. Run the repository's checks before reporting ready.",
             )
         });
         // Save and Discard follow the draft.
-        cx.subscribe(&skill_rules, |_, _, event, cx| {
+        cx.subscribe(&skill_text, |_, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
             }
@@ -277,11 +279,12 @@ impl Workspace {
             saved_model_selection: ModelSelection::default(),
             guide_input,
             skill_view: skills_view::SkillView::List,
-            skill_rules,
+            skill_text,
             stock_unfolded: false,
-            confirming_reset: false,
+            confirming: None,
             skill_history: vec![],
             viewed_entry: None,
+            stock_changes: vec![],
             verifiers,
             detection: Detection::new(),
             suggested: None,
@@ -812,24 +815,32 @@ impl Workspace {
                     cx,
                 );
             }
-            Command::SaveSkillRules { .. } => {
+            Command::SaveSkillRules { .. }
+            | Command::SaveSkillRewrite { .. }
+            | Command::MarkSkillUpToDate { .. } => {
                 match serde_json::from_value(value) {
                     Ok(saved) => self.skill_saved(saved),
-                    Err(error) => eprintln!("Saved skill rules: {error}"),
+                    Err(error) => eprintln!("Saved skill: {error}"),
                 }
-                self.toast("Your rules are saved", window, cx);
+                self.toast(skills_view::saved_toast(&command), window, cx);
                 self.request(Command::Snapshot, window, cx);
             }
-            Command::ResetSkill { .. } | Command::RestoreSkill { .. } => {
+            Command::ResetSkill { .. }
+            | Command::RestoreSkill { .. }
+            | Command::StartSkillRewrite { .. } => {
                 match serde_json::from_value(value) {
                     Ok(state) => self.skill_replaced(state, &command, window, cx),
-                    Err(error) => eprintln!("Reset or restored skill: {error}"),
+                    Err(error) => eprintln!("Reset, restored or rewrote skill: {error}"),
                 }
                 self.request(Command::Snapshot, window, cx);
             }
             Command::SkillHistory { skill } => match serde_json::from_value(value) {
                 Ok(history) => self.history_arrived(skill, history),
                 Err(error) => eprintln!("Skill history: {error}"),
+            },
+            Command::SkillStockChanges { skill } => match serde_json::from_value(value) {
+                Ok(lines) => self.stock_changes_arrived(skill, lines),
+                Err(error) => eprintln!("Skill stock changes: {error}"),
             },
             Command::SetRepositoryChecks { .. } => {
                 self.checks_edit = None;
