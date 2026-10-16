@@ -338,4 +338,22 @@ mod tests {
             "{who}"
         );
     }
+
+    #[test]
+    fn stopping_asks_first_and_promises_nothing_changes_on_github() {
+        let repository = SettingsRepository {
+            name: "MHohlios/wiffletree-storage".into(),
+            push_url: "https://github.com/MHohlios/wiffletree-storage.git".into(),
+            branch: "main".into(),
+            readers: Readers::Invited,
+        };
+        let text = confirmation(Confirm::Stop, &repository).join(" ");
+        for said in [
+            "Stop syncing with MHohlios/wiffletree-storage?",
+            "keeps every setting as it is",
+            "Nothing changes on GitHub.",
+        ] {
+            assert!(text.contains(said), "{said} in {text}");
+        }
+    }
 }

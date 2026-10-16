@@ -55,6 +55,21 @@ The Settings window SHALL have a Settings repository section after Check-ins. Th
 - **THEN** no tool reads or changes the shared folder or the settings repository chosen
 
 
+### Requirement: A second machine joins
+Naming a repository that has `wiffletree.json` SHALL offer to join it. Before joining, the section SHALL list, for each shared setting, what the repository holds beside what this machine has, and the machine and time of the repository's last change. **Use the repository's settings** SHALL add this machine's skill history entries that the repository lacks, move this machine's shared folder to `<data folder>/backups/shared-<time>/`, and put a clone of the repository in its place. **Replace the repository's settings with this Mac's** SHALL ask first and SHALL push this machine's shared files over the repository's in one commit. After joining, the section SHALL list what this machine still needs to run the shared settings.
+
+#### Scenario: Joining with the repository's settings
+- **WHEN** a machine with stock skills joins a repository where Implementing has 3 of the human's rules
+- **THEN** implementers on this machine get the 3 rules from their next turn, and the machine's previous shared folder is in `backups/`
+
+#### Scenario: Both histories are kept
+- **WHEN** both this machine and the repository have history entries for Coordinating, and the human uses the repository's settings
+- **THEN** Coordinating's history holds the entries of both machines
+
+#### Scenario: What this machine still needs
+- **WHEN** the repository's keeper triggers are on and this machine has no PR keeper model
+- **THEN** after joining, the section says the triggers are off on this machine until a PR keeper model is chosen in Models
+
 ### Requirement: Sync pushes only to the settings repository's branch
 Choosing the settings repository on a machine SHALL be what allows the host to push to it, and the confirmation SHALL say so, naming the repository, its branch and who can read it. The allowed owners SHALL NOT grant or be needed for that push, and allowing an owner SHALL NOT allow sync to push to any repository of that owner. The host SHALL push only the recorded default branch, to the recorded push URL, with no tags and no submodules. It SHALL push only a commit that contains the remote branch's head, and SHALL NOT force a push. A commit SHALL hold changes only to `wiffletree.json`, `settings/` and `skills/`. The host SHALL push only files it would accept when reading them. Commits SHALL use the human's Git identity, and their messages SHALL name what changed and the machine.
 
@@ -108,3 +123,21 @@ A pulled file the host cannot read, such as invalid JSON, a value out of range o
 #### Scenario: A newer format
 - **WHEN** `wiffletree.json` names format 2 and this release knows format 1
 - **THEN** sync stops on this machine, saying to update Wiffletree, and nothing is pulled or pushed
+
+### Requirement: Sync status is shown
+The Settings repository section SHALL show the repository, its branch, who can read it, the time of the last sync and what it pulled and pushed, when the next pull runs, the last error in Git's words, and the paused files, with Sync now and Stop syncing. The sidebar footer SHALL show a sync mark only while a repository is chosen: synced, syncing, waiting to reach GitHub, or paused. It SHALL be yellow while a file is paused or sync has stopped, and red after an error that has lasted more than an hour. Clicking it SHALL open the Settings window at the section.
+
+#### Scenario: A paused file
+- **WHEN** one file is paused
+- **THEN** the sidebar's sync mark is yellow, and the section lists the file and why it is paused
+
+#### Scenario: GitHub cannot be reached
+- **WHEN** the last three passes could not reach GitHub
+- **THEN** the section shows Git's reason, how many changes wait to be pushed, and when the next try runs
+
+### Requirement: Stopping sync
+Stop syncing SHALL ask first. It SHALL leave the shared folder as it is and keep using it, stop pulling and pushing, remove the choice from this machine's host settings, and close the workspace notes about paused files. It SHALL change nothing on GitHub.
+
+#### Scenario: Stop syncing
+- **WHEN** the human stops syncing and confirms
+- **THEN** every setting keeps its current value, nothing is pulled or pushed, and the repository on GitHub is unchanged
