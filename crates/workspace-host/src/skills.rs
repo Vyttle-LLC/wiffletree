@@ -113,6 +113,13 @@ impl SkillStore {
         let unreadable = (!unreadable.is_empty()).then(|| unreadable.join("; "));
         (Edits { rules, rewrite }, unreadable)
     }
+    /// What the human has written, refused while a file cannot be read, so no change drops it.
+    fn readable(&self, skill: Skill) -> Result<Edits> {
+        match self.read(skill) {
+            (edits, None) => Ok(edits),
+            (_, Some(unreadable)) => bail!("{unreadable}"),
+        }
+    }
     pub fn state(&self, skill: Skill) -> SkillState {
         let (Edits { rules, rewrite }, unreadable) = self.read(skill);
         SkillState {
@@ -143,7 +150,8 @@ impl SkillStore {
     /// The rewrite starts as the stock text and the human's rules under their heading, based on
     /// the stock text.
     pub fn start_rewrite(&self, skill: Skill) -> Result<()> {
-        let (Edits { rules, .. }, _) = self.read(skill);
+        let Edits { rules, rewrite } = self.readable(skill)?;
+        ensure!(rewrite.is_none(), "This skill is already rewritten");
         let mut text = stock(skill).to_owned();
         if !rules.is_empty() {
             text.push_str(&format!("\n{}\n{rules}", provider::rules_heading(skill)));
@@ -212,7 +220,7 @@ impl SkillStore {
         change: Change,
         edit: impl FnOnce(&mut Rewritten),
     ) -> Result<()> {
-        let (mut edits, _) = self.read(skill);
+        let mut edits = self.readable(skill)?;
         let rewrite = (edits.rewrite.as_mut()).context("Start a rewrite of this skill first")?;
         edit(rewrite);
         self.change(skill, change, edits)
@@ -878,6 +886,75 @@ mod tests {
         assert!(
             host.instructions(Role::ProjectOrchestrator)
                 .ends_with("Against v0")
+        );
+    }
+
+    #[test]
+    fn a_rewrite_does_not_start_while_the_rules_cannot_be_read() {
+        let (_home, host) = host();
+        host.skills()
+            .save_rules(Skill::Coordinating, "Rule")
+            .unwrap();
+        fs::write(coordinating(&host, "additions.md"), b"\xff not text").unwrap();
+        let refused = host
+            .skills()
+            .start_rewrite(Skill::Coordinating)
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .starts_with("additions.md could not be read"),
+            "{refused}"
+        );
+        assert_eq!(
+            fs::read(coordinating(&host, "additions.md")).unwrap(),
+            b"\xff not text"
+        );
+        assert!(!coordinating(&host, "rewrite.md").exists());
+        assert_eq!(changes(&host, Skill::Coordinating), [Change::SavedRules]);
+    }
+
+    #[test]
+    fn a_rewrite_whose_base_cannot_be_read_is_neither_saved_nor_marked_up_to_date() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        fs::write(coordinating(&host, "base.md"), b"\xff not text").unwrap();
+        let skills = host.skills();
+        for refused in [
+            skills.save_rewrite(Skill::Coordinating, "My way"),
+            skills.mark_up_to_date(Skill::Coordinating),
+        ] {
+            let refused = refused.unwrap_err().to_string();
+            assert!(
+                refused.starts_with("base.md could not be read"),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            fs::read(coordinating(&host, "base.md")).unwrap(),
+            b"\xff not text"
+        );
+        let rewrite = fs::read_to_string(coordinating(&host, "rewrite.md")).unwrap();
+        assert_eq!(rewrite, stock(Skill::Coordinating));
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite]
+        );
+    }
+
+    #[test]
+    fn a_rewrite_does_not_start_over_an_existing_one() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        host.skills()
+            .save_rewrite(Skill::Coordinating, "My way")
+            .unwrap();
+        assert!(host.skills().start_rewrite(Skill::Coordinating).is_err());
+        let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
+        assert_eq!(rewrite.text, "My way");
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite, Change::SavedRewrite]
         );
     }
 

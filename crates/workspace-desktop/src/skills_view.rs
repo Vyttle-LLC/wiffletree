@@ -628,7 +628,6 @@ impl Workspace {
     fn skill_page(&self, state: &SkillState, p: Palette, cx: &mut Context<Self>) -> Div {
         let skill = state.skill;
         let name = skill.name();
-        // Nothing to reset: no rules or rewrite, and no file that could not be read.
         let at_stock =
             state.rules.is_empty() && state.rewrite.is_none() && state.unreadable.is_none();
         let actions = [
@@ -674,7 +673,6 @@ impl Workspace {
             Some(_) => page.child(self.skill_editor(state, p, cx)),
             None => self.additions(page, state, p, cx),
         };
-        // In Additions mode the links sit above the rules, beside the stock text.
         let page = page
             .when(state.rewrite.is_some(), |d| {
                 d.children(self.skill_links(skill, p, cx))
@@ -1552,6 +1550,7 @@ mod tests {
         assert!(!live(&host));
         std::fs::write(&rules, b"\xff not text").unwrap();
         assert!(!live(&host));
+        std::fs::write(&rules, "Rule").unwrap();
 
         // A rewrite whose base is out of date is current while it is what agents get.
         host.skills().start_rewrite(skill).unwrap();
