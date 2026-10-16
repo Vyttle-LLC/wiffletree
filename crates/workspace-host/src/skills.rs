@@ -96,20 +96,26 @@ impl SkillStore {
         self.record(skill, change, &restored.rules)
     }
     /// At start, an entry for each skill whose latest entry recorded another stock version.
-    /// A skill with no history gets none.
+    /// A skill with no history gets none, and one whose rules cannot be read waits for a start
+    /// when they can, so no entry records rules it could not see.
     pub fn record_new_stock_versions(&self) -> Result<()> {
         for skill in Skill::ALL {
             let Some((_, latest)) = self.history(skill).pop() else {
                 continue;
             };
-            if latest.stock_version != stock_version(skill) {
+            let state = self.state(skill);
+            if latest.stock_version != stock_version(skill) && state.unreadable.is_none() {
                 let change = Change::NewStockVersion {
                     previous: latest.stock_version,
                 };
-                self.record(skill, change, &self.state(skill).rules)?;
+                self.record(skill, change, &state.rules)?;
             }
         }
         Ok(())
+    }
+    /// What a role's next turn is sent, with its skill as the store holds it.
+    pub fn instructions(&self, role: Role) -> String {
+        provider::role_instructions(role, &self.state(Skill::for_role(role)))
     }
     /// Oldest first, each entry with its name, the time it was written. A history or an entry
     /// that cannot be read counts as none.
@@ -171,13 +177,17 @@ impl SkillStore {
         }
     }
 }
+/// The store of the host whose data folder is `home`.
+pub fn store(home: &Path) -> SkillStore {
+    SkillStore::new(home.join("skills"))
+}
 impl Host {
     pub fn skills(&self) -> SkillStore {
-        SkillStore::new(self.home.join("skills"))
+        store(&self.home)
     }
     /// What a role's next turn is sent, read from the store each time.
     pub fn instructions(&self, role: Role) -> String {
-        provider::role_instructions(role, &self.skills().state(Skill::for_role(role)))
+        self.skills().instructions(role)
     }
     pub(crate) fn skill_states(&self) -> Vec<SkillState> {
         let store = self.skills();
@@ -367,6 +377,65 @@ mod tests {
         assert!(host.execute(unknown).is_err());
     }
 
+    /// Rewrites the skill's one history entry as a release whose stock was v0 wrote it.
+    fn written_by_v0(host: &Host, skill: Skill) {
+        let (name, _) = host.skills().history(skill).remove(0);
+        let path =
+            (host.home.join("skills").join(skill.folder())).join(format!("history/{name}.json"));
+        let entry = fs::read_to_string(&path).unwrap();
+        fs::write(&path, entry.replace("\"v1\"", "\"v0\"")).unwrap();
+    }
+
+    #[test]
+    fn an_update_waits_while_the_rules_cannot_be_read() {
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        host.skills()
+            .save_rules(Skill::Implementing, "Rule")
+            .unwrap();
+        written_by_v0(&host, Skill::Implementing);
+        fs::write(rules_file(&host), b"\xff not text").unwrap();
+        drop(host);
+
+        let host = Host::open(home.path()).unwrap();
+        assert_eq!(changes(&host, Skill::Implementing), [Change::SavedRules]);
+        fs::write(rules_file(&host), "Rule").unwrap();
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        let (_, latest) = host.skills().history(Skill::Implementing).pop().unwrap();
+        assert_eq!(
+            (latest.stock_version.as_str(), latest.rules.as_str()),
+            ("v1", "Rule")
+        );
+    }
+
+    #[test]
+    fn a_new_stock_version_entry_that_cannot_be_written_does_not_stop_the_host() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        host.skills().save_rules(Skill::Reviewing, "Rule").unwrap();
+        written_by_v0(&host, Skill::Reviewing);
+        drop(host);
+        let history = home.path().join("skills/reviewing/history");
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o555)).unwrap();
+        let opened = Host::open(home.path());
+        fs::set_permissions(&history, fs::Permissions::from_mode(0o755)).unwrap();
+        let host = opened.unwrap();
+        assert_eq!(changes(&host, Skill::Reviewing), [Change::SavedRules]);
+    }
+
+    #[test]
+    fn the_context_probe_reads_the_stored_rules_beside_a_running_host() {
+        let (_home, host) = host();
+        host.skills()
+            .save_rules(Skill::Implementing, "Rule")
+            .unwrap();
+        let probed = store(&host.home).instructions(Role::Implementer);
+        assert_eq!(probed, host.instructions(Role::Implementer));
+        assert!(probed.ends_with("Rule"));
+    }
+
     #[test]
     fn an_update_adds_one_new_stock_version_entry_and_keeps_the_rules() {
         let home = tempfile::tempdir().unwrap();
@@ -374,15 +443,7 @@ mod tests {
         host.skills()
             .save_rules(Skill::Reviewing, "Read the tests first")
             .unwrap();
-        // Written by a release whose Reviewing was v0.
-        let (name, _) = host.skills().history(Skill::Reviewing).remove(0);
-        let path = host
-            .home
-            .join(format!("skills/reviewing/history/{name}.json"));
-        let entry = fs::read_to_string(&path)
-            .unwrap()
-            .replace("\"v1\"", "\"v0\"");
-        fs::write(&path, entry).unwrap();
+        written_by_v0(&host, Skill::Reviewing);
         drop(host);
 
         let host = Host::open(home.path()).unwrap();

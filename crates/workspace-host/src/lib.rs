@@ -225,7 +225,9 @@ impl Host {
         host.migrate_opus_defaults()?;
         host.migrate_model_selection()?;
         host.backfill_usage()?;
-        host.skills().record_new_stock_versions()?;
+        if let Err(error) = host.skills().record_new_stock_versions() {
+            eprintln!("Recording new stock versions of skills: {error:#}");
+        }
         Ok(host)
     }
     /// A session shows as working while its turn runs, even after reporting `blocked` or
