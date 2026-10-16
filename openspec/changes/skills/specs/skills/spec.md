@@ -57,11 +57,15 @@ A skill SHALL be in Additions mode until the human starts a rewrite. In Addition
 - **THEN** the new stock text is sent with the same rules after it, and the skill is not marked out of date
 
 ### Requirement: An edit applies from each agent's next turn
-A saved change to a skill SHALL apply to every agent of the skill's roles from that agent's next turn, including agents that already exist. A turn already running SHALL keep the instructions it started with. The context estimate of a session SHALL use the same instructions as its turns.
+A saved change to a skill SHALL apply to every Claude agent of the skill's roles from that agent's next turn, including agents that already exist, and to every Codex agent from its next new session. A Codex agent that already exists SHALL keep the instructions its session started with, because Codex sends a session's first instructions on every resume. A turn already running SHALL keep the instructions it started with. The host SHALL pass each turn the instructions as they are when the turn starts, and the context estimate of a session SHALL use the same instructions as its turns.
 
 #### Scenario: A running implementer
-- **WHEN** the human saves rules for Implementing while an implementer is in a turn
+- **WHEN** the human saves rules for Implementing while a Claude implementer is in a turn
 - **THEN** that turn is unchanged, and the implementer's next turn has the rules
+
+#### Scenario: A Codex implementer
+- **WHEN** the human saves rules for Implementing while a Codex implementer's session exists
+- **THEN** its resumed turns keep the instructions its session started with, and a new Codex implementer's first turn has the rules
 
 ### Requirement: Only the human changes a skill
 Saving rules, starting and saving a rewrite, marking it up to date, resetting and restoring SHALL be commands only the human's client sends. No agent tool SHALL read or change the skills folder. The host SHALL accept any text of up to 32,000 characters for the human's rules and for a rewrite, including an empty one, and SHALL refuse a longer text with the previous state kept. The host SHALL NOT judge what the text says.

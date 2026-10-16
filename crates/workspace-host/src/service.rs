@@ -2514,16 +2514,17 @@ impl Actor {
             },
         );
         self.state_changed();
+        let role_instructions = self.host.instructions(session.role);
         let kind = match session.provider {
             Provider::Claude => TurnKind::Compaction(instructions),
             // Codex's own total for the whole context, as the card shows it.
             Provider::Codex => TurnKind::CodexCompaction {
                 before: runtime.provider_session_id.as_deref().and_then(|thread| {
                     let probe = context::Probe {
-                        role: session.role,
                         profile: &profile,
                         provider_session: thread,
                         directory: &cwd,
+                        instructions: &role_instructions,
                     };
                     context::usage(&probe).ok().map(|usage| usage.used)
                 }),
@@ -2543,6 +2544,7 @@ impl Actor {
             // calls none.
             token: format!("{}{}", new_id(), new_id()),
             helper: self.helper.clone(),
+            instructions: role_instructions,
         };
         self.run_provider(turn, cancel);
         Ok(())
@@ -2949,6 +2951,7 @@ impl Actor {
             socket: self.socket.clone(),
             token: token.clone(),
             helper: self.helper.clone(),
+            instructions: self.host.instructions(session.role),
         };
         let mut active = Active::new(
             run.clone(),

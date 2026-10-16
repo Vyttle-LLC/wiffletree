@@ -13,6 +13,9 @@ if args[:2]==['auth','status']:
     print(json.dumps({'loggedIn':True,'email':'fixture@example.invalid','orgId':'fixture-org'}))
     sys.exit(0)
 if '/context' in args:
+    assert args[args.index('--system-prompt-snapshot')+1]=='off', args
+    if os.environ.get('WORKSPACE_TEST_PROMPT_DIR'):
+        (Path(os.environ['WORKSPACE_TEST_PROMPT_DIR'])/'context-instructions.txt').write_text(args[args.index('--append-system-prompt')+1])
     report="""## Context Usage
 
 **Model:** claude-opus-5-5  
@@ -126,6 +129,7 @@ if claude:
     assert '--include-partial-messages' in args, args
     assert '--permission-prompt-tool' not in args, args
     assert args[args.index('--tools')+1] == 'default', args
+    assert args[args.index('--system-prompt-snapshot')+1] == 'off', args
     config=json.loads(args[args.index('--mcp-config')+1])['mcpServers']['agent_workspace']
     resumed=args[args.index('--resume')+1] if '--resume' in args else None
 else:
@@ -193,6 +197,8 @@ try:
     prompts=os.environ.get('WORKSPACE_TEST_PROMPT_DIR')
     if prompts:
         with open(Path(prompts)/f"{me['id']}.txt",'a') as log:log.write(prompt+'\n=====\n')
+        if claude:
+            with open(Path(prompts)/f"{me['id']}.instructions.txt",'a') as log:log.write(args[args.index('--append-system-prompt')+1]+'\n=====\n')
     # Every turn narrates and runs one command, so work steps stay out of the transcript.
     if claude:
         emit({'type':'stream_event','event':{'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}}})

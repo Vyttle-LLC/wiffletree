@@ -77,6 +77,81 @@ impl Role {
     }
 }
 
+/// A named way of working that Wiffletree runs, with a stock text the human can read and alter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Skill {
+    Coordinating,
+    Implementing,
+    Reviewing,
+    KeepingAPr,
+}
+impl Skill {
+    pub const ALL: [Self; 4] = [
+        Self::Coordinating,
+        Self::Implementing,
+        Self::Reviewing,
+        Self::KeepingAPr,
+    ];
+    /// The skill a role's instructions end with. The PR keeper's comment sorting is not a role's
+    /// turn and gets none.
+    pub fn for_role(role: Role) -> Self {
+        match role {
+            // Retired repository coordinators never run again; their archived sessions remain.
+            Role::ProjectOrchestrator | Role::TaskOrchestrator => Self::Coordinating,
+            Role::Implementer | Role::Maintenance => Self::Implementing,
+            Role::Tester | Role::Reviewer => Self::Reviewing,
+            Role::Keeper => Self::KeepingAPr,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Coordinating => "Coordinating",
+            Self::Implementing => "Implementing",
+            Self::Reviewing => "Reviewing",
+            Self::KeepingAPr => "Keeping a PR",
+        }
+    }
+    pub fn purpose(self) -> &'static str {
+        match self {
+            Self::Coordinating => {
+                "How the coordinator plans, when it creates tickets and starts agents, which model and effort it picks, when it stops chasing findings, and when it asks you."
+            }
+            Self::Implementing => {
+                "How an implementer works on its ticket, runs checks and answers review findings."
+            }
+            Self::Reviewing => {
+                "What testers and reviewers run and read, and what counts as a blocking finding."
+            }
+            Self::KeepingAPr => {
+                "How the PR keeper's model resolves a conflict or fixes failed checks in its one try."
+            }
+        }
+    }
+    /// The skill's folder in the skills folder.
+    pub fn folder(self) -> &'static str {
+        match self {
+            Self::Coordinating => "coordinating",
+            Self::Implementing => "implementing",
+            Self::Reviewing => "reviewing",
+            Self::KeepingAPr => "keeping-a-pr",
+        }
+    }
+}
+/// The longest text the human may save for a skill, in characters.
+pub const MAX_SKILL_TEXT: usize = 32_000;
+/// A skill as the human has left it, on the snapshot without its history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillState {
+    pub skill: Skill,
+    pub stock: String,
+    pub stock_version: String,
+    /// The human's own rules, sent after the stock text; empty when there are none.
+    pub rules: String,
+    /// Why the skill's file could not be read; until it can, it counts as missing.
+    pub unreadable: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -439,6 +514,8 @@ pub struct Snapshot {
     /// By ticket, the PR keeper's part of a kept ticket's PR line.
     #[serde(default)]
     pub keeper_parts: BTreeMap<String, KeeperPart>,
+    #[serde(default)]
+    pub skills: Vec<SkillState>,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -2288,6 +2365,24 @@ pub enum Command {
     /// human's client sends it.
     SetKeeper {
         keeper: KeeperSettings,
+    },
+    /// Saves the human's own rules for a skill, an empty text removing them, and refuses more
+    /// than `MAX_SKILL_TEXT` characters; answers with the `SkillState`. Only the human's client
+    /// sends it.
+    SaveSkillRules {
+        skill: Skill,
+        rules: String,
+    },
+    /// Returns a skill to its stock text with no rules of the human's own; answers with the
+    /// `SkillState`. Only the human's client sends it.
+    ResetSkill {
+        skill: Skill,
+    },
+    /// Makes the state a history entry holds current, as a new entry; answers with the
+    /// `SkillState`. Only the human's client sends it.
+    RestoreSkill {
+        skill: Skill,
+        entry: String,
     },
     /// Saves or, with none, removes a repository's checks command; answers with the
     /// `Repository`. Only the human's client sends it.

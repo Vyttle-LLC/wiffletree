@@ -29,11 +29,12 @@ fn main() -> Result<()> {
             model: model.clone(),
             effort: String::new(),
         };
+        let role = serde_json::from_value(serde_json::json!(role))?;
         let usage = workspace_host::context::usage(&workspace_host::context::Probe {
-            role: serde_json::from_value(serde_json::json!(role))?,
             profile: &profile,
             provider_session: session,
             directory: std::path::Path::new(directory),
+            instructions: &workspace_host::provider::skill(role),
         })?;
         println!("{usage:#?}");
         return Ok(());
