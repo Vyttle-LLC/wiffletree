@@ -85,7 +85,7 @@ impl SkillStore {
     /// Writes the entry's state back as a new entry; the history keeps every entry.
     pub fn restore(&self, skill: Skill, entry: &str) -> Result<()> {
         let (_, restored) = self
-            .history(skill)?
+            .history(skill)
             .into_iter()
             .find(|(name, _)| name == entry)
             .context("That history entry does not exist")?;
@@ -99,7 +99,7 @@ impl SkillStore {
     /// A skill with no history gets none.
     pub fn record_new_stock_versions(&self) -> Result<()> {
         for skill in Skill::ALL {
-            let Some((_, latest)) = self.history(skill)?.pop() else {
+            let Some((_, latest)) = self.history(skill).pop() else {
                 continue;
             };
             if latest.stock_version != stock_version(skill) {
@@ -111,12 +111,11 @@ impl SkillStore {
         }
         Ok(())
     }
-    /// Oldest first, each entry with its name, the time it was written. Entries that cannot be
-    /// read are left out.
-    pub fn history(&self, skill: Skill) -> Result<Vec<(String, Entry)>> {
-        let entries = match fs::read_dir(self.folder(skill).join(HISTORY)) {
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(vec![]),
-            entries => entries?,
+    /// Oldest first, each entry with its name, the time it was written. A history or an entry
+    /// that cannot be read counts as none.
+    pub fn history(&self, skill: Skill) -> Vec<(String, Entry)> {
+        let Ok(entries) = fs::read_dir(self.folder(skill).join(HISTORY)) else {
+            return vec![];
         };
         let mut history = entries
             .filter_map(|file| {
@@ -130,7 +129,7 @@ impl SkillStore {
             })
             .collect::<Vec<_>>();
         history.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(history)
+        history
     }
     /// Atomically, like `save_settings`; no rules means no file.
     fn write_rules(&self, skill: Skill, rules: &str) -> Result<()> {
@@ -199,7 +198,7 @@ mod tests {
     }
 
     fn changes(host: &Host, skill: Skill) -> Vec<Change> {
-        let history = host.skills().history(skill).unwrap();
+        let history = host.skills().history(skill);
         history.into_iter().map(|(_, entry)| entry.change).collect()
     }
 
@@ -234,7 +233,7 @@ mod tests {
             .unwrap();
         assert_eq!(saved["rules"], rules);
         assert_eq!(fs::read_to_string(rules_file(&host)).unwrap(), rules);
-        let history = host.skills().history(Skill::Implementing).unwrap();
+        let history = host.skills().history(Skill::Implementing);
         let entry = Entry {
             change: Change::SavedRules,
             stock_version: "v1".into(),
@@ -291,6 +290,25 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_cannot_be_read_counts_as_none_and_the_host_still_starts() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let host = Host::open(home.path()).unwrap();
+        host.skills()
+            .save_rules(Skill::Implementing, "Rule")
+            .unwrap();
+        drop(host);
+        let folder = home.path().join("skills/implementing");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
+        let host = Host::open(home.path()).unwrap();
+        let state = host.skills().state(Skill::Implementing);
+        let instructions = host.instructions(Role::Implementer);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(state.unreadable.is_some());
+        assert_eq!(instructions, provider::skill(Role::Implementer));
+    }
+
+    #[test]
     fn a_text_too_long_is_refused_and_the_rules_stay() {
         let (_home, mut host) = host();
         host.skills()
@@ -325,7 +343,7 @@ mod tests {
         assert_eq!(host.execute(reset).unwrap()["rules"], "");
         assert!(!rules_file(&host).exists());
         assert!(!host.instructions(Role::Implementer).contains(RULES_HEADING));
-        let history = host.skills().history(Skill::Implementing).unwrap();
+        let history = host.skills().history(Skill::Implementing);
         let (saved, entry) = &history[0];
         assert_eq!(entry.rules, rules);
 
@@ -357,7 +375,7 @@ mod tests {
             .save_rules(Skill::Reviewing, "Read the tests first")
             .unwrap();
         // Written by a release whose Reviewing was v0.
-        let (name, _) = host.skills().history(Skill::Reviewing).unwrap().remove(0);
+        let (name, _) = host.skills().history(Skill::Reviewing).remove(0);
         let path = host
             .home
             .join(format!("skills/reviewing/history/{name}.json"));
@@ -375,12 +393,7 @@ mod tests {
             changes(&host, Skill::Reviewing),
             [Change::SavedRules, previous.clone()]
         );
-        let (_, latest) = host
-            .skills()
-            .history(Skill::Reviewing)
-            .unwrap()
-            .pop()
-            .unwrap();
+        let (_, latest) = host.skills().history(Skill::Reviewing).pop().unwrap();
         assert_eq!(latest.stock_version, "v1");
         assert_eq!(latest.rules, "Read the tests first");
         // The new stock text is sent with the same rules, and nothing else gains an entry.
