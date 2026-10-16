@@ -2,12 +2,12 @@
 
 See proposal.md for why. The code this builds on, at origin/main e4972d98:
 
-- **Host settings.** `HostSettings` (`workspace-core/src/lib.rs:617`) is read from `settings.json` in the data folder by `Host::settings` (`settings.rs:103`) and written atomically by `save_settings` (`:245`), which keeps fields this version does not know. It holds the workspace folder, the verification setting (verifiers, review levels, rounds per review and reviews per ticket, `VerificationSettings`, `lib.rs:799`), the two check-in thresholds, the allowed owners and the PR keeper's settings (`KeeperSettings`, `lib.rs:677`). Each has its own save: `set_verification` (`:110`), `set_check_ins` (`:147`), `set_keeper` (`:159`), `set_workspaces_dir` (`:195`) and `set_owner_allowed` (`:217`). Each refuses an invalid value and keeps the saved one. `check_tries` (`lib.rs:739`) and `check_sorting_model` (`lib.rs:778`) tie the keeper's triggers to the keeper's model and to a re-check level.
+- **Host settings.** `HostSettings` (`workspace-core/src/lib.rs:694`) is read from `settings.json` in the data folder by `Host::settings` (`settings.rs:103`) and written atomically by `save_settings` (`:245`), which keeps fields this version does not know. It holds the workspace folder, the verification setting (verifiers, review levels, rounds per review and reviews per ticket, `VerificationSettings`, `lib.rs:876`), the two check-in thresholds, the allowed owners and the PR keeper's settings (`KeeperSettings`, `lib.rs:754`). Each has its own save: `set_verification` (`:110`), `set_check_ins` (`:147`), `set_keeper` (`:159`), `set_workspaces_dir` (`:195`) and `set_owner_allowed` (`:217`). Each refuses an invalid value and keeps the saved one. `check_tries` (`lib.rs:816`) and `check_sorting_model` (`lib.rs:855`) tie the keeper's triggers to the keeper's model and to a re-check level.
 - **The model selection.** `ModelSelection` (`selection.rs:47`) is one row of the database (`policies.rs:25`, saved by `set_model_selection`, `:33`). It holds the providers and their allowed models, the providers per role, the PR keeper's model and the model guide (`guide`, `selection.rs:53`), saved together at a new revision.
 - **Where the human edits them.** The Settings window (`workspace-desktop/src/settings.rs`) has Appearance, Workspace folder (`:164`) and Check-ins (`:204`). The Models page has the providers, the guide, the Review card and the PR keeper's model. The Repositories page has the allowed owners and the keeper's triggers. Appearance is this client's own preference, in `desktop-preferences.json`.
 - **Skills (change 4, `openspec/changes/skills`).** Being built alongside this change. Its decision 9 keeps skills in `<data folder>/skills/`, one folder per skill with `additions.md`, `rewrite.md`, `base.md` and one `history/<time>.json` per change, all through one `SkillStore` rooted at one folder, "so change 5 can move that folder into the settings repository unchanged". Its open question 10 left edits made outside Wiffletree to this change.
-- **Publishing (change 1).** `publish_ticket` is the only way Wiffletree pushes. It pushes exactly one ref, with `--no-follow-tags --recurse-submodules=no`, to the push URL recorded in the request (`publish.rs:254`), and never overwrites commits it did not push. The allowed owners (`repository-owners`) decide which ticket PRs open without asking. The list stays on each machine.
-- **The Inbox.** Inbox items (`Attention`, `lib.rs:312`) belong to a project and a session. Nothing today belongs to the whole workspace.
+- **Publishing (change 1).** `publish_ticket` is the only way Wiffletree pushes. It pushes exactly one ref, with `--no-follow-tags --recurse-submodules=no`, to the push URL recorded in the request (`publish.rs:269`), and never overwrites commits it did not push. The allowed owners (`repository-owners`) decide which ticket PRs open without asking. The list stays on each machine.
+- **The Inbox.** Inbox items (`Attention`, `lib.rs:387`) belong to a project and a session. Nothing today belongs to the whole workspace.
 - **Background passes.** The PR watcher (`pr_watch.rs`) runs read-only passes off the host's command thread on a timer, with backoff. Git runs through `runtime::git_output` and `git_push` (`runtime.rs:93`, `:139`).
 - **The repository today.** `Sage-Social/wiffletree-storage` exists, private, with one commit, cloned at `~/dev/sagehaven/wiffletree-storage`. This change does not touch it.
 
@@ -44,9 +44,9 @@ See proposal.md for why. The code this builds on, at origin/main e4972d98:
 - H5. Sync is fully automatic: pull at launch and periodically, push after each change.
 - H6. When both machines changed the same file, pause sync for that file, keep the local version working, and put a note in the Inbox.
 
-**Raised on October 13, 2026, to settle before real content goes in:** the human sees this as one repository, `wiffletree-storage`, for everything Wiffletree keeps; the Sage-Social organization lets every member read its private repositories; and the human's machine layout keeps company and personal material apart. These are open questions 1 and 2, with recommendations.
+**Raised on October 13, 2026, to settle before real content goes in:** the human sees this as one repository, `wiffletree-storage`, for everything Wiffletree keeps; the Sage-Social organization lets every member read its private repositories; and the human's machine layout keeps company and personal material apart. These are decided questions 1 and 2: a private repository under the human's own account.
 
-**Everything else here is a design decision for the human to approve.** The proposal's open questions name the ones with real alternatives.
+**The human approved this design on October 16, 2026,** with the recommended answer to each of the proposal's decided questions.
 
 ### 1. What is shared, what stays, what never goes
 
@@ -120,7 +120,7 @@ The Settings window gets a **Settings repository** section after Check-ins (mock
 
 ### 5. A second machine joins
 
-Joining makes this machine use the repository's shared settings (open question 5). Mockup panel e.
+Joining makes this machine use the repository's shared settings (decided question 5). Mockup panel e.
 
 1. The human names the repository and presses **Check**, as in decision 4.
 2. The section lists what the repository holds next to what this machine has, setting by setting: "Review: Full and Light (this Mac: Full only)", "Implementing: 3 of your rules (this Mac: stock)". It names the machine and time of the repository's last change.
@@ -135,18 +135,18 @@ The other way, **Replace the repository's settings with this Mac's**, is offered
 
 ### 6. Pushing: a new kind of push
 
-Pushing to the settings repository is not publishing a ticket, and the allowed owners do not govern it (open question 3).
+Pushing to the settings repository is not publishing a ticket, and the allowed owners do not govern it (decided question 3).
 
 - **Choosing the repository on this machine is the permission.** The confirmation names the repository, its branch and who can read it, and says Wiffletree will push setting changes there automatically. The choice stays on this machine, as the allowed owners do.
 - **The allowed owners neither grant nor need it.** Allowing `Sage-Social` for pull requests does not let sync push to a Sage-Social repository, and a settings repository needs no allowed owner. The Repositories page and the Settings section each say so in one line.
-- **What a push may do.** Sync pushes only the repository's default branch, chosen at set-up or join and recorded. It pushes only a commit that contains the remote branch's head, so a push never overwrites another machine's commit. It sends no tags and no submodules, and goes to the recorded push URL, never to a remote by name, as `publish.rs:254` does. A push the remote refuses is not retried by force: the next pass pulls first.
+- **What a push may do.** Sync pushes only the repository's default branch, chosen at set-up or join and recorded. It pushes only a commit that contains the remote branch's head, so a push never overwrites another machine's commit. It sends no tags and no submodules, and goes to the recorded push URL, never to a remote by name, as `publish.rs:269` does. A push the remote refuses is not retried by force: the next pass pulls first.
 - **What a commit may contain.** Only files in the layout of decision 2: `wiffletree.json`, `settings/*` and `skills/**`. Other files in the repository are pulled, kept and never changed.
 - **Who pushes.** Only the host's sync. No agent tool reads or changes the shared folder or the choice of repository. As with everything else, an agent's shell is not sandboxed: it can write the shared folder, and it can push to the repository with the human's credentials. Decision 10 covers the first; the README states the second.
 - Pushes use the human's own Git credentials and identity, as their own commits do. Each commit's message names what changed and the machine: "Implementing: saved your rules · Mike's MacBook Air". If Git has no name and email set, sync stops with that error.
 
 ### 7. When sync runs
 
-- **Pull** at launch, every 5 minutes, and when the human presses **Sync now** (open question 6).
+- **Pull** at launch, every 5 minutes, and when the human presses **Sync now** (decided question 6).
 - **Push** 5 seconds after the last change to a shared setting or skill, so a burst of saves is one commit, and after each pull that left this machine's changes unpushed.
 - A pass runs off the host's command thread, as the PR watcher's passes do. When GitHub cannot be reached, passes back off up to 30 minutes, and **Sync now** always tries at once. Changes wait in the folder meanwhile, and this machine keeps using them.
 - Pulled changes apply where each setting is read: skills from each agent's next turn, check-in thresholds from the next turn that starts, review settings from the next `verify_ticket`, keeper triggers from the keeper's next pass, the guide from the next `workspace_context`. The client's snapshot is refreshed after a pass that changed anything.
@@ -171,7 +171,7 @@ The pass then makes one commit on top of the remote head, holding this machine's
 ### 9. A file changed on both machines
 
 - This machine keeps using its own version (H6). Sync does not push it and does not take the other one. Every other file keeps syncing.
-- The host raises one **workspace note** in the Inbox, saying which setting is paused and on which machines it changed (open question 4). It also shows in the Settings section and as a mark on the sidebar's sync status (decision 13).
+- The host raises one **workspace note** in the Inbox, saying which setting is paused and on which machines it changed (decided question 4). It also shows in the Settings section and as a mark on the sidebar's sync status (decision 13).
 - The note offers three things:
   - **Compare**: both versions, as a line diff.
   - **Keep this Mac's**: pushes this machine's version over the other.
@@ -182,7 +182,7 @@ The pass then makes one commit on top of the remote head, holding this machine's
 
 ### 10. A file changed outside Wiffletree
 
-A file in the shared folder whose content differs from what the host last wrote or pulled was changed outside Wiffletree: by the human in an editor, by a script, or by an agent's shell. This answers change 4's open question 10 (open question 7).
+A file in the shared folder whose content differs from what the host last wrote or pulled was changed outside Wiffletree: by the human in an editor, by a script, or by an agent's shell. This answers change 4's open question 10 (decided question 7).
 
 - It is paused like a conflict, with a note: "Implementing · your rules was changed outside Wiffletree on this Mac."
 - **Sync this version** pushes it, after the checks of decision 11 that every pushed file must pass. **Put back the synced version** restores the last synced content.
@@ -215,7 +215,7 @@ Skills compare each rewrite's base with this machine's stock text (change 4, dec
 
 ## Risks / Trade-offs
 
-- **Whoever can push to the repository can change every machine's agents.** Skill text is part of every agent's instructions, and the review and keeper settings decide what runs. A private repository under the human's own account limits that to the human (open questions 1 and 2). The README says so.
+- **Whoever can push to the repository can change every machine's agents.** Skill text is part of every agent's instructions, and the review and keeper settings decide what runs. A private repository under the human's own account limits that to the human (decided questions 1 and 2). The README says so.
 - **Org members may read it.** An organization's base permission applies to every private repository. Wiffletree shows it and cannot change it.
 - **Agents' shells can push.** The repository is a Git clone in the data folder, and agents' shells hold the human's credentials. Wiffletree's own push is the only one it makes, and decision 10 stops an outside edit from spreading through sync, but a shell can still push to the repository directly. This is the plan's open risk, unchanged.
 - **Two machines editing the same setting pause it.** Whole-file comparison pauses some edits a line merge would have combined. It never produces a setting neither machine chose.
