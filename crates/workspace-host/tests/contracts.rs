@@ -225,7 +225,11 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator — v14"));
+    assert!(coordinator.contains("Project coordinator — v15"));
+    // A finished ticket's summary tells the human where its PR stands and what to watch.
+    assert!(coordinator.contains(
+        "one row per ticket: its status, its PR's state (open and ready for the human, open with failing checks or conflicts, or not yet published), the PR link, and its main risks or open follow-ups"
+    ));
     for role in Role::ALL {
         let skill = provider::skill(role);
         assert!(skill.contains("Wiffletree communication contract — v8"));
