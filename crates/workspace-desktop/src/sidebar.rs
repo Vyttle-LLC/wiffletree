@@ -1359,8 +1359,9 @@ impl Workspace {
                         .snapshot
                         .as_ref()
                         .and_then(|s| s.keeper_parts.get(&ticket.id));
+                    let keeper = ticket.try_part().or(keeper.copied());
                     let comments = ticket.waiting_comments();
-                    pr_line(pr, ticket.unreviewed(), keeper.copied(), comments, p)
+                    pr_line(pr, ticket.unreviewed(), keeper, comments, p)
                 }))
                 .children(waiting.map(|waiting| {
                     div()
@@ -1449,6 +1450,7 @@ fn pr_line(
             tree::Tone::Bad => p.red,
             tree::Tone::Merged => p.focus,
             tree::Tone::Warn => p.yellow,
+            tree::Tone::Busy => p.focus,
         };
         line = line.child(div().text_color(color).child(part.text));
     }

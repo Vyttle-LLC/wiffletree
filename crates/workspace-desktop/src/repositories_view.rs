@@ -16,9 +16,7 @@ const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TI
 const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
 const KEEP: &str = "Only in the repositories ticked above · all off until you tick them.";
 const REBASE: &str = "Plain Git, no model and no review. Once the base has been quiet, replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).";
-// Until the keeper's model tries conflicts itself (slice 4b), the trigger reviews only a rebase
-// whose patch changed.
-const CONFLICTS: &str = "When a rebase changes the patch, the repository’s checks run on it and a re-check must pass before anything is pushed. If not, nothing is pushed and the coordinator is told. A conflict still goes to the coordinator. Needs the rebase trigger above and a checks command in the repository.";
+const CONFLICTS: &str = "The PR keeper’s model tries once. Its result must change only the conflicted files, pass the repository’s checks and pass a review at the level below before anything is pushed. If not, the try is thrown away and the coordinator is told. A rebase that changes the patch is checked and reviewed the same way. Needs the rebase trigger above and a checks command in the repository.";
 const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
 const SORT: &str = "Reads each new comment and sorts it: needs a change, a question, or no action. Tells the coordinator about the first two. Never replies, resolves or reacts.";
 const NEVER_KEEPER: &str = "Wiffletree never merges, approves, closes or comments on a pull request. The model is chosen in Models → PR keeper.";
