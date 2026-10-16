@@ -73,8 +73,12 @@ A saved change to a skill SHALL apply to every Claude agent of the skill's roles
 - **THEN** its resumed turns keep the instructions its session started with, and a new Codex implementer's first turn has the rules
 
 ### Requirement: Skills are stored in a folder that can move
-The host SHALL keep skills in a `skills` folder in its data folder, one folder per skill, holding the human's rules, the rewrite and its base as plain text files, and one file per history entry. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. A missing file SHALL mean no state for it. A file the host cannot read SHALL count as missing for the instructions, and the skill's page SHALL say it could not be read. Credentials, the database and conversations SHALL NOT be stored there.
+The host SHALL keep skills in the `skills` folder of the shared folder (see settings-repository), one folder per skill, holding the human's rules, the rewrite and its base as plain text files, and one file per history entry. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. A missing file SHALL mean no state for it. A file the host cannot read SHALL count as missing for the instructions, and the skill's page SHALL say it could not be read. Credentials, the database and conversations SHALL NOT be stored there. A skills folder from before the shared folder SHALL be moved into it unchanged at start.
 
 #### Scenario: A file that cannot be read
 - **WHEN** Implementing's rules file is not valid UTF-8
 - **THEN** implementers get the stock text with no rules, and Implementing's page says its file could not be read
+
+#### Scenario: Skills saved before the shared folder
+- **WHEN** Wiffletree starts after an update with rules for Implementing in `<data folder>/skills/`
+- **THEN** they are in the shared folder's `skills/implementing/`, the history is unchanged, and implementers keep getting the rules
