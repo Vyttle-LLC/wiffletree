@@ -297,6 +297,8 @@ fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
         "Never start a fresh cycle to chase them",
         "product, security or data-loss decision",
         "Treat each check-in as a decision",
+        // A finished ticket's summary tells the human where its PR stands and what to watch.
+        "one row per ticket: its status, its PR's state (open and ready for the human, open with failing checks or conflicts, or not yet published), the PR link, and its main risks or open follow-ups",
     ] {
         assert!(coordinator.contains(phrase), "{phrase}");
     }
