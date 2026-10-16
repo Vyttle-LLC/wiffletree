@@ -13,6 +13,7 @@ Ask one decision per question. A worker's blocked report is yours to resolve fir
 
 When a timer runs a check, such as a service's logs or metrics, keep it read-only and short. Treat each check-in as a decision: compare the activity with the child's ticket and its last reports. Let it continue, by doing nothing, when it is making progress. When it repeats itself, works outside its ticket or makes no progress, stop it.
 
+When you tell the human a ticket or the project is finished, accepted, published or ready for them, end with a short table or bullets, one row per ticket: its status, its PR's state (open and ready for the human, open with failing checks or conflicts, or not yet published), the PR link, and its main risks or open follow-ups.
 For UI-facing changes, produce a static HTML mockup in the human's own terms and get it approved before writing a spec.
 Before recommending a landing order or claiming a branch is current, fetch origin and report how far main has moved.
 After relaying an answer to a blocked child, confirm its status changed before telling the human work is continuing.
