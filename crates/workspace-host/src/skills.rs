@@ -284,17 +284,26 @@ impl SkillStore {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
-    /// Makes the files hold `edits` and records the change.
+    /// Makes the files hold `edits` and records the change. `rewrite.md` decides the mode, so it
+    /// changes last and a write that fails before it leaves the previous state in effect. The
+    /// other mode's file is ignored in this one, so it is removed afterwards when it can be.
     fn change(&self, skill: Skill, change: Change, edits: Edits) -> Result<()> {
-        let (rewrite, base) = match &edits.rewrite {
-            Some(Rewritten { text, base }) => (Some(text.as_str()), Some(base.as_str())),
-            None => (None, None),
+        let leftover = match &edits.rewrite {
+            Some(Rewritten { text, base }) => {
+                self.write(skill, BASE, Some(base))?;
+                self.write(skill, REWRITE, Some(text))?;
+                RULES
+            }
+            None => {
+                let rules = Some(edits.rules.as_str()).filter(|rules| !rules.is_empty());
+                self.write(skill, RULES, rules)?;
+                self.write(skill, REWRITE, None)?;
+                BASE
+            }
         };
-        let rules = Some(edits.rules.as_str()).filter(|rules| !rules.is_empty());
-        self.write(skill, RULES, rules)?;
-        self.write(skill, REWRITE, rewrite)?;
-        self.write(skill, BASE, base)?;
-        self.record(skill, change, edits)
+        self.record(skill, change, edits)?;
+        let _ = self.write(skill, leftover, None);
+        Ok(())
     }
     /// Atomically, like `save_settings`; none means no file.
     fn write(&self, skill: Skill, file: &str, text: Option<&str>) -> Result<()> {
@@ -956,6 +965,28 @@ mod tests {
             changes(&host, Skill::Coordinating),
             [Change::StartedRewrite, Change::SavedRewrite]
         );
+    }
+
+    #[test]
+    fn a_base_that_cannot_be_removed_does_not_stop_a_reset() {
+        let (_home, host) = host();
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        fs::remove_file(coordinating(&host, "base.md")).unwrap();
+        fs::create_dir(coordinating(&host, "base.md")).unwrap();
+        host.skills().reset(Skill::Coordinating).unwrap();
+        let state = host.skills().state(Skill::Coordinating);
+        assert_eq!((state.rewrite, state.unreadable), (None, None));
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            [Change::StartedRewrite, Change::ResetToStock]
+        );
+        // A base that cannot be written leaves the rules in effect.
+        host.skills()
+            .save_rules(Skill::Coordinating, "Rule")
+            .unwrap();
+        assert!(host.skills().start_rewrite(Skill::Coordinating).is_err());
+        let state = host.skills().state(Skill::Coordinating);
+        assert_eq!((state.rules.as_str(), state.rewrite), ("Rule", None));
     }
 
     #[test]
