@@ -981,6 +981,8 @@ impl Host {
     pub(crate) fn stop_settings_sync(&mut self) -> Result<HostSettings> {
         let passes = self.sync_passes.clone();
         let _no_pass = no_pass_running(&passes)?;
+        // A pass started before this, still to take the lock, then reads nothing and pushes nothing.
+        let _writing = shared::Writing::start(&self.shared_writes, "");
         let settings = HostSettings {
             settings_repository: None,
             ..self.settings()
@@ -2641,6 +2643,22 @@ pub(crate) mod tests {
         assert_eq!(git(&clone, &["rev-parse", "HEAD"]), rejoined[0]);
         let status = status(&host);
         assert_eq!((status.synced_at, status.waiting), (None, 0));
+    }
+
+    #[test]
+    fn a_pass_that_started_before_sync_stopped_pushes_nothing() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        host.set_check_ins(40, 400).unwrap();
+        let pass = host.sync_pass().unwrap().unwrap();
+        let commits = github.log("%H");
+        host.execute(Command::StopSettingsSync).unwrap();
+        let passed = self::pass(pass, &github.tools());
+        assert!(!host.finish_sync(now(), passed).unwrap());
+        assert_eq!(github.log("%H"), commits);
+        assert_eq!(github.pushes(), 1);
     }
 
     #[test]
