@@ -181,6 +181,10 @@ const DRAWINGS: &[(&str, &str)] = &[
         r#"<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#,
     ),
     (
+        "history",
+        r#"<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>"#,
+    ),
+    (
         "shield",
         r#"<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/>"#,
     ),

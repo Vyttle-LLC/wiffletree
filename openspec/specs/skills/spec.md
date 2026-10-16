@@ -72,6 +72,17 @@ A saved change to a skill SHALL apply to every Claude agent of the skill's roles
 - **WHEN** the human saves rules for Implementing while a Codex implementer's session exists
 - **THEN** its resumed turns keep the instructions its session started with, and a new Codex implementer's first turn has the rules
 
+### Requirement: Every skill can be reset to stock
+Each skill's page SHALL offer Reset to stock, which SHALL ask first, naming what stops applying and that it stays in the history. Reset SHALL return the skill to Additions mode with no rules of the human's own, and SHALL write a history entry.
+
+#### Scenario: Resetting a skill with rules
+- **WHEN** the human chooses Reset to stock on Implementing with three rules, and confirms
+- **THEN** Implementing is at stock, implementers' next turns have no rules section, and the history's previous entry still holds the three rules
+
+#### Scenario: Cancelling
+- **WHEN** the human chooses Reset to stock and then Cancel
+- **THEN** nothing changes and no history entry is written
+
 ### Requirement: Skills are stored in a folder that can move
 The host SHALL keep skills in a `skills` folder in its data folder, one folder per skill, holding the human's rules, the rewrite and its base as plain text files, and one file per history entry. All reads and writes SHALL go through one store rooted at that folder, and writes SHALL be atomic. A missing file SHALL mean no state for it. A file the host cannot read SHALL count as missing for the instructions, and the skill's page SHALL say it could not be read. Credentials, the database and conversations SHALL NOT be stored there.
 

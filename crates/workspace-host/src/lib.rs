@@ -1414,6 +1414,7 @@ impl Host {
                 self.skills().restore(skill, &entry)?;
                 serde_json::to_value(self.skills().state(skill))?
             }
+            Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
             Command::SetRepositoryChecks {
                 repository_id,
                 checks,

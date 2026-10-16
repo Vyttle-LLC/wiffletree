@@ -36,9 +36,9 @@ About 290 production lines. Requirements. `skills`: "The Skills page".
 
 About 200 production lines. Requirements. `skills`: "Every skill can be reset to stock". It also builds the page part of "Every skill has a history", which slice 5 completes.
 
-- [ ] 4.1 Add Reset to stock to a skill's page with its confirmation, naming what stops applying and that it stays in the history. Verify "Resetting a skill with rules" and "Cancelling" (no command is sent).
-- [ ] 4.2 Add a request for a skill's history, answered from `SkillStore`, and the History list on the skill's page, newest first, each entry with View (read-only) and Restore. Verify "Restoring earlier rules" from the page, and that the list reads an "An update" entry as "New stock version v1 → v2".
-- [ ] 4.3 Compare by eye with the mockup in both themes: panels (e) and (f). List every difference. Run the checks of 1.6 and sync this slice's requirement.
+- [x] 4.1 Add Reset to stock to a skill's page with its confirmation, naming what stops applying and that it stays in the history. Verify "Resetting a skill with rules" and "Cancelling" (no command is sent).
+- [x] 4.2 Add a request for a skill's history, answered from `SkillStore`, and the History list on the skill's page, newest first, each entry with View (read-only) and Restore. Verify "Restoring earlier rules" from the page, and that the list reads an "An update" entry as "New stock version v1 → v2".
+- [x] 4.3 Compare by eye with the mockup in both themes: panels (e) and (f). List every difference. Run the checks of 1.6 and sync this slice's requirement.
 
 ## 5. Slice 5: Rewrite on the host
 
