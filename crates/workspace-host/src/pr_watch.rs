@@ -16,6 +16,18 @@ const BRANCHES_PER_QUERY: usize = 50;
 /// Automatic wakes on failed checks and conflicts, per PR.
 const WAKE_BUDGET: usize = 3;
 
+/// The id of the watcher's wake for `problem` at the PR's head.
+fn wake_id(ticket_id: &str, pr: &PullRequest, problem: KeeperProblem) -> String {
+    let kind = match problem {
+        KeeperProblem::Checks => "checks",
+        KeeperProblem::Conflict => "conflict",
+    };
+    format!(
+        "{PR_NOTICE_PREFIX}{ticket_id}:{kind}:{}:{}",
+        pr.number, pr.head
+    )
+}
+
 /// A message's id and body.
 type Notice = (String, String);
 
@@ -556,8 +568,6 @@ impl Host {
                 ),
             )),
             PrState::Open => {
-                let checks = format!("{prefix}:checks:{}:", pr.number);
-                let conflict = format!("{prefix}:conflict:{}:", pr.number);
                 let mut wakes = vec![];
                 // The keeper's own message about its try takes the place of the wake.
                 let mut seen = ticket.clone();
@@ -565,7 +575,7 @@ impl Host {
                 if pr.checks == CheckState::Failure {
                     wakes.push((
                         KeeperProblem::Checks,
-                        format!("{checks}{}", pr.head),
+                        wake_id(&ticket.id, pr, KeeperProblem::Checks),
                         format!(
                             "{named}: checks failed at head {head}. Run gh pr checks {} in the ticket worktree for details. A fix needs a new verification cycle before it is pushed.",
                             pr.number
@@ -575,7 +585,7 @@ impl Host {
                 if pr.merge_state == MergeState::Dirty {
                     wakes.push((
                         KeeperProblem::Conflict,
-                        format!("{conflict}{}", pr.head),
+                        wake_id(&ticket.id, pr, KeeperProblem::Conflict),
                         format!(
                             "{named} conflicts with {} at head {head}. Resolving it needs a rebase or merge in the worktree and a new verification cycle before it is pushed.",
                             pr.base
@@ -642,6 +652,13 @@ impl Host {
             ));
         }
         Ok(due)
+    }
+    /// Whether the watcher's wake for `problem` at the ticket's open PR head was already sent.
+    pub(crate) fn wake_sent(&self, ticket: &Ticket, problem: KeeperProblem) -> Result<bool> {
+        match ticket.open_pull_request() {
+            Some(pr) => self.message_exists(&wake_id(&ticket.id, pr, problem)),
+            None => Ok(false),
+        }
     }
     pub(crate) fn message_exists(&self, id: &str) -> Result<bool> {
         Ok(self
