@@ -502,7 +502,6 @@ type Content = Option<Vec<u8>>;
 pub(crate) struct Pass {
     clone: PathBuf,
     repository: SettingsRepository,
-    /// The commit last synced, or the clone's head before the record has one.
     commit: String,
     synced: BTreeMap<String, Content>,
 }
@@ -704,7 +703,15 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
             Ok(made.then(|| head.trim().to_owned()))
         });
         match pushed {
-            Ok(head) => passed.pushed = head,
+            Ok(Some(head)) => {
+                // A save made during the pass can be what was committed: record that.
+                let pushed = files_at(&clone, &head)?;
+                for (path, content) in &mut passed.committed {
+                    *content = pushed.get(path).cloned();
+                }
+                passed.pushed = Some(head);
+            }
+            Ok(None) => {}
             Err(error) => passed.error = Some(format!("{error:#}")),
         }
     }
@@ -795,10 +802,15 @@ impl Host {
         Ok(self.settings())
     }
     /// The pass sync runs next, or `None` while no settings repository is chosen.
-    pub(crate) fn sync_pass(&self) -> Result<Option<Pass>> {
+    pub(crate) fn sync_pass(&mut self) -> Result<Option<Pass>> {
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
         };
+        let recorded = "SELECT EXISTS(SELECT 1 FROM sync_record WHERE path='')";
+        if !self.db.query_row(recorded, [], |r| r.get::<_, bool>(0))? {
+            // A repository chosen before sync's record existed.
+            self.record_clone()?;
+        }
         let mut synced: BTreeMap<String, Content> = self
             .db
             .prepare("SELECT path,synced FROM sync_record")?
@@ -808,7 +820,7 @@ impl Host {
         Ok(Some(Pass {
             clone: self.home.join(shared::FOLDER),
             repository,
-            commit: commit.transpose()?.unwrap_or_else(|| "HEAD".into()),
+            commit: commit.transpose()?.context("Sync's record has no commit")?,
             synced,
         }))
     }
@@ -890,19 +902,25 @@ impl Host {
             waiting: waiting as usize,
         }))
     }
-    /// Starts sync's record afresh from the clone just put in place: every file as synced and
-    /// written, at its head.
+    /// Starts sync's record afresh from the clone: each file as its head holds it is synced, and
+    /// as the folder holds it written, so a change not yet committed waits to be pushed.
     fn record_clone(&mut self) -> Result<()> {
         let shared = self.home.join(shared::FOLDER);
         let head = runtime::git_output(&shared, &["rev-parse", "HEAD"])?;
-        let mut files: Vec<(String, Vec<u8>)> = files_here(&shared)?.into_iter().collect();
-        files.push((String::new(), head.trim().as_bytes().to_vec()));
+        let head = head.trim();
+        let (synced, written) = (files_at(&shared, head)?, files_here(&shared)?);
+        let paths: std::collections::BTreeSet<&String> =
+            synced.keys().chain(written.keys()).collect();
         let tx = self.db.transaction()?;
         tx.execute("DELETE FROM sync_record", [])?;
-        for (path, content) in files {
+        tx.execute(
+            "INSERT INTO sync_record(path,synced) VALUES ('',?1)",
+            [head.as_bytes()],
+        )?;
+        for path in paths {
             tx.execute(
-                "INSERT INTO sync_record(path,synced,written) VALUES (?1,?2,?2)",
-                params![path, content],
+                "INSERT INTO sync_record(path,synced,written) VALUES (?1,?2,?3)",
+                params![path, synced.get(path), written.get(path)],
             )?;
         }
         tx.commit()?;
@@ -948,6 +966,8 @@ pub(crate) mod tests {
 
     /// A local bare repository standing in for GitHub, the answers a fake `gh` gives, and every
     /// command each tool was sent. No test reaches GitHub.
+    type Hook = (&'static str, Box<dyn FnOnce() + Send>);
+
     pub(crate) struct GitHub {
         bare: PathBuf,
         repository: Value,
@@ -957,8 +977,9 @@ pub(crate) mod tests {
         git: Mutex<Vec<Vec<String>>>,
         /// Git cannot reach GitHub.
         offline: AtomicBool,
-        /// Runs before the next push reaches GitHub, as another machine's push would.
-        before_push: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Runs before the next Git command of that name, as another machine's push or a
+        /// save made meanwhile would.
+        before: Mutex<Option<Hook>>,
     }
     impl GitHub {
         pub(crate) fn new(folder: &Path, readme: bool) -> Self {
@@ -987,7 +1008,7 @@ pub(crate) mod tests {
                 gh: Mutex::default(),
                 git: Mutex::default(),
                 offline: AtomicBool::new(false),
-                before_push: Mutex::default(),
+                before: Mutex::default(),
             }
         }
         pub(crate) fn tools(self: &Arc<Self>) -> Tools {
@@ -1034,13 +1055,16 @@ pub(crate) mod tests {
                         error: "fatal: unable to access 'https://github.com/MHohlios/wiffletree-storage.git/': Could not resolve host: github.com".into(),
                     });
                 }
+                let mut before = github.before.lock().unwrap();
+                if before
+                    .as_ref()
+                    .is_some_and(|(command, _)| *command == args[0])
+                {
+                    before.take().unwrap().1();
+                }
+                drop(before);
                 match args[0] {
-                    "push" => {
-                        if let Some(other) = github.before_push.lock().unwrap().take() {
-                            other();
-                        }
-                        runtime::git_push(path, &local)
-                    }
+                    "push" => runtime::git_push(path, &local),
                     _ => runtime::git_answer(path, &local),
                 }
             };
@@ -1990,9 +2014,10 @@ pub(crate) mod tests {
             .unwrap();
         host.set_check_ins(40, 400).unwrap();
         let bare = github.bare.clone();
-        *github.before_push.lock().unwrap() = Some(Box::new(move || {
-            commit_on(&bare, "skills/reviewing/additions.md", "Read every test.")
-        }));
+        *github.before.lock().unwrap() = Some((
+            "push",
+            Box::new(move || commit_on(&bare, "skills/reviewing/additions.md", "Read every test.")),
+        ));
         host.sync_now(&github.tools()).unwrap();
         let refused = status(&host);
         assert!(refused.error.unwrap().contains("git push failed"));
@@ -2045,5 +2070,62 @@ pub(crate) mod tests {
         Host::open(home.path()).unwrap();
         assert!(!staging.exists());
         assert!(home.path().join("shared/wiffletree.json").exists());
+    }
+
+    #[test]
+    fn a_save_made_during_a_pass_is_recorded_as_what_was_pushed() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let (_first_home, mut first) = set_up_elsewhere(&github);
+        let (_second_home, mut second) = joined(&github);
+        let tools = github.tools();
+        first.set_check_ins(30, 300).unwrap();
+        // The pass has read 30 and 300 when the human saves 40 and 400.
+        let shared = first.home.join("shared");
+        *github.before.lock().unwrap() = Some((
+            "config",
+            Box::new(move || SharedStore::at(shared).set_check_ins(40, 400).unwrap()),
+        ));
+        first.sync_now(&tools).unwrap();
+        assert!(
+            github
+                .show("settings/check-ins.json")
+                .unwrap()
+                .contains("400")
+        );
+        // A later change made only on the other machine is pulled, not taken for a conflict.
+        second.sync_now(&tools).unwrap();
+        second.set_check_ins(50, 500).unwrap();
+        second.sync_now(&tools).unwrap();
+        first.sync_now(&tools).unwrap();
+        assert_eq!(first.settings().checkin_human_turns, 500);
+        assert_eq!(status(&first).pulled, 1);
+    }
+
+    #[test]
+    fn a_repository_chosen_before_the_record_existed_syncs_from_its_committed_head() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        host.set_check_ins(25, 250).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        // As slice 2 left it: no record, and a change made since in the clone.
+        host.db.execute("DELETE FROM sync_record", []).unwrap();
+        SharedStore::of(home.path()).set_check_ins(40, 400).unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        assert!(
+            github
+                .show("settings/check-ins.json")
+                .unwrap()
+                .contains("400")
+        );
+        let synced = status(&host);
+        assert_eq!((synced.pushed, synced.waiting, synced.error), (1, 0, None));
+        github.commit(
+            "settings/check-ins.json",
+            "{\n  \"checkin_child_turns\": 50,\n  \"checkin_human_turns\": 500\n}\n",
+        );
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(host.settings().checkin_human_turns, 500);
     }
 }
