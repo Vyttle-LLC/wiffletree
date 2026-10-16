@@ -17,10 +17,12 @@ pub(super) struct HistorySheet {
     fetch: StepFetch,
     list: ListState,
     expanded: BTreeSet<String>,
+    /// Where the session's relative file references resolve.
+    link_bases: Vec<PathBuf>,
 }
 
 impl HistorySheet {
-    pub fn new(bridge: Bridge, session_id: &str, run_id: String) -> Self {
+    pub fn new(bridge: Bridge, session_id: &str, run_id: String, link_bases: Vec<PathBuf>) -> Self {
         Self {
             bridge,
             session_id: session_id.into(),
@@ -29,6 +31,7 @@ impl HistorySheet {
             fetch: StepFetch::default(),
             list: ListState::new(0, ListAlignment::Bottom, px(200.)),
             expanded: BTreeSet::new(),
+            link_bases,
         }
     }
 
@@ -142,6 +145,7 @@ impl HistorySheet {
                 .child(markdown(
                     &format!("{}-{}", step.run_id, step.id),
                     step.detail.as_deref().unwrap_or(&step.title),
+                    &self.link_bases,
                 ))
                 .into_any_element(),
             StepKind::Thinking => div()
@@ -284,7 +288,9 @@ impl Workspace {
         let Some(session) = self.selected_session().cloned() else {
             return;
         };
-        let sheet = cx.new(|_| HistorySheet::new(self.bridge.clone(), &session.id, run_id));
+        let link_bases = self.link_bases(&session.id);
+        let sheet =
+            cx.new(|_| HistorySheet::new(self.bridge.clone(), &session.id, run_id, link_bases));
         sheet.update(cx, |sheet, cx| sheet.fetch(window, cx));
         self.history = Some(sheet.downgrade());
         let title = format!("{} · this turn", session.name);
