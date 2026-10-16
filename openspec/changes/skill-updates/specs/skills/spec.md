@@ -1,19 +1,27 @@
 ## ADDED Requirements
 
 ### Requirement: A new stock version is merged into a rewrite
-The host SHALL merge this release's stock text into a rewrite that is due a merge, without waiting for the human. A rewrite SHALL be due a merge when its base is not this release's stock text, its base is not a newer stock version than this release's, its files can be read and are not paused by sync, its history holds no Undo of a merge into this release's stock version, and no question about this stock version is waiting for the rewrite and base it has now. A skill in Additions mode SHALL NOT be merged. The host SHALL check for due rewrites at start, after the "New stock version" entries are written; after a sync pass that changed a skill's files; and when the human chooses to merge it on its skill's page. The merge SHALL be three-way, line by line, between the base, the stock text and the rewrite. A change that only the stock text or only the rewrite made SHALL be taken as made, and a change both made alike SHALL be taken once. Changes from the two sides SHALL overlap when their base lines share a line, touch with no unchanged base line between them, or both insert at the same place. With no overlap, the merge SHALL apply with no model. Applying a merge SHALL save the merged rewrite and this release's stock text as its base, with one "Merged" history entry, or SHALL change nothing. Until a merge applies, the rewrite SHALL be sent as written.
+The host SHALL merge this release's stock text into a rewrite that is due a merge, without waiting for the human. A rewrite SHALL be due a merge when its base's version is older than this release's stock version, its files can be read and are not paused by sync, its history holds no Undo of a merge into this release's stock version, and no question about this stock version is waiting for the rewrite and base it has now. A rewrite whose base has the same version as this release's stock text but different text SHALL stay out of date for the human to merge or mark up to date, and SHALL NOT be merged automatically. A skill in Additions mode SHALL NOT be merged. The host SHALL check for due rewrites at start, after the "New stock version" entries are written; after a sync pass that changed a skill's files; and when the human chooses to merge it on its skill's page. The merge SHALL be three-way, paragraph by paragraph, between the base, the stock text and the rewrite. A paragraph SHALL be a run of non-blank lines together with the blank lines after it, apart from a text's first line, its title and version. The title line SHALL be merged on its own: the side that changed it SHALL be taken, and the human's when both changed it differently. It SHALL NOT be part of an overlap, and a change to it SHALL NOT make a change to the first paragraph overlap. A change that only the stock text or only the rewrite made SHALL be taken as made, and a change both made alike SHALL be taken once. Changes from the two sides SHALL overlap when their base paragraphs share a paragraph, touch with no unchanged base paragraph between them, or both insert at the same place. A blank line SHALL NOT count as an unchanged paragraph between two changes. With no overlap, the merge SHALL apply with no model. Applying a merge SHALL save the merged rewrite and this release's stock text as its base, with one "Merged" history entry, or SHALL change nothing. Until a merge applies, the rewrite SHALL be sent as written.
 
 #### Scenario: Changes that don't overlap
 - **WHEN** Coordinating is rewritten against v1, the human changed its first paragraph, and an update brings v2, which changes only its fifth paragraph
 - **THEN** at start the rewrite holds the human's first paragraph and v2's fifth, its base is v2, no model runs, and the history gains one "Merged v1 → v2" entry
 
 #### Scenario: Neighbouring paragraphs overlap
-- **WHEN** the human changed a paragraph and v2 adds a paragraph right after it, with no unchanged paragraph between them
+- **WHEN** the human changed Coordinating's first paragraph and v2 changes its second, with only a blank line between them in the base
 - **THEN** the two changes are one overlapping passage, and the plain merge does not apply it on its own
+
+#### Scenario: A new version line and an edited first paragraph
+- **WHEN** the human changed only the first paragraph under the title, and v2 changes only the version in the title
+- **THEN** nothing overlaps, and the merged rewrite has the title "# Coordinating — v2" and the human's first paragraph
 
 #### Scenario: The human already copied the change
 - **WHEN** the human copied v2's changed paragraph into the rewrite by hand before the update
 - **THEN** the merge takes that paragraph once, and nothing overlaps
+
+#### Scenario: The same version with different text
+- **WHEN** a rewrite's base is Coordinating v2 and this release's stock text is also v2 but its text differs, because a release forgot to change the version
+- **THEN** no automatic merge runs, at start or after any pass, and the rewrite stays out of date with Merge v2 in and Mark as up to date offered
 
 #### Scenario: Additions need no merge
 - **WHEN** an update changes Implementing's stock text while the human has rules for it
@@ -47,7 +55,7 @@ When a merge has overlapping passages, the host SHALL ask the PR keeper's model 
 - **THEN** no model runs, nothing goes to the Inbox, and the skill's page says the update and the rewrite both change one passage, links to Models, and offers Take v2's wording and Keep my wording
 
 ### Requirement: The human is asked only when there is a real question
-The host SHALL ask the human about a merge only when the model answers a question for a passage. While a question waits, nothing of that merge SHALL apply, and no further merge run SHALL start for that skill and stock version while its rewrite and base are the ones the question was asked about. The host SHALL record the question in an "Asked you about" history entry holding the merge so far, with any passages the model merged, and, for each passage in question, the question and its stock and human versions, so that any Mac can show and settle it without another run. A workspace note SHALL show the question at the top of every project's Inbox, counted in each. The skill's page SHALL show it too, and the Skills list SHALL mark the skill "Rewritten · needs you". For each passage the human SHALL be able to take the update's wording or keep their own. A choice SHALL apply at once when there is one passage, and with several, Apply SHALL apply them once each passage has one. Applying SHALL save the merge with a "Merged" entry. The note SHALL close when the human chooses on any Mac, or when the skill's rewrite or base changes in any other way. A missing model, a failed run or an overlap the model merged SHALL NOT raise a note.
+The host SHALL ask the human about a merge only when the model answers a question for a passage. While a question waits, nothing of that merge SHALL apply, and no further merge run SHALL start for that skill and stock version while its rewrite and base are the ones the question was asked about. The host SHALL record the question in an "Asked you about" history entry holding the merge so far, with any passages the model merged, and, for each passage in question, the question and its stock and human versions, and the stock text it merges into, so that any Mac on that release can show and settle it without another run. Only a Mac whose stock text is the question's stock text SHALL show the question or apply an answer to it, and an answer SHALL save that stock text as the base. On a Mac with another release, the question SHALL NOT be shown and the skill SHALL be checked for a due merge into that Mac's own stock version. A workspace note SHALL show the question at the top of every project's Inbox, counted in each. The skill's page SHALL show it too, the Skills list SHALL mark the skill "Rewritten · needs you", and the sidebar's Skills row SHALL show its dot. For each passage the human SHALL be able to take the update's wording or keep their own. A choice SHALL apply at once when there is one passage, and with several, Apply SHALL apply them once each passage has one. Applying SHALL save the merge with a "Merged" entry. The note SHALL close when the human chooses on any Mac on that release, or when the skill's rewrite or base changes in any other way. A missing model, a failed run or an overlap the model merged SHALL NOT raise a note.
 
 #### Scenario: Two wordings that disagree
 - **WHEN** v2 says to run the full suite once per ticket, the human's rewrite says never to run the full suite, and the model answers a question for that passage
@@ -64,6 +72,10 @@ The host SHALL ask the human about a merge only when the model answers a questio
 #### Scenario: No second run
 - **WHEN** a question is waiting and Wiffletree starts again
 - **THEN** no merge run starts for that skill
+
+#### Scenario: A question from another release
+- **WHEN** a Mac on Reviewing v2 recorded a question about merging v1 → v2, and a Mac on v3 pulls that history
+- **THEN** the Mac on v3 shows no question and offers no choice for it, merges v1 → v3 into the rewrite itself, and once that merge reaches the Mac on v2 the question closes there, because the rewrite and base changed
 
 ### Requirement: A merge leaves a note that can be reviewed or undone
 After a merge applies, the skill's page SHALL show a note naming the versions, how many changes came from the update, how many passages the model merged and with which model, with Review changes, Undo and Dismiss, and the Skills list SHALL mark the skill "Rewritten · updated". It SHALL NOT raise an Inbox note. Review changes SHALL show the rewrite before and after the merge, line by line, each change labelled as from the update, merged by the model, or chosen by the human, with the Mac and the time. Each Mac SHALL show the note until the human chooses Review changes or Dismiss on that Mac, or the skill changes again. Undo SHALL ask first, then write back the rewrite and base from before the merge exactly, with an "Undid the merge" entry. After an Undo, no automatic merge into that stock version SHALL run, and the page SHALL offer to merge it again. The merge's history entry SHALL offer Undo this merge after later changes, and it SHALL ask first and say the later changes stay in the history.
@@ -94,7 +106,7 @@ No merge SHALL read, send or change the fixed core. A model SHALL NOT write a sk
 ## MODIFIED Requirements
 
 ### Requirement: A rewrite is marked out of date by a new stock version
-A rewrite SHALL be out of date when its base is not this release's stock text, compared as text, unless its base's version is newer than this release's stock version. A rewrite whose base is newer SHALL be sent as written, SHALL NOT be marked out of date or merged, SHALL NOT offer Mark as up to date, and its page SHALL name the newer version it is based on and say that a Mac with a newer release brought it. An out-of-date rewrite SHALL keep being sent as written until a merge applies. The Skills page SHALL mark it, the sidebar's Skills row SHALL show a dot while any rewrite is out of date or needs the human, and its page SHALL show the base's and the stock's versions, what changed between them line by line, and where its merge stands: waiting for this launch's first sync, merging, failed with the reason, undone, or waiting for a model. The human SHALL be able to merge it on demand, mark it up to date, which records the current stock text as its base and changes nothing else, or reset it to stock. The host SHALL NOT change a rewrite's text when the stock text changes, except by a merge.
+A rewrite SHALL be out of date when its base is not this release's stock text, compared as text, unless its base's version is newer than this release's stock version. A rewrite whose base is newer SHALL be sent as written, SHALL NOT be marked out of date or merged, SHALL NOT offer Mark as up to date, and its page SHALL name the newer version it is based on and say that a Mac with a newer release brought it. An out-of-date rewrite SHALL keep being sent as written until a merge applies. The Skills page SHALL mark it, the sidebar's Skills row SHALL show a dot while any rewrite is out of date, and its page SHALL show the base's and the stock's versions, what changed between them line by line, and where its merge stands: waiting for this launch's first sync, merging, failed with the reason, undone, or waiting for a model. The human SHALL be able to merge it on demand, mark it up to date, which records the current stock text as its base and changes nothing else, or reset it to stock. The host SHALL NOT change a rewrite's text when the stock text changes, except by a merge.
 
 #### Scenario: A release changes Coordinating
 - **WHEN** Coordinating is rewritten against v1, an update brings v2, and the merge has not applied yet
@@ -106,7 +118,7 @@ A rewrite SHALL be out of date when its base is not this release's stock text, c
 
 #### Scenario: A stock change without a new version
 - **WHEN** a release changes a stock text and forgets to change its version
-- **THEN** a rewrite based on the old text is still marked out of date
+- **THEN** a rewrite based on the old text is still marked out of date, and no automatic merge runs
 
 #### Scenario: A base from a newer release
 - **WHEN** this Mac runs Coordinating v2 and pulls a rewrite merged against v3 on another Mac

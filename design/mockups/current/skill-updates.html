@@ -476,7 +476,7 @@ Clarify and plan the goal first…</div>
 
 <ul class="notes">
   <li><b>Only rewrites are merged.</b> Your own rules sit beside the stock text, so an update never needs merging into them. The fixed core is never merged.</li>
-  <li><b>Overlap is by paragraph.</b> Stock texts have one paragraph per line. A change from the update and one of yours overlap when they touch the same paragraph or neighbouring ones. The plain merge uses the same line comparison the page already shows, with no new library.</li>
+  <li><b>Overlap is by paragraph.</b> The merge compares paragraphs, which blank lines separate. The title line with the version is merged on its own and never overlaps, so a new version number never sends your first paragraph to the model. A change from the update and one of yours overlap when they touch the same paragraph or neighbouring ones, so a blank line never keeps two changes apart. The plain merge uses the diff library Wiffletree already has, with no new one.</li>
   <li><b>The model.</b> The PR keeper’s model, when it is a Claude model, with every tool off and only the skill’s texts as input. It runs at most once per skill per update across your Macs, unless two Macs merge at the same moment, and only for the passages you both changed.</li>
   <li><b>Your Macs merge once.</b> At launch a Mac waits for its first sync before merging, so it usually takes another Mac’s merge. If two merge at once, the first to reach GitHub wins, and the other takes it without pausing the skill.</li>
   <li>The versions, texts, times, model and token counts are sample data. This is a static design study, not the GPUI implementation, and nothing here ran a model or a Git operation.</li>

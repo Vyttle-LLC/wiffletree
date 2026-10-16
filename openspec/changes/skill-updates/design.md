@@ -4,7 +4,7 @@ See proposal.md for why. The code this builds on, at settings-repository slice 6
 
 - **A rewrite and its base.** `SkillStore` (`workspace-host/src/skills.rs:120`) keeps each skill's current state in `skills/<skill>/` of the shared folder: `additions.md`, or `rewrite.md` with `base.md`, the stock text the rewrite started from or was last marked up to date against. `SkillStore::change` (`:327`) writes those files and one history entry together, or puts back what was there. Every history entry holds the skill's whole state after the change, the stock version and what happened (`Entry`, `Change`, `:70`, `:78`).
 - **Out of date.** A rewrite is out of date when `base.md` is not this release's stock text, compared as text (`Rewrite::out_of_date`, `workspace-core/src/lib.rs:167`). Its page shows what changed from the base to the stock text with `line_diff` (`skills.rs:108`, built on the `similar` crate), with Mark as up to date and Reset to stock. The rewrite is never changed for the human, and the confirmation that starts a rewrite says so (`skills_view.rs:43`).
-- **Stock texts.** Bundled in `workspace-host/skills/stock/`, each with a version on its first line ("# Coordinating — v1"), and one paragraph per line. They are 300 to 3,100 characters today. A rewrite or rules may be up to 32,000 characters (`MAX_SKILL_TEXT`).
+- **Stock texts.** Bundled in `workspace-host/skills/stock/`, each with a version on its first line ("# Coordinating — v1"). Paragraphs are mostly separated by blank lines, and the title line is followed directly by the first paragraph. Some runs of lines have no blank line between them, such as the last four lines of Coordinating and the headings of Keeping a PR. They are 300 to 3,100 characters today. A rewrite or rules may be up to 32,000 characters (`MAX_SKILL_TEXT`).
 - **New stock versions.** At host start, `record_new_stock_versions` (`skills.rs:261`, called at `lib.rs:249`) writes a "New stock version" entry for each skill whose history records only older stock versions. A machine on an older release writes none, and the skill's page says another machine runs a newer version (`find_newer_stock_versions`, `skills.rs:507`).
 - **Sync (change 5).** The shared folder is a clone of the settings repository. A pass (`sync.rs:767`) runs off the host thread. It fetches, compares each file whole with the version last synced, writes changes made only on GitHub, commits this Mac's changes on GitHub's head and pushes, never by force. A skill's `additions.md`, `rewrite.md` and `base.md` are compared as one unit. When both sides changed the unit differently, it pauses, this Mac keeps its own version, and a workspace note appears at the top of every project's Inbox (`WorkspaceNote`, `lib.rs:827`). History entries are one file each and always sync. A pass runs at launch, every 5 minutes, on Sync now, and 5 seconds after a shared write.
 - **Model runs.** Agents' turns are provider runs of a session (`service.rs:2972`). The PR keeper's comment sorting is the one run with no tools. It uses Claude with `--tools ""`, no MCP server, no session persistence and hooks off, a fixed `--system-prompt` and a `--json-schema` for its answer (`provider.rs:249`). Codex can't be started that way, so the host refuses a sorting run on Codex (`provider.rs:232`), and the comments trigger requires a Claude keeper model (`check_sorting_model`, `lib.rs:1026`). The PR keeper's model is one exact model chosen by the human in Models, kept on each machine, with nothing chosen by default (`ModelSelection::keeper`, `selection.rs:56`). The context probe (`context.rs:63`) shows how the host runs a one-off Claude process outside any session.
@@ -14,7 +14,8 @@ See proposal.md for why. The code this builds on, at settings-repository slice 6
 - **Update**: a release's new stock text for a skill.
 - **Merge**: bringing an update into the human's rewrite, three ways. Nothing goes upstream.
 - **Base**, **stock**, **yours**: the three texts of a merge. The base is `base.md`, the stock is this release's stock text, and yours is `rewrite.md`.
-- **Passage**: a run of paragraphs that a merge treats as one. A stock text has one paragraph per line, so a line is a paragraph.
+- **Paragraph**: a run of non-blank lines together with the blank lines after it, so a text's paragraphs join back into exactly that text. The first line, the title with its version, is not a paragraph: it is merged on its own (decision 3).
+- **Passage**: a run of paragraphs that a merge treats as one.
 - **Overlap**: a passage that both the update and the human changed (decision 3).
 - **A real question**: an overlap where the two versions want different things (decision 5).
 - On the page, in the human's words: "Merged v2 into your rewrite", "Review changes", "Undo", "Needs you", "Take v2's wording", "Keep my wording", "Merge v2 in".
@@ -49,8 +50,7 @@ From change 4: authority is enforced by the app, never by text, and the fixed co
 
 - Only a rewrite is merged. A skill in Additions mode needs nothing (H5).
 - A rewrite is **due** a merge when all of these hold:
-  - it is out of date: its base is not this release's stock text;
-  - its base is not newer than this release's stock text (decision 8);
+  - its base's version, on its first line, is older than this release's stock version. A base with a newer version is not even out of date (decision 8). A base with the same version but different text, as when a release forgot to change the version, stays out of date for the human, as today: it offers Merge v2 in and Mark as up to date but never merges on its own. *Why:* two releases that share a version but differ in text would otherwise merge back and forth on every pass, each taking the other's base as out of date;
   - its files can be read, and sync has not paused them;
   - no Undo of a merge into this stock version is in its history (open question 5). Merge v2 in still works;
   - no question about this stock version is waiting, that is, asked about exactly the rewrite and base the skill has now (decision 5);
@@ -63,20 +63,21 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 
 - **At host start**, after the "New stock version" entries are written, the host checks each skill and starts a merge for each due rewrite.
 - **After a sync pass** that changed a skill's files, the host checks that skill again. For example, a Mac on an older release saved a rewrite on the old base.
-- **On demand**: the skill's page offers **Merge v2 in** on an out-of-date rewrite that no automatic merge will touch: after an Undo, after a failed try, or with a question waiting the human would rather answer by merging again.
+- **On demand**: the skill's page offers **Merge v2 in** on an out-of-date rewrite that no automatic merge will touch: after an Undo, after a failed try, for a base with the same version but different text, or with a question waiting the human would rather answer by merging again.
 - **With a settings repository**, the host-start merges wait for the launch's first sync pass to end, whether it reached GitHub or not. That pass usually brings another Mac's merge first, so this Mac merges nothing. A Mac that can't reach GitHub merges anyway; decision 8 covers what happens when it reconnects.
 
 ### 3. The plain-text merge
 
-- A three-way merge of base, stock and yours, line by line. A line is a paragraph in every stock text, so a merge works by paragraph.
-- Built on `similar`, already a dependency of `workspace-host` (`skills.rs:108`). The host diffs base→stock and base→yours with `similar::capture_diff_slices` on lines, then walks the base's lines and groups each side's changes into hunks: a range of base lines and the lines that replace it. About 80 lines in a new `skills/merge.rs`, with tests. **No new dependency.** *Not chosen:* the `diffy` crate's `merge`. It works, but it adds a second diff engine whose hunks would not match the line diff the page already shows, and it returns conflict markers that the host would parse back out.
-- **Overlap.** Two hunks, one from each side, overlap when their base ranges share a line, when they touch with no unchanged base line between them, or when both insert at the same place. Overlapping hunks, and any hunk that overlaps one of them, form one **passage**. The rest is not overlap:
+- A three-way merge of base, stock and yours, paragraph by paragraph (see Words). Each text is split into paragraphs first, so a blank line is never an unchanged line that keeps two changes apart, and an inserted paragraph carries its own blank lines and can't be aligned on either side of one.
+- Built on `similar`, already a dependency of `workspace-host` (`skills.rs:108`). The host diffs base→stock and base→yours with `similar::capture_diff_slices` on the paragraph lists, then walks the base's paragraphs and groups each side's changes into hunks: a range of base paragraphs and the paragraphs that replace it. About 80 lines in a new `skills/merge.rs`, with tests. **No new dependency.** *Not chosen:* the `diffy` crate's `merge`. It works, but it adds a second diff engine that works on lines, not paragraphs, and it returns conflict markers that the host would parse back out.
+- **Overlap.** Two hunks, one from each side, overlap when their base ranges share a paragraph, when they touch with no unchanged base paragraph between them, or when both insert at the same place. Overlapping hunks, and any hunk that overlaps one of them, form one **passage**. The rest is not overlap:
   - a hunk only the update changed takes the stock's lines;
   - a hunk only the human changed keeps theirs;
   - a passage both changed in the same way, as when the human already copied in the stock change by hand, is taken once.
 - *Why neighbouring paragraphs count as overlap:* in prose, a paragraph added right after one the human rewrote often depends on it, and git's merge treats adjacent changes the same way. It sends a few more passages to the model, and never merges a dependent pair blindly.
 - With no overlap, the merge result is the new rewrite and the stock text is the new base. They are saved with a "Merged" entry (decision 6). No model runs.
-- The first line, "# Coordinating — v1", is a line like any other. When the human left it alone, it becomes "v2".
+- **The title line** ("# Coordinating — v1") is merged on its own, before the paragraphs. The side that changed it is taken, and the human's when both changed it differently. It is never part of an overlap, and a change to it never makes a change to the first paragraph overlap, though the two touch. So a release's new version never sends an edited first paragraph to the model. When the human left the title alone, it becomes "v2".
+- Lines with no blank line between them form one paragraph, so two edits to different lines of such a run overlap. That sends a few more passages to the model and never merges inside a run blindly.
 
 ### 4. The model merge
 
@@ -100,13 +101,14 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 
 - **When.** Only when the model answers `question` for a passage (H3). Overlap alone is not a question, and neither is a missing model or a failed try.
 - **Nothing applies meanwhile** (open question 6). The rewrite runs as written, and the base stays as it was. A rewrite's base must be one whole stock text.
-- **It is recorded.** The host writes an "Asked you about v2" history entry that holds the merge so far, that is, the plain merge's parts and any passages the model merged, and, for each passage in question, the question and its stock and human versions. Every Mac can then show and settle the question without running the model again. Writing it also stops other Macs from running their own model (decision 1).
+- **It is recorded.** The host writes an "Asked you about v2" history entry that holds the merge so far, that is, the plain merge's parts and any passages the model merged, and, for each passage in question, the question and its stock and human versions. It also records the stock text it merges into. Every Mac on that release can then show and settle the question without running the model again. Writing it also stops other Macs on that release from running their own model (decision 1).
+- **Only on the release it is about.** A question is a merge into one stock text, so only a Mac whose stock text is that text shows it and applies an answer, and the answer's base is that text. A Mac on another release doesn't show it, and checks the skill against its own stock version instead. A Mac on v3 merges v1→v3 itself, which changes the rewrite and base and so closes the v2 question everywhere. A Mac on an older release finds a base newer than its own, or the same, and does nothing. *Why:* answering a v2 question on a v3 Mac would record a v2-only merge with base v3, so v3's own changes would never merge, and answering a v3 question on a v2 Mac would move its base back.
 - **Where.**
   - A **workspace note**, a second kind beside change 5's paused files, at the top of every project's Inbox and counted in each: "Coordinating · v2 needs you". It shows each passage's question, then v2's wording beside the human's.
   - The skill's page, with the same question and choices.
   - The Skills list marks the skill "Rewritten · needs you", and the sidebar's Skills row shows its dot.
 - **Choices.** For each passage: **Take v2's wording** or **Keep my wording**. With one passage, which is the usual case, a choice applies at once. With several, the note and the page show a choice per passage, and **Apply** once each has one. Applying writes the merge with a "Merged" entry. The rest of the page still offers editing by hand, Mark as up to date, and Reset to stock.
-- **It closes** when the human chooses, on any Mac, or when the skill's rewrite or base changes in any other way. Any later change means the question is no longer about the text the skill has.
+- **It closes** when the human chooses on any Mac on that release, or when the skill's rewrite or base changes in any other way. Any later change means the question is no longer about the text the skill has.
 
 ### 6. Applying a merge, and its history entries
 
@@ -133,7 +135,7 @@ Open question 2. A new stock text arrives only with a release, so most merges st
   - When B merges v1→v3 first, A pulls a rewrite whose base, v3, is **newer** than A's stock text. A neither marks it out of date nor merges it, nor offers Mark as up to date, which would move the base back to v2. A's agents get the rewrite as written, and the page says "Merged with v3 on Mike's MacBook Air, which runs a newer Wiffletree." A newer base is told by the version number on its first line.
   - When both merge at once, the first push wins, as above. If A's v2 merge wins, B takes it and merges v2→v3. If B's v3 merge wins, A takes it and leaves it.
 - **Offline.** A Mac that can't reach GitHub merges on its own after its first pass fails (decision 2). When it reconnects, the cases above apply. If another Mac merged meanwhile, this Mac's merge is replaced without a pause.
-- **Questions.** "Asked you about v2" is an entry, so it reaches every Mac. Every Mac shows the note, and a Mac whose first pass brought it runs no model. An answer on one Mac changes the files, which sync, and the note closes everywhere.
+- **Questions.** "Asked you about v2" is an entry, so it reaches every Mac. Every Mac on v2 shows the note, and a Mac on v2 whose first pass brought it runs no model. An answer on one Mac changes the files, which sync, and the note closes everywhere. A Mac on another release doesn't show it (decision 5).
 - The settings repository's commit message names the merge: "Coordinating: merged v2 into your rewrite · Mike's MacBook Air".
 
 ### 9. Safety
@@ -161,7 +163,7 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 
 - **A model may merge badly.** Its passages apply without approval (H4). It touches only overlapping passages, its answer is bounded and checked, the note says which passages it merged, and Undo is exact.
 - **A merge changes every agent's next turn** on every Mac. It is the same reach as any saved edit (change 4), and the note and the history show it.
-- **Paragraph granularity** sends some merges to the model that a word-level merge would combine. That keeps the plain merge predictable and the page's line diff consistent with it.
+- **Paragraph granularity** sends some merges to the model that a word-level merge would combine. That keeps the plain merge predictable.
 - **Two Macs can each run a model** when they merge at the same moment while both are online but before either pulls. That costs one extra run. The result is still one version, with no pause.
 - **An older Mac runs a rewrite merged for a newer release.** Its text may describe behaviour this Mac's core lacks. Change 5 already allows this for a rewrite saved on a newer release, and the page says so.
 - **Undo is sticky for that stock version.** A human who undoes a merge and later wants it uses Merge v2 in.
