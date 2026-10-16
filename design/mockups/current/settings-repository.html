@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Settings repository study</title>
+<!--
+  Static study for the settings-repository OpenSpec change. No script, no network.
+  (a) The Settings window's new Settings repository section, before a repository is chosen:
+      what is shared, what stays on this Mac, what is never shared.
+  (b) Checking a repository: who can read it, and the Set up confirmation.
+  (c) Sync status: synced, and waiting after an error; the sync mark in the sidebar footer.
+  (d) A file paused by a conflict: the workspace note in a project's Inbox, with Compare open,
+      and a file changed outside Wiffletree.
+  (e) A second machine joins: what the repository holds beside this Mac, and what this Mac
+      still needs afterwards.
+  The theme switch at the top is CSS only: System follows the Mac's appearance.
+  Sample data is simulated; nothing here is implemented host behavior or a real Git operation.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not(:has(#theme-light:checked)){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+:root:has(#theme-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:500;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.muted{color:var(--muted)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:860px;margin-bottom:18px}
+.intro p{color:var(--subtle);font-size:12px}
+.themes{display:flex;gap:4px;align-items:center;margin:0 0 22px;font-size:12px;color:var(--subtle)}
+.themes input{position:absolute;opacity:0;pointer-events:none}
+.themes label{padding:3px 10px;border:1px solid var(--edge);border-radius:20px;cursor:pointer}
+.themes input:checked+label{background:var(--focus);border-color:var(--focus);color:var(--surface)}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:500}
+.stack{display:grid;gap:26px}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.hint{font-size:12px;color:var(--subtle)}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.focus{color:var(--focus);background:color-mix(in srgb,var(--focus) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+.new{box-shadow:inset 2px 0 0 var(--accent)}
+svg.i{width:14px;height:14px;flex:none;color:var(--subtle)}
+.btn{padding:4px 11px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.btn.danger{background:var(--red);color:var(--surface)}
+.btn.link{color:var(--focus);padding:0;border:0}
+.btn svg{width:12px;height:12px}
+.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;flex-wrap:wrap}
+code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+/* Settings window, mirroring workspace-desktop/src/settings.rs. */
+.window{background:var(--base);border:1px solid var(--edge);border-radius:12px;overflow:hidden;box-shadow:0 12px 32px color-mix(in srgb,var(--text) 10%,transparent)}
+.titlebar{height:34px;display:flex;align-items:center;justify-content:center;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:12.5px;position:relative}
+.lights{position:absolute;left:12px;display:flex;gap:7px}.lights i{width:11px;height:11px;border-radius:50%;background:var(--overlay)}
+.wbody{padding:20px;display:flex;flex-direction:column;gap:16px}
+.section{display:flex;flex-direction:column;gap:8px}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:24px}
+.rule{height:1px;background:color-mix(in srgb,var(--edge) 25%,transparent)}
+.folded{font-size:12px;color:var(--muted)}
+.field{display:flex;gap:8px;align-items:center}
+.input{flex:1;min-width:0;border:1px solid var(--edge);border-radius:7px;background:var(--surface);padding:4px 9px;font:12px ui-monospace,SFMono-Regular,monospace}
+.input.focus{border-color:var(--focus)}
+.input .ph{color:var(--muted)}
+.input .caret{display:inline-block;width:1px;height:12px;background:var(--focus);vertical-align:-2px}
+.lists{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.lists>div{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;padding:8px 10px;font-size:11.5px;background:var(--surface)}
+.lists b{display:flex;align-items:center;gap:6px;font-weight:500;font-size:12px;margin-bottom:3px}
+.lists ul{margin:0;padding-left:15px;color:var(--subtle)}
+.lists li{margin:1px 0}
+/* Repository cards. */
+.repo{border:1px solid color-mix(in srgb,var(--edge) 70%,transparent);border-radius:10px;background:var(--surface);padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.repo-head{display:flex;align-items:center;gap:8px}
+.repo-head .mono{font-size:12px;color:var(--text);flex:1}
+.who{display:flex;gap:7px;align-items:flex-start;font-size:12px}
+.who svg{margin-top:2px}
+.who.warn{color:var(--yellow)}
+.who.warn svg{color:var(--yellow)}
+.kv{display:grid;grid-template-columns:120px minmax(0,1fr);gap:3px 12px;font-size:12px}
+.kv span:nth-child(odd){color:var(--muted)}
+.status{display:flex;align-items:center;gap:8px;font-size:12.5px}
+.status .dotm{width:8px;height:8px;border-radius:50%;flex:none}
+.err{border:1px solid color-mix(in srgb,var(--red) 40%,transparent);background:color-mix(in srgb,var(--red) 7%,transparent);border-radius:9px;padding:8px 10px;font-size:12px}
+.err .mono{color:var(--text)}
+.paused{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:2px 10px;padding:8px 10px;border:1px solid color-mix(in srgb,var(--yellow) 40%,transparent);background:color-mix(in srgb,var(--yellow) 7%,transparent);border-radius:9px;font-size:12px;align-items:start}
+.paused svg{color:var(--yellow);margin-top:2px}
+.paused .why{grid-column:2;color:var(--subtle);font-size:11.5px}
+/* Sidebar footer, mirroring sidebar.rs::sidebar_footer. */
+.footers{display:grid;gap:6px}
+.foot{display:flex;align-items:center;justify-content:space-between;background:var(--base);border:1px solid color-mix(in srgb,var(--edge) 60%,transparent);border-radius:8px;padding:6px 10px 6px 14px;font-size:12px}
+.foot .left{display:flex;align-items:center;gap:6px;color:var(--subtle)}
+.syncmark{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--subtle);padding:2px 7px;border-radius:6px}
+.syncmark svg{width:13px;height:13px}
+.syncmark.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 12%,transparent)}
+.syncmark.yellow svg{color:var(--yellow)}
+.syncmark.red{color:var(--red);background:color-mix(in srgb,var(--red) 10%,transparent)}
+.syncmark.red svg{color:var(--red)}
+.tip{font-size:10.5px;color:var(--muted);text-align:right}
+/* Dialogs. */
+.scrim{position:relative;border-radius:10px;overflow:hidden}
+.scrim .behind{opacity:.35;filter:saturate(.6);pointer-events:none}
+.dialog{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(400px,92%);background:var(--surface);border:1px solid var(--edge);border-radius:12px;padding:16px;box-shadow:0 18px 50px color-mix(in srgb,#000 28%,transparent)}
+.dialog .ask{font-size:14px;font-weight:500;margin-bottom:6px}
+.dialog p{font-size:12px;color:var(--subtle);margin-bottom:8px}
+.dialog .actions{margin-top:12px}
+/* Inbox, mirroring inspector.rs::attention_card. */
+.inspector{border:1px solid var(--edge);border-radius:12px;background:var(--base);overflow:hidden}
+.ihead{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:12.5px}
+.ihead b{font-weight:500}
+.ibody{padding:12px;display:flex;flex-direction:column;gap:10px}
+.card{background:var(--surface);border:1px solid var(--edge);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--subtle)}
+.card .prompt{font-size:13px;line-height:1.5}
+.card .prompt b{font-weight:500}
+.diff2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+.diff{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;background:var(--base);font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace;overflow:hidden}
+.diff .dh{padding:4px 10px;font:500 11px -apple-system,BlinkMacSystemFont,sans-serif;color:var(--subtle);border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent);background:var(--surface)}
+.diff div.l{padding:1px 10px;white-space:pre-wrap}
+.diff .add{background:color-mix(in srgb,var(--yellow) 18%,transparent);color:var(--text)}
+.diff .ctx{color:var(--muted)}
+/* Join comparison. */
+.cmp{width:100%;border-collapse:collapse;font-size:12px}
+.cmp th{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--subtle);text-align:left;font-weight:400;padding:4px 8px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent)}
+.cmp td{padding:5px 8px;border-bottom:1px solid color-mix(in srgb,var(--edge) 25%,transparent);vertical-align:top}
+.cmp td:first-child{font-weight:500;white-space:nowrap}
+.cmp td.same{color:var(--muted)}
+.cmp td.diffc{background:color-mix(in srgb,var(--focus) 6%,transparent)}
+.needs{display:flex;flex-direction:column;gap:6px}
+.need{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:2px 10px;align-items:start;font-size:12px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;background:var(--surface)}
+.need svg{margin-top:2px}
+.need .why{grid-column:2;color:var(--subtle);font-size:11.5px}
+.trig{display:grid;grid-template-columns:16px minmax(0,1fr);gap:2px 10px;font-size:12px;padding:6px 0;border-top:1px solid color-mix(in srgb,var(--edge) 30%,transparent)}
+.trig:first-of-type{border-top:0}
+.box{width:13px;height:13px;border:1px solid var(--edge);border-radius:3px;margin-top:2px;background:var(--surface)}
+.box.on{background:var(--focus);border-color:var(--focus)}
+.box.held{background:color-mix(in srgb,var(--yellow) 30%,transparent);border-color:var(--yellow)}
+.trig .why{grid-column:2;font-size:11.5px;color:var(--subtle)}
+.trig .why.warn{color:var(--yellow)}
+.steps{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--muted);margin-bottom:10px;flex-wrap:wrap}
+.steps span{padding:1px 8px;border-radius:20px;border:1px solid color-mix(in srgb,var(--edge) 60%,transparent)}
+.steps span.on{border-color:var(--focus);color:var(--text)}
+.notes{max-width:880px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+.notes b{color:var(--text);font-weight:500}
+@media(max-width:1080px){.two,.lists,.diff2{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="sync" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12A9 9 0 0 1 18.5 5.8L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></symbol>
+  <symbol id="pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></symbol>
+  <symbol id="cloud-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M8 8a5 5 0 0 0-1 9.9h10M20 16.5A4 4 0 0 0 17 10h-1A6 6 0 0 0 10.6 6.2"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5 10 17 19 7"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="people" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17" cy="9" r="2.5"/><path d="M17 14.5a5 5 0 0 1 4.5 5"/></symbol>
+  <symbol id="laptop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></symbol>
+  <symbol id="share" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8 15.8 6.2M8.2 13.2l7.6 4.6"/></symbol>
+  <symbol id="ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6 18.4 18.4"/></symbol>
+  <symbol id="pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h0"/></symbol>
+  <symbol id="settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Settings repository</div>
+  <h1>Your settings on every Mac</h1>
+  <p>Static study for the <span class="mono">settings-repository</span> OpenSpec change. Name a private GitHub repository in Settings, and Wiffletree keeps your skills, review levels, model guide, check-ins and PR keeper triggers in sync between your machines. It pulls at launch and every 5 minutes, and pushes a few seconds after you change something. What belongs to one machine, such as its providers and models, its workspace folder and the owners it allows, stays on that machine. When two machines change the same setting, that one setting pauses until you choose. Machines, times and changes are simulated.</p>
+</header>
+
+<div class="themes" aria-label="Theme">
+  <span style="margin-right:6px">Theme</span>
+  <input type="radio" name="theme" id="theme-system" checked><label for="theme-system">System</label>
+  <input type="radio" name="theme" id="theme-light"><label for="theme-light">Tidal Light</label>
+  <input type="radio" name="theme" id="theme-dark"><label for="theme-dark">Tidal Dark</label>
+</div>
+
+<div class="stack">
+  <!-- (a) Settings window, before a repository is chosen -->
+  <section>
+    <div class="window" aria-label="Settings window, no repository yet">
+      <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Settings</div>
+      <div class="wbody">
+        <div class="section"><div class="section-head"><span class="eyebrow">Appearance</span></div><div class="folded">System · Light · Dark</div></div>
+        <div class="rule"></div>
+        <div class="section"><div class="section-head"><span class="eyebrow">Workspace folder</span><span class="btn ghost">Choose…</span></div><div class="mono">~/wiffletree</div></div>
+        <div class="rule"></div>
+        <div class="section"><div class="section-head"><span class="eyebrow">Check-ins</span></div><div class="folded">Check in on an agent every 25 turns · with you every 100 coordinator turns</div></div>
+        <div class="rule"></div>
+        <div class="section new" style="padding-left:10px">
+          <div class="section-head"><span class="eyebrow">Settings repository</span><span class="pill subtle">Not syncing</span></div>
+          <p class="hint">Keep your settings the same on every Mac you use Wiffletree on. Name a private GitHub repository: an empty one to set up, or the one your other Mac already uses.</p>
+          <div class="field"><div class="input focus"><span class="ph">owner/name or a GitHub URL</span><span class="caret"></span></div><span class="btn primary">Check</span></div>
+          <p class="small muted">No repository yet? Create an empty private repository on GitHub, then name it here. Wiffletree doesn’t create repositories for you.</p>
+          <div class="lists">
+            <div><b><svg class="i"><use href="#share"/></svg>Shared with your other Macs</b>
+              <ul><li>Skills: your rules, rewrites and their history</li><li>Review: verifiers, levels, rounds and reviews per ticket</li><li>The model guide</li><li>Check-in thresholds</li><li>PR keeper triggers</li></ul></div>
+            <div><b><svg class="i"><use href="#laptop"/></svg>Stays on this Mac</b>
+              <ul><li>Providers and allowed models</li><li>The PR keeper’s model</li><li>Workspace folder</li><li>Owners allowed to get pull requests</li><li>Repositories and their checks</li><li>Appearance</li></ul></div>
+            <div><b><svg class="i"><use href="#ban"/></svg>Never shared</b>
+              <ul><li>Passwords, tokens and keys</li><li>The database</li><li>Conversations, projects and tickets</li></ul></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(a)</b> A fourth section in the Settings window, after Check-ins. The other sections are folded here to save room. Before you name a repository, the section says exactly what would be shared and what never leaves this Mac. Your shared settings already live in one folder, so naming a repository moves nothing. The red edge marks what is new.</p>
+  </section>
+
+  <!-- (b) Checking a repository, and the confirmation -->
+  <section class="two">
+    <div>
+      <div class="panel" aria-label="Who can read the repository">
+        <div class="eyebrow" style="margin-bottom:10px">Settings repository · Check</div>
+        <div class="field" style="margin-bottom:10px"><div class="input">MHohlios/wiffletree-storage</div><span class="btn ghost">Check</span></div>
+        <div class="repo new">
+          <div class="repo-head"><svg class="i"><use href="#lock"/></svg><span class="mono">MHohlios/wiffletree-storage</span><span class="pill subtle">Private · your account</span></div>
+          <div class="who"><svg class="i"><use href="#lock"/></svg><span>Only you and people you invite can read or change it.</span></div>
+          <p class="hint">Not set up yet: it has a README and nothing else. Set up adds <code>wiffletree.json</code>, <code>settings/</code> and <code>skills/</code> beside it, and changes no other file.</p>
+          <div class="actions"><span class="btn primary">Set up…</span></div>
+        </div>
+        <div style="height:12px"></div>
+        <div class="field" style="margin-bottom:10px"><div class="input">Sage-Social/wiffletree-storage</div><span class="btn ghost">Check</span></div>
+        <div class="repo new">
+          <div class="repo-head"><svg class="i"><use href="#people"/></svg><span class="mono">Sage-Social/wiffletree-storage</span><span class="pill subtle">Private · organization</span></div>
+          <div class="who warn"><svg class="i"><use href="#alert"/></svg><span>Every member of Sage-Social can read it: the organization’s base permission is Read. Its owners can also change it, and so change your agents’ instructions on every Mac.</span></div>
+          <p class="hint">Not set up yet. A repository under your own account keeps your settings to yourself.</p>
+          <div class="actions"><span class="btn ghost">Set up anyway…</span></div>
+        </div>
+        <div style="height:12px"></div>
+        <div class="repo">
+          <div class="repo-head"><svg class="i"><use href="#ban"/></svg><span class="mono">MHohlios/public-notes</span><span class="pill red">Public</span></div>
+          <p class="hint" style="color:var(--red)">Choose a private repository. Your skills and settings would be public.</p>
+        </div>
+      </div>
+      <p class="caption"><b>(b)</b> Check reads GitHub without writing anything and says who can read the repository before you choose it. A user’s private repository is yours alone. An organization’s base permission reaches every private repository it owns, so Wiffletree names it when GitHub reports it. Public repositories are refused.</p>
+    </div>
+
+    <div>
+      <div class="panel" aria-label="Set up confirmation">
+        <div class="eyebrow" style="margin-bottom:8px">Settings repository · Set up</div>
+        <div class="scrim">
+          <div class="behind">
+            <div class="repo"><div class="repo-head"><span class="mono">MHohlios/wiffletree-storage</span></div><p class="hint">Not set up yet…</p></div>
+            <div style="height:260px"></div>
+          </div>
+          <div class="dialog new" role="dialog" aria-label="Sync your settings with MHohlios/wiffletree-storage?">
+            <div class="ask">Sync your settings with MHohlios/wiffletree-storage?</div>
+            <p>Wiffletree adds this Mac’s shared settings to <b style="font-weight:500">main</b> in one commit, then pushes there by itself a few seconds after each change, and pulls every 5 minutes.</p>
+            <p>It pushes only to this repository’s main branch, only its own files, and never by force. Owners you allowed for pull requests aren’t affected, and don’t cover this.</p>
+            <p>Only you and people you invite can read it.</p>
+            <div class="actions"><span class="btn ghost">Cancel</span><span class="btn primary">Set up and sync</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(b)</b> Choosing the repository is the permission for this new kind of push. The confirmation names the repository, its branch and who can read it. The choice stays on this Mac, like the owners you allow, so no other machine can change where this one pushes.</p>
+    </div>
+  </section>
+
+  <!-- (c) Sync status -->
+  <section class="two">
+    <div>
+      <div class="window" aria-label="Settings repository, synced">
+        <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Settings</div>
+        <div class="wbody">
+          <div class="section new" style="padding-left:10px">
+            <div class="section-head"><span class="eyebrow">Settings repository</span><span class="pill green">Synced</span></div>
+            <div class="kv">
+              <span>Repository</span><span class="mono" style="color:var(--text)">MHohlios/wiffletree-storage · main</span>
+              <span>Who can read it</span><span>Only you and people you invite</span>
+              <span>Last sync</span><span>14:32 · pulled 2 changes from Mike’s MacBook Air, pushed 1</span>
+              <span>Next pull</span><span>14:37</span>
+              <span>This Mac</span><span>Mike’s MacBook Pro</span>
+            </div>
+            <div class="actions" style="justify-content:space-between"><span class="btn link">Stop syncing…</span><span class="btn ghost"><svg><use href="#sync"/></svg>Sync now</span></div>
+          </div>
+          <div class="rule"></div>
+          <div class="section new" style="padding-left:10px">
+            <div class="section-head"><span class="eyebrow">Settings repository</span><span class="pill yellow">Waiting to reach GitHub</span></div>
+            <div class="err"><b style="font-weight:500">Couldn’t reach GitHub at 14:52.</b> Git said: <span class="mono">ssh: Could not resolve hostname github.com: nodename nor servname provided</span></div>
+            <div class="kv">
+              <span>Last sync</span><span>14:32</span>
+              <span>Waiting</span><span>1 change: Check-ins. This Mac already uses it.</span>
+              <span>Next try</span><span>15:02 · tries less often while GitHub is out of reach</span>
+            </div>
+            <div class="actions"><span class="btn ghost"><svg><use href="#sync"/></svg>Sync now</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(c)</b> Two states of the same section. Above: synced, with the last sync and what it moved. Below: offline. Your change already applies on this Mac and waits to be pushed. The error is Git’s own words. Stop syncing asks first. It keeps every setting as it is and changes nothing on GitHub.</p>
+    </div>
+
+    <div>
+      <div class="panel" aria-label="Sync mark in the sidebar footer">
+        <div class="eyebrow" style="margin-bottom:10px">Sidebar footer · the sync mark</div>
+        <div class="footers">
+          <div class="foot new"><span class="left">Wiffletree 0.9.2</span><span class="syncmark"><svg><use href="#check"/></svg>Synced</span></div>
+          <div class="tip">Tooltip: “Settings synced at 14:32 with MHohlios/wiffletree-storage”</div>
+          <div class="foot new"><span class="left">Wiffletree 0.9.2</span><span class="syncmark"><svg><use href="#sync"/></svg>Syncing</span></div>
+          <div class="foot new"><span class="left">Wiffletree 0.9.2</span><span class="syncmark"><svg><use href="#cloud-off"/></svg>1 change waiting</span></div>
+          <div class="tip">Tooltip: “Couldn’t reach GitHub at 14:52. Next try 15:02.”</div>
+          <div class="foot new"><span class="left">Wiffletree 0.9.2</span><span class="syncmark yellow"><svg><use href="#pause"/></svg>1 setting paused</span></div>
+          <div class="tip">Tooltip: “Implementing · your rules changed on both Macs. See your Inbox.”</div>
+          <div class="foot new"><span class="left">Wiffletree 0.9.2</span><span class="syncmark red"><svg><use href="#cloud-off"/></svg>Not synced for 3 hours</span></div>
+        </div>
+        <p class="hint" style="margin-top:12px">Clicking the mark opens Settings at the Settings repository section. There is no mark until you choose a repository.</p>
+      </div>
+      <p class="caption"><b>(c)</b> One small mark beside the version in the sidebar footer. It stays quiet while things work. It turns yellow while a setting is paused or sync has stopped, and red only when GitHub has been out of reach for more than an hour.</p>
+    </div>
+  </section>
+
+  <!-- (d) A paused file -->
+  <section class="two">
+    <div>
+      <div class="inspector new" aria-label="Project Inbox with a workspace note">
+        <div class="ihead"><svg class="i"><use href="#settings"/></svg><b>Inbox</b><span class="hint">· PR keeper and skills</span><span style="flex:1"></span><span class="pill subtle">4</span></div>
+        <div class="ibody">
+          <div class="card" style="border-color:color-mix(in srgb,var(--yellow) 55%,transparent)">
+            <div class="card-top"><span>Workspace · settings sync</span><span class="pill yellow">Paused</span></div>
+            <div class="prompt"><b>Implementing · your rules</b> changed on this Mac and on Mike’s MacBook Air since they last synced. This Mac keeps using its own rules. Nothing else is paused.</div>
+            <div class="diff2">
+              <div class="diff"><div class="dh">This Mac · saved 14:20</div>
+                <div class="l ctx">Write PR descriptions with a Summary and a Testing section.</div>
+                <div class="l add">Run cargo clippy with warnings as errors before ready for testing.</div>
+                <div class="l ctx">Keep commits small, with messages in the imperative.</div></div>
+              <div class="diff"><div class="dh">Mike’s MacBook Air · saved 14:28</div>
+                <div class="l ctx">Write PR descriptions with a Summary and a Testing section.</div>
+                <div class="l ctx">Keep commits small, with messages in the imperative.</div>
+                <div class="l add">Name branches after the outcome, not the files.</div></div>
+            </div>
+            <div class="actions"><span class="btn link" style="margin-right:auto">Hide comparison</span><span class="btn ghost">Use MacBook Air’s</span><span class="btn primary">Keep this Mac’s</span></div>
+            <p class="small muted">The version you don’t keep stays in the repository’s history and in Implementing’s history.</p>
+          </div>
+          <div class="card" style="border-color:color-mix(in srgb,var(--yellow) 55%,transparent)">
+            <div class="card-top"><span>Workspace · settings sync</span><span class="pill yellow">Paused</span></div>
+            <div class="prompt"><b>Reviewing · your rules</b> was changed outside Wiffletree on this Mac, by an editor, a script or an agent’s shell. It isn’t sent to your other Macs until you choose. This Mac uses it as it is now.</div>
+            <div class="actions"><span class="btn link" style="margin-right:auto">Compare</span><span class="btn ghost">Put back the synced version</span><span class="btn primary">Sync this version</span></div>
+          </div>
+          <div class="card" style="border-color:color-mix(in srgb,var(--yellow) 55%,transparent)">
+            <div class="card-top"><span>Workspace · settings sync</span><span class="pill yellow">Paused</span></div>
+            <div class="prompt"><b>Review</b> from Mike’s MacBook Air can’t be used here: two verifiers have the focus Tests. This Mac keeps its own review settings.</div>
+            <div class="actions"><span class="btn link" style="margin-right:auto">Compare</span><span class="btn ghost">Keep this Mac’s</span></div>
+          </div>
+          <div class="card">
+            <div class="card-top"><span>Implementer · watch-relay</span><span class="pill focus">Question</span></div>
+            <div class="prompt">Should the relay retry on 503, or fail the call at once?</div>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(d)</b> A paused setting raises one workspace note. It sits at the top of every project’s Inbox, because it belongs to no project, and settling it once clears it everywhere. Compare is open on the first note. Two Macs changed the same file, so only that file waits. The second note is a file changed outside the app. It doesn’t spread to your other Macs’ agents until you’ve seen it. The third arrived in a form this Mac can’t use, so this Mac keeps its own until the other Mac fixes it or you keep this one.</p>
+    </div>
+
+    <div>
+      <div class="window" aria-label="Settings repository with a paused file">
+        <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Settings</div>
+        <div class="wbody">
+          <div class="section new" style="padding-left:10px">
+            <div class="section-head"><span class="eyebrow">Settings repository</span><span class="pill yellow">3 settings paused</span></div>
+            <div class="kv">
+              <span>Repository</span><span class="mono" style="color:var(--text)">MHohlios/wiffletree-storage · main</span>
+              <span>Last sync</span><span>14:41 · pushed 1, pulled 3 from Mike’s MacBook Air</span>
+            </div>
+            <div class="paused"><svg class="i"><use href="#pause"/></svg><b style="font-weight:500">Implementing · your rules</b><span class="btn link">Compare</span>
+              <span class="why">Changed on this Mac and on Mike’s MacBook Air. This Mac uses its own.</span></div>
+            <div class="paused"><svg class="i"><use href="#pen"/></svg><b style="font-weight:500">Reviewing · your rules</b><span class="btn link">Compare</span>
+              <span class="why">Changed outside Wiffletree on this Mac.</span></div>
+            <div class="paused"><svg class="i"><use href="#alert"/></svg><b style="font-weight:500">Review</b><span class="btn link">Details</span>
+              <span class="why">The version from Mike’s MacBook Air can’t be used here: two verifiers have the focus Tests. This Mac keeps its own.</span></div>
+            <p class="small muted">Every other setting keeps syncing.</p>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(d)</b> The same paused settings in the Settings section, with the reason for each. The third is a file that arrived in a form this Mac can’t use. It isn’t applied, and this Mac keeps its last good version. Wiffletree compares whole files rather than lines, so it never builds a setting that neither Mac chose.</p>
+    </div>
+  </section>
+
+  <!-- (e) A second machine joins -->
+  <section class="two">
+    <div>
+      <div class="window" aria-label="Joining on a second Mac">
+        <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Settings · Mike’s MacBook Air</div>
+        <div class="wbody">
+          <div class="section new" style="padding-left:10px">
+            <div class="steps"><span>1 · Name it</span><span class="on">2 · Compare</span><span>3 · What this Mac needs</span></div>
+            <div class="section-head"><span class="eyebrow">Settings repository</span><span class="pill subtle">Not syncing</span></div>
+            <div class="repo">
+              <div class="repo-head"><svg class="i"><use href="#lock"/></svg><span class="mono">MHohlios/wiffletree-storage</span><span class="pill green">Set up</span></div>
+              <div class="who"><svg class="i"><use href="#lock"/></svg><span>Only you and people you invite can read or change it. Last changed by Mike’s MacBook Pro, today 14:41.</span></div>
+            </div>
+            <table class="cmp">
+              <thead><tr><th>Setting</th><th>In the repository</th><th>On this Mac</th></tr></thead>
+              <tbody>
+                <tr><td>Review</td><td class="diffc">Full and Light</td><td>Full only</td></tr>
+                <tr><td>Model guide</td><td class="diffc">Edited 12 Oct</td><td>Starter guide</td></tr>
+                <tr><td>Check-ins</td><td class="same">25 and 100</td><td class="same">Same</td></tr>
+                <tr><td>PR keeper</td><td class="diffc">Rebase, conflicts on · Light</td><td>All off</td></tr>
+                <tr><td>Implementing</td><td class="diffc">3 of your rules</td><td>Stock</td></tr>
+                <tr><td>Coordinating</td><td class="diffc">Rewritten</td><td>Stock</td></tr>
+                <tr><td>Reviewing, Keeping a PR</td><td class="same">Stock</td><td class="same">Same</td></tr>
+              </tbody>
+            </table>
+            <p class="hint">This Mac’s current settings are kept in a backup, and its skill history is added to the repository’s, so nothing is lost.</p>
+            <div class="actions" style="justify-content:space-between"><span class="btn link">Replace the repository’s settings with this Mac’s…</span><span class="btn primary">Use the repository’s settings</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(e)</b> Joining from a second Mac. Name the same repository and Check. Wiffletree sees it is set up and lists what it holds beside what this Mac has. The repository’s settings win by default, because they are the ones you have been using. Replacing them asks first, and the old ones stay in the repository’s history.</p>
+    </div>
+
+    <div>
+      <div class="window" aria-label="After joining">
+        <div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>Settings · Mike’s MacBook Air</div>
+        <div class="wbody">
+          <div class="section new" style="padding-left:10px">
+            <div class="steps"><span>1 · Name it</span><span>2 · Compare</span><span class="on">3 · What this Mac needs</span></div>
+            <div class="section-head"><span class="eyebrow">Settings repository</span><span class="pill green">Synced</span></div>
+            <p class="hint">Your settings from Mike’s MacBook Pro are in use. This Mac still needs:</p>
+            <div class="needs">
+              <div class="need"><svg class="i" style="color:var(--yellow)"><use href="#alert"/></svg><b style="font-weight:500">PR keeper triggers are off on this Mac</b><span class="btn link">Open Models</span>
+                <span class="why">They’re on in your shared settings, but this Mac has no PR keeper model. Choose one and they start.</span></div>
+              <div class="need"><svg class="i" style="color:var(--yellow)"><use href="#alert"/></svg><b style="font-weight:500">Review level Full runs Regressions on Codex</b><span class="btn link">Open Models</span>
+                <span class="why">Codex isn’t enabled on this Mac, so a Full review here can’t start that reviewer.</span></div>
+              <div class="need"><svg class="i"><use href="#laptop"/></svg><b style="font-weight:500">Owners allowed for pull requests</b><span class="btn link">Open Repositories</span>
+                <span class="why">These stay on each Mac. This one allows none yet, so every push asks first.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="panel" aria-label="Repositories page, PR keeper triggers on this Mac">
+        <div class="eyebrow" style="margin-bottom:6px">Repositories · PR keeper · Mike’s MacBook Air</div>
+        <div class="trig"><span class="box on"></span><span>Rebase when the base branch moves</span></div>
+        <div class="trig new"><span class="box held"></span><span>Try to resolve conflicts <span class="hint">· review level Light</span></span>
+          <span class="why warn">On from Mike’s MacBook Pro. Off on this Mac: choose a PR keeper model in Models.</span></div>
+        <div class="trig"><span class="box"></span><span>Try to fix failed checks</span></div>
+      </div>
+      <p class="caption"><b>(e)</b> After joining, the section lists what this Mac still needs. A shared setting this Mac can’t run is held off here and never rewritten: your other Mac keeps it on, and the trigger starts here once this Mac has a keeper model. Rebasing needs no model, so it runs.</p>
+    </div>
+  </section>
+</div>
+
+<ul class="notes">
+  <li><b>A new kind of push.</b> Choosing the repository on a Mac is what lets Wiffletree push to it: only its main branch, only Wiffletree’s own files, never by force. The owners you allow for pull requests neither grant it nor are needed for it.</li>
+  <li><b>Who can change your agents.</b> Skills are part of every agent’s instructions, so whoever can push to this repository can change how your agents work on every Mac. A private repository under your own account keeps that to you.</li>
+  <li><b>Agents’ shells.</b> They aren’t sandboxed. They can write the shared folder and could push to the repository with your credentials. Sync pauses an edit it didn’t make, so it doesn’t spread through sync, but it can’t stop a shell from pushing.</li>
+  <li><b>No model is used</b> for any of this. Sync is Git and whole-file comparisons.</li>
+  <li>Machine names, times, rules and errors are sample data. This is a static design study, not the GPUI implementation, and nothing here runs Git.</li>
+</ul>
+</body>
+</html>
