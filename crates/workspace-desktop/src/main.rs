@@ -907,6 +907,7 @@ impl Workspace {
                 .update(cx, |editor, cx| editor.setup_saved(cx));
         }
         conversation::forget_settled(&mut self.minimized_decisions, &snapshot.attention);
+        settings::share_sync(&snapshot, cx);
         self.snapshot = Some(snapshot);
         // A store with no saved setup checks the CLIs at once, so the welcome and the Models
         // page share one result. A saved store waits for its Models page, as before.

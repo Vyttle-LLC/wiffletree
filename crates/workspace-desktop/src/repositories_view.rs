@@ -11,6 +11,7 @@ use ui::{age, banner, empty_state, from_now, hint, icon, mono, pill, section};
 
 const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
 const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
+const SETTINGS_REPOSITORY: &str = "These owners don’t cover your settings repository, and it doesn’t need them: choosing it in Settings is what lets Wiffletree push your settings there.";
 const HELD: &str = "A trigger held here can be turned off only on a Mac that runs it.";
 const UNTIL_GITHUB_ANSWERS: &str = "Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has answered for a repository, it asks first, whatever is ticked. Wiffletree asks GitHub again the next time you come back.";
 const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TICK";
@@ -201,6 +202,7 @@ impl Workspace {
                     .child(pill("This Mac only", p.subtle)),
             )
             .child(hint(WITHOUT_ASKING, p))
+            .child(hint(SETTINGS_REPOSITORY, p))
             .child(div().text_size(px(12.)).child(NEVER));
         if let Some(error) = &snapshot.github_error {
             block = block.child(

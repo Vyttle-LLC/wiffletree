@@ -78,15 +78,12 @@ impl Settings {
                 button("set-up-repository").ghost().label("Set up anyway…"),
             ),
         };
-        let kind = pill(kind, p.subtle);
-        let card = repository_card(&check.repository, check.organization, kind, None, p);
-        if check.joining.is_some() {
-            return card.child(hint("Another Mac has set it up already.", p));
-        }
         let set_up = set_up
             .disabled(self.asking)
             .on_click(cx.listener(|v, _, _, c| v.confirm(Some(Confirm::SetUp), c)));
-        card.child(hint(not_set_up, p))
+        let kind = pill(kind, p.subtle);
+        repository_card(&check.repository, check.organization, kind, None, p)
+            .child(hint(not_set_up, p))
             .child(div().flex().justify_end().child(set_up))
     }
 }
