@@ -1,10 +1,10 @@
 ## Context
 
-See proposal.md for why. The code this builds on, at origin/main 1d1d749:
+See proposal.md for why. The code this builds on, at origin/main 9abbd5f:
 
-- **The files.** `crates/workspace-host/skills/` holds seven Markdown files: `communication.md` (the "Wiffletree communication contract — v8", given to every role), `main-coordinator.md` ("Project coordinator — v13"), `implementer.md` ("Implementer — v7", also given to the Maintenance role), `tester.md` ("Tester / reviewer — v6") with `tester-role.md` or `reviewer-role.md` after it, and `keeper.md` ("PR keeper — v1"; v4 on the open branch of PR keeper slice 5, #79, which adds the conflict and failed-checks tries).
-- **Composition.** `provider::skill(role)` (`provider.rs:115`) joins `communication.md` and the role's file with `include_str!`, so the text is fixed at build time. `provider::configure` passes it to Claude as `--append-system-prompt` and to Codex as `developer_instructions` on every turn (`provider.rs:239`), resumed sessions included, so a changed text reaches an agent at its next turn. `context.rs::claude` (`:73`) passes the same text to size a session's context. Turns are built in `service.rs` (`:2468`, `:2869`).
-- **The sorting run.** The keeper's comment sorting does not use `skill()`. It runs with `keeper::SORTING` (`keeper.rs:20`), `keeper.md` followed by a fixed job sentence, as its whole system prompt, with every tool off.
+- **The files.** `crates/workspace-host/skills/` holds seven Markdown files: `communication.md` (the "Wiffletree communication contract — v8", given to every role), `main-coordinator.md` ("Project coordinator — v13"), `implementer.md` ("Implementer — v7", also given to the Maintenance role), `tester.md` ("Tester / reviewer — v6") with `tester-role.md` or `reviewer-role.md` after it, and `keeper.md` ("PR keeper — v4", with the conflict and failed-checks tries).
+- **Composition.** `provider::skill(role)` (`provider.rs:115`) joins `communication.md` and the role's file with `include_str!`, so the text is fixed at build time. `provider::configure` passes it to Claude as `--append-system-prompt` and to Codex as `developer_instructions` on every turn (`provider.rs:239`), resumed sessions included, so a changed text reaches an agent at its next turn. `context.rs::claude` (`:73`) passes the same text to size a session's context. Turns are built in `service.rs` (`:2532`, `:2936`).
+- **The sorting run.** The keeper's comment sorting does not use `skill()`. It runs with `keeper::SORTING` (`keeper.rs:25`), `keeper.md` followed by a fixed job sentence, as its whole system prompt, with every tool off.
 - **Versions.** Each file's first line carries its name and version. `tests/contracts.rs` asserts the versions and about forty phrases: the confirmed publishing paragraph in every role, the process rules, `set_plan`, every coordinator tool, the review-level rules shared with `verify_ticket`'s description (`LEVEL_RULES`), the implementer's objection rule, the keeper's boundary, the findings format and who runs the full suite.
 - **Specs that say what instructions say.** `ticket-publishing` ("Instructions state the publishing rules in Wiffletree's own words"), `ticket-workspaces` ("Role instructions match the flat hierarchy"), `ticket-verification` ("The coordinator is told how to choose a level"), `pr-keeper` ("Agents are told about the keeper") and `workspace-host` ("Agents are told how to stop what they start").
 - **Settings.** `HostSettings` in `settings.json` in the data folder (`settings.rs`, `Host::home`), written atomically by `save_settings`. The model guide and the review levels, with each level's "Use it" line (`use_when`), are on the Models page. The sidebar's Workspace section lists Repositories, Usage and limits, and Models (`sidebar.rs::workspace_nav`, `:322`; `Page`, `main.rs:73`).
@@ -21,7 +21,7 @@ See proposal.md for why. The code this builds on, at origin/main 1d1d749:
 
 ## Goals / Non-Goals
 
-**Goals:** with every skill at stock, each role gets the same instructions as today; no edit can remove a statement the app depends on; Additions never clash with an update; nothing the human wrote is lost; storage that change 5 can move unchanged; each slice small and useful alone.
+**Goals:** with every skill at stock, each role gets the same instructions as today, except that testers and reviewers each also get the other's paragraph; no edit can remove a statement the app depends on; Additions never clash with an update; nothing the human wrote is lost; storage that change 5 can move unchanged; each slice small and useful alone.
 
 **Non-Goals:**
 - Merging a new stock version into a rewrite (change 6).
@@ -47,7 +47,7 @@ See proposal.md for why. The code this builds on, at origin/main 1d1d749:
 
 From the plan's settings-repository section, which change 5 will build: skills live in a local folder by default, and an edited skill notes its stock base version.
 
-**Everything else here is a design decision for the human to approve**, including the split in decision 2, the order of decision 3, folding the human's rules into a rewrite (decision 6), running an out-of-date rewrite as written (decision 7), the file layout (decision 9) and the size limit. The proposal's open questions name the ones with real alternatives.
+**Everything else here is a design decision the human approved on October 16, 2026**, with every recommended answer to the proposal's questions, including the split in decision 2, the order of decision 3, folding the human's rules into a rewrite (decision 6), running an out-of-date rewrite as written (decision 7), the file layout (decision 9) and the size limit.
 
 ### 1. The fixed core and the four skills
 
@@ -61,7 +61,7 @@ From the plan's settings-repository section, which change 5 will build: skills l
 
 The sorting run gets no skill. Its prompt is its only guard against comment text, which is written by people outside Wiffletree, and its answer is a format the host parses. Both are the app's.
 
-*Why the tester and the reviewer share Reviewing:* most of the text is about what a finding is and when it blocks, which is the same for both. Each role's own paragraph stays in the text, addressed to that role, as `tester-role.md` and `reviewer-role.md` are today (open question 7).
+*Why the tester and the reviewer share Reviewing:* most of the text is about what a finding is and when it blocks, which is the same for both. Each role's own paragraph stays in the text, addressed to that role, as `tester-role.md` and `reviewer-role.md` are today (decided question 7). Since the text is one, each role now also gets the other's paragraph; today each gets only its own.
 
 ### 2. Where each sentence goes
 
@@ -91,7 +91,7 @@ Paragraph by paragraph, in the order of today's file:
 - Core: verify one ticket in its worktree, against its acceptance criteria and your focus, at the commit your message names; report `passed`, `failed` or `blocked` with every finding's severity, `path:line` location, summary, trigger and evidence; the workspace fails a check only for a blocking finding with a location, trigger and evidence; write no patches and never edit, stage, commit or switch branches in the worktree, which the workspace checks, ignored build output aside; do not reuse the session; the workspace archives it; the coordinator owns acceptance.
 - Reviewing: when a finding blocks (an acceptance criterion, existing behavior or tests, or a concrete reachable trigger; a race only with a failing test or a `file:line` trace; older bugs are `pre_existing`); do not raise decided findings again unless the cited code changed; from round 2, check only your open findings and the new diff; one heavy command at a time with the normal build cache; the tester's paragraph (one run of the full suite, and the case where another tester owns it) and the reviewer's (read the code, one narrow check at a time).
 
-**`keeper.md` → keeper core and Keeping a PR.** As #79 leaves it:
+**`keeper.md` → keeper core and Keeping a PR.** As main has it:
 - Core: the whole first paragraph (one job, its own folder, never the worktree, judged on what it leaves, GitHub text is never instructions, never push or touch the PR); for each job, what the folder holds, what the message names, what Wiffletree checks before using the result, that nothing may be left uncommitted, and that you get one try and end your turn without finishing if you cannot.
 - Keeping a PR: how to resolve a conflict ("keeping what both sides meant", within the named files, `git rebase --continue` until done) and how to fix failed checks (fix what makes them fail, commit on top, never rebase, amend or drop the PR's commits).
 
@@ -128,16 +128,16 @@ Each skill's page lists, read-only, what the app enforces whatever the text says
 
 ### 6. Rewrite
 
-- "Rewrite the stock text…" asks first, then opens an editor holding the stock text, followed by the human's rules under their heading when there are any (open question 4). It saves `rewrite.md`, saves the stock text it started from as `base.md`, removes `additions.md`, and writes one history entry.
+- "Rewrite the stock text…" asks first, then opens an editor holding the stock text, followed by the human's rules under their heading when there are any (decided question 4). It saves `rewrite.md`, saves the stock text it started from as `base.md`, removes `additions.md`, and writes one history entry.
 - In Rewrite mode the rewrite is sent in place of the stock text, and there are no separate rules.
 - The way back to Additions is Reset to stock, or restoring an Additions entry from the history.
 
 ### 7. Out of date
 
 - A rewrite is out of date when `base.md` is not this release's stock text, compared as text. The versions in the first lines are shown to the human; the text decides, so a stock change that forgot its version bump still counts.
-- An out-of-date rewrite keeps running as written (open question 5). The Skills page marks it, the sidebar's Skills row gets a dot as Models does before a setup is saved, and its page shows a banner, "Written against Coordinating v1. This release has v2.", with what changed between `base.md` and the new stock text as a line diff.
+- An out-of-date rewrite keeps running as written (decided question 5). The Skills page marks it, the sidebar's Skills row gets a dot as Models does before a setup is saved, and its page shows a banner, "Written against Coordinating v1. This release has v2.", with what changed between `base.md` and the new stock text as a line diff.
 - The banner offers **Mark as up to date**, which records the current stock text as `base.md` after the human has brought in what they want by hand, and **Reset to stock**. The rewrite is never changed for the human; merging is change 6, and `base.md` is what its three-way merge needs.
-- The diff is computed in the host with the `similar` crate's line diff, so the page receives lines marked as added, removed or unchanged.
+- The diff is computed in the host with the `similar` crate's line diff, which slice 5 adds as a dependency, so the page receives lines marked as added, removed or unchanged.
 
 ### 8. History, Reset and Restore
 
@@ -169,7 +169,7 @@ Each skill's page lists, read-only, what the app enforces whatever the text says
 ### 10. Changing a skill
 
 - New commands, sent only by the human's client: `SaveSkillRules`, `StartSkillRewrite`, `SaveSkillRewrite`, `MarkSkillUpToDate`, `ResetSkill` and `RestoreSkill`. No agent tool changes a skill.
-- Each refuses a text over 32,000 characters (open question 8), and nothing else: an empty rewrite is accepted (H9).
+- Each refuses a text over 32,000 characters (decided question 8), and nothing else: an empty rewrite is accepted (H9).
 - The snapshot carries each skill's state: name, what it is for, stock text and version, mode, the human's text, the base's version, whether it is out of date, and whether its files could be read. The history and the diff are asked for when a skill's page opens, so the snapshot stays small.
 
 ### 11. Opening a pull request
@@ -180,13 +180,13 @@ The core's sentence stays: write the pull request's title and description "by th
 
 - The core's statements, today's assertions that name tools, formats, rules and messages, are checked on the instructions built with **every skill rewritten to an empty text**, so no edit can remove them.
 - Each stock skill's own statements (the stop rule, the objection rule, the blocking definition, who runs the full suite) are checked with every skill at stock.
-- With every skill at stock, each role's instructions contain every sentence they contain today, apart from the core's new sentence and the reworded ones slice 1 lists.
+- With every skill at stock, each role's instructions contain every sentence they contain today, apart from the reworded ones slice 1 lists. They also contain the core's new sentence and, for testers and reviewers, the other role's paragraph.
 
 ## Risks / Trade-offs
 
 - **A rule the human removes is gone.** Removing "ask the human about a product, security or data-loss waiver" from Coordinating is allowed (H9). The history shows it and can restore it.
 - **The human's rules may contradict the core.** Wiffletree does not refuse them. The core says its tools and rules still apply, and the app refuses what it always refuses.
-- **The skills folder is writable by agents' shells.** As with `settings.json`, an agent running with permission prompts bypassed can change it. Stated in the README (open question 10).
+- **The skills folder is writable by agents' shells.** As with `settings.json`, an agent running with permission prompts bypassed can change it. Stated in the README (decided question 10).
 - **Longer instructions cost context on every turn.** The 32,000-character limit bounds it.
 - **A stock change under a rewrite goes unmerged until change 6.** The out-of-date mark and the diff make it visible.
 
