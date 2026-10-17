@@ -2,11 +2,63 @@
 use super::*;
 use crate::welcome::StartScreen;
 use gpui_component::{
-    Icon, Selectable,
+    Icon, IconName, Selectable, Size,
     button::ButtonVariants,
     resizable::{h_resizable, resizable_panel},
-    spinner::Spinner,
 };
+use std::time::Duration;
+
+/// Each animation frame re-renders the whole window, so the working spinner and pulse step at
+/// this rate instead of the display's.
+pub(super) const ANIMATION_FPS: f32 = 15.;
+
+/// gpui-component's loading spinner, stepping at `ANIMATION_FPS`.
+#[derive(IntoElement)]
+pub(super) struct Spinner {
+    size: Size,
+    icon: Icon,
+    color: Option<Hsla>,
+}
+impl Spinner {
+    pub(super) fn new() -> Self {
+        Self {
+            size: Size::Medium,
+            icon: Icon::new(IconName::Loader),
+            color: None,
+        }
+    }
+    pub(super) fn icon(mut self, icon: Icon) -> Self {
+        self.icon = icon;
+        self
+    }
+    pub(super) fn color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+impl Sizable for Spinner {
+    fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
+    }
+}
+impl RenderOnce for Spinner {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().child(
+            self.icon
+                .with_size(self.size)
+                .when_some(self.color, |icon, color| icon.text_color(color))
+                .with_animation(
+                    "circle",
+                    Animation::new(Duration::from_millis(800))
+                        .repeat()
+                        .with_easing(ease_in_out)
+                        .with_max_fps(ANIMATION_FPS),
+                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+                ),
+        )
+    }
+}
 
 pub(super) fn icon(name: &str) -> Icon {
     Icon::default()

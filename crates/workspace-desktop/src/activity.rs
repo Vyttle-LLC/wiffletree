@@ -1,9 +1,9 @@
 //! A working agent's live activity: the steps of its current run, fetched as they change and
 //! shown as a fixed-height card after the transcript.
 use super::*;
-use gpui_component::{button::ButtonVariants, spinner::Spinner};
+use gpui_component::button::ButtonVariants;
 use std::time::{Duration, Instant};
-use ui::{icon, mono, now};
+use ui::{Spinner, icon, mono, now};
 
 /// Step fetches start no closer together than this, about 30 a second.
 pub(super) const STEP_PACE: Duration = Duration::from_millis(33);
@@ -285,13 +285,14 @@ impl Workspace {
     }
 
     pub(super) fn accept_run_summaries(&mut self, summaries: Vec<RunSummary>) {
+        let cache = Rc::make_mut(&mut self.run_summaries);
         // Finished runs never change, so the cache only needs a bound.
-        if self.run_summaries.len() > 1_000 {
-            self.run_summaries.clear();
+        if cache.len() > 1_000 {
+            cache.clear();
         }
         for summary in summaries {
             let reply = format!("output:{}", summary.run_id);
-            self.run_summaries.insert(summary.run_id.clone(), summary);
+            cache.insert(summary.run_id.clone(), summary);
             // The reply's row gains a summary line; the list measures it again.
             if let Some(row) = self.messages.iter().position(|m| m.id == reply)
                 && row < self.list.item_count()

@@ -1,4 +1,5 @@
 use super::bridge::Bridge;
+use super::ui::Spinner;
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, IconName, IndexPath, Selectable, Sizable,
@@ -7,7 +8,6 @@ use gpui_component::{
     input::{Input, InputState, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
     select::{Select, SelectItem, SelectState},
-    spinner::Spinner,
 };
 use std::collections::BTreeSet;
 // GPUI exports an accessibility `Role` too; ours wins over both globs.

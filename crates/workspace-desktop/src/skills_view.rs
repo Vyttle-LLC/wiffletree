@@ -989,7 +989,7 @@ impl Workspace {
 
     /// The host's answer to a save, shown until the next snapshot.
     pub(super) fn skill_saved(&mut self, saved: SkillState) {
-        if let Some(state) = (self.snapshot.as_mut())
+        if let Some(state) = (self.snapshot.as_mut().map(Rc::make_mut))
             .and_then(|s| s.skills.iter_mut().find(|state| state.skill == saved.skill))
         {
             *state = saved;
