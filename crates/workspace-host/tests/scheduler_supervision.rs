@@ -3,6 +3,7 @@
 //! runs past 100 turns without the human, raising a check-in instead of stopping. Kept in its
 //! own test binary because it sets the provider environment for the process.
 mod common;
+// Direct store writes below notify admission explicitly; `until` only reads snapshots.
 use common::{git, request, snapshot, until_snapshot as until};
 use serde_json::json;
 use std::time::Duration;
@@ -18,7 +19,6 @@ fn status(snapshot: &Snapshot, session: &str) -> Status {
         .status
 }
 
-/// Observes snapshots; direct store writes below notify admission explicitly.
 fn runs(db: &rusqlite::Connection, session: &str) -> i64 {
     db.query_row(
         "SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND finished_at IS NOT NULL",

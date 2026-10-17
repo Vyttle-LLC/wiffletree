@@ -101,11 +101,14 @@ pub fn until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// Reads snapshots until one satisfies `done`; reading them never triggers admission.
 pub fn until_snapshot(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
     until(what, || done(&snapshot(service)));
 }
 
-/// Waits on the change signal so concurrent turns need no timing assumptions.
+/// Waits for `done`, looking again on the host's change signal, which every turn start and
+/// finish sends, so the result does not depend on the machine's load. Fails at `deadline`;
+/// the panic drops the service, which stops the turns still running.
 pub fn until_changed(
     service: &Service,
     deadline: Instant,

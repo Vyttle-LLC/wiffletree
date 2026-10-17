@@ -11,9 +11,6 @@ use workspace_host::Host;
 /// about a passing run; it only makes a regression that never gets there fail instead of hang.
 const OVERALL: Duration = Duration::from_secs(300);
 
-/// Waits for `done`, looking again on the host's change signal, which every turn start and
-/// finish sends, so the result does not depend on the machine's load. Fails at `deadline`;
-/// the panic drops the service, which stops the turns still running.
 fn runtimes<'a>(
     snapshot: &'a Snapshot,
     sessions: &'a [String],

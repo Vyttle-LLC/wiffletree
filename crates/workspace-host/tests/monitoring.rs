@@ -18,7 +18,6 @@ fn messages(service: &Service, session: &str) -> Vec<Message> {
     serde_json::from_value(value).unwrap()
 }
 
-/// Observes snapshots; reads never trigger admission.
 fn idle(snapshot: &Snapshot) -> bool {
     snapshot
         .sessions
