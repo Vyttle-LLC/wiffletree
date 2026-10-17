@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use similar::{Algorithm, DiffTag};
 use std::ops::Range;
+use workspace_core::MergePassage;
 
 /// Where a change in a merged rewrite came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,13 +25,6 @@ pub struct MergedChange {
     pub before: String,
     pub after: String,
 }
-/// A run of paragraphs that both the update and the human changed, each in its own way.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Passage {
-    pub base: String,
-    pub stock: String,
-    pub yours: String,
-}
 /// The merge of an update into a rewrite, as the parts that make up the merged text in order.
 #[derive(Debug)]
 pub struct Merge {
@@ -45,30 +39,53 @@ enum Part {
         yours: String,
         stock: String,
     },
-    Overlap(Passage),
+    Overlap(MergePassage),
 }
 impl Merge {
     /// The merged rewrite and its changes, when no passage overlaps.
     pub fn plain(&self) -> Option<(String, Vec<MergedChange>)> {
+        let overlaps = self
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Overlap(_)));
+        (!overlaps).then(|| self.settled(|_, _| unreachable!("no passage overlaps")))
+    }
+    /// The merged rewrite and its changes, with the text `settle` gives each overlapping
+    /// passage, by its index, and where that text came from. Every other part is the plain
+    /// merge's.
+    pub fn settled(
+        &self,
+        mut settle: impl FnMut(usize, &MergePassage) -> (String, Source),
+    ) -> (String, Vec<MergedChange>) {
         let mut text = String::new();
         let mut changes = vec![];
+        let mut overlaps = 0;
         for part in &self.parts {
-            match part {
-                Part::Kept(kept) => text.push_str(kept),
-                Part::Update { yours, stock } => {
-                    text.push_str(stock);
-                    changes.push(MergedChange {
-                        source: Source::Update,
-                        before: yours.clone(),
-                        after: stock.clone(),
-                    });
+            let (source, before, after) = match part {
+                Part::Kept(kept) => {
+                    text.push_str(kept);
+                    continue;
                 }
-                Part::Overlap(_) => return None,
+                Part::Update { yours, stock } => (Source::Update, yours, stock.clone()),
+                Part::Overlap(passage) => {
+                    let (after, source) = settle(overlaps, passage);
+                    overlaps += 1;
+                    (source, &passage.yours, after)
+                }
+            };
+            text.push_str(&after);
+            if *before != after {
+                let before = before.clone();
+                changes.push(MergedChange {
+                    source,
+                    before,
+                    after,
+                });
             }
         }
-        Some((text, changes))
+        (text, changes)
     }
-    pub fn passages(&self) -> Vec<Passage> {
+    pub fn passages(&self) -> Vec<MergePassage> {
         let overlap = |part: &Part| match part {
             Part::Overlap(passage) => Some(passage.clone()),
             _ => None,
@@ -127,7 +144,7 @@ pub fn merge(base: &str, stock: &str, yours: &str) -> Merge {
             },
             (None, Some(yours)) => Part::Kept(yours),
             (Some(stock), Some(yours)) if stock == yours => Part::Kept(yours),
-            (stock, yours) => Part::Overlap(Passage {
+            (stock, yours) => Part::Overlap(MergePassage {
                 base: base[start..end].concat(),
                 stock: stock.unwrap_or_default(),
                 yours: yours.unwrap_or_default(),

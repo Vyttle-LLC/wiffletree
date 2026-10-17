@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::io::{ErrorKind, Write as _};
 
 pub mod merge;
+pub(crate) mod model;
 
 const RULES: &str = "additions.md";
 const REWRITE: &str = "rewrite.md";
@@ -54,6 +55,13 @@ pub fn merge_due(base: &str, stock: &str, history: &[(String, Entry)]) -> bool {
 /// automatic merges into, with every older one: the newer of the version the merge brought in
 /// and the version of the machine that undid or restored.
 fn stopped(history: &[(String, Entry)]) -> Option<u32> {
+    (history.iter())
+        .filter_map(|named| stops(history, named))
+        .max()
+}
+/// The newest stock version `named` stops automatic merges into, with every older one, when it
+/// is an Undo or a restore of a rewrite from before a merge in `history`.
+pub(crate) fn stops(history: &[(String, Entry)], (name, entry): &(String, Entry)) -> Option<u32> {
     let merged_into = |range: (&str, &str)| {
         let into = |(name, entry): &(String, Entry)| match &entry.change {
             Change::Merged { to, .. } if range.0 < name.as_str() && name.as_str() < range.1 => {
@@ -63,17 +71,14 @@ fn stopped(history: &[(String, Entry)]) -> Option<u32> {
         };
         history.iter().filter_map(into).max()
     };
-    let stops = |(name, entry): &(String, Entry)| {
-        let went_back_past = match &entry.change {
-            Change::UndidMerge { to, .. } => number(to),
-            Change::Restored { entry: restored } if entry.edits.rewrite.is_some() => {
-                merged_into((restored, name))
-            }
-            _ => None,
-        }?;
-        Some(went_back_past.max(number(&entry.stock_version).unwrap_or_default()))
-    };
-    history.iter().filter_map(stops).max()
+    let went_back_past = match &entry.change {
+        Change::UndidMerge { to, .. } => number(to),
+        Change::Restored { entry: restored } if entry.edits.rewrite.is_some() => {
+            merged_into((restored, name))
+        }
+        _ => None,
+    }?;
+    Some(went_back_past.max(number(&entry.stock_version).unwrap_or_default()))
 }
 /// Refuses rules or a rewrite over the limit; `what` names it, as "Your rules".
 pub(crate) fn check_text(what: &str, text: &str) -> Result<()> {
@@ -295,10 +300,56 @@ impl SkillStore<'_> {
         self.change(skill, change, restored.edits)
     }
     /// Merges this release's stock text into the rewrite as plain text, saved with its base and
-    /// a "Merged" entry; with passages that overlap, changes nothing and answers them. Only a
+    /// a "Merged" entry; with passages that overlap, changes nothing and answers the rewrite as
+    /// read with them. `automatic` when the host merges on its own.
+    pub fn merge_update(
+        &self,
+        skill: Skill,
+        automatic: bool,
+    ) -> Result<Option<(Rewritten, Vec<MergePassage>)>> {
+        let (before, merged) = self.mergeable(skill)?;
+        let Some(plain) = merged.plain() else {
+            return Ok(Some((before, merged.passages())));
+        };
+        self.save_merge(skill, before, plain, None, automatic)?;
+        Ok(None)
+    }
+    /// Merges with the human's wording for each passage that overlaps, in order.
+    pub fn merge_wordings(&self, skill: Skill, wordings: &[Wording]) -> Result<()> {
+        let (before, merged) = self.mergeable(skill)?;
+        let passages = merged.passages().len();
+        ensure!(
+            wordings.len() == passages && passages > 0,
+            "Choose one wording for each passage your rewrite and {} both change",
+            stock_version(skill)
+        );
+        let settled = merged.settled(|index, passage| {
+            let text = match wordings[index] {
+                Wording::Stock => &passage.stock,
+                Wording::Yours => &passage.yours,
+            };
+            (text.clone(), merge::Source::Human)
+        });
+        self.save_merge(skill, before, settled, None, false)
+    }
+    /// Merges `from`, which the caller has found the skill still holds, with the model's
+    /// `answer` for the passages that overlap, once the answer is checked.
+    pub fn merge_answer(
+        &self,
+        skill: Skill,
+        from: Rewritten,
+        answer: &Value,
+        model: MergeModel,
+        automatic: bool,
+    ) -> Result<()> {
+        let merged = merge::merge(&from.base, stock(skill), &from.text);
+        let texts = model::merged_passages(stock_version(skill), &merged.passages(), answer)?;
+        let settled = merged.settled(|index, _| (texts[index].clone(), merge::Source::Model));
+        self.save_merge(skill, from, settled, Some(model), automatic)
+    }
+    /// The rewrite to merge this release's stock text into, as read, and the merge. Only a
     /// rewrite based on an older stock version, or on this one with other text, is merged.
-    /// `automatic` when the host merges on its own.
-    pub fn merge_update(&self, skill: Skill, automatic: bool) -> Result<Vec<merge::Passage>> {
+    fn mergeable(&self, skill: Skill) -> Result<(Rewritten, merge::Merge)> {
         let edits = self.readable(skill)?;
         let before = edits
             .rewrite
@@ -318,16 +369,25 @@ impl SkillStore<'_> {
             }
         );
         let merged = merge::merge(&before.base, stock(skill), &before.text);
-        let Some((text, changes)) = merged.plain() else {
-            return Ok(merged.passages());
-        };
+        Ok((before, merged))
+    }
+    /// Saves the merged rewrite of `before` with this release's stock text as its base and a
+    /// "Merged" entry.
+    fn save_merge(
+        &self,
+        skill: Skill,
+        before: Rewritten,
+        (text, changes): (String, Vec<merge::MergedChange>),
+        model: Option<MergeModel>,
+        automatic: bool,
+    ) -> Result<()> {
         check_text("The merged rewrite", &text)?;
         let change = Change::Merged {
             from: version(&before.base).into(),
             to: stock_version(skill).into(),
             before,
             changes,
-            model: None,
+            model,
             machine: sync::machine_name(),
             automatic,
         };
@@ -339,8 +399,7 @@ impl SkillStore<'_> {
             rules: String::new(),
             rewrite: Some(rewrite),
         };
-        self.change(skill, change, edits)?;
-        Ok(vec![])
+        self.change(skill, change, edits)
     }
     /// The "Merged" entry `entry` names, or an error when it is another kind of entry.
     pub fn merged_entry(&self, skill: Skill, entry: &str) -> Result<Entry> {
@@ -665,7 +724,12 @@ impl Host {
             _ => None,
         };
         let this_release = number(&state.stock_version);
+        let tried = (self.merge_tries[skill as usize].as_ref())
+            .filter(|tried| tried.running() || holds(&tried.from));
         let merge_standing = match &state.rewrite {
+            Some(rewrite) if rewrite.out_of_date && tried.is_some() => {
+                tried.map(|tried| tried.standing.clone())
+            }
             Some(rewrite) if rewrite.out_of_date => {
                 let older = number(&rewrite.base_version).is_some_and(|b| Some(b) < this_release);
                 if recalled.stopped >= this_release {
@@ -696,12 +760,11 @@ impl Host {
         self.recall_skill_histories();
         Ok(serde_json::to_value(self.skill_state(skill)?)?)
     }
-    /// Merges, as plain text, each of `skills` whose rewrite is due a merge; one whose passages
-    /// overlap stays out of date.
+    /// Merges each of `skills` whose rewrite is due a merge.
     pub(crate) fn merge_due_skills(&mut self, skills: impl IntoIterator<Item = Skill>) {
         for skill in skills {
             let merged = match self.skill_merge_due(skill) {
-                Ok(true) => self.skills().merge_update(skill, true).map(drop),
+                Ok(true) => self.merge_skill(skill, true),
                 due => due.map(drop),
             };
             if let Err(error) = merged {
@@ -710,8 +773,101 @@ impl Host {
         }
         self.recall_skill_histories();
     }
+    /// Merges the skill's rewrite as plain text where nothing overlaps. Passages that overlap go
+    /// to the PR keeper's model when it is a Claude model, in a run the service starts off the
+    /// host thread; with none, the skill's page offers a wording for each.
+    pub(crate) fn merge_skill(&mut self, skill: Skill, automatic: bool) -> Result<()> {
+        self.merge_tries[skill as usize] = None;
+        let Some((from, passages)) = self.skills().merge_update(skill, automatic)? else {
+            return Ok(());
+        };
+        let keeper = self
+            .saved_selection()?
+            .and_then(|selection| selection.keeper);
+        let standing = match keeper {
+            Some(profile) if profile.provider == Provider::Claude => {
+                let count = passages.len();
+                self.merge_runs.push(MergeRun {
+                    skill,
+                    from: from.clone(),
+                    passages,
+                    profile,
+                    automatic,
+                });
+                MergeStanding::Merging { passages: count }
+            }
+            keeper => MergeStanding::NeedsModel {
+                passages,
+                codex: keeper.is_some(),
+            },
+        };
+        self.merge_tries[skill as usize] = Some(Tried { from, standing });
+        Ok(())
+    }
+    /// Whether a model run is merging the skill.
+    pub(crate) fn skill_merging(&self, skill: Skill) -> bool {
+        (self.merge_tries[skill as usize].as_ref()).is_some_and(Tried::running)
+    }
+    /// A merge that waited for a model can be merged with the one chosen now.
+    pub(crate) fn forget_merges_waiting_for_a_model(&mut self) {
+        for tried in &mut self.merge_tries {
+            if let Some(Tried {
+                standing: MergeStanding::NeedsModel { .. },
+                ..
+            }) = tried
+            {
+                *tried = None;
+            }
+        }
+    }
+    /// The model runs to start, each once.
+    pub(crate) fn take_merge_runs(&mut self) -> Vec<MergeRun> {
+        std::mem::take(&mut self.merge_runs)
+    }
+    /// Applies a run's answer when the skill still holds the rewrite and base it merged, and
+    /// keeps it as a failed try when it can't be used. When the files changed meanwhile, the
+    /// answer is dropped and the skill checked again.
+    pub(crate) fn finish_merge_run(
+        &mut self,
+        run: MergeRun,
+        answered: Result<provider::MergeAnswer>,
+    ) {
+        let MergeRun {
+            skill,
+            from,
+            profile,
+            automatic,
+            ..
+        } = run;
+        self.merge_tries[skill as usize] = None;
+        let holds = self.skills().read(skill)
+            == (
+                Edits {
+                    rules: String::new(),
+                    rewrite: Some(from.clone()),
+                },
+                None,
+            );
+        if !holds || self.skill_paused(skill).unwrap_or(true) {
+            return self.merge_due_skills([skill]);
+        }
+        let applied = answered.and_then(|provider::MergeAnswer { answer, tokens }| {
+            let model = MergeModel {
+                model: profile,
+                tokens,
+            };
+            (self.skills()).merge_answer(skill, from.clone(), &answer, model, automatic)
+        });
+        if let Err(error) = applied {
+            let reason = format!("{error:#}");
+            let standing = MergeStanding::Failed { reason };
+            self.merge_tries[skill as usize] = Some(Tried { from, standing });
+        }
+        self.recall_skill_histories();
+    }
     /// Whether the skill's rewrite is due a merge of this release's stock text on its own: one
-    /// whose files can be read and are not paused, by `merge_due`.
+    /// whose files can be read and are not paused, by `merge_due`, and that this Mac is not
+    /// merging and has not tried to merge as it is since it started.
     pub fn skill_merge_due(&self, skill: Skill) -> Result<bool> {
         let store = self.skills();
         let (
@@ -724,8 +880,11 @@ impl Host {
         else {
             return Ok(false);
         };
+        let tried = (self.merge_tries[skill as usize].as_ref())
+            .is_some_and(|tried| tried.running() || tried.from == rewrite);
         let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
-        Ok(!self.skill_paused(skill)?
+        Ok(!tried
+            && !self.skill_paused(skill)?
             && !self.changed_outside_wiffletree(&paths)?
             && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
     }
@@ -742,6 +901,32 @@ impl Host {
     pub(crate) fn recall_skill_histories(&mut self) {
         let store = self.skills();
         self.skill_histories = Skill::ALL.map(|skill| Recalled::of(skill, store.history(skill)));
+    }
+}
+/// A merge this Mac is running or tried since it started, from the rewrite and base it read.
+pub(crate) struct Tried {
+    from: Rewritten,
+    /// Merging, failed, or waiting for a model.
+    standing: MergeStanding,
+}
+impl Tried {
+    fn running(&self) -> bool {
+        matches!(self.standing, MergeStanding::Merging { .. })
+    }
+}
+/// A model run that merges the passages of `from` that overlap, for the service to start.
+pub struct MergeRun {
+    pub skill: Skill,
+    from: Rewritten,
+    passages: Vec<MergePassage>,
+    pub profile: ModelProfile,
+    automatic: bool,
+}
+impl MergeRun {
+    /// What the model is sent.
+    pub fn input(&self) -> Vec<u8> {
+        let Rewritten { text, base } = &self.from;
+        model::input(self.skill, base, stock(self.skill), text, &self.passages)
     }
 }
 /// What a skill's history says beyond its files, recalled so a snapshot reads no history.
@@ -796,17 +981,6 @@ pub fn merge_note(name: &str, entry: &Entry) -> Option<MergeNote> {
         model: model.clone(),
         machine: (*machine != sync::machine_name()).then(|| machine.clone()),
     })
-}
-/// Why Merge v2 in changed nothing: the update and the rewrite both change `overlaps` passages.
-pub(crate) fn needs_a_model(skill: Skill, overlaps: usize) -> String {
-    let passages = match overlaps {
-        1 => "1 passage".into(),
-        count => format!("{count} passages"),
-    };
-    format!(
-        "{} and your rewrite both change {passages}, and merging that needs a model. Bring the change in yourself, then mark it up to date.",
-        stock_version(skill)
-    )
 }
 /// A merge's note, and the rewrite before and after it, line by line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1689,7 +1863,7 @@ mod tests {
             .skills()
             .merge_update(Skill::Coordinating, false)
             .unwrap();
-        assert_eq!(overlaps, []);
+        assert_eq!(overlaps, None);
         let stock = stock(Skill::Coordinating);
         let merged = stock.replacen("Start by clarifying", "Start by restating", 1);
         let merged = format!("{}  ", merged.trim_end());
@@ -1784,6 +1958,10 @@ mod tests {
             .skills()
             .merge_update(Skill::Coordinating, false)
             .unwrap();
+        let Some((read, overlaps)) = overlaps else {
+            panic!("no overlap")
+        };
+        assert_eq!(read.text, text);
         let [passage] = &overlaps[..] else {
             panic!("{overlaps:?}")
         };
@@ -1925,7 +2103,7 @@ mod tests {
             let base = stock(skill).replacen("— v1", "— v0", 1);
             let folder = host.shared().skills_folder().join(skill.folder());
             fs::write(folder.join("base.md"), base).unwrap();
-            assert_eq!(host.skills().merge_update(skill, false).unwrap(), []);
+            assert_eq!(host.skills().merge_update(skill, false).unwrap(), None);
             let rewrite = host.skills().state(skill).rewrite.unwrap();
             assert_eq!(
                 (rewrite.text.as_str(), rewrite.out_of_date),
@@ -1942,20 +2120,26 @@ mod tests {
     fn an_agent_cannot_merge_or_undo_a_skill() {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
-        rewritten_against_v0(&host);
-        host.skills()
-            .merge_update(Skill::Coordinating, false)
-            .unwrap();
+        let skill = Skill::Coordinating;
+        let rewrite = rewritten_against_v0(&host);
+        host.skills().merge_update(skill, false).unwrap();
+        let (merge_entry, _) = host.skills().history(skill).pop().unwrap();
+        // Out of date again, with a passage the human would choose a wording for.
+        host.skills().undo_merge(skill, &merge_entry).unwrap();
+        let text = rewrite
+            .text
+            .replacen("Ask the human when", "Ask me when", 1);
+        host.skills().save_rewrite(skill, &text).unwrap();
         let before = (current(&host), changes(&host, Skill::Coordinating));
-        let (merge_entry, _) = host.skills().history(Skill::Coordinating).pop().unwrap();
         host.create_project("Site").unwrap();
         let coordinator = host.sessions().unwrap().remove(0);
         for tool in mcp::tools().as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
-            for word in ["merge", "undo", "dismiss", "skill"] {
+            for word in ["merge", "undo", "dismiss", "skill", "wording"] {
                 assert!(!name.contains(word), "{name}");
             }
-            let args = json!({"skill": "coordinating", "entry": merge_entry, "text": "Agent's"});
+            let args = json!({"skill": "coordinating", "entry": merge_entry, "text": "Agent's",
+                "wordings": ["stock"]});
             let _ = host.agent_tool(&coordinator.id, name, args);
         }
         assert_eq!(
@@ -2103,23 +2287,366 @@ mod tests {
         );
     }
 
-    #[test]
-    fn merge_v2_in_with_an_overlap_says_it_needs_a_model() {
-        let (_home, mut host) = host();
-        let before = rewritten_against_v0(&host);
-        let text = before.text.replacen("Ask the human when", "Ask me when", 1);
-        host.skills()
-            .save_rewrite(Skill::Coordinating, &text)
+    /// Coordinating rewritten against v0, where the human also changed the paragraph v1
+    /// changes, so the two overlap there. Answers the rewrite as saved.
+    fn overlapping(host: &Host) -> Rewritten {
+        let mut before = rewritten_against_v0(host);
+        before.text = before.text.replacen("Ask the human when", "Ask me when", 1);
+        (host.skills())
+            .save_rewrite(Skill::Coordinating, &before.text)
             .unwrap();
-        let merge = Command::MergeSkillUpdate {
-            skill: Skill::Coordinating,
+        before
+    }
+
+    /// The PR keeper's model made the first allowed model of `provider`.
+    fn keeper_model(host: &mut Host, provider: Provider) -> ModelProfile {
+        let mut selection = host.model_selection().unwrap();
+        let allowed = selection.allowed(provider)[0].clone();
+        let profile = ModelProfile {
+            provider,
+            model: allowed.model,
+            effort: allowed.effort,
         };
-        let refused = execute(&mut host, merge).unwrap_err().to_string();
+        selection.keeper = Some(profile.clone());
+        host.set_model_selection(&selection).unwrap();
+        profile
+    }
+
+    /// The one run this host has to start.
+    fn the_run(host: &mut Host) -> MergeRun {
+        let mut runs = host.take_merge_runs();
+        assert_eq!(runs.len(), 1);
+        runs.remove(0)
+    }
+
+    /// A merged text for the run's one passage, which keeps the human's change and v1's.
+    fn merged_passage(run: &MergeRun) -> String {
+        (run.passages[0].yours).replacen("Ask me when", "Ask me instead when a waiver", 1)
+    }
+
+    /// Stands in for Claude in a merge run: records its arguments, its folder and its input
+    /// beside itself, and answers what `answer.json` there holds.
+    const MERGING_CLAUDE: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+here = os.path.dirname(os.path.abspath(sys.argv[0]))
+record = {'args': sys.argv[1:], 'cwd': os.getcwd(), 'listing': os.listdir('.'), 'input': sys.stdin.read()}
+json.dump(record, open(os.path.join(here, 'run.json'), 'w'))
+def emit(value): print(json.dumps(value), flush=True)
+emit({'type': 'system', 'subtype': 'init', 'session_id': 's', 'tools': ['StructuredOutput'], 'mcp_servers': []})
+answer = json.load(open(os.path.join(here, 'answer.json')))
+emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', 'structured_output': answer, 'usage': {'input_tokens': 1200, 'cache_read_input_tokens': 300, 'output_tokens': 40}})
+"#;
+
+    #[test]
+    fn an_overlapping_passage_is_merged_by_the_keepers_claude_model_sent_only_the_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let profile = keeper_model(&mut host, Provider::Claude);
+        let before = overlapping(&host);
+        let mut host = started_again(&home, host);
+        let merging = MergeStanding::Merging { passages: 1 };
+        assert_eq!(coordinating_state(&host).merge_standing, Some(merging));
         assert_eq!(
-            refused,
-            "v1 and your rewrite both change 1 passage, and merging that needs a model. Bring the change in yourself, then mark it up to date."
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
         );
+        let run = the_run(&mut host);
+        assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
+        let merged = merged_passage(&run);
+
+        let scratch = tempfile::tempdir().unwrap();
+        let claude = scratch.path().join("claude");
+        fs::write(&claude, MERGING_CLAUDE).unwrap();
+        fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let answer = json!({"passages": [{"id": "1", "merged": merged}]});
+        fs::write(scratch.path().join("answer.json"), answer.to_string()).unwrap();
+        let limit = provider::MERGE_LIMIT;
+        let answered = provider::merge_run(&claude, &run.profile, run.input(), limit).unwrap();
+        let record: Value =
+            serde_json::from_slice(&fs::read(scratch.path().join("run.json")).unwrap()).unwrap();
+        let args: Vec<&str> = (record["args"].as_array().unwrap().iter())
+            .map(|arg| arg.as_str().unwrap())
+            .collect();
+        let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
+        assert_eq!(after("--tools"), "");
+        assert_eq!(after("--settings"), r#"{"disableAllHooks":true}"#);
+        assert_eq!(after("--system-prompt"), model::MERGING);
+        assert_eq!(after("--json-schema"), model::ANSWER_SCHEMA);
+        assert_eq!(
+            (after("--model"), after("--effort")),
+            (&*profile.model, &*profile.effort)
+        );
+        for flag in ["-p", "--strict-mcp-config", "--no-session-persistence"] {
+            assert!(args.contains(&flag), "{flag}");
+        }
+        for absent in ["--mcp-config", "--resume", "--dangerously-skip-permissions"] {
+            assert!(!args.contains(&absent), "{absent}");
+        }
+        assert_eq!(record["listing"], json!([]));
+        assert!(
+            !record["cwd"]
+                .as_str()
+                .unwrap()
+                .starts_with(home.path().to_str().unwrap())
+        );
+        let input: Value = serde_json::from_str(record["input"].as_str().unwrap()).unwrap();
+        let passage = run.passages[0].clone();
+        assert_eq!(
+            input,
+            json!({"skill": "Coordinating", "base": before.base, "stock": stock(Skill::Coordinating),
+                "yours": before.text, "passages": [{"id": "1", "base": passage.base,
+                "stock": passage.stock, "yours": passage.yours}]})
+        );
+        for role in Role::ALL {
+            let core = provider::instructions(role, "", "");
+            for line in core.lines().filter(|line| line.len() > 40) {
+                let sent = record["input"].as_str().unwrap();
+                assert!(
+                    !sent.contains(line) && !model::MERGING.contains(line),
+                    "{line}"
+                );
+            }
+        }
+
+        host.finish_merge_run(run, Ok(answered));
+        let text = (before.text.replacen("— v0", "— v1", 1)).replacen(&passage.yours, &merged, 1);
+        let stock = stock(Skill::Coordinating);
+        assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
+        let (_, entry) = host.skills().history(Skill::Coordinating).pop().unwrap();
+        let Change::Merged { model, changes, .. } = entry.change else {
+            panic!("{entry:?}")
+        };
+        let tokens = 1540;
+        assert_eq!(
+            model,
+            Some(MergeModel {
+                model: profile,
+                tokens
+            })
+        );
+        let sources: Vec<_> = changes.iter().map(|change| change.source).collect();
+        assert_eq!(sources, [merge::Source::Update, merge::Source::Model]);
+        let state = coordinating_state(&host);
+        assert_eq!(
+            (state.merge_note.unwrap().by_model, state.merge_standing),
+            (1, None)
+        );
+        for role in Role::ALL {
+            let core = provider::instructions(role, "", "");
+            assert!(host.instructions(role).starts_with(&core), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn an_answer_that_cant_be_used_changes_nothing_and_is_tried_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        keeper_model(&mut host, Provider::Claude);
+        let before = overlapping(&host);
+        let mut host = started_again(&home, host);
+        let history = changes(&host, Skill::Coordinating);
+        let once = "The model's answer didn't answer each passage exactly once.";
+        let skill = Skill::Coordinating;
+        let run = the_run(&mut host);
+        let too_long = "x".repeat(run.passages[0].stock.len() + run.passages[0].yours.len() + 1);
+        let merged = |id: &str, text: &str| json!({"id": id, "merged": text});
+        let cases = [
+            (
+                json!({"passages": [merged("1", &too_long)]}),
+                "The model's text for passage 1 was longer than v1's version and yours together.",
+            ),
+            (json!({"passages": []}), once),
+            (
+                json!({"passages": [merged("1", "a"), merged("1", "b")]}),
+                once,
+            ),
+            (json!({"passages": [merged("2", "a")]}), once),
+            (
+                json!({"classes": []}),
+                "The model's answer didn't have the shape it was asked for.",
+            ),
+            (
+                json!({"passages": [{"id": "1", "merged": "a", "question": "b"}]}),
+                "The model's answer didn't have the shape it was asked for.",
+            ),
+            (
+                json!({"passages": [{"id": "1", "merged": "a", "question": null}]}),
+                "The model's answer didn't have the shape it was asked for.",
+            ),
+            (
+                json!({"passages": [{"id": "1", "question": "q".repeat(301)}]}),
+                "The model's question about passage 1 was longer than 300 characters.",
+            ),
+            (
+                json!({"passages": [{"id": "1", "question": "v1 asks first; you never ask."}]}),
+                "The model found that v1 and your rewrite want different things in passage 1: v1 asks first; you never ask.",
+            ),
+        ];
+        let mut run = Some(run);
+        for (answer, reason) in cases {
+            let run = run.take().unwrap_or_else(|| {
+                execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();
+                the_run(&mut host)
+            });
+            host.finish_merge_run(run, Ok(provider::MergeAnswer { answer, tokens: 1 }));
+            let reason = reason.to_owned();
+            let failed = MergeStanding::Failed { reason };
+            assert_eq!(coordinating_state(&host).merge_standing, Some(failed));
+            assert_eq!(
+                current(&host),
+                [before.text.as_bytes(), before.base.as_bytes()]
+            );
+            assert_eq!(changes(&host, skill), history);
+            assert!(!host.skill_merge_due(skill).unwrap());
+        }
+        execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();
+        let run = the_run(&mut host);
+        host.finish_merge_run(run, Err(anyhow::anyhow!("Claude could not be started")));
+        let reason = "Claude could not be started".into();
+        let failed = MergeStanding::Failed { reason };
+        assert_eq!(coordinating_state(&host).merge_standing, Some(failed));
+
+        // A merged passage within its own limit that makes the rewrite too long.
+        let text = format!(
+            "{}\n\n{}",
+            before.text,
+            "x".repeat(MAX_SKILL_TEXT - before.text.len() - 10)
+        );
+        execute(&mut host, Command::SaveSkillRewrite { skill, text }).unwrap();
+        execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();
+        let run = the_run(&mut host);
+        let longest = run.passages[0].stock.clone() + &run.passages[0].yours;
+        let answer = json!({"passages": [merged("1", &longest)]});
+        host.finish_merge_run(run, Ok(provider::MergeAnswer { answer, tokens: 1 }));
+        let reason = "The merged rewrite can be at most 32,000 characters".into();
+        let failed = MergeStanding::Failed { reason };
+        assert_eq!(coordinating_state(&host).merge_standing, Some(failed));
+        let mut host = started_again(&home, host);
+        let merging = MergeStanding::Merging { passages: 1 };
+        assert_eq!(coordinating_state(&host).merge_standing, Some(merging));
+        the_run(&mut host);
+    }
+
+    #[test]
+    fn an_answer_is_dropped_when_the_human_saved_while_the_model_ran() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        keeper_model(&mut host, Provider::Claude);
+        let before = overlapping(&host);
+        let mut host = started_again(&home, host);
+        let run = the_run(&mut host);
+        let answer = json!({"passages": [{"id": "1", "merged": merged_passage(&run)}]});
+        let skill = Skill::Coordinating;
+        let text = before
+            .text
+            .replacen("Start by restating", "Start by restating briefly", 1);
+        let save = Command::SaveSkillRewrite {
+            skill,
+            text: text.clone(),
+        };
+        execute(&mut host, save).unwrap();
+        let history = changes(&host, skill);
+        host.finish_merge_run(run, Ok(provider::MergeAnswer { answer, tokens: 1 }));
         assert_eq!(current(&host), [text.as_bytes(), before.base.as_bytes()]);
+        assert_eq!(changes(&host, skill), history);
+        // Checked again from the saved rewrite.
+        assert_eq!(the_run(&mut host).from.text, text);
+        let merging = MergeStanding::Merging { passages: 1 };
+        assert_eq!(coordinating_state(&host).merge_standing, Some(merging));
+    }
+
+    #[test]
+    fn with_no_keeper_model_or_a_codex_one_the_human_chooses_each_wording() {
+        let (home, host) = host();
+        let before = overlapping(&host);
+        let mut host = started_again(&home, host);
+        let skill = Skill::Coordinating;
+        let state = coordinating_state(&host);
+        let Some(MergeStanding::NeedsModel {
+            passages,
+            codex: false,
+        }) = state.merge_standing
+        else {
+            panic!("{:?}", state.merge_standing)
+        };
+        assert_eq!(passages.len(), 1);
+        assert!(host.take_merge_runs().is_empty());
+        assert_eq!(host.workspace_notes().unwrap(), []);
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        let refused = execute(
+            &mut host,
+            Command::AnswerSkillQuestion {
+                skill,
+                wordings: vec![],
+            },
+        );
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "Choose one wording for each passage your rewrite and v1 both change"
+        );
+
+        let stock = stock(skill);
+        let keep = vec![Wording::Yours];
+        let kept = execute(
+            &mut host,
+            Command::AnswerSkillQuestion {
+                skill,
+                wordings: keep,
+            },
+        )
+        .unwrap();
+        assert_eq!(kept.merge_standing, None);
+        let text = before.text.replacen("— v0", "— v1", 1);
+        assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
+        let (entry, _) = host.skills().history(skill).pop().unwrap();
+        execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
+        let take = vec![Wording::Stock];
+        execute(
+            &mut host,
+            Command::AnswerSkillQuestion {
+                skill,
+                wordings: take,
+            },
+        )
+        .unwrap();
+        let text = text.replacen(&passages[0].yours, &passages[0].stock, 1);
+        assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
+        let (_, entry) = host.skills().history(skill).pop().unwrap();
+        let Change::Merged { changes, model, .. } = entry.change else {
+            panic!("{entry:?}")
+        };
+        let sources: Vec<_> = changes.iter().map(|change| change.source).collect();
+        assert_eq!(
+            (sources, model),
+            (vec![merge::Source::Update, merge::Source::Human], None)
+        );
+
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        keeper_model(&mut host, Provider::Codex);
+        overlapping(&host);
+        let mut host = started_again(&home, host);
+        let state = coordinating_state(&host);
+        assert!(matches!(
+            state.merge_standing,
+            Some(MergeStanding::NeedsModel { codex: true, .. })
+        ));
+        assert!(host.take_merge_runs().is_empty());
+        // A save that leaves the keeper's model as it was keeps the choice of wordings.
+        let mut selection = host.model_selection().unwrap();
+        selection.guide = "Prefer small models.".into();
+        host.set_model_selection(&selection).unwrap();
+        assert!(matches!(
+            coordinating_state(&host).merge_standing,
+            Some(MergeStanding::NeedsModel { codex: true, .. })
+        ));
+        keeper_model(&mut host, Provider::Claude);
+        assert_eq!(coordinating_state(&host).merge_standing, None);
+        execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();
+        the_run(&mut host);
     }
 
     #[test]

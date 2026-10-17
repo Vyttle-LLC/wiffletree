@@ -377,6 +377,19 @@ fn spawn_sync_pass(sender: Sender<Event>, pass: sync::Pass, tools: publish::Tool
         let _ = sender.send_blocking(Event::Synced(passed));
     });
 }
+/// Runs one skill merge's model on its own thread and always reports back, even if it panics,
+/// so the skill is never left marked as merging.
+fn spawn_skill_merge(sender: Sender<Event>, run: skills::MergeRun) {
+    std::thread::spawn(move || {
+        let merge = std::panic::AssertUnwindSafe(|| {
+            let claude = provider::executable(Provider::Claude)?;
+            provider::merge_run(&claude, &run.profile, run.input(), provider::MERGE_LIMIT)
+        });
+        let answered = std::panic::catch_unwind(merge)
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("The merge run stopped unexpectedly.")));
+        let _ = sender.send_blocking(Event::SkillMerged(run, answered));
+    });
+}
 /// Runs one PR keeper rebase on its own thread and always reports back, even if it panics, so
 /// the ticket is never left marked as rebasing.
 fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
@@ -447,6 +460,8 @@ enum Event {
     Command(Command, Reply),
     /// A sync pass finished on its own thread.
     Synced(Result<sync::Passed>),
+    /// A skill merge's model run finished on its own thread.
+    SkillMerged(skills::MergeRun, Result<provider::MergeAnswer>),
     /// A settings repository's clone is ready, off the host thread, to replace the shared folder.
     SettingsRepositoryPrepared {
         prepared: Result<sync::Prepared>,
@@ -760,6 +775,7 @@ impl Service {
                 actor.refresh_pull_requests(now(), true);
                 actor.refresh_github();
                 actor.refresh_settings_sync(now());
+                actor.start_skill_merges();
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
@@ -900,7 +916,15 @@ impl Actor {
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
         let syncing = self.refresh_settings_sync(now());
+        self.start_skill_merges();
         self.signal(dirty || syncing);
+    }
+
+    /// Starts the model runs of the merges the host found due.
+    fn start_skill_merges(&mut self) {
+        for run in self.host.take_merge_runs() {
+            spawn_skill_merge(self.sender.clone(), run);
+        }
     }
 
     /// Starts a sync pass when one is due, off the host thread, and arms a wake-up for the next;
@@ -1037,6 +1061,10 @@ impl Actor {
                     eprintln!("Workspace sync: {e:#}");
                     false
                 })
+            }
+            Event::SkillMerged(run, answered) => {
+                self.host.finish_merge_run(run, answered);
+                true
             }
             Event::Discovered {
                 found,
