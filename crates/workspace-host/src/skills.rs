@@ -82,11 +82,22 @@ pub(crate) fn stops(history: &[(String, Entry)], (name, entry): &(String, Entry)
 }
 /// The question that waits for the human while the skill holds the rewrite and base it asked
 /// about: the newest "Asked you about" entry in `history` about this release's stock text, when
-/// no later entry changed the skill.
+/// no later entry changed the skill. An entry whose answers don't match its merge's passages
+/// one for one, with at least one question, counts as one that cannot be read.
 fn asked(skill: Skill, history: &[(String, Entry)]) -> Option<&(String, Entry)> {
     let about_this_release = |(_, entry): &&(String, Entry)| match &entry.change {
         Change::NewStockVersion { .. } => false,
-        Change::Asked { stock: asked, .. } => asked == stock(skill),
+        Change::Asked {
+            stock: asked,
+            merge,
+            answers,
+            ..
+        } => {
+            let question = |answer| matches!(answer, &model::PassageAnswer::Question(_));
+            asked == stock(skill)
+                && answers.len() == merge.passages().len()
+                && answers.iter().any(question)
+        }
         _ => true,
     };
     let newest = history.iter().rev().find(about_this_release)?;
@@ -2984,6 +2995,33 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
     }
 
     #[test]
+    fn an_asked_entry_whose_answers_dont_fit_its_passages_is_no_question() {
+        let (_home, mut host) = host();
+        let skill = Skill::Coordinating;
+        let before = overlapping_twice(&host);
+        for answers in [
+            vec![],
+            vec![model::PassageAnswer::Merged("Ask me.\n\n".into())],
+        ] {
+            let mut entry = asked_on_another_mac(&before, stock(skill));
+            let Change::Asked { answers: kept, .. } = &mut entry.change else {
+                unreachable!()
+            };
+            *kept = answers;
+            write_entry(&mut host, "2090-01-01T00-00-00.000Z", &entry);
+            let snapshot = host.snapshot().unwrap();
+            let state = snapshot.skills.iter().find(|state| state.skill == skill);
+            assert_eq!(state.unwrap().question, None);
+            assert_eq!(snapshot.workspace_notes, []);
+            let answer = Command::AnswerSkillQuestion {
+                skill,
+                wordings: vec![Wording::Yours],
+            };
+            assert!(execute(&mut host, answer).is_err());
+        }
+    }
+
+    #[test]
     fn a_question_from_another_release_is_not_shown_and_this_mac_merges_its_own() {
         let (_home, mut host) = host();
         let skill = Skill::Coordinating;
@@ -3011,7 +3049,18 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         // newer release arrives, since the rewrite and base changed.
         let entry = coordinating_state(&host).merge_note.unwrap().entry;
         execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
-        write_entry(&mut host, "2090-01-01T00-00-01.000Z", &asked(stock(skill)));
+        let text = before.text.replacen("Ask the human when", "Ask me when", 1);
+        let save = Command::SaveSkillRewrite {
+            skill,
+            text: text.clone(),
+        };
+        execute(&mut host, save).unwrap();
+        let overlapping = Rewritten {
+            text,
+            base: before.base.clone(),
+        };
+        let entry = asked_on_another_mac(&overlapping, stock(skill));
+        write_entry(&mut host, "2090-01-01T00-00-01.000Z", &entry);
         assert!(coordinating_state(&host).question.is_some());
         let newer = stock(skill).replacen("— v1", "— v2", 1);
         based_on_an_earlier_release(&host, &newer);
