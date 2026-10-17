@@ -73,7 +73,7 @@ fn about(skill: Skill) -> About {
     match skill {
         Skill::Coordinating => About {
             roles: "Project coordinator",
-            gets: "The project coordinator gets",
+            gets: "Coordinators get",
             enforced: &[
                 "Only the models allowed on this machine",
                 "Every verifier of the chosen level runs, and all must pass",
@@ -281,6 +281,23 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], bool)> {
     Some((text, rewrite.out_of_date))
 }
 
+/// Who uses the skill, and when a merge the page still notes came in: "Project coordinator · v2
+/// merged into your rewrite today at 08:01", or "on 14 Oct at 08:01".
+fn list_who(state: &SkillState) -> String {
+    let roles = about(state.skill).roles;
+    let Some(note) = &state.merge_note else {
+        return roles.into();
+    };
+    let when = match written_at(&note.entry) {
+        Some(at) if at.date_naive() == Local::now().date_naive() => {
+            format!("today at {}", at.format("%H:%M"))
+        }
+        Some(at) => format!("on {}", at.format("%-d %b at %H:%M")),
+        None => format!("at {}", note.entry),
+    };
+    format!("{roles} · {} merged into your rewrite {when}", note.to)
+}
+
 /// "1 change" or "3 changes".
 fn counted(count: usize, noun: &str) -> String {
     match count {
@@ -315,14 +332,29 @@ fn merging_mac(note: &MergeNote) -> &str {
     note.machine.as_deref().unwrap_or("This Mac")
 }
 
-/// The merge note's title and what came in.
+/// The merge note's title and what came in, and how, naming the model when one merged.
 fn merge_note_text(state: &SkillState, note: &MergeNote, model: Option<&str>) -> [String; 2] {
     let skill = state.skill;
+    let by_model = match note.by_model {
+        0 => String::new(),
+        passages => {
+            let (passage, one) = match passages {
+                1 => ("passage", "that one"),
+                _ => ("passages", "those"),
+            };
+            format!(
+                " You had also changed {passages} {passage} {} changes, so {} merged {one}, keeping your wording where both could stand.",
+                note.to,
+                model.unwrap_or("the model")
+            )
+        }
+    };
     [
         format!("Merged {} {} into your rewrite", skill.name(), note.to),
         format!(
-            "{}. {} the merged text from their next turn.",
-            merge_counts(note, model),
+            "{} from {} came in as plain text.{by_model} {} the merged text from their next turn.",
+            counted(note.from_update, "change"),
+            note.to,
             about(skill).gets
         ),
     ]
@@ -346,7 +378,7 @@ fn undo_question(state: &SkillState, note: &MergeNote, later: bool) -> [String; 
         format!("Undo the merge of {to}?"),
         format!(
             "Your rewrite goes back to exactly what it was before {}, based on {}{since}. {} it from their next turn, on every Mac.",
-            entry_time(entry),
+            time_or_date(entry),
             based_on(from),
             about(state.skill).gets
         ),
@@ -443,6 +475,14 @@ pub(super) fn saved_toast(command: &Command) -> &'static str {
     }
 }
 
+/// "08:01" for an entry written today, otherwise as `entry_time`.
+fn time_or_date(name: &str) -> String {
+    match written_at(name) {
+        Some(at) if at.date_naive() == Local::now().date_naive() => at.format("%H:%M").to_string(),
+        _ => entry_time(name),
+    }
+}
+
 /// When a history entry was written, from its name.
 fn written_at(name: &str) -> Option<DateTime<Local>> {
     let at = NaiveDateTime::parse_from_str(name, "%Y-%m-%dT%H-%M-%S%.3fZ").ok()?;
@@ -521,6 +561,21 @@ fn banner(color: Hsla) -> Div {
         .border_color(color.opacity(0.45))
         .bg(color.opacity(0.09))
         .text_size(px(12.))
+}
+
+/// A banner that only says where things stand, with no color of its own.
+fn quiet_banner(p: Palette) -> Div {
+    banner(p.edge).border_color(p.edge.opacity(0.7)).bg(p.base)
+}
+
+/// A banner's first line: its `glyph` in `color`, then the title.
+fn banner_head(glyph: &'static str, color: Hsla, title: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(icon(glyph).size(px(14.)).text_color(color))
+        .child(div().font_weight(FontWeight::MEDIUM).child(title))
 }
 
 /// Lines of what changed, in a monospaced box.
@@ -803,7 +858,7 @@ impl Workspace {
                     SkillView::Skill(skill),
                     head,
                     skill.purpose(),
-                    about(skill).roles,
+                    list_who(state),
                     p,
                     cx,
                 )
@@ -813,7 +868,7 @@ impl Workspace {
                 SkillView::Core(0),
                 ("Fixed core", "lock", pill("Read only", p.subtle)),
                 CORE_PURPOSE,
-                "Every agent · sent before its skill",
+                "Every agent · sent before its skill".into(),
                 p,
                 cx,
             ))
@@ -825,7 +880,7 @@ impl Workspace {
         view: SkillView,
         (name, glyph, state): (&'static str, &'static str, Div),
         what: &'static str,
-        who: &'static str,
+        who: String,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -1081,7 +1136,7 @@ impl Workspace {
         let act = match confirm {
             Confirm::Reset => act.danger().label("Reset to stock"),
             Confirm::Rewrite => act.primary().label("Start rewrite").disabled(unsaved),
-            Confirm::Undo { .. } => act.danger().label("Undo merge"),
+            Confirm::Undo { .. } => act.primary().label("Undo merge"),
             Confirm::Restore { .. } => act.primary().label("Restore"),
         };
         div().w(px(380.)).h_full().flex().flex_col().child(
@@ -1137,11 +1192,17 @@ impl Workspace {
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
-                    .child(div().flex_1().font_weight(FontWeight::MEDIUM).child(title))
-                    .child(hint(format!("{} · {at}", merging_mac(note)), p)),
+                    .child(banner_head("git-merge", p.green, title).flex_1())
+                    .child(icon("laptop").size(px(13.)).text_color(p.green))
+                    .child(
+                        div()
+                            .text_color(p.green)
+                            .child(format!("{} · {at}", merging_mac(note))),
+                    ),
             )
-            .child(text)
+            .child(hint(text, p))
             .child(
                 div()
                     .flex()
@@ -1157,6 +1218,7 @@ impl Workspace {
                     .child(
                         button("undo-merge")
                             .ghost()
+                            .icon(icon("undo").size(px(13.)))
                             .label("Undo")
                             .on_click(cx.listener(move |v, _, _, c| {
                                 let note = undo.clone();
@@ -1165,7 +1227,7 @@ impl Workspace {
                     )
                     .child(
                         button("dismiss-merge")
-                            .ghost()
+                            .link()
                             .label("Dismiss")
                             .on_click(cx.listener(move |v, _, w, c| {
                                 let entry = dismiss.clone();
@@ -1186,8 +1248,9 @@ impl Workspace {
         let ([title, text], offers) = rewrite_banner(state)?;
         let skill = state.skill;
         let mergeable = (state.rewrite.as_ref()).is_some_and(|r| !r.base_version.is_empty());
+        let undone = state.merge_standing == Some(MergeStanding::Undone);
         let merge = button("merge-update")
-            .primary()
+            .when(!undone, |b| b.primary())
             .label(format!("Merge {} in", state.stock_version))
             .on_click(
                 cx.listener(move |v, _, w, c| v.request(Command::MergeSkillUpdate { skill }, w, c)),
@@ -1210,9 +1273,16 @@ impl Workspace {
                     .label("Reset to stock")
                     .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
             );
-        let color = if offers { p.yellow } else { p.focus };
-        let title = div().font_weight(FontWeight::MEDIUM).child(title);
-        Some((banner(color).child(title).child(text)).when(offers, |d| d.child(actions)))
+        let (banner, head) = match &state.merge_standing {
+            Some(MergeStanding::Undone) => (quiet_banner(p), Some("undo")),
+            Some(MergeStanding::NewerBase { .. }) => (quiet_banner(p), Some("laptop")),
+            None => (banner(p.yellow), None),
+        };
+        let title = match head {
+            Some(glyph) => banner_head(glyph, p.subtle, title),
+            None => div().font_weight(FontWeight::MEDIUM).child(title),
+        };
+        Some((banner.child(title).child(hint(text, p))).when(offers, |d| d.child(actions)))
     }
 
     /// What changed from the rewrite's base to the stock text, as removed and added lines.
@@ -1658,9 +1728,9 @@ mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
         CORE, Confirm, OUT_OF_DATE, Shown, based_on, core_tab, entry_detail, entry_time,
-        entry_title, grouped, is_change, is_live, merge_counts, merge_note_text, merged_since,
-        out_of_date, out_of_date_title, question, reset_question, rewrite_banner, rewrite_question,
-        saved_text, shown_changes, state_label, when, written_at,
+        entry_title, grouped, is_change, is_live, list_who, merge_counts, merge_note_text,
+        merged_since, out_of_date, out_of_date_title, question, reset_question, rewrite_banner,
+        rewrite_question, saved_text, shown_changes, state_label, time_or_date, when, written_at,
     };
     use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{
@@ -1929,7 +1999,7 @@ mod tests {
             reset_question(&rewritten),
             [
                 "Reset Coordinating to stock?",
-                "Your rewrite stops applying from each agent's next turn. The project coordinator gets the stock text only.",
+                "Your rewrite stops applying from each agent's next turn. Coordinators get the stock text only.",
                 "Your rewrite stays in the history, where you can restore it.",
             ]
         );
@@ -2100,7 +2170,7 @@ mod tests {
             merge_note_text(coordinating, &note, None),
             [
                 "Merged Coordinating v1 into your rewrite",
-                "1 change from v1. The project coordinator gets the merged text from their next turn.",
+                "1 change from v1 came in as plain text. Coordinators get the merged text from their next turn.",
             ]
         );
 
@@ -2109,13 +2179,13 @@ mod tests {
             later: false,
         };
         let (asked, command) = question(coordinating, &undo, false);
-        let before = entry_time(&note.entry);
+        let before = time_or_date(&note.entry);
         assert_eq!(
             asked,
             [
                 "Undo the merge of v1?".into(),
                 format!(
-                    "Your rewrite goes back to exactly what it was before {before}, based on stock v0. The project coordinator gets it from their next turn, on every Mac."
+                    "Your rewrite goes back to exactly what it was before {before}, based on stock v0. Coordinators get it from their next turn, on every Mac."
                 ),
                 "v1 won't be merged in again on its own. The merge stays in the history.".into(),
             ]
@@ -2140,7 +2210,7 @@ mod tests {
         let later = Confirm::Undo { note, later: true };
         let ([_, what, kept], _) = question(&undone, &later, false);
         assert!(what.ends_with(
-            "based on stock v0, and your changes since stop applying. The project coordinator gets it from their next turn, on every Mac."
+            "based on stock v0, and your changes since stop applying. Coordinators get it from their next turn, on every Mac."
         ));
         assert_eq!(
             kept,
@@ -2249,5 +2319,33 @@ mod tests {
             "3 changes from v2, 1 passage merged by Claude · Haiku · Medium"
         );
         assert_eq!(super::merge_tokens(&note), " · 6,240 tokens");
+        let home = tempfile::tempdir().unwrap();
+        let state = Host::open(home.path())
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .skills
+            .remove(0);
+        let [_, text] = merge_note_text(&state, &note, Some("Claude · Haiku · Medium"));
+        assert_eq!(
+            text,
+            "3 changes from v2 came in as plain text. You had also changed 1 passage v2 changes, so Claude · Haiku · Medium merged that one, keeping your wording where both could stand. Coordinators get the merged text from their next turn."
+        );
+    }
+
+    #[test]
+    fn the_list_dates_the_merge_it_notes() {
+        let home = tempfile::tempdir().unwrap();
+        let host = merged_at_start(&home);
+        let mut coordinating = host.snapshot().unwrap().skills.remove(0);
+        assert!(
+            list_who(&coordinating)
+                .starts_with("Project coordinator · v1 merged into your rewrite today at ")
+        );
+        let note = coordinating.merge_note.as_mut().unwrap();
+        note.entry = "2020-10-14T12-00-00.000Z".into();
+        assert!(list_who(&coordinating).contains(" merged into your rewrite on 14 Oct at "));
+        coordinating.merge_note = None;
+        assert_eq!(list_who(&coordinating), "Project coordinator");
     }
 }
