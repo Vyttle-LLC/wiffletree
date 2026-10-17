@@ -196,7 +196,8 @@ pub enum MergeStanding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rewrite {
     pub text: String,
-    /// The stock text the rewrite started from, or was last marked up to date against.
+    /// The stock text the rewrite started from, or was last marked up to date against or merged
+    /// with.
     pub base: String,
     /// The version on the first line of the stock text the rewrite is based on.
     pub base_version: String,

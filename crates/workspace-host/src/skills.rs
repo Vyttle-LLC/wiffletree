@@ -337,11 +337,20 @@ impl SkillStore<'_> {
         self.change(skill, change, edits)?;
         Ok(vec![])
     }
+    /// The "Merged" entry `entry` names, or an error when it is another kind of entry.
+    pub fn merged_entry(&self, skill: Skill, entry: &str) -> Result<Entry> {
+        let entry = self.entry(skill, entry)?;
+        ensure!(
+            matches!(entry.change, Change::Merged { .. }),
+            "That history entry is not a merge"
+        );
+        Ok(entry)
+    }
     /// Writes back exactly the rewrite and base from before the merge `entry` names, as a new
     /// entry.
     pub fn undo_merge(&self, skill: Skill, entry: &str) -> Result<()> {
-        let Change::Merged { before, to, .. } = self.entry(skill, entry)?.change else {
-            bail!("That history entry is not a merge");
+        let Change::Merged { before, to, .. } = self.merged_entry(skill, entry)?.change else {
+            unreachable!("merged_entry returns a merge");
         };
         let change = Change::UndidMerge {
             entry: entry.into(),
@@ -2093,6 +2102,15 @@ mod tests {
         };
         execute(&mut host, merge).unwrap();
         let (merged, entry) = host.skills().history(Skill::Coordinating).pop().unwrap();
+        // Only a "Merged" entry can be dismissed.
+        let started = host.skills().history(Skill::Coordinating).remove(0).0;
+        let not_a_merge = Command::DismissSkillMerge {
+            skill: Skill::Coordinating,
+            entry: started,
+        };
+        let refused = execute(&mut host, not_a_merge).unwrap_err().to_string();
+        assert_eq!(refused, "That history entry is not a merge");
+        assert!(coordinating_state(&host).merge_note.is_some());
         // A later entry that is not a merge.
         let later = Entry {
             change: Change::NewStockVersion {

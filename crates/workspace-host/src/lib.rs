@@ -1491,6 +1491,7 @@ impl Host {
                 self.changed_skill(skill)?
             }
             Command::DismissSkillMerge { skill, entry } => {
+                self.skills().merged_entry(skill, &entry)?;
                 self.db.execute(
                     "INSERT OR IGNORE INTO skill_merges_dismissed(skill,entry) VALUES (?1,?2)",
                     [skill.folder(), &entry],
