@@ -612,6 +612,19 @@ fn peer_line_row(
         })
 }
 
+/// A page of messages being prepared: which ask it answers, for which session and page.
+struct PageAsk {
+    number: u64,
+    session_id: String,
+    page: Option<i64>,
+}
+impl PageAsk {
+    /// Shown only if no page was asked for since and the reader is still on its session and page.
+    fn wanted(&self, latest: u64, selected: Option<&str>, page: Option<i64>) -> bool {
+        self.number == latest && selected == Some(self.session_id.as_str()) && self.page == page
+    }
+}
+
 /// The selected session's messages, a page at a time, and its live activity.
 pub(super) struct Transcript {
     bridge: Bridge,
@@ -626,7 +639,7 @@ pub(super) struct Transcript {
     cache_order: VecDeque<String>,
     /// The older page being read, by the sequence it ends before; `None` for the newest.
     page: Option<i64>,
-    /// Pages are prepared off the UI thread; only the latest one asked for is shown.
+    /// Pages are prepared off the UI thread; counts the asks so only the latest is shown.
     preparing: u64,
     /// The selected session's latest run, shown as the activity card while it works.
     activity: Option<RunActivity>,
@@ -639,7 +652,16 @@ pub(super) struct Transcript {
 }
 impl EventEmitter<Intent> for Transcript {}
 impl Transcript {
-    pub(super) fn new(bridge: Bridge, input: Entity<TextareaState>) -> Self {
+    pub(super) fn new(
+        bridge: Bridge,
+        input: Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe_global_in::<HumanWrote>(window, |view, window, cx| {
+            view.back_to_latest(window, cx)
+        })
+        .detach();
         Self {
             bridge,
             shared: Shared::default(),
@@ -741,7 +763,7 @@ impl Transcript {
     }
 
     /// After a change the human made, a reader of an older page goes back to the newest.
-    pub(super) fn back_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn back_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page.take().is_some() {
             self.load_messages(window, cx);
         }
@@ -757,8 +779,12 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) {
         self.preparing += 1;
-        let preparing = self.preparing;
-        let senders = Senders::of(&self.shared, &session_id, &messages);
+        let ask = PageAsk {
+            number: self.preparing,
+            session_id,
+            page,
+        };
+        let senders = Senders::of(&self.shared, &ask.session_id, &messages);
         let rows = cx.background_spawn(async move {
             let rows = prepare(&messages, &senders);
             (messages, rows)
@@ -766,10 +792,7 @@ impl Transcript {
         cx.spawn_in(window, async move |this, cx| {
             let (messages, rows) = rows.await;
             let _ = this.update_in(cx, |view, window, cx| {
-                let wanted = view.preparing == preparing
-                    && view.page == page
-                    && view.shared.selected.as_deref() == Some(&session_id);
-                if !wanted {
+                if !ask.wanted(view.preparing, view.shared.selected.as_deref(), view.page) {
                     return;
                 }
                 let shown = Loaded {
@@ -779,8 +802,8 @@ impl Transcript {
                 view.replace_page(shown.clone());
                 cx.emit(Intent::MessagesShown);
                 view.load_run_summaries(window, cx);
-                if page.is_none() {
-                    view.cache(session_id, shown);
+                if ask.page.is_none() {
+                    view.cache(ask.session_id, shown);
                 }
                 cx.notify();
             });
@@ -1303,6 +1326,7 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::{
+        PageAsk,
         Placement::{Alone, Folded, Heads},
         Senders, Shape, from_human, peer_line, placements, prepare, run_heading, run_troubles,
         transcript_overlap,
@@ -1334,6 +1358,29 @@ mod tests {
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!from_human(&reply));
+    }
+
+    #[test]
+    fn a_prepared_page_is_shown_only_if_it_is_still_the_one_wanted() {
+        let ask = PageAsk {
+            number: 2,
+            session_id: "s".into(),
+            page: Some(40),
+        };
+        assert!(ask.wanted(2, Some("s"), Some(40)));
+        assert!(
+            !ask.wanted(3, Some("s"), Some(40)),
+            "a later page was asked for"
+        );
+        assert!(
+            !ask.wanted(2, Some("t"), Some(40)),
+            "another session is selected"
+        );
+        assert!(
+            !ask.wanted(2, Some("s"), None),
+            "the reader went back to the newest"
+        );
+        assert!(!ask.wanted(2, None, Some(40)), "nothing is selected");
     }
 
     #[test]

@@ -895,11 +895,13 @@ impl SkillsPage {
     /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
+        // Merge notes and questions name their models from the catalog.
+        let catalog = !Rc::ptr_eq(&shared.catalog, &self.shared.catalog);
         if moved && let Some(snapshot) = shared.snapshot() {
             self.follow_saved_rules(snapshot, window, cx);
         }
         self.shared = shared;
-        if moved {
+        if moved || catalog {
             cx.notify();
         }
     }

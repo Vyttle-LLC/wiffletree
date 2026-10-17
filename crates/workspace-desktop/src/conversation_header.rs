@@ -3,7 +3,6 @@
 //! keystroke in the composer or frame of another view's spinner.
 use super::*;
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
-use transcript::Transcript;
 use ui::{icon, progress_bar, segmented_bar};
 
 const HEADER_HEIGHT: f32 = 64.;
@@ -23,15 +22,12 @@ pub(super) struct ConversationHeader {
     bridge: Bridge,
     shared: Shared,
     contexts: Entity<context_view::Contexts>,
-    /// Goes back to its newest page after a change made here.
-    transcript: Entity<Transcript>,
 }
 impl EventEmitter<Intent> for ConversationHeader {}
 impl ConversationHeader {
     pub(super) fn new(
         bridge: Bridge,
         contexts: Entity<context_view::Contexts>,
-        transcript: Entity<Transcript>,
         cx: &mut Context<Self>,
     ) -> Self {
         // The context chip draws the selected session's measurement.
@@ -40,7 +36,6 @@ impl ConversationHeader {
             bridge,
             shared: Shared::default(),
             contexts,
-            transcript,
         }
     }
     /// Draws again for a new selection, workspace, progress or panel.
@@ -309,10 +304,6 @@ impl Requests for ConversationHeader {
         if let Command::SetArchived { archived, .. } = command {
             let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
             cx.emit(Intent::Archived { archived, affected });
-        } else {
-            // The change signal brings the snapshot; the transcript goes back to its newest page.
-            self.transcript
-                .update(cx, |transcript, cx| transcript.back_to_latest(window, cx));
         }
     }
 }

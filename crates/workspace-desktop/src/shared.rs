@@ -265,15 +265,33 @@ pub(super) trait Requests: Sized + 'static {
                 .recv()
                 .await
                 .unwrap_or_else(|_| Err("Host disconnected".into()));
+            let wrote = reply.is_ok() && human_write(&command);
             let _ = cx.update(|window, cx| {
-                this.update(cx, |view, cx| {
+                let _ = this.update(cx, |view, cx| {
                     view.accept(command, reply, window, cx);
                     cx.notify();
-                })
+                });
+                if wrote {
+                    cx.set_global(HumanWrote);
+                }
             });
         })
         .detach();
     }
+}
+
+/// Set after each change the human made, so its observers hear of every one. A reader of an
+/// older transcript page goes back to the newest after any of them.
+pub(super) struct HumanWrote;
+impl Global for HumanWrote {}
+
+/// A write the human asked for, unlike the refreshes the app makes by itself.
+fn human_write(command: &Command) -> bool {
+    !command.is_read()
+        && !matches!(
+            command,
+            Command::RecordQuota { .. } | Command::RefreshRepositories
+        )
 }
 
 pub(super) fn toast(message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {

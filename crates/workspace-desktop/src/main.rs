@@ -52,7 +52,7 @@ use gpui_component::{
 use palette::{Palette, palette};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
-use shared::{Amendment, Intent, Requests, Shared, toast, toast_error};
+use shared::{Amendment, HumanWrote, Intent, Requests, Shared, toast, toast_error};
 // GPUI has an `Inspector` too; ours wins over its glob.
 use inspector::Inspector;
 use std::{
@@ -560,10 +560,16 @@ impl Workspace {
                 Ok(archive) => self.accept_archive(archive, window, cx),
                 Err(e) => self.fail(&Command::Archive, e.to_string(), window, cx),
             },
-            Command::Quotas | Command::RecordQuota { .. } => match serde_json::from_value(value) {
-                Ok(quotas) => self.shared.quotas = quotas,
-                Err(error) => toast_error(error.to_string(), window, cx),
-            },
+            Command::Quotas | Command::RecordQuota { .. } => {
+                match serde_json::from_value::<Vec<QuotaReading>>(value) {
+                    // The same readings again would only redraw what draws them.
+                    Ok(quotas) if *self.shared.quotas != quotas => {
+                        self.shared.quotas = Rc::new(quotas)
+                    }
+                    Ok(_) => {}
+                    Err(error) => toast_error(error.to_string(), window, cx),
+                }
+            }
             Command::CreateSession { .. } | Command::AssignTicket { .. } => {
                 if let Ok(session) = serde_json::from_value::<Session>(value) {
                     let id = session.id.clone();
@@ -1206,6 +1212,42 @@ mod tests {
         };
         assert!(wants_archive(&index(2), &shown));
         assert!(!wants_archive(&index(1), &shown));
+    }
+
+    #[test]
+    fn a_pending_publish_request_needs_the_archive_once_it_moved() {
+        // Its card is drawn from its ticket, which the archive holds once accepted.
+        let publish = Attention {
+            id: "a".into(),
+            project_id: "p".into(),
+            session_id: "live".into(),
+            host: "local".into(),
+            operation_id: format!("{PUBLISH_PREFIX}t:push"),
+            prompt: "Push?".into(),
+            options: vec![],
+            answer: None,
+        };
+        let with_publish = |stamp| {
+            let index = index(stamp);
+            let snapshot = Snapshot {
+                attention: vec![publish.clone()],
+                ..index.snapshot().clone()
+            };
+            WorkspaceIndex::new(snapshot, index.archive().clone())
+        };
+        assert!(wants_archive(&with_publish(2), &shown("live")));
+        assert!(!wants_archive(&with_publish(1), &shown("live")));
+        let question = Attention {
+            operation_id: "question:q".into(),
+            ..publish
+        };
+        let index = index(2);
+        let snapshot = Snapshot {
+            attention: vec![question],
+            ..index.snapshot().clone()
+        };
+        let asked = WorkspaceIndex::new(snapshot, index.archive().clone());
+        assert!(!wants_archive(&asked, &shown("live")), "a question is not");
     }
 
     #[test]

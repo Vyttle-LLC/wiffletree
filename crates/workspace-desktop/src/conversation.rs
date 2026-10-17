@@ -67,9 +67,8 @@ impl Conversation {
         .detach();
         // The decision card draws the inbox's answer box.
         cx.observe(&inbox, |_, _, cx| cx.notify()).detach();
-        let transcript = cx.new(|_| Transcript::new(bridge.clone(), input.clone()));
-        let header =
-            cx.new(|cx| ConversationHeader::new(bridge.clone(), contexts, transcript.clone(), cx));
+        let transcript = cx.new(|cx| Transcript::new(bridge.clone(), input.clone(), window, cx));
+        let header = cx.new(|cx| ConversationHeader::new(bridge.clone(), contexts, cx));
         cx.subscribe(&header, |_, _, intent: &Intent, cx| cx.emit(intent.clone()))
             .detach();
         cx.subscribe(&transcript, |_, _, intent: &Intent, cx| {
@@ -779,10 +778,6 @@ impl Requests for Conversation {
                 let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
                 cx.emit(Intent::Archived { archived, affected });
             }
-            // The change signal brings the snapshot; the transcript goes back to its newest page.
-            _ if !command.is_read() => self
-                .transcript
-                .update(cx, |transcript, cx| transcript.back_to_latest(window, cx)),
             _ => {}
         }
     }

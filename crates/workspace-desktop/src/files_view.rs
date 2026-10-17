@@ -871,6 +871,7 @@ impl Inspector {
 #[cfg(test)]
 mod tests {
     use super::{Files, Group, Live, Node, Panel, groups, live, row_key, summary, tree};
+    use gpui::{ListOffset, px};
     use workspace_core::{AgentFiles, Command, FileActivity, LineCount, Role, TicketFiles};
 
     /// The tree as indented names, directories ending in "/".
@@ -1083,6 +1084,40 @@ mod tests {
         // A refresh lists the same rows; the list keeps them, and the reader's place with them.
         files.regroup();
         assert_eq!(listed(&files), [&docs, &x, &src, &a]);
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_place_of_a_reader_scrolled_down_the_tree() {
+        let mut report = [ticket(
+            "Panel",
+            "web",
+            vec![agent("Implementer", &[("src/a.rs", 1, 0)])],
+        )];
+        report[0].tree = Some(vec!["src/a.rs".into(), "src/b.rs".into()]);
+        let mut files = Files {
+            report: report.into(),
+            ..Default::default()
+        };
+        files.regroup();
+        let b = row_key(&files.groups[0], "src/b.rs");
+        let row_of = |files: &Files, key: &str| files.rows.iter().position(|r| r.key == key);
+        let place = ListOffset {
+            item_ix: row_of(&files, &b).unwrap(),
+            offset_in_item: px(5.),
+        };
+        let top = |files: &Files| {
+            let top = files.list.logical_scroll_top();
+            (top.item_ix, top.offset_in_item)
+        };
+        files.list.scroll_to(place);
+        files.regroup();
+        assert_eq!(top(&files), (place.item_ix, px(5.)), "the same rows");
+        // A row added above the reader moves their place down with the row they were on.
+        (files.report[0].tree.as_mut().unwrap()).push("docs/x.md".into());
+        files.regroup();
+        let moved = row_of(&files, &b).unwrap();
+        assert!(moved > place.item_ix);
+        assert_eq!(top(&files), (moved, px(5.)));
     }
 
     #[test]
