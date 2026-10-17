@@ -52,6 +52,10 @@ On a read-only copy of the human's store, measured before that review change (13
 
 Of the old host build, 19 ms was `questions_waiting` scanning every message and 15 ms `undelivered` doing the same; both now go through existing indexes (message ids, and each session's outbox). Accepted and closed tickets and archived sessions are found through two expression indexes. Most of what remains is hashing the archive's stored rows for `archive_stamp`, about 4.5 ms, and finding open tickets' agents. Tree rows and the snapshot sizes and round trips on the desktop side come from the ignored `tree_rows_benchmark` test, pointed at a kept fixture or store copy; the other rows come from the benchmark. The desktop decodes the snapshot and builds the index on its main thread; that is the round trip's decode plus the index, under 1 ms here.
 
+Phase 4b replaces the remaining archive hash with a maintained revision. Its
+[same-fixture before/after measurements](host-revisions.md) reduce snapshot host
+build p50 from 8.175 ms to 2.712 ms, including per-session message revisions.
+
 Reproduce with:
 
 ```sh

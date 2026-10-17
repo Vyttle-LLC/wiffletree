@@ -61,6 +61,130 @@ impl History {
     }
 }
 
+/// A read-only keeper pass. The actor supplies durable inputs, Git runs on a job thread, and
+/// application rechecks the repository, tickets and watched base before making work due.
+pub(crate) struct KeeperPoll {
+    pub(crate) repository: Repository,
+    tickets: Vec<(Ticket, Option<String>)>,
+}
+#[derive(Default)]
+pub(crate) struct Ancestry {
+    heads: std::collections::HashMap<String, String>,
+    origins: std::collections::HashMap<String, repositories::Origin>,
+    may_change: std::collections::HashSet<String>,
+    ancestors: std::collections::HashMap<(PathBuf, String, String), bool>,
+}
+impl KeeperPoll {
+    pub(crate) fn prepare(host: &Host, repository: &str) -> Result<Self> {
+        let repository = host.repository(repository)?;
+        let tickets = if host.settings().keeper.rebase {
+            host.tickets()?
+                .into_iter()
+                .filter(|t| t.repository_id == repository.id && t.open_pull_request().is_some())
+                .map(|t| {
+                    let base = host.keeper_base(&t).map(str::to_owned);
+                    (t, base)
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        Ok(Self {
+            repository,
+            tickets,
+        })
+    }
+    pub(crate) fn is_current(&self, host: &Host) -> Result<bool> {
+        let current = Self::prepare(host, &self.repository.id)?;
+        Ok(encode(&(&self.repository, &self.tickets))?
+            == encode(&(&current.repository, &current.tickets))?)
+    }
+    pub(crate) fn apply_due(
+        &self,
+        host: &mut Host,
+        ancestry: &Ancestry,
+        at: i64,
+    ) -> Result<keeper::Due> {
+        ensure!(
+            self.is_current(host)?,
+            "Keeper inputs changed during ancestry inspection"
+        );
+        host.keeper_due_checked(&self.repository.id, at, ancestry)
+    }
+    pub(crate) fn apply_reproduced(
+        &self,
+        host: &mut Host,
+        ancestry: &Ancestry,
+        reproduced: keeper::Reproduced,
+    ) -> Result<()> {
+        ensure!(
+            self.is_current(host)?,
+            "Keeper inputs changed during ancestry inspection"
+        );
+        host.keeper_reproduced_checked(reproduced, Some(ancestry))
+    }
+    pub(crate) fn run(&self, git: &publish::GitTool) -> Ancestry {
+        let mut result = Ancestry::default();
+        for (ticket, base) in &self.tickets {
+            let pr = ticket.open_pull_request().expect("prepared open PR");
+            let worktree = Path::new(&ticket.worktree);
+            if let Ok(head) = git_output(git, worktree, &["rev-parse", "HEAD"]) {
+                let head = head.trim().to_owned();
+                result.check(git, worktree, &pr.head, &head);
+                if !result.contains(worktree, &pr.head, &head) {
+                    result
+                        .origins
+                        .insert(ticket.id.clone(), repositories::read_origin(worktree));
+                }
+                if ticket.publishing.is_none()
+                    && head == pr.head
+                    && ticket
+                        .verification
+                        .as_ref()
+                        .filter(|v| v.outcome == VerificationOutcome::Passed)
+                        .and_then(Verification::verified_commit)
+                        .is_some_and(|verified| {
+                            live::verified_head(ticket, verified, || {
+                                Ok(self.repository.base.clone())
+                            })
+                            .is_ok()
+                        })
+                {
+                    result.may_change.insert(ticket.id.clone());
+                }
+                result.heads.insert(ticket.id.clone(), head);
+            }
+            if let Some(base) = base {
+                result.check(git, Path::new(&self.repository.path), base, &pr.head);
+            }
+        }
+        result
+    }
+}
+impl Ancestry {
+    fn check(&mut self, git: &publish::GitTool, path: &Path, older: &str, head: &str) {
+        let contains = git(path, &["merge-base", "--is-ancestor", older, head])
+            .is_ok_and(|a| a.status.success());
+        self.ancestors
+            .insert((path.into(), older.into(), head.into()), contains);
+    }
+    pub(crate) fn origin(&self, ticket: &Ticket) -> Option<&repositories::Origin> {
+        self.origins.get(&ticket.id)
+    }
+    pub(crate) fn may_change(&self, ticket: &Ticket) -> bool {
+        self.may_change.contains(&ticket.id)
+    }
+    pub(crate) fn head(&self, ticket: &Ticket) -> Option<&str> {
+        self.heads.get(&ticket.id).map(String::as_str)
+    }
+    pub(crate) fn contains(&self, path: &Path, older: &str, head: &str) -> bool {
+        self.ancestors
+            .get(&(path.into(), older.into(), head.into()))
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
 /// The actor validates ownership before any Git starts, then again before reserving a path.
 pub(crate) enum Prepared {
     Existing(Box<Ticket>),
@@ -969,6 +1093,70 @@ fn hold_movement(host: &mut Host, ticket_id: &str, head: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_keeper_poll_reads_git_off_thread_and_rejects_changed_ticket_or_base_inputs() {
+        let (mut f, remote) = keeper::tests::kept();
+        let ticket = f.ticket();
+        let base = test_support::git(&f.repository, &["rev-parse", "main"]);
+        let note = |host: &mut Host, base: &str| {
+            host.note_bases(
+                &ticket.repository_id,
+                &pr_watch::Pass {
+                    found: vec![pr_watch::Found {
+                        ticket_id: ticket.id.clone(),
+                        pull_request: ticket.pull_request.clone().unwrap(),
+                        base_head: base.into(),
+                        worktree_head: None,
+                    }],
+                    rate_limit: pr_watch::RateLimit {
+                        remaining: 4000,
+                        reset_at: 0,
+                    },
+                },
+                0,
+            );
+        };
+        note(&mut f.host, &base);
+        let plan = KeeperPoll::prepare(&f.host, &ticket.repository_id).unwrap();
+        let caller = std::thread::current().id();
+        let calls = Arc::new(Mutex::new(vec![]));
+        let seen = calls.clone();
+        let real = remote.tools.git.clone();
+        let git: publish::GitTool = Arc::new(move |path, args| {
+            assert_ne!(std::thread::current().id(), caller);
+            seen.lock()
+                .unwrap()
+                .push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            real(path, args)
+        });
+        let (plan, ancestry) = std::thread::spawn(move || {
+            let result = plan.run(&git);
+            (plan, result)
+        })
+        .join()
+        .unwrap();
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| a.first().is_some_and(|a| a == "merge-base"))
+                .count()
+                >= 2
+        );
+        assert!(plan.is_current(&f.host).unwrap());
+        let due = plan.apply_due(&mut f.host, &ancestry, 0).unwrap();
+        assert!(due.rebases.is_empty());
+        assert_eq!(f.host.keeper_parts()[&ticket.id], KeeperPart::UpToDate);
+        let mut changed = ticket.clone();
+        changed.title.push_str(" changed");
+        f.host.save_ticket(&changed).unwrap();
+        assert!(plan.apply_due(&mut f.host, &ancestry, 0).is_err());
+        f.host.save_ticket(&ticket).unwrap();
+        note(&mut f.host, "a-different-base");
+        assert!(plan.apply_due(&mut f.host, &ancestry, 0).is_err());
+    }
 
     #[test]
     fn creation_reserves_colliding_names_and_resumes_the_same_worktree_after_restart() {

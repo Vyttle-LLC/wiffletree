@@ -4,8 +4,7 @@ use super::*;
 type Running = HashMap<String, (Session, Option<String>)>;
 #[derive(Default)]
 pub(super) struct Admission {
-    all_dirty: bool,
-    dirty_sessions: HashSet<String>,
+    dirty: bool,
     pub(super) wake_at: Option<i64>,
     running: Option<Running>,
 }
@@ -21,20 +20,15 @@ impl Admission {
             Event::Tool { name, .. }
                 if matches!(name.as_str(), "workspace_context" | "set_plan") => {}
             Event::Provider {
-                session,
                 event: ProviderEvent::Finished { .. },
                 ..
-            } => {
-                self.dirty_sessions.insert(session.clone());
-            }
+            } => self.dirty = true,
             Event::Provider { .. } => {}
-            _ => self.all_dirty = true,
+            _ => self.dirty = true,
         }
     }
     pub(super) fn take_due(&mut self) -> bool {
-        let due = std::mem::take(&mut self.all_dirty) || !self.dirty_sessions.is_empty();
-        self.dirty_sessions.clear();
-        due
+        std::mem::take(&mut self.dirty)
     }
     pub(super) fn started(&mut self, session: &Session, ticket: Option<String>) {
         if let Some(running) = &mut self.running {

@@ -484,7 +484,16 @@ enum PublishAction {
         approved: bool,
     },
 }
+enum KeeperPollAction {
+    Due(i64),
+    Reproduced(keeper::Reproduced),
+}
 enum Event {
+    KeeperPolled(
+        Box<checkout::KeeperPoll>,
+        Result<checkout::Ancestry>,
+        KeeperPollAction,
+    ),
     KeeperCheckoutDone(Box<checkout::KeeperCheckout>, Box<checkout::KeeperResult>),
     PublicationChecked(Box<checkout::PublicationResult>, PublishAction),
     WorktreePrepared(Box<checkout::Worktree>, Result<()>),
@@ -673,6 +682,7 @@ struct Actor {
     preparing_worktrees: HashSet<String>,
     checkout_deferred: Vec<Event>,
     checkout_jobs: usize,
+    keeper_polling: HashMap<String, i64>,
     prepared_worktrees: HashMap<String, (checkout::Worktree, Result<()>)>,
     permissions: HashMap<String, Permission>,
     socket: PathBuf,
@@ -805,6 +815,7 @@ impl Service {
                     preparing_worktrees: HashSet::new(),
                     checkout_deferred: vec![],
                     checkout_jobs: 0,
+                    keeper_polling: HashMap::new(),
                     prepared_worktrees: HashMap::new(),
                     permissions: HashMap::new(),
                     socket: socket.clone(),
@@ -900,6 +911,34 @@ impl Service {
     }
 }
 impl Actor {
+    fn poll_keeper(&mut self, repository: &str, action: KeeperPollAction) {
+        match checkout::KeeperPoll::prepare(&self.host, repository) {
+            Ok(plan) => {
+                let git = self.publish_tools.git.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    (plan, action),
+                    move |(plan, _)| Ok(plan.run(&git)),
+                    |_| {
+                        Err(anyhow::anyhow!(
+                            "The keeper ancestry inspection stopped unexpectedly"
+                        ))
+                    },
+                    |(plan, action), result| Event::KeeperPolled(Box::new(plan), result, action),
+                );
+            }
+            Err(error) => {
+                self.keeper_polling.remove(repository);
+                eprintln!("Workspace keeper inspection: {error:#}");
+                if let KeeperPollAction::Reproduced(reproduced) = action
+                    && let Err(error) = self.host.keeper_reproduced_checked(reproduced, None)
+                {
+                    eprintln!("Workspace keeper cleanup: {error:#}");
+                }
+            }
+        }
+    }
+
     fn keeper_checkout(&mut self, ticket: &str, action: checkout::KeeperAction) {
         match checkout::KeeperCheckout::prepare(&mut self.host, ticket, action) {
             Ok(job) => {
@@ -1191,6 +1230,11 @@ impl Actor {
                         .is_some_and(|read| reservations.blocks_repository(&self.host, &read.id))
             }
             Event::Synced(_) | Event::GitHub(_) | Event::SettingsRepositoryPrepared { .. } => true,
+            Event::KeeperPolled(plan, ..) => self.host.tickets().is_ok_and(|tickets| {
+                tickets.iter().any(|ticket| {
+                    ticket.repository_id == plan.repository.id && reservations.contains(&ticket.id)
+                })
+            }),
             Event::PullRequests { repository, .. } => self.host.tickets().is_ok_and(|tickets| {
                 tickets.iter().any(|ticket| {
                     ticket.repository_id == *repository && reservations.contains(&ticket.id)
@@ -1824,12 +1868,68 @@ impl Actor {
                 }
                 true
             }
-            Event::Reproduced(reproduced) => {
-                let ticket = reproduced.ticket_id.clone();
-                if let Err(e) = self.host.keeper_reproduced(reproduced) {
-                    eprintln!("Workspace PR keeper: {ticket}: {e:#}");
+            Event::KeeperPolled(plan, ancestry, mut action) => {
+                let repository = plan.repository.id.clone();
+                if let KeeperPollAction::Due(at) = &mut action {
+                    *at = self.keeper_polling.remove(&repository).unwrap_or(*at);
                 }
-                true
+                let ancestry = match ancestry {
+                    Ok(ancestry) => ancestry,
+                    Err(error) => {
+                        eprintln!("Workspace keeper inspection: {error:#}");
+                        if let KeeperPollAction::Reproduced(reproduced) = action {
+                            if let Err(error) =
+                                self.host.keeper_reproduced_checked(reproduced, None)
+                            {
+                                eprintln!("Workspace keeper cleanup: {error:#}");
+                            }
+                            return true;
+                        }
+                        return false;
+                    }
+                };
+                if self.stopping {
+                    return false;
+                }
+                if !plan.is_current(&self.host).unwrap_or(false) {
+                    if let KeeperPollAction::Due(at) = &action {
+                        self.keeper_polling.insert(repository.clone(), *at);
+                    }
+                    self.poll_keeper(&repository, action);
+                    return false;
+                }
+                match action {
+                    KeeperPollAction::Due(at) => {
+                        match plan.apply_due(&mut self.host, &ancestry, at) {
+                            Ok(due) => self.start_keeper_due(due),
+                            Err(error) => {
+                                eprintln!("Workspace PR keeper: {error:#}");
+                                false
+                            }
+                        }
+                    }
+                    KeeperPollAction::Reproduced(reproduced) => {
+                        if let Err(error) =
+                            plan.apply_reproduced(&mut self.host, &ancestry, reproduced)
+                        {
+                            eprintln!("Workspace PR keeper: {error:#}");
+                        }
+                        true
+                    }
+                }
+            }
+            Event::Reproduced(reproduced) => {
+                let repository = self
+                    .host
+                    .ticket(&reproduced.ticket_id)
+                    .map(|t| t.repository_id);
+                match repository {
+                    Ok(repository) => {
+                        self.poll_keeper(&repository, KeeperPollAction::Reproduced(reproduced))
+                    }
+                    Err(error) => eprintln!("Workspace PR keeper: {error:#}"),
+                }
+                false
             }
             Event::Fetched(fetched) => {
                 let ticket = fetched.ticket_id.clone();
@@ -2394,13 +2494,29 @@ impl Actor {
     /// worktree.
     /// Returns whether a ticket's PR line changed.
     fn keep_pull_requests(&mut self, repository: &str, at: i64) -> bool {
-        let due = match self.host.keeper_due(repository, at) {
-            Ok(due) => due,
-            Err(e) => {
-                eprintln!("Workspace PR keeper: {e:#}");
-                return false;
-            }
-        };
+        if self.stopping {
+            return false;
+        }
+        if !self.host.settings().keeper.rebase {
+            return match self.host.keeper_due_checked(
+                repository,
+                at,
+                &checkout::Ancestry::default(),
+            ) {
+                Ok(due) => self.start_keeper_due(due),
+                Err(error) => {
+                    eprintln!("Workspace PR keeper: {error:#}");
+                    false
+                }
+            };
+        }
+        let pending = self.keeper_polling.insert(repository.into(), at).is_some();
+        if !pending {
+            self.poll_keeper(repository, KeeperPollAction::Due(at));
+        }
+        false
+    }
+    fn start_keeper_due(&mut self, due: keeper::Due) -> bool {
         for ticket in &due.waiting {
             self.keeper_move(ticket);
         }
@@ -3393,6 +3509,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slow_keeper_ancestry_does_not_block_reads_and_polling_coalesces() {
+        let (f, remote) = keeper::tests::kept();
+        let repository = f.ticket().repository_id;
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let real = remote.tools.git.clone();
+        actor.publish_tools.git = Arc::new(move |path, args| {
+            if args.first() == Some(&"merge-base") {
+                started.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+            real(path, args)
+        });
+        assert!(!actor.keep_pull_requests(&repository, 1));
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!actor.keep_pull_requests(&repository, 2));
+        assert_eq!(actor.keeper_polling[&repository], 2);
+        let (reply, replies) = async_channel::bounded(1);
+        let start = Instant::now();
+        actor.handle(Event::Command(Command::Snapshot, reply));
+        replies.try_recv().unwrap().unwrap();
+        let latency = start.elapsed();
+        assert!(
+            latency < Duration::from_millis(200),
+            "read waited for ancestry: {latency:?}"
+        );
+        assert!(events.try_recv().is_err(), "Git is still held");
+        release.send(()).unwrap();
+        actor.handle(events.recv_blocking().unwrap());
+        assert!(actor.keeper_polling.is_empty());
+    }
+
+    #[test]
+    fn a_panicking_keeper_poll_releases_its_repository_for_the_next_pass() {
+        let (f, remote) = keeper::tests::kept();
+        let repository = f.ticket().repository_id;
+        let publish::tests::Fixture {
+            host, home: _home, ..
+        } = f;
+        let (mut actor, _, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        actor.publish_tools.git = Arc::new(|_, _| panic!("injected ancestry failure"));
+        actor.keep_pull_requests(&repository, 0);
+        assert!(!actor.handle(events.recv_blocking().unwrap()));
+        assert!(actor.keeper_polling.is_empty());
+        actor.publish_tools.git = remote.tools.git.clone();
+        actor.keep_pull_requests(&repository, 1);
+        actor.handle(events.recv_blocking().unwrap());
+        assert!(actor.keeper_polling.is_empty());
+    }
+
+    #[test]
     fn hot_path_measurements() {
         let (_home, host, ticket, _) = ticket_fixture();
         let (mut actor, _, _) = idle_actor(host);
@@ -3655,6 +3835,7 @@ mod tests {
             preparing_worktrees: HashSet::new(),
             checkout_deferred: vec![],
             checkout_jobs: 0,
+            keeper_polling: HashMap::new(),
             prepared_worktrees,
             permissions: HashMap::new(),
             socket: PathBuf::new(),
@@ -9050,6 +9231,8 @@ mod tests {
             host, home: _home, ..
         } = f;
         let (mut actor, changes, _) = idle_actor(host);
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
         let repository = ticket.repository_id.clone();
         // Up to date, then a base that moved and waits for its quiet period: each is news once.
         for (base, signalled) in [
@@ -9073,10 +9256,15 @@ mod tests {
             };
             actor.pr_watch.keep([repository.as_str()]);
             actor.pr_watch.start_due(i64::MAX);
-            actor.process(Event::PullRequests {
+            let dirty = actor.handle(Event::PullRequests {
                 repository: repository.clone(),
                 outcome: pr_watch::Outcome::Read(pass),
             });
+            actor.signal(dirty);
+            let event = events.recv_blocking().unwrap();
+            assert!(matches!(event, Event::KeeperPolled(..)));
+            let dirty = actor.handle(event);
+            actor.signal(dirty);
             assert_eq!(changes.try_recv().is_ok(), signalled, "{base}");
         }
         let part = actor.host.keeper_parts().get(&ticket.id).copied();
