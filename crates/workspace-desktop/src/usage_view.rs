@@ -256,8 +256,31 @@ impl Inspector {
     }
 }
 impl Workspace {
+    /// Reads the stored usage again whenever a provider reports some. A new reading redraws
+    /// the quota strip, and the Usage page reloads its report with it.
+    pub(super) fn watch_usage(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(changes) = self.bridge.usage_changes() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                let read = cx
+                    .update(|window, cx| this.update(cx, |view, cx| view.read_quotas(window, cx)));
+                if !matches!(read, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Asks for the stored quota readings, or, while a read is on its way, for one more after it.
+    pub(super) fn read_quotas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quota_request.send() {
+            self.request(Command::Quotas, window, cx);
+        }
+    }
     pub(super) fn refresh_quota(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request(Command::Quotas, window, cx);
+        self.read_quotas(window, cx);
         if self.shared.quota_pending {
             return;
         }
@@ -314,7 +337,8 @@ impl UsagePage {
             day: None,
         }
     }
-    /// Loads the report when the page opens and again with each new quota reading.
+    /// Loads the report when the page opens and again with each new quota reading, which a
+    /// provider's usage report also brings.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.shared, shared);
         if self.shared.page != Page::Usage {

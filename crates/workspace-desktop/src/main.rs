@@ -158,6 +158,7 @@ struct Workspace {
     /// The snapshot request sent and not yet answered, so that a burst of changes asks for one
     /// more, not one per change.
     snapshot_request: Coalesced,
+    quota_request: Coalesced,
     /// An archive request is on its way.
     archive_pending: bool,
     load_error: Option<String>,
@@ -220,6 +221,7 @@ impl Workspace {
             bridge,
             shared: Shared::default(),
             snapshot_request: Coalesced::default(),
+            quota_request: Coalesced::default(),
             archive_pending: false,
             load_error: None,
             models,
@@ -254,6 +256,7 @@ impl Workspace {
         }
         view.watch_steps(window, cx);
         view.watch_progress(window, cx);
+        view.watch_usage(window, cx);
         view.refresh(window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
@@ -279,7 +282,7 @@ impl Workspace {
                             if minute == 0 {
                                 view.refresh_quota(window, cx);
                             } else {
-                                view.request(Command::Quotas, window, cx);
+                                view.read_quotas(window, cx);
                             }
                             window.refresh();
                         })
@@ -504,6 +507,7 @@ impl Workspace {
         }
         match &command {
             Command::Snapshot if self.snapshot_request.answered() => self.refresh(window, cx),
+            Command::Quotas if self.quota_request.answered() => self.read_quotas(window, cx),
             Command::Archive => self.archive_pending = false,
             _ => {}
         }
@@ -668,7 +672,7 @@ impl Workspace {
     fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.shared.page = page;
         match page {
-            Page::Usage => self.request(Command::Quotas, window, cx),
+            Page::Usage => self.read_quotas(window, cx),
             Page::Repositories => self.refresh_repositories(true, window, cx),
             Page::Skills => self.skills.update(cx, |skills, cx| {
                 skills.open_skill(skills_view::SkillView::List, window, cx)
