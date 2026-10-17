@@ -34,12 +34,12 @@ pub(crate) fn input(
 struct Answer {
     passages: Vec<Answered>,
 }
+/// One passage's answer: exactly a text or a question, as the schema says.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Answered {
-    id: String,
-    merged: Option<String>,
-    question: Option<String>,
+#[serde(untagged, deny_unknown_fields)]
+enum Answered {
+    Merged { id: String, merged: String },
+    Question { id: String, question: String },
 }
 
 /// The merged text of each passage, in order, once the answer is checked. Nothing of an answer
@@ -56,7 +56,8 @@ pub(crate) fn merged_passages(
         .context("The model's answer didn't have the shape it was asked for.")?;
     let mut by_passage: Vec<Option<Answered>> = passages.iter().map(|_| None).collect();
     for answered in answered {
-        let index = (answered.id.parse::<usize>().ok()).and_then(|id| id.checked_sub(1));
+        let (Answered::Merged { id, .. } | Answered::Question { id, .. }) = &answered;
+        let index = (id.parse::<usize>().ok()).and_then(|id| id.checked_sub(1));
         match index.and_then(|index| by_passage.get_mut(index)) {
             Some(slot @ None) => *slot = Some(answered),
             _ => bail!(ONCE),
@@ -65,11 +66,7 @@ pub(crate) fn merged_passages(
     let mut texts = vec![];
     for (passage, (answered, number)) in passages.iter().zip(by_passage.into_iter().zip(1..)) {
         match answered.context(ONCE)? {
-            Answered {
-                merged: Some(text),
-                question: None,
-                ..
-            } => {
+            Answered::Merged { merged: text, .. } => {
                 let longest = passage.stock.chars().count() + passage.yours.chars().count();
                 ensure!(
                     text.chars().count() <= longest,
@@ -77,11 +74,7 @@ pub(crate) fn merged_passages(
                 );
                 texts.push(text);
             }
-            Answered {
-                merged: None,
-                question: Some(question),
-                ..
-            } => {
+            Answered::Question { question, .. } => {
                 ensure!(
                     question.chars().count() <= MAX_QUESTION,
                     "The model's question about passage {number} was longer than {MAX_QUESTION} characters."
@@ -90,7 +83,6 @@ pub(crate) fn merged_passages(
                     "The model found that {stock_version} and your rewrite want different things in passage {number}: {question}"
                 );
             }
-            _ => bail!("The model's answer for passage {number} wasn't a text or a question."),
         }
     }
     Ok(texts)

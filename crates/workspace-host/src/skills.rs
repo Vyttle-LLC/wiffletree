@@ -2467,7 +2467,11 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
             ),
             (
                 json!({"passages": [{"id": "1", "merged": "a", "question": "b"}]}),
-                "The model's answer for passage 1 wasn't a text or a question.",
+                "The model's answer didn't have the shape it was asked for.",
+            ),
+            (
+                json!({"passages": [{"id": "1", "merged": "a", "question": null}]}),
+                "The model's answer didn't have the shape it was asked for.",
             ),
             (
                 json!({"passages": [{"id": "1", "question": "q".repeat(301)}]}),
@@ -2631,6 +2635,14 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
             Some(MergeStanding::NeedsModel { codex: true, .. })
         ));
         assert!(host.take_merge_runs().is_empty());
+        // A save that leaves the keeper's model as it was keeps the choice of wordings.
+        let mut selection = host.model_selection().unwrap();
+        selection.guide = "Prefer small models.".into();
+        host.set_model_selection(&selection).unwrap();
+        assert!(matches!(
+            coordinating_state(&host).merge_standing,
+            Some(MergeStanding::NeedsModel { codex: true, .. })
+        ));
         keeper_model(&mut host, Provider::Claude);
         assert_eq!(coordinating_state(&host).merge_standing, None);
         execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();

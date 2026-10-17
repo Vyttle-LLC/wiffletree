@@ -55,6 +55,7 @@ impl Host {
         let settings = self.settings();
         check_keeper_needs(&settings.keeper, selection, &settings.verification)?;
         let row = self.saved_selection()?.unwrap_or_default();
+        let keeper_changed = row.keeper != selection.keeper;
         let saved = ModelSelection {
             revision: row.revision + 1,
             ..selection.clone()
@@ -75,7 +76,9 @@ impl Host {
         if !settings.keeper.comments && self.settings().keeper.comments {
             self.restart_comments()?;
         }
-        self.forget_merges_waiting_for_a_model();
+        if keeper_changed {
+            self.forget_merges_waiting_for_a_model();
+        }
         Ok(saved)
     }
     /// Pins a session's model and records how it was chosen.
