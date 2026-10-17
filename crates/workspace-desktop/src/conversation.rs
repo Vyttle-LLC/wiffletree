@@ -680,15 +680,18 @@ impl Conversation {
                                             .child("⏎ send · ⇧⏎ newline"),
                                     )
                                     .child(
-                                        button("send")
-                                            .primary()
-                                            .icon(icon("arrow-up"))
-                                            .loading(sending)
-                                            .disabled(unsendable)
-                                            // The stock disabled arrow is too faint on its tint.
-                                            .when(unsendable, |b| b.text_color(p.subtle))
-                                            .tooltip("Send")
-                                            .on_click(cx.listener(|v, _, w, c| v.send(w, c))),
+                                        ui::icon_or_spinner(
+                                            button("send").primary(),
+                                            icon("arrow-up"),
+                                            None,
+                                            sending,
+                                            gpui_component::Size::Small,
+                                        )
+                                        .disabled(unsendable)
+                                        // The stock disabled arrow is too faint on its tint.
+                                        .when(unsendable, |b| b.text_color(p.subtle))
+                                        .tooltip("Send")
+                                        .on_click(cx.listener(|v, _, w, c| v.send(w, c))),
                                     ),
                             ),
                     ),

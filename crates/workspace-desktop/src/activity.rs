@@ -146,7 +146,7 @@ pub(super) fn kind_icon(kind: StepKind) -> &'static str {
 }
 
 pub(super) fn state_glyph(state: StepState, p: Palette) -> AnyElement {
-    let glyph = |name: &str, color: Hsla| icon(name).size(px(13.)).text_color(color);
+    let glyph = |name: &'static str, color: Hsla| icon(name).size(px(13.)).text_color(color);
     match state {
         StepState::Running => Spinner::new().xsmall().color(p.accent).into_any_element(),
         StepState::Succeeded => glyph("check", p.green).into_any_element(),

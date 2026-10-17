@@ -857,12 +857,14 @@ impl UsagePage {
             .gap_3()
             .child(
                 section("ACCOUNT LIMITS", p).child(
-                    button("quota-refresh")
-                        .ghost()
-                        .xsmall()
-                        .icon(ui::icon("refresh").size(px(13.)))
-                        .loading(self.shared.quota_pending)
-                        .disabled(self.shared.quota_pending)
+                    ui::icon_or_spinner(
+                        button("quota-refresh").ghost().xsmall(),
+                        ui::icon("refresh").size(px(13.)),
+                        None,
+                        self.shared.quota_pending,
+                        gpui_component::Size::XSmall,
+                    )
+                    .disabled(self.shared.quota_pending)
                         .tooltip("Refresh account limits")
                         .on_click(cx.listener(|_, _, _, c| c.emit(Intent::RefreshQuotas))),
                 ),

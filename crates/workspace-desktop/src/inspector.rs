@@ -280,10 +280,14 @@ impl Inspector {
             Panel::Events => self.events_panel(p),
             Panel::Attention => self.attention_panel(p, cx),
             Panel::Git => self.git_panel(p),
-            Panel::Files => self.files_panel(p, cx),
+            Panel::Files => self.files_message(p),
             Panel::Processes => self.processes_panel(p, cx),
             Panel::Crew => self.crew_panel(p, cx),
         };
+        // The Files panel lists its tree a screenful at a time, so the tree scrolls itself.
+        let tree = (panel == Panel::Files)
+            .then(|| self.files_tree(p, cx))
+            .flatten();
         // The Files panel keeps its counts and what is live now in view while its tree scrolls.
         let (head, foot) = match panel {
             Panel::Files => (self.files_head(p, cx), self.files_live(p)),
@@ -341,16 +345,19 @@ impl Inspector {
                     ),
             )
             .children(head)
-            .child(
-                div()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .p_5()
-                    .text_size(px(13.))
-                    .child(body.w_full()),
-            )
+            .map(|d| match tree {
+                Some(tree) => d.child(tree),
+                None => d.child(
+                    div()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p_5()
+                        .text_size(px(13.))
+                        .child(body.w_full()),
+                ),
+            })
             .children(foot)
     }
 

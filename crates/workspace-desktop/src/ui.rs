@@ -6,13 +6,67 @@ use gpui_component::{
     button::ButtonVariants,
     resizable::{h_resizable, resizable_panel},
 };
-use std::time::Duration;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
-/// Each animation frame re-renders the whole window, so the working spinner and pulse step at
-/// this rate instead of the display's.
-pub(super) const ANIMATION_FPS: f32 = 15.;
+/// Each animation step redraws the views that show one, so the spinners and pulses step at this
+/// rate instead of the display's.
+const ANIMATION_FPS: u32 = 15;
+/// One turn of a spinner.
+const SPIN: Duration = Duration::from_millis(800);
+/// The moment every animation's phase counts from, so they all step together.
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-/// gpui-component's loading spinner, stepping at `ANIMATION_FPS`.
+/// The views that drew an animation since the last step. One timer steps them all, so the
+/// frame rate holds however many animations run, and it stops once none is drawn.
+#[derive(Default)]
+struct AnimationClock {
+    views: HashSet<EntityId>,
+    running: bool,
+}
+impl Global for AnimationClock {}
+
+/// How far through a `period` the shared clock is, from 0 to 1. Asks for the current view to be
+/// drawn again at the next step; with reduced motion it stays at 0 and asks for nothing.
+pub(super) fn animation_phase(period: Duration, window: &Window, cx: &mut App) -> f32 {
+    if cx.reduce_motion() {
+        return 0.;
+    }
+    let clock = cx.default_global::<AnimationClock>();
+    clock.views.insert(window.current_view());
+    if !clock.running {
+        clock.running = true;
+        cx.spawn(async move |cx| {
+            let step = Duration::from_secs(1) / ANIMATION_FPS;
+            loop {
+                let since = EPOCH.elapsed().as_nanos() % step.as_nanos();
+                let wait = step - Duration::from_nanos(since as u64);
+                cx.background_executor().timer(wait).await;
+                let stepped = cx.update(|cx| {
+                    let clock = cx.global_mut::<AnimationClock>();
+                    let views = std::mem::take(&mut clock.views);
+                    clock.running = !views.is_empty();
+                    for view in &views {
+                        cx.notify(*view);
+                    }
+                    !views.is_empty()
+                });
+                if !stepped {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    let period = period.as_nanos();
+    (EPOCH.elapsed().as_nanos() % period) as f32 / period as f32
+}
+
+/// gpui-component's loading spinner, turning on the shared animation clock.
 #[derive(IntoElement)]
 pub(super) struct Spinner {
     size: Size,
@@ -43,27 +97,55 @@ impl Sizable for Spinner {
     }
 }
 impl RenderOnce for Spinner {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let turn = ease_in_out(animation_phase(SPIN, window, cx));
         div().child(
             self.icon
                 .with_size(self.size)
                 .when_some(self.color, |icon, color| icon.text_color(color))
-                .with_animation(
-                    "circle",
-                    Animation::new(Duration::from_millis(800))
-                        .repeat()
-                        .with_easing(ease_in_out)
-                        .with_max_fps(ANIMATION_FPS),
-                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                ),
+                .transform(Transformation::rotate(percentage(turn))),
         )
     }
 }
 
-pub(super) fn icon(name: &str) -> Icon {
-    Icon::default()
-        .path(SharedString::from(format!("icons/{name}.svg")))
-        .size(px(16.))
+/// A button showing `icon`, or while `loading` this module's spinner in its place, sized as
+/// gpui-component sizes button icons. It keeps gpui-component's loading state, inert and faded,
+/// but its stock spinner draws at the display's full rate, so the button is given no icon then.
+pub(super) fn icon_or_spinner(
+    button: Button,
+    icon: Icon,
+    label: Option<&'static str>,
+    loading: bool,
+    size: Size,
+) -> Button {
+    if !loading {
+        return button
+            .icon(icon)
+            .when_some(label, |b, label| b.label(label));
+    }
+    button
+        .loading(true)
+        .child(Spinner::new().with_size(size))
+        .when_some(label, |b, label| {
+            b.child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label),
+            )
+        })
+}
+
+/// An icon from `assets/icons`. Each name's path is made once, so drawing one allocates nothing.
+pub(super) fn icon(name: &'static str) -> Icon {
+    thread_local! {
+        static PATHS: RefCell<HashMap<&'static str, &'static str>> = RefCell::default();
+    }
+    let path = PATHS.with_borrow_mut(|paths| {
+        *(paths.entry(name)).or_insert_with(|| format!("icons/{name}.svg").leak())
+    });
+    Icon::default().path(path).size(px(16.))
 }
 
 // Use the full-color image renderer; GPUI's SVG icon element applies a single tint.
@@ -207,7 +289,7 @@ pub(super) fn mono(text: impl Into<SharedString>, p: Palette) -> Div {
         .child(text.into())
 }
 pub(super) fn empty_state(
-    icon_name: &str,
+    icon_name: &'static str,
     title: &'static str,
     body: impl Into<SharedString>,
     p: Palette,

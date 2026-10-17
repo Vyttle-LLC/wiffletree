@@ -715,13 +715,16 @@ impl ModelsPage {
             .items_center()
             .gap_2()
             .child(
-                button("refresh-models")
-                    .ghost()
-                    .icon(icon("refresh"))
-                    .loading(loading)
-                    .disabled(loading)
-                    .tooltip("Refresh model lists from the installed CLIs")
-                    .on_click(cx.listener(|v, _, w, c| v.refresh_models(w, c))),
+                ui::icon_or_spinner(
+                    button("refresh-models").ghost(),
+                    icon("refresh"),
+                    None,
+                    loading,
+                    gpui_component::Size::Small,
+                )
+                .disabled(loading)
+                .tooltip("Refresh model lists from the installed CLIs")
+                .on_click(cx.listener(|v, _, w, c| v.refresh_models(w, c))),
             )
             .child(state.flex_1().min_w_0())
             .when(dirty && untouched != Some(true), |d| {

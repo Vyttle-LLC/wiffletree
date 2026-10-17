@@ -279,7 +279,7 @@ struct Loaded {
     rows: Rc<Vec<Row>>,
 }
 
-fn avatar(icon_name: &str, color: Hsla) -> Div {
+fn avatar(icon_name: &'static str, color: Hsla) -> Div {
     div()
         .flex_none()
         .size(px(26.))

@@ -190,12 +190,14 @@ impl Workspace {
                         .child(step(3, project, false, None, p)),
                 )
                 .child(
-                    button("check-again")
-                        .primary()
-                        .icon(icon("refresh"))
-                        .label("Check again")
-                        .loading(checking)
-                        .disabled(checking)
+                    ui::icon_or_spinner(
+                        button("check-again").primary(),
+                        icon("refresh"),
+                        Some("Check again"),
+                        checking,
+                        gpui_component::Size::Small,
+                    )
+                    .disabled(checking)
                         .mt_1()
                         .on_click(cx.listener(|v, _, w, c| {
                             v.models.update(c, |models, c| models.refresh_models(w, c))

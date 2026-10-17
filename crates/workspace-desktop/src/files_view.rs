@@ -3,7 +3,7 @@
 use super::*;
 use activity::{StepFetch, paced_reply};
 use std::time::Duration;
-use ui::{ANIMATION_FPS, empty_state, hint, icon, pill, segment};
+use ui::{empty_state, hint, icon, pill, segment};
 
 /// File fetches start no closer together than this; each one reads Git off the host thread.
 const FILES_PACE: Duration = Duration::from_millis(500);
@@ -258,7 +258,6 @@ fn summary(report: &[TicketFiles], rollup: bool) -> Option<String> {
     ))
 }
 
-#[derive(Default)]
 pub(super) struct Files {
     fetch: StepFetch,
     /// The session the report answers for; another selection shows nothing until its own.
@@ -273,10 +272,112 @@ pub(super) struct Files {
     error: Option<String>,
     /// Groups and directories the user flipped from their default of open or closed.
     toggled: BTreeSet<String>,
+    /// The tree as the panel lists it, worked out when the report or a toggle changes.
+    rows: Rc<Vec<Row>>,
+    list: ListState,
+}
+impl Default for Files {
+    fn default() -> Self {
+        Self {
+            fetch: StepFetch::default(),
+            session_id: None,
+            rollup: false,
+            report: vec![],
+            groups: vec![],
+            whole_tree: false,
+            by_agent: false,
+            error: None,
+            toggled: BTreeSet::new(),
+            rows: Rc::default(),
+            list: ListState::new(0, ListAlignment::Top, px(ROW_HEIGHT)),
+        }
+    }
 }
 impl Files {
     fn regroup(&mut self) {
         self.groups = groups(&self.report, self.rollup, self.by_agent);
+        self.relist();
+    }
+    /// Opens or closes a group or directory.
+    fn toggle(&mut self, key: &str) {
+        if !self.toggled.remove(key) {
+            self.toggled.insert(key.to_owned());
+        }
+        self.relist();
+    }
+    /// Lists the open tree again. Only the rows that changed are replaced, so a reader
+    /// scrolled down the tree keeps their place as the report refreshes.
+    fn relist(&mut self) {
+        let mut rows = vec![];
+        for group in &self.groups {
+            let Some(title) = &group.title else {
+                self.flatten(group, &group.nodes, 0, &mut rows);
+                continue;
+            };
+            let key = row_key(group, "");
+            let open = !self.toggled.contains(&key);
+            rows.push(Row {
+                shown: Shown::Heading {
+                    id: row_id(&key),
+                    title: title.clone(),
+                    stat: group.stat.clone(),
+                    open,
+                },
+                key: key.clone().into(),
+            });
+            if open && group.nodes.is_empty() {
+                rows.push(Row {
+                    key: format!("{key}·none").into(),
+                    shown: Shown::Untouched,
+                });
+            } else if open {
+                self.flatten(group, &group.nodes, 1, &mut rows);
+            }
+        }
+        let old = std::mem::replace(&mut self.rows, Rc::new(rows));
+        let new = &self.rows;
+        let same = |(a, b): (&Row, &Row)| a.key == b.key;
+        let head = old
+            .iter()
+            .zip(new.iter())
+            .take_while(|&pair| same(pair))
+            .count();
+        let tail = (old[head..].iter().rev())
+            .zip(new[head..].iter().rev())
+            .take_while(|&pair| same(pair))
+            .count();
+        self.list
+            .splice(head..old.len() - tail, new.len() - head - tail);
+    }
+    fn flatten(&self, group: &Group, nodes: &[Node], depth: usize, rows: &mut Vec<Row>) {
+        for node in nodes {
+            let key = row_key(group, &node.path);
+            if node.dir {
+                let open = self.is_open(group, node);
+                rows.push(Row {
+                    shown: Shown::Dir {
+                        id: row_id(&key),
+                        name: node.name.clone(),
+                        depth,
+                        open,
+                    },
+                    key: key.into(),
+                });
+                if open {
+                    self.flatten(group, &node.children, depth + 1, rows);
+                }
+            } else {
+                let mark = group.marks.get(&node.path).cloned().unwrap_or_default();
+                rows.push(Row {
+                    key: key.into(),
+                    shown: Shown::File {
+                        name: node.name.clone().into(),
+                        mark,
+                        depth,
+                    },
+                });
+            }
+        }
     }
     /// The request for the session's files and how long to wait before sending it, only
     /// while the Files panel is the one showing.
@@ -340,30 +441,61 @@ fn row_key(group: &Group, path: &str) -> String {
     format!("{}/{path}", group.key)
 }
 
-fn pulse(id: String, color: Hsla) -> impl IntoElement {
-    div()
-        .flex_none()
-        .size(px(7.))
-        .rounded_full()
-        .bg(color)
-        .with_animation(
-            SharedString::from(id),
-            Animation::new(Duration::from_millis(1100))
-                .repeat()
-                .with_easing(pulsating_between(0.25, 1.))
-                .with_max_fps(ANIMATION_FPS),
-            |dot, opacity| dot.opacity(opacity),
-        )
+/// One row of the listed tree, keyed by its group and path.
+struct Row {
+    key: SharedString,
+    shown: Shown,
+}
+enum Shown {
+    /// A ticket or agent heading in the coordinator's rollup.
+    Heading {
+        id: SharedString,
+        title: String,
+        stat: String,
+        open: bool,
+    },
+    /// Under an open heading with nothing in it.
+    Untouched,
+    Dir {
+        id: SharedString,
+        name: String,
+        depth: usize,
+        open: bool,
+    },
+    File {
+        name: SharedString,
+        mark: Mark,
+        depth: usize,
+    },
+}
+/// A folder row's element id.
+fn row_id(key: &str) -> SharedString {
+    SharedString::from(format!("files-row-{key}"))
 }
 
-fn file_name(name: &str, color: Hsla) -> Div {
+/// A dot that brightens and fades on the shared animation clock.
+#[derive(IntoElement)]
+struct Pulse(Hsla);
+impl RenderOnce for Pulse {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let phase = ui::animation_phase(Duration::from_millis(1100), window, cx);
+        div()
+            .flex_none()
+            .size(px(7.))
+            .rounded_full()
+            .bg(self.0)
+            .opacity(pulsating_between(0.25, 1.)(phase))
+    }
+}
+
+fn file_name(name: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .min_w_0()
         .font_family(".SystemMonoFont")
         .text_size(px(12.))
         .text_color(color)
         .text_ellipsis()
-        .child(name.to_owned())
+        .child(name.into())
 }
 
 /// The word and colour for a write or a read in progress.
@@ -464,6 +596,188 @@ impl Inspector {
             .filter(|files| files.session_id.is_some() && files.session_id == self.shared.selected)
     }
 
+    /// The listed tree, drawn a screenful at a time; `None` while the panel shows a message
+    /// instead.
+    pub(super) fn files_tree(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let files = self.files().filter(|files| files.blank().is_none())?;
+        let rows = files.rows.clone();
+        let view = cx.entity().downgrade();
+        // Rows take the panel's padding themselves, the first and last its ends, so the
+        // padding scrolls with the tree as it did around the whole list.
+        let last = rows.len().saturating_sub(1);
+        let tree = list(files.list.clone(), move |ix, _, _| {
+            div()
+                .w_full()
+                .px_5()
+                .when(ix == 0, |d| d.pt_5())
+                .when(ix == last, |d| d.pb_5())
+                .flex()
+                .flex_col()
+                .children(rows.get(ix).map(|row| Self::tree_row(row, p, &view)))
+                .into_any_element()
+        })
+        .size_full();
+        Some(
+            div()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .text_size(px(13.))
+                .child(tree)
+                .vertical_scrollbar(&files.list),
+        )
+    }
+
+    /// What the panel shows in place of the tree: loading, or why there is nothing to list.
+    pub(super) fn files_message(&self, p: Palette) -> Div {
+        match self.files().map(Files::blank) {
+            None => hint("Loading files…", p),
+            Some(Some((title, text))) => empty_state("folder", title, text, p),
+            Some(None) => div(),
+        }
+    }
+
+    fn tree_row(row: &Row, p: Palette, view: &WeakEntity<Self>) -> AnyElement {
+        let folder = |id: &SharedString, label: SharedString, depth: usize, open: bool| {
+            Self::folder_row(
+                id.clone(),
+                row.key.clone(),
+                label,
+                depth,
+                open,
+                p,
+                view.clone(),
+            )
+        };
+        match &row.shown {
+            Shown::Heading {
+                id,
+                title,
+                stat,
+                open,
+            } => folder(id, title.clone().into(), 0, *open)
+                .mt(px(6.))
+                .text_color(p.text)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(p.subtle)
+                        .child(stat.clone()),
+                )
+                .into_any_element(),
+            Shown::Untouched => hint("No files touched yet.", p)
+                .pl(px(8. + INDENT))
+                .into_any_element(),
+            Shown::Dir {
+                id,
+                name,
+                depth,
+                open,
+            } => folder(id, name.clone().into(), *depth, *open)
+                .font_family(".SystemMonoFont")
+                .into_any_element(),
+            Shown::File { name, mark, depth } => {
+                Self::file_row(name, mark, *depth, p).into_any_element()
+            }
+        }
+    }
+
+    /// A ticket, agent or directory row; clicking it opens or closes what is under it.
+    fn folder_row(
+        id: SharedString,
+        key: SharedString,
+        label: SharedString,
+        depth: usize,
+        open: bool,
+        p: Palette,
+        view: WeakEntity<Self>,
+    ) -> Stateful<Div> {
+        let chevron = if open {
+            "chevron-down"
+        } else {
+            "chevron-right"
+        };
+        div()
+            .id(id)
+            .h(px(ROW_HEIGHT))
+            .pl(px(8. + INDENT * depth as f32))
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(p.subtle)
+            .hover(move |d| d.bg(p.overlay))
+            .on_click(move |_, _, cx| {
+                let _ = view.update(cx, |v, cx| {
+                    v.files.toggle(&key);
+                    cx.notify();
+                });
+            })
+            .child(icon(chevron).size(px(12.)).flex_none())
+            .child(div().min_w_0().text_ellipsis().child(label))
+    }
+
+    fn file_row(name: &SharedString, mark: &Mark, depth: usize, p: Palette) -> Div {
+        let unmarked = Mark::default();
+        let live = mark.reading || mark.writing;
+        let name_color = if *mark == unmarked { p.subtle } else { p.text };
+        div()
+            .h(px(ROW_HEIGHT))
+            // Files line up with the names of the directories beside them, past the chevron.
+            .pl(px(8. + INDENT * depth as f32 + if live { 0. } else { 18. }))
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded_md()
+            .when(live, |d| {
+                let (_, color) = doing(mark.writing, p);
+                d.bg(p.accent.opacity(0.10))
+                    .child(div().w(px(12.)).flex().justify_center().child(Pulse(color)))
+            })
+            // The name takes what the counts, tag and badge leave, and is cut short last.
+            .child(file_name(name.clone(), name_color).flex_1())
+            .when_some(mark.lines.filter(|_| !live), |d, (added, removed)| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap_1()
+                        .text_size(px(10.5))
+                        .child(div().text_color(p.green).child(format!("+{added}")))
+                        .child(div().text_color(p.red).child(format!("−{removed}"))),
+                )
+            })
+            .when_some(mark.who.clone(), |d, who| {
+                let (text, fill) = if mark.clash {
+                    (p.yellow, p.yellow.opacity(0.14))
+                } else {
+                    (p.subtle, p.overlay)
+                };
+                d.child(
+                    div()
+                        .flex_none()
+                        .max_w(px(120.))
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded_sm()
+                        .bg(fill)
+                        .text_color(text)
+                        .text_size(px(10.5))
+                        .text_ellipsis()
+                        .child(who),
+                )
+            })
+            .children(badge(mark, p))
+    }
     /// The counts and the view choice, pinned above the tree.
     pub(super) fn files_head(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
         let files = self.files()?;
@@ -530,7 +844,7 @@ impl Inspector {
             .border_color(p.edge.opacity(0.3))
             .text_size(px(11.5))
             .text_color(p.subtle);
-        for (ix, entry) in live.iter().take(MAX_LIVE).enumerate() {
+        for entry in live.iter().take(MAX_LIVE) {
             let (verb, color) = doing(entry.writing, p);
             let doing = match &entry.who {
                 Some(who) => format!("{who} {verb}"),
@@ -542,179 +856,15 @@ impl Inspector {
                     .flex()
                     .items_center()
                     .gap(px(7.))
-                    .child(pulse(format!("files-live-{ix}"), color))
+                    .child(Pulse(color))
                     .child(div().flex_none().child(doing))
-                    .child(file_name(&entry.file, p.text)),
+                    .child(file_name(entry.file.clone(), p.text)),
             );
         }
         if live.len() > MAX_LIVE {
             strip = strip.child(hint(format!("+{} more", live.len() - MAX_LIVE), p));
         }
         Some(strip)
-    }
-
-    pub(super) fn files_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Some(files) = self.files() else {
-            return hint("Loading files…", p);
-        };
-        if let Some((title, text)) = files.blank() {
-            return empty_state("folder", title, text, p);
-        }
-        let mut rows = vec![];
-        for group in &files.groups {
-            let Some(title) = &group.title else {
-                self.file_rows(group, &group.nodes, 0, p, cx, &mut rows);
-                continue;
-            };
-            let key = row_key(group, "");
-            let open = !files.toggled.contains(&key);
-            let heading = self
-                .folder_row(key, title, 0, open, p, cx)
-                .mt(px(6.))
-                .text_color(p.text)
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(p.subtle)
-                        .child(group.stat.clone()),
-                );
-            rows.push(heading.into_any_element());
-            if open && group.nodes.is_empty() {
-                rows.push(
-                    hint("No files touched yet.", p)
-                        .pl(px(8. + INDENT))
-                        .into_any_element(),
-                );
-            } else if open {
-                self.file_rows(group, &group.nodes, 1, p, cx, &mut rows);
-            }
-        }
-        div().flex().flex_col().children(rows)
-    }
-
-    /// A ticket, agent or directory row; clicking it opens or closes what is under it.
-    fn folder_row(
-        &self,
-        key: String,
-        label: &str,
-        depth: usize,
-        open: bool,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let chevron = if open {
-            "chevron-down"
-        } else {
-            "chevron-right"
-        };
-        div()
-            .id(SharedString::from(format!("files-row-{key}")))
-            .h(px(ROW_HEIGHT))
-            .pl(px(8. + INDENT * depth as f32))
-            .pr_2()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded_md()
-            .cursor_pointer()
-            .text_size(px(12.))
-            .text_color(p.subtle)
-            .hover(move |d| d.bg(p.overlay))
-            .on_click(cx.listener(move |v, _, _, c| {
-                if !v.files.toggled.remove(&key) {
-                    v.files.toggled.insert(key.clone());
-                }
-                c.notify();
-            }))
-            .child(icon(chevron).size(px(12.)).flex_none())
-            .child(div().min_w_0().text_ellipsis().child(label.to_owned()))
-    }
-
-    fn file_rows(
-        &self,
-        group: &Group,
-        nodes: &[Node],
-        depth: usize,
-        p: Palette,
-        cx: &mut Context<Self>,
-        rows: &mut Vec<AnyElement>,
-    ) {
-        for node in nodes {
-            if node.dir {
-                let open = self.files.is_open(group, node);
-                let key = row_key(group, &node.path);
-                let row = self.folder_row(key, &node.name, depth, open, p, cx);
-                rows.push(row.font_family(".SystemMonoFont").into_any_element());
-                if open {
-                    self.file_rows(group, &node.children, depth + 1, p, cx, rows);
-                }
-            } else {
-                let mark = group.marks.get(&node.path);
-                rows.push(Self::file_row(group, node, mark, depth, p).into_any_element());
-            }
-        }
-    }
-
-    fn file_row(group: &Group, node: &Node, mark: Option<&Mark>, depth: usize, p: Palette) -> Div {
-        let unmarked = Mark::default();
-        let mark = mark.unwrap_or(&unmarked);
-        let live = mark.reading || mark.writing;
-        let name_color = if *mark == unmarked { p.subtle } else { p.text };
-        div()
-            .h(px(ROW_HEIGHT))
-            // Files line up with the names of the directories beside them, past the chevron.
-            .pl(px(8. + INDENT * depth as f32 + if live { 0. } else { 18. }))
-            .pr_2()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded_md()
-            .when(live, |d| {
-                let (_, color) = doing(mark.writing, p);
-                d.bg(p.accent.opacity(0.10))
-                    .child(div().w(px(12.)).flex().justify_center().child(pulse(
-                        format!("files-pulse-{}", row_key(group, &node.path)),
-                        color,
-                    )))
-            })
-            // The name takes what the counts, tag and badge leave, and is cut short last.
-            .child(file_name(&node.name, name_color).flex_1())
-            .when_some(mark.lines.filter(|_| !live), |d, (added, removed)| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap_1()
-                        .text_size(px(10.5))
-                        .child(div().text_color(p.green).child(format!("+{added}")))
-                        .child(div().text_color(p.red).child(format!("−{removed}"))),
-                )
-            })
-            .when_some(mark.who.clone(), |d, who| {
-                let (text, fill) = if mark.clash {
-                    (p.yellow, p.yellow.opacity(0.14))
-                } else {
-                    (p.subtle, p.overlay)
-                };
-                d.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(120.))
-                        .px(px(6.))
-                        .py(px(1.))
-                        .rounded_sm()
-                        .bg(fill)
-                        .text_color(text)
-                        .text_size(px(10.5))
-                        .text_ellipsis()
-                        .child(who),
-                )
-            })
-            .children(badge(mark, p))
     }
 }
 
@@ -904,6 +1054,35 @@ mod tests {
         assert_eq!(open, [("docs", false), ("gen", true), ("src", true)]);
         files.toggled.insert(row_key(group, "docs"));
         assert!(files.is_open(&files.groups[0], &files.groups[0].nodes[0]));
+    }
+
+    /// The listed rows, as their keys, and the list the panel draws them from.
+    fn listed(files: &Files) -> Vec<&str> {
+        assert_eq!(files.list.item_count(), files.rows.len());
+        files.rows.iter().map(|row| row.key.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_tree_is_listed_once_and_a_toggle_lists_only_what_it_opens() {
+        let mut report = [ticket(
+            "Panel",
+            "web",
+            vec![agent("Implementer", &[("src/a.rs", 1, 0)])],
+        )];
+        report[0].tree = Some(vec!["src/a.rs".into(), "docs/x.md".into()]);
+        let mut files = Files {
+            report: report.into(),
+            ..Default::default()
+        };
+        files.regroup();
+        let key = |path: &str| row_key(&files.groups[0], path);
+        let (docs, src, a, x) = (key("docs"), key("src"), key("src/a.rs"), key("docs/x.md"));
+        assert_eq!(listed(&files), [&docs, &src, &a]);
+        files.toggle(&docs);
+        assert_eq!(listed(&files), [&docs, &x, &src, &a]);
+        // A refresh lists the same rows; the list keeps them, and the reader's place with them.
+        files.regroup();
+        assert_eq!(listed(&files), [&docs, &x, &src, &a]);
     }
 
     #[test]

@@ -646,20 +646,22 @@ impl Inspector {
             (contexts.pending(&session.id), measured)
         };
         let header = section("CONTEXT", p).child(
-            button("context-refresh")
-                .ghost()
-                .xsmall()
-                .icon(icon("refresh").size(px(13.)))
-                .loading(pending)
-                .disabled(
-                    pending
-                        || session.status == Status::Working
-                        || self.shared.compacting(&session.id),
-                )
-                .tooltip("Measure again · no model call")
-                .on_click(cx.listener(|v, _, w, c| {
+            ui::icon_or_spinner(
+                button("context-refresh").ghost().xsmall(),
+                icon("refresh").size(px(13.)),
+                None,
+                pending,
+                gpui_component::Size::XSmall,
+            )
+            .disabled(
+                pending || session.status == Status::Working || self.shared.compacting(&session.id),
+            )
+            .tooltip("Measure again · no model call")
+            .on_click(
+                cx.listener(|v, _, w, c| {
                     v.contexts.update(c, |contexts, c| contexts.refresh(w, c))
-                })),
+                }),
+            ),
         );
         let body = match measured.as_ref() {
             None => hint(
