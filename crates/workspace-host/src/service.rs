@@ -3196,7 +3196,10 @@ impl Actor {
         }
         runtime.profile = Some(profile.clone());
         provider::executable(session.provider)?;
-        if let Some(ticket) = &runtime.ticket_id {
+        let sorting = KeeperSession::is_sorting(&session, &runtime);
+        // A sorting run works in its own emptied folder, never the ticket's worktree, and its
+        // input is held in memory alone, so it cannot wait for a preparation.
+        if let Some(ticket) = runtime.ticket_id.as_ref().filter(|_| !sorting) {
             if let Some((prepared, result)) = self
                 .prepared_worktrees
                 .remove(ticket)
@@ -3239,7 +3242,6 @@ impl Actor {
             fs::create_dir_all(&path)?;
             path
         };
-        let sorting = KeeperSession::is_sorting(&session, &runtime);
         if sorting {
             if cwd.exists() {
                 fs::remove_dir_all(&cwd)?;
@@ -9306,6 +9308,8 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
             let (ticket, session) = (f.ticket.clone(), sort.session.id.clone());
             let publish::tests::Fixture { host, home, .. } = f;
             let (mut actor, _, _) = idle_actor(host);
+            // As a running actor has it: nothing prepared for the ticket.
+            actor.prepared_worktrees.clear();
             let (sender, events) = async_channel::unbounded();
             actor.sender = sender;
             actor.start_sort(sort);
