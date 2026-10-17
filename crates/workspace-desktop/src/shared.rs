@@ -55,6 +55,11 @@ impl Shared {
     pub(super) fn session(&self, id: &str) -> Option<&Session> {
         self.index.as_ref()?.session(id)
     }
+    /// The revision of a session's messages in the latest snapshot; `None` when unknown.
+    pub(super) fn message_revision(&self, _session_id: &str) -> Option<u64> {
+        // Until the host sends revisions, every snapshot fetches the messages again.
+        None
+    }
     pub(super) fn runtime(&self, session_id: &str) -> Option<&SessionRuntime> {
         self.index.as_ref()?.runtime(session_id)
     }

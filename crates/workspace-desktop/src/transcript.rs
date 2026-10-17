@@ -625,6 +625,21 @@ impl PageAsk {
     }
 }
 
+/// The revision of the selected session's messages last asked for, so a snapshot that left
+/// them alone fetches nothing.
+#[derive(Default)]
+struct SeenRevision(Option<(String, u64)>);
+impl SeenRevision {
+    /// Whether `session_id`'s messages may have changed since the last ask: its revision moved,
+    /// or the host gave none. Remembers `revision` either way.
+    fn moved(&mut self, session_id: &str, revision: Option<u64>) -> bool {
+        let seen = revision.map(|revision| (session_id.to_owned(), revision));
+        let moved = seen.is_none() || seen != self.0;
+        self.0 = seen;
+        moved
+    }
+}
+
 /// The selected session's messages, a page at a time, and its live activity.
 pub(super) struct Transcript {
     bridge: Bridge,
@@ -639,6 +654,7 @@ pub(super) struct Transcript {
     cache_order: VecDeque<String>,
     /// The older page being read, by the sequence it ends before; `None` for the newest.
     page: Option<i64>,
+    seen: SeenRevision,
     /// Pages are prepared off the UI thread; counts the asks so only the latest is shown.
     preparing: u64,
     /// The selected session's latest run, shown as the activity card while it works.
@@ -672,6 +688,7 @@ impl Transcript {
             cached_pages: BTreeMap::new(),
             cache_order: VecDeque::new(),
             page: None,
+            seen: SeenRevision::default(),
             preparing: 0,
             activity: None,
             step_fetch: StepFetch::default(),
@@ -681,8 +698,8 @@ impl Transcript {
         }
     }
 
-    /// A new selection shows its last page at once and loads its newest; each snapshot loads
-    /// the shown page again and follows the agent's work.
+    /// A new selection shows its last page at once and loads its newest; a snapshot loads the
+    /// shown page again if its messages moved, and follows the agent's work.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (selection, moved) = shared.moved_from(&self.shared);
         self.shared = shared;
@@ -690,7 +707,7 @@ impl Transcript {
             self.show_selected(window, cx);
         } else if moved {
             self.sync_transcript_rows();
-            self.load_messages(window, cx);
+            self.reload_if_moved(window, cx);
             // A turn that just started has no steps yet; ask before the first one arrives.
             if self.selected_working() && !self.activity.as_ref().is_some_and(|a| a.running) {
                 self.fetch_steps(window, cx);
@@ -709,7 +726,8 @@ impl Transcript {
         self.shown = self.cached_pages.get(&id).cloned().unwrap_or_default();
         self.page = None;
         self.list.reset(self.transcript_rows());
-        self.load_messages(window, cx);
+        self.seen = SeenRevision::default();
+        self.reload_if_moved(window, cx);
         self.activity = None;
         self.fetch_steps(window, cx);
         self.sync_activity_clock(window, cx);
@@ -753,6 +771,16 @@ impl Transcript {
                 window,
                 cx,
             );
+        }
+    }
+
+    /// Loads the shown page again if the selected session's messages may have changed.
+    fn reload_if_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.shared.selected.as_deref() else {
+            return;
+        };
+        if self.seen.moved(id, self.shared.message_revision(id)) {
+            self.load_messages(window, cx);
         }
     }
 
@@ -1282,7 +1310,13 @@ impl Requests for Transcript {
     ) {
         let value = match reply {
             Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
+            Err(error) => {
+                // The next snapshot asks again.
+                if matches!(command, Command::Messages { .. }) {
+                    self.seen = SeenRevision::default();
+                }
+                return toast_error(error, window, cx);
+            }
         };
         match command {
             Command::Messages {
@@ -1328,8 +1362,8 @@ mod tests {
     use super::{
         PageAsk,
         Placement::{Alone, Folded, Heads},
-        Senders, Shape, from_human, peer_line, placements, prepare, run_heading, run_troubles,
-        transcript_overlap,
+        SeenRevision, Senders, Shape, from_human, peer_line, placements, prepare, run_heading,
+        run_troubles, transcript_overlap,
     };
     use gpui::SharedString;
     use std::{collections::HashMap, sync::Arc};
@@ -1381,6 +1415,22 @@ mod tests {
             "the reader went back to the newest"
         );
         assert!(!ask.wanted(2, None, Some(40)), "nothing is selected");
+    }
+
+    #[test]
+    fn messages_are_fetched_again_only_when_their_revision_moved_or_is_unknown() {
+        let mut seen = SeenRevision::default();
+        assert!(seen.moved("s", Some(3)), "the first ask");
+        assert!(!seen.moved("s", Some(3)), "a snapshot that left them alone");
+        assert!(seen.moved("s", Some(4)));
+        assert!(
+            seen.moved("t", Some(4)),
+            "another session at the same number"
+        );
+        assert!(seen.moved("t", None), "a host that gives none");
+        assert!(seen.moved("t", None), "still none");
+        assert!(seen.moved("t", Some(4)), "known again");
+        assert!(!seen.moved("t", Some(4)));
     }
 
     #[test]
