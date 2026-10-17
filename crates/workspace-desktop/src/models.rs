@@ -1,9 +1,9 @@
 //! Pure helpers behind the Models page and the model pickers.
 use workspace_core::{
-    AllowedModel, Chooser, Detection, ModelProfile, ModelSelection, PROVIDERS, Provider,
-    ProviderStatus, Role, Selection, Setup, VerificationSettings, WorkspaceIndex, suggest,
+    AllowedModel, Chooser, Detection, ModelOption, ModelProfile, ModelSelection, PROVIDERS,
+    Provider, ProviderStatus, Role, Selection, Setup, VerificationSettings, WorkspaceIndex,
+    suggest,
 };
-use workspace_host::runtime::ModelOption;
 
 pub fn fallback() -> Vec<ModelOption> {
     [

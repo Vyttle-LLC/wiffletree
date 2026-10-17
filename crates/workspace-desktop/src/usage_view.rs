@@ -50,7 +50,7 @@ fn stale(window: &QuotaWindow) -> bool {
     now() - window.observed_at > 15 * 60_000 || window.resets_at.is_some_and(|t| t <= now())
 }
 fn timestamp(at: i64) -> String {
-    workspace_host::usage::local_time(at, "America/New_York").unwrap_or_else(|| "Unknown".into())
+    wording::local_time(at, "America/New_York").unwrap_or_else(|| "Unknown".into())
 }
 fn meter(used: f64, color: Hsla, p: Palette) -> Div {
     div()
@@ -255,62 +255,6 @@ impl Inspector {
         body
     }
 }
-impl Workspace {
-    /// Reads the stored usage again whenever a provider reports some. A new reading redraws
-    /// the quota strip, and the Usage page reloads its report with it.
-    pub(super) fn watch_usage(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(changes) = self.bridge.usage_changes() else {
-            return;
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            while changes.recv().await.is_ok() {
-                let read = cx
-                    .update(|window, cx| this.update(cx, |view, cx| view.read_quotas(window, cx)));
-                if !matches!(read, Ok(Ok(()))) {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-    /// Asks for the stored quota readings, or, while a read is on its way, for one more after it.
-    pub(super) fn read_quotas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quota_request.send() {
-            self.request(Command::Quotas, window, cx);
-        }
-    }
-    pub(super) fn refresh_quota(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.read_quotas(window, cx);
-        if self.shared.quota_pending {
-            return;
-        }
-        self.shared.quota_pending = true;
-        let (send, receive) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let reading =
-                workspace_host::runtime::codex_quota().unwrap_or_else(|error| QuotaReading {
-                    provider: Provider::Codex,
-                    account: None,
-                    observed_at: now(),
-                    source: "Codex app-server".into(),
-                    windows: vec![],
-                    error: Some(error.to_string()),
-                });
-            let _ = send.send_blocking(reading);
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(reading) = receive.recv().await {
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| {
-                        view.request(Command::RecordQuota { reading }, window, cx)
-                    })
-                });
-            }
-        })
-        .detach();
-    }
-}
-
 /// The Usage page: account limits, and the tokens recorded in this app by period, provider and
 /// project.
 pub(super) struct UsagePage {
@@ -357,16 +301,24 @@ impl UsagePage {
         }
     }
     pub(super) fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request(
-            Command::Usage {
-                days: self.days,
-                project_id: self.scoped_project_id(),
-                provider: self.provider,
-                timezone: "America/New_York".into(),
-            },
-            window,
-            cx,
+        let (days, project_id, provider) = (self.days, self.scoped_project_id(), self.provider);
+        let ask = ask::usage(
+            days,
+            project_id.clone(),
+            provider,
+            "America/New_York".into(),
         );
+        self.ask(ask, window, cx, move |view, report, window, cx| {
+            // A reply to filters since changed is dropped.
+            let filters = (view.days, view.scoped_project_id(), view.provider);
+            if filters != (days, project_id, provider) {
+                return;
+            }
+            match report {
+                Ok(report) => view.report = Some(report),
+                Err(error) => toast_error(error, window, cx),
+            }
+        });
     }
     fn usage_filters(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut periods = div().flex().gap_1();
@@ -912,29 +864,11 @@ impl Requests for UsagePage {
     }
     fn accept(
         &mut self,
-        command: Command,
-        reply: Result<Value, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: Command,
+        _: Result<Value, String>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
-        let Command::Usage {
-            days,
-            project_id,
-            provider,
-            ..
-        } = command
-        else {
-            return;
-        };
-        // A reply to filters since changed is dropped.
-        if days != self.days || project_id != self.scoped_project_id() || provider != self.provider
-        {
-            return;
-        }
-        match reply.and_then(|value| serde_json::from_value(value).map_err(|e| e.to_string())) {
-            Ok(report) => self.report = Some(report),
-            Err(error) => toast_error(error, window, cx),
-        }
     }
 }
 impl Render for UsagePage {

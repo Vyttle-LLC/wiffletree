@@ -124,13 +124,11 @@ impl Mark {
 impl Settings {
     /// Reads the sync status again, for when the main window is not there to.
     pub(in crate::settings) fn refresh_sync(&self, cx: &mut Context<Self>) {
-        let Ok(receiver) = self.bridge.request(Command::Snapshot) else {
+        let Ok(snapshot) = self.bridge.ask(ask::snapshot()) else {
             return;
         };
         cx.spawn(async move |_, cx| {
-            let snapshot = receiver.recv().await.ok().and_then(Result::ok);
-            let snapshot = snapshot.and_then(|value| serde_json::from_value(value).ok());
-            if let Some(snapshot) = snapshot {
+            if let Ok(snapshot) = snapshot.await {
                 cx.update(|cx| share_sync(&snapshot, cx));
             }
         })

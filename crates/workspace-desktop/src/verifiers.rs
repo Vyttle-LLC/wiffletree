@@ -164,27 +164,21 @@ impl VerifierEditor {
     pub(super) fn setup_saved(&mut self, cx: &mut Context<Self>) {
         if self.unsaved {
             self.unsaved = false;
-            self.ask_host(Command::Settings, cx);
+            self.ask_host(ask::settings(), cx);
         }
     }
 
     /// Shows the host's saved setting, or its error beside the setting it still uses.
-    fn ask_host(&mut self, command: Command, cx: &mut Context<Self>) {
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+    fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
+        let answer = match self.bridge.ask(ask) {
+            Ok(answer) => answer,
             Err(error) => {
                 self.error = Some(error);
                 return;
             }
         };
         cx.spawn(async move |this, cx| {
-            let answer = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()))
-                .and_then(|value| {
-                    serde_json::from_value::<HostSettings>(value).map_err(|e| e.to_string())
-                });
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
                 match answer {
                     // An unsaved draft is not replaced by the host's defaults.
@@ -218,7 +212,7 @@ impl VerifierEditor {
             cx.notify();
             return;
         }
-        self.ask_host(Command::SetVerification { verification }, cx);
+        self.ask_host(ask::set_verification(verification), cx);
     }
 
     fn add_verifier(&mut self, window: &mut Window, cx: &mut Context<Self>) {

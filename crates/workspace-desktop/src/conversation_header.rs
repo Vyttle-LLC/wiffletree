@@ -292,18 +292,13 @@ impl Requests for ConversationHeader {
     }
     fn accept(
         &mut self,
-        command: Command,
+        _: Command,
         reply: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
-        };
-        if let Command::SetArchived { archived, .. } = command {
-            let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-            cx.emit(Intent::Archived { archived, affected });
+        if let Err(error) = reply {
+            toast_error(error, window, cx);
         }
     }
 }

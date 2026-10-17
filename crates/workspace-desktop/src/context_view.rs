@@ -3,8 +3,6 @@
 use super::*;
 use gpui_component::{Disableable, Sizable, button::ButtonVariants};
 use ui::{Spinner, age, card, hint, icon, progress_bar, section};
-use workspace_host::compaction::REASON_LIMIT;
-use workspace_host::context::{ContextUsage, Probe};
 
 /// The Compact form on a session's Context card, while it is open.
 #[derive(Default)]
@@ -118,7 +116,7 @@ fn compaction_notice(
     outcome: &CompactionOutcome,
 ) -> Option<(&'static str, String, bool)> {
     let reason = outcome.reason.as_deref().map(|reason| {
-        let reason = conversation::first_line(reason, REASON_LIMIT);
+        let reason = first_line(reason, REASON_LIMIT);
         if reason.ends_with(['.', '!', '?', '…']) {
             format!("{reason} ")
         } else {
@@ -214,8 +212,8 @@ fn swatch(color: Hsla) -> Div {
 
 /// How full each session's context window is, measured on demand with no model call. The
 /// conversation's header chip and the Context card both show it.
-#[derive(Default)]
 pub(super) struct Contexts {
+    bridge: Bridge,
     shared: Shared,
     measured: BTreeMap<String, Result<ContextUsage, String>>,
     pending: BTreeSet<String>,
@@ -223,6 +221,15 @@ pub(super) struct Contexts {
     seen: BTreeMap<String, Measured>,
 }
 impl Contexts {
+    pub(super) fn new(bridge: Bridge) -> Self {
+        Self {
+            bridge,
+            shared: Shared::default(),
+            measured: BTreeMap::new(),
+            pending: BTreeSet::new(),
+            seen: BTreeMap::new(),
+        }
+    }
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         self.shared = shared;
         self.sync(window, cx);
@@ -262,15 +269,10 @@ impl Contexts {
             .cloned()
             .unwrap_or_default();
         self.seen.insert(session.id.clone(), Measured::of(&runtime));
-        let skill = Skill::for_role(session.role);
-        let instructions = (self.shared.snapshot())
-            .and_then(|snapshot| snapshot.skills.iter().find(|s| s.skill == skill))
-            .map(|state| workspace_host::provider::role_instructions(session.role, state));
-        let (Some(provider_session), Some(directory), Some(profile), Some(instructions)) = (
+        let (Some(_), Some(_), Some(profile)) = (
             runtime.provider_session_id,
             runtime.directory,
             self.shared.selected_profile(),
-            instructions,
         ) else {
             self.measured.insert(
                 session.id,
@@ -279,30 +281,14 @@ impl Contexts {
             return;
         };
         self.pending.insert(session.id.clone());
-        let (send, receive) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let probe = Probe {
-                profile: &profile,
-                provider_session: &provider_session,
-                directory: std::path::Path::new(&directory),
-                instructions: &instructions,
-            };
-            let usage = workspace_host::context::usage(&probe).map_err(|e| format!("{e:#}"));
-            let _ = send.send_blocking(usage);
+        let ask = ask::measure_context(session.id.clone(), profile);
+        self.ask(ask, window, cx, move |view, usage, window, cx| {
+            view.pending.remove(&session.id);
+            view.measured.insert(session.id, usage);
+            // A turn or a compaction that ended while this probe ran is measured now;
+            // no later snapshot may come to ask for it.
+            view.sync(window, cx);
         });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(usage) = receive.recv().await {
-                let _ = this.update_in(cx, |view, window, cx| {
-                    view.pending.remove(&session.id);
-                    view.measured.insert(session.id, usage);
-                    // A turn or a compaction that ended while this probe ran is measured now;
-                    // no later snapshot may come to ask for it.
-                    view.sync(window, cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
         cx.notify();
     }
     /// The fill level for the conversation header, which opens the full breakdown.
@@ -357,6 +343,20 @@ impl Contexts {
                     )
                 }),
         )
+    }
+}
+
+impl Requests for Contexts {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        _: Command,
+        _: Result<Value, String>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
     }
 }
 

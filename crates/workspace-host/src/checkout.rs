@@ -21,7 +21,7 @@ impl History {
             limit,
         })
     }
-    pub(crate) fn run(&self, git: &publish::GitTool) -> Result<Value> {
+    pub(crate) fn run(&self, git: &publish::GitTool) -> Result<GitHistory> {
         let Self {
             repository,
             skip,
@@ -40,13 +40,24 @@ impl History {
             ],
         )?;
         ensure!(answer.status.success(), "git log failed{}", answer.reason());
-        let commits: Vec<_> = answer.output.lines().filter_map(|line| {
-            let parts: Vec<_> = line.splitn(4, '\u{1f}').collect();
-            (parts.len() == 4).then(|| json!({"sha":parts[0],"parents":parts[1].split_whitespace().collect::<Vec<_>>(),"author":parts[2],"subject":parts[3]}))
-        }).collect();
-        Ok(
-            json!({"repository":repository,"commits":commits,"next_skip":skip+commits.len(),"observed_at":now(),"source":"local Git · read only"}),
-        )
+        let commits: Vec<_> = (answer.output.lines())
+            .filter_map(|line| {
+                let parts: Vec<_> = line.splitn(4, '\u{1f}').collect();
+                (parts.len() == 4).then(|| Commit {
+                    sha: parts[0].into(),
+                    parents: parts[1].split_whitespace().map(str::to_owned).collect(),
+                    author: parts[2].into(),
+                    subject: parts[3].into(),
+                })
+            })
+            .collect();
+        Ok(GitHistory {
+            repository: repository.clone(),
+            next_skip: skip + commits.len(),
+            commits,
+            observed_at: now(),
+            source: "local Git · read only".into(),
+        })
     }
 }
 

@@ -38,6 +38,7 @@ mod update;
 mod usage_view;
 mod verifiers;
 mod welcome;
+mod wording;
 mod workspace_notes;
 use bridge::Bridge;
 use creation::{Creation, CreationForm};
@@ -62,6 +63,7 @@ use std::{
 };
 // GPUI exports an accessibility `Role` too; ours wins over both globs.
 use workspace_core::Role;
+use workspace_core::ask::Ask;
 use workspace_core::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +86,7 @@ enum PanelData {
     Loading,
     Memory(Vec<WorkLog>),
     Events(Vec<Activity>),
-    Git(Vec<inspector::Commit>),
+    Git(Vec<Commit>),
 }
 
 /// A request sent again once, rather than once per ask, when asked for while it is answered.
@@ -187,7 +189,7 @@ impl Workspace {
             .new(|cx| skills_view::SkillsPage::new(bridge.clone(), verifiers.clone(), window, cx));
         Self::adopt(&skills, window, cx);
         let inbox = cx.new(|cx| inbox::Inbox::new(bridge.clone(), window, cx));
-        let contexts = cx.new(|_| context_view::Contexts::default());
+        let contexts = cx.new(|_| context_view::Contexts::new(bridge.clone()));
         let conversation = cx.new(|cx| {
             conversation::Conversation::new(
                 bridge.clone(),
@@ -452,7 +454,21 @@ impl Workspace {
             .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60));
         if now || !recent {
             self.last_repository_refresh = Some(std::time::Instant::now());
-            self.request(Command::RefreshRepositories, window, cx);
+            let ask = ask::refresh_repositories();
+            self.ask(ask, window, cx, |view, refresh, window, cx| {
+                // A background check; an unreadable root is not worth interrupting anyone for.
+                match refresh {
+                    Ok(refresh) if !refresh.added.is_empty() => {
+                        let names: Vec<_> = refresh.added.iter().map(|r| r.name.as_str()).collect();
+                        let found = format!("Found new repositories: {}", names.join(", "));
+                        toast(found, window, cx);
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("Repository refresh: {error}"),
+                }
+                // Also picks up folders that went missing since the last snapshot.
+                view.refresh(window, cx);
+            });
         }
     }
     /// Step changes go to the transcript, for its activity card, and to the Files panel.
@@ -477,43 +493,74 @@ impl Workspace {
         })
         .detach();
     }
-    /// Handles a reply to one of the shell's own requests: snapshots, quotas and creations.
-    fn accept_reply(
+    /// Reads the stored usage again whenever a provider reports some. A new reading redraws
+    /// the quota strip, and the Usage page reloads its report with it.
+    fn watch_usage(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(changes) = self.bridge.usage_changes() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                let read = cx
+                    .update(|window, cx| this.update(cx, |view, cx| view.read_quotas(window, cx)));
+                if !matches!(read, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Asks for the stored quota readings, or, while a read is on its way, for one more after it.
+    fn read_quotas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quota_request.send() {
+            self.ask(ask::quotas(), window, cx, |view, quotas, window, cx| {
+                if view.quota_request.answered() {
+                    view.read_quotas(window, cx);
+                }
+                view.quotas_read(Command::Quotas, quotas, window, cx);
+            });
+        }
+    }
+    /// Reads Codex's account limits again, one reading at a time.
+    fn refresh_quota(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_quotas(window, cx);
+        if self.shared.quota_pending {
+            return;
+        }
+        self.shared.quota_pending = true;
+        self.ask(
+            ask::refresh_codex_quota(),
+            window,
+            cx,
+            |view, quotas, window, cx| {
+                view.shared.quota_pending = false;
+                view.quotas_read(Command::RefreshCodexQuota, quotas, window, cx);
+            },
+        );
+    }
+    fn quotas_read(
+        &mut self,
+        command: Command,
+        quotas: Result<Vec<QuotaReading>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match quotas {
+            // The same readings again would only redraw what draws them.
+            Ok(quotas) if *self.shared.quotas != quotas => self.shared.quotas = Rc::new(quotas),
+            Ok(_) => {}
+            Err(error) => self.fail(&command, error, window, cx),
+        }
+        self.share(window, cx);
+    }
+    /// Handles a reply to a creation form's command.
+    fn accept_creation(
         &mut self,
         command: Command,
         result: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(command, Command::RefreshRepositories) {
-            // A background check; an unreadable root is not worth interrupting anyone for.
-            match result.and_then(|v| {
-                serde_json::from_value::<RepositoryRefresh>(v).map_err(|e| e.to_string())
-            }) {
-                Ok(refresh) if !refresh.added.is_empty() => {
-                    let names: Vec<_> = refresh.added.iter().map(|r| r.name.as_str()).collect();
-                    toast(
-                        format!("Found new repositories: {}", names.join(", ")),
-                        window,
-                        cx,
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => eprintln!("Repository refresh: {error}"),
-            }
-            // Also picks up folders that went missing since the last snapshot.
-            self.refresh(window, cx);
-            return;
-        }
-        match &command {
-            Command::Snapshot if self.snapshot_request.answered() => self.refresh(window, cx),
-            Command::Quotas if self.quota_request.answered() => self.read_quotas(window, cx),
-            Command::Archive => self.archive_pending = false,
-            _ => {}
-        }
-        if matches!(&command, Command::RecordQuota { .. }) {
-            self.shared.quota_pending = false;
-        }
         let value = match result {
             Ok(v) => v,
             Err(e) => return self.fail(&command, e, window, cx),
@@ -540,36 +587,10 @@ impl Workspace {
             }
             return;
         }
-        if matches!(
-            command,
-            Command::CreateSession { .. }
-                | Command::CreateTicket { .. }
-                | Command::AssignTicket { .. }
-                | Command::AttachRepository { .. }
-                | Command::SetProjectRepositories { .. }
-        ) && self.creation.take().is_some()
-        {
+        if self.creation.take().is_some() {
             window.close_dialog(cx);
         }
         match command {
-            Command::Snapshot => match serde_json::from_value::<Snapshot>(value) {
-                Ok(snapshot) => self.accept_snapshot(snapshot, window, cx),
-                Err(e) => self.fail(&Command::Snapshot, e.to_string(), window, cx),
-            },
-            Command::Archive => match serde_json::from_value::<Archive>(value) {
-                Ok(archive) => self.accept_archive(archive, window, cx),
-                Err(e) => self.fail(&Command::Archive, e.to_string(), window, cx),
-            },
-            Command::Quotas | Command::RecordQuota { .. } => {
-                match serde_json::from_value::<Vec<QuotaReading>>(value) {
-                    // The same readings again would only redraw what draws them.
-                    Ok(quotas) if *self.shared.quotas != quotas => {
-                        self.shared.quotas = Rc::new(quotas)
-                    }
-                    Ok(_) => {}
-                    Err(error) => toast_error(error.to_string(), window, cx),
-                }
-            }
             Command::CreateSession { .. } | Command::AssignTicket { .. } => {
                 if let Ok(session) = serde_json::from_value::<Session>(value) {
                     let id = session.id.clone();
@@ -587,7 +608,15 @@ impl Workspace {
     /// Asks for the latest snapshot, or, while one is on its way, for one more after it.
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.snapshot_request.send() {
-            self.request(Command::Snapshot, window, cx);
+            self.ask(ask::snapshot(), window, cx, |view, snapshot, window, cx| {
+                if view.snapshot_request.answered() {
+                    view.refresh(window, cx);
+                }
+                match snapshot {
+                    Ok(snapshot) => view.accept_snapshot(snapshot, window, cx),
+                    Err(error) => view.fail(&Command::Snapshot, error, window, cx),
+                }
+            });
         }
     }
     /// Reads the archive again when what is shown needs it and the one held is out of date.
@@ -605,7 +634,13 @@ impl Workspace {
         });
         if wanted && !self.archive_pending {
             self.archive_pending = true;
-            self.request(Command::Archive, window, cx);
+            self.ask(ask::archive(), window, cx, |view, archive, window, cx| {
+                view.archive_pending = false;
+                match archive {
+                    Ok(archive) => view.accept_archive(archive, window, cx),
+                    Err(error) => view.fail(&Command::Archive, error, window, cx),
+                }
+            });
         }
     }
     fn accept_archive(&mut self, archive: Archive, window: &mut Window, cx: &mut Context<Self>) {
@@ -821,7 +856,7 @@ impl Requests for Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.accept_reply(command, reply, window, cx);
+        self.accept_creation(command, reply, window, cx);
         self.share(window, cx);
     }
 }

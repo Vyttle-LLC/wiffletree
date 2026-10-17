@@ -76,7 +76,7 @@ impl Workspace {
         let after = self.shared.progress.revision;
         let page = paced_reply(
             self.bridge.clone(),
-            Command::Progress { after },
+            ask::progress(after),
             wait,
             cx.background_executor().clone(),
         );

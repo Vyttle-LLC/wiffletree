@@ -2,98 +2,11 @@
 //! paragraph is a run of non-blank lines with the blank lines after it, so a blank line never
 //! keeps two changes apart. The title line, with its version, is merged on its own. Changes that
 //! don't overlap merge as plain text; the passages that do are handed back, unmerged.
-use serde::{Deserialize, Serialize};
 use similar::{Algorithm, DiffTag};
 use std::ops::Range;
 use workspace_core::MergePassage;
+pub use workspace_core::skills::merge::{Merge, MergedChange, Part, Source};
 
-/// Where a change in a merged rewrite came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Source {
-    /// The update's change, where the human had changed nothing.
-    Update,
-    /// An overlapping passage the model merged.
-    Model,
-    /// An overlapping passage the human settled by choosing a wording.
-    Human,
-}
-/// A change a merge made to the rewrite: what the rewrite said there, and what it says now.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MergedChange {
-    pub source: Source,
-    pub before: String,
-    pub after: String,
-}
-/// The merge of an update into a rewrite, as the parts that make up the merged text in order.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Merge {
-    parts: Vec<Part>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Part {
-    /// What the rewrite says, kept as it is.
-    Kept(String),
-    /// The update's change where the human changed nothing: `yours` becomes `stock`.
-    Update {
-        yours: String,
-        stock: String,
-    },
-    Overlap(MergePassage),
-}
-impl Merge {
-    /// The merged rewrite and its changes, when no passage overlaps.
-    pub fn plain(&self) -> Option<(String, Vec<MergedChange>)> {
-        let overlaps = self
-            .parts
-            .iter()
-            .any(|part| matches!(part, Part::Overlap(_)));
-        (!overlaps).then(|| self.settled(|_, _| unreachable!("no passage overlaps")))
-    }
-    /// The merged rewrite and its changes, with the text `settle` gives each overlapping
-    /// passage, by its index, and where that text came from. Every other part is the plain
-    /// merge's.
-    pub fn settled(
-        &self,
-        mut settle: impl FnMut(usize, &MergePassage) -> (String, Source),
-    ) -> (String, Vec<MergedChange>) {
-        let mut text = String::new();
-        let mut changes = vec![];
-        let mut overlaps = 0;
-        for part in &self.parts {
-            let (source, before, after) = match part {
-                Part::Kept(kept) => {
-                    text.push_str(kept);
-                    continue;
-                }
-                Part::Update { yours, stock } => (Source::Update, yours, stock.clone()),
-                Part::Overlap(passage) => {
-                    let (after, source) = settle(overlaps, passage);
-                    overlaps += 1;
-                    (source, &passage.yours, after)
-                }
-            };
-            text.push_str(&after);
-            if *before != after {
-                let before = before.clone();
-                changes.push(MergedChange {
-                    source,
-                    before,
-                    after,
-                });
-            }
-        }
-        (text, changes)
-    }
-    pub fn passages(&self) -> Vec<MergePassage> {
-        let overlap = |part: &Part| match part {
-            Part::Overlap(passage) => Some(passage.clone()),
-            _ => None,
-        };
-        self.parts.iter().filter_map(overlap).collect()
-    }
-}
 /// Merges the change from `base` to `stock` into `yours`, the rewrite of `base`.
 pub fn merge(base: &str, stock: &str, yours: &str) -> Merge {
     let [
@@ -155,7 +68,7 @@ pub fn merge(base: &str, stock: &str, yours: &str) -> Merge {
         rest = after;
     }
     parts.push(Part::Kept(base[unchanged_from..].concat()));
-    Merge { parts }
+    Merge::new(parts)
 }
 /// A text's first line, its title, and the paragraphs after it, which join back into the text.
 fn split(text: &str) -> (&str, Vec<&str>) {

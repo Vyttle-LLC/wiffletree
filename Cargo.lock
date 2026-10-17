@@ -8681,6 +8681,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "chrono-tz",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",

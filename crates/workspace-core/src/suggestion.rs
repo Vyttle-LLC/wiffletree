@@ -3,10 +3,11 @@ use crate::{
     AllowedModel, LevelKind, ModelSelection, PROVIDER_ROLES, PROVIDERS, Provider, ProviderAccess,
     ReviewLevel, Role, VerificationSettings, VerifierConfig,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What detection found for one provider's CLI.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     pub installed: bool,
     pub signed_in: bool,

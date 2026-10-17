@@ -74,11 +74,9 @@ impl LeftoverSelection {
         self.confirming = false;
     }
     /// The removal the human confirmed, or `None` before confirmation.
-    pub fn command(&self) -> Option<Command> {
+    pub fn removal(&self) -> Option<Ask<Vec<LeftoverRemoval>>> {
         self.confirmation()
-            .map(|_| Command::RemoveLeftoverWorktrees {
-                ticket_ids: self.selected.iter().cloned().collect(),
-            })
+            .map(|_| ask::remove_leftover_worktrees(self.selected.iter().cloned().collect()))
     }
 }
 
@@ -104,33 +102,31 @@ impl LeftoverSheet {
     }
 
     fn list(&mut self, cx: &mut Context<Self>) {
-        self.ask(Command::LeftoverWorktrees, false, cx, |sheet, value| {
-            sheet.selection = Some(LeftoverSelection::new(serde_json::from_value(value)?));
-            Ok(())
+        self.ask(ask::leftover_worktrees(), false, cx, |sheet, listing| {
+            sheet.selection = Some(LeftoverSelection::new(listing));
         });
     }
 
     fn remove(&mut self, cx: &mut Context<Self>) {
-        let Some(command) = self.selection.as_ref().and_then(LeftoverSelection::command) else {
+        let Some(removal) = self.selection.as_ref().and_then(LeftoverSelection::removal) else {
             return;
         };
         // The listing after removal shows what was kept.
-        self.ask(command, true, cx, |sheet, value| {
-            sheet.outcomes = serde_json::from_value(value)?;
+        self.ask(removal, true, cx, |sheet, outcomes| {
+            sheet.outcomes = outcomes;
             sheet.selection = None;
-            Ok(())
         });
     }
 
-    fn ask(
+    fn ask<R: serde::de::DeserializeOwned + 'static>(
         &mut self,
-        command: Command,
+        ask: Ask<R>,
         then_list: bool,
         cx: &mut Context<Self>,
-        apply: impl FnOnce(&mut Self, serde_json::Value) -> serde_json::Result<()> + 'static,
+        apply: impl FnOnce(&mut Self, R) + 'static,
     ) {
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+        let answer = match self.bridge.ask(ask) {
+            Ok(answer) => answer,
             Err(error) => {
                 self.error = Some(error);
                 return;
@@ -138,14 +134,9 @@ impl LeftoverSheet {
         };
         self.pending = true;
         cx.spawn(async move |this, cx| {
-            let answer = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()));
+            let answer = answer.await;
             let _ = this.update(cx, |sheet, cx| {
-                sheet.error = answer
-                    .and_then(|value| apply(sheet, value).map_err(|e| e.to_string()))
-                    .err();
+                sheet.error = answer.map(|answer| apply(sheet, answer)).err();
                 sheet.pending = false;
                 if then_list {
                     sheet.list(cx);
@@ -294,7 +285,7 @@ mod tests {
     // Only what the tests need: the parent's glob would bring GPUI's own `test` attribute.
     use super::LeftoverSelection;
     use std::path::Path;
-    use workspace_core::*;
+    use workspace_core::{ask::Ask, *};
     use workspace_host::Host;
 
     fn git(path: &Path, args: &[&str]) {
@@ -348,7 +339,7 @@ mod tests {
         assert_eq!(groups[0].1.len(), 2);
         assert!(!selection.is_selected(&clean.id) && !selection.is_selected(&dirty.id));
         assert_eq!(selection.confirm(), None, "nothing to confirm");
-        assert!(selection.command().is_none());
+        assert!(selection.removal().is_none());
 
         selection.toggle(&dirty.id);
         assert!(!selection.is_selected(&dirty.id), "dirty work is protected");
@@ -363,18 +354,19 @@ mod tests {
         let (_directory, mut host, clean, dirty) = store();
         let mut selection = LeftoverSelection::new(host.leftover_worktrees().unwrap());
         selection.toggle(&clean.id);
-        assert!(selection.command().is_none(), "not before confirmation");
+        assert!(selection.removal().is_none(), "not before confirmation");
 
         assert_eq!(
             selection.confirm().as_deref(),
             Some("Remove 1 leftover worktree? Their branches and commits are kept.")
         );
-        let Some(Command::RemoveLeftoverWorktrees { ticket_ids }) = selection.command() else {
+        let removal = selection.removal().map(Ask::into_command);
+        let Some(Command::RemoveLeftoverWorktrees { ticket_ids }) = removal else {
             panic!("removal command")
         };
         assert_eq!(ticket_ids, std::slice::from_ref(&clean.id));
         selection.cancel();
-        assert!(selection.command().is_none(), "cancelling withdraws it");
+        assert!(selection.removal().is_none(), "cancelling withdraws it");
 
         let outcomes = host.remove_leftover_worktrees(&ticket_ids).unwrap();
         assert!(outcomes[0].removed);

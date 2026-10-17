@@ -1,6 +1,6 @@
 //! What the shell shares with every view, and how a view talks to the host.
 use super::*;
-use workspace_host::runtime::ModelOption;
+use serde::de::DeserializeOwned;
 
 /// The host's latest workspace joined with its archive, what is selected, which page and panel
 /// show, and the figures several views draw. The shell owns it and hands each view a copy when
@@ -232,18 +232,26 @@ pub(super) trait Requests: Sized + 'static {
         window: &mut Window,
         cx: &mut Context<Self>,
     );
+    /// Archives or restores a session, and says which were.
     fn set_archived(
         &mut self,
         session_id: String,
         archived: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let command = Command::SetArchived {
-            session_id,
-            archived,
-        };
-        self.request(command, window, cx);
+    ) where
+        Self: EventEmitter<Intent>,
+    {
+        let ask = ask::set_archived(session_id, archived);
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |_, affected, window, cx| match affected {
+                Ok(affected) => cx.emit(Intent::Archived { archived, affected }),
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
     /// Starts or stops a project's agents.
     fn set_live(
@@ -261,28 +269,53 @@ pub(super) trait Requests: Sized + 'static {
     }
     /// Sends `command` to the host; its reply comes back to `accept`.
     fn request(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = match self.bridge().request(command.clone()) {
-            Ok(receiver) => receiver,
-            Err(error) => return self.accept(command, Err(error), window, cx),
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            let reply = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()));
-            let wrote = reply.is_ok() && human_write(&command);
-            let _ = cx.update(|window, cx| {
-                let _ = this.update(cx, |view, cx| {
-                    view.accept(command, reply, window, cx);
-                    cx.notify();
-                });
-                if wrote {
-                    cx.set_global(HumanWrote);
-                }
-            });
-        })
-        .detach();
+        let sent = command.clone();
+        send(self, sent, window, cx, move |view, reply, window, cx| {
+            view.accept(command, reply, window, cx)
+        });
     }
+    /// Sends `ask`; its reply, decoded as what the host answers it with, comes back to `then`.
+    fn ask<R: DeserializeOwned + 'static>(
+        &mut self,
+        ask: Ask<R>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Result<R, String>, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let command = ask.command().clone();
+        send(self, command, window, cx, move |view, reply, window, cx| {
+            then(view, reply.and_then(|reply| ask.decode(reply)), window, cx)
+        });
+    }
+}
+
+/// Sends `command` to the host and hands its reply to `then`; the view redraws after it.
+fn send<V: Requests>(
+    view: &mut V,
+    command: Command,
+    window: &mut Window,
+    cx: &mut Context<V>,
+    then: impl FnOnce(&mut V, Result<Value, String>, &mut Window, &mut Context<V>) + 'static,
+) {
+    let wrote = human_write(&command);
+    let reply = match view.bridge().send(command) {
+        Ok(reply) => reply,
+        Err(error) => return then(view, Err(error), window, cx),
+    };
+    cx.spawn_in(window, async move |this, cx| {
+        let reply = reply.await;
+        let wrote = wrote && reply.is_ok();
+        let _ = cx.update(|window, cx| {
+            let _ = this.update(cx, |view, cx| {
+                then(view, reply, window, cx);
+                cx.notify();
+            });
+            if wrote {
+                cx.set_global(HumanWrote);
+            }
+        });
+    })
+    .detach();
 }
 
 /// Set after each change the human made, so its observers hear of every one. A reader of an
@@ -295,7 +328,7 @@ fn human_write(command: &Command) -> bool {
     !command.is_read()
         && !matches!(
             command,
-            Command::RecordQuota { .. } | Command::RefreshRepositories
+            Command::RefreshCodexQuota | Command::RefreshRepositories
         )
 }
 

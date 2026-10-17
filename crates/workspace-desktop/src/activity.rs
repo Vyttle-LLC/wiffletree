@@ -118,19 +118,14 @@ impl StepFetch {
 /// Waits out the pace, then asks the host and decodes its reply.
 pub(super) async fn paced_reply<T: serde::de::DeserializeOwned>(
     bridge: Bridge,
-    command: Command,
+    ask: Ask<T>,
     wait: Duration,
     executor: BackgroundExecutor,
 ) -> Result<T, String> {
     if !wait.is_zero() {
         executor.timer(wait).await;
     }
-    let value = bridge
-        .request(command)?
-        .recv()
-        .await
-        .map_err(|_| "Host disconnected".to_string())??;
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    bridge.ask(ask)?.await
 }
 
 pub(super) fn kind_icon(kind: StepKind) -> &'static str {

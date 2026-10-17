@@ -53,14 +53,14 @@ impl HistorySheet {
         let Some(wait) = self.fetch.begin(STEP_PACE) else {
             return;
         };
-        let command = Command::Steps {
-            session_id: self.session_id.clone(),
-            run_id: Some(self.run_id.clone()),
-            after: self.run.revision,
-        };
+        let ask = ask::steps(
+            self.session_id.clone(),
+            Some(self.run_id.clone()),
+            self.run.revision,
+        );
         let page = paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             wait,
             cx.background_executor().clone(),
         );

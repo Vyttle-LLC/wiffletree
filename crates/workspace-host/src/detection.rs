@@ -7,6 +7,15 @@ use std::{process::Command as ProcessCommand, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Whether `provider`'s CLI is installed and signed in, and the models it lists. Blocks like
+/// `detect`.
+pub fn report(provider: Provider) -> ProviderReport {
+    ProviderReport {
+        status: detect(provider),
+        models: crate::runtime::models(provider).unwrap_or_default(),
+    }
+}
+
 /// Blocks for up to `TIMEOUT`; call it off the UI thread. A missing, slow or failing CLI
 /// reads as not signed in.
 pub fn detect(provider: Provider) -> ProviderStatus {

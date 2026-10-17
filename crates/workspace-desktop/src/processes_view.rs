@@ -219,11 +219,9 @@ impl Inspector {
                 let Ok(Some((session_id, bridge))) = next else {
                     break;
                 };
-                let command = Command::Processes {
-                    session_id: session_id.clone(),
-                };
+                let ask = ask::processes(session_id.clone());
                 let executor = cx.background_executor().clone();
-                let result = activity::paced_reply(bridge, command, Duration::ZERO, executor).await;
+                let result = activity::paced_reply(bridge, ask, Duration::ZERO, executor).await;
                 let _ = this.update(cx, |view, cx| {
                     view.accept_processes(&session_id, result);
                     cx.notify();
@@ -253,14 +251,11 @@ impl Inspector {
         if self.processes.stopping.is_some() {
             return;
         }
-        let command = Command::StopProcesses {
-            session_id: session_id.clone(),
-            groups: groups.clone(),
-        };
+        let ask = ask::stop_processes(session_id.clone(), groups.clone());
         self.processes.stopping = Some(groups);
         let reply = activity::paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             Duration::ZERO,
             cx.background_executor().clone(),
         );

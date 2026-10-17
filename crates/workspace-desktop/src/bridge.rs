@@ -1,8 +1,18 @@
 use async_channel::Receiver;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::path::PathBuf;
-use workspace_core::*;
+use workspace_core::{ask::Ask, *};
 use workspace_host::service::Service;
+
+/// Waits for the host's answer to `ask`, before the app starts.
+fn answer<R: DeserializeOwned>(service: &Service, ask: Ask<R>) -> anyhow::Result<R> {
+    let reply = service
+        .request(ask.command().clone())
+        .map_err(anyhow::Error::msg)?;
+    let value = reply.recv_blocking()?.map_err(anyhow::Error::msg)?;
+    ask.decode(value).map_err(anyhow::Error::msg)
+}
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -15,33 +25,15 @@ impl Bridge {
             let helper = binary.parent().unwrap().join("workspace-host");
             let service = Service::start(home, helper)?;
             if let Some(path) = demo_repository {
-                let snapshot: Snapshot = serde_json::from_value(
-                    service
-                        .request(Command::Snapshot)
-                        .map_err(anyhow::Error::msg)?
-                        .recv_blocking()?
-                        .map_err(anyhow::Error::msg)?,
-                )?;
+                let snapshot = answer(&service, ask::snapshot())?;
                 // A store without a saved setup starts nothing, the demo project included.
                 if snapshot.projects.is_empty() && snapshot.model_selection.is_saved() {
-                    let project: Project = serde_json::from_value(
-                        service
-                            .request(Command::CreateProject {
-                                name: "Workspace trial".into(),
-                            })
-                            .map_err(anyhow::Error::msg)?
-                            .recv_blocking()?
-                            .map_err(anyhow::Error::msg)?,
+                    let project = answer(&service, ask::create_project("Workspace trial".into()))?;
+                    let base = "HEAD".into();
+                    answer(
+                        &service,
+                        ask::attach_repository(Some(project.id), path, base),
                     )?;
-                    service
-                        .request(Command::AttachRepository {
-                            project_id: Some(project.id),
-                            path,
-                            base: "HEAD".into(),
-                        })
-                        .map_err(anyhow::Error::msg)?
-                        .recv_blocking()?
-                        .map_err(anyhow::Error::msg)?;
                 }
             }
             Ok(service)
@@ -55,6 +47,24 @@ impl Bridge {
             .as_ref()
             .map_err(Clone::clone)?
             .request(command)
+    }
+    /// Sends `command`; its reply arrives when the host answers, or says the host is gone.
+    pub fn send(
+        &self,
+        command: Command,
+    ) -> Result<impl Future<Output = Result<Value, String>> + use<>, String> {
+        let receiver = self.request(command)?;
+        Ok(
+            async move { (receiver.recv().await).unwrap_or_else(|_| Err("Host disconnected".into())) },
+        )
+    }
+    /// Sends `ask`; its reply arrives decoded as what the host answers it with.
+    pub fn ask<R: DeserializeOwned>(
+        &self,
+        ask: Ask<R>,
+    ) -> Result<impl Future<Output = Result<R, String>> + use<R>, String> {
+        let reply = self.send(ask.command().clone())?;
+        Ok(async move { reply.await.and_then(|reply| ask.decode(reply)) })
     }
     /// Stops running turns and the host; returns once their provider processes are stopped.
     pub fn shutdown(&self) {

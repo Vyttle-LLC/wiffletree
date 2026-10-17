@@ -156,7 +156,7 @@ pub(super) struct Sidebar {
     bridge: Bridge,
     pub(super) shared: Shared,
     /// The project created by New project, until its first snapshot selects and names it.
-    pending_project_selection: Option<String>,
+    pub(super) pending_project_selection: Option<String>,
     pub(super) creating_project: bool,
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
@@ -1089,11 +1089,11 @@ impl Sidebar {
         let grouping = cx.global::<Preferences>().group_projects;
         let entries = tree::entries(index, self.shared.show_archived, grouping);
         if let Some(moved) = tree::project_move(&entries, moving, &target) {
-            let command = Command::MoveProjects {
-                project_ids: moved.project_ids,
-                before: moved.before,
-            };
-            self.request(command, window, cx);
+            let ask = ask::move_projects(moved.project_ids, moved.before);
+            self.ask(ask, window, cx, |_, projects, window, cx| match projects {
+                Ok(projects) => cx.emit(Intent::Amend(Amendment::Projects(projects))),
+                Err(error) => toast_error(error, window, cx),
+            });
         }
     }
 
@@ -1652,61 +1652,14 @@ impl Requests for Sidebar {
     }
     fn accept(
         &mut self,
-        command: Command,
+        _: Command,
         reply: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return self.failed(&command, error, window, cx),
-        };
-        match command {
-            Command::CreateProject { .. } => {
-                if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    self.pending_project_selection = Some(project.id);
-                }
-            }
-            Command::RenameProject { project_id, .. } => {
-                if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    cx.emit(Intent::Amend(Amendment::Project(project)));
-                    if self
-                        .project_edit
-                        .as_ref()
-                        .is_some_and(|e| e.project_id == project_id)
-                    {
-                        self.project_edit = None;
-                    }
-                }
-            }
-            Command::MoveProjects { .. } => {
-                if let Ok(projects) = serde_json::from_value(value) {
-                    cx.emit(Intent::Amend(Amendment::Projects(projects)));
-                }
-            }
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                cx.emit(Intent::Archived { archived, affected });
-            }
-            _ => {}
+        if let Err(error) = reply {
+            toast_error(error, window, cx);
         }
-    }
-}
-impl Sidebar {
-    /// A rename's failure shows in its field; anything else as a toast.
-    fn failed(&mut self, command: &Command, error: String, window: &mut Window, cx: &mut App) {
-        if matches!(command, Command::CreateProject { .. }) {
-            self.creating_project = false;
-        }
-        if let Command::RenameProject { project_id, .. } = command
-            && let Some(edit) = &mut self.project_edit
-            && edit.project_id == *project_id
-        {
-            edit.saving = false;
-            edit.error = error;
-            return;
-        }
-        toast_error(error, window, cx);
     }
 }
 impl Render for Sidebar {

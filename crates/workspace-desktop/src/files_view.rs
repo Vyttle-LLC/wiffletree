@@ -386,16 +386,13 @@ impl Files {
         panel: Option<Panel>,
         session_id: &str,
         agent: bool,
-    ) -> Option<(Command, Duration)> {
+    ) -> Option<(Ask<Vec<TicketFiles>>, Duration)> {
         if panel != Some(Panel::Files) {
             return None;
         }
         let wait = self.fetch.begin(FILES_PACE)?;
-        let command = Command::Files {
-            session_id: session_id.to_owned(),
-            whole_tree: agent && self.whole_tree,
-        };
-        Some((command, wait))
+        let ask = ask::files(session_id.to_owned(), agent && self.whole_tree);
+        Some((ask, wait))
     }
     /// The title and text of the empty state standing in for the tree, if it has no rows.
     fn blank(&self) -> Option<(&'static str, String)> {
@@ -532,13 +529,12 @@ impl Inspector {
             return;
         };
         let (session_id, agent) = (session.id.clone(), session.role.is_worker());
-        let Some((command, wait)) = self.files.request(self.shared.panel, &session_id, agent)
-        else {
+        let Some((ask, wait)) = self.files.request(self.shared.panel, &session_id, agent) else {
             return;
         };
         let reply = paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             wait,
             cx.background_executor().clone(),
         );
@@ -1242,9 +1238,9 @@ mod tests {
         assert!(files.request(None, "agent", true).is_none());
         assert!(files.request(Some(Panel::Git), "agent", true).is_none());
         // Opening the panel afterwards still gets its request at once.
-        let (command, wait) = files.request(Some(Panel::Files), "agent", true).unwrap();
+        let (ask, wait) = files.request(Some(Panel::Files), "agent", true).unwrap();
         assert!(matches!(
-            command,
+            ask.command(),
             Command::Files {
                 whole_tree: false,
                 ..
@@ -1258,7 +1254,7 @@ mod tests {
         files.whole_tree = true;
         let (agent_asks, _) = files.request(Some(Panel::Files), "agent", true).unwrap();
         assert!(matches!(
-            agent_asks,
+            agent_asks.command(),
             Command::Files {
                 whole_tree: true,
                 ..
@@ -1267,7 +1263,7 @@ mod tests {
         files.fetch.finish();
         let (coordinator_asks, _) = files.request(Some(Panel::Files), "pm", false).unwrap();
         assert!(matches!(
-            coordinator_asks,
+            coordinator_asks.command(),
             Command::Files {
                 whole_tree: false,
                 ..

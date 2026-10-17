@@ -73,7 +73,7 @@ pub struct CreationForm {
     options: Vec<Choice>,
     role: Role,
     model_selection: ModelSelection,
-    catalog: Vec<workspace_host::runtime::ModelOption>,
+    catalog: Vec<ModelOption>,
     /// The human's pick; `None` follows the role's pre-fill.
     profile: Option<ModelProfile>,
     pub pending: bool,
@@ -213,7 +213,7 @@ impl CreationForm {
     }
 
     /// The installed CLIs' models, offered by the model picker beside the allowed ones.
-    pub fn with_catalog(mut self, catalog: &[workspace_host::runtime::ModelOption]) -> Self {
+    pub fn with_catalog(mut self, catalog: &[ModelOption]) -> Self {
         self.catalog = catalog.to_vec();
         self
     }
@@ -356,10 +356,9 @@ impl CreationForm {
             cx.notify();
             return;
         }
-        let receiver = match self.bridge.request(Command::DiscoverRepositories {
-            folders: self.folders.iter().cloned().collect(),
-        }) {
-            Ok(receiver) => receiver,
+        let ask = ask::discover_repositories(self.folders.iter().cloned().collect());
+        let discovery = match self.bridge.ask(ask) {
+            Ok(discovery) => discovery,
             Err(error) => {
                 self.error = error;
                 cx.notify();
@@ -372,13 +371,7 @@ impl CreationForm {
         self.error.clear();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()))
-                .and_then(|v| {
-                    serde_json::from_value::<RepositoryDiscovery>(v).map_err(|e| e.to_string())
-                });
+            let result = discovery.await;
             let _ = this.update(cx, |form, cx| {
                 form.scanning = false;
                 match result {

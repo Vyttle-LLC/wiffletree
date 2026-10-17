@@ -89,7 +89,7 @@ impl Settings {
                         confirming: None,
                         compared: None,
                     };
-                    view.ask_host(Command::Settings, cx);
+                    view.ask_host(ask::settings(), cx);
                     view.refresh_sync(cx);
                     cx.observe_global::<repository::SyncShown>(|view, cx| view.sync_shown(cx))
                         .detach();
@@ -129,12 +129,10 @@ impl Settings {
             };
             let _ = this.update(cx, |view, cx| {
                 match chosen {
-                    Some(path) => view.ask_host(
-                        Command::SetWorkspacesDir {
-                            path: path.to_string_lossy().into_owned(),
-                        },
-                        cx,
-                    ),
+                    Some(path) => {
+                        let path = path.to_string_lossy().into_owned();
+                        view.ask_host(ask::set_workspaces_dir(path), cx)
+                    }
                     None => view.choosing_folder = false,
                 }
                 cx.notify();
@@ -144,10 +142,10 @@ impl Settings {
     }
 
     /// Shows the host's answer, or its error beside the setting it still uses.
-    fn ask_host(&mut self, command: Command, cx: &mut Context<Self>) {
-        let check_ins = matches!(command, Command::SetCheckIns { .. });
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+    fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
+        let check_ins = matches!(ask.command(), Command::SetCheckIns { .. });
+        let answer = match self.bridge.ask(ask) {
+            Ok(answer) => answer,
             Err(error) => {
                 self.show_error(check_ins, error);
                 self.choosing_folder = false;
@@ -155,13 +153,7 @@ impl Settings {
             }
         };
         cx.spawn(async move |this, cx| {
-            let answer = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()))
-                .and_then(|value| {
-                    serde_json::from_value::<HostSettings>(value).map_err(|e| e.to_string())
-                });
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
                 match answer {
                     Ok(settings) => {
@@ -320,13 +312,9 @@ fn threshold_selector(
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(mut chosen) = view.host.clone() {
                     set(&mut chosen, n);
-                    view.ask_host(
-                        Command::SetCheckIns {
-                            child_turns: chosen.checkin_child_turns,
-                            human_turns: chosen.checkin_human_turns,
-                        },
-                        cx,
-                    );
+                    let ask =
+                        ask::set_check_ins(chosen.checkin_child_turns, chosen.checkin_human_turns);
+                    view.ask_host(ask, cx);
                 }
             })),
         );

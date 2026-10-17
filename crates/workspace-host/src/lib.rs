@@ -1221,7 +1221,7 @@ impl Host {
         self.project(project)?;
         Ok(self.db.prepare("SELECT * FROM activity WHERE project_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3")?.query_map(params![project, before.unwrap_or(i64::MAX), page_limit(limit)?], |r| Ok(Activity { sequence: r.get(0)?, project_id: r.get(1)?, session_id: r.get(2)?, kind: r.get(3)?, detail: r.get(4)?, created_at: r.get(5)? }))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    pub fn git_history(&self, repository: &str, skip: usize, limit: usize) -> Result<Value> {
+    pub fn git_history(&self, repository: &str, skip: usize, limit: usize) -> Result<GitHistory> {
         checkout::History::prepare(self, repository, skip, limit)?
             .run(&publish::Tools::default().git)
     }
@@ -1313,9 +1313,19 @@ impl Host {
                 serde_json::to_value(session)?
             }
             Command::Quotas => serde_json::to_value(self.quotas()?)?,
-            Command::RecordQuota { reading } => {
-                self.record_quota(reading)?;
+            Command::RefreshCodexQuota => {
+                self.record_quota(runtime::codex_reading())?;
                 serde_json::to_value(self.quotas()?)?
+            }
+            Command::InspectProvider { provider } => {
+                serde_json::to_value(detection::report(provider))?
+            }
+            Command::MeasureContext {
+                session_id,
+                profile,
+            } => serde_json::to_value(self.measurement(&session_id, profile)?.run()?)?,
+            Command::InspectAttachments { paths } => {
+                serde_json::to_value(attachments::inspect_all(&paths))?
             }
             Command::Usage {
                 days,
@@ -1452,7 +1462,7 @@ impl Host {
                 repository_id,
                 skip,
                 limit,
-            } => self.git_history(&repository_id, skip, limit)?,
+            } => serde_json::to_value(self.git_history(&repository_id, skip, limit)?)?,
             Command::Steps {
                 session_id,
                 run_id,

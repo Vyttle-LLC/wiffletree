@@ -5,11 +5,10 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
-use serde::Deserialize;
 use ui::{
     card, empty_state, eyebrow, from_now, hint, icon, mono, pill, property, section, session_icon,
 };
-use workspace_host::usage::local_time;
+use wording::local_time;
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -189,13 +188,13 @@ impl Inspector {
     }
     fn accept_panel_data(
         &mut self,
-        data: serde_json::Result<PanelData>,
+        data: Result<PanelData, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match data {
             Ok(data) => self.panel_data = data,
-            Err(error) => toast_error(error.to_string(), window, cx),
+            Err(error) => toast_error(error, window, cx),
         }
     }
     fn load_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -203,39 +202,41 @@ impl Inspector {
             return;
         };
         match self.shared.panel {
-            Some(Panel::Memory) => self.request(
-                Command::Logs {
-                    project_id,
-                    before: None,
-                    limit: 30,
-                },
-                window,
-                cx,
-            ),
-            Some(Panel::Events) => self.request(
-                Command::Activity {
-                    project_id,
-                    before: None,
-                    limit: 50,
-                },
-                window,
-                cx,
-            ),
+            Some(Panel::Memory) => {
+                let ask = ask::logs(project_id.clone(), None, 30);
+                self.ask(ask, window, cx, move |view, logs, window, cx| {
+                    let shown = view.shared.panel == Some(Panel::Memory)
+                        && view.shared.project_id() == Some(project_id);
+                    if shown {
+                        view.accept_panel_data(logs.map(PanelData::Memory), window, cx);
+                    }
+                })
+            }
+            Some(Panel::Events) => {
+                let ask = ask::activity(project_id.clone(), None, 50);
+                self.ask(ask, window, cx, move |view, events, window, cx| {
+                    let shown = view.shared.panel == Some(Panel::Events)
+                        && view.shared.project_id() == Some(project_id);
+                    if shown {
+                        view.accept_panel_data(events.map(PanelData::Events), window, cx);
+                    }
+                })
+            }
             Some(Panel::Git) => {
-                if let Some(repository_id) = self
-                    .shared
-                    .selected_session()
-                    .and_then(|s| s.repository_id.clone())
-                {
-                    self.request(
-                        Command::GitHistory {
-                            repository_id,
-                            skip: 0,
-                            limit: 30,
-                        },
-                        window,
-                        cx,
-                    )
+                let repository =
+                    (self.shared.selected_session()).and_then(|s| s.repository_id.clone());
+                if let Some(repository_id) = repository {
+                    let ask = ask::git_history(repository_id.clone(), 0, 30);
+                    self.ask(ask, window, cx, move |view, history, window, cx| {
+                        let shown = view.shared.panel == Some(Panel::Git)
+                            && (view.shared.selected_session())
+                                .and_then(|s| s.repository_id.as_ref())
+                                == Some(&repository_id);
+                        if shown {
+                            let commits = history.map(|history| PanelData::Git(history.commits));
+                            view.accept_panel_data(commits, window, cx);
+                        }
+                    })
                 }
             }
             Some(Panel::Files) => self.fetch_files(window, cx),
@@ -800,39 +801,7 @@ impl Requests for Inspector {
             }
         };
         match command {
-            Command::Logs { project_id, .. } => {
-                if self.shared.panel == Some(Panel::Memory)
-                    && self.shared.project_id() == Some(project_id)
-                {
-                    let logs = serde_json::from_value(value).map(PanelData::Memory);
-                    self.accept_panel_data(logs, window, cx);
-                }
-            }
-            Command::Activity { project_id, .. } => {
-                if self.shared.panel == Some(Panel::Events)
-                    && self.shared.project_id() == Some(project_id)
-                {
-                    let events = serde_json::from_value(value).map(PanelData::Events);
-                    self.accept_panel_data(events, window, cx);
-                }
-            }
-            Command::GitHistory { repository_id, .. } => {
-                if self.shared.panel == Some(Panel::Git)
-                    && self
-                        .shared
-                        .selected_session()
-                        .and_then(|s| s.repository_id.clone())
-                        == Some(repository_id)
-                {
-                    let history = inspector::commits(value).map(PanelData::Git);
-                    self.accept_panel_data(history, window, cx);
-                }
-            }
             Command::CompactContext { session_id, .. } => self.compact_accepted(&session_id),
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                cx.emit(Intent::Archived { archived, affected });
-            }
             Command::AppendLog { .. } => {
                 self.memory_title
                     .update(cx, |input, cx| input.set_value("", window, cx));
@@ -967,27 +936,11 @@ impl Workspace {
     }
 }
 
-/// A commit in the Git panel's local history.
-#[derive(Deserialize)]
-pub(super) struct Commit {
-    sha: String,
-    subject: String,
-}
-
-/// The commits in a `git_history` reply.
-pub(super) fn commits(reply: Value) -> serde_json::Result<Vec<Commit>> {
-    #[derive(Deserialize)]
-    struct History {
-        commits: Vec<Commit>,
-    }
-    serde_json::from_value::<History>(reply).map(|history| history.commits)
-}
-
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Panel, commits};
-    use workspace_core::Role;
+    use super::Panel;
+    use workspace_core::{Role, ask};
     use workspace_host::Host;
 
     #[test]
@@ -1000,7 +953,6 @@ mod tests {
         assert!(Panel::Git.kept_for(Role::ProjectOrchestrator) == Panel::Overview);
     }
 
-    /// The host's history reply is untyped JSON; the Git panel reads it into commits once.
     #[test]
     fn the_git_panel_reads_the_hosts_history_reply() {
         let directory = tempfile::tempdir().unwrap();
@@ -1021,7 +973,9 @@ mod tests {
         let mut host = Host::open(directory.path().join("home")).unwrap();
         let repository = host.add_repository(repo.to_str().unwrap(), "HEAD").unwrap();
 
-        let history = commits(host.git_history(&repository.id, 0, 30).unwrap()).unwrap();
+        let ask = ask::git_history(repository.id, 0, 30);
+        let reply = host.execute(ask.command().clone()).unwrap();
+        let history = ask.decode(reply).unwrap().commits;
 
         let subjects: Vec<&str> = history.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, ["Add the toolbar", "Base"]);

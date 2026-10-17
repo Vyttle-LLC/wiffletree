@@ -655,17 +655,6 @@ fn row_totals(row: &Row<'_>, offset: usize) -> rusqlite::Result<TokenTotals> {
     })
 }
 
-pub fn local_time(at: i64, timezone: &str) -> Option<String> {
-    let zone: Tz = timezone.parse().ok()?;
-    Some(
-        Utc.timestamp_millis_opt(at)
-            .single()?
-            .with_timezone(&zone)
-            .format("%b %-d, %-I:%M %p %Z")
-            .to_string(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

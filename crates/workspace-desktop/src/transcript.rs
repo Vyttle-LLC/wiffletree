@@ -2,7 +2,7 @@
 //! older pages, and the live activity row while the agent works.
 use super::*;
 use activity::{Card, RunActivity, STEP_PACE, StepFetch, paced_reply};
-use conversation::{COLUMN, first_line};
+use conversation::COLUMN;
 use file_links::Linked;
 use gpui_component::button::ButtonVariants;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -761,17 +761,27 @@ impl Transcript {
     }
 
     pub(super) fn load_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.shared.selected.clone() {
-            self.request(
-                Command::Messages {
-                    session_id,
-                    before: self.page,
-                    limit: MAX_PAGE,
-                },
-                window,
-                cx,
-            );
-        }
+        let Some(session_id) = self.shared.selected.clone() else {
+            return;
+        };
+        let before = self.page;
+        let ask = ask::messages(session_id.clone(), before, MAX_PAGE);
+        self.ask(ask, window, cx, move |view, messages, window, cx| {
+            match messages {
+                Ok(messages)
+                    if view.shared.selected.as_deref() == Some(&session_id)
+                        && view.page == before =>
+                {
+                    view.prepare(session_id, before, messages, window, cx)
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // The next snapshot asks again.
+                    view.seen = SeenRevision::default();
+                    toast_error(error, window, cx)
+                }
+            }
+        });
     }
 
     /// Loads the shown page again if the selected session's messages may have changed.
@@ -905,14 +915,10 @@ impl Transcript {
             .as_ref()
             .filter(|a| a.session_id == session_id)
             .map_or(0, |a| a.revision);
-        let command = Command::Steps {
-            session_id: session_id.clone(),
-            run_id: None,
-            after,
-        };
+        let ask = ask::steps(session_id.clone(), None, after);
         let page = paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             wait,
             cx.background_executor().clone(),
         );
@@ -1007,13 +1013,15 @@ impl Transcript {
             .map(str::to_owned)
             .collect();
         if !run_ids.is_empty() {
-            self.request(
-                Command::RunSummaries {
-                    session_id,
-                    run_ids,
-                },
+            let ask = ask::run_summaries(session_id, run_ids);
+            self.ask(
+                ask,
                 window,
                 cx,
+                |view, summaries, window, cx| match summaries {
+                    Ok(summaries) => view.accept_run_summaries(summaries),
+                    Err(error) => toast_error(error, window, cx),
+                },
             );
         }
     }
@@ -1303,36 +1311,11 @@ impl Requests for Transcript {
     }
     fn accept(
         &mut self,
-        command: Command,
-        reply: Result<Value, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: Command,
+        _: Result<Value, String>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => {
-                // The next snapshot asks again.
-                if matches!(command, Command::Messages { .. }) {
-                    self.seen = SeenRevision::default();
-                }
-                return toast_error(error, window, cx);
-            }
-        };
-        match command {
-            Command::Messages {
-                session_id, before, ..
-            } if self.shared.selected.as_deref() == Some(&session_id) && self.page == before => {
-                match serde_json::from_value::<Vec<Message>>(value) {
-                    Ok(messages) => self.prepare(session_id, before, messages, window, cx),
-                    Err(error) => toast_error(error.to_string(), window, cx),
-                }
-            }
-            Command::RunSummaries { .. } => match serde_json::from_value(value) {
-                Ok(summaries) => self.accept_run_summaries(summaries),
-                Err(error) => toast_error(error.to_string(), window, cx),
-            },
-            _ => {}
-        }
     }
 }
 

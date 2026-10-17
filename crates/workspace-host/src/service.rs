@@ -500,6 +500,11 @@ enum Event {
         prepared: Result<sync::Prepared>,
         reply: Reply,
     },
+    /// Codex's account limits, read on their own thread, to record.
+    QuotaRead {
+        reading: QuotaReading,
+        reply: Reply,
+    },
     /// A root scan finished on its own thread; adding what it found is quick.
     Discovered {
         found: Vec<RepositoryCandidate>,
@@ -989,8 +994,9 @@ impl Actor {
     }
     /// Repository scans run Git once per new repository, so they leave the host thread free
     /// for agents and send back only what the store needs. The Files panel's Git reads leave
-    /// it the same way, after the store has answered which files the agents touched. Sync now
-    /// makes a sync pass due, which `refresh_settings_sync` starts.
+    /// it the same way, after the store has answered which files the agents touched, as do the
+    /// provider CLIs asked about models, limits and context, and dropped files. Sync now makes a
+    /// sync pass due, which `refresh_settings_sync` starts.
     fn scan_in_background(&mut self, command: &Command, reply: &Reply) -> Result<bool> {
         match command {
             Command::CreateTicket {
@@ -1010,7 +1016,9 @@ impl Actor {
                 let git = self.publish_tools.git.clone();
                 let reply = reply.clone();
                 std::thread::spawn(move || {
-                    let result = history.run(&git).map_err(|error| format!("{error:#}"));
+                    let result = (history.run(&git))
+                        .and_then(|history| Ok(serde_json::to_value(history)?))
+                        .map_err(|error| format!("{error:#}"));
                     let _ = reply.try_send(result);
                 });
             }
@@ -1077,6 +1085,40 @@ impl Actor {
             Command::SyncNow => {
                 self.sync_pace.sync_now();
                 let _ = reply.try_send(Ok(Value::Null));
+            }
+            Command::RefreshCodexQuota => {
+                let (sender, reply) = (self.sender.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let reading = runtime::codex_reading();
+                    let _ = sender.send_blocking(Event::QuotaRead { reading, reply });
+                });
+            }
+            Command::InspectProvider { provider } => {
+                let (provider, reply) = (*provider, reply.clone());
+                std::thread::spawn(move || {
+                    let report = serde_json::to_value(detection::report(provider));
+                    let _ = reply.try_send(report.map_err(|e| e.to_string()));
+                });
+            }
+            Command::MeasureContext {
+                session_id,
+                profile,
+            } => {
+                let measurement = self.host.measurement(session_id, profile.clone())?;
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let result = (measurement.run())
+                        .and_then(|usage| Ok(serde_json::to_value(usage)?))
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = reply.try_send(result);
+                });
+            }
+            Command::InspectAttachments { paths } => {
+                let (paths, reply) = (paths.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let inspected = serde_json::to_value(attachments::inspect_all(&paths));
+                    let _ = reply.try_send(inspected.map_err(|e| e.to_string()));
+                });
             }
             _ => return Ok(false),
         }
@@ -1409,6 +1451,18 @@ impl Actor {
             }
             Event::SkillMerged(run, answered) => {
                 self.host.finish_merge_run(run, answered);
+                true
+            }
+            Event::QuotaRead { reading, reply } => {
+                let result = self
+                    .host
+                    .record_quota(reading)
+                    .and_then(|()| self.host.quotas());
+                let _ = reply.try_send(
+                    result
+                        .and_then(|quotas| Ok(serde_json::to_value(quotas)?))
+                        .map_err(|e| format!("{e:#}")),
+                );
                 true
             }
             Event::Discovered {

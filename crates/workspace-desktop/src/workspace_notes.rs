@@ -3,7 +3,7 @@
 use super::*;
 use gpui_component::button::ButtonVariants;
 use ui::hint;
-use workspace_host::skills::Line;
+use workspace_core::skills::Line;
 
 /// What the human chose on a note.
 #[derive(Clone, Copy)]
@@ -219,8 +219,8 @@ pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<Str
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{choices, compare_failed, kept_note, recompare, short};
+    use workspace_core::skills::Line;
     use workspace_core::*;
-    use workspace_host::skills::Line;
 
     fn note(paused: Paused) -> PausedSetting {
         PausedSetting {

@@ -19,6 +19,18 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         Command::Archive,
         Command::DiscoverRepositories { folders: vec![] },
         Command::Quotas,
+        Command::InspectProvider {
+            provider: Provider::Codex,
+        },
+        Command::MeasureContext {
+            session_id: text(),
+            profile: ModelProfile {
+                provider: Provider::Claude,
+                model: text(),
+                effort: text(),
+            },
+        },
+        Command::InspectAttachments { paths: vec![] },
         Command::Usage {
             days: 7,
             project_id: None,
@@ -110,16 +122,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
         },
         Command::CancelCompaction { session_id: text() },
         Command::DismissCompaction { session_id: text() },
-        Command::RecordQuota {
-            reading: QuotaReading {
-                provider: Provider::Claude,
-                account: None,
-                observed_at: 0,
-                source: text(),
-                windows: vec![],
-                error: None,
-            },
-        },
+        Command::RefreshCodexQuota,
         Command::CreateTicket {
             coordinator_id: text(),
             repository_id: text(),

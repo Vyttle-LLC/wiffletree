@@ -6,13 +6,11 @@ use super::*;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
 use ui::{card, eyebrow, hint, icon, pill};
-use workspace_host::{
-    provider::CORE,
-    skills::{
-        Change, Entry, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source, merge_note,
-        version,
-    },
+use workspace_core::skills::{
+    Change, Entry, History, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source,
+    merge_note, version,
 };
+use workspace_host::provider::CORE;
 
 /// What the Skills page shows: the list, the fixed core at one of its parts, one skill, its
 /// history or a review of its merge.
@@ -843,12 +841,12 @@ pub(super) struct SkillsPage {
     /// What the open skill's page is asking to confirm.
     confirming: Option<Confirm>,
     /// The open history, newest first, and the entry whose text is shown.
-    skill_history: Vec<workspace_host::skills::Recorded>,
+    skill_history: History,
     viewed_entry: Option<String>,
     /// What changed from the open rewrite's base to this release's stock text.
-    stock_changes: Vec<workspace_host::skills::Line>,
+    stock_changes: Vec<Line>,
     /// The merge open in Review changes.
-    merge_review: Option<workspace_host::skills::MergeReview>,
+    merge_review: Option<MergeReview>,
     /// Review changes was opened from a History entry, which Done returns to.
     review_from_history: bool,
     /// By skill, the wording chosen so far for each passage, until Apply.
@@ -883,7 +881,7 @@ impl SkillsPage {
             skill_text,
             stock_unfolded: false,
             confirming: None,
-            skill_history: vec![],
+            skill_history: History::default(),
             viewed_entry: None,
             stock_changes: vec![],
             merge_review: None,
@@ -933,13 +931,13 @@ impl SkillsPage {
             self.stock_unfolded = false;
             self.stock_changes.clear();
             if state.as_ref().is_some_and(out_of_date) {
-                self.request(Command::SkillStockChanges { skill }, window, cx);
+                self.read_stock_changes(skill, window, cx);
             }
         }
         if let SkillView::History(skill) = view {
-            self.skill_history.clear();
+            self.skill_history = History::default();
             self.viewed_entry = None;
-            self.request(Command::SkillHistory { skill }, window, cx);
+            self.read_history(skill, window, cx);
         }
         self.skill_view = view;
         cx.notify();
@@ -956,11 +954,7 @@ impl SkillsPage {
     ) {
         self.open_skill(SkillView::Review(skill), window, cx);
         self.review_from_history = !from_note;
-        let review = Command::SkillMergeReview {
-            skill,
-            entry: entry.clone(),
-        };
-        self.request(review, window, cx);
+        self.read_review(skill, entry.clone(), window, cx);
         if from_note {
             self.request(Command::DismissSkillMerge { skill, entry }, window, cx);
         }
@@ -988,7 +982,7 @@ impl SkillsPage {
             let text = saved_text(&state).to_owned();
             (self.skill_text).update(cx, |input, cx| input.set_value(text, window, cx));
             if out_of_date(&state) {
-                self.request(Command::SkillStockChanges { skill }, window, cx);
+                self.read_stock_changes(skill, window, cx);
             }
         }
         let restored_out_of_date = out_of_date(&state);
@@ -1013,26 +1007,45 @@ impl SkillsPage {
         };
         toast(done, window, cx);
         if self.skill_view == SkillView::History(skill) {
-            self.request(Command::SkillHistory { skill }, window, cx);
+            self.read_history(skill, window, cx);
         }
     }
 
-    pub(super) fn history_arrived(&mut self, skill: Skill, history: Vec<Recorded>) {
-        if self.skill_view == SkillView::History(skill) {
-            self.skill_history = history;
-        }
+    fn read_history(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
+        let ask = ask::skill_history(skill);
+        self.ask(ask, window, cx, move |view, history, _, _| match history {
+            Ok(history) if view.skill_view == SkillView::History(skill) => {
+                view.skill_history = history
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Skill history: {error}"),
+        });
     }
 
-    pub(super) fn review_arrived(&mut self, skill: Skill, review: MergeReview) {
-        if self.skill_view == SkillView::Review(skill) {
-            self.merge_review = Some(review);
-        }
+    fn read_review(
+        &mut self,
+        skill: Skill,
+        entry: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = ask::skill_merge_review(skill, entry);
+        self.ask(ask, window, cx, move |view, review, _, _| match review {
+            Ok(review) if view.skill_view == SkillView::Review(skill) => {
+                view.merge_review = Some(review)
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Skill merge review: {error}"),
+        });
     }
 
-    pub(super) fn stock_changes_arrived(&mut self, skill: Skill, lines: Vec<Line>) {
-        if self.skill_view == SkillView::Skill(skill) {
-            self.stock_changes = lines;
-        }
+    fn read_stock_changes(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
+        let ask = ask::skill_stock_changes(skill);
+        self.ask(ask, window, cx, move |view, lines, _, _| match lines {
+            Ok(lines) if view.skill_view == SkillView::Skill(skill) => view.stock_changes = lines,
+            Ok(_) => {}
+            Err(error) => eprintln!("Skill stock changes: {error}"),
+        });
     }
 
     /// Before `snapshot` replaces the current one: an editor without unsaved edits follows the
@@ -1885,14 +1898,14 @@ impl SkillsPage {
         let today = Local::now().date_naive();
         let crumb = self.skills_crumb(skill.name(), p, cx);
         let state = self.skill_state(skill);
-        let entries: Vec<_> = (self.skill_history.iter().enumerate())
+        let entries: Vec<_> = (self.skill_history.entries.iter().enumerate())
             .map(|(index, recorded)| {
                 let at =
                     written_at(&recorded.name).map_or(recorded.name.clone(), |at| when(at, today));
                 let live = (recorded.entry.as_ref().ok())
                     .zip(state)
                     .is_some_and(|(entry, state)| is_live(entry, state));
-                let merged_since = merged_since(&self.skill_history, index);
+                let merged_since = merged_since(&self.skill_history.entries, index);
                 let shown = (at, index == 0 && live, live, merged_since);
                 self.history_entry(skill, recorded, shown, p, cx)
             })
@@ -1907,7 +1920,7 @@ impl SkillsPage {
                 "History",
                 hint("newest first", p),
             ))
-            .when(self.skill_history.is_empty(), |d| {
+            .when(self.skill_history.entries.is_empty(), |d| {
                 d.child(hint(
                     "No changes yet. Each save, reset and restore adds an entry.",
                     p,
@@ -1953,7 +1966,7 @@ impl SkillsPage {
                             None => v.request(Command::RestoreSkill { skill, entry }, w, c),
                         }
                     }));
-                let merge = merge_note(&name, entry);
+                let merge = merge_note(&name, entry, &self.skill_history.machine);
                 let merge_actions = merge.clone().map(|note| {
                     let entry = note.entry.clone();
                     let undo = Confirm::Undo { note, later: !live };
@@ -2246,18 +2259,6 @@ impl Requests for SkillsPage {
                 Ok(state) => self.skill_saved(state, cx),
                 Err(error) => eprintln!("Dismissed skill merge: {error}"),
             },
-            Command::SkillMergeReview { skill, .. } => match serde_json::from_value(value) {
-                Ok(review) => self.review_arrived(skill, review),
-                Err(error) => eprintln!("Skill merge review: {error}"),
-            },
-            Command::SkillHistory { skill } => match serde_json::from_value(value) {
-                Ok(history) => self.history_arrived(skill, history),
-                Err(error) => eprintln!("Skill history: {error}"),
-            },
-            Command::SkillStockChanges { skill } => match serde_json::from_value(value) {
-                Ok(lines) => self.stock_changes_arrived(skill, lines),
-                Err(error) => eprintln!("Skill stock changes: {error}"),
-            },
             _ => {}
         }
     }
@@ -2291,18 +2292,17 @@ mod tests {
     use workspace_core::{
         Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider,
         QuestionedPassage, Role, Skill, SkillQuestion, SkillState, Wording,
+        skills::{Change, Edits, Entry, History, Line, Recorded},
     };
-    use workspace_host::{
-        Host,
-        skills::{Change, Edits, Entry, Line, Recorded, stock},
-    };
+    use workspace_host::{Host, skills::stock};
 
     fn state(host: &mut Host, command: Command) -> SkillState {
         serde_json::from_value(host.execute(command).unwrap()).unwrap()
     }
 
     fn listing(host: &mut Host, skill: Skill) -> Vec<Recorded> {
-        serde_json::from_value(host.execute(Command::SkillHistory { skill }).unwrap()).unwrap()
+        let reply = host.execute(Command::SkillHistory { skill }).unwrap();
+        serde_json::from_value::<History>(reply).unwrap().entries
     }
 
     fn titles(history: &[Recorded]) -> Vec<String> {

@@ -19,15 +19,6 @@ pub(super) fn forget_settled(minimized: &mut BTreeSet<String>, open: &[Attention
     minimized.retain(|project| open.iter().any(|item| &item.project_id == project));
 }
 
-pub(super) fn first_line(text: &str, limit: usize) -> String {
-    let line = text.lines().next().unwrap_or_default();
-    if line.chars().count() > limit {
-        format!("{}…", line.chars().take(limit).collect::<String>())
-    } else {
-        line.to_owned()
-    }
-}
-
 /// The selected session's conversation. The transcript is its own view, cached, so a keystroke in
 /// the composer draws only this one.
 pub(super) struct Conversation {
@@ -138,13 +129,23 @@ impl Conversation {
     }
     /// Adds dropped files to the selected session's draft. Each refused file is named with
     /// its reason; the rest are still attached.
-    fn attach_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+    fn attach_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.shared.selected.clone() else {
             return;
         };
-        self.refused_files =
-            attachment_chips::add_dropped(self.attached.entry(session).or_default(), paths);
-        cx.notify();
+        let ask = ask::inspect_attachments(paths.clone());
+        self.ask(ask, window, cx, move |view, inspected, window, cx| {
+            let inspected = match inspected {
+                Ok(inspected) => inspected,
+                Err(error) => return toast_error(error, window, cx),
+            };
+            let attached = view.attached.entry(session.clone()).or_default();
+            let refused = attachment_chips::add_dropped(attached, &paths, inspected);
+            // Why files were refused shows only with the conversation they were dropped on.
+            if view.shared.selected.as_ref() == Some(&session) {
+                view.refused_files = refused;
+            }
+        });
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(files) = self
@@ -743,42 +744,36 @@ impl Requests for Conversation {
         if let Command::Send { recipient, .. } = &command {
             self.sending.remove(recipient);
         }
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
+        if let Err(error) = reply {
+            return toast_error(error, window, cx);
+        }
+        let Command::Send {
+            recipient,
+            body,
+            attachments,
+            ..
+        } = command
+        else {
+            return;
         };
-        match command {
-            Command::Send {
-                recipient,
-                body,
-                attachments,
-                ..
-            } => {
-                if self
-                    .attached
-                    .get(&recipient)
-                    .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
-                {
-                    self.attached.remove(&recipient);
-                }
-                let selected = self.shared.selected.as_deref() == Some(&recipient);
-                if selected && self.input.read(cx).value().as_str() == body {
-                    self.input
-                        .update(cx, |input, cx| input.set_value("", window, cx));
-                }
-                if self.drafts.get(&recipient) == Some(&body) {
-                    self.drafts.remove(&recipient);
-                }
-                if selected {
-                    self.transcript
-                        .update(cx, |transcript, cx| transcript.show_latest(window, cx));
-                }
-            }
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                cx.emit(Intent::Archived { archived, affected });
-            }
-            _ => {}
+        if self
+            .attached
+            .get(&recipient)
+            .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
+        {
+            self.attached.remove(&recipient);
+        }
+        let selected = self.shared.selected.as_deref() == Some(&recipient);
+        if selected && self.input.read(cx).value().as_str() == body {
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        if self.drafts.get(&recipient) == Some(&body) {
+            self.drafts.remove(&recipient);
+        }
+        if selected {
+            self.transcript
+                .update(cx, |transcript, cx| transcript.show_latest(window, cx));
         }
     }
 }
@@ -795,7 +790,9 @@ impl Render for Conversation {
             .flex_col()
             .bg(p.base)
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(p.overlay))
-            .on_drop(cx.listener(|v, paths: &ExternalPaths, _, c| v.attach_files(paths.paths(), c)))
+            .on_drop(cx.listener(|v, paths: &ExternalPaths, w, c| {
+                v.attach_files(paths.paths().to_vec(), w, c)
+            }))
             .child(self.header.clone().cached(conversation_header::style()))
             .child(
                 (self.transcript.clone())
@@ -807,18 +804,9 @@ impl Render for Conversation {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, forget_settled};
+    use super::forget_settled;
     use std::collections::BTreeSet;
     use workspace_core::Attention;
-
-    #[test]
-    fn long_errors_show_only_a_bounded_first_line() {
-        assert_eq!(
-            first_line("Provider exited\nTraceback…", 80),
-            "Provider exited"
-        );
-        assert_eq!(first_line("abcdef", 3), "abc…");
-    }
 
     fn decision(id: &str, project: &str) -> Attention {
         Attention {

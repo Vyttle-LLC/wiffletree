@@ -25,7 +25,18 @@ impl sidebar::Sidebar {
         }
         let name = next_name(self.shared.snapshot());
         self.creating_project = true;
-        self.request(Command::CreateProject { name }, window, cx);
+        self.ask(
+            ask::create_project(name),
+            window,
+            cx,
+            |view, project, window, cx| match project {
+                Ok(project) => view.pending_project_selection = Some(project.id),
+                Err(error) => {
+                    view.creating_project = false;
+                    toast_error(error, window, cx)
+                }
+            },
+        );
         cx.notify();
     }
 
@@ -95,7 +106,30 @@ impl sidebar::Sidebar {
         edit.saving = true;
         edit.error.clear();
         let project_id = edit.project_id.clone();
-        self.request(Command::RenameProject { project_id, name }, window, cx);
+        let ask = ask::rename_project(project_id.clone(), name);
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, project, window, cx| match project {
+                Ok(project) => {
+                    cx.emit(Intent::Amend(Amendment::Project(project)));
+                    if (view.project_edit.as_ref()).is_some_and(|e| e.project_id == project_id) {
+                        view.project_edit = None;
+                    }
+                }
+                // A rename's failure shows in its field while it is open.
+                Err(error) => {
+                    match (view.project_edit.as_mut()).filter(|e| e.project_id == project_id) {
+                        Some(edit) => {
+                            edit.saving = false;
+                            edit.error = error;
+                        }
+                        None => toast_error(error, window, cx),
+                    }
+                }
+            },
+        );
         cx.notify();
     }
 
