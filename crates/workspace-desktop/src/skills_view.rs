@@ -1,30 +1,45 @@
 //! The Skills page: the four skills and the fixed core, and each skill's page, where the human
-//! adds their own rules after the stock text or rewrites it, resets it to stock and restores an
-//! earlier version from its history. No agent tool reaches what this page changes.
+//! adds their own rules after the stock text or rewrites it, resets it to stock, restores an
+//! earlier version from its history, and reviews or undoes a merge of a new stock version. No
+//! agent tool reaches what this page changes.
 use super::*;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
 use ui::{card, eyebrow, hint, icon, pill};
 use workspace_host::{
     provider::CORE,
-    skills::{Change, Entry, Line, Recorded, Rewritten, version},
+    skills::{
+        Change, Entry, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source, merge_note,
+        version,
+    },
 };
 
-/// What the Skills page shows: the list, the fixed core at one of its parts, one skill or its
-/// history.
+/// What the Skills page shows: the list, the fixed core at one of its parts, one skill, its
+/// history or a review of its merge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SkillView {
     List,
     Core(usize),
     Skill(Skill),
     History(Skill),
+    Review(Skill),
 }
 
-/// What a skill's page asks before it acts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a skill's pages ask before they act.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Confirm {
     Reset,
     Rewrite,
+    /// The merge `note` names; `later` when the skill has changed since.
+    Undo {
+        note: MergeNote,
+        later: bool,
+    },
+    /// A rewrite from an entry older than the merge of stock version `merged`.
+    Restore {
+        entry: String,
+        merged: String,
+    },
 }
 
 const CORE_NAMES: [&str; 5] = [
@@ -40,8 +55,8 @@ const CORE_HINT: &str = "Wiffletree depends on these instructions: the names of 
 const PR_RULES_HINT: &str = "Agents write pull requests by your repository's rules and your own, so put your PR rules here.";
 const APPLIES: &str =
     "Applies from each agent's next turn, and a Codex agent's from its next new session";
-const REWRITE_COST: &str = "When an update changes the stock text, your rewrite keeps running as you wrote it and is marked out of date until you bring the change in yourself. Adding your own rules never needs that.";
-const OUT_OF_DATE: &str = "Your rewrite keeps running exactly as you wrote it. Wiffletree doesn't bring stock changes into a rewrite yet: look at what changed, copy in what you want, then mark it up to date.";
+const REWRITE_COST: &str = "When an update changes the stock text, Wiffletree merges the change into your rewrite and leaves a note you can review or undo. Where you also changed what the update changes, your rewrite is marked out of date until you bring the change in yourself. Adding your own rules never needs a merge.";
+const OUT_OF_DATE: &str = "Your rewrite keeps running exactly as you wrote it. Look at what changed, then merge it in, or copy in what you want and mark it up to date.";
 const NOT_ENFORCED: &str = "Not enforced: an agent's shell isn't sandboxed, so it can still run git push or gh with your credentials.";
 
 /// What a skill's page says about it: who uses it, what the app's own operations enforce
@@ -139,20 +154,23 @@ fn saved_text(state: &SkillState) -> &str {
         .map_or(&state.rules, |rewrite| &rewrite.text)
 }
 
-/// "Stock", "Stock and N of your rules", "Rewritten" or "Rewritten · out of date".
+/// "Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated" or "Rewritten · out
+/// of date".
 fn state_label(state: &SkillState) -> String {
     match (&state.rewrite, rule_count(&state.rules)) {
         (Some(_), _) if out_of_date(state) => "Rewritten · out of date".into(),
+        (Some(_), _) if state.merge_note.is_some() => "Rewritten · updated".into(),
         (Some(_), _) => "Rewritten".into(),
         (None, 0) => "Stock".into(),
         (None, rules) => format!("Stock and {rules} of your rules"),
     }
 }
 
-/// Grey at stock, yellow out of date, and in the focus color otherwise.
+/// Grey at stock, yellow out of date, green updated, and in the focus color otherwise.
 fn state_pill(state: &SkillState, p: Palette) -> Div {
     let color = match (&state.rewrite, rule_count(&state.rules)) {
         _ if out_of_date(state) => p.yellow,
+        _ if state.merge_note.is_some() => p.green,
         (None, 0) => p.subtle,
         _ => p.focus,
     };
@@ -227,17 +245,168 @@ fn out_of_date_title(state: &SkillState, base_version: &str) -> String {
     }
 }
 
+/// The banner of a rewrite that is out of date, or based on a newer release: its title and
+/// text, and whether it offers Merge in, Mark as up to date and Reset to stock.
+fn rewrite_banner(state: &SkillState) -> Option<([String; 2], bool)> {
+    let rewrite = state.rewrite.as_ref()?;
+    let (name, stock, base) = (
+        state.skill.name(),
+        &state.stock_version,
+        &rewrite.base_version,
+    );
+    let text = match (&state.merge_standing, rewrite.out_of_date) {
+        (Some(MergeStanding::Undone), true) => [
+            format!("You undid the merge of {stock}"),
+            format!(
+                "Your rewrite is as it was before the merge, and {stock} won't be merged into it again on its own."
+            ),
+        ],
+        (_, true) => [out_of_date_title(state, base), OUT_OF_DATE.into()],
+        (Some(MergeStanding::NewerBase { machine }), false) => {
+            let merged = machine.as_ref().map_or(String::new(), |_| {
+                format!("That Mac runs a newer Wiffletree and merged {base} into your rewrite. ")
+            });
+            let from = machine
+                .as_deref()
+                .unwrap_or("a Mac with a newer Wiffletree");
+            [
+                format!("Based on {name} {base}, from {from}"),
+                format!(
+                    "{merged}This Mac has {stock} and sends the rewrite as written. It isn't out of date here, and nothing is merged here."
+                ),
+            ]
+        }
+        _ => return None,
+    };
+    Some((text, rewrite.out_of_date))
+}
+
+/// "1 change" or "3 changes".
+fn counted(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        count => format!("{count} {noun}s"),
+    }
+}
+
+/// "3 changes from v2, 1 passage merged by Claude · haiku · medium", the model as `model` names
+/// it.
+fn merge_counts(note: &MergeNote, model: Option<&str>) -> String {
+    let merged = match (note.by_model, model) {
+        (0, _) | (_, None) => String::new(),
+        (passages, Some(model)) => format!(", {} merged by {model}", counted(passages, "passage")),
+    };
+    format!(
+        "{} from {}{merged}",
+        counted(note.from_update, "change"),
+        note.to
+    )
+}
+
+/// " · 6,240 tokens" when a model merged, or nothing.
+fn merge_tokens(note: &MergeNote) -> String {
+    (note.model.as_ref()).map_or(String::new(), |model| {
+        format!(" · {} tokens", grouped(model.tokens as usize))
+    })
+}
+
+/// "This Mac", or the name of the Mac that merged.
+fn merging_mac(note: &MergeNote) -> &str {
+    note.machine.as_deref().unwrap_or("This Mac")
+}
+
+/// The merge note's title and what came in.
+fn merge_note_text(state: &SkillState, note: &MergeNote, model: Option<&str>) -> [String; 2] {
+    let skill = state.skill;
+    [
+        format!("Merged {} {} into your rewrite", skill.name(), note.to),
+        format!(
+            "{}. {} the merged text from their next turn.",
+            merge_counts(note, model),
+            about(skill).gets
+        ),
+    ]
+}
+
+/// Undo's question, what goes back, and what stays in the history; `later` when the skill has
+/// changed since the merge.
+fn undo_question(state: &SkillState, note: &MergeNote, later: bool) -> [String; 3] {
+    let MergeNote {
+        entry, from, to, ..
+    } = note;
+    let (since, kept) = if later {
+        (
+            ", and your changes since stop applying",
+            "The merge and your changes since stay",
+        )
+    } else {
+        ("", "The merge stays")
+    };
+    [
+        format!("Undo the merge of {to}?"),
+        format!(
+            "Your rewrite goes back to exactly what it was before {}, based on {}{since}. {} it from their next turn, on every Mac.",
+            entry_time(entry),
+            based_on(from),
+            about(state.skill).gets
+        ),
+        format!("{to} won't be merged in again on its own. {kept} in the history."),
+    ]
+}
+
+/// Restore's question for a rewrite from before the merge of `merged`, which it stops as an
+/// Undo does.
+fn restore_question(state: &SkillState, entry: &str, merged: &str) -> [String; 3] {
+    [
+        format!("Restore the version of {}?", entry_time(entry)),
+        format!(
+            "It is from before the merge of {merged}, so no automatic merge brings {merged} in until a newer version arrives. You can still merge it in from {}'s page.",
+            state.skill.name()
+        ),
+        "The merge and every later change stay in the history.".into(),
+    ]
+}
+
+/// What `confirm` asks, and the command its button sends.
+fn question(state: &SkillState, confirm: &Confirm, unsaved: bool) -> ([String; 3], Command) {
+    let skill = state.skill;
+    match confirm {
+        Confirm::Reset => (reset_question(state), Command::ResetSkill { skill }),
+        Confirm::Rewrite => (
+            rewrite_question(state, unsaved),
+            Command::StartSkillRewrite { skill },
+        ),
+        Confirm::Undo { note, later } => (
+            undo_question(state, note, *later),
+            Command::UndoSkillMerge {
+                skill,
+                entry: note.entry.clone(),
+            },
+        ),
+        Confirm::Restore { entry, merged } => (
+            restore_question(state, entry, merged),
+            Command::RestoreSkill {
+                skill,
+                entry: entry.clone(),
+            },
+        ),
+    }
+}
+
 /// A line of what changed, or a run of unchanged lines left out.
 #[derive(Debug, PartialEq, Eq)]
-enum Shown<'a> {
-    Line(&'a Line),
+enum Shown<'a, T> {
+    Line(&'a T),
     Gap(usize),
 }
 
+fn is_change(line: &Line) -> bool {
+    !matches!(line, Line::Unchanged(_))
+}
+
 /// What changed, with one unchanged line either side of each change and the rest left out.
-fn shown_changes(lines: &[Line]) -> Vec<Shown<'_>> {
-    let changed =
-        |index: usize| (lines.get(index)).is_some_and(|l| !matches!(l, Line::Unchanged(_)));
+fn shown_changes<T>(lines: &[T], is_change: impl Fn(&T) -> bool) -> Vec<Shown<'_, T>> {
+    let changed = |index: usize| lines.get(index).is_some_and(&is_change);
     let mut shown = vec![];
     let mut left_out = 0;
     for (index, line) in lines.iter().enumerate() {
@@ -340,6 +509,76 @@ fn grouped(count: usize) -> String {
     text
 }
 
+/// A banner above a skill's text, in `color`.
+fn banner(color: Hsla) -> Div {
+    div()
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(color.opacity(0.45))
+        .bg(color.opacity(0.09))
+        .text_size(px(12.))
+}
+
+/// Lines of what changed, in a monospaced box.
+fn diff_block(p: Palette) -> Div {
+    div()
+        .py_1()
+        .flex()
+        .flex_col()
+        .rounded_md()
+        .border_1()
+        .border_color(p.edge.opacity(0.55))
+        .bg(p.base)
+        .overflow_hidden()
+        .font_family(".SystemMonoFont")
+        .text_size(px(11.5))
+        .line_height(relative(1.55))
+}
+
+/// A line of what changed: removed lines struck through, added ones in `added`.
+fn diff_row(line: &Line, added: Hsla, p: Palette) -> Div {
+    let row = div().px_2();
+    let text = |text: &str| SharedString::from(if text.is_empty() { " " } else { text }.to_owned());
+    match line {
+        Line::Unchanged(line) => row.text_color(p.subtle).child(text(line)),
+        Line::Removed(line) => (row.bg(p.red.opacity(0.11)))
+            .text_color(p.subtle)
+            .line_through()
+            .child(text(line)),
+        Line::Added(line) => row.bg(added.opacity(0.13)).child(text(line)),
+    }
+}
+
+/// "⋯ 4 lines unchanged ⋯".
+fn gap_row(count: usize, p: Palette) -> Div {
+    let unchanged = match count {
+        1 => "1 line unchanged".into(),
+        count => format!("{count} lines unchanged"),
+    };
+    (div().px_2().bg(p.overlay))
+        .text_color(p.subtle)
+        .child(format!("⋯ {unchanged} ⋯"))
+}
+
+/// For a rewrite in a history listed newest first, the stock version the newest merge after it
+/// brought in, which restoring it stops.
+fn merged_since(history: &[Recorded], index: usize) -> Option<String> {
+    fn entry(recorded: &Recorded) -> Option<&Entry> {
+        recorded.entry.as_ref().ok()
+    }
+    (entry(&history[index])?.edits.rewrite.as_ref())?;
+    history[..index]
+        .iter()
+        .find_map(|recorded| match &entry(recorded)?.change {
+            Change::Merged { to, .. } => Some(to.clone()),
+            _ => None,
+        })
+}
+
 /// A part's tab, as "Contract v9".
 fn core_tab(part: usize) -> String {
     format!("{} {}", CORE_NAMES[part], version(CORE[part].1))
@@ -367,13 +606,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.confirming = None;
+        self.merge_review = None;
         if let SkillView::Skill(skill) = view {
             let state = self.skill_state(skill).cloned();
             let text = state.as_ref().map_or("", saved_text).to_owned();
             self.skill_text
                 .update(cx, |input, cx| input.set_value(text, window, cx));
             self.stock_unfolded = false;
-            self.confirming = None;
             self.stock_changes.clear();
             if state.as_ref().is_some_and(out_of_date) {
                 self.request(Command::SkillStockChanges { skill }, window, cx);
@@ -388,12 +628,33 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Review changes from the note, which hides it on this Mac, or from a history entry.
+    fn open_review(
+        &mut self,
+        skill: Skill,
+        entry: String,
+        from_note: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_skill(SkillView::Review(skill), window, cx);
+        let review = Command::SkillMergeReview {
+            skill,
+            entry: entry.clone(),
+        };
+        self.request(review, window, cx);
+        if from_note {
+            self.request(Command::DismissSkillMerge { skill, entry }, window, cx);
+        }
+    }
+
     fn shows_skill(&self, skill: Skill) -> bool {
         matches!(self.skill_view, SkillView::Skill(s) | SkillView::History(s) if s == skill)
     }
 
-    /// The host's answer to a reset, a restore or a rewrite's start: the editor takes the
-    /// skill's new text, and an open history gains the entry.
+    /// The host's answer to a reset, a restore, a rewrite's start, a merge or its Undo: the
+    /// editor takes the skill's new text, and an open history gains the entry. An Undo from its
+    /// review goes back to the skill's page.
     pub(super) fn skill_replaced(
         &mut self,
         state: SkillState,
@@ -402,6 +663,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let skill = state.skill;
+        if self.skill_view == SkillView::Review(skill) {
+            self.skill_view = SkillView::Skill(skill);
+        }
         if self.shows_skill(skill) {
             let text = saved_text(&state).to_owned();
             (self.skill_text).update(cx, |input, cx| input.set_value(text, window, cx));
@@ -410,6 +674,7 @@ impl Workspace {
             }
         }
         let restored_out_of_date = out_of_date(&state);
+        let state_stock_version = state.stock_version.clone();
         self.skill_saved(state);
         let done = match command {
             Command::RestoreSkill { entry, .. } if restored_out_of_date => format!(
@@ -422,6 +687,10 @@ impl Workspace {
             Command::StartSkillRewrite { .. } => {
                 format!("You're rewriting {}'s stock text", skill.name())
             }
+            Command::UndoSkillMerge { .. } => "Undid the merge".into(),
+            Command::MergeSkillUpdate { .. } => {
+                format!("Merged {} into your rewrite", state_stock_version)
+            }
             _ => format!("{} is back to stock", skill.name()),
         };
         self.toast(done, window, cx);
@@ -433,6 +702,12 @@ impl Workspace {
     pub(super) fn history_arrived(&mut self, skill: Skill, history: Vec<Recorded>) {
         if self.skill_view == SkillView::History(skill) {
             self.skill_history = history;
+        }
+    }
+
+    pub(super) fn review_arrived(&mut self, skill: Skill, review: MergeReview) {
+        if self.skill_view == SkillView::Review(skill) {
+            self.merge_review = Some(review);
         }
     }
 
@@ -476,16 +751,38 @@ impl Workspace {
         }
     }
 
+    /// The view, under what it asks to confirm.
     pub(super) fn skills_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        match self.skill_view {
+        let page = match self.skill_view {
             SkillView::Core(part) => self.core_page(part, p, cx),
             SkillView::Skill(skill) => match self.skill_state(skill) {
                 Some(state) => self.skill_page(state, p, cx),
                 None => self.skills_list(p, cx),
             },
             SkillView::History(skill) => self.history_page(skill, p, cx),
+            SkillView::Review(skill) => self.review_page(skill, p, cx),
             SkillView::List => self.skills_list(p, cx),
-        }
+        };
+        let shown = match self.skill_view {
+            SkillView::Skill(skill) | SkillView::History(skill) | SkillView::Review(skill) => {
+                self.skill_state(skill)
+            }
+            SkillView::Core(_) | SkillView::List => None,
+        };
+        let (Some(confirm), Some(state)) = (self.confirming.clone(), shown) else {
+            return page;
+        };
+        let unsaved = self.skill_draft(cx) != saved_text(state);
+        div().relative().child(page.opacity(0.35)).child(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .justify_center()
+                .pt(px(120.))
+                .child(Self::confirm_dialog(state, confirm, unsaved, p, cx)),
+        )
     }
 
     fn skills_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -574,13 +871,15 @@ impl Workspace {
             .text_size(px(11.))
             .text_color(p.subtle)
             .child(link("skills-crumb", SkillView::List, "Skills"));
-        match self.skill_view {
-            SkillView::History(skill) => crumb
-                .child("·")
-                .child(link("skill-crumb", SkillView::Skill(skill), name))
-                .child("· History"),
-            _ => crumb.child(format!("· {name}")),
-        }
+        let (skill, below) = match self.skill_view {
+            SkillView::History(skill) => (skill, "· History"),
+            SkillView::Review(skill) => (skill, "· Review changes"),
+            _ => return crumb.child(format!("· {name}")),
+        };
+        crumb
+            .child("·")
+            .child(link("skill-crumb", SkillView::Skill(skill), name))
+            .child(below)
     }
 
     fn skill_heading(glyph: &'static str, name: &'static str, state: Div) -> Div {
@@ -673,39 +972,26 @@ impl Workspace {
                     .children(actions),
             )
             .child(hint(basis, p))
-            .child(Self::modes(state, p, cx));
+            .child(Self::modes(state, p, cx))
+            .children(
+                (state.merge_note.as_ref()).map(|note| self.merge_note_banner(state, note, p, cx)),
+            )
+            .children(Self::rewrite_banner_view(state, p, cx));
         let page = match &state.rewrite {
-            Some(rewrite) if rewrite.out_of_date => page
-                .child(self.out_of_date_banner(state, &rewrite.base_version, p, cx))
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(self.stock_changes_view(state, &rewrite.base_version, p))
-                        .child(self.skill_editor(state, p, cx).flex_1().min_w_0()),
-                ),
+            Some(rewrite) if rewrite.out_of_date => page.child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(self.stock_changes_view(state, &rewrite.base_version, p))
+                    .child(self.skill_editor(state, p, cx).flex_1().min_w_0()),
+            ),
             Some(_) => page.child(self.skill_editor(state, p, cx)),
             None => self.additions(page, state, p, cx),
         };
-        let page = page
-            .when(state.rewrite.is_some(), |d| {
-                d.children(self.skill_links(skill, p, cx))
-            })
-            .child(Self::enforced_boxes(skill, p));
-        let Some(confirm) = self.confirming else {
-            return page;
-        };
-        let unsaved = self.skill_draft(cx) != saved_text(state);
-        div().relative().child(page.opacity(0.35)).child(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .justify_center()
-                .pt(px(120.))
-                .child(Self::confirm_dialog(state, confirm, unsaved, p, cx)),
-        )
+        page.when(state.rewrite.is_some(), |d| {
+            d.children(self.skill_links(skill, p, cx))
+        })
+        .child(Self::enforced_boxes(skill, p))
     }
 
     fn confirm(&mut self, confirm: Confirm, cx: &mut Context<Self>) {
@@ -775,7 +1061,7 @@ impl Workspace {
         )
     }
 
-    /// Reset and Rewrite ask first; Cancel sends nothing.
+    /// Reset, Rewrite, Undo and a restore from before a merge ask first; Cancel sends nothing.
     fn confirm_dialog(
         state: &SkillState,
         confirm: Confirm,
@@ -783,14 +1069,7 @@ impl Workspace {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let skill = state.skill;
-        let ([ask, what, kept], command) = match confirm {
-            Confirm::Reset => (reset_question(state), Command::ResetSkill { skill }),
-            Confirm::Rewrite => (
-                rewrite_question(state, unsaved),
-                Command::StartSkillRewrite { skill },
-            ),
-        };
+        let ([ask, what, kept], command) = question(state, &confirm, unsaved);
         let close = |v: &mut Self, c: &mut Context<Self>| {
             v.confirming = None;
             c.notify();
@@ -802,6 +1081,8 @@ impl Workspace {
         let act = match confirm {
             Confirm::Reset => act.danger().label("Reset to stock"),
             Confirm::Rewrite => act.primary().label("Start rewrite").disabled(unsaved),
+            Confirm::Undo { .. } => act.danger().label("Undo merge"),
+            Confirm::Restore { .. } => act.primary().label("Restore"),
         };
         div().w(px(380.)).h_full().flex().flex_col().child(
             div()
@@ -839,73 +1120,107 @@ impl Workspace {
         )
     }
 
-    fn out_of_date_banner(
+    /// The note of the merge the skill holds now, with Review changes, Undo and Dismiss.
+    fn merge_note_banner(
         &self,
         state: &SkillState,
-        base_version: &str,
+        note: &MergeNote,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
         let skill = state.skill;
-        div()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(p.yellow.opacity(0.45))
-            .bg(p.yellow.opacity(0.09))
-            .text_size(px(12.))
+        let [title, text] = merge_note_text(state, note, self.merge_model(note).as_deref());
+        let at = written_at(&note.entry)
+            .map_or(note.entry.clone(), |at| when(at, Local::now().date_naive()));
+        let (review, undo, dismiss) = (note.entry.clone(), note.clone(), note.entry.clone());
+        banner(p.green)
             .child(
                 div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(out_of_date_title(state, base_version)),
+                    .flex()
+                    .gap_2()
+                    .child(div().flex_1().font_weight(FontWeight::MEDIUM).child(title))
+                    .child(hint(format!("{} · {at}", merging_mac(note)), p)),
             )
-            .child(OUT_OF_DATE)
+            .child(text)
             .child(
                 div()
                     .flex()
                     .gap_2()
                     .child(
-                        button("mark-up-to-date")
+                        button("review-merge")
                             .primary()
-                            .label("Mark as up to date")
+                            .label("Review changes")
                             .on_click(cx.listener(move |v, _, w, c| {
-                                v.request(Command::MarkSkillUpToDate { skill }, w, c)
+                                v.open_review(skill, review.clone(), true, w, c)
                             })),
                     )
                     .child(
-                        button("banner-reset")
+                        button("undo-merge")
                             .ghost()
-                            .label("Reset to stock")
-                            .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
+                            .label("Undo")
+                            .on_click(cx.listener(move |v, _, _, c| {
+                                let note = undo.clone();
+                                v.confirm(Confirm::Undo { note, later: false }, c)
+                            })),
+                    )
+                    .child(
+                        button("dismiss-merge")
+                            .ghost()
+                            .label("Dismiss")
+                            .on_click(cx.listener(move |v, _, w, c| {
+                                let entry = dismiss.clone();
+                                v.request(Command::DismissSkillMerge { skill, entry }, w, c)
+                            })),
                     ),
             )
     }
 
+    /// "Claude · Haiku · Medium", as pickers show the model that merged.
+    fn merge_model(&self, note: &MergeNote) -> Option<String> {
+        (note.model.as_ref()).map(|model| models::profile_label(&self.model_catalog, &model.model))
+    }
+
+    /// An out-of-date rewrite's banner, with Merge in when its base has a version, Mark as up to
+    /// date and Reset to stock; or, for a base from a newer release, what this Mac does.
+    fn rewrite_banner_view(state: &SkillState, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let ([title, text], offers) = rewrite_banner(state)?;
+        let skill = state.skill;
+        let mergeable = (state.rewrite.as_ref()).is_some_and(|r| !r.base_version.is_empty());
+        let merge = button("merge-update")
+            .primary()
+            .label(format!("Merge {} in", state.stock_version))
+            .on_click(
+                cx.listener(move |v, _, w, c| v.request(Command::MergeSkillUpdate { skill }, w, c)),
+            );
+        let actions = div()
+            .flex()
+            .gap_2()
+            .when(mergeable, |d| d.child(merge))
+            .child(
+                button("mark-up-to-date")
+                    .ghost()
+                    .label("Mark as up to date")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        v.request(Command::MarkSkillUpToDate { skill }, w, c)
+                    })),
+            )
+            .child(
+                button("banner-reset")
+                    .ghost()
+                    .label("Reset to stock")
+                    .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
+            );
+        let color = if offers { p.yellow } else { p.focus };
+        let title = div().font_weight(FontWeight::MEDIUM).child(title);
+        Some((banner(color).child(title).child(text)).when(offers, |d| d.child(actions)))
+    }
+
     /// What changed from the rewrite's base to the stock text, as removed and added lines.
     fn stock_changes_view(&self, state: &SkillState, base_version: &str, p: Palette) -> Div {
-        let rows = shown_changes(&self.stock_changes).into_iter().map(|shown| {
-            let row = div().px_2();
-            let text = |text: &str| {
-                SharedString::from(if text.is_empty() { " " } else { text }.to_owned())
-            };
-            match shown {
-                Shown::Line(Line::Unchanged(line)) => row.text_color(p.subtle).child(text(line)),
-                Shown::Line(Line::Removed(line)) => (row.bg(p.red.opacity(0.11)))
-                    .text_color(p.subtle)
-                    .line_through()
-                    .child(text(line)),
-                Shown::Line(Line::Added(line)) => row.bg(p.green.opacity(0.13)).child(text(line)),
-                Shown::Gap(1) => row
-                    .bg(p.overlay)
-                    .text_color(p.subtle)
-                    .child("⋯ 1 line unchanged ⋯"),
-                Shown::Gap(count) => (row.bg(p.overlay))
-                    .text_color(p.subtle)
-                    .child(format!("⋯ {count} lines unchanged ⋯")),
-            }
+        let shown = shown_changes(&self.stock_changes, is_change);
+        let rows = shown.into_iter().map(|shown| match shown {
+            Shown::Line(line) => diff_row(line, p.green, p),
+            Shown::Gap(count) => gap_row(count, p),
         });
         let base_version = if base_version.is_empty() {
             "unknown"
@@ -931,25 +1246,87 @@ impl Workspace {
                     )
                     .child(hint(versions, p)),
             )
-            .child(
-                div()
-                    .py_1()
-                    .flex()
-                    .flex_col()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(p.edge.opacity(0.55))
-                    .bg(p.base)
-                    .overflow_hidden()
-                    .font_family(".SystemMonoFont")
-                    .text_size(px(11.5))
-                    .line_height(relative(1.55))
-                    .children(rows),
+            .child(diff_block(p).children(rows))
+    }
+
+    /// The rewrite before and after a merge, line by line, each change labelled with where it
+    /// came from, with Undo and Done.
+    fn review_page(&self, skill: Skill, p: Palette, cx: &mut Context<Self>) -> Div {
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.skills_crumb(skill.name(), p, cx));
+        let Some(review) = &self.merge_review else {
+            return page;
+        };
+        let note = &review.note;
+        let at = written_at(&note.entry)
+            .map_or(note.entry.clone(), |at| when(at, Local::now().date_naive()));
+        let versions = format!("{} → {} · {} · {at}", note.from, note.to, merging_mac(note));
+        let model = self.merge_model(note);
+        let counts = merge_counts(note, model.as_deref()) + &merge_tokens(note);
+        let label = |source| match source {
+            Source::Update => format!("From {}", note.to),
+            Source::Model => "Merged by the model".into(),
+            Source::Human => "Chosen by you".into(),
+        };
+        let added = |source| match source {
+            Some(Source::Update) | None => p.green,
+            Some(_) => p.focus,
+        };
+        let shown = shown_changes(&review.lines, |reviewed: &Reviewed| {
+            reviewed.source.is_some()
+        });
+        let mut rows = vec![];
+        for (index, item) in shown.iter().enumerate() {
+            let Reviewed { line, source } = match item {
+                Shown::Line(reviewed) => reviewed,
+                Shown::Gap(count) => {
+                    rows.push(gap_row(*count, p));
+                    continue;
+                }
+            };
+            rows.push(diff_row(line, added(*source), p));
+            // A run of one source's changes ends with its label.
+            let next = match shown.get(index + 1) {
+                Some(Shown::Line(next)) => next.source,
+                _ => None,
+            };
+            if let Some(source) = source.filter(|source| next != Some(*source)) {
+                let tag = hint(label(source), p)
+                    .px_2()
+                    .text_color(added(Some(source)));
+                rows.push(div().flex().justify_end().child(tag));
+            }
+        }
+        let undo = Confirm::Undo {
+            note: note.clone(),
+            later: !review.live,
+        };
+        page.child(
+            Self::skill_heading(
+                "history",
+                "What the merge changed in your rewrite",
+                hint(versions, p),
             )
+            .child(div().flex_1())
+            .child(
+                button("review-undo")
+                    .ghost()
+                    .label("Undo")
+                    .on_click(cx.listener(move |v, _, _, c| v.confirm(undo.clone(), c))),
+            )
+            .child(button("review-done").primary().label("Done").on_click(
+                cx.listener(move |v, _, w, c| v.open_skill(SkillView::Skill(skill), w, c)),
+            )),
+        )
+        .child(hint(counts, p))
+        .child(diff_block(p).children(rows))
     }
 
     /// Newest first, each entry with View and Restore, except the newest when it holds what is
-    /// in effect now.
+    /// in effect now; a merge's entry with Review and Undo this merge instead of View.
     fn history_page(&self, skill: Skill, p: Palette, cx: &mut Context<Self>) -> Div {
         let today = Local::now().date_naive();
         let crumb = self.skills_crumb(skill.name(), p, cx);
@@ -958,11 +1335,12 @@ impl Workspace {
             .map(|(index, recorded)| {
                 let at =
                     written_at(&recorded.name).map_or(recorded.name.clone(), |at| when(at, today));
-                let current = index == 0
-                    && (recorded.entry.as_ref().ok())
-                        .zip(state)
-                        .is_some_and(|(entry, state)| is_live(entry, state));
-                self.history_entry(skill, recorded, at, current, p, cx)
+                let live = (recorded.entry.as_ref().ok())
+                    .zip(state)
+                    .is_some_and(|(entry, state)| is_live(entry, state));
+                let merged_since = merged_since(&self.skill_history, index);
+                let shown = (at, index == 0 && live, live, merged_since);
+                self.history_entry(skill, recorded, shown, p, cx)
             })
             .collect();
         div()
@@ -984,12 +1362,13 @@ impl Workspace {
             .child(div().flex().flex_col().children(entries))
     }
 
+    /// An entry written `at`, `current` when it is the newest and in effect, `live` when it is
+    /// in effect, and from before the merge of `merged_since`.
     fn history_entry(
         &self,
         skill: Skill,
         recorded: &Recorded,
-        at: String,
-        current: bool,
+        (at, current, live, merged_since): (String, bool, bool, Option<String>),
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -1015,8 +1394,32 @@ impl Workspace {
                 let restore =
                     action("restore-entry", "Restore").on_click(cx.listener(move |v, _, w, c| {
                         let entry = entry_name.clone();
-                        v.request(Command::RestoreSkill { skill, entry }, w, c);
+                        match merged_since.clone() {
+                            Some(merged) => v.confirm(Confirm::Restore { entry, merged }, c),
+                            None => v.request(Command::RestoreSkill { skill, entry }, w, c),
+                        }
                     }));
+                let merge = merge_note(&name, entry);
+                let merge_actions = merge.clone().map(|note| {
+                    let entry = note.entry.clone();
+                    let undo = Confirm::Undo { note, later: !live };
+                    [
+                        action("review-entry", "Review").on_click(cx.listener(
+                            move |v, _, w, c| v.open_review(skill, entry.clone(), false, w, c),
+                        )),
+                        action("undo-entry", "Undo this merge")
+                            .on_click(cx.listener(move |v, _, _, c| v.confirm(undo.clone(), c))),
+                    ]
+                });
+                let detail = match &merge {
+                    Some(note) => format!(
+                        "{} · {}{}",
+                        merging_mac(note),
+                        merge_counts(note, self.merge_model(note).as_deref()),
+                        merge_tokens(note)
+                    ),
+                    None => entry_detail(entry),
+                };
                 let text = match (&entry.edits.rewrite, entry.edits.rules.as_str()) {
                     (Some(rewrite), _) => rewrite.text.clone(),
                     (None, "") => "No rules of your own: agents got the stock text alone.".into(),
@@ -1032,11 +1435,12 @@ impl Workspace {
                                 .child(entry_title(entry)),
                         )
                         .when(current, |d| d.child(pill("current", p.focus))),
-                    hint(entry_detail(entry), p),
+                    hint(detail, p),
                     div()
                         .flex()
                         .gap_3()
-                        .child(view)
+                        .when(merge.is_none(), |d| d.child(view))
+                        .children(merge_actions.into_iter().flatten())
                         .when(!current, |d| d.child(restore)),
                     viewed.then_some(text),
                 )
@@ -1253,12 +1657,16 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CORE, Shown, based_on, core_tab, entry_detail, entry_title, grouped, is_live, out_of_date,
-        out_of_date_title, reset_question, rewrite_question, saved_text, shown_changes,
-        state_label, when, written_at,
+        CORE, Confirm, OUT_OF_DATE, Shown, based_on, core_tab, entry_detail, entry_time,
+        entry_title, grouped, is_change, is_live, merge_counts, merge_note_text, merged_since,
+        out_of_date, out_of_date_title, question, reset_question, rewrite_banner, rewrite_question,
+        saved_text, shown_changes, state_label, when, written_at,
     };
     use chrono::{Local, NaiveDate, TimeZone};
-    use workspace_core::{Command, Role, Skill, SkillState};
+    use workspace_core::{
+        Command, MergeModel, MergeNote, MergeStanding, ModelProfile, Provider, Role, Skill,
+        SkillState,
+    };
     use workspace_host::{
         Host,
         skills::{Change, Edits, Entry, Line, Recorded, stock},
@@ -1553,7 +1961,7 @@ mod tests {
         let lines: Vec<Line> =
             serde_json::from_value(host.execute(Command::SkillStockChanges { skill }).unwrap())
                 .unwrap();
-        let shown = shown_changes(&lines);
+        let shown = shown_changes(&lines, is_change);
         assert!(
             matches!(&shown[..2], [Shown::Line(Line::Removed(v0)), Shown::Line(Line::Added(_))] if v0 == "# Coordinating — v0")
         );
@@ -1562,6 +1970,9 @@ mod tests {
             Some(&Shown::Line(&Line::Removed("A line v1 removed.".into())))
         );
 
+        let banner = rewrite_banner(coordinating).unwrap();
+        let title = "Written against Coordinating v0. This release has v1.";
+        assert_eq!(banner, ([title.into(), OUT_OF_DATE.into()], true));
         let marked = state(&mut host, Command::MarkSkillUpToDate { skill });
         assert_eq!(state_label(&marked), "Rewritten");
         assert!(!host.snapshot().unwrap().skills.iter().any(out_of_date));
@@ -1591,7 +2002,7 @@ mod tests {
             same("g"),
         ];
         assert_eq!(
-            shown_changes(&lines),
+            shown_changes(&lines, is_change),
             [
                 Shown::Gap(2),
                 Shown::Line(&lines[2]),
@@ -1655,5 +2066,188 @@ mod tests {
         let entry = newest();
         assert_eq!(entry_title(&entry), "Saved your rewrite");
         assert_eq!(entry_detail(&entry), "Based on stock v0 · 6 characters");
+    }
+
+    /// Coordinating rewritten against a stand-in v0 and merged into v1 at start.
+    fn merged_at_start(home: &tempfile::TempDir) -> Host {
+        let host = Host::open(home.path()).unwrap();
+        let skill = Skill::Coordinating;
+        host.skills().start_rewrite(skill).unwrap();
+        let base = stock(skill).replacen("— v1", "— v0", 1);
+        let text = base.replacen("Start by clarifying", "Start by restating", 1);
+        host.skills().save_rewrite(skill, &text).unwrap();
+        std::fs::write(
+            home.path().join("shared/skills/coordinating/base.md"),
+            &base,
+        )
+        .unwrap();
+        host.skills().save_rewrite(skill, &text).unwrap();
+        drop(host);
+        Host::open(home.path()).unwrap()
+    }
+
+    #[test]
+    fn after_an_automatic_merge_the_page_shows_its_note_and_undo_asks_first() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = merged_at_start(&home);
+        let skill = Skill::Coordinating;
+        let snapshot = host.snapshot().unwrap();
+        let coordinating = &snapshot.skills[0];
+        assert_eq!(state_label(coordinating), "Rewritten · updated");
+        assert!(!snapshot.skills.iter().any(out_of_date));
+        let note = coordinating.merge_note.clone().unwrap();
+        assert_eq!(
+            merge_note_text(coordinating, &note, None),
+            [
+                "Merged Coordinating v1 into your rewrite",
+                "1 change from v1. The project coordinator gets the merged text from their next turn.",
+            ]
+        );
+
+        let undo = Confirm::Undo {
+            note: note.clone(),
+            later: false,
+        };
+        let (asked, command) = question(coordinating, &undo, false);
+        let before = entry_time(&note.entry);
+        assert_eq!(
+            asked,
+            [
+                "Undo the merge of v1?".into(),
+                format!(
+                    "Your rewrite goes back to exactly what it was before {before}, based on stock v0. The project coordinator gets it from their next turn, on every Mac."
+                ),
+                "v1 won't be merged in again on its own. The merge stays in the history.".into(),
+            ]
+        );
+        let undone = state(&mut host, command);
+        assert_eq!(state_label(&undone), "Rewritten · out of date");
+        let (banner, offers) = rewrite_banner(&undone).unwrap();
+        assert_eq!(
+            banner,
+            [
+                "You undid the merge of v1",
+                "Your rewrite is as it was before the merge, and v1 won't be merged into it again on its own.",
+            ]
+        );
+        assert!(offers);
+        let history = listing(&mut host, skill);
+        assert_eq!(
+            titles(&history)[..2],
+            ["Undid the merge of v1", "Merged v0 → v1"]
+        );
+        // After a later change, the merge's entry still offers Undo, which says so.
+        let later = Confirm::Undo { note, later: true };
+        let ([_, what, kept], _) = question(&undone, &later, false);
+        assert!(what.ends_with(
+            "based on stock v0, and your changes since stop applying. The project coordinator gets it from their next turn, on every Mac."
+        ));
+        assert_eq!(
+            kept,
+            "v1 won't be merged in again on its own. The merge and your changes since stay in the history."
+        );
+    }
+
+    #[test]
+    fn restoring_a_rewrite_from_before_a_merge_asks_first() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = merged_at_start(&home);
+        let skill = Skill::Coordinating;
+        let history = listing(&mut host, skill);
+        assert_eq!(
+            titles(&history),
+            [
+                "Merged v0 → v1",
+                "Saved your rewrite",
+                "Saved your rewrite",
+                "Started a rewrite"
+            ]
+        );
+        assert_eq!(merged_since(&history, 0), None);
+        assert_eq!(merged_since(&history, 1).as_deref(), Some("v1"));
+        let entry = history[1].name.clone();
+        let restore = Confirm::Restore {
+            entry: entry.clone(),
+            merged: "v1".into(),
+        };
+        let coordinating = host.snapshot().unwrap().skills.remove(0);
+        let (asked, command) = question(&coordinating, &restore, false);
+        assert_eq!(
+            asked,
+            [
+                format!("Restore the version of {}?", entry_time(&entry)),
+                "It is from before the merge of v1, so no automatic merge brings v1 in until a newer version arrives. You can still merge it in from Coordinating's page.".into(),
+                "The merge and every later change stay in the history.".into(),
+            ]
+        );
+        let restored = state(&mut host, command);
+        assert_eq!(restored.merge_standing, Some(MergeStanding::Undone));
+        drop(host);
+        let host = Host::open(home.path()).unwrap();
+        let coordinating = host.snapshot().unwrap().skills.remove(0);
+        assert_eq!(state_label(&coordinating), "Rewritten · out of date");
+    }
+
+    #[test]
+    fn a_base_from_a_newer_release_names_it_and_offers_no_mark_as_up_to_date() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        let skill = Skill::Coordinating;
+        state(&mut host, Command::StartSkillRewrite { skill });
+        let base = stock(skill).replacen("— v1", "— v2", 1);
+        std::fs::write(home.path().join("shared/skills/coordinating/base.md"), base).unwrap();
+        let mut coordinating = host.snapshot().unwrap().skills.remove(0);
+        assert_eq!(state_label(&coordinating), "Rewritten");
+        let here = "This Mac has v1 and sends the rewrite as written. It isn't out of date here, and nothing is merged here.";
+        assert_eq!(
+            rewrite_banner(&coordinating),
+            Some((
+                [
+                    "Based on Coordinating v2, from a Mac with a newer Wiffletree".into(),
+                    here.into()
+                ],
+                false
+            ))
+        );
+        coordinating.merge_standing = Some(MergeStanding::NewerBase {
+            machine: Some("Mike's MacBook Air".into()),
+        });
+        assert_eq!(
+            rewrite_banner(&coordinating),
+            Some((
+                [
+                    "Based on Coordinating v2, from Mike's MacBook Air".into(),
+                    format!(
+                        "That Mac runs a newer Wiffletree and merged v2 into your rewrite. {here}"
+                    )
+                ],
+                false
+            ))
+        );
+    }
+
+    #[test]
+    fn a_note_names_the_model_that_merged_passages() {
+        let note = MergeNote {
+            entry: "2026-10-16T08-01-00.000Z".into(),
+            from: "v1".into(),
+            to: "v2".into(),
+            from_update: 3,
+            by_model: 1,
+            model: Some(MergeModel {
+                model: ModelProfile {
+                    provider: Provider::Claude,
+                    model: "haiku".into(),
+                    effort: "medium".into(),
+                },
+                tokens: 6_240,
+            }),
+            machine: None,
+        };
+        assert_eq!(
+            merge_counts(&note, Some("Claude · Haiku · Medium")),
+            "3 changes from v2, 1 passage merged by Claude · Haiku · Medium"
+        );
+        assert_eq!(super::merge_tokens(&note), " · 6,240 tokens");
     }
 }

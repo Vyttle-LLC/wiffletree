@@ -128,6 +128,8 @@ struct Workspace {
     viewed_entry: Option<String>,
     /// What changed from the open rewrite's base to this release's stock text.
     stock_changes: Vec<workspace_host::skills::Line>,
+    /// The merge open in Review changes.
+    merge_review: Option<workspace_host::skills::MergeReview>,
     /// The workspace note open in Compare in the Inbox.
     compared: workspace_notes::Compared,
     verifiers: Entity<verifiers::VerifierEditor>,
@@ -297,6 +299,7 @@ impl Workspace {
             skill_history: vec![],
             viewed_entry: None,
             stock_changes: vec![],
+            merge_review: None,
             compared: None,
             verifiers,
             detection: Detection::new(),
@@ -864,13 +867,26 @@ impl Workspace {
             }
             Command::ResetSkill { .. }
             | Command::RestoreSkill { .. }
-            | Command::StartSkillRewrite { .. } => {
+            | Command::StartSkillRewrite { .. }
+            | Command::MergeSkillUpdate { .. }
+            | Command::UndoSkillMerge { .. } => {
                 match serde_json::from_value(value) {
                     Ok(state) => self.skill_replaced(state, &command, window, cx),
-                    Err(error) => eprintln!("Reset, restored or rewrote skill: {error}"),
+                    Err(error) => eprintln!("Reset, restored, rewrote or merged skill: {error}"),
                 }
                 self.request(Command::Snapshot, window, cx);
             }
+            Command::DismissSkillMerge { .. } => {
+                match serde_json::from_value(value) {
+                    Ok(state) => self.skill_saved(state),
+                    Err(error) => eprintln!("Dismissed skill merge: {error}"),
+                }
+                self.request(Command::Snapshot, window, cx);
+            }
+            Command::SkillMergeReview { skill, .. } => match serde_json::from_value(value) {
+                Ok(review) => self.review_arrived(skill, review),
+                Err(error) => eprintln!("Skill merge review: {error}"),
+            },
             Command::SkillHistory { skill } => match serde_json::from_value(value) {
                 Ok(history) => self.history_arrived(skill, history),
                 Err(error) => eprintln!("Skill history: {error}"),

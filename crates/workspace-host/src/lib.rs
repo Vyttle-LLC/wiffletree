@@ -250,6 +250,10 @@ impl Host {
         if let Err(error) = host.skills().record_new_stock_versions() {
             eprintln!("Recording new stock versions of skills: {error:#}");
         }
+        // With a settings repository, another Mac may have merged; that waits for sync.
+        if host.settings().settings_repository.is_none() {
+            host.merge_due_skills();
+        }
         host.recall_skill_histories();
         Ok(host)
     }

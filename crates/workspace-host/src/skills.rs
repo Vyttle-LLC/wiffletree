@@ -675,6 +675,19 @@ impl Host {
         self.recall_skill_histories();
         Ok(serde_json::to_value(self.skill_state(skill)?)?)
     }
+    /// Merges, as plain text, each rewrite that is due a merge; one whose passages overlap stays
+    /// out of date.
+    pub(crate) fn merge_due_skills(&self) {
+        for skill in Skill::ALL {
+            let merged = match self.skill_merge_due(skill) {
+                Ok(true) => self.skills().merge_update(skill).map(drop),
+                due => due.map(drop),
+            };
+            if let Err(error) = merged {
+                eprintln!("Merging {}'s new stock version: {error:#}", skill.name());
+            }
+        }
+    }
     /// Whether the skill's rewrite is due a merge of this release's stock text on its own: one
     /// whose files can be read and are not paused, by `merge_due`.
     pub fn skill_merge_due(&self, skill: Skill) -> Result<bool> {
@@ -1932,6 +1945,83 @@ mod tests {
         let path = coordinating(host, &format!("history/{name}.json"));
         fs::write(path, serde_json::to_vec(entry).unwrap()).unwrap();
         host.recall_skill_histories();
+    }
+
+    #[test]
+    fn at_start_a_due_rewrite_is_merged_with_a_note_and_undo_stops_the_next() {
+        let (home, host) = host();
+        let before = rewritten_against_v0(&host);
+        host.skills()
+            .save_rules(Skill::Implementing, "Rule")
+            .unwrap();
+        let mut host = started_again(&home, host);
+        let stock = stock(Skill::Coordinating);
+        let merged = stock.replacen("Start by clarifying", "Start by restating", 1);
+        let merged = format!("{}  ", merged.trim_end());
+        assert_eq!(current(&host), [merged.as_bytes(), stock.as_bytes()]);
+        let (entry, _) = host.skills().history(Skill::Coordinating).pop().unwrap();
+        let state = coordinating_state(&host);
+        let note = MergeNote {
+            entry: entry.clone(),
+            from: "v0".into(),
+            to: "v1".into(),
+            from_update: 2,
+            by_model: 0,
+            model: None,
+            machine: None,
+        };
+        assert_eq!((state.merge_note, state.merge_standing), (Some(note), None));
+        // Additions need no merge.
+        assert_eq!(changes(&host, Skill::Implementing), [Change::SavedRules]);
+        assert!(host.instructions(Role::Implementer).ends_with("Rule"));
+
+        let undone = execute(
+            &mut host,
+            Command::UndoSkillMerge {
+                skill: Skill::Coordinating,
+                entry,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (undone.merge_note, undone.merge_standing),
+            (None, Some(MergeStanding::Undone))
+        );
+        let undid = changes(&host, Skill::Coordinating);
+        let host = started_again(&home, host);
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        assert_eq!(changes(&host, Skill::Coordinating), undid);
+    }
+
+    #[test]
+    fn at_start_a_paused_skill_or_one_with_a_settings_repository_waits() {
+        let (home, host) = host();
+        let before = rewritten_against_v0(&host);
+        let pause = "INSERT INTO sync_paused(path,why) VALUES ('skills/coordinating/base.md','{}')";
+        host.db.execute(pause, []).unwrap();
+        let host = started_again(&home, host);
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        host.db.execute("DELETE FROM sync_paused", []).unwrap();
+        let mut settings = host.settings();
+        settings.settings_repository = Some(SettingsRepository {
+            name: "mike/settings".into(),
+            push_url: "file:///nowhere".into(),
+            branch: "main".into(),
+            readers: Readers::Invited,
+        });
+        host.save_settings(&settings).unwrap();
+        let host = started_again(&home, host);
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        assert!(coordinating_state(&host).rewrite.unwrap().out_of_date);
     }
 
     #[test]
