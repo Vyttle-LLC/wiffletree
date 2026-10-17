@@ -389,6 +389,7 @@ impl Settings {
     /// Asks the host for a comparison's lines or to settle a note, and shows its answer.
     fn ask_note(&mut self, command: Command, cx: &mut Context<Self>) {
         self.repository_error = None;
+        let asked = command.clone();
         let receiver = match self.bridge.request(command.clone()) {
             Ok(receiver) => receiver,
             Err(error) => return self.repository_error = Some(error),
@@ -410,6 +411,7 @@ impl Settings {
                     }
                 });
                 if let Err(error) = shown {
+                    workspace_notes::compare_failed(&mut view.compared, &asked);
                     view.repository_error = Some(error);
                 }
                 cx.notify();
