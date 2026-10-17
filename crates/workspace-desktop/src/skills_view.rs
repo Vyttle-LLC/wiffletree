@@ -829,7 +829,7 @@ fn core_tab(part: usize) -> String {
 
 impl Workspace {
     fn skill_state(&self, skill: Skill) -> Option<&SkillState> {
-        (self.snapshot.as_ref()?.skills.iter()).find(|state| state.skill == skill)
+        (self.snapshot()?.skills.iter()).find(|state| state.skill == skill)
     }
 
     fn skill_draft(&self, cx: &App) -> String {
@@ -838,7 +838,7 @@ impl Workspace {
 
     /// Any rewrite is out of date, which the sidebar's Skills row marks.
     pub(super) fn a_rewrite_is_out_of_date(&self) -> bool {
-        (self.snapshot.iter()).any(|snapshot| snapshot.skills.iter().any(out_of_date))
+        (self.snapshot()).is_some_and(|snapshot| snapshot.skills.iter().any(out_of_date))
     }
 
     /// A skill opens with its saved rules or rewrite in the editor, its stock text folded, and
@@ -978,7 +978,7 @@ impl Workspace {
                 .find(|s| s.skill == skill)
                 .map(|s| saved_text(s).to_owned())
         };
-        let shown = self.snapshot.as_ref().and_then(|s| saved(&s.skills));
+        let shown = self.snapshot().and_then(|s| saved(&s.skills));
         if shown == Some(self.skill_draft(cx))
             && let Some(text) = saved(&snapshot.skills)
         {
@@ -989,11 +989,13 @@ impl Workspace {
 
     /// The host's answer to a save, shown until the next snapshot.
     pub(super) fn skill_saved(&mut self, saved: SkillState) {
-        if let Some(state) = (self.snapshot.as_mut().map(Rc::make_mut))
-            .and_then(|s| s.skills.iter_mut().find(|state| state.skill == saved.skill))
-        {
-            *state = saved;
-        }
+        self.amend_snapshot(|snapshot| {
+            if let Some(state) =
+                (snapshot.skills.iter_mut()).find(|state| state.skill == saved.skill)
+            {
+                *state = saved;
+            }
+        });
     }
 
     /// The view, under what it asks to confirm.
@@ -1031,7 +1033,7 @@ impl Workspace {
     }
 
     fn skills_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let skills = self.snapshot.iter().flat_map(|s| &s.skills);
+        let skills = self.snapshot().into_iter().flat_map(|s| &s.skills);
         div()
             .flex()
             .flex_col()

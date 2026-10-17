@@ -319,7 +319,7 @@ impl Workspace {
         self.context_seen
             .insert(session.id.clone(), Measured::of(&runtime));
         let skill = Skill::for_role(session.role);
-        let instructions = (self.snapshot.as_ref())
+        let instructions = (self.snapshot())
             .and_then(|snapshot| snapshot.skills.iter().find(|s| s.skill == skill))
             .map(|state| workspace_host::provider::role_instructions(session.role, state));
         let (Some(provider_session), Some(directory), Some(profile), Some(instructions)) = (

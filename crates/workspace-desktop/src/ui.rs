@@ -415,17 +415,9 @@ impl Workspace {
             self.compacting(&session.id),
         );
         let questions = self
-            .snapshot
-            .as_ref()
+            .snapshot()
             .map_or(0, |s| s.questions_waiting(&session.id));
         status_badge(status, crate::tree::badge_label(label, questions), p)
-    }
-    /// Sessions to list: archived ones appear only while the sidebar is showing them.
-    pub(super) fn shown<'a>(&'a self, snapshot: &'a Snapshot) -> impl Iterator<Item = &'a Session> {
-        snapshot
-            .sessions
-            .iter()
-            .filter(|s| self.show_archived || !s.archived)
     }
     pub(super) fn owner_name(&self) -> String {
         self.selected_session()
@@ -433,30 +425,19 @@ impl Workspace {
             .unwrap_or_default()
     }
     pub(super) fn project_name(&self) -> String {
-        let project = self.project_id();
-        self.snapshot
-            .iter()
-            .flat_map(|s| &s.projects)
-            .find(|p| Some(&p.id) == project.as_ref())
+        let project = self.project_id().unwrap_or_default();
+        (self.index.as_ref())
+            .and_then(|index| index.project(&project))
             .map(|p| p.name.clone())
             .unwrap_or_default()
     }
     pub(super) fn repository(&self) -> Option<&Repository> {
         let id = self.selected_session()?.repository_id.as_ref()?;
-        self.snapshot
-            .as_ref()?
-            .repositories
-            .iter()
-            .find(|r| &r.id == id)
+        self.snapshot()?.repositories.iter().find(|r| &r.id == id)
     }
     /// The ticket a worker session belongs to.
     pub(super) fn ticket_of(&self, session_id: &str) -> Option<&Ticket> {
-        let ticket_id = self.runtime(session_id)?.ticket_id.as_ref()?;
-        self.snapshot
-            .as_ref()?
-            .tickets
-            .iter()
-            .find(|t| &t.id == ticket_id)
+        self.index.as_ref()?.ticket_of(session_id)
     }
     /// A full-width page about the whole workspace, shown in place of the conversation.
     fn page(

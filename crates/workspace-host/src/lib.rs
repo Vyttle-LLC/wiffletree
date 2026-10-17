@@ -44,6 +44,17 @@ use std::{
 };
 use workspace_core::*;
 
+/// A stored session's archived flag as SQL over its row, which `sessions_archived` indexes.
+const ARCHIVED_FLAG: &str = "coalesce(json_extract(data,'$.archived'),0)";
+/// Where a stored ticket is open, or with `false` accepted or closed, as SQL over its row that
+/// `tickets_state` serves.
+fn tickets_where(open: bool) -> String {
+    let states: Vec<String> = (TicketState::ALL.into_iter())
+        .filter(|state| state.is_open() == open)
+        .map(|state| format!("'{state}'"))
+        .collect();
+    format!("json_extract(data,'$.state') IN ({})", states.join(","))
+}
 pub struct Host {
     pub(crate) db: Connection,
     _lock: StoreLock,
@@ -380,18 +391,69 @@ impl Host {
             })
             .context("Repository not found")
     }
+    /// The live workspace; `archive` has the rest.
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states()?, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, workspace_notes: self.workspace_notes()?, keeper_held: self.keeper_held() })
+        let skills = self.skill_states()?;
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.list_data(&format!("SELECT data FROM sessions WHERE {ARCHIVED_FLAG}=0 ORDER BY rowid"), [])?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} ORDER BY rowid", tickets_where(true)), [])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {ARCHIVED_FLAG}=1) ORDER BY rowid"), [])?, archive_stamp: self.archive_stamp()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+    }
+    /// What `snapshot` leaves out: archived sessions with their runtimes, and accepted and
+    /// closed tickets. Tickets take no state change once settled, so `shown_ticket` is not needed.
+    pub fn archive(&self) -> Result<Archive> {
+        let ids = |table: &str| -> Result<Vec<String>> {
+            Ok((self
+                .db
+                .prepare(&format!("SELECT id FROM {table} ORDER BY rowid"))?)
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+        };
+        Ok(Archive {
+            sessions: (self.list_data(&format!("SELECT data FROM sessions WHERE {ARCHIVED_FLAG}=1 ORDER BY rowid"), [])?.into_iter())
+                .map(|s| self.shown(s))
+                .collect(),
+            tickets: self.list_data(&format!("SELECT data FROM tickets WHERE {} ORDER BY rowid", tickets_where(false)), [])?,
+            runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {ARCHIVED_FLAG}=1) ORDER BY rowid"), [])?,
+            session_order: ids("sessions")?,
+            ticket_order: ids("tickets")?,
+            stamp: self.archive_stamp()?,
+        })
+    }
+    /// A hash of the stored rows `archive` reads, and of which archived sessions are mid-turn,
+    /// which `shown` reads; equal stamps mean an unchanged archive. New rows that are not yet
+    /// archived only append to its order, which a client places after it.
+    fn archive_stamp(&self) -> Result<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for sql in [
+            format!("SELECT id,data FROM sessions WHERE {ARCHIVED_FLAG}=1 ORDER BY rowid"),
+            format!(
+                "SELECT id,data FROM tickets WHERE {} ORDER BY rowid",
+                tickets_where(false)
+            ),
+            format!(
+                "SELECT session_id,data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {ARCHIVED_FLAG}=1) ORDER BY rowid"
+            ),
+        ] {
+            let mut statement = self.db.prepare(&sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let id = row.get_ref(0)?.as_str()?;
+                (id, row.get_ref(1)?.as_str()?, self.in_turn.contains(id)).hash(&mut hasher);
+            }
+            0xff_u8.hash(&mut hasher);
+        }
+        Ok(hasher.finish())
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
     /// leaves the question waiting and a restart changes nothing. The host's own `turn-held:`
-    /// reports are not the agent's questions.
+    /// reports are not the agent's questions. The range on `id` reads only reports, through
+    /// the messages' id index.
     pub(crate) fn questions_waiting(&self) -> Result<Vec<QuestionsWaiting>> {
-        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND s.parent_id=r.recipient WHERE substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.id,length(r.sender)+9,10)<>'turn-held:' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND a.sender=r.recipient AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
+        Ok(self.db.prepare("SELECT r.sender,COUNT(*) FROM messages r JOIN sessions s ON s.id=r.sender AND s.parent_id=r.recipient WHERE r.id>='report:' AND r.id<'report;' AND substr(r.id,1,length(r.sender)+8)='report:'||r.sender||':' AND substr(r.id,length(r.sender)+9,10)<>'turn-held:' AND substr(r.body,1,10)='[blocked] ' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.recipient=r.sender AND a.sender=r.recipient AND a.sequence>r.sequence AND a.receipt IN ('delivered','acknowledged','completed')) GROUP BY r.sender")?.query_map([], |r| Ok(QuestionsWaiting { session_id: r.get(0)?, count: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     fn undelivered(&self) -> Result<Vec<UndeliveredInput>> {
-        Ok(self.db.prepare("SELECT recipient,SUM(receipt='held'),SUM(receipt='queued' AND quiet=0) FROM messages WHERE receipt IN ('held','queued') GROUP BY recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
+        // Through each session's outbox index rather than a scan of every message.
+        Ok(self.db.prepare("SELECT m.recipient,SUM(m.receipt='held'),SUM(m.receipt='queued' AND m.quiet=0) FROM sessions s CROSS JOIN messages m ON m.recipient=s.id AND m.receipt IN ('held','queued') GROUP BY m.recipient")?.query_map([], |r| Ok(UndeliveredInput { session_id: r.get(0)?, held: r.get(1)?, queued: r.get(2)? }))?.collect::<rusqlite::Result<_>>()?)
     }
     pub fn create_project(&mut self, name: &str) -> Result<Project> {
         text(name, 128)?;
@@ -1225,6 +1287,7 @@ impl Host {
                 &timezone,
             )?)?,
             Command::Snapshot => serde_json::to_value(self.snapshot()?)?,
+            Command::Archive => serde_json::to_value(self.archive()?)?,
             Command::CreateProject { name } => serde_json::to_value(self.create_project(&name)?)?,
             Command::RenameProject { project_id, name } => {
                 serde_json::to_value(self.rename_project(&project_id, &name)?)?

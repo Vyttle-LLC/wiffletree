@@ -46,9 +46,15 @@ fn trigger(checkbox: Checkbox, name: &'static str, details: Vec<AnyElement>) -> 
 
 impl Workspace {
     pub(super) fn repositories_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Some(snapshot) = &self.snapshot else {
+        let Some(index) = &self.index else {
             return div();
         };
+        let snapshot = index.snapshot();
+        // Finished tickets and archived agents still point at their repository, so they keep it.
+        let in_use: std::collections::HashSet<&str> = (index.sessions())
+            .filter_map(|s| s.repository_id.as_deref())
+            .chain(index.tickets().map(|t| t.repository_id.as_str()))
+            .collect();
         let mut body = div().flex().flex_col().gap_3();
         if !snapshot.repositories.is_empty() {
             body = body
@@ -96,13 +102,7 @@ impl Workspace {
                 .iter()
                 .filter(|project| project.uses(&repository.id))
                 .count();
-            let works_here = |s: &&Session| s.repository_id.as_ref() == Some(&repository.id);
-            // Finished tickets and archived agents still point at the repository, so they keep it.
-            let in_use = snapshot.sessions.iter().any(|s| works_here(&s))
-                || snapshot
-                    .tickets
-                    .iter()
-                    .any(|t| t.repository_id == repository.id);
+            let in_use = in_use.contains(repository.id.as_str());
             let id = repository.id.clone();
             let missing = snapshot.missing_repositories.contains(&repository.id);
             let kept = kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper);
@@ -496,8 +496,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let checks = self
-            .snapshot
-            .iter()
+            .snapshot()
+            .into_iter()
             .flat_map(|s| &s.repositories)
             .find(|r| r.id == repository_id)
             .and_then(|r| r.checks.clone());
@@ -750,10 +750,10 @@ fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usi
 
 /// When the repository's PRs were last checked, or why not, and whether the check failed. A
 /// repository is not watched, and shows nothing, without an open ticket whose coordinator is
-/// not archived.
+/// not archived, which the snapshot lists.
 fn pr_check_status(snapshot: &Snapshot, repository: &Repository) -> Option<(String, bool)> {
-    let archived = |id: &str| snapshot.sessions.iter().any(|s| s.id == id && s.archived);
-    open_tickets(snapshot, repository).find(|t| !archived(&t.coordinator_id))?;
+    let listed = |id: &str| snapshot.sessions.iter().any(|s| s.id == id && !s.archived);
+    open_tickets(snapshot, repository).find(|t| listed(&t.coordinator_id))?;
     let check = snapshot
         .pull_request_checks
         .iter()
@@ -814,9 +814,12 @@ mod tests {
             })
             .collect();
         tickets.push(ticket(open_tickets, "closed", Some(pr("open"))));
+        let coordinator = serde_json::json!({"id": "c", "project_id": "p", "parent_id": null,
+            "repository_id": null, "name": "C", "role": "project_orchestrator",
+            "provider": "claude", "status": "ready"});
         let snapshot = serde_json::from_value(serde_json::json!({
-            "projects": [], "repositories": [repository], "sessions": [], "attention": [],
-            "tickets": tickets
+            "projects": [], "repositories": [repository], "sessions": [coordinator],
+            "attention": [], "tickets": tickets
         }))
         .unwrap();
         (snapshot, repository)

@@ -1129,3 +1129,48 @@ fn a_refused_archive_stops_nothing() {
 
     assert_eq!(left.stopped(&db), (false, None));
 }
+
+#[test]
+fn the_snapshot_leaves_finished_work_to_the_archive_whose_stamp_moves_only_with_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
+    let (root, coordinator) = team(&mut host, directory.path());
+    let open = worked_ticket(&mut host, &coordinator, "Toolbar");
+    let finished = worked_ticket(&mut host, &coordinator, "Review");
+    let worker = host
+        .assign_ticket(
+            &finished.id,
+            Role::Implementer,
+            Provider::Claude,
+            "Do",
+            None,
+        )
+        .unwrap();
+    let stamp = host.snapshot().unwrap().archive_stamp;
+    host.rename_project(&root.project_id, "Theme refresh")
+        .unwrap();
+    assert_eq!(
+        host.snapshot().unwrap().archive_stamp,
+        stamp,
+        "live work only"
+    );
+
+    host.close_ticket(&finished.id).unwrap();
+
+    let snapshot = host.snapshot().unwrap();
+    assert_ne!(snapshot.archive_stamp, stamp);
+    let ids = |sessions: &[Session]| sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&snapshot.sessions), std::slice::from_ref(&root.id));
+    assert_eq!(snapshot.tickets.len(), 1);
+    assert_eq!(snapshot.tickets[0].id, open.id);
+    assert!(snapshot.runtimes.iter().all(|r| r.session_id != worker.id));
+    let archive = host.archive().unwrap();
+    assert_eq!(archive.stamp, snapshot.archive_stamp);
+    assert_eq!(ids(&archive.sessions), std::slice::from_ref(&worker.id));
+    assert_eq!(archive.tickets.len(), 1);
+    assert_eq!(archive.tickets[0].state, TicketState::Closed);
+    assert_eq!(archive.runtimes.len(), 1);
+    assert_eq!(archive.runtimes[0].session_id, worker.id);
+    assert_eq!(archive.session_order, [root.id, worker.id]);
+    assert_eq!(archive.ticket_order, [open.id, finished.id]);
+}

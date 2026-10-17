@@ -20,8 +20,7 @@ impl Workspace {
     }
 
     pub(super) fn crew_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let (Some(project), Some(snapshot)) = (self.project_progress(), self.snapshot.as_ref())
-        else {
+        let (Some(project), Some(index)) = (self.project_progress(), self.index.as_ref()) else {
             return div();
         };
         let tickets = self.progress.tickets_of(project);
@@ -35,7 +34,7 @@ impl Workspace {
         }
         let mut body = div().flex().flex_col().gap_3();
         for progress in tickets {
-            let Some(ticket) = snapshot.tickets.iter().find(|t| t.id == progress.ticket_id) else {
+            let Some(ticket) = index.ticket(&progress.ticket_id) else {
                 continue;
             };
             let mut ticket_card = card(p)
@@ -50,7 +49,7 @@ impl Workspace {
                                 .min_w_0()
                                 .text_ellipsis()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(tree::ticket_label(snapshot, ticket)),
+                                .child(tree::ticket_label(index.snapshot(), ticket)),
                         )
                         .child(hint(tree::stage_figure(progress), p).flex_none()),
                 )

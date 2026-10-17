@@ -95,14 +95,14 @@ fn step(number: usize, title: &'static str, next: bool, body: Option<Div>, p: Pa
 impl Workspace {
     pub(super) fn start_screen_kind(&self) -> StartScreen {
         start_screen(
-            self.snapshot.is_some(),
+            self.index.is_some(),
             &self.saved_model_selection,
             &self.detection,
         )
     }
 
     pub(super) fn offers_new_project(&self) -> bool {
-        offers_new_project(self.snapshot.is_some(), &self.saved_model_selection)
+        offers_new_project(self.index.is_some(), &self.saved_model_selection)
     }
 
     /// Each provider as detection found it: signed in with its plan, or its one-line fix.

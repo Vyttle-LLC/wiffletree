@@ -1,7 +1,7 @@
 //! Pure helpers behind the Models page and the model pickers.
 use workspace_core::{
     AllowedModel, Chooser, Detection, ModelProfile, ModelSelection, PROVIDERS, Provider,
-    ProviderStatus, Role, Selection, Session, Setup, VerificationSettings, suggest,
+    ProviderStatus, Role, Selection, Setup, VerificationSettings, WorkspaceIndex, suggest,
 };
 use workspace_host::runtime::ModelOption;
 
@@ -384,13 +384,10 @@ pub fn picker_groups(
 }
 
 /// How an agent's model was chosen, as its chat shows it.
-pub fn chosen_by(selection: &Selection, sessions: &[Session]) -> String {
+pub fn chosen_by(selection: &Selection, index: &WorkspaceIndex) -> String {
     match &selection.chosen_by {
         Chooser::Coordinator { session_id } => {
-            let name = sessions
-                .iter()
-                .find(|s| s.id == *session_id)
-                .map_or("its coordinator", |s| s.name.as_str());
+            let name = (index.session(session_id)).map_or("its coordinator", |s| s.name.as_str());
             format!("Chosen by {name}: {}", selection.reason)
         }
         Chooser::Human => "Chosen by you".into(),

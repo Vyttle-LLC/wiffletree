@@ -1090,21 +1090,7 @@ impl Actor {
                         return false;
                     }
                 }
-                let read = matches!(
-                    command,
-                    Command::Snapshot
-                        | Command::Messages { .. }
-                        | Command::Steps { .. }
-                        | Command::Progress { .. }
-                        | Command::RunSummaries { .. }
-                        | Command::Logs { .. }
-                        | Command::Activity { .. }
-                        | Command::GitHistory { .. }
-                        | Command::Quotas
-                        | Command::Usage { .. }
-                        | Command::Settings
-                        | Command::Processes { .. }
-                );
+                let read = command.is_read();
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
@@ -4181,7 +4167,7 @@ mod tests {
         assert_eq!(shown_ticket_state(&actor.host, &coordinator).0, "assigned");
         actor.host.close_ticket(&ticket.id).unwrap();
         assert_eq!(
-            actor.host.snapshot().unwrap().tickets[0].state,
+            actor.host.archive().unwrap().tickets[0].state,
             TicketState::Closed
         );
     }

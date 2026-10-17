@@ -1,5 +1,6 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 mod files;
+mod index;
 mod owners;
 mod progress;
 mod publishing;
@@ -9,6 +10,7 @@ mod suggestion;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use files::*;
+pub use index::WorkspaceIndex;
 pub use owners::*;
 pub use progress::*;
 pub use publishing::*;
@@ -560,16 +562,25 @@ pub struct MaintenanceRun {
     pub exported: usize,
     pub created_at: i64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// The live workspace. Archived sessions, accepted and closed tickets and those sessions'
+/// runtimes are left to the `Archive`; `WorkspaceIndex` joins the two for views.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub projects: Vec<Project>,
     pub repositories: Vec<Repository>,
+    /// The sessions that are not archived, in the order they were created.
     pub sessions: Vec<Session>,
     pub attention: Vec<Attention>,
+    /// The open tickets, in the order they were created.
     #[serde(default)]
     pub tickets: Vec<Ticket>,
+    /// The runtimes of `sessions`.
     #[serde(default)]
     pub runtimes: Vec<SessionRuntime>,
+    /// Changes whenever what `Command::Archive` answers does, so a client re-reads the archive
+    /// only then.
+    #[serde(default)]
+    pub archive_stamp: u64,
     #[serde(default)]
     pub live_projects: Vec<String>,
     /// Parent folders checked for new repositories.
@@ -625,6 +636,20 @@ pub struct Snapshot {
     /// Why each keeper trigger the shared settings turn on is off on this machine.
     #[serde(default)]
     pub keeper_held: Vec<String>,
+}
+/// What a `Snapshot` leaves out: archived sessions, accepted and closed tickets, and those
+/// sessions' runtimes. Answers `Command::Archive`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Archive {
+    pub sessions: Vec<Session>,
+    pub tickets: Vec<Ticket>,
+    pub runtimes: Vec<SessionRuntime>,
+    /// Every session's id, archived or not, in the order they were created, so that joining a
+    /// snapshot keeps each session in its place; likewise every ticket's.
+    pub session_order: Vec<String>,
+    pub ticket_order: Vec<String>,
+    /// The `Snapshot::archive_stamp` this archive was read at.
+    pub stamp: u64,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -1429,6 +1454,10 @@ impl TicketState {
             Self::Closed => "closed",
         }
     }
+    /// Accepted and closed tickets take no further agents or state changes.
+    pub fn is_open(self) -> bool {
+        !matches!(self, Self::Accepted | Self::Closed)
+    }
     /// The state a stored name, or the report kind of the same name, stands for.
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|state| state.name() == name)
@@ -1741,7 +1770,7 @@ impl PublishRequest {
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
     pub fn is_open(&self) -> bool {
-        !matches!(self.state, TicketState::Accepted | TicketState::Closed)
+        self.state.is_open()
     }
     /// The verification cycle in progress, if any.
     pub fn running_cycle(&self) -> Option<&Verification> {
@@ -2478,6 +2507,8 @@ pub enum Command {
         repository_id: String,
     },
     Snapshot,
+    /// Read-only: the history a `Snapshot` leaves out; answered with `Archive`.
+    Archive,
     SetLive {
         project_id: String,
         enabled: bool,
@@ -2815,6 +2846,87 @@ pub enum Command {
         #[serde(default)]
         groups: Vec<String>,
     },
+}
+impl Command {
+    /// Reads change nothing in the store, so the host signals no change for them and clients
+    /// reload nothing after one. Every command is listed, so a new one must be classified.
+    pub fn is_read(&self) -> bool {
+        match self {
+            Self::Snapshot
+            | Self::Archive
+            | Self::DiscoverRepositories { .. }
+            | Self::Quotas
+            | Self::Usage { .. }
+            | Self::Messages { .. }
+            | Self::Steps { .. }
+            | Self::Files { .. }
+            | Self::Progress { .. }
+            | Self::RunSummaries { .. }
+            | Self::Logs { .. }
+            | Self::Runs { .. }
+            | Self::Activity { .. }
+            | Self::GitHistory { .. }
+            | Self::Settings
+            | Self::CheckSettingsRepository { .. }
+            | Self::ComparePausedFile { .. }
+            | Self::SkillHistory { .. }
+            | Self::SkillMergeReview { .. }
+            | Self::SkillStockChanges { .. }
+            | Self::LeftoverWorktrees
+            | Self::Processes { .. } => true,
+            Self::ImportRepositories { .. }
+            | Self::RefreshRepositories
+            | Self::RemoveRepositoryRoot { .. }
+            | Self::SetProjectRepositories { .. }
+            | Self::RemoveRepository { .. }
+            | Self::SetLive { .. }
+            | Self::ConfigureSession { .. }
+            | Self::ReconcileSession { .. }
+            | Self::CompactContext { .. }
+            | Self::CancelCompaction { .. }
+            | Self::DismissCompaction { .. }
+            | Self::RecordQuota { .. }
+            | Self::CreateTicket { .. }
+            | Self::AssignTicket { .. }
+            | Self::CreateProject { .. }
+            | Self::RenameProject { .. }
+            | Self::MoveProjects { .. }
+            | Self::AttachRepository { .. }
+            | Self::CreateSession { .. }
+            | Self::SetStatus { .. }
+            | Self::SetArchived { .. }
+            | Self::Send { .. }
+            | Self::SetModelSelection { .. }
+            | Self::ResolveAttention { .. }
+            | Self::DismissAttention { .. }
+            | Self::AppendLog { .. }
+            | Self::AttachBrain { .. }
+            | Self::ExportLogs { .. }
+            | Self::SetWorkspacesDir { .. }
+            | Self::SetVerification { .. }
+            | Self::SetCheckIns { .. }
+            | Self::SetOwnerAllowed { .. }
+            | Self::SetKeeper { .. }
+            | Self::SaveSkillRules { .. }
+            | Self::ResetSkill { .. }
+            | Self::RestoreSkill { .. }
+            | Self::SetUpSettingsRepository { .. }
+            | Self::JoinSettingsRepository { .. }
+            | Self::SyncNow
+            | Self::StopSettingsSync
+            | Self::SettlePausedFile { .. }
+            | Self::StartSkillRewrite { .. }
+            | Self::SaveSkillRewrite { .. }
+            | Self::MarkSkillUpToDate { .. }
+            | Self::UndoSkillMerge { .. }
+            | Self::MergeSkillUpdate { .. }
+            | Self::AnswerSkillQuestion { .. }
+            | Self::DismissSkillMerge { .. }
+            | Self::SetRepositoryChecks { .. }
+            | Self::RemoveLeftoverWorktrees { .. }
+            | Self::StopProcesses { .. } => false,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
