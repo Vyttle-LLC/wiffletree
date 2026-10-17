@@ -102,6 +102,34 @@ impl Coalesced {
     }
 }
 
+/// What is shown, as far as reading the archive goes.
+struct ArchiveDemand<'a> {
+    show_archived: bool,
+    panel: Option<Panel>,
+    page: Page,
+    selected: Option<&'a str>,
+    messages: &'a [Message],
+}
+
+/// The archive is out of date and something shown needs it: Show archived, the Tickets or Crew
+/// panel, the Repositories page or a publish request, or a selected session or message sender
+/// that the snapshot does not list, which only the archive holds.
+fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
+    let snapshot = index.snapshot();
+    let live: BTreeSet<&str> = snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
+    let archived = |id: &str| !live.contains(id);
+    index.archive_is_stale()
+        && (shown.show_archived
+            || matches!(shown.panel, Some(Panel::Team | Panel::Crew))
+            || shown.page == Page::Repositories
+            || snapshot.attention.iter().any(Attention::is_publish)
+            || shown.selected.is_some_and(archived)
+            || shown
+                .messages
+                .iter()
+                .any(|m| m.sender.as_deref().is_some_and(archived)))
+}
+
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -961,26 +989,20 @@ impl Workspace {
     }
     /// Reads the archive again when what is shown needs it and the one held is out of date.
     fn sync_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let stale = self.index.as_ref().is_some_and(|i| i.archive_is_stale());
-        if stale && self.wants_archive() && !self.archive_pending {
+        let wanted = self.index.as_ref().is_some_and(|index| {
+            let shown = ArchiveDemand {
+                show_archived: self.show_archived,
+                panel: self.panel,
+                page: self.view,
+                selected: self.selected.as_deref(),
+                messages: &self.messages,
+            };
+            wants_archive(index, &shown)
+        });
+        if wanted && !self.archive_pending {
             self.archive_pending = true;
             self.request(Command::Archive, window, cx);
         }
-    }
-    /// Something shown lists archived sessions or finished tickets: Show archived, the Tickets
-    /// and Crew panels, the Repositories page and publish requests, or the selected session or
-    /// a sender of its loaded messages is in no list held yet.
-    fn wants_archive(&self) -> bool {
-        let Some(index) = &self.index else {
-            return false;
-        };
-        let unknown = |id: &str| index.session(id).is_none();
-        self.show_archived
-            || matches!(self.panel, Some(Panel::Team | Panel::Crew))
-            || self.view == Page::Repositories
-            || index.snapshot().attention.iter().any(Attention::is_publish)
-            || self.selected.as_deref().is_some_and(unknown)
-            || (self.messages.iter()).any(|m| m.sender.as_deref().is_some_and(unknown))
     }
     fn accept_archive(&mut self, archive: Archive, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = &self.index else {
@@ -2052,7 +2074,95 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Coalesced;
+    use super::{ArchiveDemand, Coalesced, Page, Panel, wants_archive};
+    use serde_json::json;
+    use std::rc::Rc;
+    use workspace_core::*;
+
+    fn session(id: &str, archived: bool) -> Session {
+        serde_json::from_value(json!({
+            "id":id,"project_id":"p","parent_id":null,"repository_id":null,"name":id,
+            "role":"project_orchestrator","provider":"claude","status":"ready",
+            "archived":archived
+        }))
+        .unwrap()
+    }
+
+    /// A live coordinator and an archived one only the archive holds, read at stamp 1; the
+    /// snapshot's stamp is `stamp`.
+    fn index(stamp: u64) -> WorkspaceIndex {
+        let snapshot = Snapshot {
+            sessions: vec![session("live", false)],
+            archive_stamp: stamp,
+            ..Default::default()
+        };
+        let archive = Archive {
+            sessions: vec![session("old", true)],
+            session_order: vec!["old".into(), "live".into()],
+            stamp: 1,
+            ..Default::default()
+        };
+        WorkspaceIndex::new(snapshot, Rc::new(archive))
+    }
+
+    fn shown(selected: &str) -> ArchiveDemand<'_> {
+        ArchiveDemand {
+            show_archived: false,
+            panel: None,
+            page: Page::Conversation,
+            selected: Some(selected),
+            messages: &[],
+        }
+    }
+
+    #[test]
+    fn the_archive_is_read_again_only_when_it_moved_and_something_shown_needs_it() {
+        let moved = index(2);
+        assert!(!wants_archive(&moved, &shown("live")), "the default view");
+        let demands = [
+            ArchiveDemand {
+                show_archived: true,
+                ..shown("live")
+            },
+            ArchiveDemand {
+                panel: Some(Panel::Team),
+                ..shown("live")
+            },
+            ArchiveDemand {
+                panel: Some(Panel::Crew),
+                ..shown("live")
+            },
+            ArchiveDemand {
+                page: Page::Repositories,
+                ..shown("live")
+            },
+            // An archived session already in the held archive, whose status may have moved.
+            shown("old"),
+        ];
+        for demand in &demands {
+            assert!(wants_archive(&moved, demand));
+            assert!(
+                !wants_archive(&index(1), demand),
+                "the archive held is current"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_from_an_archived_sender_needs_the_archive_once_it_moved() {
+        let message: Message = serde_json::from_value(json!({
+            "sequence":1,"id":"m","project_id":"p","sender":"old","recipient":"live",
+            "body":"Done","receipt":"completed","created_at":0
+        }))
+        .unwrap();
+        let messages = [message];
+        let shown = ArchiveDemand {
+            messages: &messages,
+            ..shown("live")
+        };
+        assert!(wants_archive(&index(2), &shown));
+        assert!(!wants_archive(&index(1), &shown));
+    }
 
     #[test]
     fn asks_while_a_request_is_answered_send_it_once_more_after() {
