@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use similar::{Algorithm, DiffTag};
 use std::ops::Range;
-use workspace_core::ModelProfile;
 
 /// Where a change in a merged rewrite came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,12 +23,6 @@ pub struct MergedChange {
     pub source: Source,
     pub before: String,
     pub after: String,
-}
-/// The model that merged a rewrite's overlapping passages, and the tokens it used.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MergeModel {
-    pub model: ModelProfile,
-    pub tokens: u64,
 }
 /// A run of paragraphs that both the update and the human changed, each in its own way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

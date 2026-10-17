@@ -155,6 +155,43 @@ pub struct SkillState {
     /// A stock version newer than this release's, recorded in the history by another machine.
     #[serde(default)]
     pub newer_stock_version: Option<String>,
+    /// The note of the merge the skill holds now, unless dismissed on this machine.
+    #[serde(default)]
+    pub merge_note: Option<MergeNote>,
+    /// Why no automatic merge touches the rewrite.
+    #[serde(default)]
+    pub merge_standing: Option<MergeStanding>,
+}
+/// A "Merged" history entry, as its note and its review name it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeNote {
+    /// The entry's name, the time it was written.
+    pub entry: String,
+    pub from: String,
+    pub to: String,
+    /// The changes that came from the update as plain text.
+    pub from_update: usize,
+    /// The overlapping passages the model merged.
+    pub by_model: usize,
+    pub model: Option<MergeModel>,
+    /// The machine that merged, none for this one.
+    pub machine: Option<String>,
+}
+/// The model that merged a rewrite's overlapping passages, and the tokens it used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeModel {
+    pub model: ModelProfile,
+    pub tokens: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeStanding {
+    /// Out of date, and an Undo or a restore from before a merge stops automatic merges into
+    /// this release's stock version.
+    Undone,
+    /// Based on a newer release's stock text, so not out of date; `machine` merged it in when a
+    /// merge did.
+    NewerBase { machine: Option<String> },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rewrite {
@@ -2618,6 +2655,23 @@ pub enum Command {
     /// `entry` names, as a new entry; answers with the `SkillState`. Only the human's client
     /// sends it.
     UndoSkillMerge {
+        skill: Skill,
+        entry: String,
+    },
+    /// Merges this release's stock text into an out-of-date rewrite, refused when passages
+    /// overlap; answers with the `SkillState`. Only the human's client sends it.
+    MergeSkillUpdate {
+        skill: Skill,
+    },
+    /// Hides the note of the merge `entry` names on this machine; answers with the `SkillState`.
+    /// Only the human's client sends it.
+    DismissSkillMerge {
+        skill: Skill,
+        entry: String,
+    },
+    /// Read-only: the rewrite before and after the merge `entry` names, line by line, each
+    /// change with where it came from.
+    SkillMergeReview {
         skill: Skill,
         entry: String,
     },

@@ -74,8 +74,8 @@ pub struct Host {
     pub(crate) sync_passes: std::sync::Arc<std::sync::Mutex<()>>,
     /// What the latest sync pass did; see `sync`.
     pub(crate) sync: sync::Synced,
-    /// By skill, in `Skill::ALL`'s order, a newer stock version another machine recorded.
-    newer_stock: Vec<Option<String>>,
+    /// By skill, in `Skill::ALL`'s order, what its history says beyond its files.
+    skill_histories: [skills::Recalled; 4],
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -210,6 +210,7 @@ impl Host {
         db.execute_batch(include_str!("schedules.sql"))?;
         db.execute_batch(include_str!("selection.sql"))?;
         db.execute_batch(include_str!("sync.sql"))?;
+        db.execute_batch(include_str!("skills.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
@@ -234,7 +235,7 @@ impl Host {
             shared_writes: Default::default(),
             sync_passes: Default::default(),
             sync: Default::default(),
-            newer_stock: vec![],
+            skill_histories: Default::default(),
         };
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -249,7 +250,7 @@ impl Host {
         if let Err(error) = host.skills().record_new_stock_versions() {
             eprintln!("Recording new stock versions of skills: {error:#}");
         }
-        host.find_newer_stock_versions();
+        host.recall_skill_histories();
         Ok(host)
     }
     /// A session shows as working while its turn runs, even after reporting `blocked` or
@@ -365,7 +366,7 @@ impl Host {
             .context("Repository not found")
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states(), still_needs: self.still_needs()?, settings_sync: self.sync_status()?, workspace_notes: self.workspace_notes()?, keeper_held: self.keeper_held() })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.sessions()?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.shown_tickets()?, runtimes: self.runtimes()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, skills: self.skill_states()?, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, workspace_notes: self.workspace_notes()?, keeper_held: self.keeper_held() })
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
@@ -1426,15 +1427,15 @@ impl Host {
             Command::SetKeeper { keeper } => serde_json::to_value(self.set_keeper(keeper)?)?,
             Command::SaveSkillRules { skill, rules } => {
                 self.skills().save_rules(skill, &rules)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
             }
             Command::ResetSkill { skill } => {
                 self.skills().reset(skill)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
             }
             Command::RestoreSkill { skill, entry } => {
                 self.skills().restore(skill, &entry)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
             }
             Command::CheckSettingsRepository { repository } => serde_json::to_value(sync::check(
                 &self.home,
@@ -1466,19 +1467,34 @@ impl Host {
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
             Command::StartSkillRewrite { skill } => {
                 self.skills().start_rewrite(skill)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
             }
             Command::SaveSkillRewrite { skill, text } => {
                 self.skills().save_rewrite(skill, &text)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
             }
             Command::MarkSkillUpToDate { skill } => {
                 self.skills().mark_up_to_date(skill)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
             }
             Command::UndoSkillMerge { skill, entry } => {
                 self.skills().undo_merge(skill, &entry)?;
-                serde_json::to_value(self.skills().state(skill))?
+                self.changed_skill(skill)?
+            }
+            Command::MergeSkillUpdate { skill } => {
+                let overlaps = self.skills().merge_update(skill)?.len();
+                ensure!(overlaps == 0, skills::needs_a_model(skill, overlaps));
+                self.changed_skill(skill)?
+            }
+            Command::DismissSkillMerge { skill, entry } => {
+                self.db.execute(
+                    "INSERT OR IGNORE INTO skill_merges_dismissed(skill,entry) VALUES (?1,?2)",
+                    [skill.folder(), &entry],
+                )?;
+                serde_json::to_value(self.skill_state(skill)?)?
+            }
+            Command::SkillMergeReview { skill, entry } => {
+                serde_json::to_value(self.skills().merge_review(skill, &entry)?)?
             }
             Command::SkillStockChanges { skill } => {
                 serde_json::to_value(self.skills().stock_changes(skill))?
