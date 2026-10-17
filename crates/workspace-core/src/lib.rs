@@ -186,6 +186,8 @@ pub struct MergeModel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeStanding {
+    /// Out of date and due a merge, which waits for this launch's first sync pass to end.
+    WaitingForSync,
     /// Out of date, and an Undo or a restore from before a merge stops automatic merges into
     /// this release's stock version.
     Undone,

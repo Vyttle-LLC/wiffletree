@@ -2,7 +2,7 @@
 //! set up elsewhere, and the one push sync makes. Git and `gh` run through `Tools`, off the
 //! host's command thread; only putting a prepared clone in place runs on it.
 use crate::shared::SharedStore;
-use crate::skills::{Line, SkillStore};
+use crate::skills::{Change, Line, SkillStore};
 use crate::*;
 use publish::{GitTool, Tools};
 use std::collections::BTreeMap;
@@ -759,11 +759,70 @@ fn names(paths: &[String]) -> Vec<String> {
     names.into_iter().map(str::to_owned).collect()
 }
 
+/// The skill and stock version of a "Merged" history entry at `path`.
+fn merge_in(path: &str, content: &Content) -> Option<(Skill, String)> {
+    let skill = Skill::ALL
+        .into_iter()
+        .find(|skill| path.starts_with(&format!("skills/{}/history/", skill.folder())))?;
+    match serde_json::from_slice::<skills::Entry>(content.as_deref()?)
+        .ok()?
+        .change
+    {
+        Change::Merged { to, .. } => Some((skill, to)),
+        _ => None,
+    }
+}
+
+/// Whether this machine's only changes to the skill `unit` holds since it last synced are its
+/// own automatic merges: each history entry written here since is one, or a new stock version.
+/// Never for a unit that is not a skill, which has no history.
+fn only_own_merges(
+    unit: &str,
+    here: &BTreeMap<String, Vec<u8>>,
+    synced: &BTreeMap<String, Content>,
+) -> bool {
+    let history = format!("{unit}history/");
+    let written_since = (here.iter()).filter(|(path, _)| {
+        path.starts_with(&history) && synced.get(*path).is_none_or(Option::is_none)
+    });
+    let mut merged = false;
+    for (_, content) in written_since {
+        match serde_json::from_slice::<skills::Entry>(content).map(|entry| entry.change) {
+            Ok(Change::Merged {
+                automatic: true, ..
+            }) => merged = true,
+            Ok(Change::NewStockVersion { .. }) => {}
+            _ => return false,
+        }
+    }
+    merged
+}
+
+/// What a commit of `committed` changes, as the Settings window names it, and a skill's merge
+/// as "Coordinating: merged v2 into your rewrite".
+fn subject(committed: &[(String, Content)]) -> String {
+    let paths: Vec<String> = committed.iter().map(|(p, _)| p.clone()).collect();
+    let merges: Vec<_> = (committed.iter())
+        .filter_map(|(path, content)| merge_in(path, content))
+        .collect();
+    let named = |name: String| match merges.iter().rfind(|(skill, _)| skill.name() == name) {
+        Some((_, to)) => format!("{name}: merged {to} into your rewrite"),
+        None => name,
+    };
+    names(&paths)
+        .into_iter()
+        .map(named)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Fetches the branch, compares each file whole with the version last synced, and commits this
 /// machine's changes on GitHub's head and pushes them. A skill's rules, rewrite and base are
 /// compared as one. What changed on both sides, changed outside Wiffletree, or arrived in a
-/// form this machine refuses is paused and kept here. What the host wrote while the pass ran is
-/// left for the next one. Files to pull are returned for the host thread to write.
+/// form this machine refuses is paused and kept here, except a skill whose only change here is
+/// this machine's own automatic merge, which takes GitHub's version. What the host wrote while
+/// the pass ran is left for the next one. Files to pull are returned for the host thread to
+/// write.
 pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let Pass {
         clone,
@@ -827,7 +886,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         }
     }
     let version = |map: &BTreeMap<String, Content>, path: &String| map.get(path).cloned().flatten();
-    for paths in units.into_values() {
+    for (unit, paths) in units {
         let files: Vec<_> = (paths.iter())
             .map(|&path| {
                 let (base, mine) = (version(&synced, path), here.get(path).cloned());
@@ -842,6 +901,8 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         let changed_here = files.iter().any(|(_, base, mine, _)| mine != base);
         let changed_there = files.iter().any(|(_, base, _, theirs)| theirs != base);
         let was_paused = paths.iter().any(|path| two_machines.contains(path));
+        // GitHub's version supersedes a merge of the version both last synced.
+        let own_merge = changed_there && only_own_merges(unit, &here, &synced);
         let paused = match () {
             _ if files.iter().all(|(_, _, mine, theirs)| mine == theirs) => None,
             _ if outside => Some(Paused::OutsideWiffletree),
@@ -850,9 +911,11 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
                     machine: changed_by(&clone, &remote, &paths),
                     reason: format!("{reason:#}"),
                 }),
-                None if changed_here && changed_there || was_paused => Some(Paused::TwoMachines {
-                    machine: changed_by(&clone, &remote, &paths),
-                }),
+                None if changed_here && changed_there && !own_merge || was_paused => {
+                    Some(Paused::TwoMachines {
+                        machine: changed_by(&clone, &remote, &paths),
+                    })
+                }
                 None => None,
             },
         };
@@ -862,7 +925,7 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
                 Some(why) => passed.paused.push((path, why.clone(), theirs)),
                 None if mine == theirs && mine != base => passed.alike.push((path, mine)),
                 None if mine == theirs => {}
-                None if mine == base => passed.pulled.push((path, mine, theirs)),
+                None if mine == base || own_merge => passed.pulled.push((path, mine, theirs)),
                 None => passed.committed.push((path, mine)),
             }
         }
@@ -887,9 +950,8 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         ));
         false
     });
-    let paths: Vec<String> = passed.committed.iter().map(|(p, _)| p.clone()).collect();
-    if !paths.is_empty() {
-        let message = format!("{} · {}", names(&paths).join(", "), machine_name());
+    if !passed.committed.is_empty() {
+        let message = format!("{} · {}", subject(&passed.committed), machine_name());
         let pushed = stage(&clone, &passed.committed)
             .and_then(|()| commit_staged(&clone, &message, &tools.git))
             .and_then(|made| {
@@ -1071,6 +1133,7 @@ impl Host {
             Err(error) => {
                 self.sync.stopped = error.is::<Stopped>();
                 self.sync.failed(at, format!("{error:#}"));
+                self.merge_after_pass(&[]);
                 return Ok(true);
             }
         };
@@ -1150,7 +1213,22 @@ impl Host {
             Some(error) => self.sync.failed(at, error),
             None => self.sync.failing_since = None,
         }
+        self.merge_after_pass(&pulled);
         Ok(true)
+    }
+    /// Once a pass ended, reached GitHub or not: the merges held for this launch's first pass,
+    /// and a merge of each skill whose files it pulled.
+    fn merge_after_pass(&mut self, pulled: &[(String, Content)]) {
+        let first = std::mem::take(&mut self.merges_wait_for_sync);
+        let pulled = |skill: &Skill| {
+            let unit = format!("skills/{}/", skill.folder());
+            pulled.iter().any(|(path, _)| self::unit(path) == unit)
+        };
+        self.merge_due_skills(
+            Skill::ALL
+                .into_iter()
+                .filter(|skill| first || pulled(skill)),
+        );
     }
     /// Runs a pass on this thread, as a host with no service does for Sync now.
     pub(crate) fn sync_now(&mut self, tools: &Tools) -> Result<()> {
@@ -3232,5 +3310,258 @@ pub(crate) mod tests {
         );
         let synced = status(&host);
         assert_eq!((synced.waiting.len(), synced.error), (0, None));
+    }
+
+    const COORDINATING: &str = "skills/coordinating";
+
+    fn coordinating(host: &Host) -> skills::Rewritten {
+        let state = host.skills().state(Skill::Coordinating).rewrite.unwrap();
+        skills::Rewritten {
+            text: state.text,
+            base: state.base,
+        }
+    }
+
+    /// The "Merged" entries in Coordinating's history, by name.
+    fn merges(host: &Host) -> Vec<String> {
+        (host.skills().history(Skill::Coordinating).into_iter())
+            .filter(|(_, entry)| matches!(entry.change, Change::Merged { .. }))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Two Macs whose synced Coordinating is a rewrite of a stand-in v0, each with its data
+    /// folder closed, to be started on this release. Answers what this release's plain merge
+    /// makes of it.
+    fn rewritten_on_two_macs(
+        github: &Arc<GitHub>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, String) {
+        let (first_home, first) = host();
+        let stock = skills::stock(Skill::Coordinating);
+        let base = (stock.replacen("— v1", "— v0", 1)).replacen(
+            "Ask the human instead when a waiver",
+            "Ask the human when",
+            1,
+        );
+        let text = base.replacen("Start by clarifying", "Start by restating", 1);
+        first.skills().start_rewrite(Skill::Coordinating).unwrap();
+        (first.skills().save_rewrite(Skill::Coordinating, &text)).unwrap();
+        let folder = first_home.path().join("shared").join(COORDINATING);
+        fs::write(folder.join("base.md"), base).unwrap();
+        let mut first = first;
+        (first.choose_settings_repository(NAME, None, &github.tools())).unwrap();
+        let (second_home, _second) = joined(github);
+        let merged = stock.replacen("Start by clarifying", "Start by restating", 1);
+        (first_home, second_home, merged)
+    }
+
+    /// Pushes Coordinating's rewrite `text` on `base`, as `machine` would after merging `from`
+    /// into it, with its "Merged" entry.
+    fn push_merge(github: &GitHub, from: &str, base: &str, text: &str, machine: &str) {
+        let rewrite = skills::Rewritten {
+            text: text.into(),
+            base: base.into(),
+        };
+        let entry = skills::Entry {
+            change: Change::Merged {
+                from: from.into(),
+                to: skills::version(base).into(),
+                before: rewrite.clone(),
+                changes: vec![],
+                model: None,
+                machine: machine.into(),
+                automatic: true,
+            },
+            stock_version: skills::version(base).into(),
+            edits: skills::Edits {
+                rules: String::new(),
+                rewrite: Some(rewrite),
+            },
+        };
+        github.commit(&format!("{COORDINATING}/base.md"), base);
+        github.commit(&format!("{COORDINATING}/rewrite.md"), text);
+        let to = skills::version(base).trim_start_matches('v');
+        let history = format!("{COORDINATING}/history/2090-01-01T00-00-0{to}.000Z.json");
+        github.commit(&history, serde_json::to_vec(&entry).unwrap());
+    }
+
+    #[test]
+    fn one_mac_merges_first_and_the_other_takes_that_merge_at_its_first_pass() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (first_home, second_home, merged) = rewritten_on_two_macs(&github);
+        let stock = skills::stock(Skill::Coordinating);
+
+        let mut first = Host::open(first_home.path()).unwrap();
+        let waiting = first.skill_state(Skill::Coordinating).unwrap();
+        assert_eq!(waiting.merge_standing, Some(MergeStanding::WaitingForSync));
+        assert!(merges(&first).is_empty());
+        first.sync_now(&tools).unwrap();
+        assert_eq!(coordinating(&first).text, merged);
+        assert_eq!(coordinating(&first).base, stock);
+        first.sync_now(&tools).unwrap();
+        assert_eq!(
+            github.log("%s")[0],
+            format!(
+                "Coordinating: merged v1 into your rewrite · {}",
+                machine_name()
+            )
+        );
+
+        let mut second = Host::open(second_home.path()).unwrap();
+        let waiting = second.skill_state(Skill::Coordinating).unwrap();
+        assert_eq!(waiting.merge_standing, Some(MergeStanding::WaitingForSync));
+        let pushes = github.pushes();
+        second.sync_now(&tools).unwrap();
+        second.sync_now(&tools).unwrap();
+        assert_eq!(github.pushes(), pushes);
+        assert_eq!(coordinating(&second).text, merged);
+        assert_eq!(merges(&second), merges(&first));
+        assert_eq!(merges(&second).len(), 1);
+        for host in [&first, &second] {
+            let state = host.skill_state(Skill::Coordinating).unwrap();
+            assert_eq!(state.merge_note.unwrap().entry, merges(&first)[0]);
+            assert_eq!(state.merge_standing, None);
+        }
+    }
+
+    #[test]
+    fn both_macs_merge_at_once_and_the_second_to_push_keeps_both_entries_without_a_pause() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (first_home, second_home, merged) = rewritten_on_two_macs(&github);
+        let mut first = Host::open(first_home.path()).unwrap();
+        let mut second = Host::open(second_home.path()).unwrap();
+        github.offline.store(true, Ordering::Relaxed);
+        first.sync_now(&tools).unwrap();
+        second.sync_now(&tools).unwrap();
+        github.offline.store(false, Ordering::Relaxed);
+        first.sync_now(&tools).unwrap();
+        second.sync_now(&tools).unwrap();
+        first.sync_now(&tools).unwrap();
+        for host in [&first, &second] {
+            assert_eq!(coordinating(host).text, merged);
+            assert_eq!(merges(host).len(), 2);
+            assert_eq!((notes(host).len(), status(host).waiting.len()), (0, 0));
+        }
+    }
+
+    #[test]
+    fn offline_at_start_a_mac_merges_and_takes_another_macs_merge_without_a_pause() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (home, _second_home, merged) = rewritten_on_two_macs(&github);
+        let stock = skills::stock(Skill::Coordinating);
+        let mut host = Host::open(home.path()).unwrap();
+        github.offline.store(true, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        assert!(status(&host).error.is_some());
+        assert_eq!(coordinating(&host).text, merged);
+        let own = merges(&host).remove(0);
+
+        let theirs = merged.replacen("Start by restating", "Start by restating briefly", 1);
+        push_merge(&github, "v0", stock, &theirs, "Mike's MacBook Air");
+        github.offline.store(false, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(coordinating(&host).text, theirs);
+        assert_eq!((notes(&host).len(), status(&host).waiting.len()), (0, 0));
+        let paused = "SELECT COUNT(*) FROM sync_paused";
+        assert_eq!(
+            host.db
+                .query_row(paused, [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        // Taken, checked again and found up to date: nothing more is merged.
+        assert_eq!(merges(&host).len(), 2);
+        let entry = format!("{COORDINATING}/history/{own}.json");
+        assert!(github.show(&entry).is_some());
+        let state = host.skill_state(Skill::Coordinating).unwrap();
+        let note = state.merge_note.unwrap();
+        assert_eq!(note.machine.as_deref(), Some("Mike's MacBook Air"));
+    }
+
+    #[test]
+    fn an_edit_after_this_macs_merge_pauses_the_skill_beside_another_macs_merge() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (home, _second_home, merged) = rewritten_on_two_macs(&github);
+        let mut host = Host::open(home.path()).unwrap();
+        github.offline.store(true, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        let skill = Skill::Coordinating;
+        let text = format!("{merged}\nMy own last line.\n");
+        (host.execute(Command::SaveSkillRewrite {
+            skill,
+            text: text.clone(),
+        }))
+        .unwrap();
+        let theirs = merged.replacen("Start by restating", "Start by restating briefly", 1);
+        let stock = skills::stock(skill);
+        push_merge(&github, "v0", stock, &theirs, "Mike's MacBook Air");
+        github.offline.store(false, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(coordinating(&host).text, text);
+        let notes = notes(&host);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].setting, "Coordinating · your rewrite");
+        assert!(matches!(notes[0].paused, Paused::TwoMachines { .. }));
+    }
+
+    #[test]
+    fn a_rewrite_merged_on_an_older_release_is_merged_here_and_one_from_a_newer_is_kept() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (home, _second_home, merged) = rewritten_on_two_macs(&github);
+        let stock = skills::stock(Skill::Coordinating);
+        let mut host = Host::open(home.path()).unwrap();
+        host.sync_now(&tools).unwrap();
+        host.sync_now(&tools).unwrap();
+
+        // A Mac on v0 saves over the merge; this Mac on v1 merges v0 → v1 into it and pushes that.
+        let older = (stock.replacen("— v1", "— v0", 1)).replacen(
+            "Ask the human instead when a waiver",
+            "Ask the human when",
+            1,
+        );
+        let theirs = older.replacen("Start by clarifying", "Start by restating briefly", 1);
+        push_merge(&github, "v-1", &older, &theirs, "An older Mac");
+        host.sync_now(&tools).unwrap();
+        let briefly = merged.replacen("Start by restating", "Start by restating briefly", 1);
+        assert_eq!(coordinating(&host).text, briefly);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(
+            github.show(&format!("{COORDINATING}/base.md")).unwrap(),
+            stock
+        );
+        assert_eq!(
+            github.show(&format!("{COORDINATING}/rewrite.md")).unwrap(),
+            briefly
+        );
+
+        // A Mac on v2 merges v2 in; this Mac sends that rewrite as written and merges nothing.
+        let newer = stock.replacen("— v1", "— v2", 1);
+        let text = "Coordinating, merged with v2.";
+        push_merge(&github, "v1", &newer, text, "A newer Mac");
+        let count = merges(&host).len();
+        host.sync_now(&tools).unwrap();
+        let pushes = github.pushes();
+        host.sync_now(&tools).unwrap();
+        assert_eq!(github.pushes(), pushes);
+        assert_eq!(merges(&host).len(), count + 1);
+        let state = host.skill_state(Skill::Coordinating).unwrap();
+        assert!(!state.rewrite.unwrap().out_of_date);
+        assert_eq!(
+            state.merge_standing,
+            Some(MergeStanding::NewerBase {
+                machine: Some("A newer Mac".into())
+            })
+        );
+        assert!(host.instructions(Role::ProjectOrchestrator).ends_with(text));
     }
 }
