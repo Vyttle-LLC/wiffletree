@@ -313,6 +313,8 @@ fn entry_title(entry: &Entry) -> String {
         Change::NewStockVersion { previous } => {
             format!("New stock version {previous} → {}", entry.stock_version)
         }
+        Change::Merged { from, to, .. } => format!("Merged {from} → {to}"),
+        Change::UndidMerge { to, .. } => format!("Undid the merge of {to}"),
     }
 }
 

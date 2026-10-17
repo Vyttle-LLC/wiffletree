@@ -1476,6 +1476,10 @@ impl Host {
                 self.skills().mark_up_to_date(skill)?;
                 serde_json::to_value(self.skills().state(skill))?
             }
+            Command::UndoSkillMerge { skill, entry } => {
+                self.skills().undo_merge(skill, &entry)?;
+                serde_json::to_value(self.skills().state(skill))?
+            }
             Command::SkillStockChanges { skill } => {
                 serde_json::to_value(self.skills().stock_changes(skill))?
             }
