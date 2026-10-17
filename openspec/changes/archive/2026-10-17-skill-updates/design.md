@@ -63,7 +63,7 @@ Question 2. A new stock text arrives only with a release, so most merges start a
 
 - **At host start**, after the "New stock version" entries are written, the host checks each skill and starts a merge for each due rewrite.
 - **After a sync pass** that changed a skill's files, the host checks that skill again. For example, a Mac on an older release saved a rewrite on the old base.
-- **On demand**: the skill's page offers **Merge v2 in** on an out-of-date rewrite that no automatic merge will touch: after an Undo, after a failed try, for a base with the same version but different text, or with a question waiting the human would rather answer by merging again.
+- **On demand**: the skill's page offers **Merge v2 in** on an out-of-date rewrite that no automatic merge will touch: after an Undo, after a failed try, or for a base with the same version but different text. While a question waits, Merge v2 in is refused: the human answers the question instead.
 - **With a settings repository**, the host-start merges wait for the launch's first sync pass to end, whether it reached GitHub or not. That pass usually brings another Mac's merge first, so this Mac merges nothing. A Mac that can't reach GitHub merges anyway; decision 8 covers what happens when it reconnects.
 
 ### 3. The plain-text merge

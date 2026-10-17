@@ -130,6 +130,8 @@ struct Workspace {
     stock_changes: Vec<workspace_host::skills::Line>,
     /// The merge open in Review changes.
     merge_review: Option<workspace_host::skills::MergeReview>,
+    /// Review changes was opened from a History entry, which Done returns to.
+    review_from_history: bool,
     /// By skill, the wording chosen so far for each passage, until Apply.
     skill_wordings: [skills_view::Chosen; 4],
     /// The workspace note open in Compare in the Inbox.
@@ -302,6 +304,7 @@ impl Workspace {
             viewed_entry: None,
             stock_changes: vec![],
             merge_review: None,
+            review_from_history: false,
             skill_wordings: Default::default(),
             compared: None,
             verifiers,
