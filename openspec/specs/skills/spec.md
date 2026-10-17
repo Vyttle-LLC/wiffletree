@@ -171,6 +171,29 @@ When a merge has overlapping passages, the host SHALL ask the PR keeper's model 
 - **WHEN** no PR keeper model is chosen and a merge has one overlapping passage
 - **THEN** no model runs, nothing goes to the Inbox, and the skill's page says the update and the rewrite both change one passage, links to Models, and offers Take v2's wording and Keep my wording
 
+### Requirement: The human is asked only when there is a real question
+The host SHALL ask the human about a merge only when the model answers a question for a passage. While a question waits, nothing of that merge SHALL apply, and no further merge run SHALL start for that skill and stock version while its rewrite and base are the ones the question was asked about. The host SHALL record the question in an "Asked you about" history entry holding the merge so far, with any passages the model merged, and, for each passage in question, the question and its stock and human versions, and the stock text it merges into, so that any Mac on that release can show and settle it without another run. Only a Mac whose stock text is the question's stock text SHALL show the question or apply an answer to it, and an answer SHALL save that stock text as the base. On a Mac with another release, the question SHALL NOT be shown and the skill SHALL be checked for a due merge into that Mac's own stock version. A workspace note SHALL show the question at the top of every project's Inbox, counted in each. The skill's page SHALL show it too, the Skills list SHALL mark the skill "Rewritten · needs you", and the sidebar's Skills row SHALL show its dot. For each passage the human SHALL be able to take the update's wording or keep their own. A choice SHALL apply at once when there is one passage, and with several, Apply SHALL apply them once each passage has one. Applying SHALL save the merge with a "Merged" entry. The note SHALL close when the human chooses on any Mac on that release, or when the skill's rewrite or base changes in any other way. A missing model, a failed run or an overlap the model merged SHALL NOT raise a note.
+
+#### Scenario: Two wordings that disagree
+- **WHEN** v2 says to run the full suite once per ticket, the human's rewrite says never to run the full suite, and the model answers a question for that passage
+- **THEN** the rewrite runs as written, an Inbox note "Reviewing · v2 needs you" shows the question with both wordings, and the Skills list shows "Rewritten · needs you"
+
+#### Scenario: Keeping my wording
+- **WHEN** the human chooses Keep my wording on that note
+- **THEN** the merge applies with the human's passage and v2's other changes, the base becomes v2, the note closes in every project's Inbox, and no model runs
+
+#### Scenario: Answered on another Mac
+- **WHEN** both Macs show the note and the human answers it on one
+- **THEN** the other Mac pulls the merged rewrite, and its note closes
+
+#### Scenario: No second run
+- **WHEN** a question is waiting and Wiffletree starts again
+- **THEN** no merge run starts for that skill
+
+#### Scenario: A question from another release
+- **WHEN** a Mac on Reviewing v2 recorded a question about merging v1 → v2, and a Mac on v3 pulls that history
+- **THEN** the Mac on v3 shows no question and offers no choice for it, merges v1 → v3 into the rewrite itself, and once that merge reaches the Mac on v2 the question closes there, because the rewrite and base changed
+
 ### Requirement: A merge leaves a note that can be reviewed or undone
 After a merge applies, the skill's page SHALL show a note naming the versions, how many changes came from the update, how many passages the model merged and with which model, with Review changes, Undo and Dismiss, and the Skills list SHALL mark the skill "Rewritten · updated". It SHALL NOT raise an Inbox note. The note, Review changes and Undo SHALL be about the "Merged" entry whose after-state is the skill's rewrite and base now, not simply the latest entry, and there SHALL be no note when no entry's is. Review changes SHALL show the rewrite before and after the merge, line by line, each change labelled as from the update, merged by the model, or chosen by the human, with the Mac and the time. Each Mac SHALL show the note until the human chooses Review changes or Dismiss on that Mac, or the skill changes again. Undo SHALL ask first, then write back the rewrite and base from before the merge exactly, with an "Undid the merge" entry. An Undo, and a restore of a rewrite from an entry older than a "Merged" entry, SHALL stop automatic merges, on every machine, into the newer of the stock version that merge brought in and the stock version of the machine that undid or restored, and into every older stock version, and the page SHALL offer to merge it again. A newer stock version SHALL be merged as usual. The merge's history entry SHALL offer Undo this merge after later changes, and it SHALL ask first and say the later changes stay in the history.
 
@@ -251,7 +274,7 @@ The host SHALL keep skills in the `skills` folder of the shared folder (see sett
 - **THEN** they are in the shared folder's `skills/implementing/`, the history is unchanged, and implementers keep getting the rules
 
 ### Requirement: The Skills page
-The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · out of date"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
+The sidebar's Workspace section SHALL have a Skills row after Models, opening the Skills page. The page SHALL list the four skills, each with what it is for, the roles that use it and its state ("Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated", "Rewritten · out of date", "Rewritten · needs you"), and the fixed core, marked read-only. A skill's page SHALL show its stock text, its mode and editor, Save and Discard, Reset to stock, its history, and what the app's own operations enforce whatever the text says. It SHALL NOT claim the app enforces more: it SHALL say that an agent's shell is not sandboxed and can still push with the human's credentials. The fixed core's page SHALL show its text and why it cannot be edited. The Reviewing page SHALL show each review level's "Use it" line read-only, with a link to the Models page, and the Coordinating page SHALL link to the model guide.
 
 #### Scenario: Opening the page
 - **WHEN** the human chooses Skills in the sidebar
@@ -261,9 +284,13 @@ The sidebar's Workspace section SHALL have a Skills row after Models, opening th
 - **WHEN** the human opens the fixed core
 - **THEN** its text is shown with no editor and no Reset
 
+#### Scenario: Updated and needs you
+- **WHEN** Coordinating was merged into v2 and its note is not dismissed, and Reviewing has a question waiting
+- **THEN** the list shows Coordinating as "Rewritten · updated" and Reviewing as "Rewritten · needs you", and the sidebar's Skills row shows its dot for Reviewing
+
 ### Requirement: The limits of skills are documented
-The README SHALL say that skills change how agents work but not what they may do, which the app enforces; that the human's rules win over the stock text; that a rewrite is not updated by new releases; and that an agent's shell can write the skills folder, as it can write the settings file.
+The README SHALL say that skills change how agents work but not what they may do, which the app enforces; that the human's rules win over the stock text; that a new release is merged into a rewrite automatically, with a model for overlapping passages, a note that can be reviewed or undone, and a question only when the two wordings disagree; and that an agent's shell can write the skills folder, as it can write the settings file.
 
 #### Scenario: README
 - **WHEN** a reader looks up skills in the README
-- **THEN** it says where they are edited, that authority is not in them, and that agents' shells can write their folder
+- **THEN** it says where they are edited, that authority is not in them, how a new release reaches a rewrite and how to undo it, and that agents' shells can write their folder

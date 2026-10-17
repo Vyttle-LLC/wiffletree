@@ -11,7 +11,7 @@ const AN_HOUR_MS: i64 = 60 * 60_000;
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct SyncShown {
     pub(super) status: Option<SyncStatus>,
-    pub(super) notes: Vec<WorkspaceNote>,
+    pub(super) notes: Vec<PausedSetting>,
     pub(super) still_needs: Vec<StillNeed>,
     pub(super) owners_allowed: bool,
 }
@@ -21,7 +21,7 @@ impl Global for SyncShown {}
 pub(crate) fn share_sync(snapshot: &Snapshot, cx: &mut App) {
     let shown = SyncShown {
         status: snapshot.settings_sync.clone(),
-        notes: snapshot.workspace_notes.clone(),
+        notes: snapshot.paused_settings().cloned().collect(),
         still_needs: snapshot.still_needs.clone(),
         owners_allowed: !snapshot.allowed_owners.is_empty(),
     };
@@ -91,7 +91,7 @@ impl Mark {
             Self::Synced => "Synced".into(),
         }
     }
-    pub(crate) fn tooltip(&self, status: &SyncStatus, notes: &[WorkspaceNote]) -> String {
+    pub(crate) fn tooltip(&self, status: &SyncStatus, notes: &[PausedSetting]) -> String {
         let name = &status.repository.name;
         match (self, notes) {
             (Self::Stopped, _) => status.error.clone().unwrap_or_default(),
@@ -284,7 +284,7 @@ fn row(label: &'static str, value: String, p: Palette) -> Div {
 
 impl Settings {
     /// A paused setting and why; Compare opens both versions and the note's choices.
-    fn paused_row(&self, note: &WorkspaceNote, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn paused_row(&self, note: &PausedSetting, p: Palette, cx: &mut Context<Self>) -> Div {
         let view = cx.entity().downgrade();
         let on: OnNote = Rc::new(move |path, action, _, cx| {
             let _ = view.update(cx, |view, cx| view.note_action(path, action, cx));
@@ -419,7 +419,7 @@ impl Settings {
     }
 }
 
-fn paused_reason(note: &WorkspaceNote) -> String {
+fn paused_reason(note: &PausedSetting) -> String {
     let setting = &note.setting;
     match &note.paused {
         Paused::TwoMachines { .. } => format!("{setting} changed on both Macs."),
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_paused_file_is_named_in_the_marks_tooltip() {
-        let note = WorkspaceNote {
+        let note = PausedSetting {
             path: "skills/implementing/".into(),
             setting: "Implementing · your rules".into(),
             paused: Paused::TwoMachines {

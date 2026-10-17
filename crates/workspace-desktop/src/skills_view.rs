@@ -154,10 +154,11 @@ fn saved_text(state: &SkillState) -> &str {
         .map_or(&state.rules, |rewrite| &rewrite.text)
 }
 
-/// "Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated" or "Rewritten · out
-/// of date".
+/// "Stock", "Stock and N of your rules", "Rewritten", "Rewritten · updated", "Rewritten · needs
+/// you" or "Rewritten · out of date".
 fn state_label(state: &SkillState) -> String {
     match (&state.rewrite, rule_count(&state.rules)) {
+        (Some(_), _) if state.question.is_some() => "Rewritten · needs you".into(),
         (Some(_), _) if out_of_date(state) => "Rewritten · out of date".into(),
         (Some(_), _) if state.merge_note.is_some() => "Rewritten · updated".into(),
         (Some(_), _) => "Rewritten".into(),
@@ -245,6 +246,58 @@ fn out_of_date_title(state: &SkillState, base_version: &str) -> String {
     }
 }
 
+/// A passage the human chooses a wording for: the model's question when it asked one, then
+/// the update's wording and the human's.
+struct Choice<'a> {
+    question: Option<&'a str>,
+    stock: &'a str,
+    yours: &'a str,
+}
+impl<'a> Choice<'a> {
+    fn asked(question: &'a SkillQuestion) -> Vec<Self> {
+        let choice = |passage: &'a QuestionedPassage| Choice {
+            question: Some(&passage.question),
+            stock: &passage.stock,
+            yours: &passage.yours,
+        };
+        question.passages.iter().map(choice).collect()
+    }
+    fn overlapping(passages: &'a [MergePassage]) -> Vec<Self> {
+        let choice = |passage: &'a MergePassage| Choice {
+            question: None,
+            stock: &passage.stock,
+            yours: &passage.yours,
+        };
+        passages.iter().map(choice).collect()
+    }
+}
+
+/// The wordings chosen so far for one skill's passages, until Apply, with the update's and the
+/// human's wording of the passages they were chosen for, so passages that change start over.
+#[derive(Default)]
+pub(super) struct Chosen {
+    passages: Vec<(String, String)>,
+    wordings: Vec<Option<Wording>>,
+}
+impl Chosen {
+    fn passages(choices: &[Choice<'_>]) -> Vec<(String, String)> {
+        let wordings = |choice: &Choice<'_>| (choice.stock.to_owned(), choice.yours.to_owned());
+        choices.iter().map(wordings).collect()
+    }
+    fn get(&self, passages: &[(String, String)], index: usize) -> Option<Wording> {
+        (self.passages == passages)
+            .then(|| self.wordings.get(index).copied().flatten())
+            .flatten()
+    }
+    fn choose(&mut self, passages: &[(String, String)], index: usize, wording: Wording) {
+        if self.passages != passages {
+            self.passages = passages.to_vec();
+            self.wordings = vec![None; passages.len()];
+        }
+        self.wordings[index] = Some(wording);
+    }
+}
+
 /// What an out-of-date rewrite's banner offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Offers {
@@ -293,15 +346,22 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], Offers)> {
             ],
             Offers::Nothing,
         ),
-        (Some(MergeStanding::Failed { reason }), true) => (
-            [
-                format!("The merge of {stock} couldn't finish"),
-                format!(
-                    "{reason} Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start."
-                ),
-            ],
-            Offers::TryAgain,
-        ),
+        (Some(MergeStanding::Failed { reason }), true) => {
+            let stop = if reason.ends_with(['.', '!', '?', '…']) {
+                ""
+            } else {
+                "."
+            };
+            (
+                [
+                    format!("The merge of {stock} couldn't finish"),
+                    format!(
+                        "{reason}{stop} Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start."
+                    ),
+                ],
+                Offers::TryAgain,
+            )
+        }
         (Some(MergeStanding::NeedsModel { passages, codex }), true) => {
             let (it, which) = match passages.len() {
                 1 => ("it", "the passage"),
@@ -348,6 +408,60 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], Offers)> {
         _ => return None,
     };
     Some(banner)
+}
+
+/// "one passage" or "3 passages", as a question counts them.
+fn passages_in_question(question: &SkillQuestion) -> String {
+    match question.passages.len() {
+        1 => "one passage".into(),
+        count => format!("{count} passages"),
+    }
+}
+
+/// A question's banner on the skill's page, `model` having asked it: its title and text.
+fn question_banner(question: &SkillQuestion, model: &str) -> [String; 2] {
+    let to = &question.to;
+    let others = match question.other_changes {
+        0 => String::new(),
+        count => format!("{to}'s other {} merge cleanly. ", counted(count, "change")),
+    };
+    let it = match question.passages.len() {
+        1 => "this passage",
+        _ => "these passages",
+    };
+    [
+        format!(
+            "{to} and your rewrite disagree about {}",
+            passages_in_question(question)
+        ),
+        format!(
+            "{others}{model} didn't merge {it}, because the two want different things. Nothing changes until you choose."
+        ),
+    ]
+}
+
+/// A question's workspace note: the setting it names, as "Reviewing · v2", then its text and
+/// what either choice brings in.
+fn question_note(question: &SkillQuestion) -> (String, [String; 2]) {
+    let skill = question.skill;
+    let setting = format!("{} · {}", skill.name(), question.to);
+    let gets = about(skill).gets;
+    let gets = gets[..1].to_lowercase() + &gets[1..];
+    let either = match question.other_changes {
+        0 => String::new(),
+        count => format!(
+            "{}'s other {} merge either way. ",
+            question.to,
+            counted(count, "change")
+        ),
+    };
+    let text = format!(
+        "{setting} and your rewrite disagree about {}. Until you choose, {gets} your rewrite as you wrote it.",
+        passages_in_question(question)
+    );
+    let either =
+        format!("{either}Your choice applies on every Mac, and you can undo it like any merge.");
+    (setting, [text, either])
 }
 
 /// Who uses the skill, and when a merge the page still notes came in: "Project coordinator · v2
@@ -587,6 +701,7 @@ fn entry_title(entry: &Entry) -> String {
         }
         Change::Merged { from, to, .. } => format!("Merged {from} → {to}"),
         Change::UndidMerge { to, .. } => format!("Undid the merge of {to}"),
+        Change::Asked { to, .. } => format!("Asked you about {to}"),
     }
 }
 
@@ -732,7 +847,7 @@ impl Workspace {
     ) {
         self.confirming = None;
         self.merge_review = None;
-        self.skill_wordings.clear();
+        self.skill_wordings = Default::default();
         if let SkillView::Skill(skill) = view {
             let state = self.skill_state(skill).cloned();
             let text = state.as_ref().map_or("", saved_text).to_owned();
@@ -1320,6 +1435,9 @@ impl Workspace {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
+        if let (Some(question), None) = (&state.question, &state.merge_standing) {
+            return Some(self.question_banner_view(question, p, cx));
+        }
         let ([title, text], offers) = rewrite_banner(state)?;
         let skill = state.skill;
         let mergeable = (state.rewrite.as_ref()).is_some_and(|r| !r.base_version.is_empty());
@@ -1365,7 +1483,18 @@ impl Workspace {
                     .child(merge("Try again".into()).primary())
                     .child(mark),
             ),
-            Offers::Wordings => Some(self.wordings_view(state, p, cx)),
+            Offers::Wordings => {
+                let Some(MergeStanding::NeedsModel { passages, .. }) = &state.merge_standing else {
+                    unreachable!("only a merge that needs a model offers wordings");
+                };
+                let models = button("choose-model")
+                    .ghost()
+                    .label("Choose a model in Models")
+                    .on_click(cx.listener(|v, _, w, c| v.open_page(Page::Models, w, c)));
+                let choices = Choice::overlapping(passages);
+                let extra = ("page", vec![models]);
+                Some(self.wordings_view(skill, &state.stock_version, &choices, extra, p, cx))
+            }
         };
         let (banner, head) = match &state.merge_standing {
             Some(MergeStanding::Undone) => (quiet_banner(p), Some(("undo", p.subtle))),
@@ -1385,15 +1514,22 @@ impl Workspace {
         Some((banner.child(title).child(hint(text, p))).children(actions))
     }
 
-    /// Choose a model, or a wording for each passage that overlaps: with one passage, a choice
-    /// applies at once; with several, Apply does once each has one.
-    fn wordings_view(&self, state: &SkillState, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Some(MergeStanding::NeedsModel { passages, .. }) = &state.merge_standing else {
-            return div();
-        };
-        let (skill, stock) = (state.skill, &state.stock_version);
-        let answer = |id: &'static str, label: String, wordings: Option<Vec<Wording>>| {
-            button(id)
+    /// A wording for each passage, `extra` beside the choices: with one passage, a choice
+    /// applies at once; with several, Apply does once each has one. A passage the model asked
+    /// about shows its question and both wordings, as several passages do. `place` keeps the
+    /// Inbox's buttons apart from the page's.
+    fn wordings_view(
+        &self,
+        skill: Skill,
+        stock: &str,
+        choices: &[Choice<'_>],
+        (place, extra): (&str, Vec<Button>),
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = |name: &str| SharedString::from(format!("{place}-{}-{name}", skill.folder()));
+        let answer = |name: &str, label: String, wordings: Option<Vec<Wording>>| {
+            button(id(name))
                 .label(label)
                 .disabled(wordings.is_none())
                 .on_click(cx.listener(move |v, _, w, c| {
@@ -1401,62 +1537,127 @@ impl Workspace {
                     v.request(Command::AnswerSkillQuestion { skill, wordings }, w, c)
                 }))
         };
-        let models = button("choose-model")
-            .ghost()
-            .label("Choose a model in Models")
-            .on_click(cx.listener(|v, _, w, c| v.open_page(Page::Models, w, c)));
         let (take, keep) = (format!("Take {stock}'s wording"), "Keep my wording");
-        if let [_] = &passages[..] {
-            return div()
-                .flex()
-                .gap_2()
-                .child(models)
-                .child(answer("take-stock", take, Some(vec![Wording::Stock])).ghost())
-                .child(answer("keep-mine", keep.into(), Some(vec![Wording::Yours])).ghost());
+        let asked = choices.iter().any(|choice| choice.question.is_some());
+        let passage = |index: usize, choice: &Choice<'_>| {
+            let wording = |label: String, text: &str| {
+                (div().flex_1().min_w_0().flex().flex_col().gap_1())
+                    .child(hint(label, p).text_size(px(11.)))
+                    .child(Self::read_only_text(text.trim_end().to_owned(), p))
+            };
+            (div().flex().flex_col().gap_1())
+                .when(choices.len() > 1, |d| {
+                    d.child(hint(format!("Passage {}", index + 1), p))
+                })
+                .children(
+                    (choice.question).map(|question| hint(format!("The question: {question}"), p)),
+                )
+                .child(
+                    (div().flex().gap_2())
+                        .child(wording(format!("{stock}'s wording"), choice.stock))
+                        .child(wording("Your wording".into(), choice.yours)),
+                )
+        };
+        if let [choice] = choices {
+            let keep = answer("keep-mine", keep.into(), Some(vec![Wording::Yours]));
+            return (div().flex().flex_col().gap_2())
+                .when(asked, |d| d.child(passage(0, choice)))
+                .child(
+                    (div().flex().items_center().gap_2())
+                        .children(extra)
+                        .child(answer("take-stock", take, Some(vec![Wording::Stock])).ghost())
+                        .child(if asked { keep.primary() } else { keep.ghost() }),
+                );
         }
-        let chosen = |index: usize| self.skill_wordings.get(index).copied().flatten();
-        let rows = passages.iter().enumerate().map(|(index, passage)| {
+        let passages = Chosen::passages(choices);
+        let chosen = |index: usize| self.skill_wordings[skill as usize].get(&passages, index);
+        let rows = choices.iter().enumerate().map(|(index, choice)| {
             let pick = |wording: Wording, label: String| {
-                button(("wording", index * 2 + wording as usize))
+                let passages = passages.clone();
+                button(id(&format!("wording-{index}-{}", wording as usize)))
                     .ghost()
                     .label(label)
                     .selected(chosen(index) == Some(wording))
                     .on_click(cx.listener(move |v, _, _, c| {
-                        v.skill_wordings
-                            .resize(v.skill_wordings.len().max(index + 1), None);
-                        v.skill_wordings[index] = Some(wording);
+                        v.skill_wordings[skill as usize].choose(&passages, index, wording);
                         c.notify();
                     }))
             };
-            let wording = |text: &str| Self::read_only_text(text.trim_end().to_owned(), p).flex_1();
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(hint(format!("Passage {}", index + 1), p))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(wording(&passage.stock))
-                        .child(wording(&passage.yours)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(pick(Wording::Stock, take.clone()))
-                        .child(pick(Wording::Yours, keep.into())),
-                )
+            passage(index, choice).child(
+                (div().flex().gap_2())
+                    .child(pick(Wording::Stock, take.clone()))
+                    .child(pick(Wording::Yours, keep.into())),
+            )
         });
-        let wordings = (0..passages.len()).map(chosen).collect();
-        div().flex().flex_col().gap_3().children(rows).child(
-            div()
-                .flex()
-                .gap_2()
+        let wordings = (0..choices.len()).map(chosen).collect();
+        (div().flex().flex_col().gap_3()).children(rows).child(
+            (div().flex().items_center().gap_2())
                 .child(answer("apply-wordings", "Apply".into(), wordings).primary())
-                .child(models),
+                .children(extra),
         )
+    }
+
+    /// A question on the skill's page: what disagrees, and the choices.
+    fn question_banner_view(
+        &self,
+        question: &SkillQuestion,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let model = models::profile_label(&self.model_catalog, &question.model);
+        let [title, text] = question_banner(question, &model);
+        let choices = Choice::asked(question);
+        let wordings = self.wordings_view(
+            question.skill,
+            &question.to,
+            &choices,
+            ("page", vec![]),
+            p,
+            cx,
+        );
+        (banner(p.yellow).child(banner_head("alert", p.yellow, title)))
+            .child(hint(text, p))
+            .child(wordings)
+    }
+
+    /// A question as a workspace note at the top of every project's Inbox.
+    pub(super) fn question_card(
+        &self,
+        question: &SkillQuestion,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let skill = question.skill;
+        let (setting, [text, either]) = question_note(question);
+        let open = button(SharedString::from(format!("open-{}", skill.folder())))
+            .link()
+            .label(format!("Open {}", skill.name()))
+            .on_click(cx.listener(move |v, _, w, c| {
+                v.open_page(Page::Skills, w, c);
+                v.open_skill(SkillView::Skill(skill), w, c);
+            }));
+        let choices = Choice::asked(question);
+        let wordings =
+            self.wordings_view(skill, &question.to, &choices, ("inbox", vec![open]), p, cx);
+        card(p)
+            .bg(p.surface)
+            .border_color(p.yellow.opacity(0.55))
+            .child(
+                (div().flex().items_center().justify_between().gap_2())
+                    .child(hint("Workspace · skill update", p))
+                    .child(pill("Needs you", p.yellow)),
+            )
+            .child(div().text_size(px(13.)).line_height(relative(1.5)).child(
+                StyledText::new(text).with_highlights([(
+                    0..setting.len(),
+                    HighlightStyle {
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                )]),
+            ))
+            .child(wordings)
+            .child(hint(either, p).text_size(px(11.)))
     }
 
     /// What changed from the rewrite's base to the stock text, as removed and added lines.
@@ -1901,15 +2102,16 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CORE, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab, entry_detail, entry_time,
-        entry_title, grouped, is_change, is_live, list_who, merge_counts, merge_note_text,
-        merged_since, out_of_date, out_of_date_title, question, reset_question, rewrite_banner,
-        rewrite_question, saved_text, shown_changes, state_label, time_or_date, when, written_at,
+        CORE, Choice, Chosen, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab,
+        entry_detail, entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
+        merge_note_text, merged_since, out_of_date, out_of_date_title, question, question_banner,
+        question_note, reset_question, rewrite_banner, rewrite_question, saved_text, shown_changes,
+        state_label, time_or_date, when, written_at,
     };
     use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{
-        Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider, Role,
-        Skill, SkillState,
+        Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider,
+        QuestionedPassage, Role, Skill, SkillQuestion, SkillState, Wording,
     };
     use workspace_host::{
         Host,
@@ -2257,6 +2459,16 @@ mod tests {
                 Offers::TryAgain,
             ),
             (
+                MergeStanding::Failed {
+                    reason: "Claude could not be started".into(),
+                },
+                [
+                    "The merge of v1 couldn't finish",
+                    "Claude could not be started. Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start.",
+                ],
+                Offers::TryAgain,
+            ),
+            (
                 MergeStanding::NeedsModel {
                     passages: vec![passage.clone()],
                     codex: false,
@@ -2401,6 +2613,112 @@ mod tests {
         host.skills().save_rewrite(skill, &text).unwrap();
         drop(host);
         Host::open(home.path()).unwrap()
+    }
+
+    /// Reviewing's question about v1, the model having merged one other passage beside v1's
+    /// own changes.
+    fn reviewing_question(passages: usize) -> SkillQuestion {
+        let passage = QuestionedPassage {
+            question: "v1 asks testers to run the full suite once per ticket, and your rewrite says never to run it.".into(),
+            stock: "Tester: run the full suite once per ticket.\n".into(),
+            yours: "Tester: never run the full suite.\n".into(),
+        };
+        SkillQuestion {
+            skill: Skill::Reviewing,
+            to: "v1".into(),
+            other_changes: 2,
+            model: ModelProfile {
+                provider: Provider::Claude,
+                model: "haiku".into(),
+                effort: "medium".into(),
+            },
+            passages: vec![passage; passages],
+        }
+    }
+
+    #[test]
+    fn updated_and_needs_you_mark_the_list_and_the_dot_is_for_the_question() {
+        let home = tempfile::tempdir().unwrap();
+        let host = merged_at_start(&home);
+        let skill = Skill::Reviewing;
+        host.skills().start_rewrite(skill).unwrap();
+        let base = stock(skill).replacen("— v1", "— v0", 1);
+        std::fs::write(home.path().join("shared/skills/reviewing/base.md"), base).unwrap();
+        let mut skills = host.snapshot().unwrap().skills;
+        skills[2].question = Some(reviewing_question(1));
+        let listed: Vec<_> = skills.iter().map(state_label).collect();
+        assert_eq!(
+            listed,
+            [
+                "Rewritten · updated",
+                "Stock",
+                "Rewritten · needs you",
+                "Stock"
+            ]
+        );
+        // The sidebar's Skills row shows its dot for any rewrite out of date, as one with a
+        // question is, and for no merge note.
+        let dotted: Vec<_> = skills.iter().map(out_of_date).collect();
+        assert_eq!(dotted, [false, false, true, false]);
+    }
+
+    #[test]
+    fn choices_made_for_one_question_are_not_kept_for_another() {
+        let choice = |stock| Choice {
+            question: None,
+            stock,
+            yours: "Mine.",
+        };
+        let asked = Chosen::passages(&[choice("A."), choice("B.")]);
+        let mut chosen = Chosen::default();
+        chosen.choose(&asked, 0, Wording::Stock);
+        chosen.choose(&asked, 1, Wording::Yours);
+        assert_eq!(
+            [0, 1].map(|index| chosen.get(&asked, index)),
+            [Some(Wording::Stock), Some(Wording::Yours)]
+        );
+        let replaced = Chosen::passages(&[choice("A."), choice("C.")]);
+        assert_eq!(
+            [0, 1].map(|index| chosen.get(&replaced, index)),
+            [None, None]
+        );
+        chosen.choose(&replaced, 1, Wording::Stock);
+        assert_eq!(
+            [0, 1].map(|index| chosen.get(&replaced, index)),
+            [None, Some(Wording::Stock)]
+        );
+    }
+
+    #[test]
+    fn a_question_names_both_sides_on_the_page_and_in_the_inbox() {
+        let one = reviewing_question(1);
+        assert_eq!(
+            question_banner(&one, "Claude · haiku · medium"),
+            [
+                "v1 and your rewrite disagree about one passage",
+                "v1's other 2 changes merge cleanly. Claude · haiku · medium didn't merge this passage, because the two want different things. Nothing changes until you choose.",
+            ]
+        );
+        assert_eq!(
+            question_note(&one),
+            (
+                "Reviewing · v1".into(),
+                [
+                    "Reviewing · v1 and your rewrite disagree about one passage. Until you choose, testers and reviewers get your rewrite as you wrote it.".into(),
+                    "v1's other 2 changes merge either way. Your choice applies on every Mac, and you can undo it like any merge.".into(),
+                ]
+            )
+        );
+        let mut two = reviewing_question(2);
+        two.other_changes = 0;
+        assert_eq!(
+            question_banner(&two, "Claude · haiku · medium")[1],
+            "Claude · haiku · medium didn't merge these passages, because the two want different things. Nothing changes until you choose."
+        );
+        assert_eq!(
+            question_note(&two).1[0],
+            "Reviewing · v1 and your rewrite disagree about 2 passages. Until you choose, testers and reviewers get your rewrite as you wrote it."
+        );
     }
 
     #[test]

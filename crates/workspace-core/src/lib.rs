@@ -161,6 +161,29 @@ pub struct SkillState {
     /// Why no automatic merge touches the rewrite.
     #[serde(default)]
     pub merge_standing: Option<MergeStanding>,
+    /// The model's question about merging this release's stock text into the rewrite as it is.
+    #[serde(default)]
+    pub question: Option<SkillQuestion>,
+}
+/// A merge that waits for the human, because the model found that the update and the rewrite
+/// want different things in one or more passages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillQuestion {
+    pub skill: Skill,
+    /// The stock version the merge brings in.
+    pub to: String,
+    /// How many changes the merge brings in whatever the human chooses.
+    pub other_changes: usize,
+    pub model: ModelProfile,
+    /// In order, the passages in question; an answer chooses a wording for each.
+    pub passages: Vec<QuestionedPassage>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionedPassage {
+    /// The model's one sentence on what each wording wants.
+    pub question: String,
+    pub stock: String,
+    pub yours: String,
 }
 /// A "Merged" history entry, as its note and its review name it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -739,6 +762,14 @@ fn file_list(files: &[String]) -> String {
     list
 }
 impl Snapshot {
+    /// The workspace notes about settings sync paused.
+    pub fn paused_settings(&self) -> impl Iterator<Item = &PausedSetting> {
+        self.workspace_notes.iter().filter_map(|note| match note {
+            WorkspaceNote::Paused(setting) => Some(setting),
+            WorkspaceNote::SkillQuestion(_) => None,
+        })
+    }
+
     /// The workspace repositories a project uses, in the order they were added.
     pub fn project_repositories(&self, project_id: &str) -> Vec<&Repository> {
         let Some(project) = self.projects.iter().find(|p| p.id == project_id) else {
@@ -886,9 +917,16 @@ pub enum Paused {
     /// The version `machine` pushed is one this machine would refuse to save, for `reason`.
     CannotBeRead { machine: String, reason: String },
 }
-/// A note about the whole workspace, listed for every project: a shared setting sync paused.
+/// A note about the whole workspace, listed for every project.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceNote {
+#[serde(tag = "note", rename_all = "snake_case")]
+pub enum WorkspaceNote {
+    /// A shared setting sync paused.
+    Paused(PausedSetting),
+    SkillQuestion(SkillQuestion),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PausedSetting {
     /// The paused file, or for a skill's rules, rewrite and base, the skill's folder.
     pub path: String,
     /// As the app names it, such as "Implementing · your rules".
@@ -2686,14 +2724,15 @@ pub enum Command {
         entry: String,
     },
     /// Merges this release's stock text into an out-of-date rewrite, or tries again after a
-    /// failed try; passages that overlap go to the PR keeper's model. Answers with the
-    /// `SkillState`. Only the human's client sends it.
+    /// failed try; passages that overlap go to the PR keeper's model. Refused while a question
+    /// about the rewrite waits. Answers with the `SkillState`. Only the human's client sends it.
     MergeSkillUpdate {
         skill: Skill,
     },
     /// Merges this release's stock text into an out-of-date rewrite with the human's wording
-    /// for each passage that overlaps, in order; answers with the `SkillState`. Only the human's
-    /// client sends it.
+    /// for each passage that overlaps, in order, or with a question waiting, for each passage in
+    /// question and the model's text for the rest; answers with the `SkillState`. Only the
+    /// human's client sends it.
     AnswerSkillQuestion {
         skill: Skill,
         wordings: Vec<Wording>,

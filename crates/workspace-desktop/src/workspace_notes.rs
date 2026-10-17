@@ -31,9 +31,12 @@ pub(crate) fn toggle_compare(compared: &mut Compared, path: String) -> Option<Co
 
 /// After a sync pass or a change to the notes, asks again for the open comparison, since either
 /// version may have changed and settling uses the newest; closes it once its note is gone.
-pub(crate) fn recompare(compared: &mut Compared, notes: &[WorkspaceNote]) -> Option<Command> {
+pub(crate) fn recompare<'a>(
+    compared: &mut Compared,
+    notes: impl IntoIterator<Item = &'a PausedSetting>,
+) -> Option<Command> {
     let (path, lines) = compared.as_mut()?;
-    if !notes.iter().any(|note| note.path == *path) {
+    if !notes.into_iter().any(|note| note.path == *path) {
         *compared = None;
         return None;
     }
@@ -59,7 +62,7 @@ fn short(machine: &str) -> &str {
 }
 
 /// The choices a note offers, the main one last.
-fn choices(note: &WorkspaceNote) -> Vec<(Settle, String, bool)> {
+fn choices(note: &PausedSetting) -> Vec<(Settle, String, bool)> {
     match &note.paused {
         Paused::TwoMachines { machine } => vec![
             (
@@ -84,7 +87,7 @@ fn choices(note: &WorkspaceNote) -> Vec<(Settle, String, bool)> {
 }
 
 /// The buttons that settle a note.
-pub(crate) fn settle_buttons(note: &WorkspaceNote, on: &OnNote) -> Vec<Button> {
+pub(crate) fn settle_buttons(note: &PausedSetting, on: &OnNote) -> Vec<Button> {
     let buttons = choices(note).into_iter().map(|(settle, label, main)| {
         let (on, path) = (on.clone(), note.path.clone());
         let id = SharedString::from(format!("settle-{}-{label}", note.path));
@@ -102,7 +105,7 @@ pub(crate) fn settle_buttons(note: &WorkspaceNote, on: &OnNote) -> Vec<Button> {
 
 /// Compare, or Hide `open` when the comparison shows.
 pub(crate) fn compare_link(
-    note: &WorkspaceNote,
+    note: &PausedSetting,
     label: &'static str,
     open: &'static str,
     compared: &Compared,
@@ -120,7 +123,7 @@ pub(crate) fn compare_link(
 
 /// This Mac's version beside the other's, each with the lines only it has marked, once the host
 /// has answered for this note.
-pub(crate) fn comparison(note: &WorkspaceNote, compared: &Compared, p: Palette) -> Option<Div> {
+pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) -> Option<Div> {
     let (path, lines) = compared.as_ref()?;
     if *path != note.path {
         return None;
@@ -186,7 +189,7 @@ pub(crate) fn comparison(note: &WorkspaceNote, compared: &Compared, p: Palette) 
 }
 
 /// Where the version not kept stays, under an open comparison of two machines' versions.
-pub(crate) fn kept_note(note: &WorkspaceNote, compared: &Compared) -> Option<String> {
+pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<String> {
     let open = compared
         .as_ref()
         .is_some_and(|(path, _)| *path == note.path);
@@ -209,8 +212,8 @@ mod tests {
     use workspace_core::*;
     use workspace_host::skills::Line;
 
-    fn note(paused: Paused) -> WorkspaceNote {
-        WorkspaceNote {
+    fn note(paused: Paused) -> PausedSetting {
+        PausedSetting {
             path: "skills/implementing/".into(),
             setting: "Implementing · your rules".into(),
             paused,
