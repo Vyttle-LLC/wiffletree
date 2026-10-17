@@ -622,18 +622,39 @@ impl PageAsk {
     }
 }
 
-/// The revision of the selected session's messages last asked for, so a snapshot that left
-/// them alone fetches nothing.
+/// Which revision of the selected session's messages the shown page was fetched at, and which
+/// one a fetch on its way was asked at, so a snapshot that left them alone fetches nothing.
+/// Revisions are compared for equality only.
 #[derive(Default)]
-struct SeenRevision(Option<(String, u64)>);
-impl SeenRevision {
-    /// Whether `session_id`'s messages may have changed since the last ask: its revision moved,
-    /// or the host gave none. Remembers `revision` either way.
-    fn moved(&mut self, session_id: &str, revision: Option<u64>) -> bool {
-        let seen = revision.map(|revision| (session_id.to_owned(), revision));
-        let moved = seen.is_none() || seen != self.0;
-        self.0 = seen;
-        moved
+struct MessageRevisions {
+    shown: Option<(String, u64)>,
+    asking: Option<(String, u64)>,
+}
+impl MessageRevisions {
+    /// Whether `session_id`'s messages at `revision` are neither shown nor on their way. An
+    /// unknown revision always is wanted.
+    fn wanted(&self, session_id: &str, revision: Option<u64>) -> bool {
+        let Some(revision) = revision else {
+            return true;
+        };
+        let at = Some((session_id.to_owned(), revision));
+        at != self.shown && at != self.asking
+    }
+    /// A fetch goes out while the snapshot says `revision`.
+    fn asking(&mut self, session_id: &str, revision: Option<u64>) {
+        self.asking = revision.map(|revision| (session_id.to_owned(), revision));
+    }
+    /// The fetch asked at `revision` arrived; only now does the page count as that revision.
+    fn fetched(&mut self, session_id: &str, revision: Option<u64>) {
+        let at = revision.map(|revision| (session_id.to_owned(), revision));
+        if self.asking == at {
+            self.asking = None;
+        }
+        self.shown = at;
+    }
+    /// The fetch on its way failed; the next snapshot asks again.
+    fn failed(&mut self) {
+        self.asking = None;
     }
 }
 
@@ -651,7 +672,7 @@ pub(super) struct Transcript {
     cache_order: VecDeque<String>,
     /// The older page being read, by the sequence it ends before; `None` for the newest.
     page: Option<i64>,
-    seen: SeenRevision,
+    revisions: MessageRevisions,
     /// Pages are prepared off the UI thread; counts the asks so only the latest is shown.
     preparing: u64,
     /// The selected session's latest run, shown as the activity card while it works.
@@ -685,7 +706,7 @@ impl Transcript {
             cached_pages: BTreeMap::new(),
             cache_order: VecDeque::new(),
             page: None,
-            seen: SeenRevision::default(),
+            revisions: MessageRevisions::default(),
             preparing: 0,
             activity: None,
             step_fetch: StepFetch::default(),
@@ -723,7 +744,7 @@ impl Transcript {
         self.shown = self.cached_pages.get(&id).cloned().unwrap_or_default();
         self.page = None;
         self.list.reset(self.transcript_rows());
-        self.seen = SeenRevision::default();
+        self.revisions = MessageRevisions::default();
         self.reload_if_moved(window, cx);
         self.activity = None;
         self.fetch_steps(window, cx);
@@ -762,23 +783,29 @@ impl Transcript {
             return;
         };
         let before = self.page;
+        // The revision the snapshot gives now; the page is credited with it once it arrives.
+        let revision = self.shared.message_revision(&session_id);
+        self.revisions.asking(&session_id, revision);
         let ask = ask::messages(session_id.clone(), before, MAX_PAGE);
-        self.ask(ask, window, cx, move |view, messages, window, cx| {
-            match messages {
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, messages, window, cx| match messages {
                 Ok(messages)
                     if view.shared.selected.as_deref() == Some(&session_id)
                         && view.page == before =>
                 {
+                    view.revisions.fetched(&session_id, revision);
                     view.prepare(session_id, before, messages, window, cx)
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    // The next snapshot asks again.
-                    view.seen = SeenRevision::default();
+                    view.revisions.failed();
                     toast_error(error, window, cx)
                 }
-            }
-        });
+            },
+        );
     }
 
     /// Loads the shown page again if the selected session's messages may have changed.
@@ -786,7 +813,7 @@ impl Transcript {
         let Some(id) = self.shared.selected.as_deref() else {
             return;
         };
-        if self.seen.moved(id, self.shared.message_revision(id)) {
+        if self.revisions.wanted(id, self.shared.message_revision(id)) {
             self.load_messages(window, cx);
         }
     }
@@ -1340,10 +1367,10 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::{
-        PageAsk,
+        MessageRevisions, PageAsk,
         Placement::{Alone, Folded, Heads},
-        SeenRevision, Senders, Shape, from_human, peer_line, placements, prepare, run_heading,
-        run_troubles, transcript_overlap,
+        Senders, Shape, from_human, peer_line, placements, prepare, run_heading, run_troubles,
+        transcript_overlap,
     };
     use gpui::SharedString;
     use std::{collections::HashMap, sync::Arc};
@@ -1399,18 +1426,43 @@ mod tests {
 
     #[test]
     fn messages_are_fetched_again_only_when_their_revision_moved_or_is_unknown() {
-        let mut seen = SeenRevision::default();
-        assert!(seen.moved("s", Some(3)), "the first ask");
-        assert!(!seen.moved("s", Some(3)), "a snapshot that left them alone");
-        assert!(seen.moved("s", Some(4)));
+        let mut revisions = MessageRevisions::default();
         assert!(
-            seen.moved("t", Some(4)),
+            revisions.wanted("s", Some(0)),
+            "nothing shown yet; 0 is a revision too"
+        );
+        revisions.asking("s", Some(0));
+        assert!(!revisions.wanted("s", Some(0)), "the fetch is on its way");
+        revisions.fetched("s", Some(0));
+        assert!(
+            !revisions.wanted("s", Some(0)),
+            "a snapshot that left them alone"
+        );
+        assert!(revisions.wanted("s", Some(4)));
+        assert!(
+            revisions.wanted("t", Some(0)),
             "another session at the same number"
         );
-        assert!(seen.moved("t", None), "a host that gives none");
-        assert!(seen.moved("t", None), "still none");
-        assert!(seen.moved("t", Some(4)), "known again");
-        assert!(!seen.moved("t", Some(4)));
+        assert!(revisions.wanted("s", None), "a host that gives none");
+
+        // A newer snapshot is not credited before its own fetch arrives.
+        revisions.asking("s", Some(4));
+        revisions.failed();
+        assert!(
+            revisions.wanted("s", Some(4)),
+            "the failed fetch is asked for again"
+        );
+        revisions.asking("s", Some(4));
+        assert!(
+            revisions.wanted("s", Some(5)),
+            "a snapshot newer than the fetch"
+        );
+        revisions.asking("s", Some(5));
+        revisions.fetched("s", Some(4));
+        assert!(!revisions.wanted("s", Some(5)), "still on its way");
+        assert!(!revisions.wanted("s", Some(4)));
+        revisions.fetched("s", Some(5));
+        assert!(!revisions.wanted("s", Some(5)));
     }
 
     #[test]
