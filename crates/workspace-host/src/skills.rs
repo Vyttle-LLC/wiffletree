@@ -102,7 +102,8 @@ pub struct Edits {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rewritten {
     pub text: String,
-    /// The stock text the rewrite started from, or was last marked up to date against.
+    /// The stock text the rewrite started from, or was last marked up to date against or merged
+    /// with.
     pub base: String,
 }
 /// What a history entry records: the skill's whole state after a change, and the change.
@@ -137,7 +138,7 @@ pub enum Change {
         before: Rewritten,
         changes: Vec<merge::MergedChange>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<merge::MergeModel>,
+        model: Option<MergeModel>,
         machine: String,
     },
     /// The merge `entry` names, which brought in stock version `to`, was undone.
@@ -161,7 +162,7 @@ pub enum Line {
     Added(String),
 }
 /// What changed, line by line, from `old` to `new`.
-pub fn line_diff(old: &str, new: &str) -> Vec<Line> {
+pub(crate) fn line_diff(old: &str, new: &str) -> Vec<Line> {
     let diff = similar::TextDiff::from_lines(old, new);
     let lines = diff.iter_all_changes().map(|change| {
         let text = change.value().trim_end_matches('\n').to_owned();
@@ -233,6 +234,8 @@ impl SkillStore<'_> {
             }),
             unreadable,
             newer_stock_version: None,
+            merge_note: None,
+            merge_standing: None,
         }
     }
     pub fn save_rules(&self, skill: Skill, rules: &str) -> Result<()> {
@@ -282,23 +285,34 @@ impl SkillStore<'_> {
     /// Writes the entry's state back, a rewrite with its base, as a new entry; the history keeps
     /// every entry.
     pub fn restore(&self, skill: Skill, entry: &str) -> Result<()> {
-        let (_, restored) = self
-            .history(skill)
-            .into_iter()
-            .find(|(name, _)| name == entry)
-            .context("That history entry does not exist")?;
+        let restored = self.entry(skill, entry)?;
         let change = Change::Restored {
             entry: entry.into(),
         };
         self.change(skill, change, restored.edits)
     }
     /// Merges this release's stock text into the rewrite as plain text, saved with its base and
-    /// a "Merged" entry; with passages that overlap, changes nothing and answers them.
+    /// a "Merged" entry; with passages that overlap, changes nothing and answers them. Only a
+    /// rewrite based on an older stock version, or on this one with other text, is merged.
     pub fn merge_update(&self, skill: Skill) -> Result<Vec<merge::Passage>> {
         let edits = self.readable(skill)?;
         let before = edits
             .rewrite
             .context("Start a rewrite of this skill first")?;
+        let (from, to) = (version(&before.base), stock_version(skill));
+        ensure!(
+            before.base != stock(skill),
+            "Your rewrite is already based on {to}"
+        );
+        ensure!(
+            number(from).is_some_and(|from| Some(from) <= number(to)),
+            "Your rewrite is based on {}, not an earlier version than {to}",
+            if from.is_empty() {
+                "an unknown version"
+            } else {
+                from
+            }
+        );
         let merged = merge::merge(&before.base, stock(skill), &before.text);
         let Some((text, changes)) = merged.plain() else {
             return Ok(merged.passages());
@@ -326,12 +340,7 @@ impl SkillStore<'_> {
     /// Writes back exactly the rewrite and base from before the merge `entry` names, as a new
     /// entry.
     pub fn undo_merge(&self, skill: Skill, entry: &str) -> Result<()> {
-        let (_, merged) = self
-            .history(skill)
-            .into_iter()
-            .find(|(name, _)| name == entry)
-            .context("That history entry does not exist")?;
-        let Change::Merged { before, to, .. } = merged.change else {
+        let Change::Merged { before, to, .. } = self.entry(skill, entry)?.change else {
             bail!("That history entry is not a merge");
         };
         let change = Change::UndidMerge {
@@ -343,6 +352,31 @@ impl SkillStore<'_> {
             rewrite: Some(before),
         };
         self.change(skill, change, edits)
+    }
+    /// The merge `entry` names, with the rewrite before and after it, line by line.
+    pub fn merge_review(&self, skill: Skill, entry: &str) -> Result<MergeReview> {
+        let merged = self.entry(skill, entry)?;
+        let (
+            Some(note),
+            Change::Merged {
+                before, changes, ..
+            },
+        ) = (merge_note(entry, &merged), &merged.change)
+        else {
+            bail!("That history entry is not a merge");
+        };
+        let after = merged.edits.rewrite.as_ref().map_or("", |r| &r.text);
+        let lines = reviewed(&before.text, after, changes)
+            .context("That merge's entry does not hold the changes that make its rewrite")?;
+        let live = self.read(skill) == (merged.edits.clone(), None);
+        Ok(MergeReview { note, live, lines })
+    }
+    fn entry(&self, skill: Skill, entry: &str) -> Result<Entry> {
+        let found = self
+            .history(skill)
+            .into_iter()
+            .find(|(name, _)| name == entry);
+        Ok(found.context("That history entry does not exist")?.1)
     }
     /// What changed from a rewrite's base to this release's stock text; nothing without one.
     pub fn stock_changes(&self, skill: Skill) -> Vec<Line> {
@@ -501,17 +535,6 @@ impl SkillStore<'_> {
             .as_ref()
             .map(|recorder| recorder.writing(&key))
     }
-    /// The newest stock version the history records, when it is newer than this release's.
-    fn newer_stock_version(&self, skill: Skill) -> Option<String> {
-        let history = self
-            .history(skill)
-            .into_iter()
-            .map(|(_, e)| e.stock_version);
-        let this_release = number(stock_version(skill));
-        history
-            .filter(|version| number(version) > this_release)
-            .max_by_key(|version| number(version))
-    }
     /// One file per entry, named by its time, never replacing another; answers with the entry's
     /// path and content.
     fn record(&self, skill: Skill, change: Change, edits: Edits) -> Result<(PathBuf, Vec<u8>)> {
@@ -598,17 +621,59 @@ impl Host {
     pub fn instructions(&self, role: Role) -> String {
         self.skills().instructions(role)
     }
-    pub(crate) fn skill_states(&self) -> Vec<SkillState> {
-        let store = self.skills();
-        let state = |(skill, newer): (Skill, &Option<String>)| SkillState {
-            newer_stock_version: newer.clone(),
-            ..store.state(skill)
-        };
+    pub(crate) fn skill_states(&self) -> Result<Vec<SkillState>> {
         Skill::ALL
+            .map(|skill| self.skill_state(skill))
             .into_iter()
-            .zip(&self.newer_stock)
-            .map(state)
             .collect()
+    }
+    /// The skill's state with what its history says: a newer stock version, the note of the
+    /// merge it holds now unless dismissed here, and why no automatic merge touches it.
+    pub(crate) fn skill_state(&self, skill: Skill) -> Result<SkillState> {
+        let state = self.skills().state(skill);
+        // In declaration order, which is `Skill::ALL`'s.
+        let recalled = &self.skill_histories[skill as usize];
+        let live = (state.rewrite.as_ref()).filter(|_| state.unreadable.is_none());
+        let holds = |rewrite: &Rewritten| {
+            live.is_some_and(|live| (&live.text, &live.base) == (&rewrite.text, &rewrite.base))
+        };
+        let merged = (recalled.merges.iter().rev())
+            .find(|(_, entry)| entry.edits.rewrite.as_ref().is_some_and(holds));
+        let dismissed = |entry: &str| -> rusqlite::Result<bool> {
+            self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM skill_merges_dismissed WHERE skill=?1 AND entry=?2)",
+                [skill.folder(), entry],
+                |r| r.get(0),
+            )
+        };
+        let merge_note = match merged {
+            Some((name, entry)) if !dismissed(name)? => merge_note(name, entry),
+            _ => None,
+        };
+        let merge_standing = match &state.rewrite {
+            Some(rewrite) if rewrite.out_of_date => {
+                (recalled.stopped >= number(&state.stock_version)).then_some(MergeStanding::Undone)
+            }
+            Some(rewrite) if is_newer(&rewrite.base, skill) => {
+                let machine = merged.and_then(|(_, entry)| match &entry.change {
+                    Change::Merged { machine, .. } => Some(machine.clone()),
+                    _ => None,
+                });
+                Some(MergeStanding::NewerBase { machine })
+            }
+            _ => None,
+        };
+        Ok(SkillState {
+            newer_stock_version: recalled.newer_stock_version.clone(),
+            merge_note,
+            merge_standing,
+            ..state
+        })
+    }
+    /// After a command changed a skill: its history is recalled, and the answer is its state.
+    pub(crate) fn changed_skill(&mut self, skill: Skill) -> Result<Value> {
+        self.recall_skill_histories();
+        Ok(serde_json::to_value(self.skill_state(skill)?)?)
     }
     /// Whether the skill's rewrite is due a merge of this release's stock text on its own: one
     /// whose files can be read and are not paused, by `merge_due`.
@@ -632,14 +697,124 @@ impl Host {
         )?;
         Ok(!paused && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
     }
-    /// Reads each skill's history for a stock version newer than this release's, at start and
-    /// whenever the history may have gained another machine's entries.
-    pub(crate) fn find_newer_stock_versions(&mut self) {
+    /// Reads each skill's history, at start and whenever it may have gained entries.
+    pub(crate) fn recall_skill_histories(&mut self) {
         let store = self.skills();
-        self.newer_stock = Skill::ALL
-            .map(|skill| store.newer_stock_version(skill))
-            .into();
+        self.skill_histories = Skill::ALL.map(|skill| Recalled::of(skill, store.history(skill)));
     }
+}
+/// What a skill's history says beyond its files, recalled so a snapshot reads no history.
+#[derive(Default)]
+pub(crate) struct Recalled {
+    /// The newest stock version the history records, when it is newer than this release's.
+    newer_stock_version: Option<String>,
+    /// The "Merged" entries, oldest first.
+    merges: Vec<(String, Entry)>,
+    /// The newest stock version an Undo, or a restore from before a merge, stops merges into.
+    stopped: Option<u32>,
+}
+impl Recalled {
+    fn of(skill: Skill, history: Vec<(String, Entry)>) -> Self {
+        let this_release = number(stock_version(skill));
+        let newer_stock_version = (history.iter())
+            .map(|(_, entry)| &entry.stock_version)
+            .filter(|version| number(version) > this_release)
+            .max_by_key(|version| number(version))
+            .cloned();
+        let stopped = stopped(&history);
+        let merges = (history.into_iter())
+            .filter(|(_, entry)| matches!(entry.change, Change::Merged { .. }))
+            .collect();
+        Self {
+            newer_stock_version,
+            merges,
+            stopped,
+        }
+    }
+}
+/// The note of the "Merged" entry `name`.
+pub fn merge_note(name: &str, entry: &Entry) -> Option<MergeNote> {
+    let Change::Merged {
+        from,
+        to,
+        changes,
+        model,
+        machine,
+        ..
+    } = &entry.change
+    else {
+        return None;
+    };
+    let count = |source| changes.iter().filter(|c| c.source == source).count();
+    Some(MergeNote {
+        entry: name.into(),
+        from: from.clone(),
+        to: to.clone(),
+        from_update: count(merge::Source::Update),
+        by_model: count(merge::Source::Model),
+        model: model.clone(),
+        machine: (*machine != sync::machine_name()).then(|| machine.clone()),
+    })
+}
+/// Why Merge v2 in changed nothing: the update and the rewrite both change `overlaps` passages.
+pub(crate) fn needs_a_model(skill: Skill, overlaps: usize) -> String {
+    let passages = match overlaps {
+        1 => "1 passage".into(),
+        count => format!("{count} passages"),
+    };
+    format!(
+        "{} and your rewrite both change {passages}, and merging that needs a model. Bring the change in yourself, then mark it up to date.",
+        stock_version(skill)
+    )
+}
+/// A merge's note, and the rewrite before and after it, line by line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeReview {
+    pub note: MergeNote,
+    /// The skill still holds what the merge made, with every file read.
+    pub live: bool,
+    pub lines: Vec<Reviewed>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reviewed {
+    pub line: Line,
+    /// Where a removed or added line's change came from.
+    pub source: Option<merge::Source>,
+}
+/// `before` with each change made in turn, matched against `after`: the text between changes is
+/// the same on both sides. None when the changes don't make `after`.
+fn reviewed(
+    mut before: &str,
+    mut after: &str,
+    changes: &[merge::MergedChange],
+) -> Option<Vec<Reviewed>> {
+    fn unchanged(text: &str) -> impl Iterator<Item = Reviewed> {
+        (text.lines()).map(|line| Reviewed {
+            line: Line::Unchanged(line.into()),
+            source: None,
+        })
+    }
+    let mut lines = vec![];
+    for change in changes {
+        let same = (before.bytes().zip(after.bytes())).take_while(|(b, a)| b == a);
+        let starts = |text: &str, at: usize, part: &str| {
+            text.get(at..).is_some_and(|rest| rest.starts_with(part))
+        };
+        let kept = (0..=same.count())
+            .find(|&at| starts(before, at, &change.before) && starts(after, at, &change.after))?;
+        lines.extend(unchanged(&before[..kept]));
+        lines.extend(
+            line_diff(&change.before, &change.after)
+                .into_iter()
+                .map(|line| {
+                    let source = (!matches!(line, Line::Unchanged(_))).then_some(change.source);
+                    Reviewed { line, source }
+                }),
+        );
+        before = &before[kept + change.before.len()..];
+        after = &after[kept + change.after.len()..];
+    }
+    (before == after).then(|| lines.into_iter().chain(unchanged(before)).collect())
 }
 
 #[cfg(test)]
@@ -667,7 +842,7 @@ mod tests {
     fn a_fresh_install_is_at_stock_and_writes_nothing() {
         let (_home, host) = host();
         assert!(!host.shared().skills_folder().exists());
-        for state in host.skill_states() {
+        for state in host.skill_states().unwrap() {
             assert_eq!((state.rules.as_str(), &state.unreadable), ("", &None));
             assert_eq!(state.stock_version, "v1");
             assert_eq!(state.stock, stock(state.skill));
@@ -966,7 +1141,7 @@ mod tests {
         drop(host);
         let host = Host::open(home.path()).unwrap();
         assert_eq!(host.skills().history(Skill::Coordinating).len(), 2);
-        let states = host.skill_states();
+        let states = host.skill_states().unwrap();
         assert_eq!(states[0].newer_stock_version.as_deref(), Some("v2"));
         assert_eq!(states[1].newer_stock_version, None);
     }
@@ -1726,7 +1901,7 @@ mod tests {
         let coordinator = host.sessions().unwrap().remove(0);
         for tool in mcp::tools().as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
-            for word in ["merge", "undo", "skill"] {
+            for word in ["merge", "undo", "dismiss", "skill"] {
                 assert!(!name.contains(word), "{name}");
             }
             let args = json!({"skill": "coordinating", "entry": merge_entry, "text": "Agent's"});
@@ -1736,6 +1911,234 @@ mod tests {
             (current(&host), changes(&host, Skill::Coordinating)),
             before
         );
+    }
+
+    /// The host of `home` started again, as after an update.
+    fn started_again(home: &tempfile::TempDir, host: Host) -> Host {
+        drop(host);
+        Host::open(home.path()).unwrap()
+    }
+
+    fn coordinating_state(host: &Host) -> SkillState {
+        host.skill_state(Skill::Coordinating).unwrap()
+    }
+
+    fn execute(host: &mut Host, command: Command) -> Result<SkillState> {
+        Ok(serde_json::from_value(host.execute(command)?)?)
+    }
+
+    /// Writes a history entry as another machine's sync would bring it.
+    fn write_entry(host: &mut Host, name: &str, entry: &Entry) {
+        let path = coordinating(host, &format!("history/{name}.json"));
+        fs::write(path, serde_json::to_vec(entry).unwrap()).unwrap();
+        host.recall_skill_histories();
+    }
+
+    #[test]
+    fn merge_v2_in_takes_the_same_version_with_other_text_and_nothing_newer() {
+        let (home, host) = host();
+        let stock = stock(Skill::Coordinating);
+        let base = stock.replacen(
+            FIFTH,
+            &format!("A paragraph the release removed.\n\n{FIFTH}"),
+            1,
+        );
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        let text = base.replacen("Start by clarifying", "Start by restating", 1);
+        host.skills()
+            .save_rewrite(Skill::Coordinating, &text)
+            .unwrap();
+        based_on_an_earlier_release(&host, &base);
+        let mut host = started_again(&home, host);
+        let state = coordinating_state(&host);
+        assert!(state.rewrite.unwrap().out_of_date);
+        assert_eq!(state.merge_standing, None);
+        let merge = Command::MergeSkillUpdate {
+            skill: Skill::Coordinating,
+        };
+        let merged = execute(&mut host, merge.clone()).unwrap();
+        assert!(!merged.rewrite.unwrap().out_of_date);
+        assert_eq!(merged.merge_note.unwrap().from, "v1");
+        // Up to date, or based on a newer release, there is nothing to merge.
+        let refused = execute(&mut host, merge.clone()).unwrap_err().to_string();
+        assert_eq!(refused, "Your rewrite is already based on v1");
+        based_on_an_earlier_release(&host, &stock.replacen("— v1", "— v2", 1));
+        let refused = execute(&mut host, merge).unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            "Your rewrite is based on v2, not an earlier version than v1"
+        );
+        let state = coordinating_state(&host);
+        assert_eq!(
+            state.merge_standing,
+            Some(MergeStanding::NewerBase { machine: None })
+        );
+    }
+
+    #[test]
+    fn merge_v2_in_with_an_overlap_says_it_needs_a_model() {
+        let (_home, mut host) = host();
+        let before = rewritten_against_v0(&host);
+        let text = before.text.replacen("Ask the human when", "Ask me when", 1);
+        host.skills()
+            .save_rewrite(Skill::Coordinating, &text)
+            .unwrap();
+        let merge = Command::MergeSkillUpdate {
+            skill: Skill::Coordinating,
+        };
+        let refused = execute(&mut host, merge).unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            "v1 and your rewrite both change 1 passage, and merging that needs a model. Bring the change in yourself, then mark it up to date."
+        );
+        assert_eq!(current(&host), [text.as_bytes(), before.base.as_bytes()]);
+    }
+
+    #[test]
+    fn the_note_is_about_the_merge_the_skill_holds_and_dismissed_on_one_mac_only() {
+        let (_home, mut host) = host();
+        rewritten_against_v0(&host);
+        let merge = Command::MergeSkillUpdate {
+            skill: Skill::Coordinating,
+        };
+        execute(&mut host, merge).unwrap();
+        let (merged, entry) = host.skills().history(Skill::Coordinating).pop().unwrap();
+        // A later entry that is not a merge.
+        let later = Entry {
+            change: Change::NewStockVersion {
+                previous: "v1".into(),
+            },
+            stock_version: "v2".into(),
+            ..entry
+        };
+        write_entry(&mut host, "2999-01-01T00-00-00.000Z", &later);
+        let note = coordinating_state(&host).merge_note.unwrap();
+        assert_eq!(note.entry, merged);
+        let review = host.skills().merge_review(Skill::Coordinating, &merged);
+        assert_eq!(review.unwrap().note, note);
+
+        // Another Mac holding a copy of the same skills folder.
+        let (_other_home, mut other) = self::host();
+        let copy = |from: &Path, to: &Path| {
+            let status = std::process::Command::new("cp")
+                .arg("-R")
+                .args([from, to])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        fs::create_dir_all(other.home.join("shared")).unwrap();
+        copy(&host.shared().skills_folder(), &other.home.join("shared"));
+        other.recall_skill_histories();
+        let dismiss = Command::DismissSkillMerge {
+            skill: Skill::Coordinating,
+            entry: merged,
+        };
+        assert_eq!(execute(&mut host, dismiss).unwrap().merge_note, None);
+        assert_eq!(coordinating_state(&other).merge_note, Some(note));
+        assert_eq!(
+            changes(&host, Skill::Coordinating),
+            changes(&other, Skill::Coordinating)
+        );
+    }
+
+    #[test]
+    fn a_note_and_review_name_the_model_and_label_each_change() {
+        let (_home, mut host) = host();
+        let before = rewritten_against_v0(&host);
+        let from_update = merge::MergedChange {
+            source: merge::Source::Update,
+            before: "# Coordinating — v0\n".into(),
+            after: "# Coordinating — v1\n".into(),
+        };
+        let paragraph = before.text.split("\n\n").nth(1).unwrap().to_owned() + "\n\n";
+        let by_model = merge::MergedChange {
+            source: merge::Source::Model,
+            after: paragraph.replacen(' ', " merged ", 1),
+            before: paragraph,
+        };
+        let mut after = before
+            .text
+            .replacen(&from_update.before, &from_update.after, 1);
+        after = after.replacen(&by_model.before, &by_model.after, 1);
+        let rewrite = Rewritten {
+            text: after.clone(),
+            base: stock(Skill::Coordinating).into(),
+        };
+        let model = MergeModel {
+            model: ModelProfile {
+                provider: Provider::Claude,
+                model: "haiku".into(),
+                effort: "medium".into(),
+            },
+            tokens: 6_240,
+        };
+        let entry = Entry {
+            change: Change::Merged {
+                from: "v0".into(),
+                to: "v1".into(),
+                before: before.clone(),
+                changes: vec![from_update, by_model],
+                model: Some(model.clone()),
+                machine: "Mike's MacBook Air".into(),
+            },
+            stock_version: "v1".into(),
+            edits: Edits {
+                rules: String::new(),
+                rewrite: Some(rewrite.clone()),
+            },
+        };
+        let name = "2999-01-01T00-00-00.000Z";
+        write_entry(&mut host, name, &entry);
+        fs::write(coordinating(&host, "rewrite.md"), &rewrite.text).unwrap();
+        based_on_an_earlier_release(&host, &rewrite.base);
+        let note = coordinating_state(&host).merge_note.unwrap();
+        assert_eq!((note.from_update, note.by_model), (1, 1));
+        assert_eq!(note.model, Some(model));
+        assert_eq!(note.machine.as_deref(), Some("Mike's MacBook Air"));
+
+        let review = host
+            .execute(Command::SkillMergeReview {
+                skill: Skill::Coordinating,
+                entry: name.into(),
+            })
+            .unwrap();
+        let review: MergeReview = serde_json::from_value(review).unwrap();
+        assert!(review.live);
+        let side = |removed: bool| -> Vec<String> {
+            let kept = |reviewed: &Reviewed| match &reviewed.line {
+                Line::Unchanged(line) => Some(line.clone()),
+                Line::Removed(line) if removed => Some(line.clone()),
+                Line::Added(line) if !removed => Some(line.clone()),
+                _ => None,
+            };
+            review.lines.iter().filter_map(kept).collect()
+        };
+        assert_eq!(side(true), before.text.lines().collect::<Vec<_>>());
+        assert_eq!(side(false), after.lines().collect::<Vec<_>>());
+        let sources: Vec<_> = (review.lines.iter())
+            .filter_map(|reviewed| reviewed.source)
+            .collect();
+        use merge::Source::{Model, Update};
+        assert_eq!(sources, [Update, Update, Model, Model]);
+    }
+
+    #[test]
+    fn restoring_a_rewrite_from_before_a_merge_stops_merges_into_its_version() {
+        let (_home, mut host) = host();
+        let skill = Skill::Coordinating;
+        let before = rewritten_against_v0(&host);
+        // Saved again, so an entry holds the rewrite on its v0 base.
+        host.skills().save_rewrite(skill, &before.text).unwrap();
+        execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();
+        let entry = host.skills().history(skill).remove(2).0;
+        let restored = execute(&mut host, Command::RestoreSkill { skill, entry }).unwrap();
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        assert_eq!(restored.merge_standing, Some(MergeStanding::Undone));
+        assert!(!host.skill_merge_due(skill).unwrap());
     }
 
     #[test]

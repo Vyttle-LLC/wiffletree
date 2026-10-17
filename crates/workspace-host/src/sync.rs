@@ -1005,7 +1005,7 @@ impl Host {
             return Err(error);
         }
         self.record_clone()?;
-        self.find_newer_stock_versions();
+        self.recall_skill_histories();
         Ok(self.settings())
     }
     /// Stops syncing on this machine and forgets the repository chosen. The shared folder stays
@@ -1130,7 +1130,7 @@ impl Host {
             self.restart_comments()?;
         }
         if pulled.iter().any(|(path, _)| path.contains("/history/")) {
-            self.find_newer_stock_versions();
+            self.recall_skill_histories();
         }
         self.sync = Synced {
             // A pass that ended in an error is not a sync: the last one that reached GitHub stays.
@@ -2660,6 +2660,7 @@ pub(crate) mod tests {
         assert!(
             second
                 .skill_states()
+                .unwrap()
                 .iter()
                 .all(|s| s.newer_stock_version.is_none())
         );
@@ -2669,7 +2670,7 @@ pub(crate) mod tests {
         let entry = entry.replace("\"v1\"", "\"v2\"");
         github.commit(&format!("{history}/2099-01-01T00-00-00.000Z.json"), entry);
         second.sync_now(&github.tools()).unwrap();
-        let states = second.skill_states();
+        let states = second.skill_states().unwrap();
         assert_eq!(states[0].newer_stock_version.as_deref(), Some("v2"));
     }
 
