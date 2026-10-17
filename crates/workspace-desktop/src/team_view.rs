@@ -124,7 +124,7 @@ impl Workspace {
         // Archived agents appear only while the sidebar is showing them.
         let agents_of = |ticket: &Ticket| {
             (index.agents(&ticket.id))
-                .filter(|s| self.show_archived || !s.archived)
+                .filter(|s| self.listed(s))
                 .collect::<Vec<_>>()
         };
         for ticket in tickets {
@@ -220,7 +220,7 @@ impl Workspace {
         // Older stores can contain workers created before ticket ownership existed.
         let unassigned: Vec<_> = (index.children(&coordinator.id))
             .filter(|s| {
-                (self.show_archived || !s.archived)
+                self.listed(s)
                     && s.role != Role::TaskOrchestrator
                     && self.runtime(&s.id).is_none_or(|r| r.ticket_id.is_none())
             })

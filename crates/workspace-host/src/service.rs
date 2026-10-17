@@ -4173,6 +4173,28 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_archived_in_its_turn_shows_working_in_the_snapshot_until_it_ends() {
+        let (_home, mut actor, ticket, implementer, _) = implementer_in_turn("assigned");
+        let report = json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        actor.host.close_ticket(&ticket.id).unwrap();
+        let shown = |actor: &Actor| {
+            let snapshot = actor.host.snapshot().unwrap();
+            (snapshot.sessions.into_iter())
+                .find(|s| s.id == implementer.id)
+                .map(|s| (s.archived, s.status))
+        };
+        assert_eq!(shown(&actor), Some((true, Status::Working)));
+
+        finish_turn(&mut actor, &implementer, "run");
+
+        assert_eq!(shown(&actor), None, "it is left to the archive");
+    }
+
+    #[test]
     fn a_restart_shows_the_blocked_state_a_mid_turn_report_stored() {
         let (home, mut actor, _, implementer, coordinator) = implementer_in_turn("passed");
         report_blocked(&mut actor, &implementer);

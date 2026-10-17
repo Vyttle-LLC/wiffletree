@@ -111,8 +111,8 @@ struct ArchiveDemand<'a> {
     messages: &'a [Message],
 }
 
-/// The archive is out of date and something shown needs it: Show archived, the Tickets or Crew
-/// panel, the Repositories page or a publish request, or a selected session or message sender
+/// The archive is out of date and something shown needs it: Show archived, the Tickets, Crew or
+/// Events panel, the Repositories page or a publish request, or a selected session or message sender
 /// that the snapshot does not list, which only the archive holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let snapshot = index.snapshot();
@@ -120,7 +120,7 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let archived = |id: &str| !live.contains(id);
     index.archive_is_stale()
         && (shown.show_archived
-            || matches!(shown.panel, Some(Panel::Team | Panel::Crew))
+            || matches!(shown.panel, Some(Panel::Team | Panel::Crew | Panel::Events))
             || shown.page == Page::Repositories
             || snapshot.attention.iter().any(Attention::is_publish)
             || shown.selected.is_some_and(archived)
@@ -2130,6 +2130,11 @@ mod tests {
             },
             ArchiveDemand {
                 panel: Some(Panel::Crew),
+                ..shown("live")
+            },
+            // It names the agents behind each event.
+            ArchiveDemand {
+                panel: Some(Panel::Events),
                 ..shown("live")
             },
             ArchiveDemand {

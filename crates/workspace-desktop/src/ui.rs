@@ -419,6 +419,10 @@ impl Workspace {
             .map_or(0, |s| s.questions_waiting(&session.id));
         status_badge(status, crate::tree::badge_label(label, questions), p)
     }
+    /// Archived sessions are listed only while the sidebar shows them.
+    pub(super) fn listed(&self, session: &Session) -> bool {
+        self.show_archived || !session.archived
+    }
     pub(super) fn owner_name(&self) -> String {
         self.selected_session()
             .map(|s| s.name.clone())

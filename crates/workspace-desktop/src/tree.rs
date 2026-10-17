@@ -940,8 +940,9 @@ pub fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRele
 }
 
 /// Projects in the host's order, under their group's row while `grouped`; a collapsed group
-/// hides its projects. Archived sessions, and accepted and closed tickets, appear only when
-/// `show_archived`; a ticket whose agents are all archived goes with them.
+/// hides its projects. Archived sessions appear only when `show_archived`, and accepted and
+/// closed tickets then or while an agent of theirs is listed; a ticket whose agents are all
+/// archived goes with them.
 pub fn rows<'a>(
     index: &'a WorkspaceIndex,
     show_archived: bool,
@@ -978,10 +979,10 @@ pub fn rows<'a>(
             if collapsed.contains(&root.project_id) {
                 continue;
             }
-            let listed = |t: &&Ticket| show_archived || t.is_open();
-            for ticket in index.tickets_owned_by(&root.id).filter(listed) {
+            for ticket in index.tickets_owned_by(&root.id) {
                 let agents: Vec<&Session> = index.agents(&ticket.id).filter(shown).collect();
-                if agents.is_empty() && index.agents(&ticket.id).next().is_some() {
+                let settled = !show_archived && !ticket.is_open();
+                if agents.is_empty() && (settled || index.agents(&ticket.id).next().is_some()) {
                     continue;
                 }
                 rows.push(Row::Ticket {
@@ -1371,6 +1372,29 @@ mod tests {
         assert_eq!(
             shape(&rows(&joined(&host), true, true, &none, &none)).len(),
             5
+        );
+    }
+
+    #[test]
+    fn an_agent_restored_from_a_closed_ticket_is_listed_under_it() {
+        let (_directory, mut host, _root, ticket) = store();
+        let none = BTreeSet::new();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        host.close_ticket(&ticket.id).unwrap();
+        host.set_archived(&implementer.id, false).unwrap();
+        let live = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
+
+        let expected = [
+            (0, "Calls".to_owned()),
+            (1, "sagechat-sms · Fix inbound calls".into()),
+            (2, "Implementer".into()),
+        ];
+        assert_eq!(shape(&rows(&live, false, true, &none, &none)), expected);
+        assert_eq!(
+            shape(&rows(&joined(&host), false, true, &none, &none)),
+            expected
         );
     }
 

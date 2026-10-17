@@ -438,7 +438,7 @@ impl Workspace {
                 .filter(|t| t.is_open())
                 .count();
             let agents = (index.sessions())
-                .filter(|s| self.show_archived || !s.archived)
+                .filter(|s| self.listed(s))
                 .filter(in_project)
                 .filter(|s| s.role.is_worker())
                 .count();

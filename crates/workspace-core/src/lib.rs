@@ -568,11 +568,12 @@ pub struct MaintenanceRun {
 pub struct Snapshot {
     pub projects: Vec<Project>,
     pub repositories: Vec<Repository>,
-    /// The sessions that are not archived, and open tickets' archived agents, in the order they
-    /// were created.
+    /// The sessions that are not archived and open tickets' archived agents, in the order they
+    /// were created, then archived sessions still in a turn.
     pub sessions: Vec<Session>,
     pub attention: Vec<Attention>,
-    /// The open tickets, in the order they were created.
+    /// The open tickets, and accepted or closed ones an unarchived agent works on, in the order
+    /// they were created.
     #[serde(default)]
     pub tickets: Vec<Ticket>,
     /// The runtimes of `sessions`.
@@ -645,7 +646,8 @@ pub struct Snapshot {
     pub keeper_held: Vec<String>,
 }
 /// What a `Snapshot` leaves out: archived sessions other than open tickets' agents, accepted
-/// and closed tickets, and those sessions' runtimes. Answers `Command::Archive`.
+/// and closed tickets no unarchived agent works on, and those sessions' runtimes. Answers
+/// `Command::Archive`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Archive {
     pub sessions: Vec<Session>,
