@@ -15,11 +15,11 @@ fn answer<R: DeserializeOwned>(service: &Service, ask: Ask<R>) -> anyhow::Result
 }
 
 #[derive(Clone)]
-pub struct Bridge {
+pub(crate) struct Bridge {
     service: Result<Service, String>,
 }
 impl Bridge {
-    pub fn start(home: PathBuf, demo_repository: Option<String>) -> Self {
+    pub(crate) fn start(home: PathBuf, demo_repository: Option<String>) -> Self {
         let result = (|| -> anyhow::Result<Service> {
             let binary = std::env::current_exe()?;
             let helper = binary.parent().unwrap().join("workspace-host");
@@ -42,14 +42,17 @@ impl Bridge {
             service: result.map_err(|e| format!("{e:#}")),
         }
     }
-    pub fn request(&self, command: Command) -> Result<Receiver<Result<Value, String>>, String> {
+    pub(crate) fn request(
+        &self,
+        command: Command,
+    ) -> Result<Receiver<Result<Value, String>>, String> {
         self.service
             .as_ref()
             .map_err(Clone::clone)?
             .request(command)
     }
     /// Sends `command`; its reply arrives when the host answers, or says the host is gone.
-    pub fn send(
+    pub(crate) fn send(
         &self,
         command: Command,
     ) -> Result<impl Future<Output = Result<Value, String>> + use<>, String> {
@@ -59,7 +62,7 @@ impl Bridge {
         )
     }
     /// Sends `ask`; its reply arrives decoded as what the host answers it with.
-    pub fn ask<R: DeserializeOwned>(
+    pub(crate) fn ask<R: DeserializeOwned>(
         &self,
         ask: Ask<R>,
     ) -> Result<impl Future<Output = Result<R, String>> + use<R>, String> {
@@ -67,21 +70,21 @@ impl Bridge {
         Ok(async move { reply.await.and_then(|reply| ask.decode(reply)) })
     }
     /// Stops running turns and the host; returns once their provider processes are stopped.
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         if let Ok(service) = &self.service {
             service.shutdown();
         }
     }
-    pub fn changes(&self) -> Option<Receiver<()>> {
+    pub(crate) fn changes(&self) -> Option<Receiver<()>> {
         self.service.as_ref().ok().map(Service::changes)
     }
-    pub fn step_changes(&self) -> Option<Receiver<()>> {
+    pub(crate) fn step_changes(&self) -> Option<Receiver<()>> {
         self.service.as_ref().ok().map(Service::step_changes)
     }
-    pub fn progress_changes(&self) -> Option<Receiver<()>> {
+    pub(crate) fn progress_changes(&self) -> Option<Receiver<()>> {
         self.service.as_ref().ok().map(Service::progress_changes)
     }
-    pub fn usage_changes(&self) -> Option<Receiver<()>> {
+    pub(crate) fn usage_changes(&self) -> Option<Receiver<()>> {
         self.service.as_ref().ok().map(Service::usage_changes)
     }
 }

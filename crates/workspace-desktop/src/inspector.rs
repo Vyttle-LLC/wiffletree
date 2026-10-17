@@ -922,6 +922,7 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::Panel;
+    use crate::test_support::git;
     use workspace_core::{Role, ask};
     use workspace_host::Host;
 
@@ -940,18 +941,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let repo = directory.path().join("web");
         std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(&repo)
-                .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
-        };
-        git(&["init", "-q"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "Base"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "Add the toolbar"]);
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "Base"]);
+        git(
+            &repo,
+            &["commit", "-q", "--allow-empty", "-m", "Add the toolbar"],
+        );
         let mut host = Host::open(directory.path().join("home")).unwrap();
         let repository = host.add_repository(repo.to_str().unwrap(), "HEAD").unwrap();
 

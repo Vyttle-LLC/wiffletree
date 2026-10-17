@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
-pub use workspace_core::skills::PassageAnswer;
+pub(crate) use workspace_core::skills::PassageAnswer;
 use workspace_core::{MergePassage, Skill};
 
 /// The merge run's instructions, which hold none of the fixed core.

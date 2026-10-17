@@ -10,14 +10,14 @@ use wording::counted;
 
 /// What the human has selected from a listing. Nothing starts selected, and only clean or
 /// unpushed rows can be.
-pub struct LeftoverSelection {
+pub(crate) struct LeftoverSelection {
     listing: Vec<LeftoverWorktree>,
     selected: BTreeSet<String>,
     confirming: bool,
 }
 
 impl LeftoverSelection {
-    pub fn new(listing: Vec<LeftoverWorktree>) -> Self {
+    pub(crate) fn new(listing: Vec<LeftoverWorktree>) -> Self {
         Self {
             listing,
             selected: BTreeSet::new(),
@@ -25,7 +25,7 @@ impl LeftoverSelection {
         }
     }
     /// Rows by project, in listing order; worktrees no ticket records come last.
-    pub fn groups(&self) -> Vec<(String, Vec<&LeftoverWorktree>)> {
+    pub(crate) fn groups(&self) -> Vec<(String, Vec<&LeftoverWorktree>)> {
         let mut groups: Vec<(String, Vec<&LeftoverWorktree>)> = vec![];
         for leftover in &self.listing {
             let project = if leftover.project.is_empty() {
@@ -40,11 +40,11 @@ impl LeftoverSelection {
         }
         groups
     }
-    pub fn selectable(leftover: &LeftoverWorktree) -> bool {
+    pub(crate) fn selectable(leftover: &LeftoverWorktree) -> bool {
         leftover.ticket_id.is_some() && leftover.class.is_removable()
     }
     /// Selects or clears a removable row; protected rows never change.
-    pub fn toggle(&mut self, ticket_id: &str) {
+    pub(crate) fn toggle(&mut self, ticket_id: &str) {
         let removable = self
             .listing
             .iter()
@@ -54,15 +54,15 @@ impl LeftoverSelection {
         }
         self.confirming = false;
     }
-    pub fn is_selected(&self, ticket_id: &str) -> bool {
+    pub(crate) fn is_selected(&self, ticket_id: &str) -> bool {
         self.selected.contains(ticket_id)
     }
     /// Asks for confirmation, naming the count; `None` when nothing is selected.
-    pub fn confirm(&mut self) -> Option<String> {
+    pub(crate) fn confirm(&mut self) -> Option<String> {
         self.confirming = !self.selected.is_empty();
         self.confirmation()
     }
-    pub fn confirmation(&self) -> Option<String> {
+    pub(crate) fn confirmation(&self) -> Option<String> {
         let count = self.selected.len();
         (self.confirming && count > 0).then(|| {
             format!(
@@ -71,11 +71,11 @@ impl LeftoverSelection {
             )
         })
     }
-    pub fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         self.confirming = false;
     }
     /// The removal the human confirmed, or `None` before confirmation.
-    pub fn removal(&self) -> Option<Ask<Vec<LeftoverRemoval>>> {
+    pub(crate) fn removal(&self) -> Option<Ask<Vec<LeftoverRemoval>>> {
         self.confirmation()
             .map(|_| ask::remove_leftover_worktrees(self.selected.iter().cloned().collect()))
     }
@@ -285,19 +285,10 @@ impl Render for LeftoverSheet {
 mod tests {
     // Only what the tests need: the parent's glob would bring GPUI's own `test` attribute.
     use super::LeftoverSelection;
+    use crate::test_support::git;
     use std::path::Path;
-    use workspace_core::{ask::Ask, *};
+    use workspace_core::*;
     use workspace_host::Host;
-
-    fn git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .current_dir(path)
-            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-    }
 
     /// A temporary store whose closed "Kept clean" and "Has notes" tickets left their worktrees.
     fn store() -> (tempfile::TempDir, Host, Ticket, Ticket) {
@@ -361,7 +352,7 @@ mod tests {
             selection.confirm().as_deref(),
             Some("Remove 1 leftover worktree? Their branches and commits are kept.")
         );
-        let removal = selection.removal().map(Ask::into_command);
+        let removal = selection.removal().map(|ask| ask.command().clone());
         let Some(Command::RemoveLeftoverWorktrees { ticket_ids }) = removal else {
             panic!("removal command")
         };

@@ -15,7 +15,7 @@ use workspace_core::Role;
 use workspace_core::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Creation {
+pub(crate) enum Creation {
     Ticket,
     Agent,
     Repository,
@@ -24,7 +24,7 @@ pub enum Creation {
 }
 
 impl Creation {
-    pub fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Ticket => "New ticket",
             Self::Agent => "Assign ticket agent",
@@ -33,7 +33,7 @@ impl Creation {
             Self::ProjectRepositories => "Project repositories",
         }
     }
-    pub fn action(self) -> &'static str {
+    pub(crate) fn action(self) -> &'static str {
         match self {
             Self::Ticket => "Create ticket",
             Self::Agent => "Assign agent",
@@ -59,7 +59,7 @@ impl SelectItem for Choice {
     }
 }
 
-pub struct CreationForm {
+pub(crate) struct CreationForm {
     kind: Creation,
     project_id: Option<String>,
     project_name: String,
@@ -97,7 +97,7 @@ fn default_instruction(role: Role) -> &'static str {
 }
 
 impl CreationForm {
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.kind == Creation::ProjectRepositories {
             return;
         }
@@ -108,7 +108,7 @@ impl CreationForm {
         }
     }
 
-    pub fn new(
+    pub(crate) fn new(
         kind: Creation,
         index: &WorkspaceIndex,
         selected: Option<&Session>,
@@ -213,7 +213,7 @@ impl CreationForm {
     }
 
     /// The installed CLIs' models, offered by the model picker beside the allowed ones.
-    pub fn with_catalog(mut self, catalog: &[ModelOption]) -> Self {
+    pub(crate) fn with_catalog(mut self, catalog: &[ModelOption]) -> Self {
         self.catalog = catalog.to_vec();
         self
     }
@@ -224,7 +224,7 @@ impl CreationForm {
             .or_else(|| self.model_selection.prefill(role))
     }
 
-    pub fn command(&self, cx: &App) -> Result<Command, String> {
+    pub(crate) fn command(&self, cx: &App) -> Result<Command, String> {
         if self.kind == Creation::Import {
             if self.scanning {
                 return Err("Wait for the folder scan to finish".into());
@@ -393,7 +393,7 @@ impl CreationForm {
     }
 
     /// Enter in the folder field means Add rather than import; true when it started a scan.
-    pub fn add_typed_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn add_typed_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.kind != Creation::Import || self.name.read(cx).value().trim().is_empty() {
             return false;
         }
@@ -458,7 +458,7 @@ impl CreationForm {
         .detach();
     }
 
-    pub fn import_finished(&mut self, result: &RepositoryImport, cx: &mut Context<Self>) {
+    pub(crate) fn import_finished(&mut self, result: &RepositoryImport, cx: &mut Context<Self>) {
         self.pending = false;
         for repo in &result.imported {
             self.selected_repositories.remove(&repo.path);

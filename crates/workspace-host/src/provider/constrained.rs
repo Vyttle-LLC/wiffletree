@@ -36,13 +36,13 @@ pub(super) struct Run {
     attested: bool,
 }
 impl Run {
-    pub fn new(label: &'static str) -> Self {
+    pub(super) fn new(label: &'static str) -> Self {
         Self {
             label,
             attested: false,
         }
     }
-    pub fn event(&mut self, value: &Value) -> Result<Option<Answer>> {
+    pub(super) fn event(&mut self, value: &Value) -> Result<Option<Answer>> {
         if value["type"] == "system" && value["subtype"] == "init" {
             ensure!(
                 value["tools"] == json!(["StructuredOutput"])
@@ -83,7 +83,7 @@ pub(super) struct Errors {
     closed: std::sync::mpsc::Receiver<()>,
 }
 impl Errors {
-    pub fn spawn(mut pipe: impl Read + Send + 'static) -> Self {
+    pub(super) fn spawn(mut pipe: impl Read + Send + 'static) -> Self {
         let tail = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (done, closed) = std::sync::mpsc::sync_channel(1);
         let held = tail.clone();
@@ -101,7 +101,7 @@ impl Errors {
         });
         Self { tail, closed }
     }
-    pub fn finish(self) -> String {
+    pub(super) fn finish(self) -> String {
         let _ = self.closed.recv_timeout(STDERR_DRAIN);
         without_terminal_codes(&String::from_utf8_lossy(
             &self.tail.lock().unwrap_or_else(|e| e.into_inner()),

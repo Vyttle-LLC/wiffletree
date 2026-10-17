@@ -32,7 +32,7 @@ const PER_SESSION: &[&str] = &[
 ///
 /// # Safety
 /// Mutates the process environment, so it must run before any other thread exists.
-pub unsafe fn adopt() {
+pub(crate) unsafe fn adopt() {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
     match resolve(Path::new(&shell), TIMEOUT) {
         Ok(variables) => {

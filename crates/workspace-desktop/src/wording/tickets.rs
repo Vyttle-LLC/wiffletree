@@ -4,7 +4,7 @@ use super::{age, counted};
 use workspace_core::*;
 
 /// "repository · ticket", or the title alone when the repository is unknown.
-pub fn ticket_label(snapshot: &Snapshot, ticket: &Ticket) -> String {
+pub(crate) fn ticket_label(snapshot: &Snapshot, ticket: &Ticket) -> String {
     match snapshot
         .repositories
         .iter()
@@ -35,7 +35,7 @@ fn cycle_line(verification: &Verification) -> String {
 
 /// One line for the latest cycle and one per round, with its commit and each verifier's result,
 /// then one line per earlier cycle, newest first.
-pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
+pub(crate) fn verification_lines(ticket: &Ticket) -> Vec<String> {
     let Some(verification) = &ticket.verification else {
         return vec![];
     };
@@ -62,7 +62,7 @@ pub fn verification_lines(ticket: &Ticket) -> Vec<String> {
 
 /// The line under a ticket while a step of its publish request waits for the human, such as
 /// "push waits for your approval".
-pub fn publish_waiting(ticket: &Ticket) -> Option<String> {
+pub(crate) fn publish_waiting(ticket: &Ticket) -> Option<String> {
     let request = ticket.publishing.as_ref()?;
     request
         .waiting
@@ -71,7 +71,7 @@ pub fn publish_waiting(ticket: &Ticket) -> Option<String> {
 }
 
 /// A ticket accepted with a waiver: its row's waived ring says this beside the label.
-pub fn waiver_note(ticket: &Ticket) -> Option<String> {
+pub(crate) fn waiver_note(ticket: &Ticket) -> Option<String> {
     ticket
         .waiver
         .as_ref()
@@ -89,7 +89,7 @@ pub fn waiver_note(ticket: &Ticket) -> Option<String> {
 
 /// How a part of a ticket's PR line is colored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tone {
+pub(crate) enum Tone {
     Muted,
     Good,
     Bad,
@@ -99,7 +99,7 @@ pub enum Tone {
     Busy,
 }
 #[derive(Debug, PartialEq)]
-pub struct PrPart {
+pub(crate) struct PrPart {
     pub text: String,
     pub tone: Tone,
 }
@@ -108,7 +108,7 @@ pub struct PrPart {
 /// parts that apply appear, and an open PR ends with the keeper's part: the commits it adopted
 /// that no review has checked, what it is doing, if anything, and the sorted comments waiting,
 /// which replace "up to date"; a finished PR shows `merged` or `closed` instead of its checks.
-pub fn pr_line(
+pub(crate) fn pr_line(
     pr: &PullRequest,
     unreviewed: Option<&Unreviewed>,
     keeper: Option<KeeperPart>,
@@ -215,7 +215,7 @@ fn waiting_comments(comments: &KeeperComments) -> impl Iterator<Item = (String, 
 }
 
 /// The sorted comments waiting on the ticket's PR, for its card.
-pub fn comments_lines(ticket: &Ticket) -> Option<(String, String)> {
+pub(crate) fn comments_lines(ticket: &Ticket) -> Option<(String, String)> {
     let words: Vec<String> = waiting_comments(ticket.waiting_comments()?)
         .map(|(text, _)| text)
         .collect();
@@ -236,7 +236,7 @@ fn not_reviewed(unreviewed: &Unreviewed) -> String {
 /// Adopted commits no review has checked come first, since they hold the ticket; then a try
 /// newer than the keeper's last action, which a try that was thrown away leaves as it was,
 /// shown once thrown away only while the PR's head is the try's.
-pub fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
+pub(crate) fn keeper_lines(ticket: &Ticket) -> Option<(String, String)> {
     if let Some(unreviewed) = ticket.unreviewed() {
         return Some((
             format!("{}, taken from GitHub's branch", not_reviewed(unreviewed)),
@@ -355,7 +355,7 @@ fn capitalize_first(words: &str) -> String {
 
 /// Each keeper review that was withdrawn, newest first, for the card: kept on the keeper's
 /// record and not among the ticket's cycles, with its verdicts and its findings' decisions.
-pub fn withdrawn_lines(ticket: &Ticket) -> Vec<(String, String)> {
+pub(crate) fn withdrawn_lines(ticket: &Ticket) -> Vec<(String, String)> {
     let withdrawn = ticket
         .keeper_reviews()
         .iter()
@@ -405,7 +405,7 @@ pub fn withdrawn_lines(ticket: &Ticket) -> Vec<(String, String)> {
 }
 
 /// The PR in full words, for the row's tooltip and the ticket's card.
-pub fn pr_sentence(pr: &PullRequest) -> String {
+pub(crate) fn pr_sentence(pr: &PullRequest) -> String {
     let mut parts = vec![match pr.state {
         PrState::Merged => match &pr.merge_commit {
             Some(commit) => format!(
@@ -441,7 +441,7 @@ pub fn pr_sentence(pr: &PullRequest) -> String {
 }
 
 /// When the ticket's repository last had its PRs checked, as "Checked 3m ago".
-pub fn pr_checked(snapshot: &Snapshot, ticket: &Ticket) -> Option<String> {
+pub(crate) fn pr_checked(snapshot: &Snapshot, ticket: &Ticket) -> Option<String> {
     let at = snapshot
         .pull_request_checks
         .iter()
@@ -452,7 +452,7 @@ pub fn pr_checked(snapshot: &Snapshot, ticket: &Ticket) -> Option<String> {
 
 /// One decision-ledger entry as the Tickets panel lists it.
 #[derive(Debug, PartialEq)]
-pub struct LedgerRow {
+pub(crate) struct LedgerRow {
     pub id: String,
     pub summary: String,
     /// Its location and source: "src/calls.rs:42 · Regressions · cycle 2, round 1".
@@ -462,7 +462,7 @@ pub struct LedgerRow {
     pub note: String,
 }
 
-pub fn ledger_rows(ticket: &Ticket) -> Vec<LedgerRow> {
+pub(crate) fn ledger_rows(ticket: &Ticket) -> Vec<LedgerRow> {
     ticket
         .ledger
         .iter()
@@ -491,7 +491,7 @@ pub fn ledger_rows(ticket: &Ticket) -> Vec<LedgerRow> {
 
 /// An agent's short figure: its word, or its checklist count such as "3 of 6". An idle agent
 /// with no checklist has none.
-pub fn agent_figure(agent: &AgentProgress) -> Option<String> {
+pub(crate) fn agent_figure(agent: &AgentProgress) -> Option<String> {
     match (agent.word, &agent.plan) {
         (Some(word), _) => Some(word.label().into()),
         (None, Some(plan)) => Some(format!("{} of {}", plan.done, plan.total)),
@@ -500,12 +500,12 @@ pub fn agent_figure(agent: &AgentProgress) -> Option<String> {
 }
 
 /// A sidebar row's figure for an agent's `blocked` reports its coordinator has not answered.
-pub fn questions_figure(count: u32) -> Option<String> {
+pub(crate) fn questions_figure(count: u32) -> Option<String> {
     (count > 0).then(|| counted(count as usize, "question"))
 }
 
 /// A status badge's text: the status, then any questions waiting beside it.
-pub fn badge_label(status: &str, questions: u32) -> String {
+pub(crate) fn badge_label(status: &str, questions: u32) -> String {
     match questions_figure(questions) {
         Some(figure) => format!("{status} · {figure} waiting"),
         None => status.into(),
@@ -513,7 +513,7 @@ pub fn badge_label(status: &str, questions: u32) -> String {
 }
 
 /// A ticket's short figure: "blocked", or its percentage. A striped ticket has none.
-pub fn ticket_figure(ticket: &TicketProgress) -> Option<String> {
+pub(crate) fn ticket_figure(ticket: &TicketProgress) -> Option<String> {
     match ticket.state {
         BarState::Blocked => Some("blocked".into()),
         BarState::Indeterminate => None,
@@ -522,7 +522,7 @@ pub fn ticket_figure(ticket: &TicketProgress) -> Option<String> {
 }
 
 /// A project's percentage; none while it plans with no checklist to count.
-pub fn project_figure(project: &ProjectProgress) -> Option<String> {
+pub(crate) fn project_figure(project: &ProjectProgress) -> Option<String> {
     project
         .position
         .map(|position| format!("{}%", percent(position)))
@@ -530,7 +530,7 @@ pub fn project_figure(project: &ProjectProgress) -> Option<String> {
 
 /// The coordinator's strip figure, such as "56% · 1 of 4 tickets accepted". Before any ticket
 /// exists it is the percentage alone.
-pub fn project_summary(project: &ProjectProgress) -> String {
+pub(crate) fn project_summary(project: &ProjectProgress) -> String {
     let tickets = project.tickets.len();
     let accepted = (tickets > 0).then(|| {
         format!(
@@ -544,13 +544,13 @@ pub fn project_summary(project: &ProjectProgress) -> String {
 }
 
 /// "6 agents", the crew button's label.
-pub fn crew_label(agents: usize) -> String {
+pub(crate) fn crew_label(agents: usize) -> String {
     counted(agents, "agent")
 }
 
 /// The strip's label for an agent. Only a working agent reads "Step K of N" with its current
 /// item; `None` when the agent has nothing of its own to show.
-pub fn strip_label(agent: &AgentProgress) -> Option<String> {
+pub(crate) fn strip_label(agent: &AgentProgress) -> Option<String> {
     // The item being worked on, or the finished count when every item is done.
     let step = agent.plan.as_ref().map(|plan| {
         if plan.done < plan.total {
@@ -579,7 +579,10 @@ pub fn strip_label(agent: &AgentProgress) -> Option<String> {
 
 /// The strip's figure for an agent: its own percentage, then its ticket's, such as
 /// "50% · ticket 30%". A striped ticket is named by its stage.
-pub fn strip_figure(agent: Option<&AgentProgress>, ticket: Option<&TicketProgress>) -> String {
+pub(crate) fn strip_figure(
+    agent: Option<&AgentProgress>,
+    ticket: Option<&TicketProgress>,
+) -> String {
     let own = agent
         .and_then(AgentProgress::position)
         .map(|position| format!("{}%", percent(position)));
@@ -594,7 +597,7 @@ pub fn strip_figure(agent: Option<&AgentProgress>, ticket: Option<&TicketProgres
 }
 
 /// A crew card's heading figure, such as "Verifying · 70%" or "Verifying · 80% · blocked".
-pub fn stage_figure(ticket: &TicketProgress) -> String {
+pub(crate) fn stage_figure(ticket: &TicketProgress) -> String {
     let stage = ticket.stage.label();
     let position = percent(ticket.position);
     match ticket.state {
@@ -606,7 +609,7 @@ pub fn stage_figure(ticket: &TicketProgress) -> String {
 
 /// How long the agent's run has taken, in whole minutes: since it started while the agent
 /// works, and otherwise the length of its latest run.
-pub fn elapsed_label(agent: &AgentProgress, now: i64) -> Option<String> {
+pub(crate) fn elapsed_label(agent: &AgentProgress, now: i64) -> Option<String> {
     let started = agent.run_started_at?;
     let end = if agent.working {
         now

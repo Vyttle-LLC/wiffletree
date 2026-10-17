@@ -534,7 +534,7 @@ impl Sidebar {
                     .vertical_scrollbar(&self.tree_scroll),
             )
             .child(self.workspace_nav(p, cx))
-            .child(usage_view::quota_strip(&self.shared.quotas, p, cx))
+            .child(quotas::quota_strip(&self.shared.quotas, p, cx))
             .child(
                 self.sidebar_footer(p, cx)
                     .relative()

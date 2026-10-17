@@ -38,7 +38,7 @@ impl StepUpdate {
 /// Claude stream-json. Text and thinking stream as deltas; each tool call arrives as a complete
 /// assistant block, and its result in the next user message. Subagent calls carry
 /// `parent_tool_use_id` and arrive only as complete messages.
-pub struct ClaudeSteps {
+pub(crate) struct ClaudeSteps {
     cwd: String,
     message: String,
     open_blocks: HashMap<u64, StepUpdate>,
@@ -50,7 +50,7 @@ pub struct ClaudeSteps {
     last_text: Option<String>,
 }
 impl ClaudeSteps {
-    pub fn new(cwd: &Path) -> Self {
+    pub(crate) fn new(cwd: &Path) -> Self {
         Self {
             cwd: cwd.to_string_lossy().into_owned(),
             message: String::new(),
@@ -62,7 +62,7 @@ impl ClaudeSteps {
         }
     }
 
-    pub fn event(&mut self, value: &Value) -> Vec<StepUpdate> {
+    pub(crate) fn event(&mut self, value: &Value) -> Vec<StepUpdate> {
         let parent = value["parent_tool_use_id"].as_str();
         match value["type"].as_str() {
             Some("stream_event") if parent.is_none() => self.stream(&value["event"]),
@@ -77,7 +77,7 @@ impl ClaudeSteps {
     }
 
     /// The final text: the provider's `result`, or the last text block when it has none.
-    pub fn reply(&self, result: &Value) -> Option<String> {
+    pub(crate) fn reply(&self, result: &Value) -> Option<String> {
         result["result"]
             .as_str()
             .filter(|text| !text.trim().is_empty())
@@ -199,19 +199,19 @@ impl ClaudeSteps {
 }
 
 /// Codex `exec --json`. Every item streams as started, updated and completed snapshots.
-pub struct CodexSteps {
+pub(crate) struct CodexSteps {
     cwd: String,
     last_message: Option<String>,
 }
 impl CodexSteps {
-    pub fn new(cwd: &Path) -> Self {
+    pub(crate) fn new(cwd: &Path) -> Self {
         Self {
             cwd: cwd.to_string_lossy().into_owned(),
             last_message: None,
         }
     }
 
-    pub fn event(&mut self, value: &Value) -> Vec<StepUpdate> {
+    pub(crate) fn event(&mut self, value: &Value) -> Vec<StepUpdate> {
         let completed = match value["type"].as_str() {
             Some("item.started" | "item.updated") => false,
             Some("item.completed") => true,
@@ -221,7 +221,7 @@ impl CodexSteps {
     }
 
     /// The last agent message of the turn.
-    pub fn reply(&self) -> Option<String> {
+    pub(crate) fn reply(&self) -> Option<String> {
         self.last_message.clone()
     }
 

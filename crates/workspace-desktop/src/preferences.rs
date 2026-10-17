@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Appearance {
+pub(crate) enum Appearance {
     #[default]
     System,
     Light,
@@ -12,7 +12,7 @@ pub enum Appearance {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Preferences {
+pub(crate) struct Preferences {
     /// Show a working agent's activity as one line instead of the full card.
     #[serde(default)]
     pub minimize_activity: bool,
@@ -48,7 +48,7 @@ fn appearance_or_system<'de, D: Deserializer<'de>>(input: D) -> Result<Appearanc
 
 impl Preferences {
     /// A missing or unreadable file means the defaults.
-    pub fn load(home: &Path) -> Self {
+    pub(crate) fn load(home: &Path) -> Self {
         let path = home.join("desktop-preferences.json");
         let saved = std::fs::read(&path)
             .ok()
@@ -59,7 +59,7 @@ impl Preferences {
         }
     }
     /// Replaces the file in one step, so a crash never leaves half a file behind.
-    pub fn save(&self) -> std::io::Result<()> {
+    pub(crate) fn save(&self) -> std::io::Result<()> {
         let staged = self.path.with_extension("json.tmp");
         std::fs::write(&staged, serde_json::to_vec_pretty(self)?)?;
         std::fs::rename(staged, &self.path)

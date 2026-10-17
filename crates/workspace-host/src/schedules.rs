@@ -4,7 +4,7 @@ use crate::*;
 
 const MINUTE_MS: i64 = 60_000;
 /// Shortest `every`, so a timer cannot become a wake storm.
-pub const MIN_SCHEDULE_INTERVAL_MS: i64 = 5 * MINUTE_MS;
+pub(crate) const MIN_SCHEDULE_INTERVAL_MS: i64 = 5 * MINUTE_MS;
 /// How far ahead `at` and `until` may reach.
 const MAX_HORIZON_MS: i64 = 90 * 24 * 60 * MINUTE_MS;
 /// A fire enqueued or delivered this long after its slot (the host was stopped, say) is late.

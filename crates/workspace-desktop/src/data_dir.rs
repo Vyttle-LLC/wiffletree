@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 /// Set at build time by `package_macos.sh --beta`. A beta runs beside the release app with its
 /// own store, so it never migrates or locks the store live sessions are using.
-pub fn is_beta() -> bool {
+pub(crate) fn is_beta() -> bool {
     option_env!("WIFFLETREE_CHANNEL") == Some("beta")
 }
 
-pub fn default_directory(home: &Path) -> PathBuf {
+pub(crate) fn default_directory(home: &Path) -> PathBuf {
     directory(home, is_beta())
 }
 

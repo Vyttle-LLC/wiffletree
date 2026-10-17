@@ -20,9 +20,6 @@ impl<R> Ask<R> {
     pub fn command(&self) -> &Command {
         &self.command
     }
-    pub fn into_command(self) -> Command {
-        self.command
-    }
 }
 impl<R: DeserializeOwned> Ask<R> {
     /// The host's reply to this command, as what it is.

@@ -27,14 +27,14 @@ pub(super) struct RunActivity {
     pub steps: Vec<Step>,
 }
 impl RunActivity {
-    pub fn new(session_id: &str) -> Self {
+    pub(crate) fn new(session_id: &str) -> Self {
         Self {
             session_id: session_id.into(),
             ..Default::default()
         }
     }
     /// Applies a page of changes; a different run replaces the steps shown.
-    pub fn merge(&mut self, page: StepPage) {
+    pub(crate) fn merge(&mut self, page: StepPage) {
         if page.run_id != self.run_id {
             self.steps.clear();
             self.run_id = page.run_id;
@@ -52,7 +52,7 @@ impl RunActivity {
         self.steps.sort_by_key(|s| s.seq);
     }
     /// What the card shows; nothing from a previous run while the next one starts.
-    pub fn card(&self) -> Card {
+    pub(crate) fn card(&self) -> Card {
         if !self.running {
             return Card::default();
         }
@@ -97,7 +97,7 @@ pub(super) struct StepFetch {
 impl StepFetch {
     /// Claims the next request and says how long to wait to keep `pace`, or records that
     /// one more is owed when a request is already out.
-    pub fn begin(&mut self, pace: Duration) -> Option<Duration> {
+    pub(crate) fn begin(&mut self, pace: Duration) -> Option<Duration> {
         if self.in_flight {
             self.dirty = true;
             return None;
@@ -110,7 +110,7 @@ impl StepFetch {
         Some(wait)
     }
     /// Ends the request; true when changes arrived meanwhile and another is owed.
-    pub fn finish(&mut self) -> bool {
+    pub(crate) fn finish(&mut self) -> bool {
         self.in_flight = false;
         std::mem::take(&mut self.dirty)
     }

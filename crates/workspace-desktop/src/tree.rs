@@ -4,7 +4,7 @@ use crate::wording::ticket_label;
 use std::collections::BTreeSet;
 use workspace_core::*;
 
-pub enum Row<'a> {
+pub(crate) enum Row<'a> {
     Group(Group<'a>),
     Project {
         root: &'a Session,
@@ -25,7 +25,7 @@ pub enum Row<'a> {
 
 /// Projects whose names share a first word, drawn under one row while grouping is on.
 #[derive(Debug)]
-pub struct Group<'a> {
+pub(crate) struct Group<'a> {
     /// The first word in lowercase: what the members share.
     pub key: String,
     /// The first word as the topmost member writes it.
@@ -36,7 +36,7 @@ pub struct Group<'a> {
 
 /// A top-level row of the project list.
 #[derive(Debug)]
-pub enum Entry<'a> {
+pub(crate) enum Entry<'a> {
     Project(&'a Session),
     Group(Group<'a>),
 }
@@ -48,7 +48,7 @@ fn first_word(name: &str) -> &str {
 }
 
 /// What projects in one group share: their first word, whatever its case.
-pub fn group_key(name: &str) -> String {
+pub(crate) fn group_key(name: &str) -> String {
     first_word(name).to_lowercase()
 }
 
@@ -73,7 +73,11 @@ fn member_label(name: &str) -> &str {
 /// The shown projects in the host's order. With `grouped`, two or more that share a first word,
 /// whatever its case, gather where the topmost of them is. Archived projects count only when
 /// `show_archived`.
-pub fn entries(index: &WorkspaceIndex, show_archived: bool, grouped: bool) -> Vec<Entry<'_>> {
+pub(crate) fn entries(
+    index: &WorkspaceIndex,
+    show_archived: bool,
+    grouped: bool,
+) -> Vec<Entry<'_>> {
     let mut groups: Vec<Group> = vec![];
     for project in &index.snapshot().projects {
         let Some(root) = (index.roots(&project.id)).find(|s| show_archived || !s.archived) else {
@@ -103,7 +107,7 @@ pub fn entries(index: &WorkspaceIndex, show_archived: bool, grouped: bool) -> Ve
 
 /// The most urgent state inside a collapsed group.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Rollup {
+pub(crate) enum Rollup {
     NeedsYou(usize),
     Blocked,
     Working,
@@ -111,7 +115,7 @@ pub enum Rollup {
 
 /// A collapsed group's state, from the items in it that need the human and the status each
 /// member's row shows.
-pub fn rollup(needs_you: usize, shown: &[Status]) -> Option<Rollup> {
+pub(crate) fn rollup(needs_you: usize, shown: &[Status]) -> Option<Rollup> {
     if needs_you > 0 {
         Some(Rollup::NeedsYou(needs_you))
     } else if shown.contains(&Status::Blocked) {
@@ -125,14 +129,14 @@ pub fn rollup(needs_you: usize, shown: &[Status]) -> Option<Rollup> {
 
 /// What a drag moves as one: a project by its id, or a group, by its key, with all its members.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Movable {
+pub(crate) enum Movable {
     Project(String),
     Group(String),
 }
 
 /// Where a dragged row lands among the rows it can be reordered with.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Drop {
+pub(crate) enum Drop {
     Before(Movable),
     /// After the last member of the group with this key.
     EndOfGroup(String),
@@ -142,13 +146,13 @@ pub enum Drop {
 
 /// The host command's arguments for one drop.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ProjectMove {
+pub(crate) struct ProjectMove {
     pub project_ids: Vec<String>,
     pub before: Option<String>,
 }
 
 impl Entry<'_> {
-    pub fn movable(&self) -> Movable {
+    pub(crate) fn movable(&self) -> Movable {
         match self {
             Entry::Project(root) => Movable::Project(root.project_id.clone()),
             Entry::Group(group) => Movable::Group(group.key.clone()),
@@ -224,7 +228,7 @@ fn after(entries: &[Entry], row: &Movable) -> Option<Drop> {
 /// none when it may not land there. A grouped project stays among its group's members. A group
 /// or an ungrouped project stays among the top-level rows, and over a group's member it lands
 /// below that group.
-pub fn drops(entries: &[Entry], dragged: &Movable, over: &Movable) -> Option<(Drop, Drop)> {
+pub(crate) fn drops(entries: &[Entry], dragged: &Movable, over: &Movable) -> Option<(Drop, Drop)> {
     let siblings = Siblings::of(entries, dragged)?;
     if siblings.position(over).is_some() {
         return Some((Drop::Before(over.clone()), after(entries, over)?));
@@ -236,7 +240,11 @@ pub fn drops(entries: &[Entry], dragged: &Movable, over: &Movable) -> Option<(Dr
 }
 
 /// The move that puts `dragged` at `drop`; none when it is already there or may not land there.
-pub fn project_move(entries: &[Entry], dragged: &Movable, drop: &Drop) -> Option<ProjectMove> {
+pub(crate) fn project_move(
+    entries: &[Entry],
+    dragged: &Movable,
+    drop: &Drop,
+) -> Option<ProjectMove> {
     let siblings = Siblings::of(entries, dragged)?;
     let (group, rows) = (siblings.group, &siblings.rows);
     let from = siblings.position(dragged)?;
@@ -272,7 +280,7 @@ const SCROLL_STEP: f32 = 12.;
 /// How far one tick scrolls the list while a row is dragged with the pointer at `pointer`
 /// between the list's `top` and `bottom` edges: up when negative, down when positive, and
 /// further the nearer the edge. Zero away from both edges and outside the list.
-pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
+pub(crate) fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
     if pointer < top || pointer > bottom {
         return 0.;
     }
@@ -288,14 +296,14 @@ pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
 
 /// How the press that may become a drag began on its row.
 #[derive(Clone, Copy, Default)]
-pub struct RowPress {
+pub(crate) struct RowPress {
     pub on_chevron: bool,
     pub click_count: usize,
 }
 
 /// What releasing a dragged row over itself does.
 #[derive(Debug, PartialEq, Eq)]
-pub enum OwnRelease {
+pub(crate) enum OwnRelease {
     /// The drag left its row and came back: it is cancelled.
     Nothing,
     Click,
@@ -307,7 +315,7 @@ pub enum OwnRelease {
 
 /// A drag that never left its row is a click that moved, so it does what that click would have
 /// done still; `on_chevron` is whether it was released over the row's chevron.
-pub fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRelease {
+pub(crate) fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRelease {
     if left_row {
         OwnRelease::Nothing
     } else if press.on_chevron && on_chevron {
@@ -323,7 +331,7 @@ pub fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRele
 /// hides its projects. Archived sessions appear only when `show_archived`, and accepted and
 /// closed tickets then or while an agent of theirs is listed; a ticket whose agents are all
 /// archived goes with them.
-pub fn rows<'a>(
+pub(crate) fn rows<'a>(
     index: &'a WorkspaceIndex,
     show_archived: bool,
     grouped: bool,

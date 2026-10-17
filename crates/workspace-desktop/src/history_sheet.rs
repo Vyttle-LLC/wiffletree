@@ -23,7 +23,7 @@ pub(super) struct HistorySheet {
 }
 
 impl HistorySheet {
-    pub fn new(
+    pub(crate) fn new(
         bridge: Bridge,
         session_id: &str,
         run_id: String,
@@ -43,7 +43,7 @@ impl HistorySheet {
     }
 
     /// Loads the turn's steps changed since the last page; a finished turn loads once.
-    pub fn fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let finished = self.run.run_id.is_some() && !self.run.running;
         if finished {
             return;

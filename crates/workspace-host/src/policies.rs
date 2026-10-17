@@ -278,18 +278,18 @@ pub(crate) mod legacy {
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
-    pub enum Mode {
+    pub(crate) enum Mode {
         Fixed,
         Automatic,
     }
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Profiles {
+    pub(crate) struct Profiles {
         pub provider: Provider,
         pub big: ModelProfile,
         pub small: ModelProfile,
     }
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    pub struct Policy {
+    pub(crate) struct Policy {
         pub role: Role,
         pub mode: Mode,
         pub default: ModelProfile,
@@ -303,7 +303,7 @@ pub(crate) mod legacy {
     impl Policy {
         /// What the old router gave an unassigned session of this provider; `None` when it
         /// would have refused the provider.
-        pub fn standard(&self, provider: Provider) -> Option<ModelProfile> {
+        pub(crate) fn standard(&self, provider: Provider) -> Option<ModelProfile> {
             let profile = match self.mode {
                 Mode::Fixed => self.default.clone(),
                 Mode::Automatic if !self.provider_profiles.is_empty() => self
@@ -318,7 +318,7 @@ pub(crate) mod legacy {
         }
     }
     /// A saved policy row, or `None` when there is none.
-    pub fn load(db: &Connection, role: Role) -> Result<Option<Policy>> {
+    pub(crate) fn load(db: &Connection, role: Role) -> Result<Option<Policy>> {
         let text: Option<String> = db
             .query_row(
                 "SELECT data FROM policies WHERE role=?1",
@@ -336,7 +336,7 @@ pub(crate) mod legacy {
         }
     }
     /// The first built-in policy: fixed on Codex Sol for every role.
-    pub fn codex_fixed(role: Role) -> Policy {
+    pub(crate) fn codex_fixed(role: Role) -> Policy {
         let sol = profile(Provider::Codex, "gpt-6.1-sol", "medium");
         let small = profile(Provider::Codex, "gpt-6.1-sol", "low");
         let complex = profile(Provider::Codex, "gpt-6-astra", "high");
@@ -352,7 +352,7 @@ pub(crate) mod legacy {
         }
     }
     /// The last built-in policies: coordinators and implementers fixed on Opus.
-    pub fn builtins() -> Vec<Policy> {
+    pub(crate) fn builtins() -> Vec<Policy> {
         Role::ALL
             .into_iter()
             .map(|role| {
@@ -382,7 +382,7 @@ pub(crate) mod legacy {
     }
     /// Unions every role's allowed models per provider, defaults first; default providers become
     /// role providers. Reviewers take their providers from the verifiers instead.
-    pub fn convert(policies: &[Policy], guide: String) -> ModelSelection {
+    pub(crate) fn convert(policies: &[Policy], guide: String) -> ModelSelection {
         let mut providers: BTreeMap<Provider, ProviderAccess> = PROVIDERS
             .into_iter()
             .map(|p| (p, ProviderAccess::default()))
@@ -418,7 +418,7 @@ pub(crate) mod legacy {
     }
     /// The verifiers saved with a Big or Small `size`, which model selection replaces with the
     /// coordinator's choice: (verifier, its provider, the size).
-    pub fn verifier_sizes(home: &Path) -> Vec<(VerifierConfig, String)> {
+    pub(crate) fn verifier_sizes(home: &Path) -> Vec<(VerifierConfig, String)> {
         #[derive(Deserialize)]
         struct Saved {
             #[serde(default)]
@@ -447,7 +447,7 @@ pub(crate) mod legacy {
             .unwrap_or_default()
     }
     /// The starter guide: the human's sizing intent, then every old setting as advice.
-    pub fn guide(
+    pub(crate) fn guide(
         policies: &[Policy],
         verifier_sizes: &[(VerifierConfig, String)],
         date: &str,
