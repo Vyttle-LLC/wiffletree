@@ -1,7 +1,8 @@
 //! Account quota, recorded token usage and the project event log.
 use super::*;
 use gpui_component::{Disableable, button::ButtonVariants, tooltip::Tooltip};
-use ui::{age, card, empty_state, eyebrow, hint, humanize, now, property, section, segment};
+use ui::{card, empty_state, eyebrow, hint, now, property, section, segment};
+use wording::{age, humanize};
 
 fn number(n: u64) -> String {
     let raw = n.to_string();
@@ -67,14 +68,7 @@ fn meter(used: f64, color: Hsla, p: Palette) -> Div {
         )
 }
 fn reset(window: &QuotaWindow) -> Option<String> {
-    window.resets_at.map(|reset| {
-        let minutes = (reset - now()) / 60_000;
-        if minutes <= 0 {
-            "reset due".to_owned()
-        } else {
-            format!("resets in {}h {}m", minutes / 60, minutes % 60)
-        }
-    })
+    window.resets_at.map(wording::resets_in)
 }
 /// The most-used window of a duration; Codex can report several buckets per duration.
 fn busiest(windows: &[QuotaWindow], duration_mins: u64) -> Option<&QuotaWindow> {
@@ -99,7 +93,12 @@ fn quota_pill<V: EventEmitter<Intent>>(
     let faded = window.is_none_or(stale);
     let tooltip = match (window, reading) {
         (Some(w), Some(r)) => [
-            Some(format!("{provider:?} {} · {}", w.label, remaining(w))),
+            Some(format!(
+                "{} {} · {}",
+                provider.label(),
+                w.label,
+                remaining(w)
+            )),
             reset(w),
             Some(format!(
                 "{} · {}{}",
@@ -115,7 +114,7 @@ fn quota_pill<V: EventEmitter<Intent>>(
         (None, Some(r)) => r
             .error
             .clone()
-            .unwrap_or_else(|| format!("{provider:?} reported no {short} window")),
+            .unwrap_or_else(|| format!("{} reported no {short} window", provider.label())),
         _ => "Waiting for provider telemetry".into(),
     };
     div()
@@ -176,7 +175,7 @@ pub(super) fn quota_strip<V: EventEmitter<Intent>>(
                 .flex_none()
                 .text_size(px(11.))
                 .text_color(p.subtle)
-                .child(format!("{provider:?}")),
+                .child(provider.label()),
         );
         for (duration, short) in [(300, "5h"), (10080, "wk")] {
             let window = reading.and_then(|r| busiest(&r.windows, duration));
@@ -417,7 +416,7 @@ impl UsagePage {
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(format!("{:?}", day.provider)),
+                                .child(day.provider.label()),
                         )
                         .child(hint(
                             if day.covered {
@@ -541,7 +540,11 @@ impl UsagePage {
             .flex_1()
             .min_w(px(280.))
             .child(eyebrow(
-                format!("{:?} · {} QUOTA USED PER DAY", trend.provider, trend.label),
+                format!(
+                    "{} · {} QUOTA USED PER DAY",
+                    trend.provider.label(),
+                    trend.label
+                ),
                 p,
             ))
             .child(chart)
@@ -763,7 +766,7 @@ impl UsagePage {
                     div()
                         .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("{provider:?}")),
+                        .child(provider.label()),
                 )
                 .child(
                     hint(

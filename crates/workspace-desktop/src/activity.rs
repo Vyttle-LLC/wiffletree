@@ -3,7 +3,8 @@
 use super::*;
 use gpui_component::button::ButtonVariants;
 use std::time::{Duration, Instant};
-use ui::{Spinner, icon, mono, now};
+use ui::{Spinner, icon, mono};
+use wording::{clock, counted, duration};
 
 /// Step fetches start no closer together than this, about 30 a second.
 pub(super) const STEP_PACE: Duration = Duration::from_millis(33);
@@ -195,27 +196,6 @@ pub(super) fn step_row(step: &Step, p: Palette) -> Div {
         })
 }
 
-/// Elapsed time of a running turn, "4:18".
-pub(super) fn clock(started_at: Option<i64>) -> String {
-    let seconds = started_at.map_or(0, |at| (now() - at).max(0) / 1000);
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
-/// How long a finished turn took, "42s", "9m 12s" or "1h 04m".
-pub(super) fn duration(milliseconds: i64) -> String {
-    let seconds = milliseconds.max(0) / 1000;
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
-    }
-}
-
-/// "23 steps", "1 step".
-pub(super) fn step_count(actions: usize) -> String {
-    format!("{actions} step{}", if actions == 1 { "" } else { "s" })
-}
-
 /// "Worked 9m 12s · 23 steps", above a finished turn's reply; it opens that turn's history.
 pub(super) fn turn_summary(
     summary: &RunSummary,
@@ -241,7 +221,7 @@ pub(super) fn turn_summary(
         .cursor_pointer()
         .hover(|style| style.text_color(p.text))
         .child(icon("chevron-right").size(px(12.)))
-        .child(format!("{took}{}", step_count(summary.actions)))
+        .child(format!("{took}{}", counted(summary.actions, "step")))
         .when(summary.failed > 0, |d| {
             d.child(
                 div()
@@ -264,7 +244,7 @@ pub(super) fn activity_row(
     let stats = format!(
         "· {} · {}",
         clock(card.started_at),
-        step_count(card.actions)
+        counted(card.actions, "step")
     );
     let current = card
         .current

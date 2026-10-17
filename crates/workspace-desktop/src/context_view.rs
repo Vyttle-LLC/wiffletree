@@ -2,7 +2,8 @@
 //! that asks the agent's provider to replace the conversation with a summary.
 use super::*;
 use gpui_component::{Disableable, Sizable, button::ButtonVariants};
-use ui::{Spinner, age, card, hint, icon, progress_bar, section};
+use ui::{Spinner, card, hint, icon, progress_bar, section};
+use wording::age;
 
 /// The Compact form on a session's Context card, while it is open.
 #[derive(Default)]

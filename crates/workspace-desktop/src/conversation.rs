@@ -8,7 +8,8 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use transcript::Transcript;
-use ui::{banner, effort_label, hint, icon};
+use ui::{banner, hint, icon};
+use wording::{effort_label, plural};
 
 /// Wide enough for the composer, narrow enough that message lines stay readable.
 pub(super) const COLUMN: f32 = 720.;
@@ -277,11 +278,7 @@ impl Conversation {
                     .child(icon("pause").text_color(p.focus))
                     .child(div().flex_1().child(format!(
                         "This project is stopped. {waiting} {} waiting.",
-                        if waiting == 1 {
-                            "message is"
-                        } else {
-                            "messages are"
-                        }
+                        plural(waiting, "message is", "messages are")
                     )))
                     .child(button("notice-resume").primary().label("Resume").on_click(
                         cx.listener(|v, _, w, c| {
@@ -490,7 +487,7 @@ impl Conversation {
             let model = models
                 .get(&(profile.provider, profile.model.clone()))
                 .unwrap_or(&profile.model);
-            format!("{:?} · {model}", profile.provider)
+            format!("{} · {model}", profile.provider.label())
         };
         let session_id = session.id.clone();
         let current = profile.clone();
@@ -525,7 +522,7 @@ impl Conversation {
                     let session_id = session_id.clone();
                     let weak = weak.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(format!("{provider:?} · {label}"))
+                        PopupMenuItem::new(format!("{} · {label}", provider.label()))
                             .checked(*provider == current.provider && *model == current.model)
                             .disabled(started && *provider != current.provider)
                             .on_click(move |_, w, c| {

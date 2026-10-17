@@ -31,6 +31,8 @@ mod shared;
 mod sidebar;
 mod skills_view;
 mod team_view;
+#[cfg(test)]
+mod test_support;
 mod transcript;
 mod tree;
 mod ui;

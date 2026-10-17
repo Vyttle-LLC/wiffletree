@@ -141,6 +141,11 @@ impl WorkspaceIndex {
             At::Archived(i) => &self.archive.runtimes[i],
         })
     }
+    /// A ticket agent's short name: its role, plus the focus its runtime records.
+    pub fn agent_label(&self, session: &Session) -> String {
+        let focus = self.runtime(&session.id).and_then(|r| r.focus.as_deref());
+        session.role.agent_label(focus)
+    }
     /// An unarchived session below this one, at any depth, is working.
     pub fn team_working(&self, session_id: &str) -> bool {
         self.team_working.contains(session_id)

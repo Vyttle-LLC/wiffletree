@@ -1,7 +1,8 @@
 //! Project memory: captured decisions and observations, and the attached Markdown brain.
 use super::*;
 use gpui_component::button::ButtonVariants;
-use ui::{age, card, empty_state, hint, icon, mono, pill, section, segment};
+use ui::{card, empty_state, hint, icon, mono, pill, section, segment};
+use wording::age;
 
 impl Inspector {
     fn project_brain(&self) -> Option<String> {

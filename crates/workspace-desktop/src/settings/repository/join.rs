@@ -1,7 +1,7 @@
 //! Joining a repository another Mac set up: what it holds beside this Mac, both ways to join,
 //! and afterwards what this Mac still needs.
 use super::*;
-use chrono::{DateTime, Local};
+use crate::wording::day_and_time;
 
 const STEPS: [&str; 3] = ["1 · Name it", "2 · Compare", "3 · What this Mac needs"];
 /// How this Mac joined, which says whose settings are in use.
@@ -130,17 +130,6 @@ pub(super) fn steps(current: usize, p: Palette) -> Div {
         .children(STEPS.into_iter().enumerate().map(step))
 }
 
-/// "today 14:41", or "12 Oct 14:41" on another day.
-fn day_and_time(at: i64) -> String {
-    let Some(at) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
-        return String::new();
-    };
-    match at.date_naive() == Local::now().date_naive() {
-        true => at.format("today %H:%M").to_string(),
-        false => at.format("%-d %b %H:%M").to_string(),
-    }
-}
-
 fn comparison_row(cells: [&str; 3], p: Palette) -> Div {
     let [setting, repository, this_machine] = cells.map(|cell| SharedString::from(cell.to_owned()));
     div()
@@ -220,7 +209,7 @@ fn need(icon_name: &'static str, what: StillNeed, why: Option<&'static str>, p: 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Joined, SyncShown, day_and_time, in_use, needs};
+    use super::{Joined, SyncShown, in_use, needs};
     use workspace_core::{StillNeed, WorkspacePage};
 
     #[test]
@@ -248,13 +237,6 @@ mod tests {
             ..shown
         };
         assert_eq!(needs(&allowed).len(), 1);
-    }
-
-    #[test]
-    fn the_repositorys_last_change_is_a_time_in_milliseconds() {
-        let now = chrono::Utc::now().timestamp_millis();
-        assert!(day_and_time(now).starts_with("today "));
-        assert!(!day_and_time(now - 3 * 24 * 60 * 60_000).starts_with("today "));
     }
 
     #[test]

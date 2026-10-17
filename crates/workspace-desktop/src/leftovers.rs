@@ -6,6 +6,7 @@ use gpui_component::{
 };
 use std::collections::BTreeSet;
 use ui::{hint, mono, pill, section};
+use wording::counted;
 
 /// What the human has selected from a listing. Nothing starts selected, and only clean or
 /// unpushed rows can be.
@@ -65,8 +66,8 @@ impl LeftoverSelection {
         let count = self.selected.len();
         (self.confirming && count > 0).then(|| {
             format!(
-                "Remove {count} leftover {}? Their branches and commits are kept.",
-                if count == 1 { "worktree" } else { "worktrees" }
+                "Remove {}? Their branches and commits are kept.",
+                counted(count, "leftover worktree")
             )
         })
     }

@@ -5,9 +5,8 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
-use ui::{
-    card, empty_state, eyebrow, from_now, hint, icon, mono, pill, property, section, session_icon,
-};
+use ui::{card, empty_state, eyebrow, hint, icon, mono, pill, property, section, session_icon};
+use wording::from_now;
 use wording::local_time;
 
 fn scope(role: Role) -> &'static str {
@@ -498,8 +497,10 @@ impl Inspector {
                         d.child(property(
                             "Model",
                             format!(
-                                "{:?} · {} · {}",
-                                profile.provider, profile.model, profile.effort
+                                "{} · {} · {}",
+                                profile.provider.label(),
+                                profile.model,
+                                profile.effort
                             ),
                             p,
                         ))

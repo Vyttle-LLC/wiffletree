@@ -447,6 +447,18 @@ pub enum Receipt {
     Held,
     Cancelled,
 }
+impl Receipt {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Delivered => "Delivered",
+            Self::Acknowledged => "Acknowledged",
+            Self::Completed => "Completed",
+            Self::Held => "Held",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub sequence: i64,

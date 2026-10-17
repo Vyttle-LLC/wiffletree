@@ -104,28 +104,15 @@ fn cpu_label(cpu: f64) -> String {
     }
 }
 
-/// How long a group has run: "12 s", "41 min", "1 h 16".
-fn running_label(started_micros: i64, now_millis: i64) -> String {
-    let seconds = (now_millis - started_micros / 1000).max(0) / 1000;
-    match seconds {
-        0..60 => format!("{seconds} s"),
-        60..3600 => format!("{} min", seconds / 60),
-        _ => format!("{} h {:02}", seconds / 3600, seconds % 3600 / 60),
-    }
-}
-
 fn started_label(started_micros: i64) -> String {
     chrono::DateTime::from_timestamp_micros(started_micros)
-        .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .map(|at| wording::time_of_day(at.with_timezone(&chrono::Local)))
         .unwrap_or_default()
 }
 
 /// "1 process", "8 processes".
 fn process_count(count: usize) -> String {
-    match count {
-        1 => "1 process".into(),
-        many => format!("{many} processes"),
-    }
+    format!("{count} {}", wording::plural(count, "process", "processes"))
 }
 
 /// What the panel's head says: "8 processes running", or "Nothing running".
@@ -404,7 +391,7 @@ impl Inspector {
                     .text_ellipsis()
                     .child(programs(group)),
             )
-            .child(figure(RUNNING_WIDTH, p).child(running_label(group.started, ui::now())))
+            .child(figure(RUNNING_WIDTH, p).child(wording::running_time(group.started, ui::now())))
             .child(
                 figure(CPU_WIDTH, p)
                     .when(hot, |d| {
@@ -474,7 +461,7 @@ mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
         Duration, HashMap, Instant, Page, Panel, Processes, cpu_percent, programs, rail_count,
-        reading, running_count, running_label,
+        reading, running_count,
     };
     use workspace_core::*;
 
@@ -601,16 +588,6 @@ mod tests {
         assert_eq!(programs(&build), "node, esbuild");
         let yes = group("yes", (1..=8).map(|pid| process(pid, "yes", 0)).collect());
         assert_eq!(programs(&yes), "yes");
-    }
-
-    #[test]
-    fn running_time_reads_in_seconds_minutes_then_hours() {
-        let started = 1_000_000_000_000_000;
-        let at = |seconds: i64| started / 1000 + seconds * 1000;
-        assert_eq!(running_label(started, at(12)), "12 s");
-        assert_eq!(running_label(started, at(41 * 60 + 5)), "41 min");
-        assert_eq!(running_label(started, at(76 * 60)), "1 h 16");
-        assert_eq!(running_label(started, at(125 * 60)), "2 h 05");
     }
 
     #[test]

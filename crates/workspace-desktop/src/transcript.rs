@@ -6,7 +6,8 @@ use conversation::COLUMN;
 use file_links::Linked;
 use gpui_component::button::ButtonVariants;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use ui::{age, brand_image, humanize, icon, pill, session_icon};
+use ui::{brand_image, icon, pill, session_icon};
+use wording::{age, counted, humanize};
 
 /// How a refreshed transcript page lines up with the one on screen: how many leading messages
 /// fell off the page and how many after them are unchanged. `None` when the pages don't overlap.
@@ -115,11 +116,7 @@ fn run_heading(count: usize, senders: &[SharedString]) -> String {
             names.push(sender);
         }
     }
-    format!(
-        "{count} agent message{} · {}",
-        if count == 1 { "" } else { "s" },
-        names.join(", ")
-    )
+    format!("{} · {}", counted(count, "agent message"), names.join(", "))
 }
 
 /// Messages without a sender are the human's, apart from Wiffletree's own notices.
@@ -250,7 +247,7 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
                 sender,
                 role: named(message).map(|(_, role)| *role),
                 pill,
-                receipt: format!("{:?}", message.receipt).into(),
+                receipt: message.receipt.label().into(),
                 first_line: first_line(line.text, 160).into(),
                 body: shown.then(|| Linked::new(&message.id, text, senders.bases(message))),
                 run: None,

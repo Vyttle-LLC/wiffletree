@@ -7,9 +7,10 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use ui::{
-    bar_color, brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, now, pill,
-    progress_bar, session_icon, status_glyph, status_label, ticket_state_color,
+    bar_color, brand_image, card, eyebrow, hint, icon, needs_you_badge, now, pill, progress_bar,
+    session_icon, status_glyph, ticket_state_color,
 };
+use wording::{humanize, plural, status_label};
 
 const INDENT: f32 = 14.;
 
@@ -1293,8 +1294,7 @@ impl Sidebar {
             if live { " · Running" } else { " · Stopped" },
             match attention {
                 0 => String::new(),
-                1 => " · 1 item needs you".to_owned(),
-                n => format!(" · {n} items need you"),
+                n => format!(" · {n} {} you", plural(n, "item needs", "items need")),
             }
         );
         let project = self.shared.progress.project(&project_id);
@@ -1461,7 +1461,7 @@ impl Sidebar {
                 )
             })
             .children(figure(
-                project.and_then(tree::project_figure),
+                project.and_then(wording::project_figure),
                 project.map(|project| project.state),
                 p,
             ))
@@ -1503,10 +1503,10 @@ impl Sidebar {
             .snapshot()
             .map_or(0, |s| s.questions_waiting(&session.id));
         let detail = format!(
-            "{} · {} · {:?} · {}",
+            "{} · {} · {} · {}",
             session.name,
             session.role.label(),
-            session.provider,
+            session.provider.label(),
             self.status_detail(session)
         );
         self.row(SharedString::from(format!("tree-{id}")), depth, selected, p)
@@ -1538,7 +1538,7 @@ impl Sidebar {
                         .child(waiting),
                 )
             })
-            .when_some(tree::questions_figure(questions), |d, questions| {
+            .when_some(wording::questions_figure(questions), |d, questions| {
                 d.child(
                     div()
                         .flex_none()
@@ -1558,11 +1558,11 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let coordinator = ticket.coordinator_id.clone();
-        let waiver = tree::waiver_note(ticket);
+        let waiver = wording::waiver_note(ticket);
         let state = waiver
             .clone()
             .unwrap_or_else(|| humanize(ticket.state.name()));
-        let waiting = tree::publish_waiting(ticket);
+        let waiting = wording::publish_waiting(ticket);
         // A PR or a waiting publish step adds a second line.
         let two_lines = ticket.pull_request.is_some() || waiting.is_some();
         let mut detail = format!("{label} · {state}");
@@ -1572,11 +1572,11 @@ impl Sidebar {
         }
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
-            detail.push_str(&tree::pr_sentence(pr));
+            detail.push_str(&wording::pr_sentence(pr));
             if let Some(checked) = self
                 .shared
                 .snapshot()
-                .and_then(|s| tree::pr_checked(s, ticket))
+                .and_then(|s| wording::pr_checked(s, ticket))
             {
                 detail.push('\n');
                 detail.push_str(&checked);
@@ -1726,7 +1726,7 @@ fn pr_line(
         .text_size(px(11.))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
-    for (i, part) in tree::pr_line(pr, unreviewed, keeper, comments, now())
+    for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, now())
         .into_iter()
         .enumerate()
     {
@@ -1734,12 +1734,12 @@ fn pr_line(
             line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
         }
         let color = match part.tone {
-            tree::Tone::Muted => p.subtle,
-            tree::Tone::Good => p.green,
-            tree::Tone::Bad => p.red,
-            tree::Tone::Merged => p.focus,
-            tree::Tone::Warn => p.yellow,
-            tree::Tone::Busy => p.focus,
+            wording::Tone::Muted => p.subtle,
+            wording::Tone::Good => p.green,
+            wording::Tone::Bad => p.red,
+            wording::Tone::Merged => p.focus,
+            wording::Tone::Warn => p.yellow,
+            wording::Tone::Busy => p.focus,
         };
         line = line.child(div().text_color(color).child(part.text));
     }

@@ -1,8 +1,8 @@
 //! The chosen repository: sync's status, the paused settings, Sync now and Stop syncing, and
 //! the sync mark the sidebar footer shows.
 use super::*;
+use crate::wording::{self, counted};
 use crate::workspace_notes::{self, NoteAction, OnNote};
-use chrono::{DateTime, Local};
 use ui::banner;
 
 const AN_HOUR_MS: i64 = 60 * 60_000;
@@ -81,10 +81,10 @@ impl Mark {
                 let since = status.synced_at.or(status.failing_since).unwrap_or(now);
                 format!("Not synced for {}", hours(now - since))
             }
-            Self::Paused(n) => format!("{} paused", count(*n, "setting")),
+            Self::Paused(n) => format!("{} paused", counted(*n, "setting")),
             Self::Syncing => "Syncing".into(),
             Self::Waiting if !status.waiting.is_empty() => {
-                format!("{} waiting", count(status.waiting.len(), "change"))
+                format!("{} waiting", counted(status.waiting.len(), "change"))
             }
             Self::Waiting => "Waiting to reach GitHub".into(),
             Self::NotYet => "Not synced yet".into(),
@@ -257,8 +257,8 @@ fn rows(status: &SyncStatus, p: Palette) -> Div {
 /// "1 change: Check-ins. This Mac already uses it."
 fn waiting(status: &SyncStatus) -> String {
     let settings = &status.waiting;
-    let changes = count(settings.len(), "change");
-    let uses = if settings.len() == 1 { "it" } else { "them" };
+    let changes = counted(settings.len(), "change");
+    let uses = wording::plural(settings.len(), "it", "them");
     format!(
         "{changes}: {}. This Mac already uses {uses}.",
         settings.join(", ")
@@ -441,38 +441,28 @@ fn readers(repository: &SettingsRepository) -> String {
     }
 }
 
-/// "1 change", "3 changes".
-fn count(n: usize, noun: &str) -> String {
-    match n {
-        1 => format!("1 {noun}"),
-        n => format!("{n} {noun}s"),
-    }
-}
-
 /// "3 hours", or days past two of them.
 fn hours(ms: i64) -> String {
     let hours = (ms / AN_HOUR_MS).max(1) as usize;
     match hours {
-        ..48 => count(hours, "hour"),
-        _ => count(hours / 24, "day"),
+        ..48 => counted(hours, "hour"),
+        _ => counted(hours / 24, "day"),
     }
 }
 
 /// "14:32" on this Mac's clock.
 fn clock(at: Option<i64>) -> String {
-    let at = at.and_then(DateTime::from_timestamp_millis);
-    at.map_or("—".into(), |at| {
-        at.with_timezone(&Local).format("%H:%M").to_string()
-    })
+    at.and_then(wording::local)
+        .map_or("—".into(), wording::time_of_day)
 }
 
 /// "pulled 2 changes, pushed 1".
 fn moved(pulled: usize, pushed: usize) -> String {
     match (pulled, pushed) {
         (0, 0) => "nothing to move".into(),
-        (n, 0) => format!("pulled {}", count(n, "change")),
-        (0, m) => format!("pushed {}", count(m, "change")),
-        (n, m) => format!("pulled {}, pushed {m}", count(n, "change")),
+        (n, 0) => format!("pulled {}", counted(n, "change")),
+        (0, m) => format!("pushed {}", counted(m, "change")),
+        (n, m) => format!("pulled {}, pushed {m}", counted(n, "change")),
     }
 }
 

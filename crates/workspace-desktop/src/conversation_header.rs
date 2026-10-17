@@ -238,7 +238,7 @@ impl ConversationHeader {
                 button("crew")
                     .outline()
                     .xsmall()
-                    .label(tree::crew_label(crew))
+                    .label(wording::crew_label(crew))
                     .selected(self.shared.panel == Some(Panel::Crew))
                     .tooltip("Every ticket and the agents working on it")
                     .on_click(cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Crew))))
@@ -257,7 +257,7 @@ impl ConversationHeader {
         (
             project.phase.label().into(),
             bar,
-            tree::project_summary(project),
+            wording::project_summary(project),
         )
     }
     /// An agent's own label and bar, or its ticket's stage and bar when it has nothing of
@@ -268,8 +268,8 @@ impl ConversationHeader {
             .shared
             .ticket_of(&session.id)
             .and_then(|ticket| self.shared.progress.ticket(&ticket.id));
-        let figure = tree::strip_figure(agent, ticket);
-        let own = agent.and_then(|agent| Some((tree::strip_label(agent)?, agent)));
+        let figure = wording::strip_figure(agent, ticket);
+        let own = agent.and_then(|agent| Some((wording::strip_label(agent)?, agent)));
         match (own, ticket) {
             (Some((label, agent)), _) => {
                 let bar = progress_bar(agent.position(), agent.state, STRIP_BAR, p);

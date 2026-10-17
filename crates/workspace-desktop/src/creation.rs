@@ -136,7 +136,7 @@ impl CreationForm {
                 .filter(|t| t.is_open())
                 .map(|t| Choice {
                     id: t.id.clone(),
-                    label: super::tree::ticket_label(snapshot, t),
+                    label: super::wording::ticket_label(snapshot, t),
                 })
                 .collect()
         } else {

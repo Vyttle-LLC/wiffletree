@@ -3,9 +3,10 @@
 //! earlier version from its history, and reviews or undoes a merge of a new stock version. No
 //! agent tool reaches what this page changes.
 use super::*;
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
 use ui::{card, eyebrow, hint, icon, pill};
+use wording::{counted, date_and_time, time_of_day, when};
 use workspace_core::skills::{
     Change, Entry, History, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source,
     merge_note, version,
@@ -479,19 +480,12 @@ fn list_who(state: &SkillState) -> String {
     };
     let when = match written_at(&note.entry) {
         Some(at) if at.date_naive() == Local::now().date_naive() => {
-            format!("today at {}", at.format("%H:%M"))
+            format!("today at {}", time_of_day(at))
         }
         Some(at) => format!("on {}", at.format("%-d %b at %H:%M")),
         None => format!("at {}", note.entry),
     };
     format!("{roles} · {} merged into your rewrite {when}", note.to)
-}
-
-fn counted(count: usize, noun: &str) -> String {
-    match count {
-        1 => format!("1 {noun}"),
-        count => format!("{count} {noun}s"),
-    }
 }
 
 /// "3 changes from v2, 1 passage merged by Claude · haiku · medium", the model as `model` names
@@ -663,7 +657,7 @@ pub(super) fn saved_toast(command: &Command) -> &'static str {
 /// "08:01" for an entry written today, otherwise as `entry_time`.
 fn time_or_date(name: &str) -> String {
     match written_at(name) {
-        Some(at) if at.date_naive() == Local::now().date_naive() => at.format("%H:%M").to_string(),
+        Some(at) if at.date_naive() == Local::now().date_naive() => time_of_day(at),
         _ => entry_time(name),
     }
 }
@@ -676,17 +670,7 @@ fn written_at(name: &str) -> Option<DateTime<Local>> {
 
 /// "14 Oct 09:12", or the entry's name when it is not a time.
 fn entry_time(name: &str) -> String {
-    written_at(name).map_or(name.into(), |at| at.format("%-d %b %H:%M").to_string())
-}
-
-/// "Today 08:00", "Yesterday 17:30" or "13 Oct 10:15".
-fn when(at: DateTime<Local>, today: NaiveDate) -> String {
-    let time = at.format("%H:%M");
-    match at.date_naive() {
-        day if day == today => format!("Today {time}"),
-        day if Some(day) == today.pred_opt() => format!("Yesterday {time}"),
-        _ => at.format("%-d %b %H:%M").to_string(),
-    }
+    written_at(name).map_or(name.into(), date_and_time)
 }
 
 /// What happened, as "New stock version v1 → v2".
@@ -716,8 +700,7 @@ fn entry_detail(entry: &Entry) -> String {
     }
     let rules = match rule_count(&entry.edits.rules) {
         0 => "No rules of your own".into(),
-        1 => "1 rule".into(),
-        count => format!("{count} rules"),
+        count => counted(count, "rule"),
     };
     format!("{rules} · stock {}", entry.stock_version)
 }
@@ -796,10 +779,7 @@ fn diff_row(line: &Line, added: Hsla, p: Palette) -> Div {
 
 /// "⋯ 4 lines unchanged ⋯".
 fn gap_row(count: usize, p: Palette) -> Div {
-    let unchanged = match count {
-        1 => "1 line unchanged".into(),
-        count => format!("{count} lines unchanged"),
-    };
+    let unchanged = format!("{} unchanged", counted(count, "line"));
     (div().px_2().bg(p.overlay))
         .text_color(p.subtle)
         .child(format!("⋯ {unchanged} ⋯"))
@@ -2286,9 +2266,8 @@ mod tests {
         entry_detail, entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
         merge_note_text, merged_since, out_of_date, out_of_date_title, question, question_banner,
         question_note, reset_question, rewrite_banner, rewrite_question, saved_text, shown_changes,
-        state_label, time_or_date, when, written_at,
+        state_label, time_or_date, written_at,
     };
-    use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{
         Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider,
         QuestionedPassage, Role, Skill, SkillQuestion, SkillState, Wording,
@@ -2385,16 +2364,7 @@ mod tests {
     }
 
     #[test]
-    fn entries_are_dated_today_yesterday_or_by_day() {
-        let today = NaiveDate::from_ymd_opt(2026, 10, 16).unwrap();
-        let at = |day, hour, minute| {
-            Local
-                .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
-                .unwrap()
-        };
-        assert_eq!(when(at(16, 8, 0), today), "Today 08:00");
-        assert_eq!(when(at(15, 17, 30), today), "Yesterday 17:30");
-        assert_eq!(when(at(13, 10, 15), today), "13 Oct 10:15");
+    fn an_entrys_name_is_the_time_it_was_written() {
         let written = written_at("2026-10-15T14-03-22.481Z").unwrap();
         assert_eq!(
             written.to_utc().to_rfc3339(),

@@ -7,7 +7,8 @@ use gpui_component::{
     input::Input,
     menu::{DropdownMenu, PopupMenuItem},
 };
-use ui::{age, banner, empty_state, from_now, hint, icon, mono, pill, section};
+use ui::{banner, empty_state, hint, icon, mono, pill, section};
+use wording::{age, counted, from_now};
 
 const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
 const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
@@ -740,8 +741,8 @@ fn owners_heading(entries: &OwnerEntries, allowed: &[String]) -> String {
         total += 1;
         ticked += usize::from(is_entry_allowed(entry, allowed));
     }
-    let owners = if total == 1 { "owner" } else { "owners" };
-    format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {total} {owners} allowed")
+    let owners = counted(total, "owner");
+    format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {owners} allowed")
 }
 
 /// The repository's checks command, if it has one, and the line that goes with it: its limit,
@@ -769,13 +770,11 @@ fn open_tickets<'a>(
 
 /// "1 project · 6 open tickets · 5 open PRs", counting the open PRs of open tickets.
 fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usize) -> String {
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let tickets = open_tickets(snapshot, repository).count();
     let mut counts = format!(
         "{} · {}",
-        plural(projects, "project", "projects"),
-        plural(tickets, "open ticket", "open tickets")
+        counted(projects, "project"),
+        counted(tickets, "open ticket")
     );
     let prs = open_tickets(snapshot, repository)
         .filter(|t| {
@@ -785,7 +784,7 @@ fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usi
         })
         .count();
     if tickets > 0 {
-        counts.push_str(&format!(" · {}", plural(prs, "open PR", "open PRs")));
+        counts.push_str(&format!(" · {}", counted(prs, "open PR")));
     }
     counts
 }

@@ -2,9 +2,8 @@
 use super::*;
 use gpui_component::button::ButtonVariants;
 use inspector::copyable;
-use ui::{
-    card, empty_state, hint, humanize, icon, mono, pill, section, session_icon, ticket_state_color,
-};
+use ui::{card, empty_state, hint, icon, mono, pill, section, session_icon, ticket_state_color};
+use wording::humanize;
 
 impl Inspector {
     pub(super) fn team_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -65,9 +64,7 @@ impl Inspector {
         cx: &mut Context<Self>,
     ) -> Div {
         let runtime = self.shared.runtime(&agent.id);
-        let label = agent
-            .role
-            .agent_label(runtime.and_then(|r| r.focus.as_deref()));
+        let label = index.agent_label(agent);
         let mut entry = div()
             .flex()
             .flex_col()
@@ -137,51 +134,49 @@ impl Inspector {
         };
         for ticket in tickets {
             let ticket_id = ticket.id.clone();
-            let (state, state_color) = match tree::waiver_note(ticket) {
+            let (state, state_color) = match wording::waiver_note(ticket) {
                 Some(_) => ("Accepted with waiver".to_owned(), p.yellow),
                 None => (
                     humanize(ticket.state.name()),
                     ticket_state_color(ticket.state, p),
                 ),
             };
-            let mut entry = card(p)
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(tree::ticket_label(snapshot, ticket)),
-                        )
-                        .children(warning_badge(snapshot, ticket, p))
-                        .child(pill(state, state_color)),
-                )
-                .child(hint(ticket.brief.clone(), p).line_clamp(4))
-                .child(copyable("Branch", &ticket.branch, p))
-                .children(
-                    ticket
-                        .waiver
-                        .as_ref()
-                        .map(|reason| waiver_block(ticket, reason, p)),
-                )
-                .children(
-                    ticket
-                        .pull_request
-                        .as_ref()
-                        .map(|pr| pr_block(&ticket.id, pr, tree::pr_checked(snapshot, ticket), p)),
-                )
-                .children(tree::keeper_lines(ticket).map(|lines| keeper_block(lines, p)))
-                .children(
-                    tree::withdrawn_lines(ticket)
-                        .into_iter()
-                        .map(|lines| keeper_block(lines, p)),
-                )
-                .children(tree::comments_lines(ticket).map(|lines| keeper_block(lines, p)));
-            let rounds = tree::verification_lines(ticket);
+            let mut entry =
+                card(p)
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(wording::ticket_label(snapshot, ticket)),
+                            )
+                            .children(warning_badge(snapshot, ticket, p))
+                            .child(pill(state, state_color)),
+                    )
+                    .child(hint(ticket.brief.clone(), p).line_clamp(4))
+                    .child(copyable("Branch", &ticket.branch, p))
+                    .children(
+                        ticket
+                            .waiver
+                            .as_ref()
+                            .map(|reason| waiver_block(ticket, reason, p)),
+                    )
+                    .children(ticket.pull_request.as_ref().map(|pr| {
+                        pr_block(&ticket.id, pr, wording::pr_checked(snapshot, ticket), p)
+                    }))
+                    .children(wording::keeper_lines(ticket).map(|lines| keeper_block(lines, p)))
+                    .children(
+                        wording::withdrawn_lines(ticket)
+                            .into_iter()
+                            .map(|lines| keeper_block(lines, p)),
+                    )
+                    .children(wording::comments_lines(ticket).map(|lines| keeper_block(lines, p)));
+            let rounds = wording::verification_lines(ticket);
             if !rounds.is_empty() {
                 let mut list = div().flex().flex_col().gap_1();
                 for line in rounds {
@@ -189,7 +184,7 @@ impl Inspector {
                 }
                 entry = entry.child(list);
             }
-            let ledger = tree::ledger_rows(ticket);
+            let ledger = wording::ledger_rows(ticket);
             if !ledger.is_empty() {
                 let untriaged = ledger
                     .iter()
@@ -304,7 +299,7 @@ fn pr_block(ticket_id: &str, pr: &PullRequest, checked: Option<String>, p: Palet
         .px(px(10.))
         .py(px(6.))
         .text_size(px(12.))
-        .child(tree::pr_sentence(pr))
+        .child(wording::pr_sentence(pr))
         .child(
             div()
                 .flex()
@@ -345,7 +340,7 @@ fn keeper_block((line, detail): (String, String), p: Palette) -> Div {
 }
 
 /// Each entry's id, summary, place and decision, with its status as a pill.
-fn ledger_list(rows: Vec<tree::LedgerRow>, p: Palette) -> Div {
+fn ledger_list(rows: Vec<wording::LedgerRow>, p: Palette) -> Div {
     let line = p.edge.opacity(0.5);
     let mut list = div().flex().flex_col().border_t_1().border_color(line);
     for row in rows {

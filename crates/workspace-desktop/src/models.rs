@@ -62,7 +62,7 @@ pub fn profile_label(catalog: &[ModelOption], profile: &ModelProfile) -> String 
         "{} · {} · {}",
         profile.provider.label(),
         model_label(catalog, profile.provider, &profile.model),
-        crate::ui::effort_label(&profile.effort)
+        crate::wording::effort_label(&profile.effort)
     )
 }
 
@@ -186,7 +186,7 @@ pub fn status_label(status: &ProviderStatus) -> String {
     let plan = status
         .plan
         .as_deref()
-        .map(|plan| format!(" · {} plan", crate::ui::humanize(plan)));
+        .map(|plan| format!(" · {} plan", crate::wording::humanize(plan)));
     format!("CLI found · signed in{}", plan.unwrap_or_default())
 }
 /// The one-line fix for a provider a suggested setup left out, or `None` when it is usable.

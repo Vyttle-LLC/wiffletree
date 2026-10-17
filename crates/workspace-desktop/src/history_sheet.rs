@@ -1,14 +1,12 @@
 //! One turn's full history in a sheet over the right side of the window: each narration
 //! paragraph followed by the steps that came after it, updating live while the turn runs.
 use super::*;
-use activity::{
-    RunActivity, STEP_PACE, StepFetch, clock, duration, paced_reply, state_glyph, step_count,
-    step_row,
-};
+use activity::{RunActivity, STEP_PACE, StepFetch, paced_reply, state_glyph, step_row};
 use file_links::Linked;
 use gpui_component::ActiveTheme;
 use std::{collections::HashMap, sync::Arc};
 use ui::icon;
+use wording::{clock, counted, duration};
 
 pub(super) struct HistorySheet {
     bridge: Bridge,
@@ -148,7 +146,7 @@ impl HistorySheet {
         } else {
             String::new()
         };
-        format!("{time} · {}{failed}", step_count(actions))
+        format!("{time} · {}{failed}", counted(actions, "step"))
     }
 
     fn row(&self, index: usize, p: Palette, view: WeakEntity<Self>) -> AnyElement {

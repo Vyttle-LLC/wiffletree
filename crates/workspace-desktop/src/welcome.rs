@@ -2,7 +2,8 @@
 //! instead of offering a project the host would refuse.
 use super::*;
 use gpui_component::{Disableable, button::ButtonVariants};
-use ui::{Spinner, hint, humanize, icon};
+use ui::{Spinner, hint, icon};
+use wording::humanize;
 
 /// What fills the main area while no session can be selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

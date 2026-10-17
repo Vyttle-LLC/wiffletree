@@ -8,7 +8,8 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     switch::Switch,
 };
-use ui::{card, effort_label, hint, icon};
+use ui::{card, hint, icon};
+use wording::effort_label;
 
 pub(super) fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
     div()
@@ -141,7 +142,8 @@ impl ModelsPage {
                 self.catalog_notice.push(' ');
             }
             self.catalog_notice.push_str(&format!(
-                "{provider:?} list unavailable; showing built-in and saved models."
+                "{} list unavailable; showing built-in and saved models.",
+                provider.label()
             ));
         } else {
             let catalog = Rc::make_mut(&mut self.catalog);

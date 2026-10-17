@@ -346,44 +346,6 @@ pub(super) fn now() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
-pub(super) fn age(at: i64) -> String {
-    let minutes = (now() - at).max(0) / 60_000;
-    if minutes == 0 {
-        "Just now".into()
-    } else if minutes < 60 {
-        format!("{minutes}m ago")
-    } else if minutes < 1440 {
-        format!("{}h ago", minutes / 60)
-    } else {
-        format!("{}d ago", minutes / 1440)
-    }
-}
-/// Time until a future moment, "in 25m"; "now" once it has come.
-pub(super) fn from_now(at: i64) -> String {
-    let minutes = ((at - now()).max(0) as u64).div_ceil(60_000);
-    match minutes {
-        0 => "now".into(),
-        1..60 => format!("in {minutes}m"),
-        60..1440 => format!("in {}h {:02}m", minutes / 60, minutes % 60),
-        _ => format!("in {}d", minutes / 1440),
-    }
-}
-/// Turns a host identifier such as `ready_for_testing` into a readable label.
-pub(super) fn humanize(identifier: &str) -> String {
-    let text = identifier.replace('_', " ");
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-/// Reasoning effort as shown in menus; provider identifiers such as `xhigh` are not words.
-pub(super) fn effort_label(effort: &str) -> String {
-    match effort {
-        "xhigh" => "Extra high".into(),
-        other => humanize(other),
-    }
-}
 pub(super) fn session_icon(role: Role) -> &'static str {
     match role {
         Role::ProjectOrchestrator => "project",
@@ -407,14 +369,6 @@ fn status_icon(status: Status) -> &'static str {
         Status::Done => "check",
         Status::Paused => "pause",
         Status::Disconnected => "disconnected",
-    }
-}
-/// The host calls a session whose turn was cut short "disconnected"; to the person who pressed
-/// Stop or Pause, it was interrupted.
-pub(super) fn status_label(status: Status) -> &'static str {
-    match status {
-        Status::Disconnected => "Interrupted",
-        other => other.label(),
     }
 }
 /// Working spins so activity is visible at a glance; reduced motion leaves it still.
@@ -473,7 +427,7 @@ fn badge_state(own: Status, shown: Status, compacting: bool) -> (Status, &'stati
     if compacting {
         (Status::Working, "Compacting")
     } else if shown == own {
-        (shown, status_label(shown))
+        (shown, wording::status_label(shown))
     } else {
         (shown, "Team working")
     }
@@ -498,7 +452,7 @@ pub(super) fn session_badge(shared: &Shared, session: &Session, p: Palette) -> D
     let questions = shared
         .snapshot()
         .map_or(0, |s| s.questions_waiting(&session.id));
-    status_badge(status, crate::tree::badge_label(label, questions), p)
+    status_badge(status, crate::wording::badge_label(label, questions), p)
 }
 
 /// How a cached child view is laid out: it fills its slot, which its parent sizes.
@@ -743,7 +697,7 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_state, humanize};
+    use super::badge_state;
     use workspace_core::Status;
 
     #[test]
@@ -768,14 +722,5 @@ mod tests {
             badge_state(Status::Ready, Status::Working, false),
             (Status::Working, "Team working")
         );
-    }
-
-    #[test]
-    fn host_identifiers_read_as_labels() {
-        assert_eq!(humanize("ready_for_testing"), "Ready for testing");
-        assert_eq!(humanize("accepted"), "Accepted");
-        assert_eq!(humanize(""), "");
-        assert_eq!(super::effort_label("xhigh"), "Extra high");
-        assert_eq!(super::effort_label("medium"), "Medium");
     }
 }
