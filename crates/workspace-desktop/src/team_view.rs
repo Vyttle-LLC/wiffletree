@@ -192,8 +192,9 @@ impl Inspector {
                     .count();
                 entry = entry
                     .child(
-                        section(format!("DECISION LEDGER · {}", ledger.len()), p)
-                            .child(hint(format!("{untriaged} untriaged"), p).text_size(px(11.))),
+                        section(format!("DECISION LEDGER · {}", ledger.len()), p).child(
+                            hint(format!("{untriaged} untriaged"), p).text_size(px(font::CAPTION)),
+                        ),
                     )
                     .child(ledger_list(ledger, p));
             }
@@ -271,7 +272,7 @@ fn waiver_block(ticket: &Ticket, reason: &str, p: Palette) -> Div {
         .bg(p.yellow.opacity(0.06))
         .px(px(10.))
         .py(px(6.))
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(
             div()
                 .child(
@@ -281,7 +282,7 @@ fn waiver_block(ticket: &Ticket, reason: &str, p: Palette) -> Div {
                 )
                 .child(reason.to_owned()),
         )
-        .child(hint(left, p).text_size(px(11.)))
+        .child(hint(left, p).text_size(px(font::CAPTION)))
 }
 
 /// The ticket's PR as the watcher last read it, with a link to it on GitHub.
@@ -298,14 +299,14 @@ fn pr_block(ticket_id: &str, pr: &PullRequest, checked: Option<String>, p: Palet
         .bg(p.focus.opacity(0.06))
         .px(px(10.))
         .py(px(6.))
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(wording::pr_sentence(pr))
         .child(
             div()
                 .flex()
                 .flex_wrap()
                 .gap_x(px(6.))
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .child(
                     div()
                         .id(SharedString::from(format!("pr-link-{ticket_id}")))
@@ -315,7 +316,7 @@ fn pr_block(ticket_id: &str, pr: &PullRequest, checked: Option<String>, p: Palet
                         .child("Open on GitHub")
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
-                .child(hint(details, p).text_size(px(11.))),
+                .child(hint(details, p).text_size(px(font::CAPTION))),
         )
 }
 
@@ -328,7 +329,7 @@ fn keeper_block((line, detail): (String, String), p: Palette) -> Div {
         .bg(p.accent.opacity(0.05))
         .px(px(10.))
         .py(px(6.))
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(
             div()
                 .flex()
@@ -336,12 +337,12 @@ fn keeper_block((line, detail): (String, String), p: Palette) -> Div {
                 .child(div().font_weight(FontWeight::MEDIUM).child("PR keeper"))
                 .child(div().flex_1().min_w_0().child(format!("· {line}"))),
         )
-        .child(hint(detail, p).text_size(px(11.)))
+        .child(hint(detail, p).text_size(px(font::CAPTION)))
 }
 
 /// Each entry's id, summary, place and decision, with its status as a pill.
 fn ledger_list(rows: Vec<wording::LedgerRow>, p: Palette) -> Div {
-    let line = p.edge.opacity(0.5);
+    let line = p.edge.opacity(edge::HALF);
     let mut list = div().flex().flex_col().border_t_1().border_color(line);
     for row in rows {
         let color = match row.status {
@@ -367,15 +368,15 @@ fn ledger_list(rows: Vec<wording::LedgerRow>, p: Palette) -> Div {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(div().text_size(px(12.)).child(row.summary))
+                        .child(div().text_size(px(font::SMALL)).child(row.summary))
                         .child(
                             div()
                                 .font_family(".SystemMonoFont")
-                                .text_size(px(10.5))
+                                .text_size(px(font::META))
                                 .text_color(p.subtle)
                                 .child(row.place),
                         )
-                        .child(hint(row.note, p).text_size(px(11.))),
+                        .child(hint(row.note, p).text_size(px(font::CAPTION))),
                 )
                 .child(pill(humanize(row.status.label()), color)),
         );

@@ -429,7 +429,7 @@ impl ModelsPage {
             .gap_3()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .bg(p.surface)
             .when(!enabled, |d| d.opacity(0.6))
             .child(
@@ -591,7 +591,7 @@ impl ModelsPage {
             div()
                 .flex()
                 .gap_3()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .child(
                     div()
                         .w(px(96.))

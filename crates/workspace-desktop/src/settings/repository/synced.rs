@@ -217,7 +217,7 @@ fn error_banner(error: &str, status: &SyncStatus, p: Palette) -> Div {
             .child(
                 div()
                     .font_family(".SystemMonoFont")
-                    .text_size(px(11.))
+                    .text_size(px(font::CAPTION))
                     .child(error.to_owned()),
             ),
     )
@@ -269,7 +269,7 @@ fn row(label: &'static str, value: String, p: Palette) -> Div {
     div()
         .flex()
         .gap_3()
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(
             div()
                 .w(px(110.))
@@ -318,7 +318,7 @@ impl Settings {
             .border_1()
             .border_color(p.yellow.opacity(0.4))
             .bg(p.yellow.opacity(0.07))
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .child(
                 div()
                     .flex()
@@ -341,7 +341,7 @@ impl Settings {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(note.setting.clone()),
                             )
-                            .child(hint(why, p).text_size(px(11.5))),
+                            .child(hint(why, p).text_size(px(font::DETAIL))),
                     )
                     .child(workspace_notes::compare_link(
                         note, compare, "Hide", compared, &on,
@@ -359,7 +359,7 @@ impl Settings {
             })
             .children(
                 (workspace_notes::kept_note(note, compared))
-                    .map(|kept| hint(kept, p).text_size(px(11.))),
+                    .map(|kept| hint(kept, p).text_size(px(font::CAPTION))),
             )
     }
 

@@ -50,7 +50,7 @@ pub(super) fn chip(id: impl Into<ElementId>, attachment: &Attachment, p: Palette
         .flex_none()
         .rounded_lg()
         .border_1()
-        .border_color(p.edge.opacity(0.7))
+        .border_color(p.edge.opacity(edge::FIRM))
         .bg(p.overlay)
         .overflow_hidden();
     if attachment.image.is_some() {
@@ -86,14 +86,14 @@ pub(super) fn chip(id: impl Into<ElementId>, attachment: &Attachment, p: Palette
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(font::MESSAGE))
                             .text_color(p.text)
                             .truncate()
                             .child(attachment.name()),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(font::META))
                             .text_color(p.subtle)
                             .child(file_size(attachment.size)),
                     ),

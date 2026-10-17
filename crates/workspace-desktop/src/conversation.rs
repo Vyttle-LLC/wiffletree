@@ -421,7 +421,7 @@ impl Conversation {
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(12.5))
+                        .text_size(px(font::MESSAGE))
                         .child(first_line(&item.prompt, 200)),
                 )
                 .when(total > 1, |d| {
@@ -597,7 +597,7 @@ impl Conversation {
                 .w_full()
                 .max_w(px(COLUMN))
                 .px_1()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .text_color(p.subtle)
                 .text_ellipsis()
                 .child(models::chosen_by(selection, index)),
@@ -643,7 +643,7 @@ impl Conversation {
                     .flex_col()
                     .rounded_xl()
                     .border_1()
-                    .border_color(p.edge.opacity(0.7))
+                    .border_color(p.edge.opacity(edge::FIRM))
                     .bg(p.surface)
                     .px_3()
                     .pt_2()
@@ -672,7 +672,7 @@ impl Conversation {
                                     .items_center()
                                     .child(
                                         div()
-                                            .text_size(px(10.5))
+                                            .text_size(px(font::META))
                                             .text_color(p.subtle)
                                             .child("⏎ send · ⇧⏎ newline"),
                                     )

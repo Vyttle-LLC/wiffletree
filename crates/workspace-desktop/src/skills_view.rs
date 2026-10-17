@@ -5,7 +5,7 @@
 use super::*;
 use chrono::{DateTime, Local, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
-use ui::{card, eyebrow, hint, icon, pill};
+use ui::{card, confirm_card, eyebrow, hint, icon, over_dimmed, pill, stacked_banner};
 use wording::{counted, date_and_time, time_of_day, when};
 use workspace_core::skills::{
     Change, Entry, History, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source,
@@ -718,23 +718,11 @@ fn grouped(count: usize) -> String {
     text
 }
 
-/// A banner above a skill's text, in `color`.
-fn banner(color: Hsla) -> Div {
-    div()
-        .p_3()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .rounded_lg()
-        .border_1()
-        .border_color(color.opacity(0.45))
-        .bg(color.opacity(0.09))
-        .text_size(px(12.))
-}
-
 /// A banner that only says where things stand, with no color of its own.
 fn quiet_banner(p: Palette) -> Div {
-    banner(p.edge).border_color(p.edge.opacity(0.7)).bg(p.base)
+    stacked_banner(p.edge)
+        .border_color(p.edge.opacity(edge::FIRM))
+        .bg(p.base)
 }
 
 /// A banner's first line: its `glyph` in `color`, then the title.
@@ -755,11 +743,11 @@ fn diff_block(p: Palette) -> Div {
         .flex_col()
         .rounded_md()
         .border_1()
-        .border_color(p.edge.opacity(0.55))
+        .border_color(p.edge.opacity(edge::BOX))
         .bg(p.base)
         .overflow_hidden()
         .font_family(".SystemMonoFont")
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .line_height(relative(1.55))
 }
 
@@ -1080,16 +1068,7 @@ impl SkillsPage {
             return page;
         };
         let unsaved = self.skill_draft(cx) != saved_text(state);
-        div().relative().child(page.opacity(0.35)).child(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .justify_center()
-                .pt(px(120.))
-                .child(Self::confirm_dialog(state, confirm, unsaved, p, cx)),
-        )
+        over_dimmed(page, Self::confirm_dialog(state, confirm, unsaved, p, cx))
     }
 
     fn skills_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1144,7 +1123,7 @@ impl SkillsPage {
             .gap_1()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .cursor_pointer()
             .hover(move |d| d.bg(p.overlay.opacity(0.6)))
             .on_click(cx.listener(move |v, _, w, c| v.open_skill(view, w, c)))
@@ -1158,7 +1137,7 @@ impl SkillsPage {
                     .child(state),
             )
             .child(hint(what, p))
-            .child(hint(who, p).text_size(px(11.)))
+            .child(hint(who, p).text_size(px(font::CAPTION)))
     }
 
     /// "Skills · <name>", where Skills goes back to the list, or "Skills · <skill> · History",
@@ -1175,7 +1154,7 @@ impl SkillsPage {
         let crumb = div()
             .flex()
             .gap_1()
-            .text_size(px(11.))
+            .text_size(px(font::CAPTION))
             .text_color(p.subtle)
             .child(link("skills-crumb", SkillView::List, "Skills"));
         let (skill, below) = match self.skill_view {
@@ -1197,7 +1176,7 @@ impl SkillsPage {
             .child(icon(glyph))
             .child(
                 div()
-                    .text_size(px(16.))
+                    .text_size(px(font::HEADING))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(name),
             )
@@ -1209,9 +1188,9 @@ impl SkillsPage {
             .p_3()
             .rounded_md()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .bg(p.surface)
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .line_height(relative(1.5))
             .child(text.into())
     }
@@ -1367,7 +1346,7 @@ impl SkillsPage {
                 .border_1()
                 .border_color(p.edge)
                 .overflow_hidden()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .child(mode("rules-mode", "Add your own rules", !rewritten))
                 .child(rewrite.border_l_1().border_color(p.edge)),
         )
@@ -1396,40 +1375,8 @@ impl SkillsPage {
             Confirm::Undo { .. } => act.primary().label("Undo merge"),
             Confirm::Restore { .. } => act.primary().label("Restore"),
         };
-        div().w(px(380.)).h_full().flex().flex_col().child(
-            div()
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .rounded_xl()
-                .border_1()
-                .border_color(p.edge)
-                .bg(p.surface)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(ask),
-                )
-                .child(hint(what, p))
-                .child(hint(kept, p))
-                .child(
-                    div()
-                        .pt_2()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            button("cancel-skill")
-                                .ghost()
-                                .label("Cancel")
-                                .on_click(cx.listener(move |v, _, _, c| close(v, c))),
-                        )
-                        .child(act),
-                ),
-        )
+        let cancel = button("cancel-skill").on_click(cx.listener(move |v, _, _, c| close(v, c)));
+        confirm_card(ask, [what, kept], cancel, act, p).w(px(380.))
     }
 
     /// The note of the merge the skill holds now, with Review changes, Undo and Dismiss.
@@ -1445,7 +1392,7 @@ impl SkillsPage {
         let at = written_at(&note.entry)
             .map_or(note.entry.clone(), |at| when(at, Local::now().date_naive()));
         let (review, undo, dismiss) = (note.entry.clone(), note.clone(), note.entry.clone());
-        banner(p.green)
+        stacked_banner(p.green)
             .child(
                 div()
                     .flex()
@@ -1575,9 +1522,9 @@ impl SkillsPage {
                 (quiet_banner(p), Some(("git-merge", p.subtle)))
             }
             Some(MergeStanding::Failed { .. } | MergeStanding::NeedsModel { .. }) => {
-                (banner(p.yellow), Some(("alert", p.yellow)))
+                (stacked_banner(p.yellow), Some(("alert", p.yellow)))
             }
-            None => (banner(p.yellow), None),
+            None => (stacked_banner(p.yellow), None),
         };
         let title = match head {
             Some((glyph, color)) => banner_head(glyph, color, title),
@@ -1614,7 +1561,7 @@ impl SkillsPage {
         let passage = |index: usize, choice: &Choice<'_>| {
             let wording = |label: String, text: &str| {
                 (div().flex_1().min_w_0().flex().flex_col().gap_1())
-                    .child(hint(label, p).text_size(px(11.)))
+                    .child(hint(label, p).text_size(px(font::CAPTION)))
                     .child(Self::read_only_text(text.trim_end().to_owned(), p))
             };
             (div().flex().flex_col().gap_1())
@@ -1690,7 +1637,7 @@ impl SkillsPage {
             p,
             cx,
         );
-        (banner(p.yellow).child(banner_head("alert", p.yellow, title)))
+        (stacked_banner(p.yellow).child(banner_head("alert", p.yellow, title)))
             .child(hint(text, p))
             .child(wordings)
     }
@@ -1719,17 +1666,20 @@ impl SkillsPage {
                     .child(hint("Workspace · skill update", p))
                     .child(pill("Needs you", p.yellow)),
             )
-            .child(div().text_size(px(13.)).line_height(relative(1.5)).child(
-                StyledText::new(text).with_highlights([(
-                    0..setting.len(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                )]),
-            ))
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(StyledText::new(text).with_highlights([(
+                        0..setting.len(),
+                        HighlightStyle {
+                            font_weight: Some(FontWeight::SEMIBOLD),
+                            ..Default::default()
+                        },
+                    )])),
+            )
             .child(wordings)
-            .child(hint(either, p).text_size(px(11.)))
+            .child(hint(either, p).text_size(px(font::CAPTION)))
     }
 
     /// What changed from the rewrite's base to the stock text, as removed and added lines.
@@ -2005,8 +1955,8 @@ impl SkillsPage {
             .flex_col()
             .gap_1()
             .border_t_1()
-            .border_color(p.edge.opacity(0.3))
-            .text_size(px(12.))
+            .border_color(p.edge.opacity(edge::SEPARATOR))
+            .text_size(px(font::SMALL))
             .child(
                 div()
                     .flex()
@@ -2015,7 +1965,7 @@ impl SkillsPage {
                         div()
                             .w(px(104.))
                             .flex_none()
-                            .text_size(px(11.))
+                            .text_size(px(font::CAPTION))
                             .text_color(p.subtle)
                             .child(at),
                     )
@@ -2188,7 +2138,7 @@ impl SkillsPage {
                     models_view::card_title(title, from, p).child(
                         div()
                             .id("edit-in-models")
-                            .text_size(px(12.))
+                            .text_size(px(font::SMALL))
                             .text_color(p.focus)
                             .cursor_pointer()
                             .on_click(

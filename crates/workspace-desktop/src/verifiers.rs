@@ -400,7 +400,7 @@ impl VerifierEditor {
                 div()
                     .flex()
                     .gap(px(6.))
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .child(lead("Use it", p))
                     .child(div().min_w_0().child(level.use_when.clone())),
             )
@@ -479,7 +479,7 @@ impl VerifierEditor {
             .flex_col()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .bg(p.surface);
         for (index, level) in verification.levels.iter().enumerate() {
             levels = levels.child(match &self.level_form {
@@ -514,7 +514,7 @@ fn level_group(p: Palette) -> Div {
         .flex_col()
         .gap(px(7.))
         .border_b_1()
-        .border_color(p.edge.opacity(0.25))
+        .border_color(p.edge.opacity(edge::HAIRLINE))
 }
 
 /// The label that starts a level's "Runs" and "Use it" rows.
@@ -522,7 +522,7 @@ fn lead(label: &'static str, p: Palette) -> Div {
     div()
         .w(px(54.))
         .flex_none()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(p.subtle)
         .child(label)
 }
@@ -547,7 +547,7 @@ fn chip(id: SharedString, focus: &str, on: bool, p: Palette) -> Stateful<Div> {
         .py(px(2.))
         .rounded_full()
         .border_1()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .cursor_pointer()
         .map(|chip| match on {
             true => chip

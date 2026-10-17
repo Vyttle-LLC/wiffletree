@@ -1,5 +1,5 @@
 use super::bridge::Bridge;
-use super::ui::Spinner;
+use super::ui::{Spinner, font};
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, IconName, IndexPath, Selectable, Sizable,
@@ -334,7 +334,7 @@ impl CreationForm {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .font_weight(FontWeight::MEDIUM)
                     .child(label),
             )
@@ -476,7 +476,7 @@ impl CreationForm {
 
     fn note(text: impl Into<SharedString>, cx: &App) -> Div {
         div()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .line_height(relative(1.5))
             .text_color(cx.theme().muted_foreground)
             .child(text.into())
@@ -705,7 +705,7 @@ impl CreationForm {
                     .rounded_md()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .child(div().min_w_0().text_ellipsis().child(path.clone()))
                     .child(
                         super::button(SharedString::from(format!("remove-folder-{path}")))
@@ -861,7 +861,7 @@ impl Render for CreationForm {
             .flex()
             .flex_col()
             .gap_4()
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .child(Self::note(
                 if self.project_id.is_some() {
                     format!("In {}", self.project_name)

@@ -6,7 +6,7 @@ use super::*;
 use gpui_component::{ActiveTheme, Disableable};
 use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
-use ui::{hint, icon, mono, section, segment, setting};
+use ui::{hint, icon, mono, over_dimmed, section, segment, setting};
 
 /// The open Settings window, so ⌘, focuses it instead of opening a second one.
 #[derive(Clone)]
@@ -233,7 +233,7 @@ impl Settings {
             )
             .children(self.folder_error.clone().map(|error| {
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .line_height(relative(1.5))
                     .text_color(p.red)
                     .child(error)
@@ -335,7 +335,7 @@ impl Render for Settings {
             .bg(p.base)
             .text_color(p.text)
             .font_family(".SystemUIFont")
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .flex()
             .flex_col()
             .child(
@@ -349,7 +349,7 @@ impl Render for Settings {
                 ),
             )
             .child({
-                let rule = || div().h(px(1.)).bg(p.edge.opacity(0.25));
+                let rule = || div().h(px(1.)).bg(p.edge.opacity(edge::HAIRLINE));
                 let body = div()
                     .id("settings-body")
                     .size_full()
@@ -368,20 +368,9 @@ impl Render for Settings {
                     .child(self.repository_section(p, cx));
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
-                let shown = div().flex_1().min_h_0().relative();
                 match dialog {
-                    Some(dialog) => shown.child(body.opacity(0.35)).child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .occlude()
-                            .flex()
-                            .items_start()
-                            .justify_center()
-                            .pt(px(120.))
-                            .child(dialog),
-                    ),
-                    None => shown.child(body),
+                    Some(dialog) => over_dimmed(body, dialog).flex_1().min_h_0(),
+                    None => div().flex_1().min_h_0().relative().child(body),
                 }
             })
     }

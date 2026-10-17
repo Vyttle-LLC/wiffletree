@@ -30,9 +30,9 @@ impl Settings {
             joining.last_machine,
             day_and_time(joining.last_changed_at)
         );
-        let mut table = div().flex().flex_col().text_size(px(12.)).child(
+        let mut table = div().flex().flex_col().text_size(px(font::SMALL)).child(
             comparison_row(["SETTING", "IN THE REPOSITORY", "ON THIS MAC"], p)
-                .text_size(px(10.))
+                .text_size(px(font::TINY))
                 .text_color(p.subtle),
         );
         for setting in &joining.settings {
@@ -119,14 +119,18 @@ pub(super) fn steps(current: usize, p: Palette) -> Div {
             .px_2()
             .rounded_full()
             .border_1()
-            .border_color(if on { p.focus } else { p.edge.opacity(0.6) })
+            .border_color(if on {
+                p.focus
+            } else {
+                p.edge.opacity(edge::STRONG)
+            })
             .text_color(if on { p.text } else { p.subtle })
             .child(label)
     };
     div()
         .flex()
         .gap_1p5()
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .children(STEPS.into_iter().enumerate().map(step))
 }
 
@@ -137,7 +141,7 @@ fn comparison_row(cells: [&str; 3], p: Palette) -> Div {
         .gap_2()
         .py_1()
         .border_b_1()
-        .border_color(p.edge.opacity(0.25))
+        .border_color(p.edge.opacity(edge::HAIRLINE))
         .child(
             div()
                 .w(px(150.))
@@ -190,9 +194,9 @@ fn need(icon_name: &'static str, what: StillNeed, why: Option<&'static str>, p: 
         .gap_2()
         .rounded_lg()
         .border_1()
-        .border_color(p.edge.opacity(0.55))
+        .border_color(p.edge.opacity(edge::BOX))
         .bg(p.surface)
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(icon(icon_name).size(px(14.)).mt(px(2.)).text_color(color))
         .child(
             div()

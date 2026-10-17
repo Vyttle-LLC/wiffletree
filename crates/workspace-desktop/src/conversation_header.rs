@@ -3,9 +3,8 @@
 //! keystroke in the composer or frame of another view's spinner.
 use super::*;
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
-use ui::{icon, progress_bar, segmented_bar};
+use ui::{HEADER_HEIGHT, icon, page_header, progress_bar, segmented_bar};
 
-const HEADER_HEIGHT: f32 = 64.;
 /// The progress strip never changes height, so the transcript below it never moves.
 const STRIP_HEIGHT: f32 = 36.;
 const STRIP_BAR: f32 = 6.;
@@ -100,37 +99,10 @@ impl ConversationHeader {
         } else {
             session.name.clone()
         };
-        div()
-            .flex_none()
-            .h(px(64.))
+        let eyebrow = div().text_ellipsis().child(self.breadcrumb(session));
+        page_header(eyebrow, div().text_ellipsis().child(title), p)
             .px_6()
-            .flex()
-            .items_center()
             .gap_3()
-            .border_b_1()
-            .border_color(p.edge.opacity(0.3))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(p.subtle)
-                            .text_ellipsis()
-                            .child(self.breadcrumb(session)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_ellipsis()
-                            .child(title),
-                    ),
-            )
             .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
                 chip.on_click(cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Overview))))
             }))
@@ -216,8 +188,8 @@ impl ConversationHeader {
             .gap_3()
             .bg(p.surface)
             .border_b_1()
-            .border_color(p.edge.opacity(0.3))
-            .text_size(px(12.));
+            .border_color(p.edge.opacity(edge::SEPARATOR))
+            .text_size(px(font::SMALL));
         let (label, bar, figure) = match project {
             Some(project) => self.project_strip(project, p),
             None => self.agent_strip(session, p),

@@ -295,7 +295,7 @@ impl Inspector {
                 .justify_between()
                 .gap_2()
                 .border_b_1()
-                .border_color(p.edge.opacity(0.3))
+                .border_color(p.edge.opacity(edge::SEPARATOR))
                 .child(hint(running_count(count), p))
                 .children(stop_all),
         )
@@ -332,7 +332,7 @@ impl Inspector {
                         .flex()
                         .justify_between()
                         .gap_2()
-                        .text_size(px(12.))
+                        .text_size(px(font::SMALL))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(p.subtle)
                         .child(div().min_w_0().text_ellipsis().child(agent.name.clone()))
@@ -365,7 +365,7 @@ impl Inspector {
             return line(p)
                 .py(px(6.))
                 .flex_col()
-                .child(div().text_size(px(12.5)).child(format!("Process group {}", group.group)))
+                .child(div().text_size(px(font::MESSAGE)).child(format!("Process group {}", group.group)))
                 .child(hint(
                     "Wiffletree can't confirm these are still this agent's processes, so it won't stop them.",
                     p,
@@ -418,7 +418,7 @@ impl Inspector {
             );
         line(p).py(px(6.)).flex_col().child(figures).child(
             div()
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .text_color(p.subtle)
                 .child(group_detail(group)),
         )
@@ -431,8 +431,8 @@ fn line(p: Palette) -> Div {
         .w_full()
         .flex()
         .border_t_1()
-        .border_color(p.edge.opacity(0.4))
-        .text_size(px(12.5))
+        .border_color(p.edge.opacity(edge::CARD))
+        .text_size(px(font::MESSAGE))
 }
 
 fn figure(width: f32, p: Palette) -> Div {
@@ -448,7 +448,7 @@ fn column_heads(p: Palette) -> Div {
         .flex()
         .gap(px(10.))
         .pb_1()
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .text_color(p.subtle)
         .child(div().flex_1().child("Program"))
         .child(figure(RUNNING_WIDTH, p).child("Running"))

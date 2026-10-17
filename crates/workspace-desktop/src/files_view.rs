@@ -489,7 +489,7 @@ fn file_name(name: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .min_w_0()
         .font_family(".SystemMonoFont")
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .text_color(color)
         .text_ellipsis()
         .child(name.into())
@@ -619,7 +619,7 @@ impl Inspector {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .text_size(px(13.))
+                .text_size(px(font::TEXT))
                 .child(tree)
                 .vertical_scrollbar(&files.list),
         )
@@ -660,7 +660,7 @@ impl Inspector {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(px(font::META))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(p.subtle)
                         .child(stat.clone()),
@@ -708,7 +708,7 @@ impl Inspector {
             .gap(px(6.))
             .rounded_md()
             .cursor_pointer()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .hover(move |d| d.bg(p.overlay))
             .on_click(move |_, _, cx| {
@@ -747,7 +747,7 @@ impl Inspector {
                         .flex_none()
                         .flex()
                         .gap_1()
-                        .text_size(px(10.5))
+                        .text_size(px(font::META))
                         .child(div().text_color(p.green).child(format!("+{added}")))
                         .child(div().text_color(p.red).child(format!("−{removed}"))),
                 )
@@ -767,7 +767,7 @@ impl Inspector {
                         .rounded_sm()
                         .bg(fill)
                         .text_color(text)
-                        .text_size(px(10.5))
+                        .text_size(px(font::META))
                         .text_ellipsis()
                         .child(who),
                 )
@@ -817,7 +817,7 @@ impl Inspector {
                 .flex_col()
                 .gap_2()
                 .border_b_1()
-                .border_color(p.edge.opacity(0.3))
+                .border_color(p.edge.opacity(edge::SEPARATOR))
                 .child(hint(summary, p))
                 .child(choices),
         )
@@ -837,8 +837,8 @@ impl Inspector {
             .flex()
             .flex_col()
             .border_t_1()
-            .border_color(p.edge.opacity(0.3))
-            .text_size(px(11.5))
+            .border_color(p.edge.opacity(edge::SEPARATOR))
+            .text_size(px(font::DETAIL))
             .text_color(p.subtle);
         for entry in live.iter().take(MAX_LIVE) {
             let (verb, color) = doing(entry.writing, p);

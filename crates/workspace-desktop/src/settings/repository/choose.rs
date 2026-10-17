@@ -52,7 +52,7 @@ impl Settings {
             .child(heading("Not syncing", p.subtle, p))
             .child(hint(INTRO, p))
             .child(field)
-            .child(hint(NO_REPOSITORY, p).text_size(px(11.)));
+            .child(hint(NO_REPOSITORY, p).text_size(px(font::CAPTION)));
         match found {
             Some(card) => section.child(card),
             None => section.child(what_is_shared(p)),
@@ -100,16 +100,16 @@ fn what_is_shared(p: Palette) -> Div {
             .gap(px(2.))
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.55))
+            .border_color(p.edge.opacity(edge::BOX))
             .bg(p.surface)
-            .text_size(px(11.5))
+            .text_size(px(font::DETAIL))
             .line_height(relative(1.4))
             .child(
                 div()
                     .flex()
                     .items_start()
                     .gap_1p5()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .font_weight(FontWeight::MEDIUM)
                     .child(
                         icon(icon_name)

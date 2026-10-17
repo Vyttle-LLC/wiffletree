@@ -166,7 +166,7 @@ fn notice(color: Hsla) -> Div {
         .border_color(color)
         .rounded_r(px(6.))
         .bg(color.opacity(0.07))
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
 }
 
 fn notice_title(title: &'static str) -> Div {
@@ -182,7 +182,7 @@ fn below_measurement(p: Palette) -> Div {
     div()
         .pt(px(9.))
         .border_t_1()
-        .border_color(p.edge.opacity(0.4))
+        .border_color(p.edge.opacity(edge::CARD))
 }
 
 fn percent(tokens: u64, window: u64) -> u64 {
@@ -314,7 +314,7 @@ impl Contexts {
                 .cursor_pointer()
                 .bg(color.opacity(0.10))
                 .text_color(color)
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .hover(move |d| d.bg(color.opacity(0.18)))
                 .tooltip(move |w, c| {
                     gpui_component::tooltip::Tooltip::new("Context window in use").build(w, c)
@@ -534,7 +534,7 @@ impl Inspector {
                             div()
                                 .flex()
                                 .gap_1()
-                                .text_size(px(12.))
+                                .text_size(px(font::SMALL))
                                 .child(div().font_weight(FontWeight::MEDIUM).child("What to keep"))
                                 .child(div().text_color(p.subtle).child("· optional")),
                         )
@@ -602,14 +602,14 @@ impl Inspector {
             .flex()
             .rounded(px(3.))
             .overflow_hidden()
-            .bg(p.edge.opacity(0.3));
+            .bg(p.edge.opacity(edge::SEPARATOR));
         let mut legend = div().flex().flex_wrap().gap_x_3().gap_y_1();
         let entry = |color: Hsla, name: &str, tokens: u64| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .child(swatch(color))
                 .child(div().text_color(p.subtle).child(name.to_lowercase()))
                 .child(
@@ -631,7 +631,7 @@ impl Inspector {
             legend = legend.child(entry(color, &category.name, category.tokens));
         }
         let free = usage.window.saturating_sub(usage.used);
-        legend = legend.child(entry(p.edge.opacity(0.6), "Free", free));
+        legend = legend.child(entry(p.edge.opacity(edge::STRONG), "Free", free));
         div().flex().flex_col().gap_2().child(bar).child(legend)
     }
 
@@ -696,7 +696,7 @@ impl Inspector {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_size(px(15.))
+                                    .text_size(px(font::HEADING_SMALL))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(compact_tokens(usage.used)),
                             )
@@ -708,7 +708,7 @@ impl Inspector {
                                     .rounded_md()
                                     .bg(color.opacity(0.15))
                                     .text_color(color)
-                                    .text_size(px(12.))
+                                    .text_size(px(font::SMALL))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(format!("{filled}%")),
                             ),

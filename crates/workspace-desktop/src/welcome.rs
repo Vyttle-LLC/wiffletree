@@ -63,7 +63,11 @@ fn step(number: usize, title: &'static str, next: bool, body: Option<Div>, p: Pa
         .gap(px(10.))
         .rounded_lg()
         .border_1()
-        .border_color(if next { p.accent } else { p.edge.opacity(0.6) })
+        .border_color(if next {
+            p.accent
+        } else {
+            p.edge.opacity(edge::STRONG)
+        })
         .bg(p.surface)
         .when(!next, |d| d.opacity(0.55))
         .child(
@@ -78,7 +82,7 @@ fn step(number: usize, title: &'static str, next: bool, body: Option<Div>, p: Pa
                 .border_1()
                 .border_color(color)
                 .text_color(color)
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .child(number.to_string()),
         )
         .child(

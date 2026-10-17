@@ -163,7 +163,7 @@ impl HistorySheet {
             StepKind::Thinking => div()
                 .w_full()
                 .pt_2()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .italic()
                 .text_color(p.subtle)
                 .child(step.title.clone())
@@ -234,12 +234,17 @@ fn detail(step: &Step, p: Palette) -> Div {
         .flex_col()
         .gap_1()
         .when_some(omitted, |d, note| {
-            d.child(div().text_size(px(10.5)).text_color(p.subtle).child(note))
+            d.child(
+                div()
+                    .text_size(px(font::META))
+                    .text_color(p.subtle)
+                    .child(note),
+            )
         })
         .child(
             div()
                 .font_family(".SystemMonoFont")
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .text_color(p.subtle)
                 .child(step.detail.clone().unwrap_or_default()),
         )
@@ -261,7 +266,7 @@ impl Render for HistorySheet {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .text_color(p.subtle)
                     .child(if running {
                         state_glyph(StepState::Running, p)

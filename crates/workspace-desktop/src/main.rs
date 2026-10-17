@@ -56,6 +56,7 @@ use palette::{Palette, palette};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
 use shared::{Amendment, HumanWrote, Intent, Requests, Shared, toast, toast_error};
+use ui::{button, edge, font};
 // GPUI has an `Inspector` too; ours wins over its glob.
 use inspector::Inspector;
 use std::{
@@ -150,10 +151,6 @@ enum Page {
     Models,
     Skills,
     Repositories,
-}
-
-fn button(id: impl Into<ElementId>) -> Button {
-    Button::new(id).small()
 }
 
 struct Workspace {
@@ -912,7 +909,7 @@ fn apply_theme(cx: &mut App) {
         theme.font_size = px(14.);
         theme.colors.background = p.base;
         theme.colors.foreground = p.text;
-        theme.colors.border = p.edge.opacity(0.5);
+        theme.colors.border = p.edge.opacity(edge::HALF);
         theme.colors.popover = p.surface;
         theme.colors.popover_foreground = p.text;
         theme.colors.list_active = p.overlay;
@@ -944,7 +941,7 @@ fn apply_theme(cx: &mut App) {
         theme.colors.input = p.edge;
         theme.colors.ring = p.focus;
         theme.colors.title_bar = p.surface;
-        theme.colors.title_bar_border = p.edge.opacity(0.35);
+        theme.colors.title_bar_border = p.edge.opacity(edge::LIGHT);
         theme.colors.danger = p.red;
         theme.colors.success = p.green;
         theme.colors.warning = p.yellow;

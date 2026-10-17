@@ -55,7 +55,7 @@ impl Render for ProjectDrag {
             .border_color(p.edge)
             .bg(p.surface)
             .shadow_md()
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .text_color(p.text)
             .child(
                 div()
@@ -552,7 +552,7 @@ impl Sidebar {
             .flex_col()
             .gap(px(1.))
             .border_t_1()
-            .border_color(p.edge.opacity(0.35))
+            .border_color(p.edge.opacity(edge::LIGHT))
             .child(div().px_2().pb_1().child(eyebrow("WORKSPACE", p)));
         for (page, label, glyph) in [
             (Page::Repositories, "Repositories", "folder"),
@@ -596,7 +596,7 @@ impl Sidebar {
             .items_center()
             .justify_between()
             .border_t_1()
-            .border_color(p.edge.opacity(0.35))
+            .border_color(p.edge.opacity(edge::LIGHT))
             .child(
                 match self.update.as_ref().filter(|_| self.update_card_dismissed) {
                     Some(staged) => button("restart-to-update")
@@ -612,7 +612,7 @@ impl Sidebar {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.subtle)
                         .child(div().flex_none().size(px(6.)).rounded_full().bg(p.green))
                         .child(div().min_w_0().truncate().child("Local workspace"))
@@ -632,7 +632,7 @@ impl Sidebar {
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
-                            .text_size(px(11.))
+                            .text_size(px(font::CAPTION))
                             .text_color(p.subtle)
                             .hover(|d| d.text_color(p.text))
                             .child(if self.checking_update {
@@ -669,7 +669,7 @@ impl Sidebar {
                 .py(px(2.))
                 .rounded_md()
                 .cursor_pointer()
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .text_color(tint.unwrap_or(p.subtle))
                 .when_some(tint, |d, tint| d.bg(tint.opacity(0.12)))
                 .child(icon(mark.icon()).size(px(13.)))
@@ -708,7 +708,7 @@ impl Sidebar {
                                 .justify_between()
                                 .child(
                                     div()
-                                        .text_size(px(12.))
+                                        .text_size(px(font::SMALL))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(format!("Wiffletree {} is ready", staged.version)),
                                 )
@@ -727,7 +727,7 @@ impl Sidebar {
                         .when_some(staged.summary.clone(), |d, summary| {
                             d.child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(px(font::SMALL))
                                     .line_height(relative(1.45))
                                     .text_color(p.subtle)
                                     .line_clamp(4)
@@ -740,7 +740,7 @@ impl Sidebar {
                                 div()
                                     .id("changelog")
                                     .cursor_pointer()
-                                    .text_size(px(12.))
+                                    .text_size(px(font::SMALL))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.accent)
                                     .hover(|d| d.underline())
@@ -1134,7 +1134,7 @@ impl Sidebar {
         let row = self
             .row(SharedString::from(format!("group-{key}")), 0, false, p)
             .pl(inset(0, false) - px(4.))
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .on_click(cx.listener(move |v, _, _, c| v.toggle_group(&toggle, c)))
@@ -1167,7 +1167,7 @@ impl Sidebar {
                 div()
                     .flex_none()
                     .font_family(".SystemMonoFont")
-                    .text_size(px(10.5))
+                    .text_size(px(font::META))
                     .child(count.to_string()),
             )
             .children(state.map(|state| div().flex_none().child(state)));
@@ -1249,7 +1249,7 @@ impl Sidebar {
             .pl(inset(depth, false))
             .pr_2()
             .rounded_md()
-            .text_size(px(12.5))
+            .text_size(px(font::MESSAGE))
             .when(selected, |d| d.bg(p.overlay))
             .text_color(if depth >= 2 && !selected {
                 p.subtle
@@ -1313,7 +1313,7 @@ impl Sidebar {
             .flex_wrap()
             .gap_y(px(3.))
             .pl(inset(0, grouped) - px(4.))
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .when(root.archived, |d| d.opacity(0.55))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .capture_any_mouse_down(cx.listener(|v, event: &MouseDownEvent, _, _| {
@@ -1340,7 +1340,7 @@ impl Sidebar {
                     .justify_center()
                     .rounded_sm()
                     .text_color(p.subtle)
-                    .hover(move |d| d.bg(p.edge.opacity(0.5)))
+                    .hover(move |d| d.bg(p.edge.opacity(edge::HALF)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|v, _, _, _| v.row_press.on_chevron = true),
@@ -1533,7 +1533,7 @@ impl Sidebar {
                 d.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.subtle)
                         .child(waiting),
                 )
@@ -1542,7 +1542,7 @@ impl Sidebar {
                 d.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.subtle)
                         .child(questions),
                 )
@@ -1630,7 +1630,7 @@ impl Sidebar {
                 }))
                 .children(waiting.map(|waiting| {
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.yellow)
                         .text_ellipsis()
                         .child(waiting)
@@ -1690,7 +1690,7 @@ fn figure(text: Option<String>, state: Option<BarState>, p: Palette) -> Option<D
     Some(
         div()
             .flex_none()
-            .text_size(px(11.))
+            .text_size(px(font::CAPTION))
             .text_color(color)
             .child(text?),
     )
@@ -1723,7 +1723,7 @@ fn pr_line(
         .gap(px(5.))
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
     for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, now())

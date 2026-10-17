@@ -113,7 +113,7 @@ impl Inspector {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.))
+                                .text_size(px(font::CAPTION))
                                 .text_color(ui::bar_color(agent.state, p.subtle, p))
                                 .child(figure),
                         ),

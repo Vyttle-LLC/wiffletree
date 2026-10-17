@@ -291,7 +291,7 @@ fn avatar(icon_name: &'static str, color: Hsla) -> Div {
 
 fn meta(text: impl Into<SharedString>, p: Palette) -> Div {
     div()
-        .text_size(px(10.5))
+        .text_size(px(font::META))
         .text_color(p.subtle)
         .child(text.into())
 }
@@ -361,7 +361,7 @@ fn notice_message(message: &Message, row: &Row, p: Palette) -> Div {
                         .gap_2()
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(font::MESSAGE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.sender.clone()),
                         )
@@ -391,7 +391,7 @@ fn compaction_message(line: CompactionLine, p: Palette) -> Div {
         .flex()
         .flex_col()
         .gap(px(1.))
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(color)
         .child(
             div()
@@ -439,7 +439,7 @@ fn agent_message(message: &Message, row: &Row, own: bool, p: Palette) -> Div {
                             div()
                                 .min_w_0()
                                 .text_ellipsis()
-                                .text_size(px(12.5))
+                                .text_size(px(font::MESSAGE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.sender.clone()),
                         )
@@ -494,7 +494,7 @@ fn peer_run(
         .flex()
         .flex_col()
         .gap_1()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(p.subtle)
         .child(
             div()
@@ -603,7 +603,7 @@ fn peer_line_row(
                     .children(
                         row.body
                             .as_ref()
-                            .map(|body| body.view().text_size(px(12.5))),
+                            .map(|body| body.view().text_size(px(font::MESSAGE))),
                     ),
             )
         })
@@ -1179,14 +1179,14 @@ impl Transcript {
                     .child(
                         div()
                             .mt_3()
-                            .text_size(px(26.))
+                            .text_size(px(font::HERO))
                             .font_weight(FontWeight::MEDIUM)
                             .line_height(relative(1.2))
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(13.5))
+                            .text_size(px(font::LEAD))
                             .line_height(relative(1.6))
                             .text_color(p.subtle)
                             .child(description),
@@ -1276,7 +1276,7 @@ impl Transcript {
                 .justify_center()
                 .gap_2()
                 .border_b_1()
-                .border_color(p.edge.opacity(0.3))
+                .border_color(p.edge.opacity(edge::SEPARATOR))
                 .when(older, |d| {
                     d.child(
                         button("older")

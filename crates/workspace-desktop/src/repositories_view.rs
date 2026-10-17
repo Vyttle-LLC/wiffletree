@@ -175,7 +175,7 @@ impl RepositoriesPage {
                             .children(pr_check_status(snapshot, repository).map(
                                 |(status, failed)| {
                                     div()
-                                        .text_size(px(10.5))
+                                        .text_size(px(font::META))
                                         .text_color(if failed { p.red } else { p.subtle })
                                         .child(status)
                                 },
@@ -220,7 +220,7 @@ impl RepositoriesPage {
                 div()
                     .py_2()
                     .border_b_1()
-                    .border_color(p.edge.opacity(0.25))
+                    .border_color(p.edge.opacity(edge::HAIRLINE))
                     .child(row)
                     .child(checks.pl(px(28.))),
             );
@@ -245,7 +245,7 @@ impl RepositoriesPage {
             )
             .child(hint(WITHOUT_ASKING, p))
             .child(hint(SETTINGS_REPOSITORY, p))
-            .child(div().text_size(px(12.)).child(NEVER));
+            .child(div().text_size(px(font::SMALL)).child(NEVER));
         if let Some(error) = &snapshot.github_error {
             block = block.child(
                 banner(p.yellow).child(
@@ -365,7 +365,7 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .child("Reviewed with")
             .child(picker)
@@ -374,7 +374,7 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .child("Waits until the base has been quiet for")
             .child(step("less", "−", minutes - 1).on_click(save(quiet(minutes - 1))))
@@ -432,7 +432,7 @@ impl RepositoriesPage {
                 "Sort new comments",
                 vec![hint(SORT, p).into_any_element()],
             ))
-            .child(div().text_size(px(12.)).child(NEVER_KEEPER))
+            .child(div().text_size(px(font::SMALL)).child(NEVER_KEEPER))
     }
 
     /// The repository's checks command and its limit, or its editor while the human edits it.
@@ -448,7 +448,7 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(11.5))
+            .text_size(px(font::DETAIL))
             .text_color(p.subtle)
             .child("Checks");
         let id = repository.id.clone();
@@ -462,7 +462,7 @@ impl RepositoriesPage {
             let command = command.map(|command| {
                 div()
                     .font_family(".SystemMonoFont")
-                    .text_size(px(11.))
+                    .text_size(px(font::CAPTION))
                     .text_color(p.text)
                     .child(command)
             });
@@ -654,7 +654,7 @@ impl RepositoriesPage {
             .items_center()
             .gap_3()
             .border_b_1()
-            .border_color(p.edge.opacity(0.25))
+            .border_color(p.edge.opacity(edge::HAIRLINE))
             // A row without a box keeps its text in line with the others.
             .child(div().w(px(16.)).flex_none().children(tick))
             .child(

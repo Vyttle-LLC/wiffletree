@@ -58,7 +58,7 @@ fn meter(used: f64, color: Hsla, p: Palette) -> Div {
         .w_full()
         .h(px(5.))
         .rounded_full()
-        .bg(p.edge.opacity(0.3))
+        .bg(p.edge.opacity(edge::SEPARATOR))
         .child(
             div()
                 .h_full()
@@ -147,7 +147,7 @@ fn quota_pill<V: EventEmitter<Intent>>(
                 .flex()
                 .items_center()
                 .gap_1()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .when(faded, |d| d.opacity(0.55))
                 .child(
                     div()
@@ -173,7 +173,7 @@ pub(super) fn quota_strip<V: EventEmitter<Intent>>(
             div()
                 .w(px(46.))
                 .flex_none()
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .text_color(p.subtle)
                 .child(provider.label()),
         );
@@ -221,7 +221,7 @@ impl Inspector {
                     .flex_col()
                     .gap(px(2.))
                     .border_b_1()
-                    .border_color(p.edge.opacity(0.25))
+                    .border_color(p.edge.opacity(edge::HAIRLINE))
                     .child(
                         div()
                             .flex()
@@ -229,7 +229,7 @@ impl Inspector {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(px(font::MESSAGE))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(humanize(&event.kind)),
                             )
@@ -397,7 +397,7 @@ impl UsagePage {
             .child(hint(label, p))
             .child(
                 div()
-                    .text_size(px(22.))
+                    .text_size(px(font::FIGURE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(value),
             )
@@ -717,7 +717,7 @@ impl UsagePage {
                     .child(stack)
                     .child(
                         div()
-                            .text_size(px(9.))
+                            .text_size(px(font::NANO))
                             .text_center()
                             .text_color(p.subtle)
                             .child(if count <= 7 || index == 0 || index == count - 1 {
@@ -745,7 +745,7 @@ impl UsagePage {
                     .flex()
                     .gap_3()
                     .flex_wrap()
-                    .text_size(px(11.))
+                    .text_size(px(font::CAPTION))
                     .child(div().text_color(p.focus).child("Claude"))
                     .child(div().text_color(p.accent).child("Codex")),
             )
@@ -764,7 +764,7 @@ impl UsagePage {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(px(14.))
+                        .text_size(px(font::BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(provider.label()),
                 )

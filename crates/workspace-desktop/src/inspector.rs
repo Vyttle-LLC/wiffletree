@@ -5,9 +5,11 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
-use ui::{card, empty_state, eyebrow, hint, icon, mono, pill, property, section, session_icon};
-use wording::from_now;
-use wording::local_time;
+use ui::{
+    card, empty_state, eyebrow, hint, icon, mono, page_header, pill, property, section,
+    session_icon,
+};
+use wording::{from_now, local_time};
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -36,7 +38,7 @@ pub(super) fn copyable(label: &'static str, value: &str, p: Palette) -> Div {
             div()
                 .flex_none()
                 .w(px(56.))
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .text_color(p.subtle)
                 .child(label),
         )
@@ -305,44 +307,23 @@ impl Inspector {
             .flex_col()
             .bg(p.surface)
             .child(
-                div()
-                    .flex_none()
-                    .h(px(64.))
-                    .pl_5()
-                    .pr_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(p.edge.opacity(0.3))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(p.subtle)
-                                    .text_ellipsis()
-                                    .child(format!("{scope}  ·  {subtitle}")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(18.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(panel.title()),
-                            ),
-                    )
-                    .child(
-                        button("close-inspector")
-                            .ghost()
-                            .icon(icon("close"))
-                            .tooltip("Close")
-                            .on_click(cx.listener(|_, _, _, c| c.emit(Intent::ClosePanel))),
-                    ),
+                page_header(
+                    div()
+                        .text_ellipsis()
+                        .child(format!("{scope}  ·  {subtitle}")),
+                    div().child(panel.title()),
+                    p,
+                )
+                .pl_5()
+                .pr_3()
+                .gap_2()
+                .child(
+                    button("close-inspector")
+                        .ghost()
+                        .icon(icon("close"))
+                        .tooltip("Close")
+                        .on_click(cx.listener(|_, _, _, c| c.emit(Intent::ClosePanel))),
+                ),
             )
             .children(head)
             .map(|d| match tree {
@@ -354,7 +335,7 @@ impl Inspector {
                         .min_h_0()
                         .overflow_y_scrollbar()
                         .p_5()
-                        .text_size(px(13.))
+                        .text_size(px(font::TEXT))
                         .child(body.w_full()),
                 ),
             })
@@ -367,7 +348,7 @@ impl Inspector {
             .gap_0()
             .child(
                 div()
-                    .text_size(px(20.))
+                    .text_size(px(font::FIGURE_SMALL))
                     .font_weight(FontWeight::MEDIUM)
                     .child(value.to_string()),
             )
@@ -383,7 +364,7 @@ impl Inspector {
             .gap_3()
             .py_2()
             .border_b_1()
-            .border_color(p.edge.opacity(0.25))
+            .border_color(p.edge.opacity(edge::HAIRLINE))
             .tooltip(move |w, c| Tooltip::new(path.clone()).build(w, c))
             .child(icon("folder").text_color(p.subtle))
             .child(
@@ -421,7 +402,7 @@ impl Inspector {
             .gap_3()
             .py_2()
             .border_b_1()
-            .border_color(p.edge.opacity(0.25))
+            .border_color(p.edge.opacity(edge::HAIRLINE))
             .child(icon("clock").text_color(p.subtle))
             .child(
                 div()
@@ -482,7 +463,7 @@ impl Inspector {
                             .flex_1()
                             .child(
                                 div()
-                                    .text_size(px(14.))
+                                    .text_size(px(font::BODY))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_ellipsis()
                                     .child(session.name.clone()),
@@ -756,7 +737,7 @@ impl Inspector {
                     .gap_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(p.edge.opacity(0.25))
+                    .border_color(p.edge.opacity(edge::HAIRLINE))
                     .child(
                         div()
                             .flex_none()
@@ -770,7 +751,7 @@ impl Inspector {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.5))
+                            .text_size(px(font::MESSAGE))
                             .child(commit.subject.clone()),
                     )
                     .child(mono(sha, p).flex_none().text_color(p.accent)),
@@ -858,7 +839,7 @@ impl Workspace {
             .py_2()
             .bg(p.surface)
             .border_l_1()
-            .border_color(p.edge.opacity(0.35));
+            .border_color(p.edge.opacity(edge::LIGHT));
         if self.shared.selected_session().is_none() {
             return rail;
         }
@@ -907,7 +888,7 @@ impl Workspace {
                     .child(icon(panel.icon()).size(px(18.)))
                     .child(
                         div()
-                            .text_size(px(10.))
+                            .text_size(px(font::TINY))
                             .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                             .child(panel.title()),
                     )
@@ -923,7 +904,7 @@ impl Workspace {
                                 .rounded_full()
                                 .bg(fill)
                                 .text_color(text)
-                                .text_size(px(9.5))
+                                .text_size(px(font::MICRO))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .flex()
                                 .items_center()

@@ -189,7 +189,7 @@ pub(super) fn step_row(step: &Step, p: Palette) -> Div {
             d.child(
                 div()
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size(px(font::META))
                     .text_color(p.subtle)
                     .child(note),
             )
@@ -216,7 +216,7 @@ pub(super) fn turn_summary(
         .flex()
         .items_center()
         .gap_1()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(p.subtle)
         .cursor_pointer()
         .hover(|style| style.text_color(p.text))
@@ -284,14 +284,14 @@ pub(super) fn activity_row(
         .child(
             div()
                 .flex_none()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Working"),
         )
         .child(
             div()
                 .flex_none()
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .text_color(p.subtle)
                 .child(stats),
         )
@@ -300,7 +300,7 @@ pub(super) fn activity_row(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .child(format!("· {current}")),
@@ -312,7 +312,7 @@ pub(super) fn activity_row(
                     .flex_none()
                     .flex()
                     .items_center()
-                    .text_size(px(11.5))
+                    .text_size(px(font::DETAIL))
                     .text_color(p.subtle)
                     .child("View all")
                     .child(icon("chevron-right").size(px(12.))),
@@ -328,7 +328,7 @@ pub(super) fn activity_row(
             div()
                 .h(px(22.))
                 .mt_1()
-                .text_size(px(13.))
+                .text_size(px(font::TEXT))
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .child(card.headline.clone().unwrap_or_else(|| "Starting…".into())),
@@ -350,7 +350,7 @@ pub(super) fn activity_row(
         .py(px(7.))
         .rounded_xl()
         .border_1()
-        .border_color(p.edge.opacity(0.45))
+        .border_color(p.edge.opacity(edge::SOFT))
         .bg(p.surface)
         .flex()
         .flex_col()
