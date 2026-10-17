@@ -111,9 +111,6 @@ pub fn executable(provider: Provider) -> Result<PathBuf> {
         .find(|p| p.is_file())
         .with_context(|| format!("Install {name} CLI and sign in before starting live work"))
 }
-pub fn check() -> Value {
-    json!({"claude":executable(Provider::Claude).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"codex":executable(Provider::Codex).map(|p|p.to_string_lossy().to_string()).map_err(|e|e.to_string()),"authentication":"Uses existing CLI sign-in; first live turn verifies access"})
-}
 /// The fixed core's parts, each with who gets it: the contract, then each role's core.
 pub const CORE: [(&str, &str); 5] = [
     (

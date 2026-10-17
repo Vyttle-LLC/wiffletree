@@ -17,7 +17,9 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("probe-codex") {
         println!(
             "{}",
-            serde_json::to_string_pretty(&workspace_host::runtime::codex_models()?)?
+            serde_json::to_string_pretty(&workspace_host::runtime::models(
+                workspace_core::Provider::Codex
+            )?)?
         );
         return Ok(());
     }

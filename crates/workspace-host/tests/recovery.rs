@@ -114,19 +114,10 @@ fn messages_and_logs_do_not_cross_project_boundaries() {
 }
 
 #[test]
-fn transcript_keyset_and_simulator_are_bounded_and_idempotent() {
+fn transcript_pages_and_input_are_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path()).unwrap();
-    let (_, session) = project(&mut host, "Simulation");
-    host.send("a", None, &session.id, "Hello").unwrap();
-    let response = host.simulate("a").unwrap();
-    assert!(response.body.contains("Local simulation"));
-    assert_eq!(host.simulate("a").unwrap().id, response.id);
-    let last = host.messages(&session.id, None, 1).unwrap();
-    let previous = host
-        .messages(&session.id, Some(last[0].sequence), 1)
-        .unwrap();
-    assert_eq!(previous[0].id, "a");
+    let (_, session) = project(&mut host, "Bounds");
     assert!(host.messages(&session.id, None, 101).is_err());
     assert!(
         host.send("huge", None, &session.id, &"x".repeat(MAX_TEXT_BYTES + 1))

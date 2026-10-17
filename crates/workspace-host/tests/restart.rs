@@ -260,6 +260,38 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
             checklist(&page) == Some((3, 6, false)) && page.agents.iter().all(|a| !a.working)
         },
     );
+    // A real provider reply completes the input once; retrying the same send adds no message.
+    let transcript = messages(&service, &worker.id);
+    assert_eq!(
+        transcript.iter().find(|m| m.id == "plan").unwrap().receipt,
+        Receipt::Completed
+    );
+    request(
+        &service,
+        Command::Send {
+            id: "plan".into(),
+            sender: None,
+            recipient: worker.id.clone(),
+            body: "JUST_REPLY SET_PLAN".into(),
+            attachments: vec![],
+        },
+    );
+    assert_eq!(messages(&service, &worker.id).len(), transcript.len());
+    let page = |before| -> Vec<Message> {
+        serde_json::from_value(request(
+            &service,
+            Command::Messages {
+                session_id: worker.id.clone(),
+                before,
+                limit: 1,
+            },
+        ))
+        .unwrap()
+    };
+    let last = page(None);
+    assert_eq!(last[0].id, transcript.last().unwrap().id);
+    let previous = page(Some(last[0].sequence));
+    assert_eq!(previous[0].id, transcript[transcript.len() - 2].id);
     let before = board(&service);
     let ticket = &before.tickets[0];
     assert_eq!(
@@ -277,6 +309,16 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
         restarted.is_some()
     });
     let service = restarted.unwrap();
+    assert_eq!(
+        messages(&service, &worker.id)
+            .iter()
+            .map(|m| (&m.id, &m.receipt))
+            .collect::<Vec<_>>(),
+        transcript
+            .iter()
+            .map(|m| (&m.id, &m.receipt))
+            .collect::<Vec<_>>()
+    );
     let after = board(&service);
     assert_eq!(
         (after.agents, after.tickets, after.projects),

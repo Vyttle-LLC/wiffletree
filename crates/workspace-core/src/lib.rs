@@ -525,13 +525,6 @@ pub struct ModelProfile {
     pub model: String,
     pub effort: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ModelCapability {
-    pub provider: Provider,
-    pub model: String,
-    pub efforts: Vec<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogKind {
@@ -2456,7 +2449,6 @@ pub enum Command {
     DismissCompaction {
         session_id: String,
     },
-    ProviderCheck,
     Quotas,
     RecordQuota {
         reading: QuotaReading,
@@ -2559,9 +2551,6 @@ pub enum Command {
         session_id: String,
         run_ids: Vec<String>,
     },
-    Simulate {
-        message_id: String,
-    },
     /// Saves providers, role providers, reviews and the guide together; answered with the saved
     /// `ModelSelection` at its next revision.
     SetModelSelection {
@@ -2569,12 +2558,6 @@ pub enum Command {
         /// The verifiers to save with it: the first save of a suggested setup sends them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verification: Option<VerificationSettings>,
-    },
-    RequestAttention {
-        session_id: String,
-        host: String,
-        operation_id: String,
-        prompt: String,
     },
     ResolveAttention {
         id: String,

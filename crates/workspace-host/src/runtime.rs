@@ -9,7 +9,7 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use workspace_core::{ModelCapability, Provider};
+use workspace_core::Provider;
 
 struct Process(Child);
 impl Drop for Process {
@@ -332,7 +332,7 @@ pub(crate) fn run_limited(mut command: Command, limit: Duration) -> Result<Optio
     Ok(status)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ModelOption {
     pub provider: Provider,
     pub model: String,
@@ -372,17 +372,6 @@ fn json_lines(stdout: impl Read + Send + 'static) -> mpsc::Receiver<serde_json::
         }
     });
     receiver
-}
-
-pub fn codex_models() -> Result<Vec<ModelCapability>> {
-    Ok(codex_catalog()?
-        .into_iter()
-        .map(|model| ModelCapability {
-            provider: model.provider,
-            model: model.model,
-            efforts: model.efforts,
-        })
-        .collect())
 }
 
 fn with_codex<T>(
