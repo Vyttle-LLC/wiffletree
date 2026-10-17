@@ -1,7 +1,9 @@
 mod common;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
-use workspace_core::{PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket};
+use workspace_core::{
+    PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket, TicketState,
+};
 use workspace_host::Host;
 
 fn git(path: &Path, args: &[&str]) -> std::process::Output {
@@ -129,7 +131,7 @@ fn pass(host: &mut Host, verifier: &Session) {
 fn passed(host: &mut Host, ticket: &Ticket) -> Session {
     let verifier = verifying(host, ticket);
     pass(host, &verifier);
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "passed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Passed);
     verifier
 }
 
@@ -174,7 +176,7 @@ fn archiving_a_project_removes_clean_worktrees_and_restoring_re_creates_them() {
     assert!(branch_exists(directory.path(), &ticket));
     drop(host);
     let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "planned");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Planned);
     assert_eq!(
         host.messages(&coordinator.id, None, 100).unwrap()[0].body,
         "Keep this conversation"
@@ -257,8 +259,14 @@ fn closing_or_accepting_removes_a_clean_worktree_and_refuses_unsaved_work() {
         .unwrap_err()
         .to_string();
     assert!(refused.contains(&accepting.id), "{refused}");
-    assert_eq!(host.ticket(&closing.id).unwrap().state, "planned");
-    assert_eq!(host.ticket(&accepting.id).unwrap().state, "passed");
+    assert_eq!(
+        host.ticket(&closing.id).unwrap().state,
+        TicketState::Planned
+    );
+    assert_eq!(
+        host.ticket(&accepting.id).unwrap().state,
+        TicketState::Passed
+    );
 
     for ticket in [&closing, &accepting] {
         fs::remove_file(Path::new(&ticket.worktree).join("notes.md")).unwrap();
@@ -271,7 +279,10 @@ fn closing_or_accepting_removes_a_clean_worktree_and_refuses_unsaved_work() {
         assert!(!Path::new(&ticket.worktree).exists());
         assert!(branch_exists(directory.path(), ticket));
     }
-    assert_eq!(host.ticket(&accepting.id).unwrap().state, "accepted");
+    assert_eq!(
+        host.ticket(&accepting.id).unwrap().state,
+        TicketState::Accepted
+    );
 }
 
 #[test]
@@ -354,7 +365,10 @@ fn accepting_while_the_tester_is_in_its_turn_removes_the_worktree_when_the_turn_
         json!({"ticket_id":ticket.id}),
     )
     .unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "accepted");
+    assert_eq!(
+        host.ticket(&ticket.id).unwrap().state,
+        TicketState::Accepted
+    );
     assert!(Path::new(&ticket.worktree).exists());
     assert_eq!(
         host.pending_worktree_removals().unwrap(),
@@ -423,7 +437,7 @@ fn closing_while_the_reviewer_is_in_its_turn_removes_the_worktree_when_the_turn_
     .unwrap();
 
     host.close_ticket(&ticket.id).unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Closed);
     assert!(Path::new(&ticket.worktree).exists());
 
     finish_turn(&db, &mut host, &reviewer);
@@ -607,13 +621,16 @@ fn a_failed_close_keeps_the_ticket_its_agents_and_worktree_and_a_retry_closes_it
 
     assert!(host.close_ticket(&ticket.id).is_err());
 
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "assigned");
+    assert_eq!(
+        host.ticket(&ticket.id).unwrap().state,
+        TicketState::Assigned
+    );
     assert!(!host.session(&reviewer.id).unwrap().archived);
     assert!(Path::new(&ticket.worktree).join("style.css").exists());
 
     db.execute_batch("DROP TRIGGER fail_activity").unwrap();
     host.close_ticket(&ticket.id).unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Closed);
     assert!(host.session(&reviewer.id).unwrap().archived);
     assert!(!Path::new(&ticket.worktree).exists());
 }
@@ -676,7 +693,7 @@ fn a_close_whose_commit_fails_rolls_back_and_leaves_no_open_transaction() {
     let refused = host.close_ticket(&ticket.id).unwrap_err().to_string();
 
     assert!(refused.contains("FOREIGN KEY"), "{refused}");
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "planned");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Planned);
     assert!(Path::new(&ticket.worktree).join("style.css").exists());
     host.send("after", None, &root.id, "Still writable")
         .unwrap();

@@ -292,7 +292,7 @@ fn teams_move_under_their_coordinator_without_losing_anything() {
         let migrated = host.ticket(&ticket.id).unwrap();
         assert_eq!(migrated.coordinator_id, f.main.id);
         assert_eq!(migrated.repository_id, f.repository);
-        assert_eq!(migrated.state, state);
+        assert_eq!(migrated.state.name(), state);
         assert_eq!(
             (&migrated.worktree, &migrated.branch),
             (&ticket.worktree, &ticket.branch)
@@ -536,7 +536,7 @@ fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(cycle.state, "verifying");
+    assert_eq!(cycle.state, TicketState::Verifying);
     let run = cycle.verification.unwrap().rounds[0].verifiers[0].clone();
     host.advance_receipt(&run.message_id, Receipt::Delivered)
         .unwrap();
@@ -552,7 +552,7 @@ fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(accepted.state, "accepted");
+    assert_eq!(accepted.state, TicketState::Accepted);
 }
 
 #[test]

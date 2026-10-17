@@ -115,7 +115,7 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
         ticket = snapshot(&service)
             .tickets
             .into_iter()
-            .find(|t| t.state == "verifying");
+            .find(|t| t.state == TicketState::Verifying);
         ticket.is_some()
     });
     let ticket = ticket.unwrap();
@@ -140,7 +140,7 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
         snapshot
             .tickets
             .iter()
-            .any(|t| t.state == "accepted" && !Path::new(&t.worktree).exists())
+            .any(|t| t.state == TicketState::Accepted && !Path::new(&t.worktree).exists())
             && snapshot
                 .sessions
                 .iter()

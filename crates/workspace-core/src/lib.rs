@@ -1385,6 +1385,60 @@ pub struct VerifierChoice {
     pub reason: String,
 }
 
+/// Where a ticket is in its life, stored and sent as its snake_case name. Reports move an open
+/// ticket to the state their kind names; verification, acceptance and closing move it too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketState {
+    Planned,
+    Assigned,
+    ReadyForTesting,
+    Verifying,
+    Passed,
+    Failed,
+    Blocked,
+    Completed,
+    Accepted,
+    Closed,
+}
+impl TicketState {
+    pub const ALL: [Self; 10] = [
+        Self::Planned,
+        Self::Assigned,
+        Self::ReadyForTesting,
+        Self::Verifying,
+        Self::Passed,
+        Self::Failed,
+        Self::Blocked,
+        Self::Completed,
+        Self::Accepted,
+        Self::Closed,
+    ];
+    /// The stored name, such as `ready_for_testing`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Assigned => "assigned",
+            Self::ReadyForTesting => "ready_for_testing",
+            Self::Verifying => "verifying",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+            Self::Accepted => "accepted",
+            Self::Closed => "closed",
+        }
+    }
+    /// The state a stored name, or the report kind of the same name, stands for.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.name() == name)
+    }
+}
+impl std::fmt::Display for TicketState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
 /// A ticket is a workspace: one repository, one worktree and branch, and its agents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ticket {
@@ -1398,7 +1452,7 @@ pub struct Ticket {
     pub brief: String,
     pub worktree: String,
     pub branch: String,
-    pub state: String,
+    pub state: TicketState,
     /// The latest verification cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<Verification>,
@@ -1514,7 +1568,7 @@ pub struct KeeperReview {
     /// The base commit the keeper's commit sits on.
     pub base: String,
     /// The ticket's state when the review started.
-    pub state: String,
+    pub state: TicketState,
     /// The keeper's last action before this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<KeeperAction>,
@@ -1687,7 +1741,7 @@ impl PublishRequest {
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
     pub fn is_open(&self) -> bool {
-        !matches!(self.state.as_str(), "accepted" | "closed")
+        !matches!(self.state, TicketState::Accepted | TicketState::Closed)
     }
     /// The verification cycle in progress, if any.
     pub fn running_cycle(&self) -> Option<&Verification> {

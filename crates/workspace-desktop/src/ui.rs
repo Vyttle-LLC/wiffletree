@@ -396,12 +396,12 @@ fn badge_state(own: Status, shown: Status, compacting: bool) -> (Status, &'stati
         (shown, "Team working")
     }
 }
-pub(super) fn ticket_state_color(state: &str, p: Palette) -> Hsla {
+pub(super) fn ticket_state_color(state: TicketState, p: Palette) -> Hsla {
     match state {
-        "accepted" | "passed" => p.green,
-        "blocked" | "failed" => p.red,
-        "assigned" | "ready_for_testing" | "completed" => p.focus,
-        _ => p.subtle,
+        TicketState::Accepted | TicketState::Passed => p.green,
+        TicketState::Blocked | TicketState::Failed => p.red,
+        TicketState::Assigned | TicketState::ReadyForTesting | TicketState::Completed => p.focus,
+        TicketState::Planned | TicketState::Verifying | TicketState::Closed => p.subtle,
     }
 }
 

@@ -88,8 +88,8 @@ pub struct Host {
 pub(crate) struct MidTurnReport {
     pub(crate) reporter: String,
     /// The state the ticket showed before the report.
-    pub(crate) prior: String,
-    pub(crate) reported: String,
+    pub(crate) prior: TicketState,
+    pub(crate) reported: TicketState,
 }
 struct StoreLock(File);
 impl Drop for StoreLock {
@@ -285,7 +285,7 @@ impl Host {
         if let Some(report) = self.mid_turn_reports.get(&ticket.id)
             && report.reported == ticket.state
         {
-            ticket.state = report.prior.clone();
+            ticket.state = report.prior;
         }
         ticket
     }

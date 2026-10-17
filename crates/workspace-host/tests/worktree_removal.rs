@@ -11,7 +11,7 @@ use std::{
     sync::Once,
     time::{Duration, Instant},
 };
-use workspace_core::{Session, Ticket};
+use workspace_core::{Session, Ticket, TicketState};
 use workspace_host::Host;
 
 fn stand_in_git() {
@@ -123,7 +123,7 @@ fn a_worktree_with_large_build_output_is_removed_completely() {
 
     host.close_ticket(&ticket.id).unwrap();
 
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Closed);
     assert!(!Path::new(&ticket.worktree).exists());
     assert!(!registered(directory.path(), &ticket));
     assert!(deleted_soon(&removal_folder(&ticket)));
@@ -143,7 +143,7 @@ fn a_failed_git_step_leaves_the_worktree_whole_and_the_ticket_open() {
     let refused = host.close_ticket(&ticket.id).unwrap_err();
 
     assert!(format!("{refused:#}").contains("injected"), "{refused:#}");
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "planned");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Planned);
     let worktree = Path::new(&ticket.worktree);
     assert!(worktree.join("style.css").exists());
     assert!(worktree.join("target/debug/0/0.o").exists());
@@ -179,7 +179,7 @@ fn a_git_failure_after_it_forgot_the_worktree_still_completes_the_removal() {
 
     host.close_ticket(&ticket.id).unwrap();
 
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Closed);
     assert!(!Path::new(&ticket.worktree).exists());
     assert!(!registered(directory.path(), &ticket));
     assert!(deleted_soon(&removal_folder(&ticket)));
@@ -200,7 +200,7 @@ fn prune_cut_off_after_deleting(file: &str) {
 
     host.close_ticket(&ticket.id).unwrap();
 
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Closed);
     assert!(!Path::new(&ticket.worktree).exists());
     assert!(deleted_soon(&removal_folder(&ticket)));
     git(

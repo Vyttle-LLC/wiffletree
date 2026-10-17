@@ -95,7 +95,7 @@ pub fn waiver_note(ticket: &Ticket) -> Option<String> {
     ticket
         .waiver
         .as_ref()
-        .filter(|_| ticket.state == "accepted")?;
+        .filter(|_| ticket.state == TicketState::Accepted)?;
     let open = ticket
         .ledger
         .iter()
@@ -1349,7 +1349,8 @@ mod tests {
             panic!("ticket row")
         };
         assert_eq!(
-            shown.state, "assigned",
+            shown.state,
+            TicketState::Assigned,
             "the row carries the ticket's state"
         );
     }
@@ -1586,8 +1587,12 @@ mod tests {
     fn only_an_accepted_ticket_with_a_waiver_gets_the_waived_ring() {
         let (_directory, _host, _root, mut ticket) = store();
         ticket.ledger = vec![entry("F3", Severity::Blocking, EntryStatus::Open, None)];
-        for state in ["passed", "blocked", "accepted"] {
-            ticket.state = state.into();
+        for state in [
+            TicketState::Passed,
+            TicketState::Blocked,
+            TicketState::Accepted,
+        ] {
+            ticket.state = state;
             assert_eq!(waiver_note(&ticket), None, "{state}");
         }
         ticket.waiver = Some("F3 needs a fetched base".into());
@@ -1595,7 +1600,7 @@ mod tests {
             waiver_note(&ticket).as_deref(),
             Some("Accepted with waiver · 1 open finding")
         );
-        ticket.state = "blocked".into();
+        ticket.state = TicketState::Blocked;
         assert_eq!(waiver_note(&ticket), None);
     }
 
@@ -2436,7 +2441,7 @@ mod tests {
             before: "3daf610aa".into(),
             after: "77b0c13ff".into(),
             base: "4a1c2e9dd".into(),
-            state: "passed".into(),
+            state: TicketState::Passed,
             last: None,
             problem: None,
             withdrawn: Some(withdrawn.clone()),

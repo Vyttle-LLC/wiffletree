@@ -1336,7 +1336,9 @@ impl Workspace {
     ) -> Stateful<Div> {
         let coordinator = ticket.coordinator_id.clone();
         let waiver = tree::waiver_note(ticket);
-        let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
+        let state = waiver
+            .clone()
+            .unwrap_or_else(|| humanize(ticket.state.name()));
         let waiting = tree::publish_waiting(ticket);
         // A PR or a waiting publish step adds a second line.
         let two_lines = ticket.pull_request.is_some() || waiting.is_some();
@@ -1367,7 +1369,7 @@ impl Workspace {
                 .size(px(6.))
                 .mr(px(3.))
                 .rounded_full()
-                .bg(ticket_state_color(&ticket.state, p))
+                .bg(ticket_state_color(ticket.state, p))
                 .into_any_element(),
         };
         self.row(

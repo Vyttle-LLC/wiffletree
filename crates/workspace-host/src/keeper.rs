@@ -1639,7 +1639,7 @@ impl Host {
             before: rebase.head.clone(),
             after: result.clone(),
             base: rebase.base.clone(),
-            state: ticket.state.clone(),
+            state: ticket.state,
             last: keeper.last.clone(),
             problem,
             withdrawn: None,
@@ -1939,8 +1939,8 @@ impl Host {
             commits: earlier + commits,
             cycle: ticket.verification.as_ref().map_or(0, |v| v.cycle),
         });
-        if ticket.state == "passed" {
-            ticket.state = "ready_for_testing".into();
+        if ticket.state == TicketState::Passed {
+            ticket.state = TicketState::ReadyForTesting;
         }
         // The hold is stored before the branch moves, so no failed write or stop can leave the
         // adopted commits without it. A failed move is judged by where HEAD is, never by Git's
@@ -2966,7 +2966,7 @@ pub(crate) mod tests {
     fn adopted(file: &str, content: &str) -> (Fixture, Remote, String) {
         let (mut f, r) = kept();
         let mut ticket = f.ticket();
-        ticket.state = "passed".into();
+        ticket.state = TicketState::Passed;
         f.host.save_ticket(&ticket).unwrap();
         let theirs = pushed_elsewhere(&mut f, &r, file, content);
         fetch_and_adopt(&mut f, &r);
@@ -3015,7 +3015,7 @@ pub(crate) mod tests {
     fn a_commit_pushed_on_github_is_adopted_unchanged_and_nothing_more_is_pushed() {
         let (mut f, r) = kept();
         let mut ticket = f.ticket();
-        ticket.state = "passed".into();
+        ticket.state = TicketState::Passed;
         f.host.save_ticket(&ticket).unwrap();
         let (old, cycle) = (f.head(), ticket.verification);
         let theirs = pushed_elsewhere(&mut f, &r, "c.txt", "three\n");
@@ -3023,7 +3023,7 @@ pub(crate) mod tests {
         assert_eq!(f.head(), theirs);
         assert_eq!(git(&f.worktree, &["rev-parse", &format!("{theirs}~")]), old);
         let ticket = f.ticket();
-        assert_eq!(ticket.state, "ready_for_testing");
+        assert_eq!(ticket.state, TicketState::ReadyForTesting);
         assert_eq!(ticket.verification, cycle);
         let record = Unreviewed {
             head: theirs.clone(),
@@ -3130,7 +3130,7 @@ pub(crate) mod tests {
         }
         let ticket = f.ticket();
         assert_eq!(
-            (ticket.state.as_str(), ticket.unreviewed()),
+            (ticket.state.name(), ticket.unreviewed()),
             ("blocked", None)
         );
         assert!(!f.host.may_change_branch(&ticket));
@@ -3224,12 +3224,12 @@ pub(crate) mod tests {
         f.host.db.execute("DROP TRIGGER refuse", []).unwrap();
         // The branch cannot move: the hold is taken back and nothing is told.
         let mut ticket = f.ticket();
-        ticket.state = "passed".into();
+        ticket.state = TicketState::Passed;
         f.host.save_ticket(&ticket).unwrap();
         fs::write(f.worktree.join("new.txt"), "new\n").unwrap();
         fetch_and_adopt(&mut f, &r);
         let ticket = f.ticket();
-        assert_eq!((f.head(), ticket.state.as_str()), (old, "passed"));
+        assert_eq!((f.head(), ticket.state.name()), (old, "passed"));
         assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
     }
 
@@ -3237,7 +3237,7 @@ pub(crate) mod tests {
     /// result.
     fn fetched_from_github(f: &mut Fixture, r: &Remote) -> (String, Fetched) {
         let mut ticket = f.ticket();
-        ticket.state = "passed".into();
+        ticket.state = TicketState::Passed;
         f.host.save_ticket(&ticket).unwrap();
         let theirs = pushed_elsewhere(f, r, "c.txt", "three\n");
         let fetched = super::fetch(&fetches(f).remove(0), &r.tools.git);
@@ -3277,7 +3277,7 @@ pub(crate) mod tests {
                 .unwrap();
             let ticket = f.ticket();
             assert_eq!(f.head(), theirs);
-            assert_eq!(ticket.state, "ready_for_testing");
+            assert_eq!(ticket.state, TicketState::ReadyForTesting);
             assert_eq!(ticket.unreviewed().unwrap().head, theirs);
             refused(f.host.accept_ticket(&f.ticket.clone(), None));
             let told = notices(&f.host);
@@ -3292,7 +3292,7 @@ pub(crate) mod tests {
             .keeper_fetched(fetched, false, &failing_git(|_| {}, true))
             .unwrap();
         let ticket = f.ticket();
-        assert_eq!((f.head(), ticket.state.as_str()), (old.clone(), "passed"));
+        assert_eq!((f.head(), ticket.state.name()), (old.clone(), "passed"));
         assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
         // Git failed with the branch somewhere else: the hold stays and the coordinator is
         // told once.
@@ -3347,7 +3347,7 @@ pub(crate) mod tests {
         let ours = f.commit("d.txt", "mine\n");
         f.host.keeper_fetched(fetched, false, &r.tools.git).unwrap();
         let ticket = f.ticket();
-        assert_eq!((f.head(), ticket.state.as_str()), (ours, "passed"));
+        assert_eq!((f.head(), ticket.state.name()), (ours, "passed"));
         assert!(ticket.unreviewed().is_none() && notices(&f.host).is_empty());
     }
 
@@ -3824,7 +3824,7 @@ pub(crate) mod tests {
         };
         let (mut f, _r) = waiting();
         let mut ticket = f.ticket();
-        ticket.state = "ready_for_testing".into();
+        ticket.state = TicketState::ReadyForTesting;
         f.host.save_ticket(&ticket).unwrap();
         start_review(&mut f);
         assert!(f.ticket().waiting_comments().is_none());
@@ -4103,7 +4103,7 @@ pub(crate) mod tests {
             kind: LevelKind::FullReview,
         });
         verification.rounds[0].verifiers = verifiers;
-        ticket.state = "passed".into();
+        ticket.state = TicketState::Passed;
         f.host.save_ticket(&ticket).unwrap();
         selection.keeper = Some(profile);
         f.host.set_model_selection(&selection).unwrap();
@@ -4218,14 +4218,14 @@ pub(crate) mod tests {
         let review = ticket.keeper_reviews().last().unwrap().clone();
         assert_eq!(
             (review.cycle, review.before, review.after, review.state),
-            (2, before.clone(), after.clone(), "passed".into())
+            (2, before.clone(), after.clone(), TicketState::Passed)
         );
         // Nothing leaves before the review.
         assert_eq!(r.branch(BRANCH), Some(before));
 
         verdict(&mut f, "Correctness", "passed", json!([]));
         let ticket = f.ticket();
-        assert_eq!(ticket.state, "passed");
+        assert_eq!(ticket.state, TicketState::Passed);
         assert_eq!(
             ticket.verification.unwrap().outcome,
             VerificationOutcome::Passed
@@ -4290,7 +4290,7 @@ pub(crate) mod tests {
             (1, VerificationOutcome::Passed)
         );
         assert!(ticket.previous_cycles.is_empty());
-        assert_eq!(ticket.state, "passed");
+        assert_eq!(ticket.state, TicketState::Passed);
         assert_eq!(ticket.ledger.len(), 1);
         assert_eq!(
             (ticket.ledger[0].status, ticket.ledger[0].reason.as_deref()),
@@ -4372,7 +4372,7 @@ pub(crate) mod tests {
     fn after_a_withdrawal_a_re_check_starts_as_cycle_three_and_finding_ids_go_on() {
         let (mut f, _r) = withdrawn();
         let mut ticket = f.ticket();
-        ticket.state = "ready_for_testing".into();
+        ticket.state = TicketState::ReadyForTesting;
         f.host.save_ticket(&ticket).unwrap();
         let profile = f.host.model_selection().unwrap().keeper.unwrap();
         let choice = VerifierChoice {
@@ -4409,7 +4409,7 @@ pub(crate) mod tests {
     fn a_coordinators_cycle_that_ends_blocked_stays_beside_the_keepers_record() {
         let (mut f, _r) = withdrawn();
         let mut ticket = f.ticket();
-        ticket.state = "ready_for_testing".into();
+        ticket.state = TicketState::ReadyForTesting;
         f.host.save_ticket(&ticket).unwrap();
         let record = ticket.keeper_reviews().to_vec();
         let choice = VerifierChoice {
@@ -5121,7 +5121,7 @@ pub(crate) mod tests {
             leave(&checkout);
             // The agent says it is done; its report is progress and moves nothing.
             report_as(&mut f, &agent.id, "completed", json!([])).unwrap();
-            assert_eq!(f.ticket().state, "passed", "{case}");
+            assert_eq!(f.ticket().state, TicketState::Passed, "{case}");
             let reported = f.host.messages(&f.coordinator.id, None, 100).unwrap();
             assert!(
                 reported.last().unwrap().body.starts_with("[progress]"),

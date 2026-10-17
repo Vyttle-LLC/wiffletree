@@ -371,7 +371,7 @@ impl Host {
             repository: repository.name,
             ticket_id: Some(ticket.id.clone()),
             title: ticket.title.clone(),
-            state: ticket.state.clone(),
+            state: ticket.state.to_string(),
             worktree: ticket.worktree.clone(),
             branch: ticket.branch.clone(),
             head: head(Path::new(&ticket.worktree)).unwrap_or_default(),

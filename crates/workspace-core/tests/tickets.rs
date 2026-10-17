@@ -16,6 +16,36 @@ fn a_ticket_stored_before_repositories_and_verification_still_decodes() {
     assert_eq!(ticket.pull_request, None);
 }
 
+#[test]
+fn every_stored_ticket_state_decodes_and_is_written_back_unchanged() {
+    // Every state the host has written: at creation, from reports, by verification, and on
+    // acceptance or closing.
+    let stored = [
+        "planned",
+        "assigned",
+        "ready_for_testing",
+        "verifying",
+        "passed",
+        "failed",
+        "blocked",
+        "completed",
+        "accepted",
+        "closed",
+    ];
+    for name in stored {
+        let ticket: Ticket = serde_json::from_value(json!({
+            "id":"t","coordinator_id":"c","title":"Fix","brief":"Do",
+            "worktree":"/w","branch":"wiffletree/fix","state":name
+        }))
+        .unwrap();
+        assert_eq!(ticket.state.name(), name);
+        assert_eq!(TicketState::named(name), Some(ticket.state));
+        assert_eq!(serde_json::to_value(&ticket).unwrap()["state"], name);
+    }
+    assert_eq!(TicketState::ALL.map(TicketState::name), stored);
+    assert_eq!(TicketState::named("progress"), None);
+}
+
 fn finding(severity: Severity, location: &str, trigger: &str, evidence: &str) -> Finding {
     Finding {
         severity,

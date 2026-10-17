@@ -140,8 +140,8 @@ impl Workspace {
             let (state, state_color) = match tree::waiver_note(ticket) {
                 Some(_) => ("Accepted with waiver".to_owned(), p.yellow),
                 None => (
-                    humanize(&ticket.state),
-                    ticket_state_color(&ticket.state, p),
+                    humanize(ticket.state.name()),
+                    ticket_state_color(ticket.state, p),
                 ),
             };
             let mut entry = card(p)
