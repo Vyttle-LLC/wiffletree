@@ -259,17 +259,11 @@ fn shown_changes(lines: &[Line]) -> Vec<Shown<'_>> {
 
 /// The entry holds what is in effect now, with every file read.
 fn is_live(entry: &Entry, state: &SkillState) -> bool {
-    let rewrite = entry
-        .edits
-        .rewrite
-        .as_ref()
-        .map(|Rewritten { text, base }| Rewrite {
-            text: text.clone(),
-            base: base.clone(),
-            base_version: version(base).into(),
-            out_of_date: *base != state.stock,
-        });
-    state.unreadable.is_none() && entry.edits.rules == state.rules && rewrite == state.rewrite
+    let rewrite = (state.rewrite.as_ref()).map(|Rewrite { text, base, .. }| Rewritten {
+        text: text.clone(),
+        base: base.clone(),
+    });
+    state.unreadable.is_none() && entry.edits.rules == state.rules && entry.edits.rewrite == rewrite
 }
 
 pub(super) fn saved_toast(command: &Command) -> &'static str {
@@ -313,6 +307,8 @@ fn entry_title(entry: &Entry) -> String {
         Change::NewStockVersion { previous } => {
             format!("New stock version {previous} → {}", entry.stock_version)
         }
+        Change::Merged { from, to, .. } => format!("Merged {from} → {to}"),
+        Change::UndidMerge { to, .. } => format!("Undid the merge of {to}"),
     }
 }
 
@@ -1642,6 +1638,20 @@ mod tests {
         )
         .unwrap();
         assert!(!live(&host));
+        // So is a rewrite based on a newer release's stock text, which is not out of date.
+        std::fs::write(
+            home.path().join("shared/skills/implementing/base.md"),
+            "# Implementing — v9\n",
+        )
+        .unwrap();
+        host.skills().save_rewrite(skill, "My way").unwrap();
+        assert!(live(&host));
+        std::fs::write(
+            home.path().join("shared/skills/implementing/base.md"),
+            "# Implementing — v0\nEdited outside the app\n",
+        )
+        .unwrap();
+        host.skills().save_rewrite(skill, "My way").unwrap();
         let entry = newest();
         assert_eq!(entry_title(&entry), "Saved your rewrite");
         assert_eq!(entry_detail(&entry), "Based on stock v0 · 6 characters");

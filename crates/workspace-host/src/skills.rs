@@ -6,6 +6,8 @@ use crate::*;
 use serde::Deserialize;
 use std::io::{ErrorKind, Write as _};
 
+pub mod merge;
+
 const RULES: &str = "additions.md";
 const REWRITE: &str = "rewrite.md";
 const BASE: &str = "base.md";
@@ -31,9 +33,47 @@ pub fn version(text: &str) -> &str {
     let first = text.lines().next().unwrap_or_default();
     first.rsplit_once(" — ").map_or("", |(_, version)| version)
 }
+/// Whether `base` is a newer stock version of `skill` than this release's.
+fn is_newer(base: &str, skill: Skill) -> bool {
+    number(version(base)) > number(stock_version(skill))
+}
 /// A stock version's number, as 2 for "v2".
 fn number(version: &str) -> Option<u32> {
     version.strip_prefix('v')?.parse().ok()
+}
+/// Whether a rewrite based on `base` is due a merge of `stock` on its own: the base is an older
+/// stock version, and no Undo, or restore from before a merge, in `history` stops it. Whether
+/// its files can be read and are not paused is the host's to check.
+pub fn merge_due(base: &str, stock: &str, history: &[(String, Entry)]) -> bool {
+    let (Some(base), Some(stock)) = (number(version(base)), number(version(stock))) else {
+        return false;
+    };
+    base < stock && stopped(history).is_none_or(|stopped| stopped < stock)
+}
+/// The newest stock version an Undo, or a restore of a rewrite from before a merge, stops
+/// automatic merges into, with every older one: the newer of the version the merge brought in
+/// and the version of the machine that undid or restored.
+fn stopped(history: &[(String, Entry)]) -> Option<u32> {
+    let merged_into = |range: (&str, &str)| {
+        let into = |(name, entry): &(String, Entry)| match &entry.change {
+            Change::Merged { to, .. } if range.0 < name.as_str() && name.as_str() < range.1 => {
+                number(to)
+            }
+            _ => None,
+        };
+        history.iter().filter_map(into).max()
+    };
+    let stops = |(name, entry): &(String, Entry)| {
+        let went_back_past = match &entry.change {
+            Change::UndidMerge { to, .. } => number(to),
+            Change::Restored { entry: restored } if entry.edits.rewrite.is_some() => {
+                merged_into((restored, name))
+            }
+            _ => None,
+        }?;
+        Some(went_back_past.max(number(&entry.stock_version).unwrap_or_default()))
+    };
+    history.iter().filter_map(stops).max()
 }
 /// Refuses rules or a rewrite over the limit; `what` names it, as "Your rules".
 pub(crate) fn check_text(what: &str, text: &str) -> Result<()> {
@@ -88,6 +128,22 @@ pub enum Change {
     /// A release brought a stock version other than the one `previous` entry recorded.
     NewStockVersion {
         previous: String,
+    },
+    /// Stock version `to` merged into a rewrite based on `from`, by `machine`.
+    Merged {
+        from: String,
+        to: String,
+        /// The rewrite and base exactly as they were, which Undo writes back.
+        before: Rewritten,
+        changes: Vec<merge::MergedChange>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<merge::MergeModel>,
+        machine: String,
+    },
+    /// The merge `entry` names, which brought in stock version `to`, was undone.
+    UndidMerge {
+        entry: String,
+        to: String,
     },
 }
 /// A history entry by its name, the time it was written, or why it could not be read.
@@ -172,7 +228,7 @@ impl SkillStore<'_> {
             rewrite: rewrite.map(|Rewritten { text, base }| Rewrite {
                 text,
                 base_version: version(&base).into(),
-                out_of_date: base != stock(skill),
+                out_of_date: base != stock(skill) && !is_newer(&base, skill),
                 base,
             }),
             unreadable,
@@ -235,6 +291,58 @@ impl SkillStore<'_> {
             entry: entry.into(),
         };
         self.change(skill, change, restored.edits)
+    }
+    /// Merges this release's stock text into the rewrite as plain text, saved with its base and
+    /// a "Merged" entry; with passages that overlap, changes nothing and answers them.
+    pub fn merge_update(&self, skill: Skill) -> Result<Vec<merge::Passage>> {
+        let edits = self.readable(skill)?;
+        let before = edits
+            .rewrite
+            .context("Start a rewrite of this skill first")?;
+        let merged = merge::merge(&before.base, stock(skill), &before.text);
+        let Some((text, changes)) = merged.plain() else {
+            return Ok(merged.passages());
+        };
+        check_text("The merged rewrite", &text)?;
+        let change = Change::Merged {
+            from: version(&before.base).into(),
+            to: stock_version(skill).into(),
+            before,
+            changes,
+            model: None,
+            machine: sync::machine_name(),
+        };
+        let rewrite = Rewritten {
+            text,
+            base: stock(skill).into(),
+        };
+        let edits = Edits {
+            rules: String::new(),
+            rewrite: Some(rewrite),
+        };
+        self.change(skill, change, edits)?;
+        Ok(vec![])
+    }
+    /// Writes back exactly the rewrite and base from before the merge `entry` names, as a new
+    /// entry.
+    pub fn undo_merge(&self, skill: Skill, entry: &str) -> Result<()> {
+        let (_, merged) = self
+            .history(skill)
+            .into_iter()
+            .find(|(name, _)| name == entry)
+            .context("That history entry does not exist")?;
+        let Change::Merged { before, to, .. } = merged.change else {
+            bail!("That history entry is not a merge");
+        };
+        let change = Change::UndidMerge {
+            entry: entry.into(),
+            to,
+        };
+        let edits = Edits {
+            rules: String::new(),
+            rewrite: Some(before),
+        };
+        self.change(skill, change, edits)
     }
     /// What changed from a rewrite's base to this release's stock text; nothing without one.
     pub fn stock_changes(&self, skill: Skill) -> Vec<Line> {
@@ -501,6 +609,28 @@ impl Host {
             .zip(&self.newer_stock)
             .map(state)
             .collect()
+    }
+    /// Whether the skill's rewrite is due a merge of this release's stock text on its own: one
+    /// whose files can be read and are not paused, by `merge_due`.
+    pub fn skill_merge_due(&self, skill: Skill) -> Result<bool> {
+        let store = self.skills();
+        let (
+            Edits {
+                rewrite: Some(rewrite),
+                ..
+            },
+            None,
+        ) = store.read(skill)
+        else {
+            return Ok(false);
+        };
+        let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
+        let paused: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_paused WHERE path IN (?1,?2,?3))",
+            paths,
+            |r| r.get(0),
+        )?;
+        Ok(!paused && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
     }
     /// Reads each skill's history for a stock version newer than this release's, at start and
     /// whenever the history may have gained another machine's entries.
@@ -1310,6 +1440,302 @@ mod tests {
         assert_eq!(fs::read_to_string(&kept).unwrap(), "My way");
         let name = kept.file_name().unwrap().to_str().unwrap();
         assert!(name.starts_with("rewrite.md.kept-"), "{name}");
+    }
+
+    const FIFTH: &str = "Ask the human instead when a waiver";
+
+    /// Coordinating rewritten against a stand-in v0 whose fifth paragraph v1 changed: the human
+    /// changed its first paragraph and left trailing spaces and no final newline. Answers the
+    /// rewrite and base as written.
+    fn rewritten_against_v0(host: &Host) -> Rewritten {
+        let stock = stock(Skill::Coordinating);
+        let base = (stock.replacen("— v1", "— v0", 1)).replacen(FIFTH, "Ask the human when", 1);
+        let text = base.replacen("Start by clarifying", "Start by restating", 1);
+        let text = format!("{}  ", text.trim_end());
+        host.skills().start_rewrite(Skill::Coordinating).unwrap();
+        host.skills()
+            .save_rewrite(Skill::Coordinating, &text)
+            .unwrap();
+        based_on_an_earlier_release(host, &base);
+        Rewritten { text, base }
+    }
+
+    fn current(host: &Host) -> [Vec<u8>; 2] {
+        ["rewrite.md", "base.md"].map(|file| fs::read(coordinating(host, file)).unwrap())
+    }
+
+    #[test]
+    fn a_plain_merge_is_saved_with_its_base_and_undo_puts_back_the_exact_bytes() {
+        let (_home, mut host) = host();
+        let before = rewritten_against_v0(&host);
+        assert!(host.skill_merge_due(Skill::Coordinating).unwrap());
+        let overlaps = host.skills().merge_update(Skill::Coordinating).unwrap();
+        assert_eq!(overlaps, []);
+        let stock = stock(Skill::Coordinating);
+        let merged = stock.replacen("Start by clarifying", "Start by restating", 1);
+        let merged = format!("{}  ", merged.trim_end());
+        assert_eq!(current(&host), [merged.as_bytes(), stock.as_bytes()]);
+        let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
+        assert!(!rewrite.out_of_date);
+        assert!(
+            host.instructions(Role::ProjectOrchestrator)
+                .ends_with(&merged)
+        );
+        let (entry, recorded) = host.skills().history(Skill::Coordinating).pop().unwrap();
+        let Change::Merged {
+            from,
+            to,
+            before: recorded_before,
+            changes: merged_changes,
+            model,
+            machine,
+        } = recorded.change
+        else {
+            panic!("{recorded:?}")
+        };
+        assert_eq!((from.as_str(), to.as_str()), ("v0", "v1"));
+        assert_eq!((recorded_before, model), (before.clone(), None));
+        assert_eq!(machine, sync::machine_name());
+        let sources: Vec<_> = merged_changes.iter().map(|change| change.source).collect();
+        assert_eq!(sources, [merge::Source::Update, merge::Source::Update]);
+
+        host.execute(Command::UndoSkillMerge {
+            skill: Skill::Coordinating,
+            entry: entry.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        let undid = Change::UndidMerge {
+            entry,
+            to: "v1".into(),
+        };
+        assert_eq!(changes(&host, Skill::Coordinating).last(), Some(&undid));
+        assert!(
+            host.skills()
+                .state(Skill::Coordinating)
+                .rewrite
+                .unwrap()
+                .out_of_date
+        );
+        assert!(
+            host.instructions(Role::ProjectOrchestrator)
+                .ends_with(&before.text)
+        );
+        assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
+        // Only a merge's entry can be undone.
+        let (saved, _) = host.skills().history(Skill::Coordinating).remove(1);
+        let refused = host.skills().undo_merge(Skill::Coordinating, &saved);
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "That history entry is not a merge"
+        );
+    }
+
+    #[test]
+    fn a_merge_whose_record_cannot_be_written_changes_nothing() {
+        let (_home, host) = host();
+        let before = rewritten_against_v0(&host);
+        let merged = while_the_history_is_read_only(&host, || {
+            host.skills().merge_update(Skill::Coordinating)
+        });
+        assert!(merged.is_err());
+        assert_eq!(
+            current(&host),
+            [before.text.as_bytes(), before.base.as_bytes()]
+        );
+        assert_eq!(
+            changes(&host, Skill::Coordinating).last(),
+            Some(&Change::SavedRewrite)
+        );
+    }
+
+    #[test]
+    fn an_overlap_changes_nothing_and_is_answered() {
+        let (_home, host) = host();
+        let before = rewritten_against_v0(&host);
+        let text = before.text.replacen("Ask the human when", "Ask me when", 1);
+        host.skills()
+            .save_rewrite(Skill::Coordinating, &text)
+            .unwrap();
+        let overlaps = host.skills().merge_update(Skill::Coordinating).unwrap();
+        let [passage] = &overlaps[..] else {
+            panic!("{overlaps:?}")
+        };
+        assert!(passage.stock.starts_with(FIFTH) && passage.yours.starts_with("Ask me when"));
+        assert_eq!(current(&host), [text.as_bytes(), before.base.as_bytes()]);
+        assert_eq!(
+            changes(&host, Skill::Coordinating).last(),
+            Some(&Change::SavedRewrite)
+        );
+    }
+
+    #[test]
+    fn a_merge_is_due_only_for_a_readable_unpaused_rewrite_of_an_older_version() {
+        let (_home, host) = host();
+        host.skills()
+            .save_rules(Skill::Implementing, "Rule")
+            .unwrap();
+        assert!(!host.skill_merge_due(Skill::Implementing).unwrap());
+        let before = rewritten_against_v0(&host);
+        assert!(host.skill_merge_due(Skill::Coordinating).unwrap());
+        // A paused skill waits until the pause is settled.
+        let pause =
+            "INSERT INTO sync_paused(path,why) VALUES ('skills/coordinating/rewrite.md','{}')";
+        host.db.execute(pause, []).unwrap();
+        assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
+        host.db.execute("DELETE FROM sync_paused", []).unwrap();
+        fs::write(coordinating(&host, "base.md"), b"\xff not text").unwrap();
+        assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
+        // The same version with different text stays out of date and is not merged.
+        let stock = stock(Skill::Coordinating);
+        based_on_an_earlier_release(&host, &format!("{stock}A line the release removed.\n"));
+        assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
+        assert!(
+            host.skills()
+                .state(Skill::Coordinating)
+                .rewrite
+                .unwrap()
+                .out_of_date
+        );
+        // A base from a newer release is sent as written, neither out of date nor merged.
+        based_on_an_earlier_release(&host, &stock.replacen("— v1", "— v2", 1));
+        assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
+        let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
+        assert_eq!(
+            (rewrite.base_version.as_str(), rewrite.out_of_date),
+            ("v2", false)
+        );
+        assert!(
+            host.instructions(Role::ProjectOrchestrator)
+                .ends_with(&before.text)
+        );
+    }
+
+    #[test]
+    fn an_undo_or_a_restore_from_before_a_merge_stops_merges_until_a_newer_version() {
+        let text = |version: u32| format!("# Coordinating — v{version}\nText {version}\n");
+        let rewrite = Rewritten {
+            text: "Mine".into(),
+            base: text(1),
+        };
+        let entry = |name: &str, change: Change, on: &str, rewrite: Option<&Rewritten>| {
+            let edits = Edits {
+                rules: String::new(),
+                rewrite: rewrite.cloned(),
+            };
+            let stock_version = on.into();
+            let entry = Entry {
+                change,
+                stock_version,
+                edits,
+            };
+            (name.to_owned(), entry)
+        };
+        let merged = |to: &str| Change::Merged {
+            from: "v1".into(),
+            to: to.into(),
+            before: rewrite.clone(),
+            changes: vec![],
+            model: None,
+            machine: "Mike's MacBook Air".into(),
+        };
+        let undid = |to: &str| Change::UndidMerge {
+            entry: "b".into(),
+            to: to.into(),
+        };
+        let due =
+            |history: &[(String, Entry)], into: u32| merge_due(&text(1), &text(into), history);
+        let mine = Some(&rewrite);
+        assert!(due(&[], 2));
+        assert!(!due(&[], 1));
+        assert!(!merge_due(&text(2), "# Coordinating — v2\nOther\n", &[]));
+        assert!(!merge_due(&text(3), &text(2), &[]));
+
+        // An Undo on v2 of the v1 → v2 merge stops v2, and v3 merges as usual.
+        let on_v2 = [
+            entry("b", merged("v2"), "v2", mine),
+            entry("c", undid("v2"), "v2", mine),
+        ];
+        assert!(!due(&on_v2, 2));
+        assert!(due(&on_v2, 3));
+        // Undoing that merge on a Mac on v3 stops v2 and v3, and v4 merges.
+        let on_v3 = [
+            entry("b", merged("v2"), "v2", mine),
+            entry("c", undid("v2"), "v3", mine),
+        ];
+        assert!(!due(&on_v3, 2) && !due(&on_v3, 3));
+        assert!(due(&on_v3, 4));
+        // Undoing a Mac on v3's v2 → v3 merge on a Mac on v2 stops v3 too.
+        let newer = [
+            entry("b", merged("v3"), "v3", mine),
+            entry("c", undid("v3"), "v2", mine),
+        ];
+        assert!(!merge_due(&text(2), &text(3), &newer));
+
+        // Restoring a rewrite from before a merge stops it as an Undo does.
+        let restored = |of: &str, restored: Option<&Rewritten>| {
+            [
+                entry("a", Change::SavedRewrite, "v1", mine),
+                entry("b", merged("v2"), "v2", mine),
+                entry("c", Change::SavedRewrite, "v2", mine),
+                entry("d", Change::Restored { entry: of.into() }, "v2", restored),
+            ]
+        };
+        assert!(!due(&restored("a", mine), 2));
+        assert!(due(&restored("a", mine), 3));
+        assert!(
+            due(&restored("c", mine), 2),
+            "restored from after the merge"
+        );
+        assert!(due(&restored("a", None), 2), "restored rules");
+    }
+
+    #[test]
+    fn every_role_keeps_the_whole_fixed_core_after_every_skill_is_merged() {
+        let (_home, host) = host();
+        for skill in Skill::ALL {
+            host.skills().start_rewrite(skill).unwrap();
+            let base = stock(skill).replacen("— v1", "— v0", 1);
+            let folder = host.shared().skills_folder().join(skill.folder());
+            fs::write(folder.join("base.md"), base).unwrap();
+            assert_eq!(host.skills().merge_update(skill).unwrap(), []);
+            let rewrite = host.skills().state(skill).rewrite.unwrap();
+            assert_eq!(
+                (rewrite.text.as_str(), rewrite.out_of_date),
+                (stock(skill), false)
+            );
+        }
+        for role in Role::ALL {
+            let core = provider::instructions(role, "", "");
+            assert!(host.instructions(role).starts_with(&core), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_cannot_merge_or_undo_a_skill() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        rewritten_against_v0(&host);
+        host.skills().merge_update(Skill::Coordinating).unwrap();
+        let before = (current(&host), changes(&host, Skill::Coordinating));
+        let (merge_entry, _) = host.skills().history(Skill::Coordinating).pop().unwrap();
+        host.create_project("Site").unwrap();
+        let coordinator = host.sessions().unwrap().remove(0);
+        for tool in mcp::tools().as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            for word in ["merge", "undo", "skill"] {
+                assert!(!name.contains(word), "{name}");
+            }
+            let args = json!({"skill": "coordinating", "entry": merge_entry, "text": "Agent's"});
+            let _ = host.agent_tool(&coordinator.id, name, args);
+        }
+        assert_eq!(
+            (current(&host), changes(&host, Skill::Coordinating)),
+            before
+        );
     }
 
     #[test]

@@ -163,7 +163,7 @@ pub struct Rewrite {
     pub base: String,
     /// The version on the first line of the stock text the rewrite is based on.
     pub base_version: String,
-    /// Its base is not this release's stock text, compared as text.
+    /// Its base is not this release's stock text, compared as text, and not a newer version.
     pub out_of_date: bool,
 }
 
@@ -2613,6 +2613,13 @@ pub enum Command {
     /// `SkillState`. Only the human's client sends it.
     MarkSkillUpToDate {
         skill: Skill,
+    },
+    /// Writes back exactly the rewrite and base from before the merge the "Merged" history entry
+    /// `entry` names, as a new entry; answers with the `SkillState`. Only the human's client
+    /// sends it.
+    UndoSkillMerge {
+        skill: Skill,
+        entry: String,
     },
     /// Read-only: what changed, line by line, from a rewrite's base to this release's stock text.
     SkillStockChanges {

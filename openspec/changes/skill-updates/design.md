@@ -44,7 +44,7 @@ See proposal.md for why. The code this builds on, at settings-repository slice 6
 
 From change 4: authority is enforced by the app, never by text, and the fixed core is not a skill. From change 5: when two machines changed the same file, it pauses with a note in the Inbox.
 
-**Everything else here is a design decision for the human to approve**, including the answers to the proposal's open questions 1 to 6. This design is written as if each recommendation is accepted.
+**Everything else here was approved by the human on October 16, 2026**, with the recommended answer to each of the proposal's questions 1 to 6.
 
 ### 1. What is merged, and when a merge is due
 
@@ -52,14 +52,14 @@ From change 4: authority is enforced by the app, never by text, and the fixed co
 - A rewrite is **due** a merge when all of these hold:
   - its base's version, on its first line, is older than this release's stock version. A base with a newer version is not even out of date (decision 8). A base with the same version but different text, as when a release forgot to change the version, stays out of date for the human, as today: it offers Merge v2 in and Mark as up to date but never merges on its own. *Why:* two releases that share a version but differ in text would otherwise merge back and forth on every pass, each taking the other's base as out of date;
   - its files can be read, and sync has not paused them;
-  - no Undo of a merge into this stock version is in its history (open question 5). Merge v2 in still works;
+  - nothing in its history stops merges into this stock version: an Undo, or a restore of a rewrite from before a merge (decision 7, question 5). Merge v2 in still works;
   - no question about this stock version is waiting, that is, asked about exactly the rewrite and base the skill has now (decision 5);
   - no merge of it is already running on this Mac.
 - A due rewrite keeps running exactly as written until a merge applies, as it does today.
 
 ### 2. When a merge runs
 
-Open question 2. A new stock text arrives only with a release, so most merges start at host start. A pull can't change this Mac's stock text. It can bring a rewrite that another Mac changed, so a pass can make a rewrite due or settle one.
+Question 2. A new stock text arrives only with a release, so most merges start at host start. A pull can't change this Mac's stock text. It can bring a rewrite that another Mac changed, so a pass can make a rewrite due or settle one.
 
 - **At host start**, after the "New stock version" entries are written, the host checks each skill and starts a merge for each due rewrite.
 - **After a sync pass** that changed a skill's files, the host checks that skill again. For example, a Mac on an older release saved a rewrite on the old base.
@@ -81,7 +81,7 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 
 ### 4. The model merge
 
-- **Which model** (open question 1): the PR keeper's model, when it is a Claude model. A merge needs it only for passages that overlap.
+- **Which model** (question 1): the PR keeper's model, when it is a Claude model. A merge needs it only for passages that overlap.
 - **What it is sent.** One JSON input: the skill's name; the base, stock and yours as whole texts, for context; and the overlapping passages, each with an id and its base, stock and human versions. Nothing else: no fixed core, no other skill, no project, no file. Every text in it is either bundled with Wiffletree or written by the human, so none of it is untrusted input. It still runs with every tool off, because it needs none.
 - **The run.** A one-off Claude process, off the host thread, like the context probe and built like the sorting run: `-p`, `--tools ""`, `--strict-mcp-config` with no MCP server, `--no-session-persistence`, hooks off, the model and effort of the PR keeper's model, a fixed `--system-prompt` (`MERGING`, bundled), a `--json-schema` for the answer, in an empty temporary folder, with no workspace socket or token. Its time limit is 5 minutes. It belongs to no project, ticket or agent.
 - **The instructions** say, in short: for each passage, write one version that keeps every change the human made and brings in what the update adds or changes; keep the human's wording where both can stand; add nothing that neither version says. When the two versions want different things, so that keeping one drops what the other means, don't merge that passage: answer one sentence saying what each wants.
@@ -94,13 +94,13 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 - **Applied, or dropped.** When the skill's files changed while the model ran, because the human saved or a pass pulled, the answer is dropped and the merge is due again from the new state. Otherwise, merged passages are put into the plain merge and saved with a "Merged" entry. Questions go to the human (decision 5).
 - **The fixed core is untouched by construction.** It is bundled, it is not in the shared folder, and it is never sent to the model. The model can only write passage text, and the host puts that only between the plain merge's parts. Every line outside an overlapping passage is exactly what the plain merge produced.
 - **Cost.** One run per skill per stock version, across all Macs (decision 8), and only when something overlaps. A rewrite is at most 32,000 characters, so a run reads at most about 30,000 tokens and writes only the overlapping passages. With today's stock texts, a run reads a few thousand tokens. The "Merged" entry records the model and the tokens, and Review changes shows them. Merge runs belong to no project, so the Usage page doesn't count them.
-- **No model, or offline.** With no PR keeper model, or one that isn't Claude, nothing changes: the rewrite runs as written. The page says the update and the rewrite both change N passages, links to Models, and offers the same choice per passage as a question (decision 5), without a model's sentence. A run that fails or can't reach Claude is kept in memory as failed. The page shows the reason and **Try again**, and the next host start tries again. No Inbox note (open question 3).
+- **No model, or offline.** With no PR keeper model, or one that isn't Claude, nothing changes: the rewrite runs as written. The page says the update and the rewrite both change N passages, links to Models, and offers the same choice per passage as a question (decision 5), without a model's sentence. A run that fails or can't reach Claude is kept in memory as failed. The page shows the reason and **Try again**, and the next host start tries again. No Inbox note (question 3).
 - **No fallback model.** As for the keeper (`model-routing`, "No fallback"), a failed run never moves to another model.
 
 ### 5. A real question
 
 - **When.** Only when the model answers `question` for a passage (H3). Overlap alone is not a question, and neither is a missing model or a failed try.
-- **Nothing applies meanwhile** (open question 6). The rewrite runs as written, and the base stays as it was. A rewrite's base must be one whole stock text.
+- **Nothing applies meanwhile** (question 6). The rewrite runs as written, and the base stays as it was. A rewrite's base must be one whole stock text.
 - **It is recorded.** The host writes an "Asked you about v2" history entry that holds the merge so far, that is, the plain merge's parts and any passages the model merged, and, for each passage in question, the question and its stock and human versions. It also records the stock text it merges into. Every Mac on that release can then show and settle the question without running the model again. Writing it also stops other Macs on that release from running their own model (decision 1).
 - **Only on the release it is about.** A question is a merge into one stock text, so only a Mac whose stock text is that text shows it and applies an answer, and the answer's base is that text. A Mac on another release doesn't show it, and checks the skill against its own stock version instead. A Mac on v3 merges v1→v3 itself, which changes the rewrite and base and so closes the v2 question everywhere. A Mac on an older release finds a base newer than its own, or the same, and does nothing. *Why:* answering a v2 question on a v3 Mac would record a v2-only merge with base v3, so v3's own changes would never merge, and answering a v3 question on a v2 Mac would move its base back.
 - **Where.**
@@ -115,7 +115,7 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 - A merge is applied through `SkillStore::change`: `rewrite.md` and `base.md` are replaced and the entry is written together, or nothing changes. The new base is this release's stock text.
 - New entry kinds:
   - **Merged v1 → v2**, written by an automatic merge or by the human's choices. It holds the state after the merge, like every entry. It also holds the rewrite and base from **before** the merge, exactly. It records each change as from the update, merged by the model, or chosen by the human; the model and tokens when one ran; and the Mac that merged.
-  - **Undid the merge of v2**: the state put back.
+  - **Undid the merge of v2**: the state put back, naming the merge's entry and the stock version it brought in.
   - **Asked you about v2**: decision 5. The skill's state is unchanged.
 - Nothing is ever deleted from a history (change 4).
 
@@ -123,8 +123,11 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 
 - **Where.** On the skill's page, a banner above the rewrite: "Merged Coordinating v2 into your rewrite · 3 changes from the update, 1 passage merged by Claude haiku". It has **Review changes**, **Undo** and **Dismiss**. On the Skills list, "Rewritten · updated". No Inbox note and no dot (H3).
 - **Review changes** shows the rewrite before and after, line by line. Each change is labelled "From v2" or "Merged by Claude haiku". A merged passage can be opened to show its base, v2's and the human's versions beside the result. It also names the Mac and the time.
-- **Undo** asks first, naming what stops applying. It writes the entry's **before** rewrite and base back exactly, byte for byte, with an "Undid the merge" entry. The rewrite is then out of date again, no automatic merge into that stock version runs, and the banner offers **Merge v2 in**, Mark as up to date and Reset to stock. Undo is offered while the merge is the skill's latest change. After a later save, the merge's history entry still offers **Undo this merge**, which asks first and says the later changes stay in the history.
-- **How long it stays** (open question 4). On each Mac, until the human chooses Review changes or Dismiss there, or the skill changes again. This Mac's database keeps which merges were dismissed. It is a view preference, not a change to the skill. The merge itself stays in the history.
+- **Undo** asks first, naming what stops applying. It writes the entry's **before** rewrite and base back exactly, byte for byte, with an "Undid the merge" entry. The rewrite is then out of date again, no automatic merge into that stock version runs (see below), and the banner offers **Merge v2 in**, Mark as up to date and Reset to stock. Undo is offered while the skill still holds the merge's after-state. After a later change, the merge's history entry still offers **Undo this merge**, which asks first and says the later changes stay in the history.
+- **Which merge.** The note, Review changes and Undo are about the "Merged" entry whose after-state is the skill's live rewrite and base, not simply the latest entry: a "New stock version" entry or another Mac's entry may come after it. With no such entry, there is no note, and Undo is offered only on a "Merged" history entry.
+- **Restoring a rewrite from before a merge** sticks the way Undo does. Restore asks first when it would make current a rewrite from an entry older than a "Merged" entry, saying that no automatic merge brings that version in until a newer one arrives. *Why:* otherwise the next start would merge straight back what the human chose to go back past.
+- **What Undo and such a restore stop.** Each stops automatic merges into the newer of the stock version the merge brought in and the stock version of the Mac that undid or restored, and into every older version. A newer stock version merges as usual. So undoing Coordinating's v1 → v2 merge on a Mac on v3, another release's merge, stops v2 and v3 merges on every Mac; undoing a v2 → v3 merge on a Mac on v2 stops them too, so the Mac on v3 doesn't merge it back. Merge v2 in still works.
+- **How long it stays** (question 4). On each Mac, until the human chooses Review changes or Dismiss there, or the skill changes again. This Mac's database keeps which merges were dismissed. It is a view preference, not a change to the skill. The merge itself stays in the history.
 
 ### 8. Two Macs
 
@@ -148,7 +151,7 @@ Open question 2. A new stock text arrives only with a release, so most merges st
 
 ### 10. The snapshot and commands
 
-- `SkillState` gains: the latest merge's note when not dismissed on this Mac (versions, counts, model, Mac, time); the merge state of an out-of-date rewrite (waiting for the first pass, merging, failed with a reason, undone, needs a model, a newer base on another Mac); and a waiting question with its passages.
+- `SkillState` gains: the note of the merge the skill holds now, when not dismissed on this Mac (versions, counts, model, Mac, time); the merge state of an out-of-date rewrite (waiting for the first pass, merging, failed with a reason, undone, needs a model, a newer base on another Mac); and a waiting question with its passages.
 - `WorkspaceNote` gains a second kind, a skill question, beside a paused file.
 - New commands from the human's client: `UndoSkillMerge`, `MergeSkillUpdate` (Merge v2 in, or Try again), `AnswerSkillQuestion` (a choice per passage) and `DismissSkillMerge`. The before-and-after review is asked for when it opens, as the history and the diff are today.
 
