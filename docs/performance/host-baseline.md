@@ -37,18 +37,18 @@ The snapshot now holds only live work, the archive is read apart from it and onl
 
 | Operation | Before p50 | Before p95 | After p50 | After p95 |
 | --- | ---: | ---: | ---: | ---: |
-| Snapshot JSON size | 3,641,867 B | | 192,494 B | |
-| Workspace snapshot, host build | 37.127 ms | 38.709 ms | 8.284 ms | 9.298 ms |
-| Snapshot with JSON round trip | 40.783 ms | 42.195 ms | 7.947 ms | 8.485 ms |
-| Archive with JSON round trip (3,484,471 B), read only while a view needs it | | | 17.587 ms | 18.710 ms |
-| Index of snapshot and archive | | | 0.211 ms | 0.225 ms |
-| Sidebar tree rows | 25.986 ms | 26.076 ms | 0.005 ms | 0.006 ms |
-| Sidebar tree rows, Show archived | 50.822 ms | 51.187 ms | 0.090 ms | 0.098 ms |
-| Host restart and snapshot | 104.830 ms | 110.962 ms | 88.353 ms | 158.524 ms |
+| Snapshot JSON size | 3,641,867 B | | 192,495 B | |
+| Workspace snapshot, host build | 37.127 ms | 38.709 ms | 7.616 ms | 8.036 ms |
+| Snapshot with JSON round trip | 40.783 ms | 42.195 ms | 7.884 ms | 8.550 ms |
+| Archive with JSON round trip (3,484,472 B), read only while a view needs it | | | 18.060 ms | 19.828 ms |
+| Index of snapshot and archive | | | 0.209 ms | 0.222 ms |
+| Sidebar tree rows | 25.986 ms | 26.076 ms | 0.008 ms | 0.011 ms |
+| Sidebar tree rows, Show archived | 50.822 ms | 51.187 ms | 0.093 ms | 0.099 ms |
+| Host restart and snapshot | 104.830 ms | 110.962 ms | 78.994 ms | 86.740 ms |
 
-The after column was measured once more after review kept open tickets' archived agents, such as an earlier cycle's verifiers, in the snapshot, so that the default sidebar needs no archive. That added 40 sessions and their runtimes to the fixture's snapshot. Other builds were running on the Mac by then, so after times run a little high; the restart p95 in particular was noisy. Before that change, on a quiet machine, the snapshot was 152,783 bytes and built in 5.498 ms p50.
+The after column was measured again later that day with no other builds running, at `2261b4aa`, which adds Phase 3a's desktop work and Phase 3b's host commits. It includes review's change that keeps open tickets' archived agents, such as an earlier cycle's verifiers, in the snapshot, so that the default sidebar needs no archive. That change added 40 sessions and their runtimes to the fixture's snapshot. Before it, the snapshot was 152,783 bytes and built in 5.498 ms p50.
 
-On a read-only copy of the human's store (137 tickets, 718 sessions, 714 archived), measured before that review change, the snapshot went from 2,148,697 to 100,681 bytes and its round trip from 14.357 to 4.325 ms p50; the archive is 2,081,614 bytes and round-trips in 5.590 ms. Tree rows with Show archived went from 54.480 to 0.098 ms p50, and without it from 0.816 to 0.001 ms.
+On a read-only copy of the human's store, measured before that review change (137 tickets, 718 sessions, 714 archived), the snapshot went from 2,148,697 to 100,681 bytes and its round trip from 14.357 to 4.325 ms p50. Tree rows with Show archived went from 54.480 to 0.098 ms p50, and without it from 0.816 to 0.001 ms. A fresh copy measured with the after column holds 142 tickets and 728 sessions, 723 of them archived. Its snapshot is 181,175 bytes and round-trips in 7.266 ms p50 (7.587 ms p95). The archive is 2,048,423 bytes and round-trips in 7.823 ms, the index builds in 0.207 ms, and tree rows take 0.101 ms with Show archived and 0.002 ms without.
 
 Of the old host build, 19 ms was `questions_waiting` scanning every message and 15 ms `undelivered` doing the same; both now go through existing indexes (message ids, and each session's outbox). Accepted and closed tickets and archived sessions are found through two expression indexes. Most of what remains is hashing the archive's stored rows for `archive_stamp`, about 4.5 ms, and finding open tickets' agents. Tree rows and the snapshot sizes and round trips on the desktop side come from the ignored `tree_rows_benchmark` test, pointed at a kept fixture or store copy; the other rows come from the benchmark. The desktop decodes the snapshot and builds the index on its main thread; that is the round trip's decode plus the index, under 1 ms here.
 
