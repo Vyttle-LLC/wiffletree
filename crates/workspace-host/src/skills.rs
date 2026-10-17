@@ -2869,9 +2869,16 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let note = WorkspaceNote::SkillQuestion(question.clone());
         assert_eq!(host.workspace_notes().unwrap(), [note]);
 
-        // No second run, now or at the next start.
+        // No second run, now, at the next start or on Merge v1 in.
         assert!(!host.skill_merge_due(skill).unwrap());
         let mut host = started_again(&home, host);
+        assert!(host.take_merge_runs().is_empty());
+        assert_eq!(
+            execute(&mut host, Command::MergeSkillUpdate { skill })
+                .unwrap_err()
+                .to_string(),
+            "Choose a wording for Coordinating's question first"
+        );
         assert!(host.take_merge_runs().is_empty());
         assert_eq!(coordinating_state(&host).question, Some(question));
 

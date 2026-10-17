@@ -1502,6 +1502,11 @@ impl Host {
                     "{} is being merged already",
                     skill.name()
                 );
+                ensure!(
+                    self.skill_state(skill)?.question.is_none(),
+                    "Choose a wording for {}'s question first",
+                    skill.name()
+                );
                 self.merge_skill(skill, false)?;
                 self.changed_skill(skill)?
             }

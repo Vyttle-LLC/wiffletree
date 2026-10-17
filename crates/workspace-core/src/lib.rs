@@ -2724,8 +2724,8 @@ pub enum Command {
         entry: String,
     },
     /// Merges this release's stock text into an out-of-date rewrite, or tries again after a
-    /// failed try; passages that overlap go to the PR keeper's model. Answers with the
-    /// `SkillState`. Only the human's client sends it.
+    /// failed try; passages that overlap go to the PR keeper's model. Refused while a question
+    /// about the rewrite waits. Answers with the `SkillState`. Only the human's client sends it.
     MergeSkillUpdate {
         skill: Skill,
     },
