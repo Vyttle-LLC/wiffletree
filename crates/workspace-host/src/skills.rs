@@ -140,6 +140,9 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<MergeModel>,
         machine: String,
+        /// The host merged on its own, not at the human's Merge v2 in.
+        #[serde(default)]
+        automatic: bool,
     },
     /// The merge `entry` names, which brought in stock version `to`, was undone.
     UndidMerge {
@@ -294,7 +297,8 @@ impl SkillStore<'_> {
     /// Merges this release's stock text into the rewrite as plain text, saved with its base and
     /// a "Merged" entry; with passages that overlap, changes nothing and answers them. Only a
     /// rewrite based on an older stock version, or on this one with other text, is merged.
-    pub fn merge_update(&self, skill: Skill) -> Result<Vec<merge::Passage>> {
+    /// `automatic` when the host merges on its own.
+    pub fn merge_update(&self, skill: Skill, automatic: bool) -> Result<Vec<merge::Passage>> {
         let edits = self.readable(skill)?;
         let before = edits
             .rewrite
@@ -325,6 +329,7 @@ impl SkillStore<'_> {
             changes,
             model: None,
             machine: sync::machine_name(),
+            automatic,
         };
         let rewrite = Rewritten {
             text,
@@ -659,9 +664,16 @@ impl Host {
             Some((name, entry)) if !dismissed(name)? => merge_note(name, entry),
             _ => None,
         };
+        let this_release = number(&state.stock_version);
         let merge_standing = match &state.rewrite {
             Some(rewrite) if rewrite.out_of_date => {
-                (recalled.stopped >= number(&state.stock_version)).then_some(MergeStanding::Undone)
+                let older = number(&rewrite.base_version).is_some_and(|b| Some(b) < this_release);
+                if recalled.stopped >= this_release {
+                    Some(MergeStanding::Undone)
+                } else {
+                    (self.merges_wait_for_sync && older && !self.skill_paused(skill)?)
+                        .then_some(MergeStanding::WaitingForSync)
+                }
             }
             Some(rewrite) if is_newer(&rewrite.base, skill) => {
                 let machine = merged.and_then(|(_, entry)| match &entry.change {
@@ -684,18 +696,19 @@ impl Host {
         self.recall_skill_histories();
         Ok(serde_json::to_value(self.skill_state(skill)?)?)
     }
-    /// Merges, as plain text, each rewrite that is due a merge; one whose passages overlap stays
-    /// out of date.
-    pub(crate) fn merge_due_skills(&self) {
-        for skill in Skill::ALL {
+    /// Merges, as plain text, each of `skills` whose rewrite is due a merge; one whose passages
+    /// overlap stays out of date.
+    pub(crate) fn merge_due_skills(&mut self, skills: impl IntoIterator<Item = Skill>) {
+        for skill in skills {
             let merged = match self.skill_merge_due(skill) {
-                Ok(true) => self.skills().merge_update(skill).map(drop),
+                Ok(true) => self.skills().merge_update(skill, true).map(drop),
                 due => due.map(drop),
             };
             if let Err(error) = merged {
                 eprintln!("Merging {}'s new stock version: {error:#}", skill.name());
             }
         }
+        self.recall_skill_histories();
     }
     /// Whether the skill's rewrite is due a merge of this release's stock text on its own: one
     /// whose files can be read and are not paused, by `merge_due`.
@@ -712,12 +725,18 @@ impl Host {
             return Ok(false);
         };
         let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
-        let paused: bool = self.db.query_row(
+        Ok(!self.skill_paused(skill)?
+            && !self.changed_outside_wiffletree(&paths)?
+            && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
+    }
+    /// Whether sync has paused the skill's files.
+    fn skill_paused(&self, skill: Skill) -> rusqlite::Result<bool> {
+        let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
+        self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sync_paused WHERE path IN (?1,?2,?3))",
             paths,
             |r| r.get(0),
-        )?;
-        Ok(!paused && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
+        )
     }
     /// Reads each skill's history, at start and whenever it may have gained entries.
     pub(crate) fn recall_skill_histories(&mut self) {
@@ -1666,7 +1685,10 @@ mod tests {
         let (_home, mut host) = host();
         let before = rewritten_against_v0(&host);
         assert!(host.skill_merge_due(Skill::Coordinating).unwrap());
-        let overlaps = host.skills().merge_update(Skill::Coordinating).unwrap();
+        let overlaps = host
+            .skills()
+            .merge_update(Skill::Coordinating, false)
+            .unwrap();
         assert_eq!(overlaps, []);
         let stock = stock(Skill::Coordinating);
         let merged = stock.replacen("Start by clarifying", "Start by restating", 1);
@@ -1686,13 +1708,14 @@ mod tests {
             changes: merged_changes,
             model,
             machine,
+            automatic,
         } = recorded.change
         else {
             panic!("{recorded:?}")
         };
         assert_eq!((from.as_str(), to.as_str()), ("v0", "v1"));
         assert_eq!((recorded_before, model), (before.clone(), None));
-        assert_eq!(machine, sync::machine_name());
+        assert_eq!((machine, automatic), (sync::machine_name(), false));
         let sources: Vec<_> = merged_changes.iter().map(|change| change.source).collect();
         assert_eq!(sources, [merge::Source::Update, merge::Source::Update]);
 
@@ -1736,7 +1759,7 @@ mod tests {
         let (_home, host) = host();
         let before = rewritten_against_v0(&host);
         let merged = while_the_history_is_read_only(&host, || {
-            host.skills().merge_update(Skill::Coordinating)
+            host.skills().merge_update(Skill::Coordinating, false)
         });
         assert!(merged.is_err());
         assert_eq!(
@@ -1757,7 +1780,10 @@ mod tests {
         host.skills()
             .save_rewrite(Skill::Coordinating, &text)
             .unwrap();
-        let overlaps = host.skills().merge_update(Skill::Coordinating).unwrap();
+        let overlaps = host
+            .skills()
+            .merge_update(Skill::Coordinating, false)
+            .unwrap();
         let [passage] = &overlaps[..] else {
             panic!("{overlaps:?}")
         };
@@ -1838,6 +1864,7 @@ mod tests {
             changes: vec![],
             model: None,
             machine: "Mike's MacBook Air".into(),
+            automatic: true,
         };
         let undid = |to: &str| Change::UndidMerge {
             entry: "b".into(),
@@ -1898,7 +1925,7 @@ mod tests {
             let base = stock(skill).replacen("— v1", "— v0", 1);
             let folder = host.shared().skills_folder().join(skill.folder());
             fs::write(folder.join("base.md"), base).unwrap();
-            assert_eq!(host.skills().merge_update(skill).unwrap(), []);
+            assert_eq!(host.skills().merge_update(skill, false).unwrap(), []);
             let rewrite = host.skills().state(skill).rewrite.unwrap();
             assert_eq!(
                 (rewrite.text.as_str(), rewrite.out_of_date),
@@ -1916,7 +1943,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
         rewritten_against_v0(&host);
-        host.skills().merge_update(Skill::Coordinating).unwrap();
+        host.skills()
+            .merge_update(Skill::Coordinating, false)
+            .unwrap();
         let before = (current(&host), changes(&host, Skill::Coordinating));
         let (merge_entry, _) = host.skills().history(Skill::Coordinating).pop().unwrap();
         host.create_project("Site").unwrap();
@@ -2189,6 +2218,7 @@ mod tests {
                 changes: vec![from_update, by_model],
                 model: Some(model.clone()),
                 machine: "Mike's MacBook Air".into(),
+                automatic: true,
             },
             stock_version: "v1".into(),
             edits: Edits {

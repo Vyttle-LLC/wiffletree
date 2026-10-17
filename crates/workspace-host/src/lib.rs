@@ -76,6 +76,9 @@ pub struct Host {
     pub(crate) sync: sync::Synced,
     /// By skill, in `Skill::ALL`'s order, what its history says beyond its files.
     skill_histories: [skills::Recalled; 4],
+    /// With a settings repository, the merges due at start wait for this launch's first sync
+    /// pass to end, since it may bring another Mac's.
+    pub(crate) merges_wait_for_sync: bool,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -236,6 +239,7 @@ impl Host {
             sync_passes: Default::default(),
             sync: Default::default(),
             skill_histories: Default::default(),
+            merges_wait_for_sync: false,
         };
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -250,11 +254,12 @@ impl Host {
         if let Err(error) = host.skills().record_new_stock_versions() {
             eprintln!("Recording new stock versions of skills: {error:#}");
         }
-        // With a settings repository, another Mac may have merged; that waits for sync.
-        if host.settings().settings_repository.is_none() {
-            host.merge_due_skills();
-        }
         host.recall_skill_histories();
+        if host.settings().settings_repository.is_some() {
+            host.merges_wait_for_sync = true;
+        } else {
+            host.merge_due_skills(Skill::ALL);
+        }
         Ok(host)
     }
     /// A session shows as working while its turn runs, even after reporting `blocked` or
@@ -1486,7 +1491,7 @@ impl Host {
                 self.changed_skill(skill)?
             }
             Command::MergeSkillUpdate { skill } => {
-                let overlaps = self.skills().merge_update(skill)?.len();
+                let overlaps = self.skills().merge_update(skill, false)?.len();
                 ensure!(overlaps == 0, skills::needs_a_model(skill, overlaps));
                 self.changed_skill(skill)?
             }

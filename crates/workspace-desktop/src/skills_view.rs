@@ -246,7 +246,8 @@ fn out_of_date_title(state: &SkillState, base_version: &str) -> String {
 }
 
 /// The banner of a rewrite that is out of date, or based on a newer release: its title and
-/// text, and whether it offers Merge in, Mark as up to date and Reset to stock.
+/// text, and whether it offers Merge in, Mark as up to date and Reset to stock, which it does
+/// while out of date unless a merge waits for the first sync.
 fn rewrite_banner(state: &SkillState) -> Option<([String; 2], bool)> {
     let rewrite = state.rewrite.as_ref()?;
     let (name, stock, base) = (
@@ -261,6 +262,12 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], bool)> {
                 "Your rewrite is as it was before the merge, and {stock} won't be merged into it again on its own."
             ),
         ],
+        (Some(MergeStanding::WaitingForSync), true) => {
+            let waiting = format!(
+                "Waiting for this launch's first sync, so your Macs merge {stock} only once. If another Mac already merged it, this Mac takes that."
+            );
+            return Some(([out_of_date_title(state, base), waiting], false));
+        }
         (_, true) => [out_of_date_title(state, base), OUT_OF_DATE.into()],
         (Some(MergeStanding::NewerBase { machine }), false) => {
             let merged = machine.as_ref().map_or(String::new(), |_| {
@@ -1276,6 +1283,7 @@ impl Workspace {
         let (banner, head) = match &state.merge_standing {
             Some(MergeStanding::Undone) => (quiet_banner(p), Some("undo")),
             Some(MergeStanding::NewerBase { .. }) => (quiet_banner(p), Some("laptop")),
+            Some(MergeStanding::WaitingForSync) => (quiet_banner(p), Some("git-merge")),
             None => (banner(p.yellow), None),
         };
         let title = match head {
@@ -2043,6 +2051,13 @@ mod tests {
         let banner = rewrite_banner(coordinating).unwrap();
         let title = "Written against Coordinating v0. This release has v1.";
         assert_eq!(banner, ([title.into(), OUT_OF_DATE.into()], true));
+        let mut waiting = coordinating.clone();
+        waiting.merge_standing = Some(MergeStanding::WaitingForSync);
+        let text = "Waiting for this launch's first sync, so your Macs merge v1 only once. If another Mac already merged it, this Mac takes that.";
+        assert_eq!(
+            rewrite_banner(&waiting),
+            Some(([title.into(), text.into()], false))
+        );
         let marked = state(&mut host, Command::MarkSkillUpToDate { skill });
         assert_eq!(state_label(&marked), "Rewritten");
         assert!(!host.snapshot().unwrap().skills.iter().any(out_of_date));

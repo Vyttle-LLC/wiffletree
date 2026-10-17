@@ -24,9 +24,9 @@ About 300 production lines. Requirements. `skills`: "A new stock version is merg
 
 About 220 production lines. Requirements. `settings-repository`: "A skill update is merged once for all machines", "A file changed on two machines is paused". Of "A rewrite is marked out of date by a new stock version", it adds the out-of-date page's state of waiting for this launch's first sync.
 
-- [ ] 3.1 With a settings repository chosen, turn on the host-start merges and hold them until this launch's first pass ends (`sync.rs::finish_sync`, `:1068`), whether it reached GitHub or not, showing that wait on the out-of-date page. After any pass that changed a skill's files, check that skill for a due merge. Verify "One Mac merges first" and "Offline at start" with two data folders and one bare repository.
-- [ ] 3.2 In the pass (`sync.rs::pass`, `:767`), when both sides changed a skill's unit and this Mac's only change since it last synced is its own automatic merge, write GitHub's version here with no pause and no note, keep both machines' history entries, and check the skill again. Name the merge in sync's commit message. Verify "Both merge at once", "Only this Mac's own merge", "A Mac with a newer release" and "An edit after the merge".
-- [ ] 3.3 Run the checks of 1.5 and sync this slice's two requirements.
+- [x] 3.1 With a settings repository chosen, turn on the host-start merges and hold them until this launch's first pass ends (`sync.rs::finish_sync`, `:1068`), whether it reached GitHub or not, showing that wait on the out-of-date page. After any pass that changed a skill's files, check that skill for a due merge. Verify "One Mac merges first" and "Offline at start" with two data folders and one bare repository.
+- [x] 3.2 In the pass (`sync.rs::pass`, `:767`), when both sides changed a skill's unit and this Mac's only change since it last synced is its own automatic merge, write GitHub's version here with no pause and no note, keep both machines' history entries, and check the skill again. Name the merge in sync's commit message. Verify "Both merge at once", "Only this Mac's own merge", "A Mac with a newer release" and "An edit after the merge".
+- [x] 3.3 Run the checks of 1.5 and sync this slice's two requirements.
 
 ## 4. Slice 4: the model merge
 
