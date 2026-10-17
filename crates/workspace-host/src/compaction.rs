@@ -73,26 +73,6 @@ pub(crate) fn outcome(
     }
 }
 
-/// The conversation line for an outcome; finding nothing to compact leaves none.
-fn line(
-    result: CompactionResult,
-    tokens: Option<(u64, u64)>,
-    kept: Option<&str>,
-) -> Option<String> {
-    Some(match result {
-        CompactionResult::Compacted => {
-            let figures = tokens.map_or_else(String::new, |(before, after)| {
-                format!(" · {} → {}", compact_tokens(before), compact_tokens(after))
-            });
-            let kept = kept.map_or_else(String::new, |kept| format!("\nKept: {kept}"));
-            format!("Context compacted{figures}{kept}")
-        }
-        CompactionResult::Failed => "Compaction failed · context unchanged".into(),
-        CompactionResult::Interrupted => "Compaction interrupted".into(),
-        CompactionResult::NothingToCompact => return None,
-    })
-}
-
 impl Host {
     /// Stores the person's request; it runs when the session's next turn could start.
     pub fn request_compaction(&mut self, id: &str, note: Option<&str>) -> Result<()> {
@@ -185,7 +165,7 @@ impl Host {
         } else {
             "compaction_failed"
         };
-        let detail = match (&reason, line(result, tokens, None)) {
+        let detail = match (&reason, compaction_line(result, tokens, None)) {
             (Some(reason), _) => reason.clone(),
             (None, line) => line.unwrap_or_default(),
         };
@@ -194,7 +174,7 @@ impl Host {
             reason,
             at: now(),
         });
-        let line = line(result, tokens, kept);
+        let line = compaction_line(result, tokens, kept);
         self.atomically(|host| {
             host.save_runtime(&runtime)?;
             if let Some(body) = line {
@@ -254,35 +234,6 @@ mod tests {
             outcome(Provider::Codex, None, None),
             (Failed, Some("Codex reported no compaction result.".into()))
         );
-    }
-
-    #[test]
-    fn the_line_prints_the_providers_figures_and_the_note_only_when_given() {
-        use CompactionResult::*;
-        let figures = Some((812_000, 5_000));
-        assert_eq!(
-            line(
-                Compacted,
-                figures,
-                Some("The failing test names and the migration plan")
-            )
-            .unwrap(),
-            "Context compacted · 812k → 5k\nKept: The failing test names and the migration plan"
-        );
-        assert_eq!(
-            line(Compacted, figures, None).unwrap(),
-            "Context compacted · 812k → 5k"
-        );
-        assert_eq!(line(Compacted, None, None).unwrap(), "Context compacted");
-        assert_eq!(
-            line(Failed, None, Some("a note")).unwrap(),
-            "Compaction failed · context unchanged"
-        );
-        assert_eq!(
-            line(Interrupted, None, None).unwrap(),
-            "Compaction interrupted"
-        );
-        assert_eq!(line(NothingToCompact, None, Some("a note")), None);
     }
 
     #[test]

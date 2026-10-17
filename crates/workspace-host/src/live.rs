@@ -975,7 +975,7 @@ impl Host {
             return Ok(());
         }
         let body = body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>();
-        self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![format!("output:{run}"),session.project_id,session.id,body,now()])?;
+        self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![reply_id(run),session.project_id,session.id,body,now()])?;
         Ok(())
     }
 }

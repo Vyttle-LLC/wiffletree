@@ -268,7 +268,7 @@ impl Workspace {
         let run_ids: Vec<String> = self
             .messages
             .iter()
-            .filter_map(|m| m.id.strip_prefix("output:"))
+            .filter_map(|m| reply_run(&m.id))
             .filter(|run| !self.run_summaries.contains_key(*run))
             .map(str::to_owned)
             .collect();
@@ -291,7 +291,7 @@ impl Workspace {
             cache.clear();
         }
         for summary in summaries {
-            let reply = format!("output:{}", summary.run_id);
+            let reply = reply_id(&summary.run_id);
             cache.insert(summary.run_id.clone(), summary);
             // The reply's row gains a summary line; the list measures it again.
             if let Some(row) = self.messages.iter().position(|m| m.id == reply)

@@ -126,6 +126,7 @@ fn compaction_notice(
         }
     });
     let reason = reason.unwrap_or_default();
+    let title = outcome.result.title();
     match outcome.result {
         CompactionResult::Compacted => None,
         CompactionResult::NothingToCompact => {
@@ -135,18 +136,16 @@ fn compaction_notice(
                 "Claude said: "
             };
             Some((
-                "Nothing to compact",
+                title,
                 format!("{said}{reason}The context is unchanged."),
                 false,
             ))
         }
-        CompactionResult::Failed => Some((
-            "Compaction failed",
-            format!("{reason}The context is unchanged."),
-            true,
-        )),
+        CompactionResult::Failed => {
+            Some((title, format!("{reason}The context is unchanged."), true))
+        }
         CompactionResult::Interrupted => Some((
-            "Compaction interrupted",
+            title,
             format!(
                 "Wiffletree stopped while {} was compacting. The figure above was measured again.",
                 provider.label()

@@ -7,14 +7,6 @@ use crate::*;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
-const REPORT_KINDS: [&str; 6] = [
-    "progress",
-    "blocked",
-    "ready_for_testing",
-    "passed",
-    "failed",
-    "completed",
-];
 const WORKTREE_CHANGED: &str = "worktree changed during verification";
 const UNCOMMITTED: &str = "The worktree has uncommitted or untracked files; ask the implementer to commit or discard them";
 /// How many verification cycles may hold a slot at once across the host, so concurrent
@@ -931,12 +923,14 @@ impl Host {
         message_id: &str,
         findings: &[ReportedFinding],
     ) -> Result<Value> {
-        ensure!(REPORT_KINDS.contains(&kind), "Unknown report kind");
+        let kind = ReportKind::named(kind).context("Unknown report kind")?;
         // Wiffletree judges what a PR keeper agent leaves behind, never what it reports.
         let kind = match session.role {
-            Role::Keeper => "progress",
+            Role::Keeper => ReportKind::Progress,
             _ => kind,
         };
+        let content = report_body(kind, &session.name, body);
+        let kind = kind.name();
         check_findings(findings)?;
         ensure!(
             kind != "passed" || matches!(session.role, Role::Tester | Role::Reviewer),
@@ -947,7 +941,6 @@ impl Host {
             .clone()
             .context("You have no parent to report to; answer the human in this chat instead")?;
         let report_id = format!("report:{}:{message_id}", session.id);
-        let content = format!("[{kind}] {}\n{body}", session.name);
         if let Ok(existing) = self.message(&report_id) {
             ensure!(
                 existing.body == content,

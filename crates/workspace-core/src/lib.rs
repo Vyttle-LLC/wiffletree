@@ -1,6 +1,7 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 mod files;
 mod index;
+mod messages;
 mod owners;
 mod progress;
 mod publishing;
@@ -11,6 +12,7 @@ mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use files::*;
 pub use index::WorkspaceIndex;
+pub use messages::*;
 pub use owners::*;
 pub use progress::*;
 pub use publishing::*;
@@ -2031,9 +2033,6 @@ pub fn host_notice(id: &str) -> Option<&'static str> {
 pub const PR_NOTICE_PREFIX: &str = "pr:";
 /// The id prefix of the PR keeper's messages.
 pub const KEEPER_NOTICE_PREFIX: &str = "keeper:";
-/// The id prefix of the line a compaction leaves in its session's conversation; the rest is
-/// the run's id. A session's other messages to itself are replies, under `output:` ids.
-pub const COMPACTION_LINE_PREFIX: &str = "compaction:";
 /// The id prefix of a publish request's result message and of its Inbox items. Only the host
 /// creates either.
 pub const PUBLISH_PREFIX: &str = "publish:";

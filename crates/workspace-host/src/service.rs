@@ -59,7 +59,7 @@ fn turn_prompt(
             let status = status.as_ref().map_or(String::new(), |s| format!("\n{s}"));
             format!(
                 "Sender: {}\nMessage ID: {}{status}\n\n{}{}",
-                if m.id.starts_with(schedules::FIRE_PREFIX) {
+                if m.id.starts_with(TIMER_PREFIX) {
                     "your timer"
                 } else if let Some(label) = host_notice(&m.id) {
                     label
@@ -1625,19 +1625,12 @@ impl Actor {
                     && !active.stopped_by_human
                     && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
-                    let body = if let Some(error) = &error {
-                        format!(
-                            "{} stopped with an error: {error}. Inspect its worktree, then resume it with resume_agent, choosing held: retry or skip.",
-                            session.name
-                        )
-                    } else {
-                        format!(
-                            "{} finished a turn. This is not ticket acceptance.\n{}",
-                            session.name, active.output
-                        )
+                    let body = match &error {
+                        Some(error) => turn_error_body(&session.name, error),
+                        None => turn_finished_body(&session.name, &active.output),
                     };
                     self.host.send(
-                        &format!("turn-result:{run}"),
+                        &turn_result_id(run),
                         Some(id),
                         parent,
                         &body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>(),
@@ -2380,9 +2373,9 @@ impl Actor {
                     &format!("{CHECK_IN}{run}:{minutes}"),
                     Some(id),
                     parent,
-                    &format!(
-                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{id}] and a reason."
-                    ),
+                    &check_in_body(&format!(
+                        "{status}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{id}] and a reason."
+                    )),
                 )?;
             }
             None => {
@@ -2473,12 +2466,12 @@ impl Actor {
             &format!("{CHECK_IN}{run}:turns"),
             Some(&session.id),
             parent,
-            &format!(
-                "[check-in] {}{} has run {turns} turns {since}. {reply}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{}] and a reason.",
+            &check_in_body(&format!(
+                "{}{} has run {turns} turns {since}. {reply}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{}] and a reason.",
                 session.name,
                 self.ticket_label(&session.id)?,
                 session.id
-            ),
+            )),
         )?;
         Ok(())
     }

@@ -15,8 +15,6 @@ const FIRE_RETRY_MS: i64 = MINUTE_MS;
 const MAX_LABEL_BYTES: usize = 80;
 const MAX_PROMPT_BYTES: usize = 4096;
 const MAX_ACTIVE_PER_SESSION: i64 = 20;
-/// Turn input ids of timer fires; live.rs and the scheduler rely on this prefix.
-pub(crate) const FIRE_PREFIX: &str = "timer:";
 const COLUMNS: &str =
     "id,project_id,session_id,label,prompt,first_at,every_ms,until,next_fire_at,created_at";
 
@@ -87,12 +85,14 @@ fn schedule_row(row: &Row<'_>) -> rusqlite::Result<Schedule> {
 /// The fire's message. It names the timer so it never reads as the human's message; whether
 /// it is late is only known at delivery (see `fire_status`), so the stored body never changes.
 fn fire_body(schedule: &Schedule, due_at: i64) -> String {
-    format!(
-        "[timer] {}\nYour timer {}, scheduled for {}. This is your own scheduled prompt, not a message from the human.\n\n{}",
-        schedule.label,
-        schedule.id,
-        rfc3339(due_at),
-        schedule.prompt
+    timer_body(
+        &schedule.label,
+        &format!(
+            "Your timer {}, scheduled for {}. This is your own scheduled prompt, not a message from the human.\n\n{}",
+            schedule.id,
+            rfc3339(due_at),
+            schedule.prompt
+        ),
     )
 }
 /// A short description of when the timer fires, for tool results and the resume note.
@@ -345,7 +345,7 @@ impl Host {
             None => {
                 let missed = slots - 1;
                 let late = missed > 0 || now - due_at > LATE_AFTER_MS;
-                let message = format!("{FIRE_PREFIX}{}:{due_at}", schedule.id);
+                let message = format!("{TIMER_PREFIX}{}:{due_at}", schedule.id);
                 self.send(
                     &message,
                     Some(&schedule.session_id),

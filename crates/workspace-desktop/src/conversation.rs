@@ -17,16 +17,6 @@ const COLUMN: f32 = 720.;
 const STRIP_HEIGHT: f32 = 36.;
 const STRIP_BAR: f32 = 6.;
 
-/// Kinds an agent can pass to the host's `report` tool.
-const REPORT_KINDS: [&str; 6] = [
-    "progress",
-    "blocked",
-    "ready_for_testing",
-    "passed",
-    "failed",
-    "completed",
-];
-
 /// How a refreshed transcript page lines up with the one on screen: how many leading messages
 /// fell off the page and how many after them are unchanged. `None` when the pages don't overlap.
 pub(super) fn transcript_overlap(
@@ -49,14 +39,6 @@ pub(super) fn forget_settled(minimized: &mut BTreeSet<String>, open: &[Attention
     minimized.retain(|project| open.iter().any(|item| &item.project_id == project));
 }
 
-/// Agent reports arrive as `[kind] sender name\nbody`, and timer fires as `[timer] label\nbody`;
-/// returns the kind and body.
-fn report(body: &str) -> Option<(&str, &str)> {
-    let (kind, rest) = body.strip_prefix('[')?.split_once("] ")?;
-    (REPORT_KINDS.contains(&kind) || kind == "timer")
-        .then(|| (kind, rest.split_once('\n').map_or("", |(_, text)| text)))
-}
-
 /// A peer message is coordination traffic rather than conversation: anything another session
 /// sent this one (reports and verdicts, turn results, check-ins, direct messages, a
 /// coordinator's assignments) and this session's own timer fires. The human's messages,
@@ -64,7 +46,7 @@ fn report(body: &str) -> Option<(&str, &str)> {
 fn peer_message(message: &Message, session_id: &str) -> bool {
     message.sender.as_deref().is_some_and(|sender| {
         (sender != session_id && host_notice(&message.id).is_none())
-            || message.id.starts_with("timer:")
+            || message.id.starts_with(TIMER_PREFIX)
     })
 }
 
@@ -108,25 +90,16 @@ struct PeerLine<'a> {
 }
 
 fn peer_line(message: &Message) -> PeerLine<'_> {
-    let body = message.body.as_str();
-    let (kind, text) = if let Some((kind, text)) = report(body) {
-        (Some(kind), text)
-    } else if let Some(text) = body.strip_prefix("[check-in] ") {
-        (Some("check_in"), text)
-    } else if message.id.starts_with("turn-result:") {
-        (Some("turn_result"), body)
-    } else {
-        (None, body)
-    };
+    let kind = MessageKind::of(&message.id, &message.body);
     let trouble = match kind {
-        Some("failed") => Some("failed"),
-        Some("blocked") => Some("blocked"),
-        Some("turn_result") if body.contains(" stopped with an error: ") => Some("error"),
+        MessageKind::Report(ReportKind::Failed) => Some("failed"),
+        MessageKind::Report(ReportKind::Blocked) => Some("blocked"),
+        MessageKind::TurnResult { failed: true } => Some("error"),
         _ => None,
     };
     PeerLine {
-        kind,
-        text,
+        kind: kind.name(),
+        text: kind.text(&message.body),
         trouble,
     }
 }
@@ -302,27 +275,14 @@ fn notice_message(message: &Message, bases: &[PathBuf], p: Palette) -> Div {
         )
 }
 
-/// The line a compaction left in the conversation, split into its title, the rest of its first
-/// line and its "Kept:" line, and whether it failed. `None` for any other message: a reply is
-/// written under an `output:` id, never this one.
-fn compaction_line(message: &Message) -> Option<(&str, &str, Option<&str>, bool)> {
-    if !message.id.starts_with(COMPACTION_LINE_PREFIX) {
-        return None;
-    }
-    let (first, kept) = match message.body.split_once('\n') {
-        Some((first, kept)) => (first, Some(kept)),
-        None => (message.body.as_str(), None),
-    };
-    let (title, rest) = match first.find(" · ") {
-        Some(at) => first.split_at(at),
-        None => (first, ""),
-    };
-    Some((title, rest, kept, title != "Context compacted"))
-}
-
 /// One line where a finished turn's summary would be, never a bubble; red when it failed.
-fn compaction_message(line: (&str, &str, Option<&str>, bool), p: Palette) -> Div {
-    let (title, rest, kept, failed) = line;
+fn compaction_message(line: CompactionLine, p: Palette) -> Div {
+    let CompactionLine {
+        title,
+        rest,
+        kept,
+        failed,
+    } = line;
     let (color, strong) = if failed {
         (p.red, p.red)
     } else {
@@ -362,8 +322,11 @@ fn agent_message(
     bases: &[PathBuf],
     p: Palette,
 ) -> Div {
-    let (kind, body) = match report(&message.body) {
-        Some((kind, body)) if !own => (Some(kind), body),
+    let kind = MessageKind::of(&message.id, &message.body);
+    let (kind, body) = match kind {
+        MessageKind::Report(_) | MessageKind::Timer if !own => {
+            (kind.name(), kind.text(&message.body))
+        }
         _ => (None, message.body.as_str()),
     };
     let role = sender.map(|s| s.role);
@@ -425,11 +388,7 @@ pub(super) struct OpenPeers {
 
 /// Who sent a peer message: the sending agent, or a timer's label.
 fn peer_sender(message: &Message, sender: Option<&Session>) -> String {
-    let timer = message
-        .body
-        .strip_prefix("[timer] ")
-        .filter(|_| message.id.starts_with("timer:"))
-        .and_then(|body| body.lines().next());
+    let timer = MessageKind::of(&message.id, &message.body).timer_label(&message.body);
     match timer {
         Some(label) => label.to_owned(),
         None => sender.map_or("Agent".to_owned(), |s| s.name.clone()),
@@ -1149,8 +1108,8 @@ impl Workspace {
                 (_, Some(message)) if message.sender.is_none() => {
                     notice_message(message, links.of(message), p)
                 }
-                (_, Some(message)) if compaction_line(message).is_some() => {
-                    compaction_line(message).map_or_else(div, |line| compaction_message(line, p))
+                (_, Some(message)) if message.id.starts_with(COMPACTION_LINE_PREFIX) => {
+                    compaction_message(CompactionLine::parse(&message.body), p)
                 }
                 (_, Some(message)) => {
                     let sender = sender(message);
@@ -1158,9 +1117,7 @@ impl Workspace {
                     let own = message.sender.as_ref() == Some(&current.id);
                     let reply = agent_message(message, sender, own, links.of(message), p);
                     // A reply whose turn did something shows how long and how much, above it.
-                    let summary = message
-                        .id
-                        .strip_prefix("output:")
+                    let summary = reply_run(&message.id)
                         .and_then(|run| summaries.get(run))
                         .filter(|s| own && s.actions > 0);
                     match summary {
@@ -1646,27 +1603,11 @@ impl Workspace {
 mod tests {
     use super::{
         Placement::{Alone, Folded, Heads},
-        compaction_line, first_line, forget_settled, from_human, peer_line, placements, report,
-        run_heading, run_troubles, transcript_overlap,
+        first_line, forget_settled, from_human, peer_line, placements, run_heading, run_troubles,
+        transcript_overlap,
     };
     use std::collections::BTreeSet;
     use workspace_core::{Attention, Message, Receipt};
-
-    #[test]
-    fn reports_split_into_kind_and_body() {
-        assert_eq!(
-            report("[ready_for_testing] Implementer · Toolbar\nresult.txt written"),
-            Some(("ready_for_testing", "result.txt written"))
-        );
-        assert_eq!(report("[completed] celadon-web"), Some(("completed", "")));
-    }
-
-    #[test]
-    fn ordinary_messages_are_not_reports() {
-        assert_eq!(report("[x] A checklist item"), None);
-        assert_eq!(report("[See the docs] for details\nmore"), None);
-        assert_eq!(report("Plain text"), None);
-    }
 
     #[test]
     fn long_errors_show_only_a_bounded_first_line() {
@@ -1700,40 +1641,6 @@ mod tests {
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!from_human(&reply));
-    }
-
-    #[test]
-    fn a_compaction_line_is_its_own_kind_of_entry_never_a_reply() {
-        let own = |id: &str, body: &str| {
-            let mut own = message(id, body);
-            own.sender = Some("s".into());
-            own
-        };
-        let compacted = own(
-            "compaction:r",
-            "Context compacted · 812k → 5k\nKept: The failing test names",
-        );
-        assert_eq!(
-            compaction_line(&compacted),
-            Some((
-                "Context compacted",
-                " · 812k → 5k",
-                Some("Kept: The failing test names"),
-                false
-            ))
-        );
-        let failed = own("compaction:r", "Compaction failed · context unchanged");
-        assert_eq!(
-            compaction_line(&failed),
-            Some(("Compaction failed", " · context unchanged", None, true))
-        );
-        let interrupted = own("compaction:r", "Compaction interrupted");
-        assert_eq!(
-            compaction_line(&interrupted),
-            Some(("Compaction interrupted", "", None, true))
-        );
-        // A reply that merely says the same is still a reply, with its bubble and turn summary.
-        assert_eq!(compaction_line(&own("output:r", "Context compacted")), None);
     }
 
     #[test]
