@@ -820,11 +820,12 @@ impl Host {
             _ => None,
         };
         let this_release = number(&state.stock_version);
-        let tried = (self.merge_tries[skill as usize].as_ref())
-            .filter(|tried| tried.running() || holds(&tried.from));
         let question = (recalled.asked.as_ref())
             .filter(|(_, asked)| asked.edits.rewrite.as_ref().is_some_and(holds))
             .and_then(|(_, asked)| question(skill, asked));
+        // A question, such as one another Mac asked, outranks this Mac's own try unless it runs.
+        let tried = (self.merge_tries[skill as usize].as_ref())
+            .filter(|tried| tried.running() || (holds(&tried.from) && question.is_none()));
         let merge_standing = match &state.rewrite {
             Some(rewrite) if rewrite.out_of_date && tried.is_some() => {
                 tried.map(|tried| tried.standing.clone())
@@ -2935,36 +2936,59 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         assert_eq!(changes[1].source, merge::Source::Human);
     }
 
+    /// The "Asked you about" entry another Mac writes about merging `into` into `before`, with
+    /// a question for each passage that overlaps.
+    fn asked_on_another_mac(before: &Rewritten, into: &str) -> Entry {
+        let merge = merge::merge(&before.base, into, &before.text);
+        let question = model::PassageAnswer::Question(QUESTION.into());
+        let model = ModelProfile {
+            provider: Provider::Claude,
+            model: "haiku".into(),
+            effort: "medium".into(),
+        };
+        Entry {
+            change: Change::Asked {
+                from: version(&before.base).into(),
+                to: version(into).into(),
+                stock: into.into(),
+                answers: vec![question; merge.passages().len()],
+                merge,
+                model: MergeModel { model, tokens: 1 },
+                machine: "Mike's MacBook Air".into(),
+            },
+            stock_version: version(into).into(),
+            edits: Edits {
+                rules: String::new(),
+                rewrite: Some(before.clone()),
+            },
+        }
+    }
+
+    #[test]
+    fn another_macs_question_outranks_this_macs_try_that_waits_or_failed() {
+        let (home, host) = host();
+        let before = overlapping_twice(&host);
+        let mut host = started_again(&home, host);
+        let skill = Skill::Coordinating;
+        let state = coordinating_state(&host);
+        assert!(matches!(
+            state.merge_standing,
+            Some(MergeStanding::NeedsModel { .. })
+        ));
+        let entry = asked_on_another_mac(&before, stock(skill));
+        write_entry(&mut host, "2090-01-01T00-00-00.000Z", &entry);
+        let state = coordinating_state(&host);
+        assert_eq!(state.merge_standing, None);
+        assert_eq!(state.question.unwrap().passages.len(), 2);
+        assert!(!host.skill_merge_due(skill).unwrap());
+    }
+
     #[test]
     fn a_question_from_another_release_is_not_shown_and_this_mac_merges_its_own() {
         let (_home, mut host) = host();
         let skill = Skill::Coordinating;
         let before = rewritten_against_v0(&host);
-        let asked = |into: &str| {
-            let merge = merge::merge(&before.base, into, &before.text);
-            let question = model::PassageAnswer::Question(QUESTION.into());
-            let model = ModelProfile {
-                provider: Provider::Claude,
-                model: "haiku".into(),
-                effort: "medium".into(),
-            };
-            Entry {
-                change: Change::Asked {
-                    from: "v0".into(),
-                    to: version(into).into(),
-                    stock: into.into(),
-                    answers: vec![question; merge.passages().len()],
-                    merge,
-                    model: MergeModel { model, tokens: 1 },
-                    machine: "Mike's MacBook Air".into(),
-                },
-                stock_version: version(into).into(),
-                edits: Edits {
-                    rules: String::new(),
-                    rewrite: Some(before.clone()),
-                },
-            }
-        };
+        let asked = |into: &str| asked_on_another_mac(&before, into);
         // A stand-in for another release's stock text, which also changes the paragraph the
         // human changed.
         let other = stock(skill).replacen("Start by clarifying", "Start by asking", 1);

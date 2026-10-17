@@ -131,7 +131,7 @@ struct Workspace {
     /// The merge open in Review changes.
     merge_review: Option<workspace_host::skills::MergeReview>,
     /// By skill, the wording chosen so far for each passage, until Apply.
-    skill_wordings: [Vec<Option<Wording>>; 4],
+    skill_wordings: [skills_view::Chosen; 4],
     /// The workspace note open in Compare in the Inbox.
     compared: workspace_notes::Compared,
     verifiers: Entity<verifiers::VerifierEditor>,

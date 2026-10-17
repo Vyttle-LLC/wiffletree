@@ -272,6 +272,32 @@ impl<'a> Choice<'a> {
     }
 }
 
+/// The wordings chosen so far for one skill's passages, until Apply, with the update's and the
+/// human's wording of the passages they were chosen for, so passages that change start over.
+#[derive(Default)]
+pub(super) struct Chosen {
+    passages: Vec<(String, String)>,
+    wordings: Vec<Option<Wording>>,
+}
+impl Chosen {
+    fn passages(choices: &[Choice<'_>]) -> Vec<(String, String)> {
+        let wordings = |choice: &Choice<'_>| (choice.stock.to_owned(), choice.yours.to_owned());
+        choices.iter().map(wordings).collect()
+    }
+    fn get(&self, passages: &[(String, String)], index: usize) -> Option<Wording> {
+        (self.passages == passages)
+            .then(|| self.wordings.get(index).copied().flatten())
+            .flatten()
+    }
+    fn choose(&mut self, passages: &[(String, String)], index: usize, wording: Wording) {
+        if self.passages != passages {
+            self.passages = passages.to_vec();
+            self.wordings = vec![None; passages.len()];
+        }
+        self.wordings[index] = Some(wording);
+    }
+}
+
 /// What an out-of-date rewrite's banner offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Offers {
@@ -1543,18 +1569,17 @@ impl Workspace {
                         .child(if asked { keep.primary() } else { keep.ghost() }),
                 );
         }
-        let chosen = &self.skill_wordings[skill as usize];
-        let chosen = |index: usize| chosen.get(index).copied().flatten();
+        let passages = Chosen::passages(choices);
+        let chosen = |index: usize| self.skill_wordings[skill as usize].get(&passages, index);
         let rows = choices.iter().enumerate().map(|(index, choice)| {
             let pick = |wording: Wording, label: String| {
+                let passages = passages.clone();
                 button(id(&format!("wording-{index}-{}", wording as usize)))
                     .ghost()
                     .label(label)
                     .selected(chosen(index) == Some(wording))
                     .on_click(cx.listener(move |v, _, _, c| {
-                        let chosen = &mut v.skill_wordings[skill as usize];
-                        chosen.resize(chosen.len().max(index + 1), None);
-                        chosen[index] = Some(wording);
+                        v.skill_wordings[skill as usize].choose(&passages, index, wording);
                         c.notify();
                     }))
             };
@@ -2077,16 +2102,16 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CORE, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab, entry_detail, entry_time,
-        entry_title, grouped, is_change, is_live, list_who, merge_counts, merge_note_text,
-        merged_since, out_of_date, out_of_date_title, question, question_banner, question_note,
-        reset_question, rewrite_banner, rewrite_question, saved_text, shown_changes, state_label,
-        time_or_date, when, written_at,
+        CORE, Choice, Chosen, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab,
+        entry_detail, entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
+        merge_note_text, merged_since, out_of_date, out_of_date_title, question, question_banner,
+        question_note, reset_question, rewrite_banner, rewrite_question, saved_text, shown_changes,
+        state_label, time_or_date, when, written_at,
     };
     use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{
         Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider,
-        QuestionedPassage, Role, Skill, SkillQuestion, SkillState,
+        QuestionedPassage, Role, Skill, SkillQuestion, SkillState, Wording,
     };
     use workspace_host::{
         Host,
@@ -2635,6 +2660,33 @@ mod tests {
         // question is, and for no merge note.
         let dotted: Vec<_> = skills.iter().map(out_of_date).collect();
         assert_eq!(dotted, [false, false, true, false]);
+    }
+
+    #[test]
+    fn choices_made_for_one_question_are_not_kept_for_another() {
+        let choice = |stock| Choice {
+            question: None,
+            stock,
+            yours: "Mine.",
+        };
+        let asked = Chosen::passages(&[choice("A."), choice("B.")]);
+        let mut chosen = Chosen::default();
+        chosen.choose(&asked, 0, Wording::Stock);
+        chosen.choose(&asked, 1, Wording::Yours);
+        assert_eq!(
+            [0, 1].map(|index| chosen.get(&asked, index)),
+            [Some(Wording::Stock), Some(Wording::Yours)]
+        );
+        let replaced = Chosen::passages(&[choice("A."), choice("C.")]);
+        assert_eq!(
+            [0, 1].map(|index| chosen.get(&replaced, index)),
+            [None, None]
+        );
+        chosen.choose(&replaced, 1, Wording::Stock);
+        assert_eq!(
+            [0, 1].map(|index| chosen.get(&replaced, index)),
+            [None, Some(Wording::Stock)]
+        );
     }
 
     #[test]
