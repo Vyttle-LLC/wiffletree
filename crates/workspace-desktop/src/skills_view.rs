@@ -55,7 +55,7 @@ const CORE_HINT: &str = "Wiffletree depends on these instructions: the names of 
 const PR_RULES_HINT: &str = "Agents write pull requests by your repository's rules and your own, so put your PR rules here.";
 const APPLIES: &str =
     "Applies from each agent's next turn, and a Codex agent's from its next new session";
-const REWRITE_COST: &str = "When an update changes the stock text, Wiffletree merges the change into your rewrite and leaves a note you can review or undo. Where you also changed what the update changes, your rewrite is marked out of date until you bring the change in yourself. Adding your own rules never needs a merge.";
+const REWRITE_COST: &str = "When an update changes the stock text, Wiffletree merges the change into your rewrite and leaves a note you can review or undo. Where you also changed what the update changes, the PR keeper's Claude model merges that passage, or, without one, you choose the wording. Adding your own rules never needs a merge.";
 const OUT_OF_DATE: &str = "Your rewrite keeps running exactly as you wrote it. Look at what changed, then merge it in, or copy in what you want and mark it up to date.";
 const NOT_ENFORCED: &str = "Not enforced: an agent's shell isn't sandboxed, so it can still run git push or gh with your credentials.";
 
@@ -245,30 +245,89 @@ fn out_of_date_title(state: &SkillState, base_version: &str) -> String {
     }
 }
 
+/// What an out-of-date rewrite's banner offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Offers {
+    /// Nothing, while a merge waits or runs, or for a base from a newer release.
+    Nothing,
+    /// Merge in, Mark as up to date and Reset to stock.
+    MergeIn,
+    /// Try again and Mark as up to date.
+    TryAgain,
+    /// Choosing a model, or a wording for each passage.
+    Wordings,
+}
+
 /// The banner of a rewrite that is out of date, or based on a newer release: its title and
-/// text, and whether it offers Merge in, Mark as up to date and Reset to stock, which it does
-/// while out of date unless a merge waits for the first sync.
-fn rewrite_banner(state: &SkillState) -> Option<([String; 2], bool)> {
+/// text, and what it offers.
+fn rewrite_banner(state: &SkillState) -> Option<([String; 2], Offers)> {
     let rewrite = state.rewrite.as_ref()?;
     let (name, stock, base) = (
         state.skill.name(),
         &state.stock_version,
         &rewrite.base_version,
     );
-    let text = match (&state.merge_standing, rewrite.out_of_date) {
-        (Some(MergeStanding::Undone), true) => [
-            format!("You undid the merge of {stock}"),
-            format!(
-                "Your rewrite is as it was before the merge, and {stock} won't be merged into it again on its own."
-            ),
-        ],
+    let banner = match (&state.merge_standing, rewrite.out_of_date) {
+        (Some(MergeStanding::Undone), true) => (
+            [
+                format!("You undid the merge of {stock}"),
+                format!(
+                    "Your rewrite is as it was before the merge, and {stock} won't be merged into it again on its own."
+                ),
+            ],
+            Offers::MergeIn,
+        ),
         (Some(MergeStanding::WaitingForSync), true) => {
             let waiting = format!(
                 "Waiting for this launch's first sync, so your Macs merge {stock} only once. If another Mac already merged it, this Mac takes that."
             );
-            return Some(([out_of_date_title(state, base), waiting], false));
+            ([out_of_date_title(state, base), waiting], Offers::Nothing)
         }
-        (_, true) => [out_of_date_title(state, base), OUT_OF_DATE.into()],
+        (Some(MergeStanding::Merging { passages }), true) => (
+            [
+                format!("Merging {stock} into your rewrite"),
+                format!(
+                    "The PR keeper's model is merging the {} you and {stock} both changed. Your rewrite runs as you wrote it until the merge applies.",
+                    counted(*passages, "passage")
+                ),
+            ],
+            Offers::Nothing,
+        ),
+        (Some(MergeStanding::Failed { reason }), true) => (
+            [
+                format!("The merge of {stock} couldn't finish"),
+                format!(
+                    "{reason} Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start."
+                ),
+            ],
+            Offers::TryAgain,
+        ),
+        (Some(MergeStanding::NeedsModel { passages, codex }), true) => {
+            let (it, which) = match passages.len() {
+                1 => ("it", "the passage"),
+                _ => ("them", "each passage"),
+            };
+            let chosen = match codex {
+                true => "the one chosen is a Codex model",
+                false => "none is chosen",
+            };
+            (
+                [
+                    format!(
+                        "{stock} and your rewrite both change {}",
+                        counted(passages.len(), "passage")
+                    ),
+                    format!(
+                        "Merging {it} needs a Claude model for the PR keeper, and {chosen}. Your rewrite runs as you wrote it. Choose a model, or choose a wording for {which}."
+                    ),
+                ],
+                Offers::Wordings,
+            )
+        }
+        (_, true) => (
+            [out_of_date_title(state, base), OUT_OF_DATE.into()],
+            Offers::MergeIn,
+        ),
         (Some(MergeStanding::NewerBase { machine }), false) => {
             let merged = machine.as_ref().map_or(String::new(), |_| {
                 format!("That Mac runs a newer Wiffletree and merged {base} into your rewrite. ")
@@ -276,16 +335,19 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], bool)> {
             let from = machine
                 .as_deref()
                 .unwrap_or("a Mac with a newer Wiffletree");
-            [
-                format!("Based on {name} {base}, from {from}"),
-                format!(
-                    "{merged}This Mac has {stock} and sends the rewrite as written. It isn't out of date here, and nothing is merged here."
-                ),
-            ]
+            (
+                [
+                    format!("Based on {name} {base}, from {from}"),
+                    format!(
+                        "{merged}This Mac has {stock} and sends the rewrite as written. It isn't out of date here, and nothing is merged here."
+                    ),
+                ],
+                Offers::Nothing,
+            )
         }
         _ => return None,
     };
-    Some((text, rewrite.out_of_date))
+    Some(banner)
 }
 
 /// Who uses the skill, and when a merge the page still notes came in: "Project coordinator · v2
@@ -670,6 +732,7 @@ impl Workspace {
     ) {
         self.confirming = None;
         self.merge_review = None;
+        self.skill_wordings.clear();
         if let SkillView::Skill(skill) = view {
             let state = self.skill_state(skill).cloned();
             let text = state.as_ref().map_or("", saved_text).to_owned();
@@ -1038,7 +1101,7 @@ impl Workspace {
             .children(
                 (state.merge_note.as_ref()).map(|note| self.merge_note_banner(state, note, p, cx)),
             )
-            .children(Self::rewrite_banner_view(state, p, cx));
+            .children(self.rewrite_banner_view(state, p, cx));
         let page = match &state.rewrite {
             Some(rewrite) if rewrite.out_of_date => page.child(
                 div()
@@ -1249,48 +1312,151 @@ impl Workspace {
         (note.model.as_ref()).map(|model| models::profile_label(&self.model_catalog, &model.model))
     }
 
-    /// An out-of-date rewrite's banner, with Merge in when its base has a version, Mark as up to
-    /// date and Reset to stock; or, for a base from a newer release, what this Mac does.
-    fn rewrite_banner_view(state: &SkillState, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+    /// An out-of-date rewrite's banner, with what it offers; or, for a base from a newer
+    /// release, what this Mac does.
+    fn rewrite_banner_view(
+        &self,
+        state: &SkillState,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let ([title, text], offers) = rewrite_banner(state)?;
         let skill = state.skill;
         let mergeable = (state.rewrite.as_ref()).is_some_and(|r| !r.base_version.is_empty());
         let undone = state.merge_standing == Some(MergeStanding::Undone);
-        let merge = button("merge-update")
-            .when(!undone, |b| b.primary())
-            .label(format!("Merge {} in", state.stock_version))
-            .on_click(
+        let merge = |label: String| {
+            button("merge-update").label(label).on_click(
                 cx.listener(move |v, _, w, c| v.request(Command::MergeSkillUpdate { skill }, w, c)),
-            );
-        let actions = div()
-            .flex()
-            .gap_2()
-            .when(mergeable, |d| d.child(merge))
-            .child(
-                button("mark-up-to-date")
-                    .ghost()
-                    .label("Mark as up to date")
-                    .on_click(cx.listener(move |v, _, w, c| {
-                        v.request(Command::MarkSkillUpToDate { skill }, w, c)
-                    })),
             )
-            .child(
-                button("banner-reset")
-                    .ghost()
-                    .label("Reset to stock")
-                    .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
-            );
+        };
+        let mark =
+            button("mark-up-to-date")
+                .ghost()
+                .label("Mark as up to date")
+                .on_click(cx.listener(move |v, _, w, c| {
+                    v.request(Command::MarkSkillUpToDate { skill }, w, c)
+                }));
+        let actions = match offers {
+            Offers::Nothing => None,
+            Offers::MergeIn => Some(
+                div()
+                    .flex()
+                    .gap_2()
+                    .when(mergeable, |d| {
+                        let merge = merge(format!("Merge {} in", state.stock_version));
+                        d.child(if undone {
+                            merge.ghost()
+                        } else {
+                            merge.primary()
+                        })
+                    })
+                    .child(mark)
+                    .child(
+                        button("banner-reset")
+                            .ghost()
+                            .label("Reset to stock")
+                            .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
+                    ),
+            ),
+            Offers::TryAgain => Some(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(merge("Try again".into()).primary())
+                    .child(mark),
+            ),
+            Offers::Wordings => Some(self.wordings_view(state, p, cx)),
+        };
         let (banner, head) = match &state.merge_standing {
-            Some(MergeStanding::Undone) => (quiet_banner(p), Some("undo")),
-            Some(MergeStanding::NewerBase { .. }) => (quiet_banner(p), Some("laptop")),
-            Some(MergeStanding::WaitingForSync) => (quiet_banner(p), Some("git-merge")),
-            _ => (banner(p.yellow), None),
+            Some(MergeStanding::Undone) => (quiet_banner(p), Some(("undo", p.subtle))),
+            Some(MergeStanding::NewerBase { .. }) => (quiet_banner(p), Some(("laptop", p.subtle))),
+            Some(MergeStanding::WaitingForSync | MergeStanding::Merging { .. }) => {
+                (quiet_banner(p), Some(("git-merge", p.subtle)))
+            }
+            Some(MergeStanding::Failed { .. } | MergeStanding::NeedsModel { .. }) => {
+                (banner(p.yellow), Some(("alert", p.yellow)))
+            }
+            None => (banner(p.yellow), None),
         };
         let title = match head {
-            Some(glyph) => banner_head(glyph, p.subtle, title),
+            Some((glyph, color)) => banner_head(glyph, color, title),
             None => div().font_weight(FontWeight::MEDIUM).child(title),
         };
-        Some((banner.child(title).child(hint(text, p))).when(offers, |d| d.child(actions)))
+        Some((banner.child(title).child(hint(text, p))).children(actions))
+    }
+
+    /// Choose a model, or a wording for each passage that overlaps: with one passage, a choice
+    /// applies at once; with several, Apply does once each has one.
+    fn wordings_view(&self, state: &SkillState, p: Palette, cx: &mut Context<Self>) -> Div {
+        let Some(MergeStanding::NeedsModel { passages, .. }) = &state.merge_standing else {
+            return div();
+        };
+        let (skill, stock) = (state.skill, &state.stock_version);
+        let answer = |id: &'static str, label: String, wordings: Option<Vec<Wording>>| {
+            button(id)
+                .label(label)
+                .disabled(wordings.is_none())
+                .on_click(cx.listener(move |v, _, w, c| {
+                    let wordings = wordings.clone().unwrap_or_default();
+                    v.request(Command::AnswerSkillQuestion { skill, wordings }, w, c)
+                }))
+        };
+        let models = button("choose-model")
+            .ghost()
+            .label("Choose a model in Models")
+            .on_click(cx.listener(|v, _, w, c| v.open_page(Page::Models, w, c)));
+        let (take, keep) = (format!("Take {stock}'s wording"), "Keep my wording");
+        if let [_] = &passages[..] {
+            return div()
+                .flex()
+                .gap_2()
+                .child(models)
+                .child(answer("take-stock", take, Some(vec![Wording::Stock])).ghost())
+                .child(answer("keep-mine", keep.into(), Some(vec![Wording::Yours])).ghost());
+        }
+        let chosen = |index: usize| self.skill_wordings.get(index).copied().flatten();
+        let rows = passages.iter().enumerate().map(|(index, passage)| {
+            let pick = |wording: Wording, label: String| {
+                button(("wording", index * 2 + wording as usize))
+                    .ghost()
+                    .label(label)
+                    .selected(chosen(index) == Some(wording))
+                    .on_click(cx.listener(move |v, _, _, c| {
+                        v.skill_wordings
+                            .resize(v.skill_wordings.len().max(index + 1), None);
+                        v.skill_wordings[index] = Some(wording);
+                        c.notify();
+                    }))
+            };
+            let wording = |text: &str| Self::read_only_text(text.trim_end().to_owned(), p).flex_1();
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(hint(format!("Passage {}", index + 1), p))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(wording(&passage.stock))
+                        .child(wording(&passage.yours)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(pick(Wording::Stock, take.clone()))
+                        .child(pick(Wording::Yours, keep.into())),
+                )
+        });
+        let wordings = (0..passages.len()).map(chosen).collect();
+        div().flex().flex_col().gap_3().children(rows).child(
+            div()
+                .flex()
+                .gap_2()
+                .child(answer("apply-wordings", "Apply".into(), wordings).primary())
+                .child(models),
+        )
     }
 
     /// What changed from the rewrite's base to the stock text, as removed and added lines.
@@ -1735,15 +1901,15 @@ impl Workspace {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CORE, Confirm, OUT_OF_DATE, Shown, based_on, core_tab, entry_detail, entry_time,
+        CORE, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab, entry_detail, entry_time,
         entry_title, grouped, is_change, is_live, list_who, merge_counts, merge_note_text,
         merged_since, out_of_date, out_of_date_title, question, reset_question, rewrite_banner,
         rewrite_question, saved_text, shown_changes, state_label, time_or_date, when, written_at,
     };
     use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{
-        Command, MergeModel, MergeNote, MergeStanding, ModelProfile, Provider, Role, Skill,
-        SkillState,
+        Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider, Role,
+        Skill, SkillState,
     };
     use workspace_host::{
         Host,
@@ -2050,14 +2216,80 @@ mod tests {
 
         let banner = rewrite_banner(coordinating).unwrap();
         let title = "Written against Coordinating v0. This release has v1.";
-        assert_eq!(banner, ([title.into(), OUT_OF_DATE.into()], true));
-        let mut waiting = coordinating.clone();
-        waiting.merge_standing = Some(MergeStanding::WaitingForSync);
-        let text = "Waiting for this launch's first sync, so your Macs merge v1 only once. If another Mac already merged it, this Mac takes that.";
         assert_eq!(
-            rewrite_banner(&waiting),
-            Some(([title.into(), text.into()], false))
+            banner,
+            ([title.into(), OUT_OF_DATE.into()], Offers::MergeIn)
         );
+        let passage = MergePassage {
+            base: "Ask the human when.\n\n".into(),
+            stock: "Ask the human instead when.\n\n".into(),
+            yours: "Ask me when.\n\n".into(),
+        };
+        let failed =
+            "The model's text for passage 1 was longer than v1's version and yours together.";
+        let standings = [
+            (
+                MergeStanding::WaitingForSync,
+                [
+                    title,
+                    "Waiting for this launch's first sync, so your Macs merge v1 only once. If another Mac already merged it, this Mac takes that.",
+                ],
+                Offers::Nothing,
+            ),
+            (
+                MergeStanding::Merging { passages: 1 },
+                [
+                    "Merging v1 into your rewrite",
+                    "The PR keeper's model is merging the 1 passage you and v1 both changed. Your rewrite runs as you wrote it until the merge applies.",
+                ],
+                Offers::Nothing,
+            ),
+            (
+                MergeStanding::Failed {
+                    reason: failed.into(),
+                },
+                [
+                    "The merge of v1 couldn't finish",
+                    &format!(
+                        "{failed} Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start."
+                    ),
+                ],
+                Offers::TryAgain,
+            ),
+            (
+                MergeStanding::NeedsModel {
+                    passages: vec![passage.clone()],
+                    codex: false,
+                },
+                [
+                    "v1 and your rewrite both change 1 passage",
+                    "Merging it needs a Claude model for the PR keeper, and none is chosen. Your rewrite runs as you wrote it. Choose a model, or choose a wording for the passage.",
+                ],
+                Offers::Wordings,
+            ),
+            (
+                MergeStanding::NeedsModel {
+                    passages: vec![passage.clone(), passage],
+                    codex: true,
+                },
+                [
+                    "v1 and your rewrite both change 2 passages",
+                    "Merging them needs a Claude model for the PR keeper, and the one chosen is a Codex model. Your rewrite runs as you wrote it. Choose a model, or choose a wording for each passage.",
+                ],
+                Offers::Wordings,
+            ),
+        ];
+        for (standing, [title, text], offers) in standings {
+            let mut shown = coordinating.clone();
+            shown.merge_standing = Some(standing);
+            // The list keeps its mark and the sidebar its dot.
+            assert_eq!(state_label(&shown), "Rewritten · out of date");
+            assert!(out_of_date(&shown));
+            assert_eq!(
+                rewrite_banner(&shown),
+                Some(([title.into(), text.into()], offers))
+            );
+        }
         let marked = state(&mut host, Command::MarkSkillUpToDate { skill });
         assert_eq!(state_label(&marked), "Rewritten");
         assert!(!host.snapshot().unwrap().skills.iter().any(out_of_date));
@@ -2215,7 +2447,7 @@ mod tests {
                 "Your rewrite is as it was before the merge, and v1 won't be merged into it again on its own.",
             ]
         );
-        assert!(offers);
+        assert_eq!(offers, Offers::MergeIn);
         let history = listing(&mut host, skill);
         assert_eq!(
             titles(&history)[..2],
@@ -2291,7 +2523,7 @@ mod tests {
                     "Based on Coordinating v2, from a Mac with a newer Wiffletree".into(),
                     here.into()
                 ],
-                false
+                Offers::Nothing
             ))
         );
         coordinating.merge_standing = Some(MergeStanding::NewerBase {
@@ -2306,7 +2538,7 @@ mod tests {
                         "That Mac runs a newer Wiffletree and merged v2 into your rewrite. {here}"
                     )
                 ],
-                false
+                Offers::Nothing
             ))
         );
     }

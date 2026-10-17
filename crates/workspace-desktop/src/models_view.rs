@@ -452,14 +452,14 @@ impl Workspace {
             ))
             .child(fact(
                 "Used for",
-                div().child("One try at a conflict or a failed check, and sorting new comments. Watching pull requests and rebasing use no model."),
+                div().child("One try at a conflict or a failed check, sorting new comments, and merging the passages of a skill update that you also changed in your rewrite. Watching pull requests and rebasing use no model."),
             ))
             .child(fact(
                 "Reviews",
                 div().child("A fix it makes is reviewed at the level chosen in Repositories, by the models the coordinator last chose for those verifiers on that ticket."),
             ))
             .child(hint(
-                "Sorting comments needs a Claude model: it runs with every tool turned off, and Codex cannot be started that way.",
+                "Sorting comments and merging skill updates need a Claude model: they run with every tool turned off, and Codex cannot be started that way.",
                 p,
             ))
     }

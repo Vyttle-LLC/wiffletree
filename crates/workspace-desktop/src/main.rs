@@ -130,6 +130,8 @@ struct Workspace {
     stock_changes: Vec<workspace_host::skills::Line>,
     /// The merge open in Review changes.
     merge_review: Option<workspace_host::skills::MergeReview>,
+    /// The wording chosen for each passage of the open skill that waits for a model.
+    skill_wordings: Vec<Option<Wording>>,
     /// The workspace note open in Compare in the Inbox.
     compared: workspace_notes::Compared,
     verifiers: Entity<verifiers::VerifierEditor>,
@@ -300,6 +302,7 @@ impl Workspace {
             viewed_entry: None,
             stock_changes: vec![],
             merge_review: None,
+            skill_wordings: vec![],
             compared: None,
             verifiers,
             detection: Detection::new(),
