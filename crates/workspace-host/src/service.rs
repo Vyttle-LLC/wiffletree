@@ -3428,8 +3428,43 @@ mod tests {
         assert!(steps.is_empty());
         assert_eq!(actor.schedule_runs, 0);
     }
+    /// Runs the ignored test `test` again in a process of its own whose Claude and Codex are
+    /// `provider`: a provider is found through the environment, which only a process of its
+    /// own may set. The fixture provider keeps its counts in a scratch folder.
+    fn run_with_provider(test: &str, provider: &Path) {
+        let scratch = tempfile::tempdir().unwrap();
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--ignored", "--test-threads=1"])
+            .env("WORKSPACE_CLAUDE_BIN", provider)
+            .env("WORKSPACE_CODEX_BIN", provider)
+            .env("WORKSPACE_TEST_USAGE_DIR", scratch.path())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&ran.stdout);
+        assert!(
+            ran.status.success() && out.contains("1 passed"),
+            "{out}{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+    fn fixture_provider() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py")
+    }
+
     #[test]
     fn slow_worktree_preparation_preserves_input_and_defers_its_archive_until_git_finishes() {
+        run_with_provider(
+            "service::tests::slow_preparation_with_the_fixture_provider",
+            &fixture_provider(),
+        );
+    }
+    #[test]
+    #[ignore = "run by slow_worktree_preparation_preserves_input_and_defers_its_archive_until_git_finishes, with the fixture as its provider"]
+    fn slow_preparation_with_the_fixture_provider() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
         let (_home, mut actor, ticket, implementer, _) = implementer_in_turn("assigned");
         actor.active.clear();
         actor
@@ -9322,24 +9357,14 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
 
     #[test]
     fn no_sorted_comments_text_is_stored_or_sent_anywhere() {
-        // A provider is found through the environment, which only a process of its own may set:
-        // the test below runs again in one whose Claude is the stand-in.
+        // The test below runs again with the stand-in as its Claude.
         let scratch = tempfile::tempdir().unwrap();
         let claude = scratch.path().join("claude");
         fs::write(&claude, STAND_IN).unwrap();
         fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let test = "service::tests::sorting_through_the_real_launch_keeps_no_comment_text";
-        let ran = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--ignored", "--test-threads=1"])
-            .env("WORKSPACE_CLAUDE_BIN", &claude)
-            .env("WORKSPACE_CODEX_BIN", &claude)
-            .output()
-            .unwrap();
-        let out = String::from_utf8_lossy(&ran.stdout);
-        assert!(
-            ran.status.success() && out.contains("1 passed"),
-            "{out}{}",
-            String::from_utf8_lossy(&ran.stderr)
+        run_with_provider(
+            "service::tests::sorting_through_the_real_launch_keeps_no_comment_text",
+            &claude,
         );
     }
 
