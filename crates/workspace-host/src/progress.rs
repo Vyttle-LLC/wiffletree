@@ -62,16 +62,19 @@ fn merge<T: PartialEq>(
     next: u64,
     id: impl Fn(&T) -> &str,
 ) -> Merge {
-    let removed = held
-        .iter()
-        .any(|(_, old)| derived.iter().all(|entry| id(entry) != id(old)));
+    let mut old: HashMap<String, (u64, T)> = std::mem::take(held)
+        .into_iter()
+        .map(|entry| (id(&entry.1).to_owned(), entry))
+        .collect();
     let mut changed = false;
-    let merged = derived
+    *held = derived
         .into_iter()
         .map(|entry| {
-            let same = held.iter().find(|(_, old)| id(old) == id(&entry));
-            match same.filter(|(_, old)| *old == entry) {
-                Some((revision, _)) => (*revision, entry),
+            match old
+                .remove(id(&entry))
+                .filter(|(_, previous)| *previous == entry)
+            {
+                Some((revision, _)) => (revision, entry),
                 None => {
                     changed = true;
                     (next, entry)
@@ -79,7 +82,7 @@ fn merge<T: PartialEq>(
             }
         })
         .collect();
-    *held = merged;
+    let removed = !old.is_empty();
     Merge { changed, removed }
 }
 
