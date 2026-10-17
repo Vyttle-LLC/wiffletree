@@ -724,7 +724,9 @@ impl Host {
         else {
             return Ok(false);
         };
+        let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
         Ok(!self.skill_paused(skill)?
+            && !self.changed_outside_wiffletree(&paths)?
             && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
     }
     /// Whether sync has paused the skill's files.

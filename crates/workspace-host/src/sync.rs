@@ -1237,6 +1237,26 @@ impl Host {
         }
         Ok(())
     }
+    /// Whether, with a settings repository, any of the shared `paths` holds what the host
+    /// neither last wrote nor last synced, which the next pass pauses.
+    pub(crate) fn changed_outside_wiffletree(&self, paths: &[String]) -> Result<bool> {
+        if self.settings().settings_repository.is_none() {
+            return Ok(false);
+        }
+        let shared = self.home.join(shared::FOLDER);
+        for path in paths {
+            let recorded = "SELECT synced,written FROM sync_record WHERE path=?1";
+            let (synced, written): (Content, Content) = (self.db)
+                .query_row(recorded, [path], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .unwrap_or_default();
+            let mine = fs::read(shared.join(path)).ok();
+            if mine != synced && mine != written {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(crate) fn sync_status(&self) -> Result<Option<SyncStatus>> {
         let Some(repository) = self.settings().settings_repository else {
             return Ok(None);
@@ -3482,6 +3502,39 @@ pub(crate) mod tests {
         let state = host.skill_state(Skill::Coordinating).unwrap();
         let note = state.merge_note.unwrap();
         assert_eq!(note.machine.as_deref(), Some("Mike's MacBook Air"));
+    }
+
+    #[test]
+    fn an_outside_edit_is_not_merged_offline_at_start_and_pauses_once_online() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (home, _second_home, _) = rewritten_on_two_macs(&github);
+        let rewrite = home
+            .path()
+            .join("shared")
+            .join(COORDINATING)
+            .join("rewrite.md");
+        let edited = format!(
+            "{}\nAn agent's shell edit.\n",
+            fs::read_to_string(&rewrite).unwrap()
+        );
+        fs::write(&rewrite, &edited).unwrap();
+        let mut host = Host::open(home.path()).unwrap();
+        github.offline.store(true, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(coordinating(&host).text, edited);
+        assert!(merges(&host).is_empty());
+        github.offline.store(false, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(coordinating(&host).text, edited);
+        assert!(matches!(
+            notes(&host)[..],
+            [WorkspaceNote {
+                paused: Paused::OutsideWiffletree,
+                ..
+            }]
+        ));
     }
 
     #[test]
