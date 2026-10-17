@@ -26,11 +26,12 @@ pub struct MergedChange {
     pub after: String,
 }
 /// The merge of an update into a rewrite, as the parts that make up the merged text in order.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Merge {
     parts: Vec<Part>,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Part {
     /// What the rewrite says, kept as it is.
     Kept(String),

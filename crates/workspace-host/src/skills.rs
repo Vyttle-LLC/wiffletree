@@ -80,6 +80,18 @@ pub(crate) fn stops(history: &[(String, Entry)], (name, entry): &(String, Entry)
     }?;
     Some(went_back_past.max(number(&entry.stock_version).unwrap_or_default()))
 }
+/// The question that waits for the human while the skill holds the rewrite and base it asked
+/// about: the newest "Asked you about" entry in `history` about this release's stock text, when
+/// no later entry changed the skill.
+fn asked(skill: Skill, history: &[(String, Entry)]) -> Option<&(String, Entry)> {
+    let about_this_release = |(_, entry): &&(String, Entry)| match &entry.change {
+        Change::NewStockVersion { .. } => false,
+        Change::Asked { stock: asked, .. } => asked == stock(skill),
+        _ => true,
+    };
+    let newest = history.iter().rev().find(about_this_release)?;
+    matches!(newest.1.change, Change::Asked { .. }).then_some(newest)
+}
 /// Refuses rules or a rewrite over the limit; `what` names it, as "Your rules".
 pub(crate) fn check_text(what: &str, text: &str) -> Result<()> {
     ensure!(
@@ -153,6 +165,20 @@ pub enum Change {
     UndidMerge {
         entry: String,
         to: String,
+    },
+    /// The model found that stock version `to` and the rewrite based on `from` want different
+    /// things in a passage, so the human is asked; the skill is unchanged. Holds the merge so
+    /// far, so an answer needs no model: the plain merge, and an answer for each passage that
+    /// overlaps. `stock` is the stock text it merges into, which only a machine with that text
+    /// shows and settles.
+    Asked {
+        from: String,
+        to: String,
+        stock: String,
+        merge: merge::Merge,
+        answers: Vec<model::PassageAnswer>,
+        model: MergeModel,
+        machine: String,
     },
 }
 /// A history entry by its name, the time it was written, or why it could not be read.
@@ -244,6 +270,7 @@ impl SkillStore<'_> {
             newer_stock_version: None,
             merge_note: None,
             merge_standing: None,
+            question: None,
         }
     }
     pub fn save_rules(&self, skill: Skill, rules: &str) -> Result<()> {
@@ -314,8 +341,16 @@ impl SkillStore<'_> {
         self.save_merge(skill, before, plain, None, automatic)?;
         Ok(None)
     }
-    /// Merges with the human's wording for each passage that overlaps, in order.
+    /// Merges with the human's wording for each passage that overlaps, in order, or with a
+    /// question waiting, for each passage in question.
     pub fn merge_wordings(&self, skill: Skill, wordings: &[Wording]) -> Result<()> {
+        let rewrite = self.readable(skill)?.rewrite;
+        let history = self.history(skill);
+        if let Some((_, asked)) = asked(skill, &history)
+            && asked.edits.rewrite == rewrite
+        {
+            return self.answer(skill, asked.clone(), wordings);
+        }
         let (before, merged) = self.mergeable(skill)?;
         let passages = merged.passages().len();
         ensure!(
@@ -333,7 +368,8 @@ impl SkillStore<'_> {
         self.save_merge(skill, before, settled, None, false)
     }
     /// Merges `from`, which the caller has found the skill still holds, with the model's
-    /// `answer` for the passages that overlap, once the answer is checked.
+    /// `answer` for the passages that overlap, once the answer is checked; when it asks about a
+    /// passage, records the question instead.
     pub fn merge_answer(
         &self,
         skill: Skill,
@@ -343,9 +379,69 @@ impl SkillStore<'_> {
         automatic: bool,
     ) -> Result<()> {
         let merged = merge::merge(&from.base, stock(skill), &from.text);
-        let texts = model::merged_passages(stock_version(skill), &merged.passages(), answer)?;
+        let answers = model::answers(stock_version(skill), &merged.passages(), answer)?;
+        let texts: Option<Vec<&String>> = (answers.iter())
+            .map(|answer| match answer {
+                model::PassageAnswer::Merged(text) => Some(text),
+                model::PassageAnswer::Question(_) => None,
+            })
+            .collect();
+        let Some(texts) = texts else {
+            let change = Change::Asked {
+                from: version(&from.base).into(),
+                to: stock_version(skill).into(),
+                stock: stock(skill).into(),
+                merge: merged,
+                answers,
+                model,
+                machine: sync::machine_name(),
+            };
+            let edits = Edits {
+                rules: String::new(),
+                rewrite: Some(from),
+            };
+            let _writing = self.writing(skill);
+            let (path, entry) = self.record(skill, change, edits)?;
+            return self.recorded(&path, Some(&entry));
+        };
         let settled = merged.settled(|index, _| (texts[index].clone(), merge::Source::Model));
         self.save_merge(skill, from, settled, Some(model), automatic)
+    }
+    /// Merges what the "Asked you about" entry `asked` holds, with the human's wording for each
+    /// passage in question, in order, and the model's text for the rest.
+    fn answer(&self, skill: Skill, asked: Entry, wordings: &[Wording]) -> Result<()> {
+        let Change::Asked {
+            merge,
+            answers,
+            model,
+            ..
+        } = asked.change
+        else {
+            unreachable!("a waiting question is an \"Asked you about\" entry");
+        };
+        let questions = (answers.iter())
+            .filter(|answer| matches!(answer, model::PassageAnswer::Question(_)))
+            .count();
+        ensure!(
+            wordings.len() == questions,
+            "Choose one wording for each passage in question"
+        );
+        let mut wordings = wordings.iter();
+        let settled = merge.settled(|index, passage| match &answers[index] {
+            model::PassageAnswer::Merged(text) => (text.clone(), merge::Source::Model),
+            model::PassageAnswer::Question(_) => {
+                let text = match wordings.next() {
+                    Some(Wording::Stock) => &passage.stock,
+                    _ => &passage.yours,
+                };
+                (text.clone(), merge::Source::Human)
+            }
+        });
+        let before = asked
+            .edits
+            .rewrite
+            .context("A question is about a rewrite")?;
+        self.save_merge(skill, before, settled, Some(model), false)
     }
     /// The rewrite to merge this release's stock text into, as read, and the merge. Only a
     /// rewrite based on an older stock version, or on this one with other text, is merged.
@@ -726,10 +822,14 @@ impl Host {
         let this_release = number(&state.stock_version);
         let tried = (self.merge_tries[skill as usize].as_ref())
             .filter(|tried| tried.running() || holds(&tried.from));
+        let question = (recalled.asked.as_ref())
+            .filter(|(_, asked)| asked.edits.rewrite.as_ref().is_some_and(holds))
+            .and_then(|(_, asked)| question(skill, asked));
         let merge_standing = match &state.rewrite {
             Some(rewrite) if rewrite.out_of_date && tried.is_some() => {
                 tried.map(|tried| tried.standing.clone())
             }
+            _ if question.is_some() => None,
             Some(rewrite) if rewrite.out_of_date => {
                 let older = number(&rewrite.base_version).is_some_and(|b| Some(b) < this_release);
                 if recalled.stopped >= this_release {
@@ -752,6 +852,7 @@ impl Host {
             newer_stock_version: recalled.newer_stock_version.clone(),
             merge_note,
             merge_standing,
+            question,
             ..state
         })
     }
@@ -866,8 +967,9 @@ impl Host {
         self.recall_skill_histories();
     }
     /// Whether the skill's rewrite is due a merge of this release's stock text on its own: one
-    /// whose files can be read and are not paused, by `merge_due`, and that this Mac is not
-    /// merging and has not tried to merge as it is since it started.
+    /// whose files can be read and are not paused, by `merge_due`, with no question waiting
+    /// about it, and that this Mac is not merging and has not tried to merge as it is since it
+    /// started.
     pub fn skill_merge_due(&self, skill: Skill) -> Result<bool> {
         let store = self.skills();
         let (
@@ -883,10 +985,12 @@ impl Host {
         let tried = (self.merge_tries[skill as usize].as_ref())
             .is_some_and(|tried| tried.running() || tried.from == rewrite);
         let paths = CURRENT.map(|file| format!("skills/{}/{file}", skill.folder()));
+        let history = store.history(skill);
         Ok(!tried
             && !self.skill_paused(skill)?
             && !self.changed_outside_wiffletree(&paths)?
-            && merge_due(&rewrite.base, stock(skill), &store.history(skill)))
+            && merge_due(&rewrite.base, stock(skill), &history)
+            && asked(skill, &history).is_none_or(|(_, asked)| asked.edits.rewrite != Some(rewrite)))
     }
     /// Whether sync has paused the skill's files.
     fn skill_paused(&self, skill: Skill) -> rusqlite::Result<bool> {
@@ -938,6 +1042,8 @@ pub(crate) struct Recalled {
     merges: Vec<(String, Entry)>,
     /// The newest stock version an Undo, or a restore from before a merge, stops merges into.
     stopped: Option<u32>,
+    /// The question that waits while the skill holds what it asked about, by `asked`.
+    asked: Option<(String, Entry)>,
 }
 impl Recalled {
     fn of(skill: Skill, history: Vec<(String, Entry)>) -> Self {
@@ -948,6 +1054,7 @@ impl Recalled {
             .max_by_key(|version| number(version))
             .cloned();
         let stopped = stopped(&history);
+        let asked = asked(skill, &history).cloned();
         let merges = (history.into_iter())
             .filter(|(_, entry)| matches!(entry.change, Change::Merged { .. }))
             .collect();
@@ -955,8 +1062,44 @@ impl Recalled {
             newer_stock_version,
             merges,
             stopped,
+            asked,
         }
     }
+}
+/// The question of the "Asked you about" entry `asked`, with the passages in question.
+fn question(skill: Skill, asked: &Entry) -> Option<SkillQuestion> {
+    let Change::Asked {
+        to,
+        merge,
+        answers,
+        model,
+        ..
+    } = &asked.change
+    else {
+        return None;
+    };
+    let passages = (merge.passages().into_iter().zip(answers))
+        .filter_map(|(passage, answer)| match answer {
+            model::PassageAnswer::Question(question) => Some(QuestionedPassage {
+                question: question.clone(),
+                stock: passage.stock,
+                yours: passage.yours,
+            }),
+            model::PassageAnswer::Merged(_) => None,
+        })
+        .collect();
+    // Keeping the human's wording changes nothing there, so what changes is the rest.
+    let (_, changes) = merge.settled(|index, passage| match &answers[index] {
+        model::PassageAnswer::Merged(text) => (text.clone(), merge::Source::Model),
+        model::PassageAnswer::Question(_) => (passage.yours.clone(), merge::Source::Human),
+    });
+    Some(SkillQuestion {
+        skill,
+        to: to.clone(),
+        other_changes: changes.len(),
+        model: model.model.clone(),
+        passages,
+    })
 }
 /// The note of the "Merged" entry `name`.
 pub fn merge_note(name: &str, entry: &Entry) -> Option<MergeNote> {
@@ -2477,10 +2620,6 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
                 json!({"passages": [{"id": "1", "question": "q".repeat(301)}]}),
                 "The model's question about passage 1 was longer than 300 characters.",
             ),
-            (
-                json!({"passages": [{"id": "1", "question": "v1 asks first; you never ask."}]}),
-                "The model found that v1 and your rewrite want different things in passage 1: v1 asks first; you never ask.",
-            ),
         ];
         let mut run = Some(run);
         for (answer, reason) in cases {
@@ -2647,6 +2786,216 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         assert_eq!(coordinating_state(&host).merge_standing, None);
         execute(&mut host, Command::MergeSkillUpdate { skill }).unwrap();
         the_run(&mut host);
+    }
+
+    /// Coordinating overlapping in two passages: its first two paragraphs, where the human
+    /// changed both and v1 the second, and the fifth.
+    fn overlapping_twice(host: &Host) -> Rewritten {
+        let mut before = overlapping(host);
+        before.base = before.base.replacen("Break the plan", "Split the plan", 1);
+        before.text = before.text.replacen("Break the plan", "Cut the plan", 1);
+        (host.skills())
+            .save_rewrite(Skill::Coordinating, &before.text)
+            .unwrap();
+        based_on_an_earlier_release(host, &before.base);
+        before
+    }
+
+    const QUESTION: &str = "v1 asks the human before a waiver; your rewrite asks you instead.";
+
+    #[test]
+    fn a_question_waits_with_the_merge_so_far_and_keeping_my_wording_needs_no_model() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        let profile = keeper_model(&mut host, Provider::Claude);
+        let before = overlapping_twice(&host);
+        let mut host = started_again(&home, host);
+        let skill = Skill::Coordinating;
+        let run = the_run(&mut host);
+        let [first, second] = [0, 1].map(|index| run.passages[index].clone());
+        let merged = first
+            .yours
+            .replacen("Cut the plan", "Cut and break the plan", 1);
+        let answer = json!({"passages": [
+            {"id": "1", "merged": merged}, {"id": "2", "question": QUESTION}]});
+        host.finish_merge_run(run, Ok(provider::MergeAnswer { answer, tokens: 9 }));
+
+        // Nothing applies: the rewrite runs as written, with the question in its history.
+        let unchanged = [before.text.as_bytes(), before.base.as_bytes()];
+        assert_eq!(current(&host), unchanged);
+        assert_eq!(
+            host.instructions(Role::ProjectOrchestrator)
+                .matches(&before.text)
+                .count(),
+            1
+        );
+        let (_, asked) = host.skills().history(skill).pop().unwrap();
+        let Change::Asked {
+            to, stock: into, ..
+        } = &asked.change
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!((&**to, &**into), ("v1", stock(skill)));
+        assert_eq!(asked.edits.rewrite.as_ref(), Some(&before));
+        let question = SkillQuestion {
+            skill,
+            to: "v1".into(),
+            other_changes: 2,
+            model: profile.clone(),
+            passages: vec![QuestionedPassage {
+                question: QUESTION.into(),
+                stock: second.stock.clone(),
+                yours: second.yours.clone(),
+            }],
+        };
+        let state = coordinating_state(&host);
+        assert_eq!(
+            (state.question.as_ref(), state.merge_standing),
+            (Some(&question), None)
+        );
+        let note = WorkspaceNote::SkillQuestion(question.clone());
+        assert_eq!(host.workspace_notes().unwrap(), [note]);
+
+        // No second run, now or at the next start.
+        assert!(!host.skill_merge_due(skill).unwrap());
+        let mut host = started_again(&home, host);
+        assert!(host.take_merge_runs().is_empty());
+        assert_eq!(coordinating_state(&host).question, Some(question));
+
+        let refused = Command::AnswerSkillQuestion {
+            skill,
+            wordings: vec![Wording::Yours, Wording::Yours],
+        };
+        assert_eq!(
+            execute(&mut host, refused).unwrap_err().to_string(),
+            "Choose one wording for each passage in question"
+        );
+        let keep = Command::AnswerSkillQuestion {
+            skill,
+            wordings: vec![Wording::Yours],
+        };
+        let kept = execute(&mut host, keep).unwrap();
+        assert!(host.take_merge_runs().is_empty());
+        let text = (before.text.replacen("— v0", "— v1", 1)).replacen(&first.yours, &merged, 1);
+        assert_eq!(current(&host), [text.as_bytes(), stock(skill).as_bytes()]);
+        let (entry, merge) = host.skills().history(skill).pop().unwrap();
+        let Change::Merged { changes, model, .. } = merge.change else {
+            panic!("{merge:?}")
+        };
+        let sources: Vec<_> = changes.iter().map(|change| change.source).collect();
+        assert_eq!(sources, [merge::Source::Update, merge::Source::Model]);
+        let tokens = 9;
+        assert_eq!(
+            model,
+            Some(MergeModel {
+                model: profile,
+                tokens
+            })
+        );
+        assert_eq!(
+            (kept.question, kept.merge_note.unwrap().entry),
+            (None, entry.clone())
+        );
+        assert_eq!(host.workspace_notes().unwrap(), []);
+
+        // Undone, the question stays closed, and v2's wording is still a merge away.
+        execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
+        let undone = coordinating_state(&host);
+        assert_eq!(
+            (undone.question, undone.merge_standing),
+            (None, Some(MergeStanding::Undone))
+        );
+    }
+
+    #[test]
+    fn taking_the_updates_wording_merges_its_passage_chosen_by_the_human() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        keeper_model(&mut host, Provider::Claude);
+        let before = overlapping(&host);
+        let mut host = started_again(&home, host);
+        let skill = Skill::Coordinating;
+        let run = the_run(&mut host);
+        let passage = run.passages[0].clone();
+        let answer = json!({"passages": [{"id": "1", "question": QUESTION}]});
+        host.finish_merge_run(run, Ok(provider::MergeAnswer { answer, tokens: 1 }));
+        let take = Command::AnswerSkillQuestion {
+            skill,
+            wordings: vec![Wording::Stock],
+        };
+        execute(&mut host, take).unwrap();
+        let text =
+            (before.text.replacen("— v0", "— v1", 1)).replacen(&passage.yours, &passage.stock, 1);
+        assert_eq!(current(&host), [text.as_bytes(), stock(skill).as_bytes()]);
+        let (_, merge) = host.skills().history(skill).pop().unwrap();
+        let Change::Merged { changes, .. } = merge.change else {
+            panic!("{merge:?}")
+        };
+        assert_eq!(changes[1].source, merge::Source::Human);
+    }
+
+    #[test]
+    fn a_question_from_another_release_is_not_shown_and_this_mac_merges_its_own() {
+        let (_home, mut host) = host();
+        let skill = Skill::Coordinating;
+        let before = rewritten_against_v0(&host);
+        let asked = |into: &str| {
+            let merge = merge::merge(&before.base, into, &before.text);
+            let question = model::PassageAnswer::Question(QUESTION.into());
+            let model = ModelProfile {
+                provider: Provider::Claude,
+                model: "haiku".into(),
+                effort: "medium".into(),
+            };
+            Entry {
+                change: Change::Asked {
+                    from: "v0".into(),
+                    to: version(into).into(),
+                    stock: into.into(),
+                    answers: vec![question; merge.passages().len()],
+                    merge,
+                    model: MergeModel { model, tokens: 1 },
+                    machine: "Mike's MacBook Air".into(),
+                },
+                stock_version: version(into).into(),
+                edits: Edits {
+                    rules: String::new(),
+                    rewrite: Some(before.clone()),
+                },
+            }
+        };
+        // A stand-in for another release's stock text, which also changes the paragraph the
+        // human changed.
+        let other = stock(skill).replacen("Start by clarifying", "Start by asking", 1);
+        write_entry(&mut host, "2090-01-01T00-00-00.000Z", &asked(&other));
+        let state = coordinating_state(&host);
+        assert_eq!(
+            (state.question, host.workspace_notes().unwrap()),
+            (None, vec![])
+        );
+        let answer = Command::AnswerSkillQuestion {
+            skill,
+            wordings: vec![Wording::Yours],
+        };
+        assert!(execute(&mut host, answer).is_err());
+        assert!(host.skill_merge_due(skill).unwrap());
+        host.merge_due_skills([skill]);
+        assert_eq!(current(&host)[1], stock(skill).as_bytes());
+
+        // Asked about this release's text, the question closes once another Mac's merge into a
+        // newer release arrives, since the rewrite and base changed.
+        let entry = coordinating_state(&host).merge_note.unwrap().entry;
+        execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
+        write_entry(&mut host, "2090-01-01T00-00-01.000Z", &asked(stock(skill)));
+        assert!(coordinating_state(&host).question.is_some());
+        let newer = stock(skill).replacen("— v1", "— v2", 1);
+        based_on_an_earlier_release(&host, &newer);
+        let state = coordinating_state(&host);
+        assert_eq!(
+            (state.question, host.workspace_notes().unwrap()),
+            (None, vec![])
+        );
     }
 
     #[test]

@@ -426,10 +426,13 @@ impl Workspace {
     fn sync_mark(&self, p: Palette) -> Option<Stateful<Div>> {
         let snapshot = self.snapshot.as_ref()?;
         let status = snapshot.settings_sync.as_ref()?;
-        let (notes, now) = (&snapshot.workspace_notes, now());
+        let (notes, now) = (
+            snapshot.paused_settings().cloned().collect::<Vec<_>>(),
+            now(),
+        );
         let mark = settings::Mark::of(status, notes.len(), now);
         let tint = mark.tint(p);
-        let tooltip = mark.tooltip(status, notes);
+        let tooltip = mark.tooltip(status, &notes);
         let bridge = self.bridge.clone();
         Some(
             div()

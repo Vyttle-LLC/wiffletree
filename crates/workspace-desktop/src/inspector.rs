@@ -753,9 +753,16 @@ impl Workspace {
         }
     }
 
-    /// A workspace note: the paused setting, what happened, Compare and the choices that settle
-    /// it for every project at once.
     fn note_card(&self, note: &WorkspaceNote, p: Palette, cx: &mut Context<Self>) -> Div {
+        match note {
+            WorkspaceNote::Paused(setting) => self.paused_card(setting, p, cx),
+            WorkspaceNote::SkillQuestion(question) => self.question_card(question, p, cx),
+        }
+    }
+
+    /// A paused setting's note: the setting, what happened, Compare and the choices that settle
+    /// it for every project at once.
+    fn paused_card(&self, note: &PausedSetting, p: Palette, cx: &mut Context<Self>) -> Div {
         let view = cx.entity().downgrade();
         let on: workspace_notes::OnNote = Rc::new(move |path, action, window, cx| {
             let _ = view.update(cx, |view, cx| view.note_action(path, action, window, cx));

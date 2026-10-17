@@ -1,7 +1,7 @@
 //! The model's part of a merge: what it is told and sent, and the check of its answer before
 //! the host puts any of it into the plain merge.
 use anyhow::{Context as _, Result, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workspace_core::{MergePassage, Skill};
 
@@ -42,15 +42,23 @@ enum Answered {
     Question { id: String, question: String },
 }
 
-/// The merged text of each passage, in order, once the answer is checked. Nothing of an answer
-/// is used when it doesn't answer every passage exactly once with a text or a question, when a
-/// text is longer than the passage's stock and human versions together, or when a question is
-/// longer than 300 characters. A question is not merged.
-pub(crate) fn merged_passages(
+/// A passage's answer, once checked: the model's merged text, or its one-sentence question.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassageAnswer {
+    Merged(String),
+    Question(String),
+}
+
+/// Each passage's answer, in order, once the answer is checked. Nothing of an answer is used
+/// when it doesn't answer every passage exactly once with a text or a question, when a text is
+/// longer than the passage's stock and human versions together, or when a question is longer
+/// than 300 characters.
+pub(crate) fn answers(
     stock_version: &str,
     passages: &[MergePassage],
     answer: &Value,
-) -> Result<Vec<String>> {
+) -> Result<Vec<PassageAnswer>> {
     const ONCE: &str = "The model's answer didn't answer each passage exactly once.";
     let Answer { passages: answered } = (serde_json::from_value(answer.clone()).ok())
         .context("The model's answer didn't have the shape it was asked for.")?;
@@ -63,27 +71,25 @@ pub(crate) fn merged_passages(
             _ => bail!(ONCE),
         }
     }
-    let mut texts = vec![];
+    let mut answers = vec![];
     for (passage, (answered, number)) in passages.iter().zip(by_passage.into_iter().zip(1..)) {
-        match answered.context(ONCE)? {
+        answers.push(match answered.context(ONCE)? {
             Answered::Merged { merged: text, .. } => {
                 let longest = passage.stock.chars().count() + passage.yours.chars().count();
                 ensure!(
                     text.chars().count() <= longest,
                     "The model's text for passage {number} was longer than {stock_version}'s version and yours together."
                 );
-                texts.push(text);
+                PassageAnswer::Merged(text)
             }
             Answered::Question { question, .. } => {
                 ensure!(
                     question.chars().count() <= MAX_QUESTION,
                     "The model's question about passage {number} was longer than {MAX_QUESTION} characters."
                 );
-                bail!(
-                    "The model found that {stock_version} and your rewrite want different things in passage {number}: {question}"
-                );
+                PassageAnswer::Question(question)
             }
-        }
+        });
     }
-    Ok(texts)
+    Ok(answers)
 }

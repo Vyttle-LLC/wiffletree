@@ -1309,6 +1309,7 @@ impl Host {
     }
     /// One note per paused setting, a skill's rules, rewrite and base being one: two machines'
     /// changes first, then edits made outside Wiffletree, then what this machine cannot read.
+    /// Then one per skill question.
     pub(crate) fn workspace_notes(&self) -> Result<Vec<WorkspaceNote>> {
         let rows: Vec<(String, String)> = (self.db.prepare("SELECT path,why FROM sync_paused")?)
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -1333,7 +1334,7 @@ impl Host {
                     "{setting} from {machine} can’t be used here: {reason}. This Mac keeps its own {own}."
                 ),
             };
-            let note = WorkspaceNote {
+            let note = PausedSetting {
                 path: path.clone(),
                 setting,
                 paused,
@@ -1341,13 +1342,17 @@ impl Host {
             };
             notes.insert(path, note);
         }
-        let mut notes: Vec<WorkspaceNote> = notes.into_values().collect();
+        let mut notes: Vec<PausedSetting> = notes.into_values().collect();
         notes.sort_by_key(|note| match note.paused {
             Paused::TwoMachines { .. } => 0,
             Paused::OutsideWiffletree => 1,
             Paused::CannotBeRead { .. } => 2,
         });
-        Ok(notes)
+        let questions = (self.skill_states()?.into_iter()).filter_map(|state| state.question);
+        let notes = notes.into_iter().map(WorkspaceNote::Paused);
+        Ok(notes
+            .chain(questions.map(WorkspaceNote::SkillQuestion))
+            .collect())
     }
     /// A paused file as the app names it, such as "Implementing · your rules".
     fn setting(&self, path: &str) -> String {
@@ -2473,8 +2478,12 @@ pub(crate) mod tests {
         assert_eq!(status(&host).error, None);
     }
 
-    fn notes(host: &Host) -> Vec<WorkspaceNote> {
-        host.snapshot().unwrap().workspace_notes
+    fn notes(host: &Host) -> Vec<PausedSetting> {
+        host.snapshot()
+            .unwrap()
+            .paused_settings()
+            .cloned()
+            .collect()
     }
 
     fn compare(host: &mut Host, path: &str) -> Vec<Line> {
@@ -2510,7 +2519,7 @@ pub(crate) mod tests {
         let machine = machine_name();
         assert_eq!(
             notes(&second),
-            [WorkspaceNote {
+            [PausedSetting {
                 path: "skills/implementing/".into(),
                 setting: "Implementing · your rules".into(),
                 paused: Paused::TwoMachines {
@@ -3473,6 +3482,70 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_question_asked_on_one_mac_is_shown_on_both_and_answered_once_for_both() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (first_home, second_home, _) = rewritten_on_two_macs(&github);
+        let skill = Skill::Coordinating;
+        let with_a_claude_keeper = |home: &tempfile::TempDir| {
+            let mut host = Host::open(home.path()).unwrap();
+            let mut selection = host.model_selection().unwrap();
+            let allowed = selection.allowed(Provider::Claude)[0].clone();
+            selection.keeper = Some(ModelProfile {
+                provider: Provider::Claude,
+                model: allowed.model,
+                effort: allowed.effort,
+            });
+            host.set_model_selection(&selection).unwrap();
+            host
+        };
+        let mut first = with_a_claude_keeper(&first_home);
+        let mut second = with_a_claude_keeper(&second_home);
+        let text = coordinating(&first)
+            .text
+            .replacen("Ask the human when", "Ask me when", 1);
+        first.skills().save_rewrite(skill, &text).unwrap();
+        first.sync_now(&tools).unwrap();
+        let mut runs = first.take_merge_runs();
+        assert_eq!(runs.len(), 1);
+        let answer =
+            json!({"passages": [{"id": "1", "question": "v1 asks the human; yours asks you."}]});
+        first.finish_merge_run(
+            runs.remove(0),
+            Ok(provider::MergeAnswer { answer, tokens: 1 }),
+        );
+        first.sync_now(&tools).unwrap();
+
+        second.sync_now(&tools).unwrap();
+        assert!(second.take_merge_runs().is_empty());
+        assert_eq!(coordinating(&second).text, text);
+        for host in [&first, &second] {
+            let notes = host.snapshot().unwrap().workspace_notes;
+            assert!(
+                matches!(notes[..], [WorkspaceNote::SkillQuestion(_)]),
+                "{notes:?}"
+            );
+        }
+
+        let keep = Command::AnswerSkillQuestion {
+            skill,
+            wordings: vec![Wording::Yours],
+        };
+        first.execute(keep).unwrap();
+        first.sync_now(&tools).unwrap();
+        second.sync_now(&tools).unwrap();
+        let merged = text.replacen("— v0", "— v1", 1);
+        for host in [&first, &second] {
+            assert_eq!(coordinating(host).text, merged);
+            assert_eq!(coordinating(host).base, skills::stock(skill));
+            assert_eq!(host.snapshot().unwrap().workspace_notes, []);
+            assert_eq!(host.skill_state(skill).unwrap().question, None);
+        }
+        assert!(second.take_merge_runs().is_empty());
+    }
+
+    #[test]
     fn both_macs_merge_at_once_and_the_second_to_push_keeps_both_entries_without_a_pause() {
         let folder = tempfile::tempdir().unwrap();
         let github = Arc::new(GitHub::new(folder.path(), true));
@@ -3556,7 +3629,7 @@ pub(crate) mod tests {
         assert_eq!(coordinating(&host).text, edited);
         assert!(matches!(
             notes(&host)[..],
-            [WorkspaceNote {
+            [PausedSetting {
                 paused: Paused::OutsideWiffletree,
                 ..
             }]
