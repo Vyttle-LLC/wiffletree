@@ -41,6 +41,16 @@ pub(crate) fn recompare(compared: &mut Compared, notes: &[WorkspaceNote]) -> Opt
     Some(Command::ComparePausedFile { path: path.clone() })
 }
 
+/// Closes the comparison a failed request was asking for, such as one whose note was settled in
+/// the other window; the caller shows the host's error.
+pub(crate) fn compare_failed(compared: &mut Compared, command: &Command) {
+    if let Command::ComparePausedFile { path } = command
+        && compared.as_ref().is_some_and(|(open, _)| open == path)
+    {
+        *compared = None;
+    }
+}
+
 /// Keeps lines that answer the note still open.
 pub(crate) fn compared_arrived(compared: &mut Compared, path: &str, lines: Vec<Line>) {
     if let Some((open, shown)) = compared
@@ -205,7 +215,7 @@ pub(crate) fn kept_note(note: &WorkspaceNote, compared: &Compared) -> Option<Str
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{choices, kept_note, recompare, short};
+    use super::{choices, compare_failed, kept_note, recompare, short};
     use workspace_core::*;
     use workspace_host::skills::Line;
 
@@ -276,6 +286,18 @@ mod tests {
         assert!(matches!(asked, Some(Command::ComparePausedFile { path }) if path == two.path));
         assert_eq!(compared, Some((two.path.clone(), None)));
         assert!(recompare(&mut compared, &[]).is_none());
+        assert_eq!(compared, None);
+    }
+
+    #[test]
+    fn a_failed_compare_closes_the_comparison_it_asked_for() {
+        let ask = |path: &str| Command::ComparePausedFile { path: path.into() };
+        let mut compared = Some(("skills/a/".to_owned(), None));
+        compare_failed(&mut compared, &ask("skills/b/"));
+        assert!(compared.is_some());
+        compare_failed(&mut compared, &Command::Snapshot);
+        assert!(compared.is_some());
+        compare_failed(&mut compared, &ask("skills/a/"));
         assert_eq!(compared, None);
     }
 }

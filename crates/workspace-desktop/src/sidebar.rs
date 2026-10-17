@@ -1064,12 +1064,9 @@ impl Workspace {
             .snapshot
             .as_ref()
             .is_some_and(|s| s.live_projects.contains(&project_id));
-        let attention = self
-            .snapshot
-            .iter()
-            .flat_map(|s| &s.attention)
-            .filter(|a| a.project_id == project_id)
-            .count();
+        let attention = self.snapshot.as_ref().map_or(0, |s| {
+            needs_you(&s.attention, &s.workspace_notes, &project_id)
+        });
         let detail = format!(
             "{} · {}{}{}",
             root.name,
@@ -1523,10 +1520,19 @@ fn team_working(coordinator_id: &str, sessions: &[Session]) -> bool {
         .any(|s| !s.archived && s.status == Status::Working && reports_to(s))
 }
 
+/// What a project's badge counts: its attention items, and the workspace notes, as the Inbox rail does.
+fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str) -> usize {
+    attention
+        .iter()
+        .filter(|a| a.project_id == project_id)
+        .count()
+        + notes.len()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::shown_status;
-    use workspace_core::{Provider, Role, Session, Status};
+    use super::{needs_you, shown_status};
+    use workspace_core::{Attention, Paused, Provider, Role, Session, Status, WorkspaceNote};
 
     fn session(id: &str, parent: Option<&str>, status: Status) -> Session {
         Session {
@@ -1566,5 +1572,29 @@ mod tests {
         sessions[0].status = Status::Ready;
         sessions[1].archived = true;
         assert_eq!(shown_status(&sessions[0], &sessions), Status::Ready);
+    }
+
+    #[test]
+    fn workspace_notes_count_in_each_projects_badge() {
+        let attention = |project: &str| Attention {
+            id: project.into(),
+            project_id: project.into(),
+            session_id: "s".into(),
+            host: "claude".into(),
+            operation_id: "o".into(),
+            prompt: "Q".into(),
+            options: Vec::new(),
+            answer: None,
+        };
+        let note = WorkspaceNote {
+            path: "skills/implementing/".into(),
+            setting: "Implementing".into(),
+            paused: Paused::OutsideWiffletree,
+            text: String::new(),
+        };
+        let items = [attention("a"), attention("b")];
+        assert_eq!(needs_you(&items, &[], "a"), 1);
+        assert_eq!(needs_you(&items, std::slice::from_ref(&note), "a"), 2);
+        assert_eq!(needs_you(&[], std::slice::from_ref(&note), "c"), 1);
     }
 }

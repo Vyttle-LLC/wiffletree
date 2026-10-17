@@ -490,6 +490,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        workspace_notes::compare_failed(&mut self.compared, command);
         if self.snapshot.is_none() {
             self.load_error = Some(error);
         } else if !self.form_failed(command, &error, cx) {

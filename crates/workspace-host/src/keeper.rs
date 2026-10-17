@@ -1499,6 +1499,13 @@ impl Host {
         let pr = ticket.pull_request.as_ref();
         let (base, number) = pr.map_or(("", 0), |pr| (pr.base.as_str(), pr.number));
         let (named, head) = (named(ticket), short_sha(&running.head));
+        // Findings listed in `why` end without punctuation.
+        let why = why.trim();
+        let why = &if why.ends_with(['.', '!', '?']) {
+            why.to_owned()
+        } else {
+            format!("{why}.")
+        };
         let (what, body) = match running.problem {
             KeeperProblem::Conflict => (
                 "conflict",
@@ -5175,6 +5182,10 @@ pub(crate) mod tests {
         for named in ["Correctness", "src/tree.rs:5", "Line 5 is lost"] {
             assert!(body.contains(named), "{named}: {body}");
         }
+        assert!(
+            body.contains("Line 5 is lost. Nothing was pushed"),
+            "{body}"
+        );
     }
 
     #[test]
