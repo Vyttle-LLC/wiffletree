@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Skill updates study</title>
+<!--
+  Static study for the skill-updates OpenSpec change. No script, no network.
+  (a) The Skills list: "Rewritten · updated" and "Rewritten · needs you", and the dot on the Skills row.
+  (b) A skill's page after an automatic merge: the note, Review changes, Undo and Dismiss.
+  (c) Review changes: the rewrite before and after, each change labelled, and a passage the model merged.
+  (d) A merge that needs you: the workspace note in a project's Inbox, with its choices.
+  (e) The same question on the skill's page.
+  (f) Where an out-of-date rewrite's merge stands: waiting for the first sync, no model, a failed try,
+      after Undo, and a base from a Mac with a newer release.
+  (g) Undo's confirmation and the history with a merge entry.
+  The theme switch at the top is CSS only: System follows the Mac's appearance.
+  Sample data is simulated; nothing here is implemented host behavior, a model run or a Git operation.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not(:has(#theme-light:checked)){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+:root:has(#theme-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:500;margin:0}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.muted{color:var(--muted)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.intro{max-width:860px;margin-bottom:18px}
+.intro p{color:var(--subtle);font-size:12px}
+.themes{display:flex;gap:4px;align-items:center;margin:0 0 22px;font-size:12px;color:var(--subtle)}
+.themes input{position:absolute;opacity:0;pointer-events:none}
+.themes label{padding:3px 10px;border:1px solid var(--edge);border-radius:20px;cursor:pointer}
+.themes input:checked+label{background:var(--focus);border-color:var(--focus);color:var(--surface)}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:14px;padding:16px}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle);max-width:900px}
+.caption b{color:var(--text);font-weight:500}
+.stack{display:grid;gap:26px}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.app{display:grid;grid-template-columns:230px minmax(0,1fr);gap:0;padding:0;overflow:hidden}
+.hint{font-size:12px;color:var(--subtle)}
+.pill{flex:none;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.focus{color:var(--focus);background:color-mix(in srgb,var(--focus) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.new{box-shadow:inset 2px 0 0 var(--accent)}
+svg.i{width:14px;height:14px;flex:none;color:var(--subtle)}
+/* (a) Sidebar, mirroring sidebar.rs. */
+.side{background:var(--base);border-right:1px solid var(--edge);padding:10px 8px;display:flex;flex-direction:column;gap:1px;min-height:100%}
+.side .eyebrow{padding:8px 8px 4px}
+.row{min-height:30px;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:6px;font-size:12.5px}
+.row.d1{padding-left:24px}
+.row .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row.selected{background:color-mix(in srgb,var(--focus) 14%,transparent)}
+.row.selected svg.i{color:var(--text)}
+.dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--accent)}
+.navsep{border-top:1px solid color-mix(in srgb,var(--edge) 35%,transparent);margin:8px 0 2px}
+/* The Skills page. */
+.page{padding:18px 20px}
+.page-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
+.page-head h2{font-size:17px}
+.skill{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:2px 12px;padding:11px 0;border-bottom:1px solid color-mix(in srgb,var(--edge) 30%,transparent);align-items:start}
+.skill:last-of-type{border-bottom:0}
+.skill svg.i{margin-top:2px}
+.skill b{font-weight:500;font-size:13.5px}
+.skill .what{grid-column:2;font-size:12px;color:var(--subtle)}
+.skill .who{grid-column:2;font-size:11px;color:var(--muted)}
+.skill .state{grid-row:1;grid-column:3;text-align:right}
+.skill.core{background:color-mix(in srgb,var(--overlay) 45%,transparent);border-radius:8px;padding:11px 10px;margin:0 -10px;border-bottom:0}
+.section-label{margin:14px 0 2px}
+/* Skill pages. */
+.skill-head{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.skill-head h2{flex:1}
+.btn{padding:4px 11px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.btn.danger{background:var(--red);color:var(--surface)}
+.btn.link{color:var(--focus);padding:0;border:0}
+.btn svg{width:12px;height:12px}
+.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center}
+.modes{display:inline-flex;border:1px solid var(--edge);border-radius:8px;overflow:hidden;margin:10px 0 12px;font-size:12px}
+.modes span{padding:4px 12px;color:var(--subtle)}
+.modes span+span{border-left:1px solid var(--edge)}
+.modes .on{background:color-mix(in srgb,var(--focus) 14%,transparent);color:var(--text);font-weight:500}
+.fold{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;background:var(--base);padding:8px 10px;font-size:12px}
+.fold .peek{margin-top:6px;color:var(--muted);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.editor{border:1px solid var(--focus);border-radius:9px;background:var(--base);padding:10px 12px;font:12px/1.6 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;color:var(--text);margin-top:6px}
+.editor .caret{display:inline-block;width:1px;height:13px;background:var(--focus);vertical-align:-2px}
+.editor.read{border-color:var(--edge);color:var(--subtle)}
+.editor .mark{background:color-mix(in srgb,var(--yellow) 18%,transparent);border-radius:3px}
+.under{display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:11px;color:var(--muted)}
+.label-row{display:flex;align-items:baseline;gap:8px;margin-top:14px}
+.label-row b{font-weight:500}
+.receives{display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:11px;margin-top:12px;color:var(--subtle)}
+.receives span{padding:2px 8px;border-radius:6px;background:var(--overlay)}
+.receives span.yours{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text)}
+.receives i{font-style:normal;color:var(--muted)}
+.enforced{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-top:14px}
+.enforced>div{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;padding:9px 11px;font-size:11.5px}
+.enforced b{display:flex;align-items:center;gap:6px;font-weight:500;font-size:12px;margin-bottom:3px}
+.enforced ul{margin:0;padding-left:16px;color:var(--subtle)}
+.enforced li{margin:1px 0}
+.banner{border:1px solid color-mix(in srgb,var(--yellow) 45%,transparent);background:color-mix(in srgb,var(--yellow) 9%,transparent);border-radius:10px;padding:10px 12px;margin:10px 0 12px;font-size:12px}
+.banner b{font-weight:500}
+.banner .actions{justify-content:flex-start;margin-top:8px}
+.diff{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;background:var(--base);font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace;overflow:hidden;margin-top:6px}
+.diff div{padding:1px 10px;white-space:pre-wrap}
+.diff .add{background:color-mix(in srgb,var(--green) 13%,transparent);color:var(--text)}
+.diff .del{background:color-mix(in srgb,var(--red) 11%,transparent);color:var(--subtle);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--red) 60%,transparent)}
+.diff .ctx{color:var(--muted)}
+.diff .gap{color:var(--muted);background:var(--overlay);font-size:10.5px}
+/* (e) and (g) confirmations. */
+.scrim{position:relative;border-radius:10px;overflow:hidden}
+.scrim .behind{opacity:.35;filter:saturate(.6);pointer-events:none}
+.dialog{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(380px,90%);background:var(--surface);border:1px solid var(--edge);border-radius:12px;padding:16px;box-shadow:0 18px 50px color-mix(in srgb,#000 28%,transparent)}
+.dialog .ask{font-size:14px;font-weight:500;margin-bottom:6px}
+.dialog p{font-size:12px;color:var(--subtle);margin-bottom:8px}
+.dialog .actions{margin-top:12px}
+/* (f) History. */
+.entry{display:grid;grid-template-columns:104px minmax(0,1fr) auto;gap:2px 12px;padding:8px 0;border-top:1px solid color-mix(in srgb,var(--edge) 30%,transparent);font-size:12px;align-items:start}
+.entry:first-of-type{border-top:0}
+.entry .when{color:var(--muted);font-size:11px}
+.entry b{font-weight:500}
+.entry .detail{grid-column:2;color:var(--subtle);font-size:11.5px}
+.entry .acts{grid-row:1;grid-column:3;display:flex;gap:10px;font-size:11.5px}
+.entry .acts span{color:var(--focus)}
+.entry.open{background:color-mix(in srgb,var(--focus) 5%,transparent);border-radius:8px;padding:8px 10px;margin:0 -10px}
+.entry .view{grid-column:1/-1;margin-top:6px}
+.tabs{display:flex;gap:2px;margin:10px 0 8px;flex-wrap:wrap}
+.tabs span{padding:3px 10px;border-radius:6px;font-size:11.5px;color:var(--subtle)}
+.tabs span.on{background:var(--overlay);color:var(--text);font-weight:500}
+code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+.notes{max-width:880px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+.notes b{color:var(--text);font-weight:500}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 11%,transparent)}
+.banner.ok{border-color:color-mix(in srgb,var(--green) 45%,transparent);background:color-mix(in srgb,var(--green) 8%,transparent)}
+.banner.quiet{border-color:color-mix(in srgb,var(--edge) 70%,transparent);background:var(--base)}
+.banner .head{display:flex;align-items:center;gap:7px}
+.banner .head svg.i{color:inherit}
+.banner p{margin-top:4px;color:var(--subtle)}
+.banner p b{color:var(--text)}
+.banner.ok .head{color:var(--green)}
+.banner.ok .head b{color:var(--text)}
+.variants{display:grid;gap:8px}
+.variants .banner{margin:0}
+.variants .tag{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:2px}
+/* (c) Review changes. */
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--subtle);margin:8px 0 6px}
+.legend span{display:inline-flex;align-items:center;gap:5px}
+.sw{width:9px;height:9px;border-radius:2px;display:inline-block}
+.sw.up{background:color-mix(in srgb,var(--green) 45%,transparent)}
+.sw.model{background:color-mix(in srgb,var(--blue) 50%,transparent)}
+.rev{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;background:var(--base);overflow:hidden;font:11.5px/1.55 ui-monospace,SFMono-Regular,monospace}
+.rev>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:1px 10px;white-space:pre-wrap}
+.rev .who{font:10.5px -apple-system,BlinkMacSystemFont,sans-serif;color:var(--muted);white-space:nowrap;align-self:center}
+.rev .ctx{color:var(--muted)}
+.rev .gap{color:var(--muted);background:var(--overlay);font-size:10.5px}
+.rev .del{background:color-mix(in srgb,var(--red) 10%,transparent);color:var(--subtle);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--red) 60%,transparent)}
+.rev .add.up{background:color-mix(in srgb,var(--green) 13%,transparent)}
+.rev .add.model{background:color-mix(in srgb,var(--blue) 14%,transparent)}
+.rev .del.model{background:color-mix(in srgb,var(--blue) 7%,transparent)}
+.passage{border:1px solid color-mix(in srgb,var(--blue) 40%,transparent);border-radius:9px;padding:9px 10px;margin-top:10px;background:color-mix(in srgb,var(--blue) 4%,transparent)}
+.passage .ph{display:flex;align-items:baseline;gap:8px;font-size:12px;margin-bottom:6px}
+.passage .ph b{font-weight:500}
+.three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.three>div,.result{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:8px;background:var(--surface);padding:6px 9px;font-size:11.5px}
+.three .k,.result .k{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);display:block;margin-bottom:2px}
+.result{margin-top:8px;border-color:color-mix(in srgb,var(--blue) 45%,transparent)}
+/* (d) Inbox, mirroring inspector.rs::attention_card, as in settings-repository.html. */
+.inspector{border:1px solid var(--edge);border-radius:12px;background:var(--base);overflow:hidden}
+.ihead{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-size:12.5px}
+.ihead b{font-weight:500}
+.ibody{padding:12px;display:flex;flex-direction:column;gap:10px}
+.card{background:var(--surface);border:1px solid var(--edge);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--subtle)}
+.card .prompt{font-size:13px;line-height:1.5}
+.card .prompt b{font-weight:500}
+.why{font-size:12px;color:var(--subtle);border-left:2px solid color-mix(in srgb,var(--yellow) 55%,transparent);padding:1px 0 1px 9px}
+.why b{color:var(--text);font-weight:500}
+.wordings{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+.wording{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:9px;background:var(--base);overflow:hidden;font-size:12px}
+.wording .dh{padding:4px 10px;font-size:11px;font-weight:500;color:var(--subtle);border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent);background:var(--surface)}
+.wording .l{padding:6px 10px}
+.wording .l mark{background:color-mix(in srgb,var(--yellow) 22%,transparent);color:inherit;border-radius:3px;padding:0 1px}
+.machine{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+@media(max-width:1080px){.two,.enforced,.wordings,.three{grid-template-columns:minmax(0,1fr)}.app{grid-template-columns:minmax(0,1fr)}.side{border-right:0;border-bottom:1px solid var(--edge)}body{padding:16px}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+  <symbol id="book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V5a2 2 0 0 1 2-2h13v16H6.5A2.5 2.5 0 0 0 4 21.5"/><path d="M19 19v3H6.5"/><path d="M8 7h7M8 11h5"/></symbol>
+  <symbol id="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></symbol>
+  <symbol id="reset" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/></symbol>
+  <symbol id="orbit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><path d="M10.4 21.9a10 10 0 0 0 9.94-15.93M13.6 2.1A10 10 0 0 0 3.66 18.03"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></symbol>
+  <symbol id="pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 9c0 3 3 3 6 3h4"/></symbol>
+  <symbol id="undo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></symbol>
+  <symbol id="alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17h0"/></symbol>
+  <symbol id="laptop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></symbol>
+  <symbol id="spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Skill updates</div>
+  <h1>Updates that reach your rewrite</h1>
+  <p>Static study for the <span class="mono">skill-updates</span> OpenSpec change. When a Wiffletree update changes the stock text of a skill you rewrote, Wiffletree now brings the change into your rewrite for you. Changes that don’t touch what you changed merge as plain text. Where you both changed the same passage, the PR keeper’s model merges just that passage. You’re asked only when the two wordings want different things. Every merge leaves a note you can review or undo. Sample data is simulated: no model ran and nothing was merged.</p>
+</header>
+
+<div class="themes" aria-label="Theme">
+  <span style="margin-right:6px">Theme</span>
+  <input type="radio" name="theme" id="theme-system" checked><label for="theme-system">System</label>
+  <input type="radio" name="theme" id="theme-light"><label for="theme-light">Tidal Light</label>
+  <input type="radio" name="theme" id="theme-dark"><label for="theme-dark">Tidal Dark</label>
+</div>
+
+<div class="stack">
+  <!-- (a) The Skills list: updated and needs you -->
+  <section>
+    <div class="panel app" aria-label="Sidebar and Skills page">
+      <nav class="side">
+        <div class="eyebrow">Projects</div>
+        <div class="row"><svg class="i"><use href="#orbit"/></svg><span class="label">PR keeper and skills</span></div>
+        <div class="row"><svg class="i"><use href="#orbit"/></svg><span class="label">Celadon website refresh</span></div>
+        <div class="row"><svg class="i"><use href="#orbit"/></svg><span class="label">Watch app call relay</span></div>
+        <div class="navsep"></div>
+        <div class="eyebrow">Workspace</div>
+        <div class="row"><svg class="i"><use href="#folder"/></svg><span class="label">Repositories</span></div>
+        <div class="row"><svg class="i"><use href="#activity"/></svg><span class="label">Usage and limits</span></div>
+        <div class="row"><svg class="i"><use href="#settings"/></svg><span class="label">Models</span></div>
+        <div class="row selected"><svg class="i"><use href="#book"/></svg><span class="label">Skills</span><span class="dot" title="Reviewing needs you"></span></div>
+      </nav>
+      <div class="page">
+        <div class="page-head"><h2>Skills</h2><span class="hint">how your agents work · changes apply from each agent’s next turn</span></div>
+
+        <div class="eyebrow section-label">Skills you can change</div>
+        <div class="skill new">
+          <svg class="i"><use href="#book"/></svg><b>Coordinating</b>
+          <span class="state"><span class="pill green">Rewritten · updated</span></span>
+          <span class="what">How the coordinator plans, when it creates tickets and starts agents, which model and effort it picks, when it stops chasing findings, and when it asks you.</span>
+          <span class="who">Project coordinator · v2 merged into your rewrite today at 08:01</span>
+        </div>
+        <div class="skill">
+          <svg class="i"><use href="#book"/></svg><b>Implementing</b>
+          <span class="state"><span class="pill focus">Stock and 3 of your rules</span></span>
+          <span class="what">How an implementer works on its ticket, runs checks and answers review findings.</span>
+          <span class="who">Implementers and maintenance agents · v2 needed no merge: your rules sit beside it</span>
+        </div>
+        <div class="skill new">
+          <svg class="i"><use href="#book"/></svg><b>Reviewing</b>
+          <span class="state"><span class="pill yellow">Rewritten · needs you</span></span>
+          <span class="what">What testers and reviewers run and read, and what counts as a blocking finding.</span>
+          <span class="who">Testers and reviewers · v2 and your rewrite disagree about one passage</span>
+        </div>
+        <div class="skill">
+          <svg class="i"><use href="#book"/></svg><b>Keeping a PR</b>
+          <span class="state"><span class="pill subtle">Stock</span></span>
+          <span class="what">How the PR keeper’s model resolves a conflict or fixes failed checks in its one try.</span>
+          <span class="who">PR keeper</span>
+        </div>
+
+        <div class="eyebrow section-label">Always included</div>
+        <div class="skill core">
+          <svg class="i"><use href="#lock"/></svg><b>Fixed core</b>
+          <span class="state"><span class="pill subtle">Read only</span></span>
+          <span class="what">How every agent talks to Wiffletree. It is never merged: an update replaces it whole, and no skill or model can change it.</span>
+          <span class="who">Every agent · sent before its skill</span>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><b>(a)</b> An update brought v2 of three skills. <b>Coordinating</b> was merged into your rewrite on its own, so it shows <b>Rewritten · updated</b> in green until you’ve looked. That needs no dot and no Inbox note. <b>Reviewing</b> has a real question, so it shows <b>Rewritten · needs you</b>, and the dot on the Skills row is for it. Implementing needed nothing: your rules sit beside the new stock text. New parts are marked with the red edge.</p>
+  </section>
+
+  <!-- (b) After an automatic merge -->
+  <section>
+    <div class="panel" aria-label="Coordinating after an automatic merge">
+      <div class="eyebrow" style="margin-bottom:8px">Skills · Coordinating</div>
+      <div class="skill-head"><svg class="i"><use href="#book"/></svg><h2>Coordinating</h2><span class="pill green">Rewritten · updated</span>
+        <span class="btn ghost"><svg><use href="#history"/></svg>History</span><span class="btn ghost"><svg><use href="#reset"/></svg>Reset to stock</span></div>
+      <p class="hint">Project coordinator · your rewrite, based on stock v2</p>
+      <div class="modes"><span>Add your own rules</span><span class="on">Your rewrite</span></div>
+
+      <div class="banner ok new">
+        <div class="head"><svg class="i"><use href="#merge"/></svg><b>Merged Coordinating v2 into your rewrite</b><span class="machine" style="margin-left:auto"><svg class="i"><use href="#laptop"/></svg>This Mac · today 08:01</span></div>
+        <p>3 changes from v2 came in as plain text. You had also changed <b>1 passage</b> v2 changes, so Claude · haiku · medium merged that one, keeping your wording where both could stand. Your coordinators get the merged text from their next turn.</p>
+        <div class="actions"><span class="btn primary">Review changes</span><span class="btn ghost"><svg><use href="#undo"/></svg>Undo</span><span class="btn link" style="margin-left:6px">Dismiss</span></div>
+      </div>
+
+      <div class="label-row" style="margin-top:0"><b>Your rewrite</b><span class="hint">sent in place of the stock text</span></div>
+      <div class="editor"># Coordinating — v2
+Clarify and plan the goal first. Create tickets only once I say go.
+…
+Overrule an implementer’s objection only when its evidence holds. Keep each ticket brief under a page.
+After two rounds, remaining non-blocking findings become follow-up tickets. Never start a fresh cycle to chase them.
+…
+When the PR keeper hands a conflict back, send it to the ticket’s own implementer rather than a new one.
+## Your own rules for Coordinating
+Name every ticket after its outcome, not its files.<span class="caret"></span></div>
+      <div class="under"><span>Applies from the coordinator’s next turn · 5,010 of 32,000 characters</span><span class="actions"><span class="btn ghost">Discard</span><span class="btn primary">Save</span></span></div>
+    </div>
+    <p class="caption"><b>(b)</b> After an automatic merge. It applied without asking, because nothing in it was a real question. The note says what came in and how, and names the model where one was used. <b>Undo</b> asks first, then puts back your exact text and the v1 base, and v2 isn’t merged again on its own. The note stays on this Mac until you review or dismiss it here, or the skill changes again. Your other Macs show it too, because their agents get the same text. If Mike’s MacBook Air had merged first, this note would name that Mac, and this Mac would have run no model.</p>
+  </section>
+
+  <!-- (c) Review changes -->
+  <section>
+    <div class="panel" aria-label="Review changes">
+      <div class="eyebrow" style="margin-bottom:8px">Skills · Coordinating · Review changes</div>
+      <div class="skill-head"><svg class="i"><use href="#merge"/></svg><h2>What the merge changed in your rewrite</h2><span class="hint">v1 → v2 · this Mac · today 08:01</span>
+        <span class="btn ghost"><svg><use href="#undo"/></svg>Undo</span><span class="btn primary">Done</span></div>
+      <div class="legend"><span><i class="sw up"></i>From v2, as plain text: 3</span><span><i class="sw model"></i>Merged by Claude · haiku · medium: 1 passage · 6,240 tokens</span><span>Everything else is your text, unchanged</span></div>
+      <div class="rev">
+        <div class="del"><span># Coordinating — v1</span><span class="who"></span></div>
+        <div class="add up"><span># Coordinating — v2</span><span class="who">From v2</span></div>
+        <div class="ctx"><span>Clarify and plan the goal first. Create tickets only once I say go.</span><span class="who"></span></div>
+        <div class="gap"><span>⋯ 4 lines unchanged ⋯</span><span class="who"></span></div>
+        <div class="del"><span>Choose the model and effort the guide suggests, and give a reason.</span><span class="who"></span></div>
+        <div class="add up"><span>Choose the model and effort the guide suggests, and give a reason that names the deciding factor.</span><span class="who">From v2</span></div>
+        <div class="ctx"><span>Overrule an implementer’s objection only when its evidence holds. Keep each ticket brief under a page.</span><span class="who"></span></div>
+        <div class="del model"><span>After two or three rounds, remaining non-blocking findings become follow-up tickets. Never start a fresh cycle to chase them.</span><span class="who"></span></div>
+        <div class="add model"><span>After two rounds, remaining non-blocking findings become follow-up tickets. Never start a fresh cycle to chase them.</span><span class="who">Merged by the model · passage 1</span></div>
+        <div class="gap"><span>⋯ 9 lines unchanged ⋯</span><span class="who"></span></div>
+        <div class="ctx"><span>One decision per question, with what you recommend.</span><span class="who"></span></div>
+        <div class="add up"><span>When the PR keeper hands a conflict back, send it to the ticket’s own implementer rather than a new one.</span><span class="who">From v2</span></div>
+        <div class="ctx"><span>## Your own rules for Coordinating</span><span class="who"></span></div>
+      </div>
+
+      <div class="passage">
+        <div class="ph"><svg class="i" style="color:var(--blue)"><use href="#spark"/></svg><b>Passage 1, merged by the model</b><span class="hint">v2 and you both changed this paragraph</span></div>
+        <div class="three">
+          <div><span class="k">Stock v1, the base</span>After two or three rounds, remaining non-blocking findings become follow-up tickets or won’t-fix entries. Never start a fresh cycle to chase them.</div>
+          <div><span class="k">Stock v2</span>After <b style="font-weight:500">two rounds</b>, remaining non-blocking findings become follow-up tickets or won’t-fix entries. Never start a fresh cycle to chase them.</div>
+          <div><span class="k">Yours, before</span>After two or three rounds, remaining non-blocking findings become follow-up tickets<b style="font-weight:500">.</b> Never start a fresh cycle to chase them.</div>
+        </div>
+        <div class="result"><span class="k">Merged</span>After two rounds, remaining non-blocking findings become follow-up tickets. Never start a fresh cycle to chase them.</div>
+        <p class="small muted" style="margin-top:6px">v2 shortened “two or three rounds”, and you had dropped won’t-fix entries. Both changes fit, so both are kept.</p>
+      </div>
+    </div>
+    <p class="caption"><b>(c)</b> Review changes shows your rewrite before and after, line by line. Green lines came from v2 as plain text, where only the update changed something. Blue lines are the one passage you had both changed, which the model merged. Open it to see the base, v2’s version and yours beside the result. The model is sent only these texts, never the fixed core, and its answer is checked before anything changes: one answer per passage, none longer than both versions together, and the whole rewrite within 32,000 characters.</p>
+  </section>
+
+  <!-- (d) Needs you, in the Inbox, and (e) on the page -->
+  <section class="two">
+    <div>
+      <div class="inspector new" aria-label="Project Inbox with a skill update that needs you">
+        <div class="ihead"><svg class="i"><use href="#settings"/></svg><b>Inbox</b><span class="hint">· PR keeper and skills</span><span style="flex:1"></span><span class="pill subtle">2</span></div>
+        <div class="ibody">
+          <div class="card" style="border-color:color-mix(in srgb,var(--yellow) 55%,transparent)">
+            <div class="card-top"><span>Workspace · skill update</span><span class="pill yellow">Needs you</span></div>
+            <div class="prompt"><b>Reviewing · v2</b> and your rewrite disagree about one passage. Until you choose, testers and reviewers get your rewrite as you wrote it.</div>
+            <div class="why"><b>The question:</b> v2 asks testers to run the full suite once per ticket, and your rewrite says never to run it.</div>
+            <div class="wordings">
+              <div class="wording"><div class="dh">v2’s wording</div><div class="l">Tester: <mark>run the repository’s full test suite once per ticket</mark>, at the final round, and narrower checks before it.</div></div>
+              <div class="wording"><div class="dh">Your wording</div><div class="l">Tester: <mark>never run the full suite.</mark> Run the tests for the files the ticket changed, one command at a time.</div></div>
+            </div>
+            <div class="actions"><span class="btn link" style="margin-right:auto">Open Reviewing</span><span class="btn ghost">Take v2’s wording</span><span class="btn primary">Keep my wording</span></div>
+            <p class="small muted">v2’s other 2 changes merge either way. Your choice applies on every Mac, and you can undo it like any merge.</p>
+          </div>
+          <div class="card">
+            <div class="card-top"><span>Implementer · watch-relay</span><span class="pill focus">Question</span></div>
+            <div class="prompt">Should the relay retry on 503, or fail the call at once?</div>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>(d)</b> A real question goes to the Inbox, as a workspace note at the top of every project’s Inbox, like a paused setting. It is raised only when the model reports that the two wordings want different things, so keeping one drops the other. A missing model or a failed try never lands here. The question is recorded in Reviewing’s history, so every Mac shows it, no other Mac runs a model for it, and answering on one Mac closes it on all of them.</p>
+    </div>
+
+    <div>
+      <div class="panel" aria-label="Reviewing, a merge that needs you">
+        <div class="eyebrow" style="margin-bottom:8px">Skills · Reviewing</div>
+        <div class="skill-head"><svg class="i"><use href="#book"/></svg><h2>Reviewing</h2><span class="pill yellow">Rewritten · needs you</span>
+          <span class="btn ghost"><svg><use href="#history"/></svg>History</span><span class="btn ghost"><svg><use href="#reset"/></svg>Reset to stock</span></div>
+        <p class="hint">Testers and reviewers · your rewrite, based on stock v1 · this release has v2</p>
+        <div class="banner new">
+          <div class="head"><svg class="i" style="color:var(--yellow)"><use href="#alert"/></svg><b>v2 and your rewrite disagree about one passage</b></div>
+          <p>v2’s other 2 changes merge cleanly. Claude · haiku · medium didn’t merge this passage, because the two want different things: v2 asks testers to run the full suite once per ticket, and your rewrite says never to run it. Nothing changes until you choose.</p>
+          <div class="wordings" style="margin-top:8px">
+            <div class="wording"><div class="dh">v2’s wording</div><div class="l">Tester: <mark>run the repository’s full test suite once per ticket</mark>, at the final round, and narrower checks before it.</div></div>
+            <div class="wording"><div class="dh">Your wording</div><div class="l">Tester: <mark>never run the full suite.</mark> Run the tests for the files the ticket changed, one command at a time.</div></div>
+          </div>
+          <div class="actions"><span class="btn primary">Keep my wording</span><span class="btn ghost">Take v2’s wording</span><span class="btn link" style="margin-left:6px">See all of v2’s changes</span></div>
+        </div>
+        <div class="label-row" style="margin-top:0"><b>Your rewrite</b><span class="hint">sent in place of the stock text, as written, until you choose</span></div>
+        <div class="editor"># Reviewing — v1
+A finding blocks only when it breaks an acceptance criterion, existing behavior or tests, or has a concrete reachable trigger.
+…
+Tester: never run the full suite. Run the tests for the files the ticket changed, one command at a time.<span class="caret"></span></div>
+        <div class="under"><span>Or edit it yourself and choose Mark as up to date</span><span class="actions"><span class="btn ghost">Mark as up to date</span><span class="btn primary">Save</span></span></div>
+      </div>
+      <p class="caption"><b>(e)</b> The same question on the skill’s page. Either choice merges the rest of v2 and makes v2 the base. With several passages, each gets its own pair of choices and one <b>Apply</b>, because a base must be one whole stock text. You can still edit by hand and mark it up to date, or reset to stock, and the question closes.</p>
+    </div>
+  </section>
+
+  <!-- (f) Where a merge stands -->
+  <section class="two">
+    <div>
+      <div class="panel" aria-label="Where an out-of-date rewrite's merge stands">
+        <div class="eyebrow" style="margin-bottom:8px">Skills · Coordinating · an out-of-date rewrite</div>
+        <div class="variants">
+          <div><div class="tag">Waiting for the first sync</div>
+            <div class="banner quiet"><div class="head"><svg class="i"><use href="#merge"/></svg><b>Written against v1. This release has v2.</b></div>
+              <p>Waiting for this launch’s first sync, so your Macs merge v2 only once. If another Mac already merged it, this Mac takes that.</p></div></div>
+          <div><div class="tag">No model for the passage you both changed</div>
+            <div class="banner"><div class="head"><svg class="i" style="color:var(--yellow)"><use href="#alert"/></svg><b>v2 and your rewrite both change 1 passage</b></div>
+              <p>Merging it needs a Claude model for the PR keeper, and none is chosen. Your rewrite runs as you wrote it. Choose a model, or choose a wording for the passage.</p>
+              <div class="actions"><span class="btn ghost">Choose a model in Models</span><span class="btn ghost">Take v2’s wording</span><span class="btn ghost">Keep my wording</span></div></div></div>
+          <div><div class="tag">A try that failed</div>
+            <div class="banner"><div class="head"><svg class="i" style="color:var(--yellow)"><use href="#alert"/></svg><b>The merge of v2 couldn’t finish</b></div>
+              <p>The model’s text for passage 1 was longer than v2’s version and yours together, so nothing was changed. Your rewrite runs as you wrote it. Wiffletree tries again at the next start.</p>
+              <div class="actions"><span class="btn primary">Try again</span><span class="btn ghost">Mark as up to date</span></div></div></div>
+          <div><div class="tag">After Undo</div>
+            <div class="banner quiet"><div class="head"><svg class="i"><use href="#undo"/></svg><b>You undid the merge of v2</b></div>
+              <p>Your rewrite is exactly as it was before the merge, and v2 won’t be merged into it again on its own.</p>
+              <div class="actions"><span class="btn ghost">Merge v2 in</span><span class="btn ghost">Mark as up to date</span><span class="btn ghost">Reset to stock</span></div></div></div>
+          <div><div class="tag">On a Mac with an older release</div>
+            <div class="banner quiet"><div class="head"><svg class="i"><use href="#laptop"/></svg><b>Based on Coordinating v3, from Mike’s MacBook Air</b></div>
+              <p>That Mac runs a newer Wiffletree and merged v3 into your rewrite. This Mac has v2 and sends the rewrite as written. It isn’t out of date here, and nothing is merged here.</p></div></div>
+        </div>
+      </div>
+      <p class="caption"><b>(f)</b> Where a merge stands, on the page only. None of these goes to the Inbox, because none is a question about your text. While a rewrite is out of date it runs as written, as it does today. The list keeps the yellow <b>Rewritten · out of date</b> mark and the dot, except on the older Mac, where nothing is out of date.</p>
+    </div>
+
+    <!-- (g) Undo and the history -->
+    <div>
+      <div class="panel" aria-label="Undo and the history">
+        <div class="eyebrow" style="margin-bottom:8px">Skills · Coordinating · Undo</div>
+        <div class="scrim">
+          <div class="behind">
+            <div class="skill-head"><h2>Coordinating</h2><span class="btn ghost">History</span><span class="btn ghost">Reset to stock</span></div>
+            <div class="banner ok">Merged Coordinating v2 into your rewrite</div>
+            <div class="editor" style="min-height:110px"># Coordinating — v2
+Clarify and plan the goal first…</div>
+            <div style="height:20px"></div>
+          </div>
+          <div class="dialog new" role="dialog" aria-label="Undo the merge of v2?">
+            <div class="ask">Undo the merge of v2?</div>
+            <p>Your rewrite goes back to exactly what it was before 08:01, based on v1. Coordinators get it from their next turn, on every Mac.</p>
+            <p>v2 won’t be merged in again on its own. The merge stays in the history.</p>
+            <div class="actions"><span class="btn ghost">Cancel</span><span class="btn primary">Undo merge</span></div>
+          </div>
+        </div>
+
+        <div class="skill-head" style="margin-top:14px"><svg class="i"><use href="#history"/></svg><h2>History</h2><span class="hint">newest first</span></div>
+        <div class="entry new">
+          <span class="when">Today 08:01</span><span><b>Merged v1 → v2</b> <span class="pill focus">current</span></span>
+          <span class="acts"><span>Review</span><span>Undo this merge</span></span>
+          <span class="detail">This Mac · 3 changes from v2, 1 passage merged by Claude · haiku · medium · 6,240 tokens</span>
+        </div>
+        <div class="entry">
+          <span class="when">Today 08:00</span><b>New stock version</b>
+          <span class="acts"><span>View</span></span>
+          <span class="detail">Coordinating v1 → v2, from the Wiffletree update</span>
+        </div>
+        <div class="entry">
+          <span class="when">Yesterday 17:30</span><b>Saved your rewrite</b>
+          <span class="acts"><span>View</span><span>Restore</span></span>
+          <span class="detail">Based on stock v1 · 4,880 characters</span>
+        </div>
+</div>
+      </div>
+      <p class="caption"><b>(g)</b> Undo asks first and says it is exact. The merge’s history entry keeps your text and base from before the merge, so Undo writes those bytes back rather than rebuilding them. After you’ve saved again, the entry still offers <b>Undo this merge</b>, which asks first and says your later changes stay in the history. A merge, an Undo and a question are history entries like any other change, so they sync with the skill.</p>
+    </div>
+  </section>
+</div>
+
+<ul class="notes">
+  <li><b>Only rewrites are merged.</b> Your own rules sit beside the stock text, so an update never needs merging into them. The fixed core is never merged.</li>
+  <li><b>Overlap is by paragraph.</b> The merge compares paragraphs, which blank lines separate. The title line with the version is merged on its own and never overlaps, so a new version number never sends your first paragraph to the model. A change from the update and one of yours overlap when they touch the same paragraph or neighbouring ones, so a blank line never keeps two changes apart. The plain merge uses the diff library Wiffletree already has, with no new one.</li>
+  <li><b>The model.</b> The PR keeper’s model, when it is a Claude model, with every tool off and only the skill’s texts as input. It runs at most once per skill per update across your Macs, unless two Macs merge at the same moment, and only for the passages you both changed.</li>
+  <li><b>Your Macs merge once.</b> At launch a Mac waits for its first sync before merging, so it usually takes another Mac’s merge. If two merge at once, the first to reach GitHub wins, and the other takes it without pausing the skill.</li>
+  <li>The versions, texts, times, model and token counts are sample data. This is a static design study, not the GPUI implementation, and nothing here ran a model or a Git operation.</li>
+</ul>
+</body>
+</html>
