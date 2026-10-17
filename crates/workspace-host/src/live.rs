@@ -10,6 +10,9 @@ impl Host {
     pub fn tickets(&self) -> Result<Vec<Ticket>> {
         self.list_data("SELECT data FROM tickets ORDER BY rowid", [])
     }
+    pub(crate) fn running_verifications(&self) -> Result<Vec<Ticket>> {
+        self.list_data("SELECT data FROM tickets WHERE json_extract(data,'$.verification.outcome')='running' ORDER BY rowid", [])
+    }
     pub fn runtimes(&self) -> Result<Vec<SessionRuntime>> {
         self.list_data("SELECT data FROM runtimes ORDER BY rowid", [])
     }
@@ -150,69 +153,15 @@ impl Host {
         title: &str,
         brief: &str,
     ) -> Result<Ticket> {
-        text(title, 128)?;
-        text(brief, MAX_TEXT_BYTES)?;
-        let coordinator = self.session(owner)?;
-        ensure!(
-            coordinator.role == Role::ProjectOrchestrator,
-            "Tickets belong to the project coordinator"
-        );
-        ensure!(
-            !coordinator.archived,
-            "{} is archived; restore it before adding tickets",
-            coordinator.name
-        );
-        let repo = self.repository(repository_id)?;
-        let project = self.project(&coordinator.project_id)?;
-        ensure!(
-            project.uses(&repo.id),
-            "Project {} does not use repository {}",
-            project.name,
-            repo.name
-        );
-        if let Some(ticket) = self
-            .tickets()?
-            .into_iter()
-            .find(|t| t.coordinator_id == owner && t.repository_id == repo.id && t.title == title)
-        {
-            ensure!(
-                ticket.brief == brief,
-                "Ticket title already exists with a different brief"
-            );
-            return Ok(ticket);
+        match checkout::Creation::prepare(self, owner, repository_id, title, brief)? {
+            checkout::Prepared::Existing(ticket) => Ok(*ticket),
+            checkout::Prepared::Create(plan) => {
+                let branches = plan.inspect(&publish::Tools::default().git)?;
+                let creation = plan.reserve(self, &branches)?;
+                creation.run(&publish::Tools::default().git)?;
+                creation.apply(self)
+            }
         }
-        let (path, branch) = self.new_ticket_place(&project, &repo, title)?;
-        worktrees::ensure_worktree(Path::new(&repo.path), &path, &branch, Some(&repo.base))?;
-        let ticket = Ticket {
-            id: new_id(),
-            coordinator_id: owner.into(),
-            repository_id: repo.id.clone(),
-            title: title.into(),
-            brief: brief.into(),
-            worktree: path.to_string_lossy().into(),
-            branch,
-            state: TicketState::Planned,
-            verification: None,
-            previous_cycles: vec![],
-            ledger: vec![],
-            waiver: None,
-            pull_request: None,
-            publishing: None,
-            pushed: None,
-            keeper: None,
-        };
-        self.db.execute(
-            "INSERT INTO tickets VALUES (?1,?2,?3)",
-            params![ticket.id, owner, encode(&ticket)?],
-        )?;
-        Self::event(
-            &self.db,
-            &coordinator.project_id,
-            Some(owner),
-            "ticket_created",
-            &ticket.id,
-        )?;
-        Ok(ticket)
     }
     pub fn ticket(&self, id: &str) -> Result<Ticket> {
         self.db

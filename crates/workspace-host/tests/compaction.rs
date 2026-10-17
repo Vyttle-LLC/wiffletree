@@ -548,7 +548,7 @@ impl World {
         .sum()
     }
 
-    /// Lets the scheduler pass several times; every request is followed by a pass.
+    /// Observes the settled result repeatedly; these reads never trigger admission.
     fn several_passes(&self) {
         for _ in 0..10 {
             self.snapshot();

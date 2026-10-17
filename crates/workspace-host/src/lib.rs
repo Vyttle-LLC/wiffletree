@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
 pub mod attachments;
+mod checkout;
 pub mod compaction;
 pub mod context;
 pub mod detection;
@@ -97,6 +98,10 @@ pub struct Host {
     /// Each session's latest checklist; `None` until first read from stored steps.
     plans: Option<std::collections::HashMap<String, PlanCounts>>,
     progress: progress::Progress,
+    checked_publish: Option<checkout::PublicationResult>,
+    checkout_reservations: checkout::Reservations,
+    completed_move: Option<checkout::KeeperResult>,
+    checkout_rollbacks: Vec<(String, KeeperReview, String)>,
     /// Sessions in a turn this host started; see `shown`.
     pub(crate) in_turn: std::collections::HashSet<String>,
     /// By ticket, the report that last set its state from a running turn; see `shown_ticket`.
@@ -255,6 +260,7 @@ impl Host {
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
+        checkout::migrate(&db)?;
         agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
         order::migrate(&db)?;
@@ -270,6 +276,10 @@ impl Host {
             github_error: None,
             plans: None,
             progress: Default::default(),
+            checked_publish: None,
+            checkout_reservations: Default::default(),
+            completed_move: None,
+            checkout_rollbacks: vec![],
             in_turn: Default::default(),
             mid_turn_reports: Default::default(),
             shared_written: Default::default(),
@@ -1209,25 +1219,8 @@ impl Host {
         Ok(self.db.prepare("SELECT * FROM activity WHERE project_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3")?.query_map(params![project, before.unwrap_or(i64::MAX), page_limit(limit)?], |r| Ok(Activity { sequence: r.get(0)?, project_id: r.get(1)?, session_id: r.get(2)?, kind: r.get(3)?, detail: r.get(4)?, created_at: r.get(5)? }))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn git_history(&self, repository: &str, skip: usize, limit: usize) -> Result<Value> {
-        page_limit(limit)?;
-        ensure!(skip <= 100_000, "History cursor too large");
-        let repo = self.repository(repository)?;
-        let output = runtime::git_output(
-            Path::new(&repo.path),
-            &[
-                "log",
-                "--date-order",
-                &format!("--max-count={limit}"),
-                &format!("--skip={skip}"),
-                "--format=%H%x1f%P%x1f%an%x1f%s",
-                "HEAD",
-                "--",
-            ],
-        )?;
-        let commits: Vec<_> = output.lines().filter_map(|line| { let parts: Vec<_> = line.splitn(4, '\u{1f}').collect(); (parts.len() == 4).then(|| json!({"sha":parts[0],"parents":parts[1].split_whitespace().collect::<Vec<_>>(),"author":parts[2],"subject":parts[3]})) }).collect();
-        Ok(
-            json!({"repository":repo,"commits":commits,"next_skip":skip+commits.len(),"observed_at":now(),"source":"local Git · read only"}),
-        )
+        checkout::History::prepare(self, repository, skip, limit)?
+            .run(&publish::Tools::default().git)
     }
     pub fn respond(&mut self, request: Request) -> Response {
         let result = if request.version != PROTOCOL_VERSION {

@@ -76,7 +76,9 @@ pub(crate) struct Job {
 }
 
 /// What a publish of the ticket would send now, read from its worktree and its repository.
-struct Checked {
+#[derive(Clone)]
+pub(crate) struct Checked {
+    size: Option<String>,
     repository: Repository,
     /// GitHub's `owner/name`, or the URL's until GitHub has answered.
     name: String,
@@ -361,18 +363,39 @@ fn open_pull_request(job: &Job, tools: &Tools) -> StepResult {
     }
 }
 
+pub(crate) fn check_with_size(ticket: &Ticket, repository: Repository) -> Result<Checked> {
+    let mut checked = check(ticket, repository)?;
+    checked.size = Some(commit_size(
+        Path::new(&ticket.worktree),
+        &checked.repository.base,
+        ticket.pushed.as_deref(),
+        &checked.commit,
+    )?);
+    Ok(checked)
+}
 impl Host {
-    /// Publishes a ticket for its coordinator or implementer: checks it, freezes what will be
-    /// sent, and either returns the first step to run or asks the human. Returns the tool's
-    /// result and the step to run now, if any.
-    pub(crate) fn publish_ticket(
-        &mut self,
+    fn check_publish(&self, ticket: &Ticket, repository: Repository) -> Result<Checked> {
+        match &self.checked_publish {
+            Some(checked) => checked.get(ticket, &repository),
+            None => check(ticket, repository),
+        }
+    }
+    fn recheck_publish(
+        &self,
+        ticket: &Ticket,
+        repository: Repository,
+        request: &PublishRequest,
+    ) -> Result<Repository> {
+        recheck_checked(self.check_publish(ticket, repository)?, request)
+    }
+    pub(crate) fn publish_inputs(
+        &self,
         caller: &str,
         ticket_id: &str,
         title: Option<&str>,
         body: Option<&str>,
-    ) -> Result<(Value, Option<Job>)> {
-        let mut ticket = self.ticket(ticket_id)?;
+    ) -> Result<Ticket> {
+        let ticket = self.ticket(ticket_id)?;
         let session = self.session(caller)?;
         let implements = session.role == Role::Implementer
             && self.session_runtime(caller)?.ticket_id.as_deref() == Some(ticket_id);
@@ -407,7 +430,20 @@ impl Host {
                 open.number
             ),
         }
-        let checked = check(&ticket, self.ticket_repository(&ticket)?)?;
+        Ok(ticket)
+    }
+    /// Publishes a ticket for its coordinator or implementer: checks it, freezes what will be
+    /// sent, and either returns the first step to run or asks the human. Returns the tool's
+    /// result and the step to run now, if any.
+    pub(crate) fn publish_ticket(
+        &mut self,
+        caller: &str,
+        ticket_id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(Value, Option<Job>)> {
+        let mut ticket = self.publish_inputs(caller, ticket_id, title, body)?;
+        let checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?)?;
         if let Some(waiting) = ticket.publishing.clone() {
             // The same call again changes nothing; a different one replaces the request.
             if waiting.commit == checked.commit
@@ -439,7 +475,7 @@ impl Host {
             ticket.publishing.is_none(),
             "A publish request for this ticket is running or waiting"
         );
-        let checked = check(&ticket, self.ticket_repository(&ticket)?)?;
+        let checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?)?;
         let caller = ticket.coordinator_id.clone();
         self.start_request(&mut ticket, checked, &caller, None, None, true)
     }
@@ -455,12 +491,15 @@ impl Host {
         keeper: bool,
     ) -> Result<Option<Job>> {
         let worktree = Path::new(&ticket.worktree);
-        let size = commit_size(
-            worktree,
-            &checked.repository.base,
-            ticket.pushed.as_deref(),
-            &checked.commit,
-        )?;
+        let size = match checked.size.clone() {
+            Some(size) => size,
+            None => commit_size(
+                worktree,
+                &checked.repository.base,
+                ticket.pushed.as_deref(),
+                &checked.commit,
+            )?,
+        };
         ticket.publishing = Some(PublishRequest {
             id: new_id(),
             caller: caller.into(),
@@ -562,7 +601,7 @@ impl Host {
 /// The checks no answer from the human overrides: the ticket is open and reviewed with no
 /// cycle running, the worktree is on the ticket's branch at the reviewed commit or a
 /// patch-equivalent one, and `origin` is one checked place on GitHub that the base tracks.
-fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
+pub(crate) fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
     ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
     if let Some(cycle) = ticket.running_cycle() {
         bail!(
@@ -619,6 +658,7 @@ fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
         )
     })?;
     Ok(Checked {
+        size: None,
         name: match &recorded.facts {
             Some(facts) => facts.name_with_owner.clone(),
             None => format!("{owner}/{name}"),
@@ -641,7 +681,9 @@ fn recheck(
     repository: Repository,
     request: &PublishRequest,
 ) -> Result<Repository> {
-    let now = check(ticket, repository)?;
+    recheck_checked(check(ticket, repository)?, request)
+}
+fn recheck_checked(now: Checked, request: &PublishRequest) -> Result<Repository> {
     // The request was decided on one review. A later one decides anew: whether it passed, and
     // so whether the human must be asked, is the next call's question.
     ensure!(
@@ -825,7 +867,7 @@ impl Host {
         }
         let rechecked = self
             .ticket_repository(&ticket)
-            .and_then(|repository| recheck(&ticket, repository, &request));
+            .and_then(|repository| self.recheck_publish(&ticket, repository, &request));
         let repository = match rechecked {
             Ok(repository) => repository,
             Err(changed) => {
@@ -852,7 +894,7 @@ impl Host {
         let request = ticket.publishing.clone().context("No publish request")?;
         let rechecked = self
             .ticket_repository(ticket)
-            .and_then(|repository| recheck(ticket, repository, &request));
+            .and_then(|repository| self.recheck_publish(ticket, repository, &request));
         match rechecked {
             Ok(repository) => self.start_step(ticket, &repository),
             Err(changed) => {

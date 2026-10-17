@@ -30,7 +30,7 @@ fn snapshot(service: &Service) -> Snapshot {
     serde_json::from_value(request(service, Command::Snapshot)).unwrap()
 }
 
-/// Polls with a snapshot, which also lets the actor run its scheduler.
+/// Observes snapshots; reads never trigger admission.
 fn until(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !done(&snapshot(service)) {
@@ -137,6 +137,15 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
     let timer = timer.unwrap();
     for check in 1..=6 {
         advance_to_next_fire(&db, &timer);
+        // The clock fixture changed the store behind the actor. Notify its scheduler
+        // through an input event; snapshot polling is deliberately read-only.
+        request(
+            &service,
+            Command::SetLive {
+                project_id: monitored.id.clone(),
+                enabled: true,
+            },
+        );
         until(&service, &format!("check {check}"), |s| {
             idle(s) && outputs(&service, &main.id, "SERVICE_HEALTHY") == check
         });

@@ -699,10 +699,46 @@ impl Host {
             && is_allowed(repository, &self.settings().allowed_owners)
             && self.live_projects()?.contains(&coordinator.project_id))
     }
+    pub(crate) fn keeper_checkout_stopped(&mut self, ticket: &str) {
+        self.keeper.running.remove(ticket);
+        self.keeper.reviews_ended.remove(ticket);
+    }
+    pub(crate) fn keeper_checkout_allowed(
+        &self,
+        ticket: &Ticket,
+        repository: &Repository,
+        waiting: bool,
+    ) -> Result<()> {
+        let settings = self.settings().keeper;
+        let coordinator = self.session(&ticket.coordinator_id)?;
+        ensure!(
+            settings.rebase && self.kept(ticket, repository, &coordinator)?,
+            "the keeper may no longer change the branch"
+        );
+        if waiting && ticket.keeper.as_ref().is_some_and(|k| k.waiting_changed) {
+            let trigger = ticket
+                .running_try()
+                .map_or(KeeperProblem::Conflict, |t| t.problem);
+            ensure!(
+                settings.tries(trigger),
+                "\"{}\" was turned off",
+                trigger.trigger()
+            );
+            self.keeper_review_ready(ticket)?;
+        }
+        Ok(())
+    }
     /// Whether the keeper may change a kept ticket's branch: exactly when `publish_ticket` would
     /// push it without asking. The latest cycle passed, the worktree's HEAD is the verified
     /// commit or patch-equivalent to it and is the PR's head, and no publish request exists.
     pub(crate) fn may_change_branch(&self, ticket: &Ticket) -> bool {
+        if let Some(may) = self
+            .completed_move
+            .as_ref()
+            .and_then(|done| done.may_change(ticket))
+        {
+            return may;
+        }
         let passed = ticket
             .verification
             .as_ref()
@@ -735,7 +771,9 @@ impl Host {
         let repository = self.repository(repository_id)?;
         let mut due = Due::default();
         for ticket in self.tickets()? {
-            if ticket.repository_id != repository.id {
+            if ticket.repository_id != repository.id
+                || self.checkout_reservations.contains(&ticket.id)
+            {
                 continue;
             }
             if ticket.keeper.as_ref().is_some_and(|k| k.waiting.is_some()) {
@@ -1260,7 +1298,16 @@ impl Host {
                     Some(ended) => {
                         let repository = self.ticket_repository(&ticket)?;
                         let drop_ref = ["update-ref", "-d", &result_ref(&ticket.id)];
-                        runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+                        match self
+                            .completed_move
+                            .as_ref()
+                            .filter(|done| done.for_ticket(&ticket))
+                        {
+                            Some(done) => done.cleanup()?,
+                            None => {
+                                runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+                            }
+                        }
                         format!(
                             "The repository's checks {ended} on it, so the PR keeper did not move or push it."
                         )
@@ -1618,7 +1665,16 @@ impl Host {
             )),
         };
         let drop_ref = ["update-ref", "-d", &result_ref(ticket_id)];
-        runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+        match self
+            .completed_move
+            .as_ref()
+            .filter(|done| done.for_ticket(&ticket))
+        {
+            Some(done) => done.cleanup()?,
+            None => {
+                runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+            }
+        }
         let keeper = ticket.keeper.get_or_insert_default();
         keeper.waiting = None;
         keeper.waiting_changed = false;
@@ -1738,7 +1794,21 @@ impl Host {
     /// for any move, and tells the coordinator once why the keeper's commit was thrown away.
     /// A branch that cannot go back is left as it is, and the keeper's commit is recorded as
     /// not reviewed.
-    fn put_back(&mut self, ticket: &mut Ticket, review: &KeeperReview, why: &str) -> Result<()> {
+    pub(crate) fn put_back(
+        &mut self,
+        ticket: &mut Ticket,
+        review: &KeeperReview,
+        why: &str,
+    ) -> Result<()> {
+        if self
+            .completed_move
+            .as_ref()
+            .is_some_and(|done| !done.matches(ticket, &review.after, &review.before))
+        {
+            self.checkout_rollbacks
+                .push((ticket.id.clone(), review.clone(), why.into()));
+            return Ok(());
+        }
         let back = self.keeper_adopt(ticket, &review.after, &review.before, Move::Reset);
         let keeper = ticket.keeper.get_or_insert_default();
         if let Some(withdrawn) = keeper.reviews.last_mut().and_then(|r| r.withdrawn.as_mut()) {
@@ -1751,16 +1821,26 @@ impl Host {
             }
             Err(e) => {
                 let range = format!("{}..{}", review.base, review.after);
-                let commits = runtime::git_output(
-                    Path::new(&ticket.worktree),
-                    &["rev-list", "--count", &range],
-                )?;
+                let commits = match self
+                    .completed_move
+                    .as_ref()
+                    .filter(|done| done.for_id(&ticket.id))
+                {
+                    Some(done) => done.commits.clone().map_err(anyhow::Error::msg)?,
+                    None => runtime::git_output(
+                        Path::new(&ticket.worktree),
+                        &["rev-list", "--count", &range],
+                    )?
+                    .trim()
+                    .parse()?,
+                };
                 keeper.unreviewed = Some(Unreviewed {
                     head: review.after.clone(),
-                    commits: commits.trim().parse()?,
+                    commits,
                     cycle: ticket.verification.as_ref().map_or(0, |v| v.cycle),
                 });
-                let now = verification::head(ticket)
+                let now = self
+                    .checkout_head(ticket)
                     .map_or("a commit that could not be read".into(), |c| {
                         short_sha(&c).to_owned()
                     });
@@ -1814,58 +1894,21 @@ impl Host {
         to: &str,
         how: Move,
     ) -> Result<()> {
-        self.movable(ticket, from)?;
-        let worktree = Path::new(&ticket.worktree);
-        match how {
-            Move::Reset => {
-                runtime::git_output(worktree, &["reset", "--quiet", "--hard", to]).map(drop)
-            }
-            Move::FastForward(git) => {
-                let merge = [
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "merge",
-                    "--quiet",
-                    "--ff-only",
-                    "--no-autostash",
-                    to,
-                ];
-                let answer = git(worktree, &merge)?;
-                ensure!(
-                    answer.status.success(),
-                    "git merge failed{}",
-                    answer.reason()
-                );
-                Ok(())
-            }
+        if let Some(done) = &self.completed_move {
+            return done.movement(ticket, from, to);
         }
+        checkout::move_now(self, ticket, from, to, how)
     }
-    /// Whether the ticket's branch may move from `from` now: the worktree is on the ticket's
-    /// branch at `from`, clean, and no cycle or publish request runs.
+    /// Whether the ticket's branch may move from `from` now.
     fn movable(&self, ticket: &Ticket, from: &str) -> Result<()> {
-        ensure!(
-            ticket.running_cycle().is_none(),
-            "a verification cycle is running"
-        );
-        ensure!(
-            ticket.publishing.is_none(),
-            "a publish request is running or waiting"
-        );
-        let worktree = Path::new(&ticket.worktree);
-        let on = runtime::git_answer(worktree, &["symbolic-ref", "--quiet", "HEAD"])?;
-        ensure!(
-            on.status.success() && on.output.trim() == format!("refs/heads/{}", ticket.branch),
-            "the worktree is not on the ticket's branch"
-        );
-        ensure!(
-            worktrees::head(worktree)? == from,
-            "the worktree's HEAD moved"
-        );
-        ensure!(
-            worktrees::is_clean(worktree)?,
-            "the worktree has uncommitted or untracked files"
-        );
-        Ok(())
+        if let Some(done) = self
+            .completed_move
+            .as_ref()
+            .filter(|done| done.for_ticket(ticket))
+        {
+            return done.movable();
+        }
+        checkout::validate_movement(ticket, from, &publish::Tools::default().git)
     }
     /// Takes the commits a fetch found on top of the worktree's HEAD into the ticket's branch
     /// with `git`, or tells the coordinator once that the two diverged. While an agent of the
@@ -1880,7 +1923,16 @@ impl Host {
         let mut ticket = self.ticket(&fetched.ticket_id)?;
         let repository = self.ticket_repository(&ticket)?;
         let drop_ref = ["update-ref", "-d", &result_ref(&ticket.id)];
-        runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+        match self
+            .completed_move
+            .as_ref()
+            .filter(|done| done.for_ticket(&ticket))
+        {
+            Some(done) => done.cleanup()?,
+            None => {
+                runtime::git_output(Path::new(&repository.path), &drop_ref)?;
+            }
+        }
         let from = fetched.from;
         match fetched.found {
             Found::Ahead { head, commits } if !in_turn => {
@@ -1948,7 +2000,7 @@ impl Host {
         self.save_ticket(ticket)?;
         if let Err(e) = self.keeper_adopt(&before, from, head, Move::FastForward(git)) {
             eprintln!("Workspace PR keeper: {}: fast-forward: {e:#}", ticket.id);
-            match verification::head(ticket) {
+            match self.checkout_head(ticket) {
                 Ok(now) if now == from => {
                     *ticket = before;
                     return self.save_ticket(ticket);

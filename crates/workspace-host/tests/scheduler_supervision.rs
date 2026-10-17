@@ -32,8 +32,7 @@ fn status(snapshot: &Snapshot, session: &str) -> Status {
         .status
 }
 
-/// Polls with a snapshot, which also lets the actor run its scheduler on the messages this test
-/// writes straight into the store.
+/// Observes snapshots; direct store writes below notify admission explicitly.
 fn until(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !done(&snapshot(service)) {
@@ -193,6 +192,15 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
             rusqlite::params![format!("tick-{turn}"), busy.id, coordinator.id, now()],
         )
         .unwrap();
+        // A human Send would reset the coordinator's turn count. Notify the actor of
+        // the fixture's direct write without changing the project's live state.
+        request(
+            &service,
+            Command::SetLive {
+                project_id: busy.id.clone(),
+                enabled: true,
+            },
+        );
         until(&service, &format!("coordinator turn {turn}"), |s| {
             runs(&db, &coordinator.id) == turn && status(s, &coordinator.id) != Status::Working
         });

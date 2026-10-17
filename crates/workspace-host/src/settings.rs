@@ -86,26 +86,6 @@ fn reason(error: &std::io::Error) -> std::io::Error {
         .unwrap_or_else(|| error.kind().into())
 }
 
-/// Every local branch under `wiffletree/`, as `refs/heads/...` names.
-fn wiffletree_branches(repository: &Path) -> Result<Vec<String>> {
-    let refs = runtime::git_output(
-        repository,
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/heads/wiffletree",
-        ],
-    )
-    .context("Could not list the repository's wiffletree branches")?;
-    let refs: Vec<String> = refs.lines().map(str::to_owned).collect();
-    ensure!(
-        !refs.iter().any(|r| r == "refs/heads/wiffletree"),
-        "A branch named \"wiffletree\" blocks ticket branches; rename it in {}",
-        repository.display()
-    );
-    Ok(refs)
-}
-
 /// A keeper trigger's switch.
 type Switch = fn(&mut KeeperSettings) -> &mut bool;
 
@@ -357,11 +337,12 @@ impl Host {
     }
     /// `<workspaces>/tasks/<project>/<repository>/<ticket>` and its `wiffletree/<ticket>`
     /// branch, suffixing the ticket slug until neither is in use.
-    pub(crate) fn new_ticket_place(
+    pub(crate) fn new_ticket_place_observed(
         &self,
         project: &Project,
         repository: &Repository,
         title: &str,
+        branches: &[String],
     ) -> Result<(PathBuf, String)> {
         let repository_path = Path::new(&repository.path);
         let workspaces = PathBuf::from(self.settings().workspaces_dir);
@@ -375,8 +356,12 @@ impl Host {
                     .to_string_lossy(),
                 "repository",
             ));
-        let tickets = self.tickets()?;
-        let branches = wiffletree_branches(repository_path)?;
+        let mut tickets = self.tickets()?;
+        tickets.extend(
+            checkout::pending_creations(self)?
+                .into_iter()
+                .map(|c| c.ticket),
+        );
         let slug = unused(&slug(title, "ticket"), |candidate| {
             let path = parent.join(candidate);
             let branch = format!("refs/heads/wiffletree/{candidate}");
