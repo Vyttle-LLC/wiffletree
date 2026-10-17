@@ -4,7 +4,7 @@ use super::*;
 use activity::paced_reply;
 use std::{collections::HashMap, time::Duration};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ProgressBoard {
     revision: u64,
     agents: HashMap<String, AgentProgress>,
@@ -73,7 +73,7 @@ impl Workspace {
         let Some(wait) = self.progress_fetch.begin(Duration::ZERO) else {
             return;
         };
-        let after = self.progress.revision;
+        let after = self.shared.progress.revision;
         let page = paced_reply(
             self.bridge.clone(),
             Command::Progress { after },
@@ -98,8 +98,8 @@ impl Workspace {
         let owed = self.progress_fetch.finish();
         match result {
             Ok(page) => {
-                self.progress.merge(page);
-                self.sync_crew_clock(window, cx);
+                Rc::make_mut(&mut self.shared.progress).merge(page);
+                self.share(window, cx);
                 cx.notify();
             }
             Err(error) => eprintln!("Progress: {error}"),

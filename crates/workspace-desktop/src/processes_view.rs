@@ -183,14 +183,14 @@ fn rail_count(index: &WorkspaceIndex, session: &Session) -> u32 {
         .sum()
 }
 
-impl Workspace {
+impl Inspector {
     /// The count on the rail's Processes entry, if anything runs: the open panel's live count,
     /// or else the record's.
     pub(super) fn processes_badge(&self) -> Option<usize> {
-        let (index, session) = (self.index.as_ref()?, self.selected_session()?);
+        let (index, session) = (self.shared.index.as_ref()?, self.shared.selected_session()?);
         let count = match self
             .processes()
-            .filter(|_| self.panel == Some(Panel::Processes))
+            .filter(|_| self.shared.panel == Some(Panel::Processes))
         {
             Some(open) => open.listing.iter().map(agent_count).sum(),
             None => rail_count(index, session) as usize,
@@ -201,14 +201,18 @@ impl Workspace {
     /// Reads the panel's processes now and then once a second, for as long as the panel is
     /// open on a selected session.
     pub(super) fn sync_process_readings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.processes.reading_loop || self.panel != Some(Panel::Processes) {
+        if self.processes.reading_loop || self.shared.panel != Some(Panel::Processes) {
             return;
         }
         self.processes.reading_loop = true;
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let next = this.update(cx, |view, _| {
-                    let session_id = reading(view.panel, view.view, view.selected.as_deref());
+                    let session_id = reading(
+                        view.shared.panel,
+                        view.shared.page,
+                        view.shared.selected.as_deref(),
+                    );
                     view.processes.reading_loop = session_id.is_some();
                     Some((session_id?, view.bridge.clone()))
                 });
@@ -243,7 +247,7 @@ impl Workspace {
     /// Stops the named groups of the selected session's panel, or with none named every group
     /// it lists. The reply is the panel's listing after the stop.
     fn stop_processes(&mut self, groups: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.selected.clone() else {
+        let Some(session_id) = self.shared.selected.clone() else {
             return;
         };
         if self.processes.stopping.is_some() {
@@ -267,7 +271,7 @@ impl Workspace {
                     view.processes.stopping = None;
                     match result {
                         Ok(listing) => view.processes.accept(&session_id, listing, Instant::now()),
-                        Err(error) => view.toast_error(error, window, cx),
+                        Err(error) => toast_error(error, window, cx),
                     }
                     cx.notify();
                 })
@@ -278,14 +282,15 @@ impl Workspace {
 
     /// The listing, when it answers for the selected session.
     fn processes(&self) -> Option<&Processes> {
-        Some(&self.processes).filter(|p| p.session_id.is_some() && p.session_id == self.selected)
+        Some(&self.processes)
+            .filter(|p| p.session_id.is_some() && p.session_id == self.shared.selected)
     }
 
     /// The count and, on one agent's panel, Stop all, pinned above the list.
     pub(super) fn processes_head(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
         let processes = self.processes()?;
         let count: usize = processes.listing.iter().map(agent_count).sum();
-        let agent = self.selected_role() != Role::ProjectOrchestrator;
+        let agent = self.shared.selected_role() != Role::ProjectOrchestrator;
         // An agent with nothing running has the panel's empty state instead.
         if agent && count == 0 {
             return None;
@@ -321,7 +326,7 @@ impl Workspace {
         if let Some(error) = &processes.error {
             return empty_state("terminal", "Processes unavailable", error.clone(), p);
         }
-        let rollup = self.selected_role() == Role::ProjectOrchestrator;
+        let rollup = self.shared.selected_role() == Role::ProjectOrchestrator;
         if !rollup
             && processes
                 .listing

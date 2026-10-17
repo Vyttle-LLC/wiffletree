@@ -44,9 +44,47 @@ fn trigger(checkbox: Checkbox, name: &'static str, details: Vec<AnyElement>) -> 
     )
 }
 
-impl Workspace {
-    pub(super) fn repositories_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Some(index) = &self.index else {
+/// The Repositories page: the workspace's repositories, the owners allowed to publish without
+/// asking, the PR keeper's triggers and each repository's checks command.
+pub(super) struct RepositoriesPage {
+    bridge: Bridge,
+    shared: Shared,
+    checks_command: Entity<InputState>,
+    checks_edit: Option<ChecksEdit>,
+    /// The saved review levels, which the keeper's review level picks from.
+    verifiers: Entity<verifiers::VerifierEditor>,
+}
+impl EventEmitter<Intent> for RepositoriesPage {}
+impl RepositoriesPage {
+    pub(super) fn new(
+        bridge: Bridge,
+        verifiers: Entity<verifiers::VerifierEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&verifiers, |_, _, cx| cx.notify()).detach();
+        Self {
+            verifiers,
+            bridge,
+            shared: Shared::default(),
+            checks_command: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("The command that runs its checks")
+            }),
+            checks_edit: None,
+        }
+    }
+    /// Redraws while shown, as the repositories it lists change.
+    pub(super) fn share(&mut self, shared: Shared, cx: &mut Context<Self>) {
+        let (_, moved) = shared.moved_from(&self.shared);
+        let opened = shared.page == Page::Repositories && self.shared.page != Page::Repositories;
+        self.shared = shared;
+        if opened || (moved && self.shared.page == Page::Repositories) {
+            cx.notify();
+        }
+    }
+
+    fn body(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let Some(index) = &self.shared.index else {
             return div();
         };
         let snapshot = index.snapshot();
@@ -77,9 +115,12 @@ impl Workspace {
                     .primary()
                     .icon(icon("plus"))
                     .label("Add repositories…")
-                    .on_click(
-                        cx.listener(|v, _, w, c| v.open_creation(Creation::Import, None, w, c)),
-                    ),
+                    .on_click(cx.listener(|_, _, _, c| {
+                        c.emit(Intent::Create {
+                            kind: Creation::Import,
+                            ticket: None,
+                        })
+                    })),
             ),
         );
         if snapshot.repositories.is_empty() {
@@ -496,6 +537,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let checks = self
+            .shared
             .snapshot()
             .into_iter()
             .flat_map(|s| &s.repositories)
@@ -774,6 +816,41 @@ fn pr_check_status(snapshot: &Snapshot, repository: &Repository) -> Option<(Stri
             None => ("PRs not checked yet".into(), false),
         },
     })
+}
+
+impl Requests for RepositoriesPage {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match reply {
+            Err(error) => toast_error(error, window, cx),
+            Ok(_) if matches!(command, Command::SetRepositoryChecks { .. }) => {
+                self.checks_edit = None
+            }
+            Ok(_) => {}
+        }
+    }
+}
+impl Render for RepositoriesPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_counts::count("Repositories");
+        let p = palette(is_dark(cx));
+        ui::page(
+            "Repositories",
+            "Repositories every project can use",
+            self.body(p, cx),
+            None,
+            p,
+            cx,
+        )
+    }
 }
 
 #[cfg(test)]

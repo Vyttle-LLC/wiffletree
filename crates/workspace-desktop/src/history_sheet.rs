@@ -5,8 +5,9 @@ use activity::{
     RunActivity, STEP_PACE, StepFetch, clock, duration, paced_reply, state_glyph, step_count,
     step_row,
 };
-use conversation::markdown;
+use file_links::Linked;
 use gpui_component::ActiveTheme;
+use std::{collections::HashMap, sync::Arc};
 use ui::icon;
 
 pub(super) struct HistorySheet {
@@ -18,11 +19,18 @@ pub(super) struct HistorySheet {
     list: ListState,
     expanded: BTreeSet<String>,
     /// Where the session's relative file references resolve.
-    link_bases: Vec<PathBuf>,
+    link_bases: Arc<[PathBuf]>,
+    /// Each narration step's text with its file references linked, by step id.
+    narration: HashMap<String, Linked>,
 }
 
 impl HistorySheet {
-    pub fn new(bridge: Bridge, session_id: &str, run_id: String, link_bases: Vec<PathBuf>) -> Self {
+    pub fn new(
+        bridge: Bridge,
+        session_id: &str,
+        run_id: String,
+        link_bases: Arc<[PathBuf]>,
+    ) -> Self {
         Self {
             bridge,
             session_id: session_id.into(),
@@ -32,6 +40,7 @@ impl HistorySheet {
             list: ListState::new(0, ListAlignment::Bottom, px(200.)),
             expanded: BTreeSet::new(),
             link_bases,
+            narration: HashMap::new(),
         }
     }
 
@@ -87,6 +96,15 @@ impl HistorySheet {
                         *id == step.id && *revision == step.revision
                     })
                     .count();
+                // Narration is linked here, as it arrives, so drawing it reads nothing from disk.
+                for step in &self.run.steps[unchanged..] {
+                    if step.kind == StepKind::Narration {
+                        let id = format!("{}-{}", step.run_id, step.id);
+                        let text = step.detail.as_deref().unwrap_or(&step.title);
+                        let linked = Linked::new(&id, text, self.link_bases.clone());
+                        self.narration.insert(step.id.clone(), linked);
+                    }
+                }
                 let (shown, rows) = (self.list.item_count(), self.run.steps.len());
                 if unchanged < rows || shown != rows {
                     self.list.splice(unchanged..shown, rows - unchanged);
@@ -142,11 +160,7 @@ impl HistorySheet {
                 .w_full()
                 .pt_3()
                 .pb_1()
-                .child(markdown(
-                    &format!("{}-{}", step.run_id, step.id),
-                    step.detail.as_deref().unwrap_or(&step.title),
-                    &self.link_bases,
-                ))
+                .children(self.narration.get(&step.id).map(Linked::view))
                 .into_any_element(),
             StepKind::Thinking => div()
                 .w_full()
@@ -274,31 +288,5 @@ impl Render for HistorySheet {
                     )
                     .vertical_scrollbar(&self.list),
             )
-    }
-}
-
-impl Workspace {
-    /// Opens a turn's history over the conversation; the draft and selection stay as they are.
-    pub(super) fn open_history(
-        &mut self,
-        run_id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.selected_session().cloned() else {
-            return;
-        };
-        let link_bases = self.link_bases(&session.id);
-        let sheet =
-            cx.new(|_| HistorySheet::new(self.bridge.clone(), &session.id, run_id, link_bases));
-        sheet.update(cx, |sheet, cx| sheet.fetch(window, cx));
-        self.history = Some(sheet.downgrade());
-        let title = format!("{} · this turn", session.name);
-        window.open_sheet(cx, move |panel, _, _| {
-            panel
-                .size(px(560.))
-                .title(title.clone())
-                .child(sheet.clone())
-        });
     }
 }

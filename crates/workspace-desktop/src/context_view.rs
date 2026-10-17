@@ -32,7 +32,7 @@ impl Measured {
     }
 }
 
-fn compacting(runtime: Option<&SessionRuntime>) -> bool {
+pub(super) fn compacting(runtime: Option<&SessionRuntime>) -> bool {
     let request = runtime.and_then(|r| r.compaction.as_ref());
     request.is_some_and(|c| c.state == CompactionState::Running)
 }
@@ -212,20 +212,155 @@ fn swatch(color: Hsla) -> Div {
     div().flex_none().size(px(9.)).rounded(px(2.)).bg(color)
 }
 
-impl Workspace {
+/// How full each session's context window is, measured on demand with no model call. The
+/// conversation's header chip and the Context card both show it.
+#[derive(Default)]
+pub(super) struct Contexts {
+    shared: Shared,
+    measured: BTreeMap<String, Result<ContextUsage, String>>,
+    pending: BTreeSet<String>,
+    /// What each session's context was last measured after.
+    seen: BTreeMap<String, Measured>,
+}
+impl Contexts {
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
+        self.shared = shared;
+        self.sync(window, cx);
+    }
+    pub(super) fn measured(&self, session_id: &str) -> Option<&Result<ContextUsage, String>> {
+        self.measured.get(session_id)
+    }
+    pub(super) fn pending(&self, session_id: &str) -> bool {
+        self.pending.contains(session_id)
+    }
     /// Probes the selected session when its last turn or its last compaction is newer than
     /// what is shown; see `measure_now`.
-    pub(super) fn sync_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session() else {
+    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.shared.selected_session() else {
             return;
         };
-        let runtime = self.runtime(&session.id).cloned().unwrap_or_default();
-        let seen = self.context_seen.get(&session.id).copied();
+        let runtime = self
+            .shared
+            .runtime(&session.id)
+            .cloned()
+            .unwrap_or_default();
+        let seen = self.seen.get(&session.id).copied();
         if measure_now(seen, &runtime, session.status == Status::Working) {
-            self.refresh_context(window, cx);
+            self.refresh(window, cx);
         }
     }
+    pub(super) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.shared.selected_session().cloned() else {
+            return;
+        };
+        if self.pending.contains(&session.id) {
+            return;
+        }
+        let runtime = self
+            .shared
+            .runtime(&session.id)
+            .cloned()
+            .unwrap_or_default();
+        self.seen.insert(session.id.clone(), Measured::of(&runtime));
+        let skill = Skill::for_role(session.role);
+        let instructions = (self.shared.snapshot())
+            .and_then(|snapshot| snapshot.skills.iter().find(|s| s.skill == skill))
+            .map(|state| workspace_host::provider::role_instructions(session.role, state));
+        let (Some(provider_session), Some(directory), Some(profile), Some(instructions)) = (
+            runtime.provider_session_id,
+            runtime.directory,
+            self.shared.selected_profile(),
+            instructions,
+        ) else {
+            self.measured.insert(
+                session.id,
+                Err("Appears after this session’s next turn.".into()),
+            );
+            return;
+        };
+        self.pending.insert(session.id.clone());
+        let (send, receive) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let probe = Probe {
+                profile: &profile,
+                provider_session: &provider_session,
+                directory: std::path::Path::new(&directory),
+                instructions: &instructions,
+            };
+            let usage = workspace_host::context::usage(&probe).map_err(|e| format!("{e:#}"));
+            let _ = send.send_blocking(usage);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(usage) = receive.recv().await {
+                let _ = this.update_in(cx, |view, window, cx| {
+                    view.pending.remove(&session.id);
+                    view.measured.insert(session.id, usage);
+                    // A turn or a compaction that ended while this probe ran is measured now;
+                    // no later snapshot may come to ask for it.
+                    view.sync(window, cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    /// The fill level for the conversation header, which opens the full breakdown.
+    pub(super) fn chip(&self, session: &Session, p: Palette) -> Option<Stateful<Div>> {
+        let usage = self.measured.get(&session.id)?.as_ref().ok()?;
+        let filled = percent(usage.used, usage.window);
+        let color = fill_color(filled, p);
+        let request = self
+            .shared
+            .runtime(&session.id)
+            .and_then(|r| r.compaction.as_ref());
+        Some(
+            div()
+                .id("context-chip")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px_2()
+                .py(px(3.))
+                .rounded_full()
+                .cursor_pointer()
+                .bg(color.opacity(0.10))
+                .text_color(color)
+                .text_size(px(11.))
+                .hover(move |d| d.bg(color.opacity(0.18)))
+                .tooltip(move |w, c| {
+                    gpui_component::tooltip::Tooltip::new("Context window in use").build(w, c)
+                })
+                .child(
+                    div()
+                        .w(px(28.))
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(color.opacity(0.25))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(filled.min(100) as f32 / 100.))
+                                .rounded_full()
+                                .bg(color),
+                        ),
+                )
+                .child(format!("{filled}%"))
+                .when_some(chip_note(request), |chip, note| {
+                    chip.child(
+                        div()
+                            .pl(px(6.))
+                            .border_l_1()
+                            .border_color(color.opacity(0.35))
+                            .child(note),
+                    )
+                }),
+        )
+    }
+}
 
+impl Inspector {
     /// Keeps what was typed in the Compact form with its session when another is selected.
     pub(super) fn swap_compact_note(
         &mut self,
@@ -245,7 +380,7 @@ impl Workspace {
     }
 
     fn open_compact_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.shared.selected_session() else {
             return;
         };
         let takes_note = takes_note(session.provider);
@@ -261,7 +396,7 @@ impl Workspace {
     }
 
     fn close_compact_form(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = &self.selected {
+        if let Some(id) = &self.shared.selected {
             self.compact_forms.remove(id);
             cx.notify();
         }
@@ -269,7 +404,7 @@ impl Workspace {
 
     /// Sends the request; nothing reaches the host before this.
     fn confirm_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.shared.selected_session() else {
             return;
         };
         let (session_id, provider) = (session.id.clone(), session.provider);
@@ -303,64 +438,6 @@ impl Workspace {
         form.sending = false;
     }
 
-    pub(super) fn compacting(&self, session_id: &str) -> bool {
-        compacting(self.runtime(session_id))
-    }
-
-    pub(super) fn refresh_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session().cloned() else {
-            return;
-        };
-        if self.context_pending.contains(&session.id) {
-            return;
-        }
-        let runtime = self.runtime(&session.id).cloned().unwrap_or_default();
-        self.context_seen
-            .insert(session.id.clone(), Measured::of(&runtime));
-        let skill = Skill::for_role(session.role);
-        let instructions = (self.snapshot())
-            .and_then(|snapshot| snapshot.skills.iter().find(|s| s.skill == skill))
-            .map(|state| workspace_host::provider::role_instructions(session.role, state));
-        let (Some(provider_session), Some(directory), Some(profile), Some(instructions)) = (
-            runtime.provider_session_id,
-            runtime.directory,
-            self.selected_profile(),
-            instructions,
-        ) else {
-            self.context.insert(
-                session.id,
-                Err("Appears after this session’s next turn.".into()),
-            );
-            return;
-        };
-        self.context_pending.insert(session.id.clone());
-        let (send, receive) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let probe = Probe {
-                profile: &profile,
-                provider_session: &provider_session,
-                directory: std::path::Path::new(&directory),
-                instructions: &instructions,
-            };
-            let usage = workspace_host::context::usage(&probe).map_err(|e| format!("{e:#}"));
-            let _ = send.send_blocking(usage);
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(usage) = receive.recv().await {
-                let _ = this.update_in(cx, |view, window, cx| {
-                    view.context_pending.remove(&session.id);
-                    view.context.insert(session.id, usage);
-                    // A turn or a compaction that ended while this probe ran is measured now;
-                    // no later snapshot may come to ask for it.
-                    view.sync_context(window, cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn context_colors(p: Palette) -> [Hsla; 8] {
         // Ordered so neighbouring segments differ in hue.
         [
@@ -368,69 +445,10 @@ impl Workspace {
         ]
     }
 
-    /// The fill level for the conversation header; opens the full breakdown.
-    pub(super) fn context_chip(
-        &self,
-        session: &Session,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        let usage = self.context.get(&session.id)?.as_ref().ok()?;
-        let filled = percent(usage.used, usage.window);
-        let color = fill_color(filled, p);
-        let request = self
-            .runtime(&session.id)
-            .and_then(|r| r.compaction.as_ref());
-        Some(
-            div()
-                .id("context-chip")
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px_2()
-                .py(px(3.))
-                .rounded_full()
-                .cursor_pointer()
-                .bg(color.opacity(0.10))
-                .text_color(color)
-                .text_size(px(11.))
-                .hover(move |d| d.bg(color.opacity(0.18)))
-                .tooltip(move |w, c| {
-                    gpui_component::tooltip::Tooltip::new("Context window in use").build(w, c)
-                })
-                .on_click(cx.listener(|v, _, w, c| v.show_panel(Panel::Overview, w, c)))
-                .child(
-                    div()
-                        .w(px(28.))
-                        .h(px(4.))
-                        .rounded_full()
-                        .bg(color.opacity(0.25))
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(filled.min(100) as f32 / 100.))
-                                .rounded_full()
-                                .bg(color),
-                        ),
-                )
-                .child(format!("{filled}%"))
-                .when_some(chip_note(request), |chip, note| {
-                    chip.child(
-                        div()
-                            .pl(px(6.))
-                            .border_l_1()
-                            .border_color(color.opacity(0.35))
-                            .child(note),
-                    )
-                }),
-        )
-    }
-
     /// The Compact row, or in its place the form, the waiting request or the running
     /// compaction; above it, the notice the last compaction left.
     fn compact_section(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
-        let runtime = self.runtime(&session.id);
+        let runtime = self.shared.runtime(&session.id);
         let working = session.status == Status::Working;
         if let Some(request) = runtime.and_then(|r| r.compaction.as_ref()) {
             return match request.state {
@@ -466,7 +484,7 @@ impl Workspace {
                                     .outline()
                                     .label("Cancel")
                                     .on_click(cx.listener(|v, _, w, c| {
-                                        if let Some(session_id) = v.selected.clone() {
+                                        if let Some(session_id) = v.shared.selected.clone() {
                                             v.request(
                                                 Command::CancelCompaction { session_id },
                                                 w,
@@ -495,7 +513,7 @@ impl Workspace {
                             .child(notice_title(title))
                             .child(button("compact-dismiss").ghost().label("Dismiss").on_click(
                                 cx.listener(|v, _, w, c| {
-                                    if let Some(session_id) = v.selected.clone() {
+                                    if let Some(session_id) = v.shared.selected.clone() {
                                         v.request(Command::DismissCompaction { session_id }, w, c);
                                     }
                                 }),
@@ -622,7 +640,11 @@ impl Workspace {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let pending = self.context_pending.contains(&session.id);
+        let (pending, measured) = {
+            let contexts = self.contexts.read(cx);
+            let measured = contexts.measured(&session.id).cloned();
+            (contexts.pending(&session.id), measured)
+        };
         let header = section("CONTEXT", p).child(
             button("context-refresh")
                 .ghost()
@@ -630,12 +652,16 @@ impl Workspace {
                 .icon(icon("refresh").size(px(13.)))
                 .loading(pending)
                 .disabled(
-                    pending || session.status == Status::Working || self.compacting(&session.id),
+                    pending
+                        || session.status == Status::Working
+                        || self.shared.compacting(&session.id),
                 )
                 .tooltip("Measure again · no model call")
-                .on_click(cx.listener(|v, _, w, c| v.refresh_context(w, c))),
+                .on_click(cx.listener(|v, _, w, c| {
+                    v.contexts.update(c, |contexts, c| contexts.refresh(w, c))
+                })),
         );
-        let body = match self.context.get(&session.id) {
+        let body = match measured.as_ref() {
             None => hint(
                 if pending {
                     "Measuring…"

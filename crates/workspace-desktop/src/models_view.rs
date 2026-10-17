@@ -10,7 +10,168 @@ use gpui_component::{
 };
 use ui::{card, effort_label, hint, icon};
 
-impl Workspace {
+pub(super) fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap_2()
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+        .child(hint(note, p))
+}
+
+/// The Models page: providers and allowed models, providers per role, the verifiers and the
+/// guide. It also finds the CLIs on this machine and lists their models, which the welcome
+/// screen and every model picker read.
+pub(super) struct ModelsPage {
+    bridge: Bridge,
+    shared: Shared,
+    /// The page's draft and the host's saved copy.
+    model_selection: ModelSelection,
+    pub(super) saved_model_selection: ModelSelection,
+    guide_input: Entity<TextareaState>,
+    verifiers: Entity<verifiers::VerifierEditor>,
+    /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
+    pub(super) detection: Detection,
+    /// The setup last suggested from `detection`, while the store has no saved one.
+    suggested: Option<Setup>,
+    /// The model each provider's Add row on the Providers card shows.
+    model_drafts: BTreeMap<Provider, String>,
+    catalog: Rc<Vec<workspace_host::runtime::ModelOption>>,
+    pub(super) catalog_pending: usize,
+    catalog_loaded: bool,
+    catalog_notice: String,
+}
+impl EventEmitter<Intent> for ModelsPage {}
+impl ModelsPage {
+    pub(super) fn new(
+        bridge: Bridge,
+        verifiers: Entity<verifiers::VerifierEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let guide_input = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(8, 24).placeholder(
+                "e.g. Claude: small, contained change → sonnet; large or cross-cutting → opus.",
+            )
+        });
+        cx.subscribe(&guide_input, |view: &mut Self, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.model_selection.guide = input.read(cx).value().to_string();
+                cx.notify();
+            }
+        })
+        .detach();
+        // The Save bar follows the verifiers while they are part of an unsaved setup.
+        cx.observe(&verifiers, |_, _, cx| cx.notify()).detach();
+        Self {
+            bridge,
+            shared: Shared::default(),
+            model_selection: ModelSelection::default(),
+            saved_model_selection: ModelSelection::default(),
+            guide_input,
+            verifiers,
+            detection: Detection::new(),
+            suggested: None,
+            model_drafts: BTreeMap::new(),
+            catalog: Rc::new(models::fallback()),
+            catalog_pending: 0,
+            catalog_loaded: false,
+            catalog_notice: String::new(),
+        }
+    }
+    /// Follows the saved setup in each snapshot, and lists the models when the page opens.
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
+        let (_, moved) = shared.moved_from(&self.shared);
+        let opened = shared.page == Page::Models && self.shared.page != Page::Models;
+        self.shared = shared;
+        if moved && let Some(snapshot) = self.shared.snapshot() {
+            let saved = snapshot.model_selection.clone();
+            self.sync_model_selection(&saved, window, cx);
+            if saved.is_saved() {
+                self.verifiers
+                    .update(cx, |editor, cx| editor.setup_saved(cx));
+            }
+            // A store with no saved setup checks the CLIs at once, so the welcome and the
+            // Models page share one result. A saved store waits for its Models page.
+            if !self.saved_model_selection.is_saved() && !self.catalog_loaded {
+                self.refresh_models(window, cx);
+            }
+            self.offer_suggestion(window, cx);
+            cx.notify();
+        }
+        if opened {
+            if !self.catalog_loaded {
+                self.refresh_models(window, cx);
+            }
+            cx.notify();
+        }
+    }
+    pub(super) fn refresh_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.catalog_pending > 0 {
+            return;
+        }
+        self.catalog_pending = 2;
+        self.catalog_loaded = true;
+        self.catalog_notice.clear();
+        let (sender, receiver) = async_channel::bounded(2);
+        for provider in PROVIDERS {
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                let status = workspace_host::detection::detect(provider);
+                let result = workspace_host::runtime::models(provider).map_err(|e| e.to_string());
+                let _ = sender.send_blocking((provider, status, result));
+            });
+        }
+        drop(sender);
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok((provider, status, result)) = receiver.recv().await {
+                let updated = cx.update(|window, cx| {
+                    this.update(cx, |view, cx| {
+                        view.catalog_pending -= 1;
+                        view.detection.insert(provider, status);
+                        match result {
+                            Ok(models) if !models.is_empty() => {
+                                let catalog = Rc::make_mut(&mut view.catalog);
+                                catalog.retain(|model| model.provider != provider);
+                                catalog.extend(models);
+                                cx.emit(Intent::Catalog(view.catalog.clone()));
+                            }
+                            _ => {
+                                if !view.catalog_notice.is_empty() {
+                                    view.catalog_notice.push(' ');
+                                }
+                                view.catalog_notice.push_str(&format!(
+                                    "{provider:?} list unavailable; showing built-in and saved models."
+                                ));
+                            }
+                        }
+                        view.offer_suggestion(window, cx);
+                        cx.notify();
+                    })
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    fn save_model_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A first save also sends the verifiers shown; afterwards they save on their own.
+        let verification = self
+            .suggested
+            .as_ref()
+            .and_then(|_| self.verifiers.read(cx).verification().cloned());
+        self.request(
+            Command::SetModelSelection {
+                selection: Box::new(self.model_selection.clone()),
+                verification,
+            },
+            window,
+            cx,
+        );
+    }
     /// A fresh store waits for its first suggestion before anything can change.
     fn models_editable(&self) -> bool {
         models::editable(&self.saved_model_selection, self.suggested.as_ref())
@@ -57,12 +218,12 @@ impl Workspace {
     /// On a store with no saved setup, suggests one from the last detection. An untouched
     /// suggestion follows a new detection; one the human edited is kept.
     pub(super) fn offer_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.index.is_none() || self.catalog_pending > 0 {
+        if self.shared.index.is_none() || self.catalog_pending > 0 {
             return;
         }
         let Some(offer) = models::offer(
             &self.saved_model_selection,
-            self.snapshot().is_some_and(|s| s.guide_saved),
+            self.shared.snapshot().is_some_and(|s| s.guide_saved),
             self.suggested.as_ref(),
             &self.model_selection,
             self.verifiers.read(cx).verification(),
@@ -106,15 +267,6 @@ impl Workspace {
             .child(hint(note, p))
     }
 
-    pub(super) fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
-        div()
-            .flex()
-            .items_baseline()
-            .gap_2()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(hint(note, p))
-    }
-
     fn provider_section(&self, provider: Provider, p: Palette, cx: &mut Context<Self>) -> Div {
         let selection = &self.model_selection;
         let enabled = selection.is_enabled(provider);
@@ -138,7 +290,7 @@ impl Workspace {
             .as_ref()
             .and(detected)
             .and_then(|found| models::fix_hint(provider, found));
-        let rows = models::model_rows(&self.model_catalog, provider, selection);
+        let rows = models::model_rows(&self.catalog, provider, selection);
         let allowed = models::allowed_models(selection, provider);
         let row_of = |model: &str| rows.iter().find(|r| r.model == model);
         let mut list = div().flex().flex_col().gap_1();
@@ -360,7 +512,7 @@ impl Workspace {
         }
         card(p)
             .gap_3()
-            .child(Self::card_title(
+            .child(card_title(
                 "Roles",
                 "which providers coordinators may assign to each role",
                 p,
@@ -371,7 +523,7 @@ impl Workspace {
     fn review_card(&self, p: Palette) -> Div {
         card(p)
             .gap_3()
-            .child(Self::card_title(
+            .child(card_title(
                 "Review",
                 "who reviews a ticket, and how thoroughly",
                 p,
@@ -389,7 +541,7 @@ impl Workspace {
     fn keeper_card(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let chosen = self.model_selection.keeper.clone();
         let choices = models::keeper_choices(&self.model_selection);
-        let catalog = self.model_catalog.clone();
+        let catalog = self.catalog.clone();
         let label = chosen
             .as_ref()
             .map_or("No model chosen".to_owned(), |profile| {
@@ -436,7 +588,7 @@ impl Workspace {
         };
         card(p)
             .gap_3()
-            .child(Self::card_title(
+            .child(card_title(
                 "PR keeper",
                 "the small model that keeps pull requests current",
                 p,
@@ -468,7 +620,7 @@ impl Workspace {
         let bytes = self.model_selection.guide.len();
         card(p)
             .gap_3()
-            .child(Self::card_title(
+            .child(card_title(
                 "Guide",
                 "how coordinators pick the model and effort within a provider",
                 p,
@@ -492,7 +644,7 @@ impl Workspace {
             )
     }
 
-    pub(super) fn models_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn models_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut body = div()
             .w_full()
             .min_w_0()
@@ -511,7 +663,7 @@ impl Workspace {
         if !self.catalog_notice.is_empty() {
             body = body.child(hint(self.catalog_notice.clone(), p).text_color(p.yellow));
         }
-        let mut providers = card(p).gap_3().child(Self::card_title(
+        let mut providers = card(p).gap_3().child(card_title(
             "Providers",
             "the subscriptions on this machine",
             p,
@@ -530,7 +682,7 @@ impl Workspace {
             .child(self.guide_card(p))
     }
 
-    pub(super) fn models_footer(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn models_footer(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         // A suggested setup is unsaved from the start: Save needs no edit first.
         let untouched = self
             .suggested
@@ -597,5 +749,53 @@ impl Workspace {
                     .disabled(!can_save)
                     .on_click(cx.listener(|v, _, w, c| v.save_model_selection(w, c))),
             )
+    }
+}
+
+impl Requests for ModelsPage {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = match reply {
+            Ok(value) => value,
+            Err(error) => return toast_error(error, window, cx),
+        };
+        if let Command::SetModelSelection { selection, .. } = command {
+            // The host answers with the saved selection at its new revision, so the store
+            // reads as saved before the next snapshot arrives.
+            let saved: ModelSelection = serde_json::from_value(value)
+                .map_err(|e| e.to_string())
+                .unwrap_or_else(|e| {
+                    eprintln!("Saved model selection: {e}");
+                    *selection.clone()
+                });
+            self.model_selection = models::after_save(&self.model_selection, &selection, &saved);
+            self.saved_model_selection = saved;
+            self.suggested = None;
+            self.verifiers
+                .update(cx, |editor, cx| editor.setup_saved(cx));
+            toast("Models saved", window, cx);
+        }
+    }
+}
+impl Render for ModelsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_counts::count("Models");
+        let p = palette(is_dark(cx));
+        ui::page(
+            "Models",
+            "Models on this machine",
+            self.models_panel(p, cx),
+            Some(self.models_footer(p, cx)),
+            p,
+            cx,
+        )
     }
 }

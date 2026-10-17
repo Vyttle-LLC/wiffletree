@@ -113,7 +113,7 @@ fn repeat_pointer(window: &mut Window, cx: &mut App) {
 fn aiming<E: InteractiveElement>(
     element: E,
     halves: Option<Halves>,
-    cx: &mut Context<Workspace>,
+    cx: &mut Context<Sidebar>,
 ) -> E {
     let Some(halves) = halves else {
         return element;
@@ -150,17 +150,247 @@ impl Appearance {
     }
 }
 
-impl Workspace {
-    pub(super) fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+/// The project tree, the workspace pages, the account limits and the update card down the
+/// window's left edge.
+pub(super) struct Sidebar {
+    bridge: Bridge,
+    pub(super) shared: Shared,
+    /// The project created by New project, until its first snapshot selects and names it.
+    pending_project_selection: Option<String>,
+    pub(super) creating_project: bool,
+    pub(super) project_name: Entity<InputState>,
+    pub(super) project_edit: Option<project_name::NameEdit>,
+    collapsed_projects: BTreeSet<String>,
+    /// Collapsed project groups, by their first word in lowercase.
+    collapsed_groups: BTreeSet<String>,
+    /// The project or group being dragged in the sidebar; gone once the drag ends.
+    project_drag: Option<WeakEntity<ProjectDrag>>,
+    /// The press in progress ended a rename, so it does not also start a drag.
+    rename_press: bool,
+    /// How the latest press on a project row began.
+    row_press: tree::RowPress,
+    /// The tree is scrolling under a row dragged to its edge.
+    drag_scrolling: bool,
+    tree_scroll: ScrollHandle,
+    /// A downloaded release that installs on restart or quit.
+    update: Option<update::Staged>,
+    checking_update: bool,
+    /// Hides the update card; the footer keeps a smaller restart button.
+    update_card_dismissed: bool,
+}
+impl EventEmitter<Intent> for Sidebar {}
+impl Sidebar {
+    pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
+        cx.subscribe_in(
+            &project_name,
+            window,
+            |view, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    view.save_project_name(window, cx)
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        let sidebar = Self {
+            bridge,
+            shared: Shared::default(),
+            pending_project_selection: None,
+            creating_project: false,
+            project_name,
+            project_edit: None,
+            collapsed_projects: BTreeSet::new(),
+            collapsed_groups: BTreeSet::new(),
+            project_drag: None,
+            rename_press: false,
+            row_press: tree::RowPress::default(),
+            drag_scrolling: false,
+            tree_scroll: ScrollHandle::new(),
+            update: None,
+            checking_update: false,
+            update_card_dismissed: false,
+        };
+        sidebar.watch_for_updates(window, cx);
+        sidebar
+    }
+    /// Redraws when anything it lists changed, and selects and names a project it created once
+    /// the project arrives.
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.shared, shared);
+        let (selection, moved) = self.shared.moved_from(&old);
+        if moved {
+            self.name_new_project(window, cx);
+        }
+        let new = &self.shared;
+        if moved
+            || selection
+            || new.page != old.page
+            || new.show_archived != old.show_archived
+            || !Rc::ptr_eq(&new.progress, &old.progress)
+            || !Rc::ptr_eq(&new.quotas, &old.quotas)
+        {
+            cx.notify();
+        }
+    }
+    fn name_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = (self.pending_project_selection.as_ref()).and_then(|project| {
+            (self.shared.index.iter())
+                .flat_map(|index| index.sessions())
+                .find(|s| &s.project_id == project && s.role == Role::ProjectOrchestrator)
+        });
+        let Some(root) = root.cloned() else {
+            return;
+        };
+        let project_id = self.pending_project_selection.take().unwrap();
+        self.creating_project = false;
+        self.collapsed_projects.remove(&project_id);
+        // Naming it needs its row, which a collapsed group would hide.
+        self.collapsed_groups.remove(&tree::group_key(&root.name));
+        cx.emit(Intent::Select(root.id));
+        self.tree_scroll.set_offset(point(px(0.), px(0.)));
+        self.begin_project_rename(project_id, window, cx);
+    }
+    /// Checks for a newer release now and hourly, and installs a staged one when the app quits.
+    fn watch_for_updates(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if update::VERSION.is_none() || update::installed_bundle().is_none() {
+            return;
+        }
+        cx.on_app_quit(|view, _| {
+            if let Some(staged) = view.update.take() {
+                let _ = staged.install_after_exit(false);
+            }
+            async {}
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let checked = cx.update(|window, cx| {
+                    this.update(cx, |view, cx| view.check_for_updates(false, window, cx))
+                });
+                if checked.is_err() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60 * 60))
+                    .await;
+            }
+        })
+        .detach();
+    }
+    /// Downloads and stages a newer release. A `manual` check also reports when there is none.
+    pub(super) fn check_for_updates(
+        &mut self,
+        manual: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.update.is_some() {
+            if manual {
+                self.update_card_dismissed = false;
+                cx.notify();
+            }
+            return;
+        }
+        let (Some(current), Some(installed)) = (update::VERSION, update::installed_bundle()) else {
+            if manual {
+                window.push_notification(
+                    Notification::info(
+                        "This build can't update itself. Install a release to get updates.",
+                    ),
+                    cx,
+                );
+            }
+            return;
+        };
+        if self.checking_update {
+            return;
+        }
+        self.checking_update = true;
+        cx.notify();
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = sender.send_blocking(update::check(current, &installed));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = cx.update(|window, cx| {
+                this.update(cx, |view, cx| {
+                    view.checking_update = false;
+                    match result {
+                        Ok(Some(staged)) => {
+                            view.update = Some(staged);
+                            view.update_card_dismissed = false;
+                        }
+                        Ok(None) if manual => toast(
+                            format!("Wiffletree {current} is the latest version"),
+                            window,
+                            cx,
+                        ),
+                        Ok(None) => {}
+                        Err(error) if manual => window.push_notification(
+                            Notification::error(format!("{error:#}"))
+                                .title("Couldn’t check for updates"),
+                            cx,
+                        ),
+                        Err(error) => eprintln!("Update check failed: {error:#}"),
+                    }
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
+    }
+    /// Restarts into the staged release, confirming first if agents would be interrupted.
+    fn restart_to_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let working = self
+            .shared
+            .index
+            .iter()
+            .flat_map(|index| index.sessions())
+            .any(|s| s.status == Status::Working);
+        if !working {
+            return self.install_update(window, cx);
+        }
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let weak = weak.clone();
+            dialog
+                .title("Restart to update?")
+                .confirm()
+                .ok_text("Restart")
+                .child("Agents are working. Restarting interrupts their turns; you can retry the held input afterwards.")
+                .on_ok(move |_, window, cx| {
+                    let _ = weak.update(cx, |view, cx| view.install_update(window, cx));
+                    true
+                })
+        });
+    }
+    fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(staged) = self.update.take() else {
+            return;
+        };
+        match staged.install_after_exit(true) {
+            Ok(()) => cx.quit(),
+            Err(error) => {
+                self.update = Some(staged);
+                toast_error(format!("{error:#}"), window, cx);
+            }
+        }
+    }
+
+    fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let dark = is_dark(cx);
         // The snapshot lists every session that is not archived.
-        let projects = (self.snapshot().iter())
+        let projects = (self.shared.snapshot().iter())
             .flat_map(|s| &s.sessions)
             .filter(|s| s.parent_id.is_none() && !s.archived)
             .count();
-        let offers_new_project = self.offers_new_project();
+        let offers_new_project = self.shared.offers_new_project();
         let grouped = cx.global::<Preferences>().group_projects;
-        let archived = self.snapshot().map_or(0, |s| s.archived_sessions);
+        let archived = self.shared.snapshot().map_or(0, |s| s.archived_sessions);
         div()
             .size_full()
             .flex()
@@ -248,15 +478,14 @@ impl Workspace {
                                         .ghost()
                                         .xsmall()
                                         .icon(icon("archive").size(px(13.)))
-                                        .label(if self.show_archived {
+                                        .label(if self.shared.show_archived {
                                             "Hide archived"
                                         } else {
                                             "Archived"
                                         })
                                         .tooltip(format!("{archived} archived sessions"))
-                                        .on_click(cx.listener(|v, _, w, c| {
-                                            v.show_archived = !v.show_archived;
-                                            v.sync_archive(w, c);
+                                        .on_click(cx.listener(|v, _, _, c| {
+                                            c.emit(Intent::ShowArchived(!v.shared.show_archived));
                                             c.notify();
                                         })),
                                 )
@@ -304,7 +533,7 @@ impl Workspace {
                     .vertical_scrollbar(&self.tree_scroll),
             )
             .child(self.workspace_nav(p, cx))
-            .child(self.quota_strip(p, cx))
+            .child(usage_view::quota_strip(&self.shared.quotas, p, cx))
             .child(
                 self.sidebar_footer(p, cx)
                     .relative()
@@ -330,10 +559,10 @@ impl Workspace {
             (Page::Models, "Models", "settings"),
             (Page::Skills, "Skills", "book"),
         ] {
-            let selected = self.view == page;
+            let selected = self.shared.page == page;
             nav = nav.child(
                 self.row(SharedString::from(label), 0, selected, p)
-                    .on_click(cx.listener(move |v, _, w, c| v.open_page(page, w, c)))
+                    .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenPage(page))))
                     .child(
                         div()
                             .flex_none()
@@ -342,12 +571,13 @@ impl Workspace {
                     )
                     .child(label)
                     // Until a setup is saved, Models is where to go next.
-                    .when(page == Page::Models && !self.offers_new_project(), |d| {
-                        d.child(div().size(px(6.)).rounded_full().bg(p.accent))
-                    })
+                    .when(
+                        page == Page::Models && !self.shared.offers_new_project(),
+                        |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
+                    )
                     // A rewrite out of date waits on the Skills page.
                     .when(
-                        page == Page::Skills && self.a_rewrite_is_out_of_date(),
+                        page == Page::Skills && skills_view::a_rewrite_is_out_of_date(&self.shared),
                         |d| d.child(div().size(px(6.)).rounded_full().bg(p.accent)),
                     ),
             );
@@ -418,7 +648,7 @@ impl Workspace {
 
     /// While a settings repository is chosen, how sync is doing; it opens Settings at its section.
     fn sync_mark(&self, p: Palette) -> Option<Stateful<Div>> {
-        let snapshot = self.snapshot()?;
+        let snapshot = self.shared.snapshot()?;
         let status = snapshot.settings_sync.as_ref()?;
         let (notes, now) = (
             snapshot.paused_settings().cloned().collect::<Vec<_>>(),
@@ -553,12 +783,12 @@ impl Workspace {
 
     fn tree(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut tree = div().flex().flex_col().gap(px(1.));
-        let Some(index) = &self.index else {
+        let Some(index) = &self.shared.index else {
             return tree;
         };
         if index.snapshot().projects.is_empty() {
             return tree.child(div().px_2().py_3().child(hint(
-                if self.offers_new_project() {
+                if self.shared.offers_new_project() {
                     "No projects yet. Create one to brief a coordinator."
                 } else {
                     "Set up your models to create your first project."
@@ -568,7 +798,7 @@ impl Workspace {
         }
         let has_tickets = &index.snapshot().tickets_owned;
         let grouping = cx.global::<Preferences>().group_projects;
-        let entries = tree::entries(index, self.show_archived, grouping);
+        let entries = tree::entries(index, self.shared.show_archived, grouping);
         let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
         let (moving, target) = drag
             .map(|drag| {
@@ -592,7 +822,7 @@ impl Workspace {
         let mut in_group = false;
         for row in tree::rows(
             index,
-            self.show_archived,
+            self.shared.show_archived,
             grouping,
             &self.collapsed_projects,
             &self.collapsed_groups,
@@ -747,9 +977,9 @@ impl Workspace {
                 self.toggle_project(project_id, cx)
             }
             (tree::Movable::Project(project_id), release) => {
-                let root = (self.index.as_ref()).and_then(|i| i.roots(project_id).next());
+                let root = (self.shared.index.as_ref()).and_then(|i| i.roots(project_id).next());
                 if let Some(id) = root.map(|root| root.id.clone()) {
-                    self.select(id, window, cx);
+                    cx.emit(Intent::Select(id));
                     if release == tree::OwnRelease::Rename {
                         self.begin_project_rename(project_id.clone(), window, cx);
                     }
@@ -853,11 +1083,11 @@ impl Workspace {
         let Some(target) = drag.and_then(|drag| drag.read(cx).target.clone()) else {
             return;
         };
-        let Some(index) = &self.index else {
+        let Some(index) = &self.shared.index else {
             return;
         };
         let grouping = cx.global::<Preferences>().group_projects;
-        let entries = tree::entries(index, self.show_archived, grouping);
+        let entries = tree::entries(index, self.shared.show_archived, grouping);
         if let Some(moved) = tree::project_move(&entries, moving, &target) {
             let command = Command::MoveProjects {
                 project_ids: moved.project_ids,
@@ -882,14 +1112,14 @@ impl Workspace {
         let detail = format!("{count} projects starting with “{}”", group.label);
         let state = collapsed
             .then(|| {
-                let needs_you = (self.snapshot().iter())
+                let needs_you = (self.shared.snapshot().iter())
                     .flat_map(|s| &s.attention)
                     .filter(|a| group.members.iter().any(|m| m.project_id == a.project_id))
                     .count();
                 let shown: Vec<Status> = group
                     .members
                     .iter()
-                    .map(|root| self.shown_status(root))
+                    .map(|root| self.shared.shown_status(root))
                     .collect();
                 tree::rollup(needs_you, &shown)
             })
@@ -956,29 +1186,27 @@ impl Workspace {
     ) -> Div {
         if !has_tickets.contains_key(&root.id)
             && !self.collapsed_projects.contains(&root.project_id)
-            && self.selected.as_ref() == Some(&root.id)
+            && self.shared.selected.as_ref() == Some(&root.id)
         {
             let add = button(SharedString::from(format!("add-ticket-{}", root.id)))
                 .ghost()
                 .icon(icon("plus"))
                 .label("New ticket")
                 .ml(inset(1, grouped))
-                .on_click(cx.listener(|v, _, w, c| v.open_creation(Creation::Ticket, None, w, c)));
+                .on_click(cx.listener(|_, _, _, c| {
+                    c.emit(Intent::Create {
+                        kind: Creation::Ticket,
+                        ticket: None,
+                    })
+                }));
             tree = tree.child(aiming(div().flex().child(add), under.clone(), cx));
         }
         tree.child(aiming(div().h_2(), under, cx))
     }
 
-    pub(super) fn shown_status(&self, session: &Session) -> Status {
-        match &self.index {
-            Some(index) => shown_status(session, index),
-            None => session.status,
-        }
-    }
-
     fn status_detail(&self, session: &Session) -> String {
         let label = status_label(session.status);
-        let mut detail = if self.shown_status(session) == session.status {
+        let mut detail = if self.shared.shown_status(session) == session.status {
             label.to_owned()
         } else {
             format!("{label} · Team working")
@@ -993,6 +1221,7 @@ impl Workspace {
     /// turn, or queued while it is idle.
     fn waiting_input(&self, session: &Session) -> Option<&'static str> {
         let input = self
+            .shared
             .snapshot()?
             .undelivered
             .iter()
@@ -1042,7 +1271,8 @@ impl Workspace {
     ) -> Stateful<Div> {
         let id = root.id.clone();
         let project_id = root.project_id.clone();
-        let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
+        let selected =
+            self.shared.page == Page::Conversation && self.shared.selected.as_ref() == Some(&id);
         let collapsed = self.collapsed_projects.contains(&project_id);
         let edit = self
             .project_edit
@@ -1050,9 +1280,10 @@ impl Workspace {
             .filter(|e| e.project_id == project_id);
         let editing = edit.is_some();
         let live = self
+            .shared
             .snapshot()
             .is_some_and(|s| s.live_projects.contains(&project_id));
-        let attention = self.snapshot().map_or(0, |s| {
+        let attention = self.shared.snapshot().map_or(0, |s| {
             needs_you(&s.attention, &s.workspace_notes, &project_id)
         });
         let detail = format!(
@@ -1066,7 +1297,7 @@ impl Workspace {
                 n => format!(" · {n} items need you"),
             }
         );
-        let project = self.progress.project(&project_id);
+        let project = self.shared.progress.project(&project_id);
         let archived = root.archived;
         let archive_id = id.clone();
         let toggle_id = project_id.clone();
@@ -1093,7 +1324,7 @@ impl Workspace {
             }))
             .on_click(cx.listener(move |v, event: &ClickEvent, w, c| {
                 if !editing {
-                    v.select(id.clone(), w, c);
+                    c.emit(Intent::Select(id.clone()));
                     if event.click_count() == 2 {
                         v.begin_project_rename(click_project.clone(), w, c);
                     }
@@ -1191,18 +1422,24 @@ impl Workspace {
                             .item(
                                 PopupMenuItem::new("Add repositories…")
                                     .icon(icon("folder"))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = add_repositories.update(cx, |view, cx| {
-                                            view.open_creation(Creation::Import, None, window, cx)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = add_repositories.update(cx, |_, cx| {
+                                            cx.emit(Intent::Create {
+                                                kind: Creation::Import,
+                                                ticket: None,
+                                            })
                                         });
                                     }),
                             )
                             .item(
                                 PopupMenuItem::new("New ticket")
                                     .icon(icon("plus"))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = add_ticket.update(cx, |view, cx| {
-                                            view.open_creation(Creation::Ticket, None, window, cx)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = add_ticket.update(cx, |_, cx| {
+                                            cx.emit(Intent::Create {
+                                                kind: Creation::Ticket,
+                                                ticket: None,
+                                            })
                                         });
                                     }),
                             )
@@ -1234,7 +1471,7 @@ impl Workspace {
             } else {
                 div()
                     .flex_none()
-                    .child(status_glyph(self.shown_status(root), 12., p))
+                    .child(status_glyph(self.shared.shown_status(root), 12., p))
             })
             .when(!root.archived, |row| {
                 row.child(track(
@@ -1258,9 +1495,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = session.id.clone();
-        let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
-        let status = self.shown_status(session);
+        let selected =
+            self.shared.page == Page::Conversation && self.shared.selected.as_ref() == Some(&id);
+        let status = self.shared.shown_status(session);
         let questions = self
+            .shared
             .snapshot()
             .map_or(0, |s| s.questions_waiting(&session.id));
         let detail = format!(
@@ -1275,7 +1514,7 @@ impl Workspace {
             // Working agents keep full-strength text; idle ones recede.
             .when(status == Status::Working, |d| d.text_color(p.text))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
-            .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
+            .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
             .child(
                 div()
                     .flex_none()
@@ -1334,7 +1573,11 @@ impl Workspace {
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
             detail.push_str(&tree::pr_sentence(pr));
-            if let Some(checked) = self.snapshot().and_then(|s| tree::pr_checked(s, ticket)) {
+            if let Some(checked) = self
+                .shared
+                .snapshot()
+                .and_then(|s| tree::pr_checked(s, ticket))
+            {
                 detail.push('\n');
                 detail.push_str(&checked);
             }
@@ -1359,9 +1602,9 @@ impl Workspace {
             p,
         )
         .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
-        .on_click(cx.listener(move |v, _, w, c| {
-            v.select(coordinator.clone(), w, c);
-            v.show_panel(Panel::Team, w, c);
+        .on_click(cx.listener(move |_, _, _, c| {
+            c.emit(Intent::Select(coordinator.clone()));
+            c.emit(Intent::ShowPanel(Panel::Team));
         }))
         // The icon and mark stay beside the first line.
         .when(two_lines, |row| row.items_start().pt(px(6.)).pb(px(5.)))
@@ -1377,7 +1620,10 @@ impl Workspace {
                 .min_w_0()
                 .child(div().text_ellipsis().text_color(p.text).child(label))
                 .children(ticket.pull_request.as_ref().map(|pr| {
-                    let keeper = self.snapshot().and_then(|s| s.keeper_parts.get(&ticket.id));
+                    let keeper = self
+                        .shared
+                        .snapshot()
+                        .and_then(|s| s.keeper_parts.get(&ticket.id));
                     let keeper = ticket.try_part().or(keeper.copied());
                     let comments = ticket.waiting_comments();
                     pr_line(pr, ticket.unreviewed(), keeper, comments, p)
@@ -1400,6 +1646,77 @@ impl Workspace {
 }
 
 /// Where the dragged row would land. It takes no room, so no row shifts under the pointer.
+impl Requests for Sidebar {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = match reply {
+            Ok(value) => value,
+            Err(error) => return self.failed(&command, error, window, cx),
+        };
+        match command {
+            Command::CreateProject { .. } => {
+                if let Ok(project) = serde_json::from_value::<Project>(value) {
+                    self.pending_project_selection = Some(project.id);
+                }
+            }
+            Command::RenameProject { project_id, .. } => {
+                if let Ok(project) = serde_json::from_value::<Project>(value) {
+                    cx.emit(Intent::Amend(Amendment::Project(project)));
+                    if self
+                        .project_edit
+                        .as_ref()
+                        .is_some_and(|e| e.project_id == project_id)
+                    {
+                        self.project_edit = None;
+                    }
+                }
+            }
+            Command::MoveProjects { .. } => {
+                if let Ok(projects) = serde_json::from_value(value) {
+                    cx.emit(Intent::Amend(Amendment::Projects(projects)));
+                }
+            }
+            Command::SetArchived { archived, .. } => {
+                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
+                cx.emit(Intent::Archived { archived, affected });
+            }
+            _ => {}
+        }
+    }
+}
+impl Sidebar {
+    /// A rename's failure shows in its field; anything else as a toast.
+    fn failed(&mut self, command: &Command, error: String, window: &mut Window, cx: &mut App) {
+        if matches!(command, Command::CreateProject { .. }) {
+            self.creating_project = false;
+        }
+        if let Command::RenameProject { project_id, .. } = command
+            && let Some(edit) = &mut self.project_edit
+            && edit.project_id == *project_id
+        {
+            edit.saving = false;
+            edit.error = error;
+            return;
+        }
+        toast_error(error, window, cx);
+    }
+}
+impl Render for Sidebar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_counts::count("Sidebar");
+        let p = palette(is_dark(cx));
+        self.sidebar(p, cx)
+    }
+}
+
 fn insertion_line(grouped: bool, p: Palette) -> Div {
     div().relative().h_0().mt(px(-1.)).child(
         div()
@@ -1477,7 +1794,7 @@ fn pr_line(
 }
 
 /// An idle coordinator shows its team's work, so a collapsed or quiet parent never hides it.
-fn shown_status(session: &Session, index: &WorkspaceIndex) -> Status {
+pub(super) fn shown_status(session: &Session, index: &WorkspaceIndex) -> Status {
     let idle = matches!(session.status, Status::Ready | Status::Done);
     if idle && index.team_working(&session.id) {
         Status::Working

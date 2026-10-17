@@ -8,11 +8,11 @@ pub(super) struct NameEdit {
     pub error: String,
 }
 
-impl Workspace {
+impl sidebar::Sidebar {
     pub(super) fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The host would refuse; the Models page is where a first setup is saved.
-        if !self.offers_new_project() {
-            self.open_page(Page::Models, window, cx);
+        if !self.shared.offers_new_project() {
+            cx.emit(Intent::OpenPage(Page::Models));
             return;
         }
         if self.creating_project || self.project_edit.as_ref().is_some_and(|e| e.saving) {
@@ -23,7 +23,7 @@ impl Workspace {
                 .update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        let name = next_name(self.snapshot());
+        let name = next_name(self.shared.snapshot());
         self.creating_project = true;
         self.request(Command::CreateProject { name }, window, cx);
         cx.notify();
@@ -38,7 +38,12 @@ impl Workspace {
         if self.project_edit.as_ref().is_some_and(|e| e.saving) {
             return;
         }
-        let Some(project) = self.index.as_ref().and_then(|s| s.project(&project_id)) else {
+        let Some(project) = self
+            .shared
+            .index
+            .as_ref()
+            .and_then(|s| s.project(&project_id))
+        else {
             return;
         };
         let original = project.name.clone();

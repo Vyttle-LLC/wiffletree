@@ -321,7 +321,11 @@ impl NativeWindow {
 impl Step {
     pub fn perform(self, window: &mut Window, cx: &mut App) -> Result<Value, String> {
         // GPUI stops drawing a window that is covered by others; draw this one on request.
-        window.refresh();
+        // Notifying the root asks for a frame without discarding the cached views, so a step
+        // redraws what a person's input would.
+        if let Some(Some(root)) = window.root::<gpui_component::Root>() {
+            cx.notify(root.entity_id());
+        }
         NativeWindow::find()?.draw_later();
         let size = window.viewport_size();
         let height = f64::from(f32::from(size.height));

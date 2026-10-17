@@ -393,14 +393,15 @@ fn badge(mark: &Mark, p: Palette) -> Option<Div> {
     Some(pill(text, color))
 }
 
-impl Workspace {
+impl Inspector {
     /// Asks for the selected session's files, only while the Files panel shows them.
     pub(super) fn fetch_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.shared.selected_session() else {
             return;
         };
         let (session_id, agent) = (session.id.clone(), session.role.is_worker());
-        let Some((command, wait)) = self.files.request(self.panel, &session_id, agent) else {
+        let Some((command, wait)) = self.files.request(self.shared.panel, &session_id, agent)
+        else {
             return;
         };
         let reply = paced_reply(
@@ -428,7 +429,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let owed = self.files.fetch.finish();
-        let selected = self.selected_session().filter(|s| s.id == session_id);
+        let selected = self
+            .shared
+            .selected_session()
+            .filter(|s| s.id == session_id);
         match (result, selected.map(|s| s.role)) {
             (Ok(report), Some(role)) => {
                 self.files.session_id = Some(session_id.to_owned());
@@ -457,7 +461,7 @@ impl Workspace {
     /// The loaded report, when it answers for the selected session.
     fn files(&self) -> Option<&Files> {
         Some(&self.files)
-            .filter(|files| files.session_id.is_some() && files.session_id == self.selected)
+            .filter(|files| files.session_id.is_some() && files.session_id == self.shared.selected)
     }
 
     /// The counts and the view choice, pinned above the tree.

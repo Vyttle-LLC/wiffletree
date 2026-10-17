@@ -2,12 +2,16 @@
 //! `crates/foo/src/bar.rs:63`, becomes a link that opens the file in its default app, and a
 //! Markdown link to a local path opens the same way. Web links keep opening in the browser.
 use super::*;
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::{
+    button::ButtonVariants,
+    menu::{PopupMenu, PopupMenuItem},
+    text::TextView,
+};
 use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     path::Path,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 /// Characters that never appear in a file reference, so code holding them is not looked up.
@@ -15,9 +19,50 @@ const NOT_IN_PATHS: &[char] = &['`', '*', '?', '|', ';', '$', '"', '<', '>', '\\
 /// Linked bodies kept before the cache starts over; enough for every message on screen.
 const CACHE_LIMIT: usize = 1024;
 
+/// Markdown whose file references are already links, so drawing it reads nothing from disk.
+#[derive(Clone)]
+pub(super) struct Linked {
+    id: SharedString,
+    text: SharedString,
+    bases: Arc<[PathBuf]>,
+}
+impl Linked {
+    /// Links `body`'s file references against `bases` in order. That parses the Markdown and
+    /// looks for files, so it runs when the text arrives, never while drawing.
+    pub(super) fn new(id: &str, body: &str, bases: Arc<[PathBuf]>) -> Self {
+        Self {
+            id: SharedString::from(format!("message-markdown-{id}")),
+            text: linkify(body, &bases),
+            bases,
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+    pub(super) fn view(&self) -> TextView {
+        let bases = self.bases.clone();
+        TextView::markdown(self.id.clone(), self.text.clone())
+            .selectable(true)
+            .on_link_click(move |url, event, window, cx| open_link(url, event, &bases, window, cx))
+            .code_block_actions(|block, _, _| {
+                let code = block.code();
+                button("copy-code")
+                    .ghost()
+                    .icon(ui::icon("copy"))
+                    .label("Copy")
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()))
+                    })
+            })
+            .text_size(px(14.))
+            .line_height(relative(1.5))
+    }
+}
+
 /// `body` with its file references turned into links, resolved against `bases` in order.
-/// Each body is resolved once and cached, since rendering asks for it every frame.
-pub(super) fn linkify(body: &str, bases: &[PathBuf]) -> SharedString {
+/// Each body is resolved once and cached, since a page is prepared again on each refresh.
+fn linkify(body: &str, bases: &[PathBuf]) -> SharedString {
     if !body.contains('`') {
         return SharedString::from(body.to_owned());
     }

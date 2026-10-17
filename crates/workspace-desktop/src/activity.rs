@@ -133,190 +133,6 @@ pub(super) async fn paced_reply<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
-impl Workspace {
-    pub(super) fn watch_steps(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(changes) = self.bridge.step_changes() else {
-            return;
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            while changes.recv().await.is_ok() {
-                let fetched = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| {
-                        view.fetch_steps(window, cx);
-                        view.fetch_files(window, cx);
-                    })
-                });
-                if !matches!(fetched, Ok(Ok(()))) {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Asks for the selected session's steps changed since the last page.
-    pub(super) fn fetch_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.selected.clone() else {
-            return;
-        };
-        let Some(wait) = self.step_fetch.begin(STEP_PACE) else {
-            return;
-        };
-        let after = self
-            .activity
-            .as_ref()
-            .filter(|a| a.session_id == session_id)
-            .map_or(0, |a| a.revision);
-        let command = Command::Steps {
-            session_id: session_id.clone(),
-            run_id: None,
-            after,
-        };
-        let page = paced_reply(
-            self.bridge.clone(),
-            command,
-            wait,
-            cx.background_executor().clone(),
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let result = page.await;
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |view, cx| {
-                    view.accept_steps(&session_id, result, window, cx)
-                })
-            });
-        })
-        .detach();
-        // The open history sheet follows the same changes.
-        if let Some(sheet) = self.history.as_ref().and_then(WeakEntity::upgrade) {
-            sheet.update(cx, |sheet, cx| sheet.fetch(window, cx));
-        }
-    }
-
-    fn accept_steps(
-        &mut self,
-        session_id: &str,
-        result: Result<StepPage, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let owed = self.step_fetch.finish();
-        match result {
-            Ok(page) if self.selected.as_deref() == Some(session_id) => {
-                let activity = match &mut self.activity {
-                    Some(activity) if activity.session_id == session_id => activity,
-                    other => other.insert(RunActivity::new(session_id)),
-                };
-                activity.merge(page);
-                cx.notify();
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("Work steps: {error}"),
-        }
-        if owed {
-            self.fetch_steps(window, cx);
-        }
-    }
-
-    /// Ticks the elapsed time once a second, only while the selected session works.
-    pub(super) fn sync_activity_clock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.activity_clock || !self.selected_working() {
-            return;
-        }
-        self.activity_clock = true;
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let ticking = this.update(cx, |view, cx| {
-                    view.activity_clock = view.selected_working();
-                    if view.activity_clock {
-                        cx.notify();
-                        if let Some(sheet) = view.history.as_ref().and_then(WeakEntity::upgrade) {
-                            sheet.update(cx, |_, cx| cx.notify());
-                        }
-                    }
-                    view.activity_clock
-                });
-                if !matches!(ticking, Ok(true)) {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    pub(super) fn selected_working(&self) -> bool {
-        self.page.is_none()
-            && self
-                .selected_session()
-                .is_some_and(|s| s.status == Status::Working)
-    }
-
-    pub(super) fn activity_card(&self) -> Card {
-        self.activity
-            .as_ref()
-            .filter(|a| self.selected.as_ref() == Some(&a.session_id))
-            .map(RunActivity::card)
-            .unwrap_or_default()
-    }
-
-    /// Asks for the summaries of finished turns on the loaded page that are not known yet.
-    pub(super) fn load_run_summaries(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.selected.clone() else {
-            return;
-        };
-        let run_ids: Vec<String> = self
-            .messages
-            .iter()
-            .filter_map(|m| reply_run(&m.id))
-            .filter(|run| !self.run_summaries.contains_key(*run))
-            .map(str::to_owned)
-            .collect();
-        if !run_ids.is_empty() {
-            self.request(
-                Command::RunSummaries {
-                    session_id,
-                    run_ids,
-                },
-                window,
-                cx,
-            );
-        }
-    }
-
-    pub(super) fn accept_run_summaries(&mut self, summaries: Vec<RunSummary>) {
-        let cache = Rc::make_mut(&mut self.run_summaries);
-        // Finished runs never change, so the cache only needs a bound.
-        if cache.len() > 1_000 {
-            cache.clear();
-        }
-        for summary in summaries {
-            let reply = reply_id(&summary.run_id);
-            cache.insert(summary.run_id.clone(), summary);
-            // The reply's row gains a summary line; the list measures it again.
-            if let Some(row) = self.messages.iter().position(|m| m.id == reply)
-                && row < self.list.item_count()
-            {
-                self.list.splice(row..row + 1, 1);
-            }
-        }
-    }
-
-    fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        let preferences = cx.global_mut::<Preferences>();
-        preferences.minimize_activity = !preferences.minimize_activity;
-        if let Err(error) = preferences.save() {
-            eprintln!("Saving preferences: {error}");
-        }
-        // The trailing row changed height; the list measures it again.
-        let shown = self.messages.len();
-        if self.list.item_count() > shown {
-            self.list.splice(shown..shown + 1, 1);
-        }
-        cx.notify();
-    }
-}
-
 pub(super) fn kind_icon(kind: StepKind) -> &'static str {
     match kind {
         StepKind::Command => "terminal",
@@ -409,7 +225,7 @@ pub(super) fn step_count(actions: usize) -> String {
 pub(super) fn turn_summary(
     summary: &RunSummary,
     p: Palette,
-    view: WeakEntity<Workspace>,
+    view: WeakEntity<transcript::Transcript>,
 ) -> Stateful<Div> {
     let took = summary.finished_at.map_or(String::new(), |finished| {
         format!("Worked {} · ", duration(finished - summary.started_at))
@@ -448,7 +264,7 @@ pub(super) fn activity_row(
     card: &Card,
     minimized: bool,
     p: Palette,
-    view: WeakEntity<Workspace>,
+    view: WeakEntity<transcript::Transcript>,
 ) -> Stateful<Div> {
     let stats = format!(
         "· {} · {}",

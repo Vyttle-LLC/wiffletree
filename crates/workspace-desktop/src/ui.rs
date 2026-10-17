@@ -405,127 +405,106 @@ pub(super) fn ticket_state_color(state: TicketState, p: Palette) -> Hsla {
     }
 }
 
-impl Workspace {
-    /// A session's status badge; an idle coordinator whose team is working says so. Questions
-    /// it still waits on share the status color: they go to its coordinator, not to you.
-    pub(super) fn session_badge(&self, session: &Session, p: Palette) -> Div {
-        let (status, label) = badge_state(
-            session.status,
-            self.shown_status(session),
-            self.compacting(&session.id),
-        );
-        let questions = self
-            .snapshot()
-            .map_or(0, |s| s.questions_waiting(&session.id));
-        status_badge(status, crate::tree::badge_label(label, questions), p)
-    }
-    /// Archived sessions are listed only while the sidebar shows them.
-    pub(super) fn listed(&self, session: &Session) -> bool {
-        self.show_archived || !session.archived
-    }
-    pub(super) fn owner_name(&self) -> String {
-        self.selected_session()
-            .map(|s| s.name.clone())
-            .unwrap_or_default()
-    }
-    pub(super) fn project_name(&self) -> String {
-        let project = self.project_id().unwrap_or_default();
-        (self.index.as_ref())
-            .and_then(|index| index.project(&project))
-            .map(|p| p.name.clone())
-            .unwrap_or_default()
-    }
-    pub(super) fn repository(&self) -> Option<&Repository> {
-        let id = self.selected_session()?.repository_id.as_ref()?;
-        self.snapshot()?.repositories.iter().find(|r| &r.id == id)
-    }
-    /// The ticket a worker session belongs to.
-    pub(super) fn ticket_of(&self, session_id: &str) -> Option<&Ticket> {
-        self.index.as_ref()?.ticket_of(session_id)
-    }
-    /// A full-width page about the whole workspace, shown in place of the conversation.
-    fn page(
-        &self,
-        title: &'static str,
-        subtitle: &'static str,
-        body: Div,
-        footer: Option<Div>,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        const COLUMN: f32 = 980.;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(p.base)
-            .child(
+/// A session's status badge; an idle coordinator whose team is working says so. Questions
+/// it still waits on share the status color: they go to its coordinator, not to you.
+pub(super) fn session_badge(shared: &Shared, session: &Session, p: Palette) -> Div {
+    let (status, label) = badge_state(
+        session.status,
+        shared.shown_status(session),
+        shared.compacting(&session.id),
+    );
+    let questions = shared
+        .snapshot()
+        .map_or(0, |s| s.questions_waiting(&session.id));
+    status_badge(status, crate::tree::badge_label(label, questions), p)
+}
+
+/// How a cached child view is laid out: it fills its slot, which its parent sizes.
+pub(super) fn full() -> StyleRefinement {
+    StyleRefinement::default().size_full()
+}
+
+/// A full-width page about the whole workspace, shown in place of the conversation.
+pub(super) fn page<V: EventEmitter<Intent>>(
+    title: &'static str,
+    subtitle: &'static str,
+    body: impl IntoElement,
+    footer: Option<Div>,
+    p: Palette,
+    cx: &mut Context<V>,
+) -> Div {
+    const COLUMN: f32 = 980.;
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .bg(p.base)
+        .child(
+            div()
+                .flex_none()
+                .h(px(64.))
+                .px_6()
+                .flex()
+                .items_center()
+                .gap_3()
+                .border_b_1()
+                .border_color(p.edge.opacity(0.3))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(p.subtle)
+                                .child(format!("Workspace  ›  {subtitle}")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        ),
+                )
+                .child(
+                    button("close-page")
+                        .ghost()
+                        .icon(icon("close"))
+                        .tooltip("Back to the conversation")
+                        .on_click(
+                            cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Conversation))),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .px_6()
+                .py_5()
+                .child(div().w_full().max_w(px(COLUMN)).mx_auto().child(body)),
+        )
+        .when_some(footer, |d, footer| {
+            d.child(
                 div()
                     .flex_none()
-                    .h(px(64.))
                     .px_6()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
+                    .py_3()
+                    .border_t_1()
                     .border_color(p.edge.opacity(0.3))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(p.subtle)
-                                    .child(format!("Workspace  ›  {subtitle}")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(18.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            ),
-                    )
-                    .child(
-                        button("close-page")
-                            .ghost()
-                            .icon(icon("close"))
-                            .tooltip("Back to the conversation")
-                            .on_click(cx.listener(|v, _, w, c| {
-                                v.view = Page::Conversation;
-                                v.sync_process_readings(w, c);
-                                c.notify();
-                            })),
-                    ),
+                    .child(footer.w_full().max_w(px(COLUMN)).mx_auto()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .px_6()
-                    .py_5()
-                    .child(div().w_full().max_w(px(COLUMN)).mx_auto().child(body)),
-            )
-            .when_some(footer, |d, footer| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .px_6()
-                        .py_3()
-                        .border_t_1()
-                        .border_color(p.edge.opacity(0.3))
-                        .child(footer.w_full().max_w(px(COLUMN)).mx_auto()),
-                )
-            })
-    }
+        })
+}
 
+impl Workspace {
     /// Shown in place of the conversation until a session can be selected.
     fn start_screen(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let kind = self.start_screen_kind();
+        let kind = self.start_screen_kind(cx);
         let content = if let Some(error) = &self.load_error {
             empty_state(
                 "triangle-alert",
@@ -603,45 +582,22 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::render_counts::count("Workspace");
         let p = self.colors(cx);
-        let main = match self.view {
-            Page::Usage => self.page(
-                "Usage",
-                "Account limits and tokens across every project",
-                self.usage_page(p, cx),
-                None,
-                p,
-                cx,
-            ),
-            Page::Models => self.page(
-                "Models",
-                "Models on this machine",
-                self.models_panel(p, cx),
-                Some(self.models_footer(p, cx)),
-                p,
-                cx,
-            ),
-            Page::Skills => self.page(
-                "Skills",
-                "How your agents work",
-                self.skills_page(p, cx),
-                None,
-                p,
-                cx,
-            ),
-            Page::Repositories => self.page(
-                "Repositories",
-                "Repositories every project can use",
-                self.repositories_page(p, cx),
-                None,
-                p,
-                cx,
-            ),
-            Page::Conversation if self.selected_session().is_some() => self.conversation(p, cx),
-            Page::Conversation => self.start_screen(p, cx),
+        let main = match self.shared.page {
+            Page::Usage => self.usage.clone().cached(full()).into_any_element(),
+            Page::Models => self.models.clone().cached(full()).into_any_element(),
+            Page::Skills => self.skills.clone().cached(full()).into_any_element(),
+            Page::Repositories => self.repositories.clone().cached(full()).into_any_element(),
+            Page::Conversation if self.shared.selected_session().is_some() => {
+                // Not cached: GPUI draws every view inside a cached view that renders again,
+                // so the transcript is cached only below an uncached conversation.
+                self.conversation.clone().into_any_element()
+            }
+            Page::Conversation => self.start_screen(p, cx).into_any_element(),
         };
         // Session tools make no sense beside a page about the whole workspace.
-        let session_tools = self.view == Page::Conversation;
+        let session_tools = self.shared.page == Page::Conversation;
         div()
             .size_full()
             .bg(p.base)
@@ -663,7 +619,7 @@ impl Render for Workspace {
                                     resizable_panel()
                                         .size(px(264.))
                                         .size_range(px(240.)..px(500.))
-                                        .child(self.sidebar(p, cx)),
+                                        .child(self.sidebar.clone().cached(full())),
                                 )
                                 .child(
                                     resizable_panel().size_range(px(620.)..Pixels::MAX).child(
@@ -677,11 +633,19 @@ impl Render for Workspace {
                                                 resizable_panel()
                                                     .size(px(372.))
                                                     .size_range(px(300.)..px(560.))
-                                                    .visible(session_tools && self.panel.is_some())
-                                                    .when_some(
-                                                        self.panel.filter(|_| session_tools),
-                                                        |d, panel| {
-                                                            d.child(self.panel_view(panel, p, cx))
+                                                    .visible(
+                                                        session_tools
+                                                            && self.shared.panel.is_some(),
+                                                    )
+                                                    .when(
+                                                        session_tools
+                                                            && self.shared.panel.is_some(),
+                                                        |d| {
+                                                            d.child(
+                                                                self.inspector
+                                                                    .clone()
+                                                                    .cached(full()),
+                                                            )
                                                         },
                                                     ),
                                             ),
