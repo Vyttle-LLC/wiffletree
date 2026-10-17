@@ -2158,6 +2158,9 @@ impl Actor {
             }
             host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
         })?;
+        if matches!(spent, Some(Ok(_))) {
+            let _ = self.usage_changed.try_send(());
+        }
         // A stop let this compaction finish. If its agent is still stopped, paused or in a
         // stopped project, what the compaction's provider left running is stopped now.
         let live = self.host.live_projects()?.contains(&session.project_id);

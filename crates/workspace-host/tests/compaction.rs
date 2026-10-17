@@ -1620,6 +1620,23 @@ fn a_codex_server_that_ignores_its_input_closing_is_stopped_once_its_margin_has_
 }
 
 #[test]
+fn a_codex_compaction_signals_the_usage_it_records() {
+    let world = World::codex();
+    let main = world.main.id.clone();
+    world.record_last_turn(&main);
+    let usage = world.service.as_ref().unwrap().usage_changes();
+    while usage.try_recv().is_ok() {}
+
+    world.compacted(None);
+
+    assert_eq!(world.ledger().0, 2, "the compaction's request is recorded");
+    assert!(
+        usage.try_recv().is_ok(),
+        "and an open Usage page hears of it"
+    );
+}
+
+#[test]
 fn the_turn_after_a_codex_compaction_is_counted_whole() {
     let world = World::codex();
     let main = world.main.id.clone();
