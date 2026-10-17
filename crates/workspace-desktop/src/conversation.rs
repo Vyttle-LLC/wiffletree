@@ -11,6 +11,44 @@ use transcript::Transcript;
 use ui::{banner, hint, icon};
 use wording::{effort_label, plural};
 
+/// The files dropped on each session's draft that the host is still checking, and the send
+/// pressed on each meanwhile, with the text it was pressed on.
+#[derive(Default)]
+struct DropChecks {
+    checking: BTreeMap<String, usize>,
+    waiting: BTreeMap<String, String>,
+}
+impl DropChecks {
+    fn started(&mut self, session: &str) {
+        *self.checking.entry(session.to_owned()).or_default() += 1;
+    }
+    /// Whether a send of `body` must wait for `session`'s dropped files; it waits with that text.
+    fn hold(&mut self, session: &str, body: &str) -> bool {
+        let holds = self.checking.contains_key(session);
+        if holds {
+            self.waiting.insert(session.to_owned(), body.to_owned());
+        }
+        holds
+    }
+    /// One of `session`'s checks came back. Returns the text of the send to make now: one that
+    /// waited for this, the last check. A failed check drops the waiting send for good.
+    fn finished(&mut self, session: &str, succeeded: bool) -> Option<String> {
+        if let Some(count) = self.checking.get_mut(session) {
+            *count -= 1;
+            if *count == 0 {
+                self.checking.remove(session);
+            }
+        }
+        if !succeeded {
+            self.waiting.remove(session);
+            return None;
+        }
+        (!self.checking.contains_key(session))
+            .then(|| self.waiting.remove(session))
+            .flatten()
+    }
+}
+
 /// Wide enough for the composer, narrow enough that message lines stay readable.
 pub(super) const COLUMN: f32 = 720.;
 
@@ -35,10 +73,7 @@ pub(super) struct Conversation {
     /// Why files in the selected conversation's last drop were not attached.
     refused_files: Vec<String>,
     sending: BTreeSet<String>,
-    /// By session, the dropped files the host is still checking; a send waits for them.
-    inspecting: BTreeMap<String, usize>,
-    /// Sessions whose send waits for their dropped files.
-    send_waiting: BTreeSet<String>,
+    drop_checks: DropChecks,
     /// Projects whose decision card is folded to one row. Kept in memory only.
     minimized_decisions: BTreeSet<String>,
     /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
@@ -82,8 +117,7 @@ impl Conversation {
             attached: BTreeMap::new(),
             refused_files: vec![],
             sending: BTreeSet::new(),
-            inspecting: BTreeMap::new(),
-            send_waiting: BTreeSet::new(),
+            drop_checks: DropChecks::default(),
             minimized_decisions: BTreeSet::new(),
             chat_models: Rc::default(),
         }
@@ -140,37 +174,27 @@ impl Conversation {
         let Some(session) = self.shared.selected.clone() else {
             return;
         };
-        *self.inspecting.entry(session.clone()).or_default() += 1;
+        self.drop_checks.started(&session);
         let ask = ask::inspect_attachments(paths.clone());
         self.ask(ask, window, cx, move |view, inspected, window, cx| {
-            view.inspected(&session);
             let inspected = match inspected {
                 Ok(inspected) => inspected,
-                Err(error) => return toast_error(error, window, cx),
+                Err(error) => {
+                    // A send pressed meanwhile is not made; its draft stays to send again.
+                    view.drop_checks.finished(&session, false);
+                    return toast_error(error, window, cx);
+                }
             };
             let attached = view.attached.entry(session.clone()).or_default();
             let refused = attachment_chips::add_dropped(attached, &paths, inspected);
             // Why files were refused shows only with the conversation they were dropped on.
-            let selected = view.shared.selected.as_ref() == Some(&session);
-            if selected {
+            if view.shared.selected.as_ref() == Some(&session) {
                 view.refused_files = refused;
             }
-            // A send pressed meanwhile goes now, with the files, if its draft is still the one shown.
-            let waited =
-                !view.inspecting.contains_key(&session) && view.send_waiting.remove(&session);
-            if waited && selected {
-                view.send(window, cx);
+            if let Some(body) = view.drop_checks.finished(&session, true) {
+                view.send_draft(session, body, window, cx);
             }
         });
-    }
-    /// One drop's check on `session` came back.
-    fn inspected(&mut self, session: &str) {
-        if let Some(count) = self.inspecting.get_mut(session) {
-            *count -= 1;
-            if *count == 0 {
-                self.inspecting.remove(session);
-            }
-        }
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(files) = self
@@ -183,26 +207,39 @@ impl Conversation {
         }
         cx.notify();
     }
+    /// Sends the selected session's draft as it reads now, or once its dropped files are checked.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let body = self.input.read(cx).value().to_string();
         let Some(recipient) = self.shared.selected.clone() else {
             return;
         };
+        if !self.drop_checks.hold(&recipient, &body) {
+            self.send_draft(recipient, body, window, cx);
+        }
+    }
+    /// Sends `body` with the files attached to `recipient`'s draft, whichever session is
+    /// selected by then.
+    fn send_draft(
+        &mut self,
+        recipient: String,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let attachments = self
             .attached
             .get(&recipient)
             .map(|files| files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
             .unwrap_or_default();
-        if self.inspecting.contains_key(&recipient) {
-            self.send_waiting.insert(recipient);
-            return;
-        }
         if (body.trim().is_empty() && attachments.is_empty()) || self.sending.contains(&recipient) {
             return;
         }
-        self.drafts.insert(recipient.clone(), body.clone());
+        // Another session's saved draft is what was typed after; the reply leaves it.
+        if self.shared.selected.as_ref() == Some(&recipient) {
+            self.drafts.insert(recipient.clone(), body.clone());
+            self.refused_files.clear();
+        }
         self.sending.insert(recipient.clone());
-        self.refused_files.clear();
         self.request(
             Command::Send {
                 id: new_id(),
@@ -829,7 +866,7 @@ impl Render for Conversation {
 
 #[cfg(test)]
 mod tests {
-    use super::forget_settled;
+    use super::{DropChecks, forget_settled};
     use std::collections::BTreeSet;
     use workspace_core::Attention;
 
@@ -844,6 +881,31 @@ mod tests {
             options: Vec::new(),
             answer: None,
         }
+    }
+
+    #[test]
+    fn a_send_pressed_while_files_are_checked_goes_with_its_own_text_after_the_last_check() {
+        let mut checks = DropChecks::default();
+        assert!(!checks.hold("s", "Now"), "nothing is being checked");
+        checks.started("s");
+        checks.started("s");
+        assert!(checks.hold("s", "Look at these"));
+        assert!(!checks.hold("t", "Elsewhere"), "another session's send goes at once");
+        assert_eq!(checks.finished("s", true), None, "a check is still on its way");
+        assert_eq!(checks.finished("s", true).as_deref(), Some("Look at these"));
+        assert_eq!(checks.finished("s", true), None, "it went once");
+    }
+
+    #[test]
+    fn a_failed_check_drops_the_waiting_send_and_no_later_drop_makes_it() {
+        let mut checks = DropChecks::default();
+        checks.started("s");
+        checks.started("s");
+        assert!(checks.hold("s", "Look at these"));
+        assert_eq!(checks.finished("s", false), None);
+        assert_eq!(checks.finished("s", true), None, "the other check sends nothing");
+        checks.started("s");
+        assert_eq!(checks.finished("s", true), None, "nor does a later drop");
     }
 
     #[test]
