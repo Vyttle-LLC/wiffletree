@@ -31,6 +31,8 @@ mod steps;
 mod stream;
 mod sync;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 pub mod usage;
 mod verification;
 mod worktrees;

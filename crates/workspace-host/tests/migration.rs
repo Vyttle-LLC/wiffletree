@@ -2,21 +2,12 @@
 //! previous release left it, with an active team and an archived one. Schema 7 adds the manual
 //! order of projects.
 mod common;
+use common::git;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use workspace_core::*;
 use workspace_host::Host;
-
-fn git(path: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
 
 struct Fixture {
     _directory: tempfile::TempDir,

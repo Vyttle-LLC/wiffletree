@@ -810,17 +810,10 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::git;
     use std::cell::RefCell;
     use std::os::unix::process::ExitStatusExt;
 
-    fn git(path: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .current_dir(path)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
     /// A scratch repository under `root` whose `origin` is `url`, if any.
     fn scratch(root: &Path, name: &str, url: Option<&str>) -> PathBuf {
         let path = root.join(name);

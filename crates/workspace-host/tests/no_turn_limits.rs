@@ -1,22 +1,11 @@
 //! The real Service runs every due turn at once, with the fake provider standing in for the
 //! CLIs: no project or host-wide turn limit holds workers back. Kept in its own test binary
 //! because it sets the provider environment for the process.
-use serde_json::Value;
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+mod common;
+use common::{git, request, until_changed as until};
+use std::time::{Duration, Instant};
 use workspace_core::*;
-use workspace_host::{Host, service::Service};
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
+use workspace_host::Host;
 
 /// Far longer than ten turns take to start and stop on a loaded machine. It decides nothing
 /// about a passing run; it only makes a regression that never gets there fail instead of hang.
@@ -25,24 +14,6 @@ const OVERALL: Duration = Duration::from_secs(300);
 /// Waits for `done`, looking again on the host's change signal, which every turn start and
 /// finish sends, so the result does not depend on the machine's load. Fails at `deadline`;
 /// the panic drops the service, which stops the turns still running.
-fn until(service: &Service, deadline: Instant, done: impl Fn(&Snapshot) -> bool) -> Snapshot {
-    let changes = service.changes();
-    loop {
-        let snapshot: Snapshot =
-            serde_json::from_value(request(service, Command::Snapshot)).unwrap();
-        if done(&snapshot) {
-            return snapshot;
-        }
-        while changes.try_recv().is_err() {
-            assert!(
-                Instant::now() < deadline,
-                "the turns did not get there within {OVERALL:?}"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-}
-
 fn runtimes<'a>(
     snapshot: &'a Snapshot,
     sessions: &'a [String],
@@ -51,16 +22,6 @@ fn runtimes<'a>(
         .runtimes
         .iter()
         .filter(|r| sessions.contains(&r.session_id))
-}
-
-fn git(path: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success());
 }
 
 #[test]
@@ -113,18 +74,12 @@ fn ten_workers_in_two_projects_run_at_once() {
         }
         workers
     };
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .start()
+    };
     let deadline = Instant::now() + OVERALL;
 
     // Every turn started before any of them finished, so all ten ran at once. A limit would

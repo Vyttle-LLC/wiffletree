@@ -1,26 +1,11 @@
 //! Ticket verification through the host's tools: one call, pinned commits, read-only
 //! verifiers, failures back to the implementer and a capped number of rounds.
 mod common;
+use common::git;
 use serde_json::{Value, json};
 use std::path::Path;
 use workspace_core::*;
 use workspace_host::Host;
-
-fn git(path: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(path)
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
 
 fn profile(provider: Provider, model: &str, effort: &str) -> ModelProfile {
     ModelProfile {

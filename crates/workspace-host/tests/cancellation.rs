@@ -1,6 +1,8 @@
 //! A provider's whole process group stops when its turn ends, through the real Service, even
 //! with a tool process that ignores SIGTERM and holds stderr open. Kept in its own test binary
 //! because it sets the provider environment for the process.
+mod common;
+use common::{request, snapshot, until_snapshot as until};
 use std::{
     os::unix::fs::PermissionsExt,
     path::Path,
@@ -39,27 +41,6 @@ esac
 exec 1>&-
 sleep 90
 "#;
-
-fn request(service: &Service, command: Command) -> serde_json::Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
-
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
-
-fn until(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !done(&snapshot(service)) {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 fn session(snapshot: &Snapshot, id: &str) -> (Status, SessionRuntime) {
     let status = snapshot
@@ -100,17 +81,13 @@ fn every_way_a_turn_ends_stops_its_whole_process_group_promptly() {
         host.create_project("Process groups").unwrap();
         host.sessions().unwrap().remove(0)
     };
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &provider);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &provider);
-        std::env::set_var("WORKSPACE_TEST_GROUPS", &groups);
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .provider(&provider)
+            .env("WORKSPACE_TEST_GROUPS", &groups)
+            .start()
+    };
     let send = |id: &str, body: &str| {
         request(
             &service,

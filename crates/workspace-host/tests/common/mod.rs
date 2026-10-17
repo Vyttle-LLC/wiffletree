@@ -53,3 +53,118 @@ pub fn process_started(pid: i32) -> i64 {
     assert_eq!(read, size, "process {pid} is not running");
     (info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec) as i64
 }
+
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+use workspace_host::service::Service;
+
+pub fn git_output(path: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .current_dir(path)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+        ])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+pub fn git(path: &Path, args: &[&str]) -> String {
+    let output = git_output(path, args);
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+pub fn request(service: &Service, command: Command) -> Value {
+    service
+        .request(command)
+        .unwrap()
+        .recv_blocking()
+        .unwrap()
+        .unwrap()
+}
+
+pub fn snapshot(service: &Service) -> Snapshot {
+    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
+}
+
+pub fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+pub fn until_snapshot(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
+    until(what, || done(&snapshot(service)));
+}
+
+/// Waits on the change signal so concurrent turns need no timing assumptions.
+pub fn until_changed(
+    service: &Service,
+    deadline: Instant,
+    done: impl Fn(&Snapshot) -> bool,
+) -> Snapshot {
+    let changes = service.changes();
+    loop {
+        let snapshot = snapshot(service);
+        if done(&snapshot) {
+            return snapshot;
+        }
+        while changes.try_recv().is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "the turns did not finish before the deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Setup shared by fake-provider tests. Tests own their temporary folders and store setup.
+pub struct ServiceFixture {
+    home: PathBuf,
+    provider: Option<PathBuf>,
+    environment: Vec<(String, PathBuf)>,
+}
+impl ServiceFixture {
+    pub fn new(home: &Path) -> Self {
+        Self {
+            home: home.into(),
+            provider: None,
+            environment: vec![],
+        }
+    }
+    pub fn fake_provider(self, usage: &Path) -> Self {
+        self.provider(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py"))
+            .env("WORKSPACE_TEST_USAGE_DIR", usage)
+    }
+    pub fn provider(mut self, provider: &Path) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+    pub fn env(mut self, key: &str, value: &Path) -> Self {
+        self.environment.push((key.into(), value.into()));
+        self
+    }
+    /// The caller must serialize tests using the process environment and keep it unchanged
+    /// while the service runs. Each fixture binary has one test or holds an environment lock.
+    pub unsafe fn start(self) -> Service {
+        unsafe {
+            if let Some(provider) = self.provider {
+                std::env::set_var("WORKSPACE_CLAUDE_BIN", &provider);
+                std::env::set_var("WORKSPACE_CODEX_BIN", &provider);
+            }
+            for (key, value) in self.environment {
+                std::env::set_var(key, value);
+            }
+        }
+        Service::start(self.home, env!("CARGO_BIN_EXE_workspace-host").into()).unwrap()
+    }
+}

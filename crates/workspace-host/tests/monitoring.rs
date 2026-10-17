@@ -1,18 +1,10 @@
 //! Coordinator-run monitoring through the real Service, with the fake provider standing in for
 //! the CLIs. Kept in its own test binary because it sets the provider environment for the process.
-use serde_json::Value;
-use std::{path::Path, time::Duration};
+mod common;
+use common::{request, snapshot, until_snapshot as until};
+use std::time::Duration;
 use workspace_core::*;
 use workspace_host::{Host, now, service::Service};
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
 
 fn messages(service: &Service, session: &str) -> Vec<Message> {
     let value = request(
@@ -26,19 +18,7 @@ fn messages(service: &Service, session: &str) -> Vec<Message> {
     serde_json::from_value(value).unwrap()
 }
 
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
-
 /// Observes snapshots; reads never trigger admission.
-fn until(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !done(&snapshot(service)) {
-        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 fn idle(snapshot: &Snapshot) -> bool {
     snapshot
         .sessions
@@ -68,43 +48,18 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
     let scratch = tempfile::tempdir().unwrap();
     let repo = scratch.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
-    for args in [
-        &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=T",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
-    ] {
-        let git = std::process::Command::new("git")
-            .current_dir(&repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(git.success());
-    }
+    common::git(&repo, &["init", "-q"]);
+    common::git(&repo, &["commit", "-q", "--allow-empty", "-m", "Initial"]);
     let monitored = {
         let mut host = Host::open_set_up(home.path()).unwrap();
         host.create_project("Monitor").unwrap()
     };
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .start()
+    };
     let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
 

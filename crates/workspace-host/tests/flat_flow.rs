@@ -1,24 +1,12 @@
 //! An SH-1171-sized task end to end through the real Service, with the fake provider standing
 //! in for the CLIs: one repository, one ticket, three verifiers, one failure fixed in round 2.
 //! Kept in its own test binary because it sets the provider environment for the process.
+mod common;
+use common::{git, request, snapshot, until};
 use rusqlite::OptionalExtension;
-use serde_json::Value;
 use std::{path::Path, time::Duration};
 use workspace_core::*;
 use workspace_host::{Host, service::Service};
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
-
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
 
 /// The snapshot with the archive's sessions, tickets and runtimes added.
 fn everything(service: &Service) -> Snapshot {
@@ -28,25 +16,6 @@ fn everything(service: &Service) -> Snapshot {
     snapshot.tickets.extend(archive.tickets);
     snapshot.runtimes.extend(archive.runtimes);
     snapshot
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while !done() {
-        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn git(path: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8(output.stdout).unwrap()
 }
 
 fn verifier(role: Role, focus: &str, provider: Option<Provider>) -> VerifierConfig {
@@ -96,18 +65,12 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
             .unwrap();
         (project, main)
     };
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .start()
+    };
 
     request(
         &service,

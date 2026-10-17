@@ -1,24 +1,11 @@
 mod common;
+use common::git_output as git;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
 use workspace_core::{
     PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket, TicketState,
 };
 use workspace_host::Host;
-
-fn git(path: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git")
-        .current_dir(path)
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap()
-}
 
 fn succeed(path: &Path, args: &[&str]) {
     let output = git(path, args);

@@ -1,21 +1,11 @@
+mod common;
+use common::git;
 use rusqlite::{Connection, params};
 use serde_json::json;
-use std::{fs, os::unix::fs::symlink, path::Path, process::Command};
+use std::{fs, os::unix::fs::symlink, path::Path};
 use workspace_core::{Provider, Role, Session, Status, Ticket};
 use workspace_host::Host;
 
-fn git(path: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .current_dir(path)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 fn repo(path: &Path, committed: bool) {
     fs::create_dir_all(path).unwrap();
     git(path, &["init", "-q", "-b", "main"]);
