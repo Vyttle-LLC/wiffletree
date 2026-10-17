@@ -492,7 +492,8 @@ impl Tree {
 struct Watcher {
     trees: HashMap<u64, Tree>,
     next_key: u64,
-    /// The process ids of the last listing, in order; only ids not in it are read.
+    /// The process ids of the last listing that could be read, in order; only ids not in it
+    /// are read.
     listed: Vec<i32>,
     scanned_at: Option<Instant>,
     /// How many times the process table has been listed.
@@ -520,10 +521,17 @@ impl Watcher {
         let mut pids = os::all();
         pids.sort_unstable();
         self.listings += 1;
+        let mut unread = Vec::new();
         let mut fresh: Vec<ProcessInfo> = pids
             .iter()
             .filter(|pid| self.listed.binary_search(pid).is_err())
-            .filter_map(|pid| read(*pid))
+            .filter_map(|pid| {
+                let process = read(*pid);
+                if process.is_none() {
+                    unread.push(*pid);
+                }
+                process
+            })
             .collect();
         // A parent and its child can both be new; the child is adopted on the pass after.
         loop {
@@ -538,6 +546,8 @@ impl Watcher {
                 break;
             }
         }
+        // A process part way through an exec cannot be read; it is read again at the next scan.
+        pids.retain(|pid| unread.binary_search(pid).is_err());
         self.listed = pids;
         // Nobody takes a handed-over tree's sightings, and one with nothing left to follow has
         // nothing left to name.
