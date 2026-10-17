@@ -351,3 +351,58 @@ pub(super) fn toast_error(message: impl Into<SharedString>, window: &mut Window,
         cx,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::human_write;
+    use workspace_core::*;
+
+    #[test]
+    fn only_the_writes_the_human_asks_for_send_a_reader_back_to_the_newest_page() {
+        let session_id = || "s".to_owned();
+        let human = [
+            Command::Send {
+                id: "m".into(),
+                sender: None,
+                recipient: session_id(),
+                body: "Go".into(),
+                attachments: vec![],
+            },
+            Command::SetArchived {
+                session_id: session_id(),
+                archived: true,
+            },
+            Command::StopProcesses {
+                session_id: session_id(),
+                groups: vec![],
+            },
+            Command::SetCheckIns {
+                child_turns: 25,
+                human_turns: 100,
+            },
+            Command::CancelCompaction {
+                session_id: session_id(),
+            },
+        ];
+        for command in &human {
+            assert!(human_write(command), "{command:?}");
+        }
+        let not = [
+            // The app refreshes these by itself.
+            Command::RefreshCodexQuota,
+            Command::RefreshRepositories,
+            // Reads change nothing.
+            Command::Snapshot,
+            Command::Quotas,
+            Command::Messages {
+                session_id: session_id(),
+                before: None,
+                limit: 100,
+            },
+            Command::InspectAttachments { paths: vec![] },
+        ];
+        for command in &not {
+            assert!(!human_write(command), "{command:?}");
+        }
+    }
+}

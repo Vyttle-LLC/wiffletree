@@ -890,8 +890,15 @@ mod tests {
         checks.started("s");
         checks.started("s");
         assert!(checks.hold("s", "Look at these"));
-        assert!(!checks.hold("t", "Elsewhere"), "another session's send goes at once");
-        assert_eq!(checks.finished("s", true), None, "a check is still on its way");
+        assert!(
+            !checks.hold("t", "Elsewhere"),
+            "another session's send goes at once"
+        );
+        assert_eq!(
+            checks.finished("s", true),
+            None,
+            "a check is still on its way"
+        );
         assert_eq!(checks.finished("s", true).as_deref(), Some("Look at these"));
         assert_eq!(checks.finished("s", true), None, "it went once");
     }
@@ -903,7 +910,11 @@ mod tests {
         checks.started("s");
         assert!(checks.hold("s", "Look at these"));
         assert_eq!(checks.finished("s", false), None);
-        assert_eq!(checks.finished("s", true), None, "the other check sends nothing");
+        assert_eq!(
+            checks.finished("s", true),
+            None,
+            "the other check sends nothing"
+        );
         checks.started("s");
         assert_eq!(checks.finished("s", true), None, "nor does a later drop");
     }

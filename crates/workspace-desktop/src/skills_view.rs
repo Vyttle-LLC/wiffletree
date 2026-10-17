@@ -24,6 +24,13 @@ pub(super) enum SkillView {
     Review(Skill),
 }
 
+/// The page draws again for another workspace or catalog: merge notes and questions name their
+/// models from the catalog.
+fn redraws(old: &Shared, new: &Shared) -> bool {
+    let (_, moved) = new.moved_from(old);
+    moved || !Rc::ptr_eq(&old.catalog, &new.catalog)
+}
+
 /// What a skill's pages ask before they act.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Confirm {
@@ -861,13 +868,12 @@ impl SkillsPage {
     /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
-        // Merge notes and questions name their models from the catalog.
-        let catalog = !Rc::ptr_eq(&shared.catalog, &self.shared.catalog);
+        let redraw = redraws(&self.shared, &shared);
         if moved && let Some(snapshot) = shared.snapshot() {
             self.follow_saved_rules(snapshot, window, cx);
         }
         self.shared = shared;
-        if moved || catalog {
+        if redraw {
             cx.notify();
         }
     }
@@ -2215,8 +2221,8 @@ mod tests {
         CORE, Choice, Chosen, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab,
         entry_detail, entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
         merge_note_text, merged_since, out_of_date, out_of_date_title, question, question_banner,
-        question_note, reset_question, rewrite_banner, rewrite_question, saved_text, shown_changes,
-        state_label, time_or_date, written_at,
+        question_note, redraws, reset_question, rewrite_banner, rewrite_question, saved_text,
+        shown_changes, state_label, time_or_date, written_at,
     };
     use workspace_core::{
         Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider,
@@ -2237,6 +2243,30 @@ mod tests {
     fn titles(history: &[Recorded]) -> Vec<String> {
         let title = |r: &Recorded| entry_title(r.entry.as_ref().unwrap());
         history.iter().map(title).collect()
+    }
+
+    #[test]
+    fn the_page_draws_again_for_a_new_catalog_or_workspace_only() {
+        use crate::shared::Shared;
+        use std::rc::Rc;
+        let old = Shared::default();
+        assert!(!redraws(&old, &old.clone()), "nothing moved");
+        let catalog = Shared {
+            catalog: Rc::new(vec![]),
+            ..old.clone()
+        };
+        assert!(
+            redraws(&old, &catalog),
+            "its labels name the catalog's models"
+        );
+        let workspace = Shared {
+            index: Some(Rc::new(workspace_core::WorkspaceIndex::new(
+                Default::default(),
+                Default::default(),
+            ))),
+            ..old.clone()
+        };
+        assert!(redraws(&old, &workspace));
     }
 
     #[test]

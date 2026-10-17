@@ -145,6 +145,14 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 .any(|m| m.sender.as_deref().is_some_and(archived)))
 }
 
+/// Replaces the readings held only when a read brings different ones: the same readings again
+/// would only redraw what draws them.
+fn keep_quotas(held: &mut Rc<Vec<QuotaReading>>, read: Vec<QuotaReading>) {
+    if **held != read {
+        *held = Rc::new(read);
+    }
+}
+
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -547,9 +555,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match quotas {
-            // The same readings again would only redraw what draws them.
-            Ok(quotas) if *self.shared.quotas != quotas => self.shared.quotas = Rc::new(quotas),
-            Ok(_) => {}
+            Ok(quotas) => keep_quotas(&mut self.shared.quotas, quotas),
             Err(error) => self.fail(&command, error, window, cx),
         }
         self.share(window, cx);
@@ -1155,7 +1161,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveDemand, Coalesced, Page, Panel, wants_archive};
+    use super::{ArchiveDemand, Coalesced, Page, Panel, keep_quotas, wants_archive};
     use serde_json::json;
     use std::rc::Rc;
     use workspace_core::*;
@@ -1284,6 +1290,36 @@ mod tests {
         };
         let asked = WorkspaceIndex::new(snapshot, index.archive().clone());
         assert!(!wants_archive(&asked, &shown("live")), "a question is not");
+    }
+
+    #[test]
+    fn the_same_quota_readings_again_keep_the_ones_held() {
+        let reading = |used| QuotaReading {
+            provider: Provider::Codex,
+            account: None,
+            observed_at: 1,
+            source: "Codex app-server".into(),
+            windows: vec![QuotaWindow {
+                key: "weekly".into(),
+                label: "Weekly".into(),
+                used_percent: Some(used),
+                observed_at: 1,
+                duration_mins: Some(10080),
+                resets_at: None,
+                status: None,
+            }],
+            error: None,
+        };
+        let mut held = Rc::new(vec![reading(40.)]);
+        let before = held.clone();
+        keep_quotas(&mut held, vec![reading(40.)]);
+        assert!(
+            Rc::ptr_eq(&held, &before),
+            "nothing that draws them redraws"
+        );
+        keep_quotas(&mut held, vec![reading(41.)]);
+        assert!(!Rc::ptr_eq(&held, &before));
+        assert_eq!(*held, vec![reading(41.)]);
     }
 
     #[test]
