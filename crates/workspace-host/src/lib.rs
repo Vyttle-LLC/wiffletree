@@ -250,6 +250,10 @@ impl Host {
         if let Err(error) = host.skills().record_new_stock_versions() {
             eprintln!("Recording new stock versions of skills: {error:#}");
         }
+        // With a settings repository, another Mac may have merged; that waits for sync.
+        if host.settings().settings_repository.is_none() {
+            host.merge_due_skills();
+        }
         host.recall_skill_histories();
         Ok(host)
     }
@@ -1487,6 +1491,7 @@ impl Host {
                 self.changed_skill(skill)?
             }
             Command::DismissSkillMerge { skill, entry } => {
+                self.skills().merged_entry(skill, &entry)?;
                 self.db.execute(
                     "INSERT OR IGNORE INTO skill_merges_dismissed(skill,entry) VALUES (?1,?2)",
                     [skill.folder(), &entry],
