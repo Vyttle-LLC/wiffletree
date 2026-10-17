@@ -297,22 +297,20 @@ fn send<V: Requests>(
     cx: &mut Context<V>,
     then: impl FnOnce(&mut V, Result<Value, String>, &mut Window, &mut Context<V>) + 'static,
 ) {
-    let wrote = human_write(&command);
+    let sent = command.clone();
     let reply = match view.bridge().send(command) {
         Ok(reply) => reply,
         Err(error) => return then(view, Err(error), window, cx),
     };
     cx.spawn_in(window, async move |this, cx| {
         let reply = reply.await;
-        let wrote = wrote && reply.is_ok();
+        let wrote = reply.is_ok();
         let _ = cx.update(|window, cx| {
             let _ = this.update(cx, |view, cx| {
                 then(view, reply, window, cx);
                 cx.notify();
             });
-            if wrote {
-                cx.set_global(HumanWrote);
-            }
+            replied(&sent, wrote, cx);
         });
     })
     .detach();
@@ -322,6 +320,14 @@ fn send<V: Requests>(
 /// older transcript page goes back to the newest after any of them.
 pub(super) struct HumanWrote;
 impl Global for HumanWrote {}
+
+/// After a reply to `command`, tells the transcript of a write the human asked for that
+/// `succeeded`. Views that send outside `Requests` call it too.
+pub(super) fn replied(command: &Command, succeeded: bool, cx: &mut App) {
+    if succeeded && human_write(command) {
+        cx.set_global(HumanWrote);
+    }
+}
 
 /// A write the human asked for, unlike the refreshes the app makes by itself.
 fn human_write(command: &Command) -> bool {

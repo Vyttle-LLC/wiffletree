@@ -170,6 +170,7 @@ impl VerifierEditor {
 
     /// Shows the host's saved setting, or its error beside the setting it still uses.
     fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
+        let command = ask.command().clone();
         let answer = match self.bridge.ask(ask) {
             Ok(answer) => answer,
             Err(error) => {
@@ -180,6 +181,7 @@ impl VerifierEditor {
         cx.spawn(async move |this, cx| {
             let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&command, answer.is_ok(), cx);
                 match answer {
                     // An unsaved draft is not replaced by the host's defaults.
                     Ok(_) if view.unsaved => {}

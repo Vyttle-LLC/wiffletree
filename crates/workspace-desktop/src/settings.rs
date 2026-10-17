@@ -143,7 +143,8 @@ impl Settings {
 
     /// Shows the host's answer, or its error beside the setting it still uses.
     fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
-        let check_ins = matches!(ask.command(), Command::SetCheckIns { .. });
+        let command = ask.command().clone();
+        let check_ins = matches!(command, Command::SetCheckIns { .. });
         let answer = match self.bridge.ask(ask) {
             Ok(answer) => answer,
             Err(error) => {
@@ -155,6 +156,7 @@ impl Settings {
         cx.spawn(async move |this, cx| {
             let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&command, answer.is_ok(), cx);
                 match answer {
                     Ok(settings) => {
                         view.host = Some(settings);

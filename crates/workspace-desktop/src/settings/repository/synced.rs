@@ -388,14 +388,14 @@ impl Settings {
     fn ask_note(&mut self, command: Command, cx: &mut Context<Self>) {
         self.repository_error = None;
         let asked = command.clone();
-        let receiver = match self.bridge.request(command.clone()) {
-            Ok(receiver) => receiver,
+        let answer = match self.bridge.send(command.clone()) {
+            Ok(answer) => answer,
             Err(error) => return self.repository_error = Some(error),
         };
         cx.spawn(async move |this, cx| {
-            let answer =
-                (receiver.recv().await).unwrap_or_else(|_| Err("Host disconnected".into()));
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&asked, answer.is_ok(), cx);
                 let shown = answer.and_then(|value| match command {
                     Command::ComparePausedFile { path } => {
                         let lines = serde_json::from_value(value).map_err(|e| e.to_string())?;

@@ -126,6 +126,7 @@ impl LeftoverSheet {
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut Self, R) + 'static,
     ) {
+        let command = ask.command().clone();
         let answer = match self.bridge.ask(ask) {
             Ok(answer) => answer,
             Err(error) => {
@@ -137,6 +138,7 @@ impl LeftoverSheet {
         cx.spawn(async move |this, cx| {
             let answer = answer.await;
             let _ = this.update(cx, |sheet, cx| {
+                shared::replied(&command, answer.is_ok(), cx);
                 sheet.error = answer.map(|answer| apply(sheet, answer)).err();
                 sheet.pending = false;
                 if then_list {

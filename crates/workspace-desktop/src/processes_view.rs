@@ -239,6 +239,7 @@ impl Inspector {
             return;
         }
         let ask = ask::stop_processes(session_id.clone(), groups.clone());
+        let command = ask.command().clone();
         self.processes.stopping = Some(groups);
         let reply = activity::paced_reply(
             self.bridge.clone(),
@@ -251,6 +252,7 @@ impl Inspector {
             let _ = cx.update(|window, cx| {
                 this.update(cx, |view, cx| {
                     view.processes.stopping = None;
+                    shared::replied(&command, result.is_ok(), cx);
                     match result {
                         Ok(listing) => view.processes.accept(&session_id, listing, Instant::now()),
                         Err(error) => toast_error(error, window, cx),

@@ -122,16 +122,17 @@ impl Settings {
         let checking = matches!(command, Command::CheckSettingsRepository { .. });
         let answers_settings = !checking && !matches!(command, Command::SyncNow);
         self.repository_error = None;
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+        let sent = command.clone();
+        let answer = match self.bridge.send(command) {
+            Ok(answer) => answer,
             Err(error) => return self.repository_error = Some(error),
         };
         self.asking = true;
         let input = self.repository_input.read(cx).value().to_string();
         cx.spawn(async move |this, cx| {
-            let answer =
-                (receiver.recv().await).unwrap_or_else(|_| Err("Host disconnected".into()));
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&sent, answer.is_ok(), cx);
                 view.asking = false;
                 let shown = answer.and_then(|value| {
                     if checking {
