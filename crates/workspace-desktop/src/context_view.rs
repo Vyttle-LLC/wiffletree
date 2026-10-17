@@ -351,14 +351,6 @@ impl Requests for Contexts {
     fn bridge(&self) -> &Bridge {
         &self.bridge
     }
-    fn accept(
-        &mut self,
-        _: Command,
-        _: Result<Value, String>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-    }
 }
 
 impl Inspector {

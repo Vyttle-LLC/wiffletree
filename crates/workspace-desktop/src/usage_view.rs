@@ -653,14 +653,6 @@ impl Requests for UsagePage {
     fn bridge(&self) -> &Bridge {
         &self.bridge
     }
-    fn accept(
-        &mut self,
-        _: Command,
-        _: Result<Value, String>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-    }
 }
 impl Render for UsagePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

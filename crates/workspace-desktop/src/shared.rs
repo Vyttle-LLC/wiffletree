@@ -224,14 +224,16 @@ pub(super) enum Amendment {
 /// A view that asks the host for things and handles the replies itself.
 pub(super) trait Requests: Sized + 'static {
     fn bridge(&self) -> &Bridge;
-    /// Handles the host's reply to a command this view sent; the view redraws after it.
+    /// Handles the host's reply to a command this view sent with `request`; the view redraws
+    /// after it. A view that only sends asks handles each reply where it asks, and needs none.
     fn accept(
         &mut self,
-        command: Command,
-        reply: Result<Value, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    );
+        _command: Command,
+        _reply: Result<Value, String>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
     /// Archives or restores a session, and says which were.
     fn set_archived(
         &mut self,
