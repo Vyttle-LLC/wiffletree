@@ -1589,12 +1589,12 @@ mod tests {
             options: Vec::new(),
             answer: None,
         };
-        let note = WorkspaceNote {
+        let note = WorkspaceNote::Paused(workspace_core::PausedSetting {
             path: "skills/implementing/".into(),
             setting: "Implementing".into(),
             paused: Paused::OutsideWiffletree,
             text: String::new(),
-        };
+        });
         let items = [attention("a"), attention("b")];
         assert_eq!(needs_you(&items, &[], "a"), 1);
         assert_eq!(needs_you(&items, std::slice::from_ref(&note), "a"), 2);
