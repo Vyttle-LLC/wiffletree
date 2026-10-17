@@ -325,7 +325,7 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], Offers)> {
             [
                 format!("You undid the merge of {stock}"),
                 format!(
-                    "Your rewrite is as it was before the merge, and {stock} won't be merged into it again on its own."
+                    "Your rewrite is exactly as it was before the merge, and {stock} won't be merged into it again on its own."
                 ),
             ],
             Offers::MergeIn,
@@ -464,10 +464,18 @@ fn question_note(question: &SkillQuestion) -> (String, [String; 2]) {
     (setting, [text, either])
 }
 
-/// Who uses the skill, and when a merge the page still notes came in: "Project coordinator · v2
-/// merged into your rewrite today at 08:01", or "on 14 Oct at 08:01".
+/// Who uses the skill, and what the page notes: "Project coordinator · v2 merged into your
+/// rewrite today at 08:01", or "on 14 Oct at 08:01"; or, for a question, "v2 and your rewrite
+/// disagree about one passage".
 fn list_who(state: &SkillState) -> String {
     let roles = about(state.skill).roles;
+    if let Some(question) = &state.question {
+        let passages = passages_in_question(question);
+        return format!(
+            "{roles} · {} and your rewrite disagree about {passages}",
+            question.to
+        );
+    }
     let Some(note) = &state.merge_note else {
         return roles.into();
     };
@@ -481,7 +489,6 @@ fn list_who(state: &SkillState) -> String {
     format!("{roles} · {} merged into your rewrite {when}", note.to)
 }
 
-/// "1 change" or "3 changes".
 fn counted(count: usize, noun: &str) -> String {
     match count {
         1 => format!("1 {noun}"),
@@ -503,14 +510,12 @@ fn merge_counts(note: &MergeNote, model: Option<&str>) -> String {
     )
 }
 
-/// " · 6,240 tokens" when a model merged, or nothing.
 fn merge_tokens(note: &MergeNote) -> String {
     (note.model.as_ref()).map_or(String::new(), |model| {
         format!(" · {} tokens", grouped(model.tokens as usize))
     })
 }
 
-/// "This Mac", or the name of the Mac that merged.
 fn merging_mac(note: &MergeNote) -> &str {
     note.machine.as_deref().unwrap_or("This Mac")
 }
@@ -560,9 +565,8 @@ fn undo_question(state: &SkillState, note: &MergeNote, later: bool) -> [String; 
     [
         format!("Undo the merge of {to}?"),
         format!(
-            "Your rewrite goes back to exactly what it was before {}, based on {}{since}. {} it from their next turn, on every Mac.",
+            "Your rewrite goes back to exactly what it was before {}, based on {from}{since}. {} it from their next turn, on every Mac.",
             time_or_date(entry),
-            based_on(from),
             about(state.skill).gets
         ),
         format!("{to} won't be merged in again on its own. {kept} in the history."),
@@ -878,6 +882,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_skill(SkillView::Review(skill), window, cx);
+        self.review_from_history = !from_note;
         let review = Command::SkillMergeReview {
             skill,
             entry: entry.clone(),
@@ -1195,6 +1200,11 @@ impl Workspace {
         ];
         let roles = about(skill).roles;
         let basis = match &state.rewrite {
+            Some(rewrite) if rewrite.out_of_date => format!(
+                "{roles} · your rewrite, based on {} · this release has {}",
+                based_on(&rewrite.base_version),
+                state.stock_version
+            ),
             Some(rewrite) => format!(
                 "{roles} · your rewrite, based on {}",
                 based_on(&rewrite.base_version)
@@ -1560,14 +1570,17 @@ impl Workspace {
         };
         if let [choice] = choices {
             let keep = answer("keep-mine", keep.into(), Some(vec![Wording::Yours]));
+            let keep = if asked { keep.primary() } else { keep.ghost() };
+            let take = answer("take-stock", take, Some(vec![Wording::Stock])).ghost();
+            // The page leads with the wording to keep, as the Inbox's card ends with it.
+            let choices = (div().flex().flex_wrap().items_center().gap_2()).children(extra);
+            let choices = match place == "page" && asked {
+                true => choices.child(keep).child(take),
+                false => choices.child(take).child(keep),
+            };
             return (div().flex().flex_col().gap_2())
                 .when(asked, |d| d.child(passage(0, choice)))
-                .child(
-                    (div().flex().items_center().gap_2())
-                        .children(extra)
-                        .child(answer("take-stock", take, Some(vec![Wording::Stock])).ghost())
-                        .child(if asked { keep.primary() } else { keep.ghost() }),
-                );
+                .child(choices);
         }
         let passages = Chosen::passages(choices);
         let chosen = |index: usize| self.skill_wordings[skill as usize].get(&passages, index);
@@ -1591,7 +1604,7 @@ impl Workspace {
         });
         let wordings = (0..choices.len()).map(chosen).collect();
         (div().flex().flex_col().gap_3()).children(rows).child(
-            (div().flex().items_center().gap_2())
+            (div().flex().flex_wrap().items_center().gap_2())
                 .child(answer("apply-wordings", "Apply".into(), wordings).primary())
                 .children(extra),
         )
@@ -1710,16 +1723,36 @@ impl Workspace {
             .map_or(note.entry.clone(), |at| when(at, Local::now().date_naive()));
         let versions = format!("{} → {} · {} · {at}", note.from, note.to, merging_mac(note));
         let model = self.merge_model(note);
-        let counts = merge_counts(note, model.as_deref()) + &merge_tokens(note);
-        let label = |source| match source {
+        let label = |source, passage| match source {
             Source::Update => format!("From {}", note.to),
-            Source::Model => "Merged by the model".into(),
+            Source::Model => format!("Merged by the model · passage {passage}"),
             Source::Human => "Chosen by you".into(),
         };
         let added = |source| match source {
             Some(Source::Update) | None => p.green,
             Some(_) => p.focus,
         };
+        let swatch = |color: Hsla, text: String| {
+            let square = div().size(px(8.)).rounded_sm().bg(color.opacity(0.5));
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(square)
+                .child(hint(text, p))
+        };
+        let mut legend = div().flex().flex_wrap().gap_3().child(swatch(
+            p.green,
+            format!("From {}, as plain text: {}", note.to, note.from_update),
+        ));
+        if note.by_model > 0 {
+            let by = model.as_deref().unwrap_or("the model");
+            let passages = counted(note.by_model, "passage");
+            let text = format!("Merged by {by}: {passages}{}", merge_tokens(note));
+            legend = legend.child(swatch(p.focus, text));
+        }
+        let legend = legend.child(hint("Everything else is your text, unchanged", p));
+        let mut passage = 0;
         let shown = shown_changes(&review.lines, |reviewed: &Reviewed| {
             reviewed.source.is_some()
         });
@@ -1739,7 +1772,8 @@ impl Workspace {
                 _ => None,
             };
             if let Some(source) = source.filter(|source| next != Some(*source)) {
-                let tag = hint(label(source), p)
+                passage += usize::from(source == Source::Model);
+                let tag = hint(label(source, passage), p)
                     .px_2()
                     .text_color(added(Some(source)));
                 rows.push(div().flex().justify_end().child(tag));
@@ -1751,7 +1785,7 @@ impl Workspace {
         };
         page.child(
             Self::skill_heading(
-                "history",
+                "git-merge",
                 "What the merge changed in your rewrite",
                 hint(versions, p),
             )
@@ -1762,11 +1796,20 @@ impl Workspace {
                     .label("Undo")
                     .on_click(cx.listener(move |v, _, _, c| v.confirm(undo.clone(), c))),
             )
-            .child(button("review-done").primary().label("Done").on_click(
-                cx.listener(move |v, _, w, c| v.open_skill(SkillView::Skill(skill), w, c)),
-            )),
+            .child(
+                button("review-done")
+                    .primary()
+                    .label("Done")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        let back = match v.review_from_history {
+                            true => SkillView::History(skill),
+                            false => SkillView::Skill(skill),
+                        };
+                        v.open_skill(back, w, c)
+                    })),
+            ),
         )
-        .child(hint(counts, p))
+        .child(legend)
         .child(diff_block(p).children(rows))
     }
 
@@ -2660,6 +2703,10 @@ mod tests {
         // question is, and for no merge note.
         let dotted: Vec<_> = skills.iter().map(out_of_date).collect();
         assert_eq!(dotted, [false, false, true, false]);
+        assert_eq!(
+            list_who(&skills[2]),
+            "Testers and reviewers · v1 and your rewrite disagree about one passage"
+        );
     }
 
     #[test]
@@ -2750,7 +2797,7 @@ mod tests {
             [
                 "Undo the merge of v1?".into(),
                 format!(
-                    "Your rewrite goes back to exactly what it was before {before}, based on stock v0. Coordinators get it from their next turn, on every Mac."
+                    "Your rewrite goes back to exactly what it was before {before}, based on v0. Coordinators get it from their next turn, on every Mac."
                 ),
                 "v1 won't be merged in again on its own. The merge stays in the history.".into(),
             ]
@@ -2762,7 +2809,7 @@ mod tests {
             banner,
             [
                 "You undid the merge of v1",
-                "Your rewrite is as it was before the merge, and v1 won't be merged into it again on its own.",
+                "Your rewrite is exactly as it was before the merge, and v1 won't be merged into it again on its own.",
             ]
         );
         assert_eq!(offers, Offers::MergeIn);
@@ -2775,7 +2822,7 @@ mod tests {
         let later = Confirm::Undo { note, later: true };
         let ([_, what, kept], _) = question(&undone, &later, false);
         assert!(what.ends_with(
-            "based on stock v0, and your changes since stop applying. Coordinators get it from their next turn, on every Mac."
+            "based on v0, and your changes since stop applying. Coordinators get it from their next turn, on every Mac."
         ));
         assert_eq!(
             kept,

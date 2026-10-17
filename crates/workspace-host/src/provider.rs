@@ -426,10 +426,9 @@ pub fn merge_run(
         }
     }
     let stderr = without_terminal_codes(&String::from_utf8_lossy(&stderr.unwrap_or_default()));
-    bail!(
-        "Claude ended without an answer ({status}). {}",
-        stderr.trim().chars().take(1500).collect::<String>()
-    )
+    let said = stderr.trim().chars().take(1500).collect::<String>();
+    let ended = format!("Claude ended without an answer ({status}). {said}");
+    bail!("{}", ended.trim_end())
 }
 /// How long a finished turn waits for the rest of the provider's stderr.
 const STDERR_DRAIN: Duration = Duration::from_millis(500);
