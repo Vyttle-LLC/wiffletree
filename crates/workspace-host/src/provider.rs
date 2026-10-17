@@ -247,26 +247,7 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .at_low_priority()
         .own_descriptors_only();
     if matches!(turn.kind, TurnKind::Sort) {
-        cmd.env_remove("WORKSPACE_SOCKET")
-            .env_remove("WORKSPACE_TOKEN")
-            .args([
-                "-p",
-                "--tools",
-                "",
-                "--strict-mcp-config",
-                "--no-session-persistence",
-            ])
-            // Hooks would receive the untrusted comments on stdin.
-            .args(["--settings", r#"{"disableAllHooks":true}"#])
-            .args(["--output-format", "stream-json", "--verbose", "--no-chrome"])
-            .args([
-                "--model",
-                &turn.profile.model,
-                "--effort",
-                &turn.profile.effort,
-            ])
-            .args(["--system-prompt", keeper::SORTING])
-            .args(["--json-schema", keeper::ANSWER_SCHEMA]);
+        with_no_tools(cmd, &turn.profile, keeper::SORTING, keeper::ANSWER_SCHEMA);
         return;
     }
     // Credentials go to the MCP subprocess environment, never in the prompt.
@@ -328,6 +309,127 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
             cmd.arg("-");
         }
     }
+}
+/// Claude with every tool off but the one that returns its answer to `schema`, no MCP server,
+/// hooks, workspace access, earlier conversation or stored session, told only `prompt`.
+fn with_no_tools(cmd: &mut ProcessCommand, profile: &ModelProfile, prompt: &str, schema: &str) {
+    cmd.env_remove("WORKSPACE_SOCKET")
+        .env_remove("WORKSPACE_TOKEN")
+        .args([
+            "-p",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+        ])
+        // Hooks would receive the input, such as untrusted comments, on stdin.
+        .args(["--settings", r#"{"disableAllHooks":true}"#])
+        .args(["--output-format", "stream-json", "--verbose", "--no-chrome"])
+        .args(["--model", &profile.model, "--effort", &profile.effort])
+        .args(["--system-prompt", prompt])
+        .args(["--json-schema", schema]);
+}
+/// How long a skill merge's model run may take.
+pub const MERGE_LIMIT: Duration = Duration::from_secs(5 * 60);
+/// A skill merge's answer, as the run returned it, and the tokens the run used.
+pub struct MergeAnswer {
+    pub answer: Value,
+    pub tokens: u64,
+}
+/// Runs `claude` once to merge a skill's overlapping passages: built like a sorting run, but of
+/// no session, in an empty temporary folder, and stopped after `limit`.
+pub fn merge_run(
+    claude: &Path,
+    profile: &ModelProfile,
+    input: Vec<u8>,
+    limit: Duration,
+) -> Result<MergeAnswer> {
+    let folder = tempfile::tempdir()?;
+    let mut cmd = ProcessCommand::new(claude);
+    cmd.current_dir(folder.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .at_low_priority()
+        .own_descriptors_only();
+    with_no_tools(
+        &mut cmd,
+        profile,
+        skills::model::MERGING,
+        skills::model::ANSWER_SCHEMA,
+    );
+    let mut child = cmd.spawn().context("Claude could not be started")?;
+    let mut stdin = child.stdin.take().context("No Claude stdin")?;
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut read = vec![];
+            let _ = pipe.read_to_end(&mut read);
+            read
+        })
+    };
+    let stdout = read(Box::new(child.stdout.take().context("No Claude stdout")?));
+    let stderr = read(Box::new(child.stderr.take().context("No Claude stderr")?));
+    let mut process = Process {
+        child,
+        status: None,
+    };
+    std::thread::spawn(move || stdin.write_all(&input));
+    let deadline = Instant::now() + limit;
+    while !process.exited()? {
+        ensure!(
+            Instant::now() < deadline,
+            "The model took too long to answer, so the run was stopped."
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Stops what outlived Claude in its group, which closes the pipes.
+    let status = process.stop()?;
+    let (stdout, stderr) = (stdout.join(), stderr.join());
+    let mut attested = false;
+    for line in stdout.unwrap_or_default().split(|&byte| byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        match value["type"].as_str() {
+            // Anything the run could act with ends it, and its answer with it.
+            Some("system") if value["subtype"] == "init" => {
+                ensure!(
+                    value["tools"] == json!(["StructuredOutput"])
+                        && value["mcp_servers"].as_array().is_some_and(Vec::is_empty),
+                    "The merge run started with tools {} and MCP servers {}.",
+                    value["tools"],
+                    value["mcp_servers"]
+                );
+                attested = true;
+            }
+            Some("result") if attested => {
+                ensure!(
+                    value["is_error"] != true && value["structured_output"].is_object(),
+                    "The merge run failed: {}.",
+                    value["subtype"]
+                );
+                let usage = &value["usage"];
+                let counts = [
+                    "input_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                    "output_tokens",
+                ];
+                let tokens = counts.iter().filter_map(|count| usage[count].as_u64());
+                return Ok(MergeAnswer {
+                    answer: value["structured_output"].clone(),
+                    tokens: tokens.sum(),
+                });
+            }
+            _ => {}
+        }
+    }
+    let stderr = without_terminal_codes(&String::from_utf8_lossy(&stderr.unwrap_or_default()));
+    bail!(
+        "Claude ended without an answer ({status}). {}",
+        stderr.trim().chars().take(1500).collect::<String>()
+    )
 }
 /// How long a finished turn waits for the rest of the provider's stderr.
 const STDERR_DRAIN: Duration = Duration::from_millis(500);
@@ -861,6 +963,50 @@ mod tests {
             .filter(|l| !l.is_empty())
         {
             assert!(!keeper::SORTING.contains(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_merge_run_that_hangs_starts_with_tools_or_ends_without_an_answer_returns_nothing() {
+        let init = |tools: &str| {
+            format!(
+                "print(json.dumps({{'type': 'system', 'subtype': 'init', 'tools': {tools}, 'mcp_servers': []}}), flush=True)"
+            )
+        };
+        let result = "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'structured_output': {'passages': []}, 'usage': {}}), flush=True)";
+        let cases = [
+            (
+                format!("{}\ntime.sleep(30)", init("['StructuredOutput']")),
+                "The model took too long to answer, so the run was stopped.",
+            ),
+            (
+                format!("{}\n{result}", init("['StructuredOutput', 'Bash']")),
+                r#"The merge run started with tools ["StructuredOutput","Bash"] and MCP servers []."#,
+            ),
+            (
+                "print('Not signed in', file=sys.stderr); sys.exit(1)".into(),
+                "Claude ended without an answer (exit status: 1). Not signed in",
+            ),
+        ];
+        let profile = ModelProfile {
+            provider: Provider::Claude,
+            model: "haiku".into(),
+            effort: "low".into(),
+        };
+        for (body, error) in cases {
+            let scratch = tempfile::tempdir().unwrap();
+            let claude = scratch.path().join("claude");
+            let script = format!("#!/usr/bin/env python3\nimport json, sys, time\n{body}\n");
+            fs::write(&claude, script).unwrap();
+            fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            let limit = Duration::from_secs(2);
+            let started = Instant::now();
+            let failed = merge_run(&claude, &profile, b"{}".to_vec(), limit)
+                .err()
+                .unwrap();
+            assert_eq!(failed.to_string(), error);
+            assert!(started.elapsed() < Duration::from_secs(10));
         }
     }
 

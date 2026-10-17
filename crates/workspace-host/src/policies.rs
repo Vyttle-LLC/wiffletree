@@ -75,6 +75,7 @@ impl Host {
         if !settings.keeper.comments && self.settings().keeper.comments {
             self.restart_comments()?;
         }
+        self.forget_merges_waiting_for_a_model();
         Ok(saved)
     }
     /// Pins a session's model and records how it was chosen.

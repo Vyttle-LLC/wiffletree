@@ -79,6 +79,10 @@ pub struct Host {
     /// With a settings repository, the merges due at start wait for this launch's first sync
     /// pass to end, since it may bring another Mac's.
     pub(crate) merges_wait_for_sync: bool,
+    /// By skill, the merge this Mac is running or tried since it started.
+    merge_tries: [Option<skills::Tried>; 4],
+    /// Model runs of merges, for the service to start off the host thread.
+    merge_runs: Vec<skills::MergeRun>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -240,6 +244,8 @@ impl Host {
             sync: Default::default(),
             skill_histories: Default::default(),
             merges_wait_for_sync: false,
+            merge_tries: Default::default(),
+            merge_runs: vec![],
         };
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -1491,8 +1497,21 @@ impl Host {
                 self.changed_skill(skill)?
             }
             Command::MergeSkillUpdate { skill } => {
-                let overlaps = self.skills().merge_update(skill, false)?.len();
-                ensure!(overlaps == 0, skills::needs_a_model(skill, overlaps));
+                ensure!(
+                    !self.skill_merging(skill),
+                    "{} is being merged already",
+                    skill.name()
+                );
+                self.merge_skill(skill, false)?;
+                self.changed_skill(skill)?
+            }
+            Command::AnswerSkillQuestion { skill, wordings } => {
+                ensure!(
+                    !self.skill_merging(skill),
+                    "{} is being merged already",
+                    skill.name()
+                );
+                self.skills().merge_wordings(skill, &wordings)?;
                 self.changed_skill(skill)?
             }
             Command::DismissSkillMerge { skill, entry } => {

@@ -188,12 +188,36 @@ pub struct MergeModel {
 pub enum MergeStanding {
     /// Out of date and due a merge, which waits for this launch's first sync pass to end.
     WaitingForSync,
+    /// The PR keeper's model is merging the `passages` that overlap.
+    Merging { passages: usize },
+    /// The latest try changed nothing, for `reason`; the next start tries again.
+    Failed { reason: String },
+    /// Passages overlap and no model merges them: the PR keeper has none or, when `codex`, a
+    /// Codex model. The human chooses a wording for each.
+    NeedsModel {
+        passages: Vec<MergePassage>,
+        codex: bool,
+    },
     /// Out of date, and an Undo or a restore from before a merge stops automatic merges into
     /// this release's stock version.
     Undone,
     /// Based on a newer release's stock text, so not out of date; `machine` merged it in when a
     /// merge did.
     NewerBase { machine: Option<String> },
+}
+/// A run of paragraphs that both the update and the human changed, each in its own way.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergePassage {
+    pub base: String,
+    pub stock: String,
+    pub yours: String,
+}
+/// The wording the human keeps for an overlapping passage: the update's or their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Wording {
+    Stock,
+    Yours,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rewrite {
@@ -2661,10 +2685,18 @@ pub enum Command {
         skill: Skill,
         entry: String,
     },
-    /// Merges this release's stock text into an out-of-date rewrite, refused when passages
-    /// overlap; answers with the `SkillState`. Only the human's client sends it.
+    /// Merges this release's stock text into an out-of-date rewrite, or tries again after a
+    /// failed try; passages that overlap go to the PR keeper's model. Answers with the
+    /// `SkillState`. Only the human's client sends it.
     MergeSkillUpdate {
         skill: Skill,
+    },
+    /// Merges this release's stock text into an out-of-date rewrite with the human's wording
+    /// for each passage that overlaps, in order; answers with the `SkillState`. Only the human's
+    /// client sends it.
+    AnswerSkillQuestion {
+        skill: Skill,
+        wordings: Vec<Wording>,
     },
     /// Hides the note of the merge `entry` names on this machine; answers with the `SkillState`.
     /// Only the human's client sends it.

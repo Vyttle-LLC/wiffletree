@@ -1284,7 +1284,7 @@ impl Workspace {
             Some(MergeStanding::Undone) => (quiet_banner(p), Some("undo")),
             Some(MergeStanding::NewerBase { .. }) => (quiet_banner(p), Some("laptop")),
             Some(MergeStanding::WaitingForSync) => (quiet_banner(p), Some("git-merge")),
-            None => (banner(p.yellow), None),
+            _ => (banner(p.yellow), None),
         };
         let title = match head {
             Some(glyph) => banner_head(glyph, p.subtle, title),

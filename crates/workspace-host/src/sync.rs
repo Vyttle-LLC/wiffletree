@@ -798,6 +798,31 @@ fn only_own_merges(
     merged
 }
 
+/// Whether this machine undid a merge of the skill `unit` holds, or restored its rewrite from
+/// before one, since it last synced. That is a change to the skill even when its files are back
+/// to the version last synced. Never for a unit that is not a skill.
+fn went_back_here(
+    unit: &str,
+    here: &BTreeMap<String, Vec<u8>>,
+    synced: &BTreeMap<String, Content>,
+) -> bool {
+    let folder = format!("{unit}history/");
+    let unsynced = |path: &str| synced.get(path).is_none_or(Option::is_none);
+    if !(here.keys()).any(|path| path.starts_with(&folder) && unsynced(path)) {
+        return false;
+    }
+    // By name, the time each was written, as the paths sort.
+    let history: Vec<(String, skills::Entry)> = (here.iter())
+        .filter_map(|(path, content)| {
+            let name = path.strip_prefix(&folder)?.strip_suffix(".json")?;
+            Some((name.to_owned(), serde_json::from_slice(content).ok()?))
+        })
+        .collect();
+    (history.iter())
+        .filter(|(name, _)| unsynced(&format!("{folder}{name}.json")))
+        .any(|named| skills::stops(&history, named).is_some())
+}
+
 /// What a commit of `committed` changes, as the Settings window names it, and a skill's merge
 /// as "Coordinating: merged v2 into your rewrite".
 fn subject(committed: &[(String, Content)]) -> String {
@@ -898,7 +923,8 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
         let refused = (files.iter())
             .filter(|(_, base, _, theirs)| theirs != base)
             .find_map(|(path, _, _, theirs)| shared::check(path, theirs.as_ref()?).err());
-        let changed_here = files.iter().any(|(_, base, mine, _)| mine != base);
+        let changed_here = went_back_here(unit, &here, &synced)
+            || files.iter().any(|(_, base, mine, _)| mine != base);
         let changed_there = files.iter().any(|(_, base, _, theirs)| theirs != base);
         let was_paused = paths.iter().any(|path| two_machines.contains(path));
         // GitHub's version supersedes a merge of the version both last synced.
@@ -3563,6 +3589,72 @@ pub(crate) mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].setting, "Coordinating · your rewrite");
         assert!(matches!(notes[0].paused, Paused::TwoMachines { .. }));
+    }
+
+    #[test]
+    fn an_undo_before_it_syncs_pauses_the_skill_beside_another_macs_merge() {
+        let folder = tempfile::tempdir().unwrap();
+        let github = Arc::new(GitHub::new(folder.path(), true));
+        let tools = github.tools();
+        let (home, _second_home, merged) = rewritten_on_two_macs(&github);
+        let mut host = Host::open(home.path()).unwrap();
+        let synced = coordinating(&host);
+        github.offline.store(true, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        let skill = Skill::Coordinating;
+        let entry = merges(&host).remove(0);
+        (host.execute(Command::UndoSkillMerge { skill, entry })).unwrap();
+        assert_eq!(coordinating(&host), synced);
+        let theirs = merged.replacen("Start by restating", "Start by restating briefly", 1);
+        let stock = skills::stock(skill);
+        push_merge(&github, "v0", stock, &theirs, "Mike's MacBook Air");
+        github.offline.store(false, Ordering::Relaxed);
+        host.sync_now(&tools).unwrap();
+        assert_eq!(coordinating(&host), synced);
+        let notes = notes(&host);
+        assert_eq!(notes.len(), 1);
+        assert!(matches!(notes[0].paused, Paused::TwoMachines { .. }));
+    }
+
+    #[test]
+    fn a_restore_from_before_a_merge_is_a_change_here_until_it_syncs() {
+        let rewrite = skills::Rewritten {
+            text: "Mine".into(),
+            base: "# Coordinating — v0\n".into(),
+        };
+        let entry = |change| skills::Entry {
+            change,
+            stock_version: "v1".into(),
+            edits: skills::Edits {
+                rules: String::new(),
+                rewrite: Some(rewrite.clone()),
+            },
+        };
+        let merged = Change::Merged {
+            from: "v0".into(),
+            to: "v1".into(),
+            before: rewrite.clone(),
+            changes: vec![],
+            model: None,
+            machine: machine_name(),
+            automatic: true,
+        };
+        let restored = Change::Restored { entry: "1".into() };
+        let path = |name: &str| format!("{COORDINATING}/history/{name}.json");
+        let here: BTreeMap<_, _> = [("1", Change::SavedRewrite), ("2", merged), ("3", restored)]
+            .map(|(name, change)| (path(name), serde_json::to_vec(&entry(change)).unwrap()))
+            .into();
+        let synced_up_to = |last: usize| {
+            let synced = (here.iter().take(last)).map(|(p, c)| (p.clone(), Some(c.clone())));
+            synced.collect::<BTreeMap<_, Content>>()
+        };
+        let unit = format!("{COORDINATING}/");
+        assert!(went_back_here(&unit, &here, &synced_up_to(1)));
+        assert!(went_back_here(&unit, &here, &synced_up_to(2)));
+        assert!(!went_back_here(&unit, &here, &synced_up_to(3)));
+        let mut merged_only = here.clone();
+        merged_only.remove(&path("3"));
+        assert!(!went_back_here(&unit, &merged_only, &synced_up_to(1)));
     }
 
     #[test]
