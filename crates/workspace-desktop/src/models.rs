@@ -2,25 +2,8 @@
 use workspace_core::{
     AllowedModel, Chooser, Detection, ModelOption, ModelProfile, ModelSelection, PROVIDERS,
     Provider, ProviderStatus, Role, Selection, Setup, VerificationSettings, WorkspaceIndex,
-    suggest,
+    suggest, usual_efforts,
 };
-
-pub fn fallback() -> Vec<ModelOption> {
-    [
-        (Provider::Claude, "opus", "Opus · latest"),
-        (Provider::Claude, "sonnet", "Sonnet · latest"),
-        (Provider::Codex, "gpt-6.1-sol", "GPT 6.1 Sol"),
-        (Provider::Codex, "gpt-6-astra", "GPT 6 Astra"),
-    ]
-    .into_iter()
-    .map(|(provider, model, label)| ModelOption {
-        provider,
-        model: model.into(),
-        label: label.into(),
-        efforts: vec![],
-    })
-    .collect()
-}
 
 pub fn choices(catalog: &[ModelOption], provider: Provider, saved: &[&str]) -> Vec<ModelOption> {
     let mut choices: Vec<_> = catalog
@@ -54,12 +37,9 @@ pub fn effort_choices(
         .map(|option| option.efforts.clone())
         .filter(|efforts| !efforts.is_empty())
         .unwrap_or_else(|| {
-            let fallback = if provider == Provider::Claude {
-                vec!["low", "medium", "high", "xhigh", "max"]
-            } else {
-                vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-            };
-            fallback.into_iter().map(str::to_owned).collect()
+            (usual_efforts(provider).iter())
+                .map(|e| (*e).to_owned())
+                .collect()
         });
     for saved in saved {
         if !efforts.iter().any(|effort| effort == saved) {
@@ -399,7 +379,7 @@ pub fn chosen_by(selection: &Selection, index: &WorkspaceIndex) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use workspace_core::{PROVIDER_ROLES, ProviderAccess};
+    use workspace_core::{PROVIDER_ROLES, ProviderAccess, fallback_catalog};
 
     fn selection() -> ModelSelection {
         let access = |models: &[(&str, &str)]| ProviderAccess {
@@ -661,17 +641,20 @@ mod tests {
     #[test]
     fn refreshed_catalog_preserves_saved_models_without_crossing_providers() {
         let options = choices(
-            &fallback(),
+            &fallback_catalog(),
             Provider::Codex,
             &["gpt-6.1-sol", "custom-codex-version"],
         );
         assert!(options.iter().all(|m| m.provider == Provider::Codex));
         assert!(options.iter().any(|m| m.model == "custom-codex-version"));
-        assert_eq!(choices(&fallback(), Provider::Claude, &["opus"]).len(), 2);
+        assert_eq!(
+            choices(&fallback_catalog(), Provider::Claude, &["opus"]).len(),
+            2
+        );
     }
     #[test]
     fn efforts_follow_the_selected_model_and_preserve_saved_values() {
-        let mut catalog = fallback();
+        let mut catalog = fallback_catalog();
         catalog[2].efforts = vec!["high".into(), "ultra".into()];
         assert_eq!(
             effort_choices(&catalog, Provider::Codex, "gpt-6.1-sol", &["high"]),
@@ -699,7 +682,7 @@ mod tests {
             .models
             .push(saved);
         // Allowed models the catalog no longer lists stay offered with their saved effort.
-        let rows = model_rows(&fallback(), Provider::Claude, &selection);
+        let rows = model_rows(&fallback_catalog(), Provider::Claude, &selection);
         let legacy = rows.iter().find(|r| r.model == "opus-legacy").unwrap();
         assert_eq!(legacy.label, "Saved · opus-legacy");
         assert!(legacy.efforts.contains(&"medium".to_owned()));
@@ -779,7 +762,7 @@ mod tests {
     #[test]
     fn the_picker_lists_the_roles_providers_first_then_everything_else() {
         let selection = selection();
-        let groups = picker_groups(&selection, &fallback(), Role::Reviewer);
+        let groups = picker_groups(&selection, &fallback_catalog(), Role::Reviewer);
         let headings: Vec<_> = groups.iter().map(|g| g.heading.as_str()).collect();
         assert_eq!(
             headings,
@@ -789,7 +772,7 @@ mod tests {
             groups[0].profiles[0],
             selection.prefill(Role::Reviewer).unwrap()
         );
-        let implementer = picker_groups(&selection, &fallback(), Role::Implementer);
+        let implementer = picker_groups(&selection, &fallback_catalog(), Role::Implementer);
         assert_eq!(implementer[0].heading, "Implementer · Claude");
         let others = &implementer[1].profiles;
         assert_eq!(others[0].model, "gpt-6.1-sol");

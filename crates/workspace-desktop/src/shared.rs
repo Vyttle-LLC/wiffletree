@@ -34,7 +34,7 @@ impl Default for Shared {
             progress: Rc::default(),
             quotas: Rc::default(),
             quota_pending: false,
-            catalog: Rc::new(models::fallback()),
+            catalog: Rc::new(fallback_catalog()),
         }
     }
 }

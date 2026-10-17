@@ -73,7 +73,7 @@ impl ModelsPage {
             detection: Detection::new(),
             suggested: None,
             model_drafts: BTreeMap::new(),
-            catalog: Rc::new(models::fallback()),
+            catalog: Rc::new(fallback_catalog()),
             catalog_pending: 0,
             catalog_loaded: false,
             catalog_notice: String::new(),
