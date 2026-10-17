@@ -568,7 +568,8 @@ pub struct MaintenanceRun {
 pub struct Snapshot {
     pub projects: Vec<Project>,
     pub repositories: Vec<Repository>,
-    /// The sessions that are not archived, in the order they were created.
+    /// The sessions that are not archived, and open tickets' archived agents, in the order they
+    /// were created.
     pub sessions: Vec<Session>,
     pub attention: Vec<Attention>,
     /// The open tickets, in the order they were created.
@@ -581,6 +582,12 @@ pub struct Snapshot {
     /// only then.
     #[serde(default)]
     pub archive_stamp: u64,
+    /// How many sessions are archived, the archive's included.
+    #[serde(default)]
+    pub archived_sessions: u32,
+    /// By coordinator, how many tickets it owns, open or not.
+    #[serde(default)]
+    pub tickets_owned: BTreeMap<String, u32>,
     #[serde(default)]
     pub live_projects: Vec<String>,
     /// Parent folders checked for new repositories.
@@ -637,8 +644,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub keeper_held: Vec<String>,
 }
-/// What a `Snapshot` leaves out: archived sessions, accepted and closed tickets, and those
-/// sessions' runtimes. Answers `Command::Archive`.
+/// What a `Snapshot` leaves out: archived sessions other than open tickets' agents, accepted
+/// and closed tickets, and those sessions' runtimes. Answers `Command::Archive`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Archive {
     pub sessions: Vec<Session>,

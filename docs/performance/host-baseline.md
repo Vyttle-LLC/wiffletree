@@ -33,22 +33,24 @@ Peak resident memory was 16,596,992 bytes (~15.8 MiB). Not measured: the service
 
 ## Bounded snapshot — October 17, 2026
 
-The snapshot now holds only live work, the archive is read apart from it, and the desktop joins the two in `WorkspaceIndex`. The fixture gains a finished store's shape: 140 tickets, ten of them open, each with an implementer and four verifiers, so 750 sessions with the coordinators and workers, 690 of them archived, and a runtime for every ticket agent. Ticket rows are sized like the human's (a 4,400-character brief, two cycles, up to 18 ledger entries). Before is Phase 1's head (`87b85177`) with this fixture, after is this change; both ran on the Apple M4 above (macOS 27.0.1, Rust 1.97.0, release build) on the same day.
+The snapshot now holds only live work, the archive is read apart from it and only while a view needs it, and the desktop joins the two in `WorkspaceIndex`. The fixture gains a finished store's shape: 140 tickets, ten of them open, each with an implementer and four verifiers, so 750 sessions with the coordinators and workers, 690 of them archived, and a runtime for every ticket agent. Ticket rows are sized like the human's (a 4,400-character brief, two cycles, up to 18 ledger entries). Before is Phase 1's head (`87b85177`) with this fixture, after is this change; both ran on the Apple M4 above (macOS 27.0.1, Rust 1.97.0, release build) on the same day.
 
 | Operation | Before p50 | Before p95 | After p50 | After p95 |
 | --- | ---: | ---: | ---: | ---: |
-| Snapshot JSON size | 3,641,867 B | | 152,783 B | |
-| Workspace snapshot, host build | 37.127 ms | 38.709 ms | 5.498 ms | 5.872 ms |
-| Snapshot with JSON round trip | 40.783 ms | 42.195 ms | 5.644 ms | 5.993 ms |
-| Archive with JSON round trip (3,523,932 B), read only when it changed | | | 15.164 ms | 15.879 ms |
-| Index of snapshot and archive | | | 0.196 ms | 0.204 ms |
-| Sidebar tree rows | 25.986 ms | 26.076 ms | 0.010 ms | 0.010 ms |
-| Sidebar tree rows, Show archived | 50.822 ms | 51.187 ms | 0.088 ms | 0.093 ms |
-| Host restart and snapshot | 104.830 ms | 110.962 ms | 72.516 ms | 79.257 ms |
+| Snapshot JSON size | 3,641,867 B | | 192,494 B | |
+| Workspace snapshot, host build | 37.127 ms | 38.709 ms | 8.284 ms | 9.298 ms |
+| Snapshot with JSON round trip | 40.783 ms | 42.195 ms | 7.947 ms | 8.485 ms |
+| Archive with JSON round trip (3,484,471 B), read only while a view needs it | | | 17.587 ms | 18.710 ms |
+| Index of snapshot and archive | | | 0.211 ms | 0.225 ms |
+| Sidebar tree rows | 25.986 ms | 26.076 ms | 0.005 ms | 0.006 ms |
+| Sidebar tree rows, Show archived | 50.822 ms | 51.187 ms | 0.090 ms | 0.098 ms |
+| Host restart and snapshot | 104.830 ms | 110.962 ms | 88.353 ms | 158.524 ms |
 
-On a read-only copy of the human's store (137 tickets, 718 sessions, 714 archived) the snapshot went from 2,148,697 to 100,681 bytes and its round trip from 14.357 to 4.325 ms p50; the archive is 2,081,614 bytes and round-trips in 5.590 ms. Tree rows with Show archived went from 54.480 to 0.098 ms p50, and without it from 0.816 to 0.001 ms.
+The after column was measured once more after review kept open tickets' archived agents, such as an earlier cycle's verifiers, in the snapshot, so that the default sidebar needs no archive. That added 40 sessions and their runtimes to the fixture's snapshot. Other builds were running on the Mac by then, so after times run a little high; the restart p95 in particular was noisy. Before that change, on a quiet machine, the snapshot was 152,783 bytes and built in 5.498 ms p50.
 
-Of the old host build, 19 ms was `questions_waiting` scanning every message and 15 ms `undelivered` doing the same; both now go through existing indexes (message ids, and each session's outbox). Accepted and closed tickets and archived sessions are found through two expression indexes. Most of what remains, about 4.5 ms, is hashing the archive's stored rows for `archive_stamp`. Tree rows and the snapshot sizes and round trips on the desktop side come from the ignored `tree_rows_benchmark` test, pointed at a kept fixture or store copy; the other rows come from the benchmark. The desktop decodes the snapshot and builds the index on its main thread; that is the round trip's decode plus the index, under 1 ms here.
+On a read-only copy of the human's store (137 tickets, 718 sessions, 714 archived), measured before that review change, the snapshot went from 2,148,697 to 100,681 bytes and its round trip from 14.357 to 4.325 ms p50; the archive is 2,081,614 bytes and round-trips in 5.590 ms. Tree rows with Show archived went from 54.480 to 0.098 ms p50, and without it from 0.816 to 0.001 ms.
+
+Of the old host build, 19 ms was `questions_waiting` scanning every message and 15 ms `undelivered` doing the same; both now go through existing indexes (message ids, and each session's outbox). Accepted and closed tickets and archived sessions are found through two expression indexes. Most of what remains is hashing the archive's stored rows for `archive_stamp`, about 4.5 ms, and finding open tickets' agents. Tree rows and the snapshot sizes and round trips on the desktop side come from the ignored `tree_rows_benchmark` test, pointed at a kept fixture or store copy; the other rows come from the benchmark. The desktop decodes the snapshot and builds the index on its main thread; that is the round trip's decode plus the index, under 1 ms here.
 
 Reproduce with:
 

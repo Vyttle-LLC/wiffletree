@@ -153,14 +153,14 @@ impl Appearance {
 impl Workspace {
     pub(super) fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let dark = is_dark(cx);
-        // The snapshot lists the sessions that are not archived.
+        // The snapshot lists every session that is not archived.
         let projects = (self.snapshot().iter())
             .flat_map(|s| &s.sessions)
-            .filter(|s| s.parent_id.is_none())
+            .filter(|s| s.parent_id.is_none() && !s.archived)
             .count();
         let offers_new_project = self.offers_new_project();
         let grouped = cx.global::<Preferences>().group_projects;
-        let archived = self.index.as_ref().map_or(0, |i| i.archived_sessions());
+        let archived = self.snapshot().map_or(0, |s| s.archived_sessions);
         div()
             .size_full()
             .flex()
@@ -254,8 +254,9 @@ impl Workspace {
                                             "Archived"
                                         })
                                         .tooltip(format!("{archived} archived sessions"))
-                                        .on_click(cx.listener(|v, _, _, c| {
+                                        .on_click(cx.listener(|v, _, w, c| {
                                             v.show_archived = !v.show_archived;
+                                            v.sync_archive(w, c);
                                             c.notify();
                                         })),
                                 )
@@ -565,10 +566,7 @@ impl Workspace {
                 p,
             )));
         }
-        let mut has_tickets = std::collections::BTreeSet::new();
-        for ticket in index.tickets() {
-            has_tickets.insert(ticket.coordinator_id.clone());
-        }
+        let has_tickets = &index.snapshot().tickets_owned;
         let grouping = cx.global::<Preferences>().group_projects;
         let entries = tree::entries(index, self.show_archived, grouping);
         let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
@@ -609,7 +607,7 @@ impl Workspace {
             if let Some(top_level) = top_level {
                 if let Some(previous) = project.take() {
                     let under = under.take();
-                    tree = self.close_project(tree, previous, in_group, under, &has_tickets, cx);
+                    tree = self.close_project(tree, previous, in_group, under, has_tickets, cx);
                 }
                 if let Some(key) = group.take_if(|_| top_level) {
                     tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
@@ -654,7 +652,7 @@ impl Workspace {
             }
         }
         if let Some(last) = project {
-            tree = self.close_project(tree, last, in_group, under, &has_tickets, cx);
+            tree = self.close_project(tree, last, in_group, under, has_tickets, cx);
         }
         if let Some(key) = group {
             tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
@@ -953,10 +951,10 @@ impl Workspace {
         root: &Session,
         grouped: bool,
         under: Option<Halves>,
-        has_tickets: &std::collections::BTreeSet<String>,
+        has_tickets: &BTreeMap<String, u32>,
         cx: &mut Context<Self>,
     ) -> Div {
-        if !has_tickets.contains(&root.id)
+        if !has_tickets.contains_key(&root.id)
             && !self.collapsed_projects.contains(&root.project_id)
             && self.selected.as_ref() == Some(&root.id)
         {

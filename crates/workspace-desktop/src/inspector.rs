@@ -428,8 +428,15 @@ impl Workspace {
         body = body.child(self.context_card(session, p, cx));
         if session.role == Role::ProjectOrchestrator {
             let in_project = |s: &&Session| s.project_id == session.project_id;
-            let tickets: Vec<_> = index.tickets_owned_by(&session.id).collect();
-            let open = tickets.iter().filter(|t| t.is_open()).count();
+            // Open tickets are live; the snapshot counts the others.
+            let tickets = snapshot
+                .tickets_owned
+                .get(&session.id)
+                .copied()
+                .unwrap_or(0);
+            let open = (index.tickets_owned_by(&session.id))
+                .filter(|t| t.is_open())
+                .count();
             let agents = (index.sessions())
                 .filter(|s| self.show_archived || !s.archived)
                 .filter(in_project)
@@ -439,7 +446,7 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(Self::stat(tickets.len(), "Tickets", p))
+                    .child(Self::stat(tickets as usize, "Tickets", p))
                     .child(Self::stat(open, "Open", p))
                     .child(Self::stat(agents, "Agents", p)),
             );

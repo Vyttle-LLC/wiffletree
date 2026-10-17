@@ -62,7 +62,6 @@ fn the_index_joins_live_and_archived_work_in_creation_order() {
 
     assert_eq!(ids(index.sessions()), ["root", "before", "now"]);
     assert!(index.session("before").unwrap().archived);
-    assert_eq!(index.archived_sessions(), 1);
     assert_eq!(ids(index.children("root")), ["before", "now"]);
     assert_eq!(ids(index.roots("p")), ["root"]);
     assert_eq!(ids(index.agents("finished")), ["before"]);
@@ -99,7 +98,6 @@ fn work_restored_or_created_since_the_archive_was_read_shows_live_in_its_place()
 
     assert_eq!(ids(index.sessions()), ["root", "before", "now", "newest"]);
     assert!(!index.session("before").unwrap().archived);
-    assert_eq!(index.archived_sessions(), 0);
     assert!(index.runtime("before").unwrap().ticket_id.is_none());
     assert!(index.archive_is_stale());
 }

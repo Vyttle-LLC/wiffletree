@@ -80,12 +80,12 @@
     },
     "fixture": {
       "activity": 100000,
-      "archive_bytes": 3523932,
+      "archive_bytes": 3484471,
       "messages": 100000,
       "projects": 5,
       "repositories": "10 metadata fixtures; no Git history benchmark",
       "sessions": 750,
-      "snapshot_bytes": 152783,
+      "snapshot_bytes": 192494,
       "source_logs": 100000,
       "step_runs": 101,
       "steps": 4000,
@@ -125,51 +125,52 @@
       }
     },
     "after": {
-      "snapshot_bytes": 152783,
-      "archive_bytes": 3523932,
+      "snapshot_bytes": 192494,
+      "archive_bytes": 3484471,
       "results": [
         {
-          "max_ms": 9.335374999999999,
           "measure": "workspace snapshot (750 sessions, 140 tickets)",
-          "p50_ms": 5.498165999999999,
-          "p95_ms": 5.8717500000000005,
-          "samples": 200
+          "samples": 200,
+          "p50_ms": 8.284,
+          "p95_ms": 9.298,
+          "max_ms": 11.818
         },
         {
-          "max_ms": 9.564582999999999,
           "measure": "workspace snapshot with JSON round trip",
-          "p50_ms": 5.644167,
-          "p95_ms": 5.992500000000001,
-          "samples": 200
+          "samples": 200,
+          "p50_ms": 7.947,
+          "p95_ms": 8.485,
+          "max_ms": 18.997
         },
         {
-          "max_ms": 28.03025,
           "measure": "archive with JSON round trip",
-          "p50_ms": 15.163833,
-          "p95_ms": 15.879332999999999,
-          "samples": 200
+          "samples": 200,
+          "p50_ms": 17.587,
+          "p95_ms": 18.71,
+          "max_ms": 36.166
         },
         {
-          "max_ms": 0.33875,
           "measure": "workspace index of snapshot and archive",
-          "p50_ms": 0.19616699999999998,
-          "p95_ms": 0.204375,
-          "samples": 200
+          "samples": 200,
+          "p50_ms": 0.211,
+          "p95_ms": 0.225,
+          "max_ms": 0.334
         },
         {
-          "max_ms": 81.706167,
           "measure": "host restart and cached snapshot",
-          "p50_ms": 72.516334,
-          "p95_ms": 79.25699999999999,
-          "samples": 100
+          "samples": 100,
+          "p50_ms": 88.353,
+          "p95_ms": 158.524,
+          "max_ms": 385.164
         }
       ],
       "desktop": {
-        "tree_rows_p50_ms": 0.01,
-        "tree_rows_p95_ms": 0.01,
-        "tree_rows_show_archived_p50_ms": 0.088,
-        "tree_rows_show_archived_p95_ms": 0.093
-      }
+        "tree_rows_p50_ms": 0.005,
+        "tree_rows_p95_ms": 0.006,
+        "tree_rows_show_archived_p50_ms": 0.09,
+        "tree_rows_show_archived_p95_ms": 0.098
+      },
+      "note": "Measured after review kept open tickets' archived agents in the snapshot, while other builds ran on the machine. Before that change, on a quiet machine: 152,783 B and a 5.498 ms p50 host build."
     },
     "human_store_copy": {
       "tickets": 137,
@@ -192,7 +193,8 @@
         "tree_rows_p50_ms": 0.001,
         "tree_rows_show_archived_p50_ms": 0.098,
         "tree_rows_show_archived_p95_ms": 0.103
-      }
+      },
+      "note": "Measured before the review change that keeps open tickets' archived agents in the snapshot."
     },
     "notes": "Desktop rows come from the ignored tree_rows_benchmark test in workspace-desktop; the rest from examples/benchmark.rs. Before and after ran on the same machine on the same day."
   }

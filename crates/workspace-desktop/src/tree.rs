@@ -940,8 +940,8 @@ pub fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRele
 }
 
 /// Projects in the host's order, under their group's row while `grouped`; a collapsed group
-/// hides its projects. Archived sessions appear only when `show_archived`; a ticket whose
-/// agents are all archived, such as a closed one, goes with them.
+/// hides its projects. Archived sessions, and accepted and closed tickets, appear only when
+/// `show_archived`; a ticket whose agents are all archived goes with them.
 pub fn rows<'a>(
     index: &'a WorkspaceIndex,
     show_archived: bool,
@@ -978,7 +978,8 @@ pub fn rows<'a>(
             if collapsed.contains(&root.project_id) {
                 continue;
             }
-            for ticket in index.tickets_owned_by(&root.id) {
+            let listed = |t: &&Ticket| show_archived || t.is_open();
+            for ticket in index.tickets_owned_by(&root.id).filter(listed) {
                 let agents: Vec<&Session> = index.agents(&ticket.id).filter(shown).collect();
                 if agents.is_empty() && index.agents(&ticket.id).next().is_some() {
                     continue;
@@ -1336,6 +1337,40 @@ mod tests {
             shown.state,
             TicketState::Assigned,
             "the row carries the ticket's state"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_without_archived_sessions_needs_no_archive() {
+        let (_directory, mut host, root, ticket) = store();
+        let none = BTreeSet::new();
+        host.assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        let retired = host
+            .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
+            .unwrap();
+        host.set_archived(&retired.id, true).unwrap();
+        let repository = host.repositories().unwrap().remove(0);
+        let finished = host
+            .create_ticket(&root.id, &repository.id, "Old calls", "Done")
+            .unwrap();
+        host.close_ticket(&finished.id).unwrap();
+        let live = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
+
+        let expected = [
+            (0, "Calls".to_owned()),
+            (1, "sagechat-sms · Fix inbound calls".into()),
+            (2, "Implementer".into()),
+        ];
+        assert_eq!(shape(&rows(&live, false, true, &none, &none)), expected);
+        assert_eq!(
+            shape(&rows(&joined(&host), false, true, &none, &none)),
+            expected,
+            "the archive changes nothing until archived sessions are shown"
+        );
+        assert_eq!(
+            shape(&rows(&joined(&host), true, true, &none, &none)).len(),
+            5
         );
     }
 

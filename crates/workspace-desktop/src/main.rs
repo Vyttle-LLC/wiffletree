@@ -121,12 +121,11 @@ struct Workspace {
     /// The latest snapshot joined with the archive; shared so that a frame's transcript rows
     /// can hold it without a copy.
     index: Option<Rc<WorkspaceIndex>>,
-    /// Snapshot and archive requests sent and not yet answered, so that a burst of changes asks
-    /// for one more of each, not one per change.
+    /// The snapshot request sent and not yet answered, so that a burst of changes asks for one
+    /// more, not one per change.
     snapshot_request: Coalesced,
-    archive_request: Coalesced,
-    /// A snapshot that arrived with a new archive stamp, until that archive is read.
-    waiting_snapshot: Option<Snapshot>,
+    /// An archive request is on its way.
+    archive_pending: bool,
     load_error: Option<String>,
     selected: Option<String>,
     messages: Rc<Vec<Message>>,
@@ -308,8 +307,7 @@ impl Workspace {
             bridge,
             index: None,
             snapshot_request: Coalesced::default(),
-            archive_request: Coalesced::default(),
-            waiting_snapshot: None,
+            archive_pending: false,
             load_error: None,
             selected: None,
             messages: Rc::new(vec![]),
@@ -613,14 +611,7 @@ impl Workspace {
         }
         match &command {
             Command::Snapshot if self.snapshot_request.answered() => self.refresh(window, cx),
-            Command::Archive if self.archive_request.answered() => self.load_archive(window, cx),
-            // The snapshot that waited for this archive is shown with the archive it has.
-            Command::Archive if result.is_err() => {
-                if let Some(snapshot) = self.waiting_snapshot.take() {
-                    let archive = self.archive();
-                    self.accept_snapshot(snapshot, archive, window, cx);
-                }
-            }
+            Command::Archive => self.archive_pending = false,
             _ => {}
         }
         if matches!(&command, Command::RecordQuota { .. }) {
@@ -668,26 +659,11 @@ impl Workspace {
         }
         match command {
             Command::Snapshot => match serde_json::from_value::<Snapshot>(value) {
-                // The archive changed: the snapshot is shown once the archive is read again,
-                // so that nothing archived since goes missing in between.
-                Ok(snapshot) if snapshot.archive_stamp != self.archive().stamp => {
-                    self.waiting_snapshot = Some(snapshot);
-                    self.load_archive(window, cx);
-                }
-                Ok(snapshot) => {
-                    let archive = self.archive();
-                    self.accept_snapshot(snapshot, archive, window, cx);
-                }
+                Ok(snapshot) => self.accept_snapshot(snapshot, window, cx),
                 Err(e) => self.fail(&Command::Snapshot, e.to_string(), window, cx),
             },
             Command::Archive => match serde_json::from_value::<Archive>(value) {
-                Ok(archive) => {
-                    let snapshot = (self.waiting_snapshot.take())
-                        .or_else(|| self.index.as_ref().map(|index| index.snapshot().clone()));
-                    if let Some(snapshot) = snapshot {
-                        self.accept_snapshot(snapshot, Rc::new(archive), window, cx);
-                    }
-                }
+                Ok(archive) => self.accept_archive(archive, window, cx),
                 Err(e) => self.fail(&Command::Archive, e.to_string(), window, cx),
             },
             Command::Messages {
@@ -697,6 +673,7 @@ impl Workspace {
                     match serde_json::from_value::<Vec<Message>>(value) {
                         Ok(rows) => {
                             self.replace_messages(rows);
+                            self.sync_archive(window, cx);
                             self.load_run_summaries(window, cx);
                             if before.is_none() {
                                 self.cached_pages
@@ -982,16 +959,49 @@ impl Workspace {
             self.request(Command::Snapshot, window, cx);
         }
     }
-    fn load_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.archive_request.send() {
+    /// Reads the archive again when what is shown needs it and the one held is out of date.
+    fn sync_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stale = self.index.as_ref().is_some_and(|i| i.archive_is_stale());
+        if stale && self.wants_archive() && !self.archive_pending {
+            self.archive_pending = true;
             self.request(Command::Archive, window, cx);
         }
     }
-    /// The archive last read; empty until the first is.
-    fn archive(&self) -> Rc<Archive> {
-        self.index
-            .as_ref()
-            .map_or_else(Rc::default, |index| index.archive().clone())
+    /// Something shown lists archived sessions or finished tickets: Show archived, the Tickets
+    /// and Crew panels, the Repositories page and publish requests, or the selected session or
+    /// a sender of its loaded messages is in no list held yet.
+    fn wants_archive(&self) -> bool {
+        let Some(index) = &self.index else {
+            return false;
+        };
+        let unknown = |id: &str| index.session(id).is_none();
+        self.show_archived
+            || matches!(self.panel, Some(Panel::Team | Panel::Crew))
+            || self.view == Page::Repositories
+            || index.snapshot().attention.iter().any(Attention::is_publish)
+            || self.selected.as_deref().is_some_and(unknown)
+            || (self.messages.iter()).any(|m| m.sender.as_deref().is_some_and(unknown))
+    }
+    fn accept_archive(&mut self, archive: Archive, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = &self.index else {
+            return;
+        };
+        let snapshot = index.snapshot().clone();
+        self.index = Some(Rc::new(WorkspaceIndex::new(snapshot, Rc::new(archive))));
+        // A selection the archive does not hold either is gone.
+        if self.selected_session().is_none() {
+            let first = self
+                .index
+                .as_ref()
+                .and_then(|index| index.sessions().find(|s| !s.archived).map(|s| s.id.clone()));
+            match first {
+                Some(id) => self.select(id, window, cx),
+                None => self.selected = None,
+            }
+        }
+        self.place_links();
+        // A snapshot that arrived meanwhile may have moved the stamp again.
+        self.sync_archive(window, cx);
     }
     /// Shows a change the host confirmed before the snapshot that has it arrives.
     fn amend_snapshot(&mut self, change: impl FnOnce(&mut Snapshot)) {
@@ -1002,13 +1012,11 @@ impl Workspace {
             self.index = Some(Rc::new(WorkspaceIndex::new(snapshot, archive)));
         }
     }
-    fn accept_snapshot(
-        &mut self,
-        snapshot: Snapshot,
-        archive: Rc<Archive>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn accept_snapshot(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+        let archive = self
+            .index
+            .as_ref()
+            .map_or_else(Rc::default, |index| index.archive().clone());
         let index = WorkspaceIndex::new(snapshot, archive);
         let new_root = self.pending_project_selection.as_ref().and_then(|project| {
             index
@@ -1016,7 +1024,10 @@ impl Workspace {
                 .find(|s| &s.project_id == project && s.role == Role::ProjectOrchestrator)
                 .map(|s| s.id.clone())
         });
-        if (self.selected.as_ref()).is_none_or(|id| index.session(id).is_none()) {
+        // A selected session the held archive is out of date for may be in the next one, which
+        // `accept_archive` checks.
+        let gone = |id: &String| index.session(id).is_none() && !index.archive_is_stale();
+        if self.selected.as_ref().is_none_or(gone) {
             self.selected = index.sessions().find(|s| !s.archived).map(|s| s.id.clone());
         }
         let snapshot = index.snapshot();
@@ -1070,6 +1081,7 @@ impl Workspace {
         }
         self.sync_activity_clock(window, cx);
         self.sync_context(window, cx);
+        self.sync_archive(window, cx);
     }
     /// Transcript rows are the loaded messages plus a trailing activity row while the agent works.
     fn transcript_rows(&self) -> usize {
@@ -1188,6 +1200,7 @@ impl Workspace {
         self.fetch_steps(window, cx);
         self.sync_activity_clock(window, cx);
         self.sync_crew_clock(window, cx);
+        self.sync_archive(window, cx);
         cx.notify();
     }
     /// Adds dropped files to the selected session's draft. Each refused file is named with
@@ -1322,12 +1335,14 @@ impl Workspace {
         self.panel = Some(panel);
         self.panel_data = PanelData::Loading;
         self.load_panel(window, cx);
+        self.sync_archive(window, cx);
         self.sync_crew_clock(window, cx);
         cx.notify();
     }
     /// Opens a workspace page in place of the conversation.
     fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.view = page;
+        self.sync_archive(window, cx);
         match page {
             Page::Usage => {
                 self.request(Command::Quotas, window, cx);

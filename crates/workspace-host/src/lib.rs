@@ -55,6 +55,19 @@ fn tickets_where(open: bool) -> String {
         .collect();
     format!("json_extract(data,'$.state') IN ({})", states.join(","))
 }
+/// Where a stored session is live, or with `false` in the archive. Open tickets' agents stay
+/// live when archived, as an earlier cycle's verifiers are, so their ticket shows them.
+fn sessions_where(live: bool) -> String {
+    let on_open_ticket = format!(
+        "id IN (SELECT session_id FROM runtimes WHERE json_extract(data,'$.ticket_id') IN (SELECT id FROM tickets WHERE {}))",
+        tickets_where(true)
+    );
+    if live {
+        format!("({ARCHIVED_FLAG}=0 OR {on_open_ticket})")
+    } else {
+        format!("({ARCHIVED_FLAG}=1 AND NOT {on_open_ticket})")
+    }
+}
 pub struct Host {
     pub(crate) db: Connection,
     _lock: StoreLock,
@@ -394,10 +407,10 @@ impl Host {
     /// The live workspace; `archive` has the rest.
     pub fn snapshot(&self) -> Result<Snapshot> {
         let skills = self.skill_states()?;
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.list_data(&format!("SELECT data FROM sessions WHERE {ARCHIVED_FLAG}=0 ORDER BY rowid"), [])?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} ORDER BY rowid", tickets_where(true)), [])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {ARCHIVED_FLAG}=1) ORDER BY rowid"), [])?, archive_stamp: self.archive_stamp()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.list_data(&format!("SELECT data FROM sessions WHERE {} ORDER BY rowid", sessions_where(true)), [])?.into_iter().map(|s| self.shown(s)).collect(), attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} ORDER BY rowid", tickets_where(true)), [])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) ORDER BY rowid", sessions_where(false)), [])?, archive_stamp: self.archive_stamp()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
     }
-    /// What `snapshot` leaves out: archived sessions with their runtimes, and accepted and
-    /// closed tickets. Tickets take no state change once settled, so `shown_ticket` is not needed.
+    /// What `snapshot` leaves out: archived sessions with their runtimes, apart from open
+    /// tickets' agents, and accepted and closed tickets. Tickets take no state change once settled, so `shown_ticket` is not needed.
     pub fn archive(&self) -> Result<Archive> {
         let ids = |table: &str| -> Result<Vec<String>> {
             Ok((self
@@ -407,11 +420,11 @@ impl Host {
             .collect::<rusqlite::Result<_>>()?)
         };
         Ok(Archive {
-            sessions: (self.list_data(&format!("SELECT data FROM sessions WHERE {ARCHIVED_FLAG}=1 ORDER BY rowid"), [])?.into_iter())
+            sessions: (self.list_data(&format!("SELECT data FROM sessions WHERE {} ORDER BY rowid", sessions_where(false)), [])?.into_iter())
                 .map(|s| self.shown(s))
                 .collect(),
             tickets: self.list_data(&format!("SELECT data FROM tickets WHERE {} ORDER BY rowid", tickets_where(false)), [])?,
-            runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {ARCHIVED_FLAG}=1) ORDER BY rowid"), [])?,
+            runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) ORDER BY rowid", sessions_where(false)), [])?,
             session_order: ids("sessions")?,
             ticket_order: ids("tickets")?,
             stamp: self.archive_stamp()?,
@@ -424,13 +437,17 @@ impl Host {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for sql in [
-            format!("SELECT id,data FROM sessions WHERE {ARCHIVED_FLAG}=1 ORDER BY rowid"),
+            format!(
+                "SELECT id,data FROM sessions WHERE {} ORDER BY rowid",
+                sessions_where(false)
+            ),
             format!(
                 "SELECT id,data FROM tickets WHERE {} ORDER BY rowid",
                 tickets_where(false)
             ),
             format!(
-                "SELECT session_id,data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {ARCHIVED_FLAG}=1) ORDER BY rowid"
+                "SELECT session_id,data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) ORDER BY rowid",
+                sessions_where(false)
             ),
         ] {
             let mut statement = self.db.prepare(&sql)?;

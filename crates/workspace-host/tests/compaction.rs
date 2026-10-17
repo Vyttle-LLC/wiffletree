@@ -1437,8 +1437,9 @@ fn archiving_a_worker_while_it_compacts_lets_it_finish_and_runs_no_turn_after() 
             archived: true,
         });
     });
-    let archived = world.archive().sessions;
-    assert!(archived.iter().find(|s| s.id == worker).unwrap().archived);
+    let sessions = world.snapshot().sessions.into_iter();
+    let mut sessions = sessions.chain(world.archive().sessions);
+    assert!(sessions.find(|s| s.id == worker).unwrap().archived);
 }
 
 #[test]

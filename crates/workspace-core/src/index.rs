@@ -32,7 +32,6 @@ pub struct WorkspaceIndex {
     owned: HashMap<String, Vec<usize>>,
     /// Sessions with an unarchived session working anywhere below them.
     team_working: HashSet<String>,
-    archived_sessions: usize,
 }
 
 impl WorkspaceIndex {
@@ -62,7 +61,6 @@ impl WorkspaceIndex {
             agents: HashMap::new(),
             owned: HashMap::new(),
             team_working: HashSet::new(),
-            archived_sessions: 0,
         };
         let runtimes = (index.archive.runtimes.iter().enumerate())
             .map(|(i, r)| (r.session_id.clone(), At::Archived(i)));
@@ -73,11 +71,9 @@ impl WorkspaceIndex {
         let mut session_at = HashMap::new();
         let (mut children, mut roots, mut agents) =
             (HashMap::new(), HashMap::new(), HashMap::new());
-        let mut archived = 0;
         for (position, &at) in index.sessions.iter().enumerate() {
             let session = index.at_session(at);
             session_at.insert(session.id.clone(), position);
-            archived += usize::from(session.archived);
             let (siblings, key): (&mut HashMap<String, Vec<usize>>, _) = match &session.parent_id {
                 Some(parent) => (&mut children, parent),
                 None => (&mut roots, &session.project_id),
@@ -100,7 +96,6 @@ impl WorkspaceIndex {
         }
         (index.session_at, index.children, index.agents) = (session_at, children, agents);
         index.roots = roots;
-        index.archived_sessions = archived;
         (index.ticket_at, index.owned) = (ticket_at, owned);
         index.team_working = index.working_teams();
         index
@@ -124,9 +119,6 @@ impl WorkspaceIndex {
     }
     pub fn session(&self, id: &str) -> Option<&Session> {
         Some(self.at_session(self.sessions[*self.session_at.get(id)?]))
-    }
-    pub fn archived_sessions(&self) -> usize {
-        self.archived_sessions
     }
     /// The sessions whose parent is `parent_id`, in the order they were created.
     pub fn children(&self, parent_id: &str) -> impl Iterator<Item = &Session> {

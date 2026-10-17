@@ -1132,6 +1132,7 @@ fn a_refused_archive_stops_nothing() {
 
 #[test]
 fn the_snapshot_leaves_finished_work_to_the_archive_whose_stamp_moves_only_with_it() {
+    // An open ticket's archived agent, such as an earlier cycle's verifier, stays live.
     let directory = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
     let (root, coordinator) = team(&mut host, directory.path());
@@ -1146,6 +1147,10 @@ fn the_snapshot_leaves_finished_work_to_the_archive_whose_stamp_moves_only_with_
             None,
         )
         .unwrap();
+    let retired = host
+        .assign_ticket(&open.id, Role::Reviewer, Provider::Claude, "Review", None)
+        .unwrap();
+    host.set_archived(&retired.id, true).unwrap();
     let stamp = host.snapshot().unwrap().archive_stamp;
     host.rename_project(&root.project_id, "Theme refresh")
         .unwrap();
@@ -1160,7 +1165,13 @@ fn the_snapshot_leaves_finished_work_to_the_archive_whose_stamp_moves_only_with_
     let snapshot = host.snapshot().unwrap();
     assert_ne!(snapshot.archive_stamp, stamp);
     let ids = |sessions: &[Session]| sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
-    assert_eq!(ids(&snapshot.sessions), std::slice::from_ref(&root.id));
+    assert_eq!(
+        ids(&snapshot.sessions),
+        [root.id.clone(), retired.id.clone()]
+    );
+    assert!(snapshot.runtimes.iter().any(|r| r.session_id == retired.id));
+    assert_eq!(snapshot.archived_sessions, 2);
+    assert_eq!(snapshot.tickets_owned[&coordinator.id], 2);
     assert_eq!(snapshot.tickets.len(), 1);
     assert_eq!(snapshot.tickets[0].id, open.id);
     assert!(snapshot.runtimes.iter().all(|r| r.session_id != worker.id));
@@ -1171,6 +1182,6 @@ fn the_snapshot_leaves_finished_work_to_the_archive_whose_stamp_moves_only_with_
     assert_eq!(archive.tickets[0].state, TicketState::Closed);
     assert_eq!(archive.runtimes.len(), 1);
     assert_eq!(archive.runtimes[0].session_id, worker.id);
-    assert_eq!(archive.session_order, [root.id, worker.id]);
+    assert_eq!(archive.session_order, [root.id, worker.id, retired.id]);
     assert_eq!(archive.ticket_order, [open.id, finished.id]);
 }
