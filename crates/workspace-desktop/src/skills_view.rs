@@ -527,11 +527,11 @@ fn merge_note_text(state: &SkillState, note: &MergeNote, model: Option<&str>) ->
         0 => String::new(),
         passages => {
             let (passage, one) = match passages {
-                1 => ("passage", "that one"),
-                _ => ("passages", "those"),
+                1 => ("passage", "it"),
+                _ => ("passages", "them"),
             };
             format!(
-                " You had also changed {passages} {passage} {} changes, so {} merged {one}, keeping your wording where both could stand.",
+                " You had also changed {passages} {passage} that {} changes, so {} merged {one}, keeping your wording where both could stand.",
                 note.to,
                 model.unwrap_or("the model")
             )
@@ -2941,7 +2941,7 @@ mod tests {
         let [_, text] = merge_note_text(&state, &note, Some("Claude · Haiku · Medium"));
         assert_eq!(
             text,
-            "3 changes from v2 came in as plain text. You had also changed 1 passage v2 changes, so Claude · Haiku · Medium merged that one, keeping your wording where both could stand. Coordinators get the merged text from their next turn."
+            "3 changes from v2 came in as plain text. You had also changed 1 passage that v2 changes, so Claude · Haiku · Medium merged it, keeping your wording where both could stand. Coordinators get the merged text from their next turn."
         );
     }
 
