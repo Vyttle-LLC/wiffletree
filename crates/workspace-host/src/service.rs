@@ -4714,6 +4714,56 @@ mod tests {
     }
 
     #[test]
+    fn a_report_admission_sends_is_admitted_in_the_same_pass() {
+        let (_home, mut actor, _reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
+        assert!(
+            coordinator.parent_id.is_none(),
+            "its own hold reports to no one"
+        );
+        let queued = |actor: &Actor| -> i64 {
+            actor
+                .host
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0",
+                    [&coordinator.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(queued(&actor), 0);
+        actor
+            .host
+            .set_status(&coordinator.id, Status::Ready)
+            .unwrap();
+        // The coordinator is pinned to the disabled provider too, so reaching it holds its turn
+        // where it would otherwise start one.
+        let mut runtime = actor.host.session_runtime(&coordinator.id).unwrap();
+        runtime.profile = Some(ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
+        });
+        runtime.selection = Some(Selection {
+            chosen_by: Chooser::Coordinator {
+                session_id: coordinator.id.clone(),
+            },
+            reason: "Test".into(),
+            revision: 0,
+            at: now(),
+        });
+        actor.host.save_runtime(&runtime).unwrap();
+
+        actor.schedule().unwrap();
+
+        assert_eq!(queued(&actor), 1, "the reviewer's blocked report");
+        assert!(
+            actor.host.session_runtime(&coordinator.id).unwrap().held,
+            "the pass that sent the report also reached its coordinator"
+        );
+    }
+
+    #[test]
     fn a_paused_coordinators_long_queue_does_not_hide_a_runnable_worker() {
         let (_home, mut actor, reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
         for n in 0..101 {

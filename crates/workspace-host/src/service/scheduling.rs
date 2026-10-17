@@ -98,10 +98,26 @@ impl Actor {
                 })
                 .collect::<Result<_>>()?,
         );
-        let result = self.admit();
+        // What a pass sends, such as a held turn's report or a check-in, may wake a session
+        // the pass already went by; nothing else may come to admit it.
+        let result = loop {
+            let sent = self.last_message()?;
+            if let Err(error) = self.admit() {
+                break Err(error);
+            }
+            if self.last_message()? == sent {
+                break Ok(());
+            }
+        };
         self.scheduling.running = None;
         self.prepared_worktrees.clear();
         result
+    }
+    fn last_message(&self) -> Result<Option<i64>> {
+        Ok(self
+            .host
+            .db
+            .query_row("SELECT MAX(sequence) FROM messages", [], |r| r.get(0))?)
     }
     fn admit(&mut self) -> Result<()> {
         self.check_in_long_turns(now());
