@@ -103,7 +103,7 @@ impl Workspace {
 
     pub(super) fn inspector_rail(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let role = self.selected_role();
-        let attention = self.project_attention().len();
+        let attention = self.workspace_notes().len() + self.project_attention().len();
         let mut rail = div()
             .w(px(64.))
             .h_full()
@@ -591,7 +591,8 @@ impl Workspace {
 
     fn attention_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let items = self.project_attention();
-        if items.is_empty() {
+        let notes = self.workspace_notes();
+        if items.is_empty() && notes.is_empty() {
             return empty_state(
                 "check",
                 "You’re all caught up",
@@ -605,7 +606,11 @@ impl Workspace {
                 .find(|item| !item.is_permission())
                 .map(|item| item.id.clone())
         });
-        let mut body = div().flex().flex_col().gap_3();
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .children(notes.iter().map(|note| self.note_card(note, p, cx)));
         for item in items {
             let open = answering.as_ref() == Some(&item.id);
             body = body.child(self.attention_card(item, open, p, cx));
@@ -745,6 +750,81 @@ impl Workspace {
                         .on_click(cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))),
                 ),
             )
+        }
+    }
+
+    /// A workspace note: the paused setting, what happened, Compare and the choices that settle
+    /// it for every project at once.
+    fn note_card(&self, note: &WorkspaceNote, p: Palette, cx: &mut Context<Self>) -> Div {
+        let view = cx.entity().downgrade();
+        let on: workspace_notes::OnNote = Rc::new(move |path, action, window, cx| {
+            let _ = view.update(cx, |view, cx| view.note_action(path, action, window, cx));
+        });
+        let said = (note.text.strip_prefix(&note.setting)).unwrap_or(&note.text);
+        let compared = &self.compared;
+        card(p)
+            .bg(p.surface)
+            .border_color(p.yellow.opacity(0.55))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(hint("Workspace · settings sync", p))
+                    .child(pill("Paused", p.yellow)),
+            )
+            .child(div().text_size(px(13.)).line_height(relative(1.5)).child(
+                StyledText::new(format!("{}{said}", note.setting)).with_highlights([(
+                    0..note.setting.len(),
+                    HighlightStyle {
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                )]),
+            ))
+            .children(workspace_notes::comparison(note, compared, p))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .flex_wrap()
+                    .gap_2()
+                    // Narrow, the choices wrap to the right under Compare.
+                    .child(div().flex_1().flex().child(workspace_notes::compare_link(
+                        note,
+                        "Compare",
+                        "Hide comparison",
+                        compared,
+                        &on,
+                    )))
+                    .children(workspace_notes::settle_buttons(note, &on)),
+            )
+            .children(
+                workspace_notes::kept_note(note, compared)
+                    .map(|kept| hint(kept, p).text_size(px(11.))),
+            )
+    }
+
+    fn note_action(
+        &mut self,
+        path: String,
+        action: workspace_notes::NoteAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = match action {
+            workspace_notes::NoteAction::Compare => {
+                workspace_notes::toggle_compare(&mut self.compared, path)
+            }
+            workspace_notes::NoteAction::Settle(settle) => {
+                Some(Command::SettlePausedFile { path, settle })
+            }
+        };
+        match command {
+            Some(command) => self.request(command, window, cx),
+            None => cx.notify(),
         }
     }
 

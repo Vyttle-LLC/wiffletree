@@ -1460,6 +1460,9 @@ impl Host {
                 self.settle_paused(&path, settle)?;
                 Value::Null
             }
+            Command::ComparePausedFile { path } => {
+                serde_json::to_value(self.compare_paused(&path)?)?
+            }
             Command::SkillHistory { skill } => serde_json::to_value(self.skills().listing(skill))?,
             Command::StartSkillRewrite { skill } => {
                 self.skills().start_rewrite(skill)?;

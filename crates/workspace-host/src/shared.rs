@@ -205,6 +205,13 @@ impl SharedStore<'_> {
     pub(crate) fn guide(&self) -> Option<String> {
         fs::read_to_string(self.root.join(GUIDE)).ok()
     }
+    /// When the guide was last saved here, in milliseconds.
+    pub(crate) fn guide_saved_at(&self) -> Option<i64> {
+        let modified = fs::metadata(self.root.join(GUIDE))
+            .and_then(|m| m.modified())
+            .ok()?;
+        Some(chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis())
+    }
     pub(crate) fn set_guide(&self, guide: &str) -> Result<()> {
         self.write(GUIDE, guide.as_bytes())
     }

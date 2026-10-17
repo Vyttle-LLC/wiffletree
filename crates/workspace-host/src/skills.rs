@@ -96,13 +96,26 @@ pub struct Recorded {
     pub name: String,
     pub entry: Result<Entry, String>,
 }
-/// A line of what changed from a rewrite's base to the stock text.
+/// A line of what changed from one text to another, such as a rewrite's base to the stock text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "text", rename_all = "snake_case")]
 pub enum Line {
     Unchanged(String),
     Removed(String),
     Added(String),
+}
+/// What changed, line by line, from `old` to `new`.
+pub fn line_diff(old: &str, new: &str) -> Vec<Line> {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let lines = diff.iter_all_changes().map(|change| {
+        let text = change.value().trim_end_matches('\n').to_owned();
+        match change.tag() {
+            similar::ChangeTag::Equal => Line::Unchanged(text),
+            similar::ChangeTag::Delete => Line::Removed(text),
+            similar::ChangeTag::Insert => Line::Added(text),
+        }
+    });
+    lines.collect()
 }
 pub struct SkillStore<'a> {
     root: PathBuf,
@@ -228,16 +241,7 @@ impl SkillStore<'_> {
         let Some(Rewritten { base, .. }) = self.read(skill).0.rewrite else {
             return vec![];
         };
-        let diff = similar::TextDiff::from_lines(base.as_str(), stock(skill));
-        let lines = diff.iter_all_changes().map(|change| {
-            let text = change.value().trim_end_matches('\n').to_owned();
-            match change.tag() {
-                similar::ChangeTag::Equal => Line::Unchanged(text),
-                similar::ChangeTag::Delete => Line::Removed(text),
-                similar::ChangeTag::Insert => Line::Added(text),
-            }
-        });
-        lines.collect()
+        line_diff(&base, stock(skill))
     }
     fn change_rewrite(
         &self,

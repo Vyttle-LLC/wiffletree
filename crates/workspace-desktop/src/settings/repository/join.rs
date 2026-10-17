@@ -161,21 +161,34 @@ fn comparison_row(cells: [&str; 3], p: Palette) -> Div {
 }
 
 /// What this Mac lacks to run the shared settings, each with an icon and why.
-fn needs(shown: &SyncShown) -> Vec<(&'static str, String, Option<&'static str>)> {
+fn needs(shown: &SyncShown) -> Vec<(&'static str, StillNeed, Option<&'static str>)> {
     let mut needs: Vec<_> = (shown.still_needs.iter())
-        .map(|line| ("alert", line.clone(), None))
+        .map(|need| ("alert", need.clone(), None))
         .collect();
     if !shown.owners_allowed {
+        let owners = StillNeed {
+            text: "Owners allowed for pull requests".into(),
+            page: WorkspacePage::Repositories,
+        };
         needs.push((
             "laptop",
-            "Owners allowed for pull requests".into(),
+            owners,
             Some("These stay on each Mac. This one allows none yet, so every push asks first."),
         ));
     }
     needs
 }
 
-fn need(icon_name: &str, what: String, why: Option<&'static str>, p: Palette) -> Div {
+/// What one card lacks, why, and a link to the main window's page that provides it.
+fn need(icon_name: &str, what: StillNeed, why: Option<&'static str>, p: Palette) -> Div {
+    let (label, open): (_, Box<dyn Action>) = match what.page {
+        WorkspacePage::Models => ("Open Models", Box::new(OpenModels)),
+        WorkspacePage::Repositories => ("Open Repositories", Box::new(OpenRepositories)),
+    };
+    let link = button(SharedString::from(format!("need-{}", what.text)))
+        .link()
+        .label(label)
+        .on_click(move |_, window, cx| window.dispatch_action(open.boxed_clone(), cx));
     let color = if icon_name == "alert" {
         p.yellow
     } else {
@@ -198,26 +211,38 @@ fn need(icon_name: &str, what: String, why: Option<&'static str>, p: Palette) ->
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(div().font_weight(FontWeight::MEDIUM).child(what))
+                .child(div().font_weight(FontWeight::MEDIUM).child(what.text))
                 .children(why.map(|why| hint(why, p))),
         )
+        .child(link)
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{Joined, SyncShown, day_and_time, in_use, needs};
+    use workspace_core::{StillNeed, WorkspacePage};
 
     #[test]
     fn after_joining_the_section_lists_what_this_mac_still_needs() {
-        let held = "On from another machine, off on this Mac: \"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first";
+        let held = StillNeed {
+            text: "On from another machine, off on this Mac: \"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first".into(),
+            page: WorkspacePage::Models,
+        };
         let shown = SyncShown {
-            still_needs: vec![held.into()],
+            still_needs: vec![held.clone()],
             ..SyncShown::default()
         };
         let listed = needs(&shown);
         assert_eq!(listed[0].1, held);
-        assert_eq!(listed[1].1, "Owners allowed for pull requests");
+        let owners = &listed[1].1;
+        assert_eq!(
+            (&*owners.text, owners.page),
+            (
+                "Owners allowed for pull requests",
+                WorkspacePage::Repositories
+            )
+        );
         let allowed = SyncShown {
             owners_allowed: true,
             ..shown
