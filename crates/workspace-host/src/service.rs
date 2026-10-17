@@ -4599,10 +4599,24 @@ mod tests {
                 .map(|s| (s.archived, s.status))
         };
         assert_eq!(shown(&actor), Some((true, Status::Working)));
+        let index = WorkspaceIndex::new(actor.host.snapshot().unwrap(), Default::default());
+        assert_eq!(
+            index.ticket_of(&implementer.id).map(|t| &t.id),
+            Some(&ticket.id),
+            "its title and inspector name the ticket without the archive"
+        );
 
         finish_turn(&mut actor, &implementer, "run");
 
         assert_eq!(shown(&actor), None, "it is left to the archive");
+        let snapshot = actor.host.snapshot().unwrap();
+        assert!(
+            snapshot
+                .runtimes
+                .iter()
+                .all(|r| r.session_id != implementer.id)
+        );
+        assert!(snapshot.tickets.iter().all(|t| t.id != ticket.id));
     }
 
     #[test]
