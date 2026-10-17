@@ -23,16 +23,129 @@ fn samples(
         json!({"measure":name,"samples":count,"p50_ms":ms(times[count/2]),"p95_ms":ms(times[count*95/100]),"max_ms":ms(times[count-1])}),
     )
 }
+/// A finished store's shape: 140 tickets, ten still open, each with an implementer and four
+/// verifiers, so 700 ticket agents, all archived but the open tickets' implementers. Every
+/// agent has a runtime, and each open implementer has a question waiting for its coordinator.
+fn seed_history(
+    tx: &rusqlite::Transaction,
+    roots: &[Session],
+    repositories: &[(String, Repository)],
+) -> Result<()> {
+    const OPEN: [&str; 5] = [
+        "assigned",
+        "verifying",
+        "ready_for_testing",
+        "blocked",
+        "passed",
+    ];
+    const VERIFIERS: [(Role, &str); 4] = [
+        (Role::Tester, "Tests"),
+        (Role::Reviewer, "Claude"),
+        (Role::Reviewer, "Codex"),
+        (Role::Reviewer, "Style"),
+    ];
+    let mut session = tx.prepare("INSERT INTO sessions VALUES (?1,?2,?3,?4,?5)")?;
+    let mut runtime = tx.prepare("INSERT INTO runtimes VALUES (?1,?2)")?;
+    let mut ticket_row = tx.prepare("INSERT INTO tickets VALUES (?1,?2,?3)")?;
+    let mut question = tx.prepare("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?4,'[blocked] Which base?','completed',?5)")?;
+    for i in 0..140 {
+        let root = &roots[i % roots.len()];
+        let repository = &repositories
+            .iter()
+            .find(|(p, _)| *p == root.project_id)
+            .unwrap()
+            .1;
+        let open = i < 10;
+        let state = if open {
+            OPEN[i % OPEN.len()]
+        } else if i % 2 == 0 {
+            "accepted"
+        } else {
+            "closed"
+        };
+        let ticket_id = new_id();
+        let worktree = format!("/benchmark/tasks/project-{}/ticket-{i}", i % roots.len());
+        let agents: Vec<(Role, Option<&str>)> = std::iter::once((Role::Implementer, None))
+            .chain(VERIFIERS.iter().map(|(role, focus)| (*role, Some(*focus))))
+            .collect();
+        let mut verifiers = vec![];
+        for (role, focus) in agents {
+            let id = new_id();
+            let name = format!(
+                "{} · {} · Fixture ticket {i}: a title as long as a real one",
+                role.agent_label(focus),
+                "Fixture"
+            );
+            let agent = Session {
+                id: id.clone(),
+                project_id: root.project_id.clone(),
+                parent_id: Some(root.id.clone()),
+                repository_id: Some(repository.id.clone()),
+                name,
+                role,
+                provider: Provider::Claude,
+                status: Status::Done,
+                archived: !(open && role == Role::Implementer),
+            };
+            session.execute(params![
+                agent.id,
+                agent.project_id,
+                agent.parent_id,
+                serde_json::to_value(role)?.as_str(),
+                serde_json::to_string(&agent)?
+            ])?;
+            let record = json!({"session_id":id,"provider_session_id":new_id(),"profile":{"provider":"claude","model":"opus","effort":"high"},
+                "ticket_id":ticket_id,"focus":focus,"workdir":worktree,"directory":worktree,"last_error":null,
+                "selection":{"chosen_by":{"kind":"coordinator","session_id":root.id},"reason":"Large cross-crate change; the guide says raise effort","revision":3,"at":now()},
+                "last_started_at":now(),"last_finished_at":now()});
+            runtime.execute(params![
+                id,
+                serde_json::to_string(&serde_json::from_value::<SessionRuntime>(record)?)?
+            ])?;
+            if let Some(focus) = focus {
+                verifiers.push(json!({"session_id":id,"role":role,"focus":focus,"message_id":format!("verify:{ticket_id}:1:1:{id}"),"result":"passed","report_id":format!("report:{id}:{}", new_id())}));
+            } else if open {
+                question.execute(params![
+                    format!("report:{id}:{}", new_id()),
+                    root.project_id,
+                    id,
+                    root.id,
+                    now()
+                ])?;
+            }
+        }
+        let round = |n: u32| json!({"round":n,"commit":"0123456789abcdef0123456789abcdef01234567","verifiers":verifiers});
+        let ledger: Vec<_> = (1..=if open { 4 } else { 18 }).map(|n| json!({"id":format!("F{n}"),"severity":"non_blocking","location":"crates/workspace-desktop/src/sidebar.rs:412",
+            "summary":"The row label repeats the ticket title it sits under","trigger":"x".repeat(150),"evidence":"y".repeat(190),"focus":"Codex","cycle":1,"round":1,"status":"follow_up","reason":"z".repeat(110)})).collect();
+        let pull_request = (state == "accepted").then(|| json!({"number":i,"url":format!("https://github.com/fixture/repo/pull/{i}"),"state":"merged","draft":false,"base":"main",
+            "head":"0123456789abcdef0123456789abcdef01234567","merge_state":"clean","checks":"success","unresolved_threads":0,"comments":{"issue":null,"review":null,"inline":null}}));
+        let ticket = json!({"id":ticket_id,"coordinator_id":root.id,"repository_id":repository.id,"title":format!("Fixture ticket {i}: a title as long as a real one"),
+            "brief":"b".repeat(4400),"worktree":worktree,"branch":format!("wiffletree/fixture-ticket-{i}"),"state":state,
+            "verification":{"cycle":2,"max_rounds":2,"outcome":"passed","rounds":[round(1)]},
+            "previous_cycles":[{"cycle":1,"max_rounds":2,"outcome":"blocked","rounds":[round(1),round(2)]}],
+            "ledger":ledger,"pull_request":pull_request});
+        let ticket: Ticket = serde_json::from_value(ticket)?;
+        ticket_row.execute(params![
+            ticket.id,
+            ticket.coordinator_id,
+            serde_json::to_string(&ticket)?
+        ])?;
+    }
+    Ok(())
+}
 fn main() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let mut host = Host::open_set_up(directory.path())?;
+    // With a folder argument the fixture is built there and kept, for the desktop's tree bench.
+    let kept = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let temporary = tempfile::tempdir()?;
+    let directory = kept.as_deref().unwrap_or(temporary.path());
+    let mut host = Host::open_set_up(directory)?;
     let mut projects = Vec::new();
     for i in 0..5 {
         projects.push(host.create_project(&format!("Fixture {i}"))?);
     }
     let roots = host.sessions()?;
     drop(host);
-    let mut db = Connection::open(directory.path().join("workspace.sqlite3"))?;
+    let mut db = Connection::open(directory.join("workspace.sqlite3"))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
     let tx = db.transaction()?;
     let mut repositories = Vec::new();
@@ -56,7 +169,7 @@ fn main() -> Result<()> {
     }
     tx.commit()?;
     drop(db);
-    let mut host = Host::open_set_up(directory.path())?;
+    let mut host = Host::open_set_up(directory)?;
     // 45 agents across the projects' repositories, for 50 sessions with the coordinators.
     for i in 0..45 {
         let (project_id, repo) = &repositories[i % repositories.len()];
@@ -72,10 +185,11 @@ fn main() -> Result<()> {
     }
     let session = host.sessions()?.last().unwrap().clone();
     drop(host);
-    let mut db = Connection::open(directory.path().join("workspace.sqlite3"))?;
+    let mut db = Connection::open(directory.join("workspace.sqlite3"))?;
     db.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
     let tx = db.transaction()?;
     let seed_started = Instant::now();
+    seed_history(&tx, &roots, &repositories)?;
     {
         let mut messages=tx.prepare("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5)")?;
         let mut activity=tx.prepare("INSERT INTO activity(project_id,session_id,kind,detail,created_at) VALUES (?1,?2,'fixture','Historical activity',?3)")?;
@@ -166,14 +280,39 @@ fn main() -> Result<()> {
     tx.commit()?;
     let seed_ms = seed_started.elapsed().as_secs_f64() * 1000.;
     drop(db);
-    let mut host = Host::open_set_up(directory.path())?;
+    let mut host = Host::open_set_up(directory)?;
+    let snapshot_bytes = serde_json::to_vec(&host.snapshot()?)?.len();
+    let archive_bytes = serde_json::to_vec(&host.archive()?)?.len();
+    let (live, archive) = (host.snapshot()?, std::rc::Rc::new(host.archive()?));
     let results = vec![
         samples("indexed transcript page (100 rows)", 1000, |_| {
             std::hint::black_box(host.messages(&session.id, None, 100)?);
             Ok(())
         })?,
-        samples("workspace snapshot (50 sessions)", 1000, |_| {
-            std::hint::black_box(host.snapshot()?);
+        samples(
+            "workspace snapshot (750 sessions, 140 tickets)",
+            200,
+            |_| {
+                std::hint::black_box(host.snapshot()?);
+                Ok(())
+            },
+        )?,
+        // What the desktop waits for: the host's build, its JSON value and the decode.
+        samples("workspace snapshot with JSON round trip", 200, |_| {
+            let value = serde_json::to_value(host.snapshot()?)?;
+            std::hint::black_box(serde_json::from_value::<Snapshot>(value)?);
+            Ok(())
+        })?,
+        // Read again only when its stamp moves: on archiving, accepting or closing.
+        samples("archive with JSON round trip", 200, |_| {
+            let value = serde_json::to_value(host.archive()?)?;
+            std::hint::black_box(serde_json::from_value::<Archive>(value)?);
+            Ok(())
+        })?,
+        // As the desktop joins them on each snapshot; the copy of the snapshot is timed too.
+        samples("workspace index of snapshot and archive", 200, |_| {
+            let index = WorkspaceIndex::new(live.clone(), archive.clone());
+            std::hint::black_box(index);
             Ok(())
         })?,
         samples("indexed activity page (100 rows)", 1000, |_| {
@@ -208,14 +347,14 @@ fn main() -> Result<()> {
     ];
     drop(host);
     let reopen = samples("host restart and cached snapshot", 100, |_| {
-        let host = Host::open_set_up(directory.path())?;
+        let host = Host::open_set_up(directory)?;
         std::hint::black_box(host.snapshot()?);
         Ok(())
     })?;
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"build":if cfg!(debug_assertions){"debug"}else{"release"},"durability":"SQLite WAL / synchronous=FULL","fixture":{"projects":5,"repositories":"10 metadata fixtures; no Git history benchmark","sessions":50,"messages":100000,"activity":100000,"source_logs":100000,"step_runs":101,"steps":MAX_RUN_STEPS+MAX_PAGE*20},"seed_ms":seed_ms,"results":results,"recovery":reopen,"excluded":"native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak"})
+            &json!({"build":if cfg!(debug_assertions){"debug"}else{"release"},"durability":"SQLite WAL / synchronous=FULL","fixture":{"projects":5,"repositories":"10 metadata fixtures; no Git history benchmark","sessions":750,"tickets":140,"snapshot_bytes":snapshot_bytes,"archive_bytes":archive_bytes,"messages":100000,"activity":100000,"source_logs":100000,"step_runs":101,"steps":MAX_RUN_STEPS+MAX_PAGE*20},"seed_ms":seed_ms,"results":results,"recovery":reopen,"excluded":"native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak"})
         )?
     );
     Ok(())

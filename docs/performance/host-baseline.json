@@ -66,5 +66,134 @@
     "native_gpui": "0.2.2",
     "peak_host_benchmark_rss_bytes": 11255808,
     "notes": "Local temporary filesystem; warm indexed reads; release build; desktop build overlapped part of the run. No provider execution."
+  },
+  "bounded_snapshot": {
+    "recorded_date": "2026-10-17 America/New_York",
+    "environment": {
+      "cpu": "Apple M4",
+      "model": "Mac16,10",
+      "memory_bytes": 25769803776,
+      "logical_cores": 10,
+      "os": "macOS 27.0.1 (26A434)",
+      "rust": "1.97.0",
+      "build": "release"
+    },
+    "fixture": {
+      "activity": 100000,
+      "archive_bytes": 3523932,
+      "messages": 100000,
+      "projects": 5,
+      "repositories": "10 metadata fixtures; no Git history benchmark",
+      "sessions": 750,
+      "snapshot_bytes": 152783,
+      "source_logs": 100000,
+      "step_runs": 101,
+      "steps": 4000,
+      "tickets": 140
+    },
+    "before": {
+      "commit": "87b85177",
+      "snapshot_bytes": 3641867,
+      "results": [
+        {
+          "max_ms": 40.559,
+          "measure": "workspace snapshot (750 sessions, 140 tickets)",
+          "p50_ms": 37.1265,
+          "p95_ms": 38.709042,
+          "samples": 200
+        },
+        {
+          "max_ms": 44.395916,
+          "measure": "workspace snapshot with JSON round trip",
+          "p50_ms": 40.783417,
+          "p95_ms": 42.195499999999996,
+          "samples": 200
+        },
+        {
+          "max_ms": 114.769833,
+          "measure": "host restart and cached snapshot",
+          "p50_ms": 104.829917,
+          "p95_ms": 110.962083,
+          "samples": 100
+        }
+      ],
+      "desktop": {
+        "tree_rows_p50_ms": 25.986,
+        "tree_rows_p95_ms": 26.076,
+        "tree_rows_show_archived_p50_ms": 50.822,
+        "tree_rows_show_archived_p95_ms": 51.187
+      }
+    },
+    "after": {
+      "snapshot_bytes": 152783,
+      "archive_bytes": 3523932,
+      "results": [
+        {
+          "max_ms": 9.335374999999999,
+          "measure": "workspace snapshot (750 sessions, 140 tickets)",
+          "p50_ms": 5.498165999999999,
+          "p95_ms": 5.8717500000000005,
+          "samples": 200
+        },
+        {
+          "max_ms": 9.564582999999999,
+          "measure": "workspace snapshot with JSON round trip",
+          "p50_ms": 5.644167,
+          "p95_ms": 5.992500000000001,
+          "samples": 200
+        },
+        {
+          "max_ms": 28.03025,
+          "measure": "archive with JSON round trip",
+          "p50_ms": 15.163833,
+          "p95_ms": 15.879332999999999,
+          "samples": 200
+        },
+        {
+          "max_ms": 0.33875,
+          "measure": "workspace index of snapshot and archive",
+          "p50_ms": 0.19616699999999998,
+          "p95_ms": 0.204375,
+          "samples": 200
+        },
+        {
+          "max_ms": 81.706167,
+          "measure": "host restart and cached snapshot",
+          "p50_ms": 72.516334,
+          "p95_ms": 79.25699999999999,
+          "samples": 100
+        }
+      ],
+      "desktop": {
+        "tree_rows_p50_ms": 0.01,
+        "tree_rows_p95_ms": 0.01,
+        "tree_rows_show_archived_p50_ms": 0.088,
+        "tree_rows_show_archived_p95_ms": 0.093
+      }
+    },
+    "human_store_copy": {
+      "tickets": 137,
+      "sessions": 718,
+      "archived_sessions": 714,
+      "before": {
+        "snapshot_bytes": 2148697,
+        "round_trip_p50_ms": 14.357,
+        "round_trip_p95_ms": 15.168,
+        "tree_rows_p50_ms": 0.816,
+        "tree_rows_show_archived_p50_ms": 54.48,
+        "tree_rows_show_archived_p95_ms": 54.739
+      },
+      "after": {
+        "snapshot_bytes": 100681,
+        "round_trip_p50_ms": 4.325,
+        "round_trip_p95_ms": 4.803,
+        "archive_bytes": 2081614,
+        "archive_round_trip_p50_ms": 5.59,
+        "tree_rows_p50_ms": 0.001,
+        "tree_rows_show_archived_p50_ms": 0.098,
+        "tree_rows_show_archived_p95_ms": 0.103
+      }
+    },
+    "notes": "Desktop rows come from the ignored tree_rows_benchmark test in workspace-desktop; the rest from examples/benchmark.rs. Before and after ran on the same machine on the same day."
   }
 }
