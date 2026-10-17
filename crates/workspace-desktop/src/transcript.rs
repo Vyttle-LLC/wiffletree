@@ -159,6 +159,7 @@ pub(super) struct Row {
 }
 
 /// Who may have sent the messages on a page, and where each one's file references resolve.
+#[derive(Default, PartialEq)]
 struct Senders {
     session_id: String,
     names: HashMap<String, (SharedString, Role)>,
@@ -274,6 +275,8 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
 struct Loaded {
     messages: Rc<Vec<Message>>,
     rows: Rc<Vec<Row>>,
+    /// The names and link bases the rows were prepared with.
+    senders: Arc<Senders>,
 }
 
 fn avatar(icon_name: &'static str, color: Hsla) -> Div {
@@ -675,6 +678,8 @@ pub(super) struct Transcript {
     revisions: MessageRevisions,
     /// Pages are prepared off the UI thread; counts the asks so only the latest is shown.
     preparing: u64,
+    /// The latest preparation that finished, shown or not.
+    finished: u64,
     /// The selected session's latest run, shown as the activity card while it works.
     activity: Option<RunActivity>,
     step_fetch: StepFetch,
@@ -708,6 +713,7 @@ impl Transcript {
             page: None,
             revisions: MessageRevisions::default(),
             preparing: 0,
+            finished: 0,
             activity: None,
             step_fetch: StepFetch::default(),
             activity_clock: false,
@@ -815,6 +821,23 @@ impl Transcript {
         };
         if self.revisions.wanted(id, self.shared.message_revision(id)) {
             self.load_messages(window, cx);
+        } else {
+            self.name_senders_again(window, cx);
+        }
+    }
+
+    /// Prepares the shown page again, without asking the host, when the workspace now names its
+    /// senders or finds their files differently, as after a rename or once the archive arrives.
+    fn name_senders_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A fetch or a preparation on its way names them as the workspace is when it lands.
+        let busy = self.finished != self.preparing || self.revisions.asking.is_some();
+        let Some(id) = self.shared.selected.clone().filter(|_| !busy) else {
+            return;
+        };
+        let messages = &self.shown.messages;
+        if *self.shown.senders != Senders::of(&self.shared, &id, messages) {
+            let messages = messages.to_vec();
+            self.prepare(id, self.page, messages, window, cx);
         }
     }
 
@@ -846,20 +869,23 @@ impl Transcript {
             session_id,
             page,
         };
-        let senders = Senders::of(&self.shared, &ask.session_id, &messages);
+        let senders = Arc::new(Senders::of(&self.shared, &ask.session_id, &messages));
+        let prepared_with = senders.clone();
         let rows = cx.background_spawn(async move {
-            let rows = prepare(&messages, &senders);
+            let rows = prepare(&messages, &prepared_with);
             (messages, rows)
         });
         cx.spawn_in(window, async move |this, cx| {
             let (messages, rows) = rows.await;
             let _ = this.update_in(cx, |view, window, cx| {
+                view.finished = view.finished.max(ask.number);
                 if !ask.wanted(view.preparing, view.shared.selected.as_deref(), view.page) {
                     return;
                 }
                 let shown = Loaded {
                     messages: Rc::new(messages),
                     rows: Rc::new(rows),
+                    senders,
                 };
                 view.replace_page(shown.clone());
                 cx.emit(Intent::MessagesShown);
@@ -867,6 +893,8 @@ impl Transcript {
                 if ask.page.is_none() {
                     view.cache(ask.session_id, shown);
                 }
+                // The workspace may have moved while the rows were prepared.
+                view.name_senders_again(window, cx);
                 cx.notify();
             });
         })
@@ -1223,7 +1251,7 @@ impl Transcript {
     }
 
     fn transcript(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Loaded { messages, rows } = self.shown.clone();
+        let Loaded { messages, rows, .. } = self.shown.clone();
         let card = self.activity_card();
         let summaries = self.run_summaries.clone();
         let minimized = cx.global::<Preferences>().minimize_activity;
@@ -1372,9 +1400,10 @@ mod tests {
         Senders, Shape, from_human, peer_line, placements, prepare, run_heading, run_troubles,
         transcript_overlap,
     };
+    use crate::shared::Shared;
     use gpui::SharedString;
-    use std::{collections::HashMap, sync::Arc};
-    use workspace_core::{Message, Receipt, Role};
+    use std::{collections::HashMap, rc::Rc, sync::Arc};
+    use workspace_core::{Archive, Message, Receipt, Role, Session, Snapshot, WorkspaceIndex};
 
     fn message(id: &str, body: &str) -> Message {
         Message {
@@ -1660,6 +1689,43 @@ mod tests {
             current: bases,
         };
         prepare(messages, &senders)
+    }
+
+    #[test]
+    fn a_rename_or_the_archive_arriving_names_the_senders_anew() {
+        let session = |id: &str, name: &str, archived: bool| -> Session {
+            serde_json::from_value(serde_json::json!({
+                "id":id,"project_id":"p","parent_id":null,"repository_id":null,"name":name,
+                "role":"implementer","provider":"codex","status":"done","archived":archived
+            }))
+            .unwrap()
+        };
+        let shared = |live: Vec<Session>, archived: Vec<Session>| Shared {
+            index: Some(Rc::new(WorkspaceIndex::new(
+                Snapshot {
+                    sessions: live,
+                    ..Default::default()
+                },
+                Rc::new(Archive {
+                    session_order: archived.iter().map(|s| s.id.clone()).collect(),
+                    sessions: archived,
+                    ..Default::default()
+                }),
+            ))),
+            ..Default::default()
+        };
+        let page = [from(Some("impl"), "report:impl:1", "Done")];
+        let senders = |shared: &Shared| Senders::of(shared, "me", &page);
+        let before_archive = senders(&shared(vec![], vec![]));
+        let archived = senders(&shared(vec![], vec![session("impl", "Implementer", true)]));
+        assert!(
+            before_archive != archived,
+            "the archive names an archived sender"
+        );
+        let renamed = senders(&shared(vec![], vec![session("impl", "Builder", true)]));
+        assert!(archived != renamed);
+        let same = senders(&shared(vec![], vec![session("impl", "Builder", true)]));
+        assert!(renamed == same, "nothing to prepare again");
     }
 
     #[test]
