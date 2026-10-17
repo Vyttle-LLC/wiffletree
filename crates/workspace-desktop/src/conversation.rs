@@ -35,6 +35,10 @@ pub(super) struct Conversation {
     /// Why files in the selected conversation's last drop were not attached.
     refused_files: Vec<String>,
     sending: BTreeSet<String>,
+    /// By session, the dropped files the host is still checking; a send waits for them.
+    inspecting: BTreeMap<String, usize>,
+    /// Sessions whose send waits for their dropped files.
+    send_waiting: BTreeSet<String>,
     /// Projects whose decision card is folded to one row. Kept in memory only.
     minimized_decisions: BTreeSet<String>,
     /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
@@ -78,6 +82,8 @@ impl Conversation {
             attached: BTreeMap::new(),
             refused_files: vec![],
             sending: BTreeSet::new(),
+            inspecting: BTreeMap::new(),
+            send_waiting: BTreeSet::new(),
             minimized_decisions: BTreeSet::new(),
             chat_models: Rc::default(),
         }
@@ -134,8 +140,10 @@ impl Conversation {
         let Some(session) = self.shared.selected.clone() else {
             return;
         };
+        *self.inspecting.entry(session.clone()).or_default() += 1;
         let ask = ask::inspect_attachments(paths.clone());
         self.ask(ask, window, cx, move |view, inspected, window, cx| {
+            view.inspected(&session);
             let inspected = match inspected {
                 Ok(inspected) => inspected,
                 Err(error) => return toast_error(error, window, cx),
@@ -143,10 +151,26 @@ impl Conversation {
             let attached = view.attached.entry(session.clone()).or_default();
             let refused = attachment_chips::add_dropped(attached, &paths, inspected);
             // Why files were refused shows only with the conversation they were dropped on.
-            if view.shared.selected.as_ref() == Some(&session) {
+            let selected = view.shared.selected.as_ref() == Some(&session);
+            if selected {
                 view.refused_files = refused;
             }
+            // A send pressed meanwhile goes now, with the files, if its draft is still the one shown.
+            let waited =
+                !view.inspecting.contains_key(&session) && view.send_waiting.remove(&session);
+            if waited && selected {
+                view.send(window, cx);
+            }
         });
+    }
+    /// One drop's check on `session` came back.
+    fn inspected(&mut self, session: &str) {
+        if let Some(count) = self.inspecting.get_mut(session) {
+            *count -= 1;
+            if *count == 0 {
+                self.inspecting.remove(session);
+            }
+        }
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(files) = self
@@ -169,6 +193,10 @@ impl Conversation {
             .get(&recipient)
             .map(|files| files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
             .unwrap_or_default();
+        if self.inspecting.contains_key(&recipient) {
+            self.send_waiting.insert(recipient);
+            return;
+        }
         if (body.trim().is_empty() && attachments.is_empty()) || self.sending.contains(&recipient) {
             return;
         }
