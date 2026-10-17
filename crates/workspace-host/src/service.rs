@@ -1988,7 +1988,7 @@ impl Actor {
                 cancelled,
             } => {
                 let mut active = self.active.remove(id).unwrap();
-                self.host.turn_ended(id);
+                self.host.turn_ended(id)?;
                 // A quit cancels every turn; the record names the quit, as a retry's notes expect.
                 let error = if self.stopping && cancelled {
                     Some(QUIT_DURING_TURN.into())
@@ -3168,7 +3168,7 @@ impl Actor {
                 &format!("{run}; queue_ms={}", now() - queued_at),
             )
         })?;
-        self.host.in_turn.insert(session.id.clone());
+        self.host.turn_started(&session.id)?;
         Ok(())
     }
     /// The turn's whole prompt. A session's first turn since the host started also says what
@@ -9014,7 +9014,7 @@ mod tests {
         actor
             .active
             .insert(implementer.clone(), active_turn("run", vec![]));
-        actor.host.in_turn.insert(implementer.clone());
+        actor.host.turn_started(&implementer).unwrap();
         let (sender, events) = async_channel::bounded(8);
         actor.sender = sender;
         actor.handle(Event::Fetched(keeper::fetch(&job, &r.tools.git)));
@@ -9033,7 +9033,7 @@ mod tests {
         let due = |actor: &mut Actor| actor.host.keeper_due(&ticket.repository_id, 0).unwrap();
         assert!(due(&mut actor).fetches.is_empty());
         actor.active.clear();
-        actor.host.turn_ended(&implementer);
+        actor.host.turn_ended(&implementer).unwrap();
         let job = due(&mut actor).fetches.remove(0);
         actor.handle(Event::Fetched(keeper::fetch(&job, &r.tools.git)));
         actor.handle(events.recv_blocking().unwrap());

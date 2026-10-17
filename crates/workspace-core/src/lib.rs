@@ -625,6 +625,13 @@ pub struct Snapshot {
     /// only then.
     #[serde(default)]
     pub archive_stamp: u64,
+    /// Opaque, durable message revisions for sessions included in this snapshot. Compare for
+    /// equality only. A revision changes on any insert, edit, receipt change or deletion in
+    /// that session's `Messages` pages; unrelated sessions and no-op writes leave it alone.
+    /// Missing entries mean unknown: fetch on first selection or when the entry is absent.
+    /// Older hosts omit this field; older clients may ignore it and keep refetching.
+    #[serde(default)]
+    pub message_revisions: BTreeMap<String, u64>,
     /// How many sessions are archived, the archive's included.
     #[serde(default)]
     pub archived_sessions: u32,

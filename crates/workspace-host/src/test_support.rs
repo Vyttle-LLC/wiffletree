@@ -4,12 +4,7 @@ use std::path::Path;
 pub(crate) fn git(path: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .current_dir(path)
-        .args([
-            "-c",
-            "user.name=F",
-            "-c",
-            "user.email=f@example.invalid",
-        ])
+        .args(["-c", "user.name=F", "-c", "user.email=f@example.invalid"])
         .args(args)
         .output()
         .unwrap();

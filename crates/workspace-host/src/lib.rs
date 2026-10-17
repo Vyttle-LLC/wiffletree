@@ -20,6 +20,7 @@ mod progress;
 pub mod provider;
 mod publish;
 mod repositories;
+mod revisions;
 pub mod runtime;
 pub(crate) mod schedules;
 pub use schedules::TimerPass;
@@ -261,6 +262,7 @@ impl Host {
         db.execute_batch(include_str!("skills.sql"))?;
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
+        revisions::migrate(&db)?;
         worktrees::migrate(&db)?;
         checkout::migrate(&db)?;
         agent_processes::migrate(&db)?;
@@ -343,10 +345,13 @@ impl Host {
             .collect())
     }
     /// The session's turn is over, so what it reported in it now shows.
-    pub(crate) fn turn_ended(&mut self, session: &str) {
+    pub(crate) fn turn_ended(&mut self, session: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM archive_turns WHERE session_id=?1", [session])?;
         self.in_turn.remove(session);
         self.mid_turn_reports
             .retain(|_, report| report.reporter != session);
+        Ok(())
     }
     fn recover(&mut self) -> Result<()> {
         let sessions = self.sessions()?;
@@ -432,7 +437,7 @@ impl Host {
         // Archived sessions still in a turn keep their runtime and ticket until it ends.
         let turning = serde_json::to_string(&self.in_turn)?;
         let in_turn = "SELECT value FROM json_each(?1)";
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, message_revisions: self.message_revisions()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -473,36 +478,6 @@ impl Host {
             ticket_order: ids("tickets")?,
             stamp: self.archive_stamp()?,
         })
-    }
-    /// A hash of the stored rows `archive` reads, and of which archived sessions are mid-turn,
-    /// which `shown` reads; equal stamps mean an unchanged archive. New rows that are not yet
-    /// archived only append to its order, which a client places after it.
-    fn archive_stamp(&self) -> Result<u64> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for sql in [
-            format!(
-                "SELECT id,data FROM sessions WHERE {} ORDER BY rowid",
-                sessions_where(false)
-            ),
-            format!(
-                "SELECT id,data FROM tickets WHERE {} ORDER BY rowid",
-                tickets_listed(false)
-            ),
-            format!(
-                "SELECT session_id,data FROM runtimes WHERE session_id IN (SELECT id FROM sessions WHERE {}) ORDER BY rowid",
-                sessions_where(false)
-            ),
-        ] {
-            let mut statement = self.db.prepare(&sql)?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let id = row.get_ref(0)?.as_str()?;
-                (id, row.get_ref(1)?.as_str()?, self.in_turn.contains(id)).hash(&mut hasher);
-            }
-            0xff_u8.hash(&mut hasher);
-        }
-        Ok(hasher.finish())
     }
     /// Each session's `blocked` reports to its parent with no later message from that parent
     /// taken by one of the session's turns. Read from stored messages, so a queued answer
