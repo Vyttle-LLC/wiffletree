@@ -198,8 +198,7 @@ pub(crate) fn unusable(detection: &Detection) -> BTreeSet<Provider> {
         .filter(|provider| !detection.get(provider).is_some_and(ProviderStatus::usable))
         .collect()
 }
-/// Whether detection has answered for every provider.
-pub(crate) fn all_checked(detection: &Detection) -> bool {
+fn all_checked(detection: &Detection) -> bool {
     PROVIDERS
         .iter()
         .all(|provider| detection.contains_key(provider))

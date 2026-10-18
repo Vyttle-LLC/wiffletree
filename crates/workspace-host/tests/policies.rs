@@ -746,26 +746,72 @@ fn reopening_a_migrated_store_changes_nothing() {
 #[test]
 fn an_unedited_old_starter_guide_gets_the_current_one_and_an_edited_one_stays() {
     let guide_file = |home: &Path| home.join("shared/settings/model-guide.md");
-    for (old, edited) in [(true, false), (true, true), (false, false)] {
+    let mut cases: Vec<(String, bool)> = retired_starter_guides()
+        .into_iter()
+        .map(|guide| (guide, true))
+        .collect();
+    cases.push((
+        format!("{}\n\n", retired_starter_guides()[0].trim_end()),
+        true,
+    ));
+    cases.push((STARTER_GUIDE.to_owned(), true));
+    cases.push((
+        format!(
+            "{}Prefer Opus for migrations.\n",
+            retired_starter_guides()[0]
+        ),
+        false,
+    ));
+    for (guide, replaced) in cases {
         let home = tempfile::tempdir().unwrap();
         drop(Host::open_set_up(home.path()).unwrap());
-        let retired = retired_starter_guides();
-        let mut guide = match old {
-            true => retired[0].clone(),
-            false => STARTER_GUIDE.to_owned(),
-        };
-        if edited {
-            guide.push_str("Prefer Opus for migrations.\n");
-        }
         std::fs::write(guide_file(home.path()), &guide).unwrap();
         let host = Host::open(home.path()).unwrap();
-        let expected = if old && !edited {
-            STARTER_GUIDE
-        } else {
-            &guide
-        };
+        let expected = if replaced { STARTER_GUIDE } else { &guide };
         assert_eq!(host.model_selection().unwrap().guide, expected);
     }
+}
+
+#[test]
+fn the_old_starter_guide_with_its_previous_settings_section_ends_as_the_current_one() {
+    let home = tempfile::tempdir().unwrap();
+    drop(seed(home.path(), current, |_| {}));
+    // This shape: the old combined starter paragraph, then the section an earlier upgrade wrote,
+    // with trailing blank lines, in the row and in the shared folder.
+    let guide = format!(
+        "{}\n## Previous settings (migrated 2026-10-08)\n\n### Tester\n- Claude: small work → sonnet · low.\n\n\n",
+        retired_starter_guides()[0]
+    );
+    let legacy = json!({"revision":4,"guide":guide,
+        "providers":{"claude":{"enabled":true,"models":[{"model":"opus","effort":"high"}]},
+            "codex":{"enabled":true,"models":[{"model":"gpt-6.1-sol","effort":"high"}]}},
+        "role_providers":{}});
+    let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute_batch("DELETE FROM policy_migrations WHERE id='who-runs-what'")
+        .unwrap();
+    db.execute("UPDATE model_selection SET data=?1", [legacy.to_string()])
+        .unwrap();
+    drop(db);
+    std::fs::write(home.path().join("shared/settings/model-guide.md"), guide).unwrap();
+    let host = Host::open_detecting(home.path(), &signed_in(&PROVIDERS)).unwrap();
+    let selection = host.model_selection().unwrap();
+    assert_eq!(selection.guide, STARTER_GUIDE);
+    for line in [
+        "From the guide: ### Tester",
+        "From the guide: - Claude: small work → sonnet · low.",
+    ] {
+        assert!(
+            selection.notes.iter().any(|n| n == line),
+            "{:?}",
+            selection.notes
+        );
+    }
+    // Re-running changes nothing.
+    drop(host);
+    assert_eq!(
+        Host::open(home.path()).unwrap().model_selection().unwrap(),
+        selection
+    );
 }
 
 #[test]

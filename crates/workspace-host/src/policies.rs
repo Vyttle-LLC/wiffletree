@@ -457,7 +457,8 @@ impl Host {
         let Some(guide) = self.shared().guide() else {
             return Ok(());
         };
-        if retired_starter_guides().contains(&guide) {
+        let unedited = |retired: &String| retired.trim() == guide.trim();
+        if retired_starter_guides().iter().any(unedited) {
             self.shared().set_guide(STARTER_GUIDE)?;
         }
         Ok(())

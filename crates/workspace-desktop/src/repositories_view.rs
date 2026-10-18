@@ -33,8 +33,8 @@ pub(super) struct ChecksEdit {
 }
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
-fn trigger(checkbox: Checkbox, name: &'static str, details: Vec<AnyElement>) -> Div {
-    div().flex().items_start().gap_3().child(checkbox).child(
+fn trigger(mark: impl IntoElement, name: &'static str, details: Vec<AnyElement>) -> Div {
+    div().flex().items_start().gap_3().child(mark).child(
         div()
             .flex_1()
             .min_w_0()
@@ -416,9 +416,9 @@ impl RepositoriesPage {
             )
             .when(!held.is_empty(), |d| d.child(hint(HELD, p)))
             .child(trigger(
-                // Not `disabled`: its tick is half-faded on a half-faded box, unreadable in both
-                // themes. With no click handler it still cannot change.
-                Checkbox::new("keeper-watch").checked(true),
+                // A plain tick: a disabled checkbox fades its tick into its fill, unreadable in
+                // both themes, and an enabled one would look clickable.
+                icon("check").text_color(p.accent),
                 "Watch it",
                 vec![hint(WATCH, p).into_any_element()],
             ))
