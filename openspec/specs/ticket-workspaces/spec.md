@@ -145,7 +145,7 @@ Removing a ticket's worktree, on accept, close, archive, a pending removal or an
 - **THEN** that folder is deleted and the ticket's worktree is untouched
 
 ### Requirement: A ticket may stack on another ticket in its repository
-`create_ticket` with `stack_on` SHALL accept only a ticket of the same project and repository that is not closed, and SHALL otherwise refuse, naming the parent and why, and create nothing. The ticket SHALL record the parent as `stacked_on`, and `workspace_context` SHALL show it on the ticket's full and short entries. A stacked ticket SHALL be measured against its parent's branch: the reviewers' base and diff, the size a publish reports, and whether a later commit has the verified commit's patch. A later commit SHALL also count as having that patch when it has it against the repository's base. Without `stack_on`, creation and measurement SHALL be unchanged.
+`create_ticket` with `stack_on` SHALL accept only a ticket of the same project and repository that is not closed, and SHALL otherwise refuse, naming the parent and why, and create nothing. The ticket SHALL record the parent as `stacked_on`, and `workspace_context` SHALL show it on the ticket's full and short entries. A stacked ticket SHALL be measured against its parent's branch: the reviewers' base and diff, the size a publish reports, and whether a later commit has the verified commit's patch. A later commit SHALL NOT count as having that patch because it has it against the repository's base. Without `stack_on`, creation and measurement SHALL be unchanged.
 
 #### Scenario: Stacked on a reviewed ticket
 - **WHEN** the coordinator creates "Child" with `stack_on` naming a ticket whose branch has two commits

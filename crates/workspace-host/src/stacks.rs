@@ -44,23 +44,14 @@ impl Base {
             Self::Stacked { branch, .. } => branch,
         }
     }
-    /// Whether two commits carry the same patch against the measured ref, or for a stacked
-    /// ticket against the repository's base, as after a rebase of the whole stack.
+    /// Whether two commits carry the same patch against the measured ref. A stacked ticket's
+    /// patch is its own changes alone, so a rebase of the whole stack needs a new review.
     pub(crate) fn same_patch(&self, worktree: &Path, one: &str, other: &str) -> Result<bool> {
-        let bases = match self {
-            Self::Repository(base) => vec![base],
-            Self::Stacked {
-                repository, branch, ..
-            } => vec![branch, repository],
-        };
-        for base in bases {
-            if worktrees::patch_id(worktree, base, one)?
-                == worktrees::patch_id(worktree, base, other)?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let base = self.measured();
+        Ok(
+            worktrees::patch_id(worktree, base, one)?
+                == worktrees::patch_id(worktree, base, other)?,
+        )
     }
     /// The branch on origin the pull request opens into: the parent's branch once the host has
     /// pushed it, or the repository's base after the parent's pull request merged.
@@ -291,7 +282,13 @@ mod tests {
         assert!(lines.ends_with("1 file changed, 1 insertion(+)"), "{lines}");
         // The parent gains a fix and the child is rebased onto it: the review still holds.
         let parent = f.commit("a.txt", "one, fixed\n");
-        git(Path::new(&child.worktree), &["rebase", "-q", &parent]);
+        let worktree = Path::new(&child.worktree);
+        git(worktree, &["rebase", "-q", &parent]);
         f.host.check_verified_head(&child, &head).unwrap();
+        // Undoing the parent's fix matches the reviewed tree against main, but not the child's
+        // own reviewed changes, so it needs a new review.
+        fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        git(worktree, &["commit", "-q", "-am", "revert the fix"]);
+        assert!(f.host.check_verified_head(&child, &head).is_err());
     }
 }

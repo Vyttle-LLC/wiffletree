@@ -5,7 +5,7 @@ Every ticket branches from its repository's base and every pull request opens in
 ## What Changes
 
 - **`create_ticket` takes an optional `stack_on`**: the id of a ticket of the same project and repository that is not closed. The new ticket records it as `stacked_on`, and its branch starts at the parent's branch tip. Without it, nothing changes.
-- **A stacked ticket is measured against its parent's branch**: the reviewers' base and diff, the publish size, and the patch comparison behind accepting, publishing and the PR keeper. A later commit also keeps its review when it has the verified commit's patch against the repository's base, as after the whole stack was rebased.
+- **A stacked ticket is measured against its parent's branch**: the reviewers' base and diff, the publish size, and the patch comparison behind accepting, publishing and the PR keeper. A rebase of the whole stack, which changes the parent's commits, needs a new review of the child.
 - **Its pull request opens into the parent's branch**. `publish_ticket` refuses until the host has pushed the parent's branch. Once the parent's pull request has merged, the child's opens into the repository's base instead, since the parent's branch is finished and may be deleted.
 - **The PR keeper** already rebases a PR onto the PR's own base branch, so a stacked PR follows its parent's branch and is never moved onto main. Its patch comparison now uses the ticket's base, so a parent that only gained commits leaves the child's change the same.
 - **Instructions**: the `create_ticket`, `publish_ticket` and `workspace_context` tool descriptions and the coordinator's fixed core (v2) say how and when to stack.

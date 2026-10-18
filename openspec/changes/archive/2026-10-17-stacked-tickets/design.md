@@ -8,7 +8,7 @@ A ticket's base was always `repository.base`, read in several places: worktree c
 
 **The parent's local branch is the measured ref.** Ticket worktrees share the repository's refs, so `wiffletree/<parent>` is visible to every worktree and is current even before the parent is pushed. The merge-base of the child and that branch is the fork point, so reviewers see only the child's commits.
 
-**Patch equivalence accepts either base for a stacked ticket.** Against the parent's branch, a child rebased onto a parent that only gained commits keeps its patch. Against the repository's base, a child rebased with its whole stack, as after the keeper rebased the parent onto main, keeps its patch. A match against either keeps the review; anything else needs a new one, as today.
+**Patch equivalence is against the parent's branch alone.** A child rebased onto a parent that only gained commits keeps its patch. A match against the repository's base is not accepted: the aggregate diff can equal the reviewed one while the child's own changes differ, for example a commit that reverts a parent fix. So a child rebased with its whole stack, as after the keeper rebased the parent onto main, needs a new review.
 
 **After the parent's PR merges, publish targets the repository's base.** The parent's branch is finished then and GitHub may delete it. Opening into it would put the change where nobody merges it. Retargeting a child PR that is already open is left to GitHub and the human.
 
@@ -21,4 +21,4 @@ A ticket's base was always `repository.base`, read in several places: worktree c
 ## Risks
 
 - Overlap warnings compare open branches against the repository's base, so a parent and its child share files and show an overlap without conflicts.
-- A parent squashed after its child branched leaves the child carrying the parent's old commits; its next rebase may conflict, as with any stacked PR.
+- A parent rebased or squashed after its child branched needs a new review of the child, and its next rebase may conflict, as with any stacked PR.
