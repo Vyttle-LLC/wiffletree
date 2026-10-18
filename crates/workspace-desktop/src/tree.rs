@@ -95,7 +95,7 @@ pub fn waiver_note(ticket: &Ticket) -> Option<String> {
     ticket
         .waiver
         .as_ref()
-        .filter(|_| ticket.state == "accepted")?;
+        .filter(|_| ticket.state == TicketState::Accepted)?;
     let open = ticket
         .ledger
         .iter()
@@ -693,12 +693,10 @@ fn member_label(name: &str) -> &str {
 /// The shown projects in the host's order. With `grouped`, two or more that share a first word,
 /// whatever its case, gather where the topmost of them is. Archived projects count only when
 /// `show_archived`.
-pub fn entries(snapshot: &Snapshot, show_archived: bool, grouped: bool) -> Vec<Entry<'_>> {
+pub fn entries(index: &WorkspaceIndex, show_archived: bool, grouped: bool) -> Vec<Entry<'_>> {
     let mut groups: Vec<Group> = vec![];
-    for project in &snapshot.projects {
-        let Some(root) = snapshot.sessions.iter().find(|s| {
-            s.project_id == project.id && s.parent_id.is_none() && (show_archived || !s.archived)
-        }) else {
+    for project in &index.snapshot().projects {
+        let Some(root) = (index.roots(&project.id)).find(|s| show_archived || !s.archived) else {
             continue;
         };
         let key = group_key(&root.name);
@@ -942,32 +940,20 @@ pub fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRele
 }
 
 /// Projects in the host's order, under their group's row while `grouped`; a collapsed group
-/// hides its projects. Archived sessions appear only when `show_archived`; a ticket whose
-/// agents are all archived, such as a closed one, goes with them.
+/// hides its projects. Archived sessions appear only when `show_archived`, and accepted and
+/// closed tickets then or while an agent of theirs is listed; a ticket whose agents are all
+/// archived goes with them.
 pub fn rows<'a>(
-    snapshot: &'a Snapshot,
+    index: &'a WorkspaceIndex,
     show_archived: bool,
     grouped: bool,
     collapsed: &BTreeSet<String>,
     collapsed_groups: &BTreeSet<String>,
 ) -> Vec<Row<'a>> {
     let shown = |s: &&Session| show_archived || !s.archived;
-    let ticket_of = |id: &str| {
-        snapshot
-            .runtimes
-            .iter()
-            .find(|r| r.session_id == id)
-            .and_then(|r| r.ticket_id.as_deref())
-    };
-    let focus_of = |id: &str| {
-        snapshot
-            .runtimes
-            .iter()
-            .find(|r| r.session_id == id)
-            .and_then(|r| r.focus.as_deref())
-    };
+    let runtime = |id: &str| index.runtime(id);
     let mut rows = vec![];
-    for entry in entries(snapshot, show_archived, grouped) {
+    for entry in entries(index, show_archived, grouped) {
         let projects = match entry {
             Entry::Project(root) => vec![(root, root.name.clone(), false)],
             Entry::Group(group) => {
@@ -993,40 +979,34 @@ pub fn rows<'a>(
             if collapsed.contains(&root.project_id) {
                 continue;
             }
-            for ticket in snapshot
-                .tickets
-                .iter()
-                .filter(|t| t.coordinator_id == root.id)
-            {
-                let on_ticket = |s: &&Session| ticket_of(&s.id) == Some(ticket.id.as_str());
-                let agents: Vec<&Session> = snapshot
-                    .sessions
-                    .iter()
-                    .filter(shown)
-                    .filter(on_ticket)
-                    .collect();
-                if agents.is_empty() && snapshot.sessions.iter().any(|s| on_ticket(&s)) {
+            for ticket in index.tickets_owned_by(&root.id) {
+                let agents: Vec<&Session> = index.agents(&ticket.id).filter(shown).collect();
+                let settled = !show_archived && !ticket.is_open();
+                if agents.is_empty() && (settled || index.agents(&ticket.id).next().is_some()) {
                     continue;
                 }
                 rows.push(Row::Ticket {
                     ticket,
-                    label: ticket_label(snapshot, ticket),
+                    label: ticket_label(index.snapshot(), ticket),
                 });
                 for session in agents {
+                    let focus = runtime(&session.id).and_then(|r| r.focus.as_deref());
                     rows.push(Row::Agent {
                         session,
                         depth: 2,
                         // The ticket row above already names the work.
-                        label: session.role.agent_label(focus_of(&session.id)),
+                        label: session.role.agent_label(focus),
                     });
                 }
             }
             // Older stores can contain workers created before ticket ownership existed, and
             // retired repository coordinators stay readable from the archive.
-            for session in
-                snapshot.sessions.iter().filter(shown).filter(|s| {
-                    s.parent_id.as_ref() == Some(&root.id) && ticket_of(&s.id).is_none()
-                })
+            let without_ticket =
+                |s: &&Session| runtime(&s.id).and_then(|r| r.ticket_id.as_ref()).is_none();
+            for session in index
+                .children(&root.id)
+                .filter(shown)
+                .filter(without_ticket)
             {
                 let label = if session.role == Role::TaskOrchestrator {
                     format!("{} (retired)", session.name)
@@ -1047,8 +1027,14 @@ pub fn rows<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::{path::Path, rc::Rc};
     use workspace_host::Host;
+
+    /// The host's snapshot joined with its archive, as the app shows it.
+    fn joined(host: &Host) -> WorkspaceIndex {
+        let archive = Rc::new(host.archive().unwrap());
+        WorkspaceIndex::new(host.snapshot().unwrap(), archive)
+    }
 
     fn agent(word: Option<Word>, plan: Option<(u32, u32)>, working: bool) -> AgentProgress {
         let state = match word {
@@ -1331,7 +1317,7 @@ mod tests {
             )
             .unwrap();
         }
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
 
         let rows = rows(&snapshot, false, true, &BTreeSet::new(), &BTreeSet::new());
 
@@ -1349,8 +1335,66 @@ mod tests {
             panic!("ticket row")
         };
         assert_eq!(
-            shown.state, "assigned",
+            shown.state,
+            TicketState::Assigned,
             "the row carries the ticket's state"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_without_archived_sessions_needs_no_archive() {
+        let (_directory, mut host, root, ticket) = store();
+        let none = BTreeSet::new();
+        host.assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        let retired = host
+            .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
+            .unwrap();
+        host.set_archived(&retired.id, true).unwrap();
+        let repository = host.repositories().unwrap().remove(0);
+        let finished = host
+            .create_ticket(&root.id, &repository.id, "Old calls", "Done")
+            .unwrap();
+        host.close_ticket(&finished.id).unwrap();
+        let live = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
+
+        let expected = [
+            (0, "Calls".to_owned()),
+            (1, "sagechat-sms · Fix inbound calls".into()),
+            (2, "Implementer".into()),
+        ];
+        assert_eq!(shape(&rows(&live, false, true, &none, &none)), expected);
+        assert_eq!(
+            shape(&rows(&joined(&host), false, true, &none, &none)),
+            expected,
+            "the archive changes nothing until archived sessions are shown"
+        );
+        assert_eq!(
+            shape(&rows(&joined(&host), true, true, &none, &none)).len(),
+            5
+        );
+    }
+
+    #[test]
+    fn an_agent_restored_from_a_closed_ticket_is_listed_under_it() {
+        let (_directory, mut host, _root, ticket) = store();
+        let none = BTreeSet::new();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        host.close_ticket(&ticket.id).unwrap();
+        host.set_archived(&implementer.id, false).unwrap();
+        let live = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
+
+        let expected = [
+            (0, "Calls".to_owned()),
+            (1, "sagechat-sms · Fix inbound calls".into()),
+            (2, "Implementer".into()),
+        ];
+        assert_eq!(shape(&rows(&live, false, true, &none, &none)), expected);
+        assert_eq!(
+            shape(&rows(&joined(&host), false, true, &none, &none)),
+            expected
         );
     }
 
@@ -1361,7 +1405,7 @@ mod tests {
         host.assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
             .unwrap();
         host.close_ticket(&ticket.id).unwrap();
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
 
         assert_eq!(
             shape(&rows(&snapshot, false, true, &none, &none)),
@@ -1586,8 +1630,12 @@ mod tests {
     fn only_an_accepted_ticket_with_a_waiver_gets_the_waived_ring() {
         let (_directory, _host, _root, mut ticket) = store();
         ticket.ledger = vec![entry("F3", Severity::Blocking, EntryStatus::Open, None)];
-        for state in ["passed", "blocked", "accepted"] {
-            ticket.state = state.into();
+        for state in [
+            TicketState::Passed,
+            TicketState::Blocked,
+            TicketState::Accepted,
+        ] {
+            ticket.state = state;
             assert_eq!(waiver_note(&ticket), None, "{state}");
         }
         ticket.waiver = Some("F3 needs a fetched base".into());
@@ -1595,7 +1643,7 @@ mod tests {
             waiver_note(&ticket).as_deref(),
             Some("Accepted with waiver · 1 open finding")
         );
-        ticket.state = "blocked".into();
+        ticket.state = TicketState::Blocked;
         assert_eq!(waiver_note(&ticket), None);
     }
 
@@ -1639,7 +1687,7 @@ mod tests {
             )
             .unwrap();
         let none = BTreeSet::new();
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
 
         assert_eq!(
             shape(&rows(&snapshot, false, true, &none, &none)),
@@ -1666,10 +1714,61 @@ mod tests {
         (directory, host)
     }
 
-    /// The project list as drawn: group rows with their count, their projects indented.
-    fn drawn(snapshot: &Snapshot, show_archived: bool, grouped: bool) -> Vec<String> {
+    /// Times what the desktop does with a store's workspace: decoding the snapshot and the
+    /// archive, joining them, and the sidebar's rows. Run it on a copy of a store, such as the
+    /// benchmark's kept fixture: `WIFFLETREE_BENCH_DIR=<folder> cargo test --release -p
+    /// workspace-desktop tree_rows_benchmark -- --ignored --nocapture`. Never on a live store.
+    #[test]
+    #[ignore]
+    fn tree_rows_benchmark() {
+        let folder = std::env::var("WIFFLETREE_BENCH_DIR").expect("WIFFLETREE_BENCH_DIR");
+        let host = Host::open(folder).unwrap();
+        let timed = |name: &str, work: &mut dyn FnMut()| {
+            let mut times: Vec<f64> = (0..200)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    work();
+                    start.elapsed().as_secs_f64() * 1000.
+                })
+                .collect();
+            times.sort_by(f64::total_cmp);
+            println!(
+                "{name}: p50 {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+                times[100], times[190], times[199]
+            );
+        };
+        let snapshot_bytes = serde_json::to_vec(&host.snapshot().unwrap()).unwrap().len();
+        let archive_bytes = serde_json::to_vec(&host.archive().unwrap()).unwrap().len();
+        println!("snapshot {snapshot_bytes} bytes, archive {archive_bytes} bytes");
+        timed("snapshot with JSON round trip", &mut || {
+            let value = serde_json::to_value(host.snapshot().unwrap()).unwrap();
+            std::hint::black_box(serde_json::from_value::<Snapshot>(value).unwrap());
+        });
+        timed("archive with JSON round trip", &mut || {
+            let value = serde_json::to_value(host.archive().unwrap()).unwrap();
+            std::hint::black_box(serde_json::from_value::<Archive>(value).unwrap());
+        });
+        let (snapshot, archive) = (host.snapshot().unwrap(), Rc::new(host.archive().unwrap()));
+        timed("index build", &mut || {
+            let index = WorkspaceIndex::new(snapshot.clone(), archive.clone());
+            std::hint::black_box(index);
+        });
+        let index = WorkspaceIndex::new(snapshot, archive);
         let none = BTreeSet::new();
-        rows(snapshot, show_archived, grouped, &none, &none)
+        for show_archived in [false, true] {
+            timed(
+                &format!("tree rows, show archived {show_archived}"),
+                &mut || {
+                    std::hint::black_box(rows(&index, show_archived, true, &none, &none));
+                },
+            );
+        }
+    }
+
+    /// The project list as drawn: group rows with their count, their projects indented.
+    fn drawn(index: &WorkspaceIndex, show_archived: bool, grouped: bool) -> Vec<String> {
+        let none = BTreeSet::new();
+        rows(index, show_archived, grouped, &none, &none)
             .iter()
             .map(|row| match row {
                 Row::Group(group) => format!("{} ({})", group.label, group.members.len()),
@@ -1699,7 +1798,7 @@ mod tests {
     #[test]
     fn projects_sharing_a_first_word_gather_where_the_topmost_of_them_is() {
         let (_directory, host) = listed(&MOCKUP);
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
 
         // Case and the colon do not matter, a lone first word stays an ordinary row, and
         // members keep the host's order under the word as their topmost member writes it.
@@ -1735,7 +1834,7 @@ mod tests {
         assert_eq!(first_word("— untitled"), "");
         let (_directory, host) = listed(&["— one", "— two", "Wiffletree: a", "wiffletree b"]);
         assert_eq!(
-            drawn(&host.snapshot().unwrap(), false, true),
+            drawn(&joined(&host), false, true),
             ["— one", "— two", "Wiffletree (2)", "  a", "  b"]
         );
     }
@@ -1768,7 +1867,7 @@ mod tests {
         let neptune = host.sessions().unwrap().remove(0);
         assert_eq!(neptune.name, "infra: Neptune");
         host.set_archived(&neptune.id, true).unwrap();
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
 
         assert_eq!(
             drawn(&snapshot, false, true),
@@ -1787,7 +1886,7 @@ mod tests {
     #[test]
     fn a_collapsed_group_hides_its_projects_and_rolls_up_the_most_urgent_state() {
         let (_directory, host) = listed(&["infra: a", "Billing", "infra: b"]);
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
         let (none, infra) = (BTreeSet::new(), BTreeSet::from(["infra".to_owned()]));
 
         let collapsed = rows(&snapshot, false, true, &none, &infra);
@@ -1809,7 +1908,7 @@ mod tests {
 
     /// The order the host would hold after `dragged` is dropped at `drop`.
     fn dropped(host: &mut Host, grouped: bool, dragged: &Movable, drop: &Drop) -> Option<String> {
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(host);
         let entries = entries(&snapshot, false, grouped);
         let moved = project_move(&entries, dragged, drop)?;
         let order = host
@@ -1848,7 +1947,7 @@ mod tests {
         );
         // The upper half of a row means before it; the lower half, before the next one, or
         // the end below the last.
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
         let flat = entries(&snapshot, false, false);
         let before = |row: &Movable| Drop::Before(row.clone());
         assert_eq!(drops(&flat, &d, &a), Some((before(&a), before(&b))));
@@ -1879,7 +1978,7 @@ mod tests {
 
         // It cannot leave its group, and nothing from outside can land inside: over a member,
         // a top-level row lands below the whole group.
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
         let grouped = entries(&snapshot, false, true);
         let (group, before) = (Movable::Group("w".into()), |row: &Movable| {
             Drop::Before(row.clone())
@@ -1915,7 +2014,7 @@ mod tests {
         }
         let [x, y] = ["x", "y"].map(|name| project(&host, name));
         let (group, hidden) = (Movable::Group("w".into()), project(&host, "old"));
-        let snapshot = host.snapshot().unwrap();
+        let snapshot = joined(&host);
         let shown = entries(&snapshot, false, true);
         // A hidden project is no row: nothing lands beside it, and it is not dragged.
         assert_eq!(drops(&shown, &x, &hidden), None);
@@ -2436,7 +2535,7 @@ mod tests {
             before: "3daf610aa".into(),
             after: "77b0c13ff".into(),
             base: "4a1c2e9dd".into(),
-            state: "passed".into(),
+            state: TicketState::Passed,
             last: None,
             problem: None,
             withdrawn: Some(withdrawn.clone()),

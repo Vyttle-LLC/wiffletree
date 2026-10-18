@@ -57,12 +57,12 @@ impl Workspace {
     /// On a store with no saved setup, suggests one from the last detection. An untouched
     /// suggestion follows a new detection; one the human edited is kept.
     pub(super) fn offer_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.snapshot.is_none() || self.catalog_pending > 0 {
+        if self.index.is_none() || self.catalog_pending > 0 {
             return;
         }
         let Some(offer) = models::offer(
             &self.saved_model_selection,
-            self.snapshot.as_ref().is_some_and(|s| s.guide_saved),
+            self.snapshot().is_some_and(|s| s.guide_saved),
             self.suggested.as_ref(),
             &self.model_selection,
             self.verifiers.read(cx).verification(),

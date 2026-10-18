@@ -400,10 +400,10 @@ impl Host {
         }
         // A finished ticket that was never verified, for example a migrated one, has no cycle to
         // accept against yet.
-        let finished_unverified =
-            ticket.verification.is_none() && matches!(ticket.state.as_str(), "passed" | "failed");
+        let finished_unverified = ticket.verification.is_none()
+            && matches!(ticket.state, TicketState::Passed | TicketState::Failed);
         ensure!(
-            ticket.state == "ready_for_testing" || finished_unverified,
+            ticket.state == TicketState::ReadyForTesting || finished_unverified,
             "Ticket is {}; verify it once its implementer reports ready_for_testing",
             ticket.state
         );
@@ -579,7 +579,7 @@ impl Host {
                 keeper,
             });
             let milestone = if queued_at.is_some() {
-                ticket.state = "verifying".into();
+                ticket.state = TicketState::Verifying;
                 host.save_ticket(&ticket)?;
                 "verification_queued"
             } else {
@@ -700,7 +700,7 @@ impl Host {
                 "Wiffletree verification cycle {} of ticket \"{}\" ({}) cannot go on: {why}. The cycle is blocked; fix the cause and call verify_ticket again, close the ticket or ask the human.",
                 verification.cycle, ticket.title, ticket.id
             );
-            ticket.state = "blocked".into();
+            ticket.state = TicketState::Blocked;
             ticket.end_unreviewed();
             host.save_ticket(&ticket)?;
             host.send(&id, None, &ticket.coordinator_id, &body)?;
@@ -819,7 +819,7 @@ impl Host {
     /// verifier's own open entries. From round 2 on, it limits the check to those entries and
     /// the new diff.
     fn start_round(&mut self, ticket: &mut Ticket) -> Result<()> {
-        ticket.state = "verifying".into();
+        ticket.state = TicketState::Verifying;
         self.save_ticket(ticket)?;
         let settings = self.settings().verification;
         let verification = ticket.verification.as_ref().context("No verification")?;
@@ -979,7 +979,7 @@ impl Host {
         }
         if let (Routing::Ready, Some(ticket)) = (&routing, &ticket) {
             ensure!(
-                ticket.state == "failed",
+                ticket.state == TicketState::Failed,
                 "Verification round is still running; wait for its result before reporting ready again"
             );
             ensure!(
@@ -1010,7 +1010,8 @@ impl Host {
                 match routing {
                     Routing::Plain if ticket.is_open() => {
                         let prior = host.shown_ticket(ticket.clone()).state;
-                        ticket.state = kind.into();
+                        let reported = TicketState::named(kind).context("Unknown report kind")?;
+                        ticket.state = reported;
                         host.save_ticket(&ticket)?;
                         if host.in_turn.contains(&session.id) {
                             host.mid_turn_reports.insert(
@@ -1018,7 +1019,7 @@ impl Host {
                                 MidTurnReport {
                                     reporter: session.id.clone(),
                                     prior,
-                                    reported: kind.into(),
+                                    reported,
                                 },
                             );
                         }
@@ -1036,7 +1037,7 @@ impl Host {
                             verification.outcome = VerificationOutcome::Blocked;
                             untriage_orphans(verification, &mut ticket.ledger);
                         }
-                        ticket.state = "blocked".into();
+                        ticket.state = TicketState::Blocked;
                         ticket.end_unreviewed();
                         host.save_ticket(&ticket)?;
                         host.retire(&cycle_verifiers(&ticket))?;
@@ -1185,7 +1186,7 @@ impl Host {
                 .filter(|v| v.result == VerifierResult::Passed)
                 .map(|v| v.session_id.clone())
                 .collect();
-            ticket.state = "failed".into();
+            ticket.state = TicketState::Failed;
             self.save_ticket(&ticket)?;
             self.send(&id, None, &implementer, &body)?;
             return self.retire(&passed);
@@ -1276,10 +1277,9 @@ impl Host {
         let id = format!("verification:{}:{cycle}:outcome", ticket.id);
         let coordinator = ticket.coordinator_id.clone();
         ticket.state = match outcome {
-            VerificationOutcome::Passed => "passed",
-            _ => "blocked",
-        }
-        .into();
+            VerificationOutcome::Passed => TicketState::Passed,
+            _ => TicketState::Blocked,
+        };
         let mut keeper = false;
         if let Some(verification) = &mut ticket.verification {
             verification.outcome = outcome;
@@ -1329,7 +1329,7 @@ impl Host {
         cycle.outcome = VerificationOutcome::Blocked;
         ticket.ledger = ledger;
         ticket.verification = ticket.previous_cycles.pop();
-        ticket.state = review.state.clone();
+        ticket.state = review.state;
         let keeper = ticket.keeper.get_or_insert_default();
         if let Some(recorded) = keeper.reviews.last_mut() {
             recorded.withdrawn = Some(Withdrawn {

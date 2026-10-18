@@ -23,7 +23,7 @@ impl Workspace {
                 .update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        let name = next_name(self.snapshot.as_deref());
+        let name = next_name(self.snapshot());
         self.creating_project = true;
         self.request(Command::CreateProject { name }, window, cx);
         cx.notify();
@@ -38,11 +38,7 @@ impl Workspace {
         if self.project_edit.as_ref().is_some_and(|e| e.saving) {
             return;
         }
-        let Some(project) = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.projects.iter().find(|p| p.id == project_id))
-        else {
+        let Some(project) = self.index.as_ref().and_then(|s| s.project(&project_id)) else {
             return;
         };
         let original = project.name.clone();

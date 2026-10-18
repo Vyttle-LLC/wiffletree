@@ -2,7 +2,8 @@
 //! keeps: plan steps, session status, ticket state and the verification record. Nothing here
 //! is stored or reported by an agent.
 use crate::{
-    PlanCounts, Role, Session, SessionRuntime, Status, Ticket, VerificationOutcome, VerifierResult,
+    PlanCounts, Role, Session, SessionRuntime, Status, Ticket, TicketState, VerificationOutcome,
+    VerifierResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -206,7 +207,7 @@ pub fn derive(
     };
     let tickets: Vec<_> = tickets
         .iter()
-        .filter(|ticket| ticket.state != "closed")
+        .filter(|ticket| ticket.state != TicketState::Closed)
         .map(|ticket| records.ticket(ticket))
         .collect();
     let crew: HashSet<&str> = tickets
@@ -281,10 +282,10 @@ impl Records<'_> {
 
     fn ticket(&self, ticket: &Ticket) -> TicketProgress {
         use BarState::{Finished, InProgress};
-        let (stage, state, position) = match (ticket.state.as_str(), &ticket.verification) {
-            ("accepted", _) => (Stage::Accepted, Finished, FULL_POSITION),
-            ("ready_for_testing", _) => (Stage::Implementing, InProgress, IMPLEMENTED),
-            ("assigned", _) | (_, None) => {
+        let (stage, state, position) = match (ticket.state, &ticket.verification) {
+            (TicketState::Accepted, _) => (Stage::Accepted, Finished, FULL_POSITION),
+            (TicketState::ReadyForTesting, _) => (Stage::Implementing, InProgress, IMPLEMENTED),
+            (TicketState::Assigned, _) | (_, None) => {
                 let (state, position) = self.implementing(ticket);
                 (Stage::Implementing, state, position)
             }
@@ -302,7 +303,7 @@ impl Records<'_> {
             }
         };
         // Blocked wins over stripes: a bar is in exactly one state.
-        let state = if ticket.state == "blocked" {
+        let state = if ticket.state == TicketState::Blocked {
             BarState::Blocked
         } else {
             state

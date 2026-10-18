@@ -2785,7 +2785,7 @@ pub(crate) mod tests {
             };
             assert!(f.open_items().is_empty());
             let ticket = f.ticket();
-            assert_eq!((ticket.state.as_str(), ticket.publishing), (finish, None));
+            assert_eq!((ticket.state.name(), ticket.publishing), (finish, None));
             assert_eq!(
                 results(&f.host),
                 [(

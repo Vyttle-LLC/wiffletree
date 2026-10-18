@@ -629,7 +629,10 @@ fn ticket_agents_are_scoped_and_reports_are_immediate_and_idempotent() {
         json!({"message_id":"verified","kind":"passed","body":"Independent checks pass"}),
     )
     .unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "accepted");
+    assert_eq!(
+        host.ticket(&ticket.id).unwrap().state,
+        TicketState::Accepted
+    );
     host.agent_tool(&coordinator.id, "accept_ticket", accept)
         .unwrap();
     assert!(
@@ -689,7 +692,10 @@ fn progress_reaches_the_parent_without_moving_the_ticket_or_the_reporter() {
         .filter(|a| a.kind == "agent_progress")
         .count();
     assert_eq!(progress_rows, 1, "Every progress row has its message");
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "assigned");
+    assert_eq!(
+        host.ticket(&ticket.id).unwrap().state,
+        TicketState::Assigned
+    );
     assert_eq!(
         host.session(&implementer.id).unwrap().status,
         implementer.status
@@ -965,7 +971,7 @@ fn closing_a_finished_review_ticket_archives_its_agents() {
         .unwrap();
     host.agent_tool(&coordinator.id, "close_ticket", close)
         .unwrap();
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "closed");
+    assert_eq!(host.ticket(&ticket.id).unwrap().state, TicketState::Closed);
     assert!(host.session(&reviewer.id).unwrap().archived);
     assert!(!host.session(&coordinator.id).unwrap().archived);
     assert!(
@@ -988,7 +994,7 @@ fn accepting_archives_the_tickets_agents_and_keeps_their_conversations() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(accepted.state, "accepted");
+    assert_eq!(accepted.state, TicketState::Accepted);
     for agent in [&worker, &verifier] {
         assert!(host.session(&agent.id).unwrap().archived);
         assert!(!host.messages(&agent.id, None, 100).unwrap().is_empty());
@@ -1048,7 +1054,10 @@ fn only_the_project_coordinator_manages_tickets() {
         ),
         before
     );
-    assert_eq!(host.ticket(&ticket.id).unwrap().state, "assigned");
+    assert_eq!(
+        host.ticket(&ticket.id).unwrap().state,
+        TicketState::Assigned
+    );
     for removed in ["create_repo_coordinator", "archive_team"] {
         assert!(
             host.agent_tool(&coordinator.id, removed, json!({}))

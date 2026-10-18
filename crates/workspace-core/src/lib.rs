@@ -1,5 +1,6 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 mod files;
+mod index;
 mod owners;
 mod progress;
 mod publishing;
@@ -9,6 +10,7 @@ mod suggestion;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use files::*;
+pub use index::WorkspaceIndex;
 pub use owners::*;
 pub use progress::*;
 pub use publishing::*;
@@ -560,16 +562,33 @@ pub struct MaintenanceRun {
     pub exported: usize,
     pub created_at: i64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// The live workspace. Archived sessions, accepted and closed tickets and those sessions'
+/// runtimes are left to the `Archive`; `WorkspaceIndex` joins the two for views.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub projects: Vec<Project>,
     pub repositories: Vec<Repository>,
+    /// The sessions that are not archived and open tickets' archived agents, in the order they
+    /// were created, then archived sessions still in a turn.
     pub sessions: Vec<Session>,
     pub attention: Vec<Attention>,
+    /// The open tickets, and accepted or closed ones an unarchived agent works on, in the order
+    /// they were created.
     #[serde(default)]
     pub tickets: Vec<Ticket>,
+    /// The runtimes of `sessions`.
     #[serde(default)]
     pub runtimes: Vec<SessionRuntime>,
+    /// Changes whenever what `Command::Archive` answers does, so a client re-reads the archive
+    /// only then.
+    #[serde(default)]
+    pub archive_stamp: u64,
+    /// How many sessions are archived, the archive's included.
+    #[serde(default)]
+    pub archived_sessions: u32,
+    /// By coordinator, how many tickets it owns, open or not.
+    #[serde(default)]
+    pub tickets_owned: BTreeMap<String, u32>,
     #[serde(default)]
     pub live_projects: Vec<String>,
     /// Parent folders checked for new repositories.
@@ -625,6 +644,21 @@ pub struct Snapshot {
     /// Why each keeper trigger the shared settings turn on is off on this machine.
     #[serde(default)]
     pub keeper_held: Vec<String>,
+}
+/// What a `Snapshot` leaves out: archived sessions other than open tickets' agents, accepted
+/// and closed tickets no unarchived agent works on, and those sessions' runtimes. Answers
+/// `Command::Archive`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Archive {
+    pub sessions: Vec<Session>,
+    pub tickets: Vec<Ticket>,
+    pub runtimes: Vec<SessionRuntime>,
+    /// Every session's id, archived or not, in the order they were created, so that joining a
+    /// snapshot keeps each session in its place; likewise every ticket's.
+    pub session_order: Vec<String>,
+    pub ticket_order: Vec<String>,
+    /// The `Snapshot::archive_stamp` this archive was read at.
+    pub stamp: u64,
 }
 /// How many processes the record says an agent started and still runs; between turns the
 /// record is exact, during one it can count members that have since exited.
@@ -1385,6 +1419,64 @@ pub struct VerifierChoice {
     pub reason: String,
 }
 
+/// Where a ticket is in its life, stored and sent as its snake_case name. Reports move an open
+/// ticket to the state their kind names; verification, acceptance and closing move it too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketState {
+    Planned,
+    Assigned,
+    ReadyForTesting,
+    Verifying,
+    Passed,
+    Failed,
+    Blocked,
+    Completed,
+    Accepted,
+    Closed,
+}
+impl TicketState {
+    pub const ALL: [Self; 10] = [
+        Self::Planned,
+        Self::Assigned,
+        Self::ReadyForTesting,
+        Self::Verifying,
+        Self::Passed,
+        Self::Failed,
+        Self::Blocked,
+        Self::Completed,
+        Self::Accepted,
+        Self::Closed,
+    ];
+    /// The stored name, such as `ready_for_testing`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Assigned => "assigned",
+            Self::ReadyForTesting => "ready_for_testing",
+            Self::Verifying => "verifying",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+            Self::Accepted => "accepted",
+            Self::Closed => "closed",
+        }
+    }
+    /// Accepted and closed tickets take no further agents or state changes.
+    pub fn is_open(self) -> bool {
+        !matches!(self, Self::Accepted | Self::Closed)
+    }
+    /// The state a stored name, or the report kind of the same name, stands for.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.name() == name)
+    }
+}
+impl std::fmt::Display for TicketState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
 /// A ticket is a workspace: one repository, one worktree and branch, and its agents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ticket {
@@ -1398,7 +1490,7 @@ pub struct Ticket {
     pub brief: String,
     pub worktree: String,
     pub branch: String,
-    pub state: String,
+    pub state: TicketState,
     /// The latest verification cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<Verification>,
@@ -1514,7 +1606,7 @@ pub struct KeeperReview {
     /// The base commit the keeper's commit sits on.
     pub base: String,
     /// The ticket's state when the review started.
-    pub state: String,
+    pub state: TicketState,
     /// The keeper's last action before this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<KeeperAction>,
@@ -1687,7 +1779,7 @@ impl PublishRequest {
 impl Ticket {
     /// Accepted and closed tickets take no further agents or state changes.
     pub fn is_open(&self) -> bool {
-        !matches!(self.state.as_str(), "accepted" | "closed")
+        self.state.is_open()
     }
     /// The verification cycle in progress, if any.
     pub fn running_cycle(&self) -> Option<&Verification> {
@@ -2424,6 +2516,8 @@ pub enum Command {
         repository_id: String,
     },
     Snapshot,
+    /// Read-only: the history a `Snapshot` leaves out; answered with `Archive`.
+    Archive,
     SetLive {
         project_id: String,
         enabled: bool,
@@ -2761,6 +2855,87 @@ pub enum Command {
         #[serde(default)]
         groups: Vec<String>,
     },
+}
+impl Command {
+    /// Reads change nothing in the store, so the host signals no change for them and clients
+    /// reload nothing after one. Every command is listed, so a new one must be classified.
+    pub fn is_read(&self) -> bool {
+        match self {
+            Self::Snapshot
+            | Self::Archive
+            | Self::DiscoverRepositories { .. }
+            | Self::Quotas
+            | Self::Usage { .. }
+            | Self::Messages { .. }
+            | Self::Steps { .. }
+            | Self::Files { .. }
+            | Self::Progress { .. }
+            | Self::RunSummaries { .. }
+            | Self::Logs { .. }
+            | Self::Runs { .. }
+            | Self::Activity { .. }
+            | Self::GitHistory { .. }
+            | Self::Settings
+            | Self::CheckSettingsRepository { .. }
+            | Self::ComparePausedFile { .. }
+            | Self::SkillHistory { .. }
+            | Self::SkillMergeReview { .. }
+            | Self::SkillStockChanges { .. }
+            | Self::LeftoverWorktrees
+            | Self::Processes { .. } => true,
+            Self::ImportRepositories { .. }
+            | Self::RefreshRepositories
+            | Self::RemoveRepositoryRoot { .. }
+            | Self::SetProjectRepositories { .. }
+            | Self::RemoveRepository { .. }
+            | Self::SetLive { .. }
+            | Self::ConfigureSession { .. }
+            | Self::ReconcileSession { .. }
+            | Self::CompactContext { .. }
+            | Self::CancelCompaction { .. }
+            | Self::DismissCompaction { .. }
+            | Self::RecordQuota { .. }
+            | Self::CreateTicket { .. }
+            | Self::AssignTicket { .. }
+            | Self::CreateProject { .. }
+            | Self::RenameProject { .. }
+            | Self::MoveProjects { .. }
+            | Self::AttachRepository { .. }
+            | Self::CreateSession { .. }
+            | Self::SetStatus { .. }
+            | Self::SetArchived { .. }
+            | Self::Send { .. }
+            | Self::SetModelSelection { .. }
+            | Self::ResolveAttention { .. }
+            | Self::DismissAttention { .. }
+            | Self::AppendLog { .. }
+            | Self::AttachBrain { .. }
+            | Self::ExportLogs { .. }
+            | Self::SetWorkspacesDir { .. }
+            | Self::SetVerification { .. }
+            | Self::SetCheckIns { .. }
+            | Self::SetOwnerAllowed { .. }
+            | Self::SetKeeper { .. }
+            | Self::SaveSkillRules { .. }
+            | Self::ResetSkill { .. }
+            | Self::RestoreSkill { .. }
+            | Self::SetUpSettingsRepository { .. }
+            | Self::JoinSettingsRepository { .. }
+            | Self::SyncNow
+            | Self::StopSettingsSync
+            | Self::SettlePausedFile { .. }
+            | Self::StartSkillRewrite { .. }
+            | Self::SaveSkillRewrite { .. }
+            | Self::MarkSkillUpToDate { .. }
+            | Self::UndoSkillMerge { .. }
+            | Self::MergeSkillUpdate { .. }
+            | Self::AnswerSkillQuestion { .. }
+            | Self::DismissSkillMerge { .. }
+            | Self::SetRepositoryChecks { .. }
+            | Self::RemoveLeftoverWorktrees { .. }
+            | Self::StopProcesses { .. } => false,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {

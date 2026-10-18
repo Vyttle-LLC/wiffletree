@@ -2722,7 +2722,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         };
         assert_eq!(passages.len(), 1);
         assert!(host.take_merge_runs().is_empty());
-        assert_eq!(host.workspace_notes().unwrap(), []);
+        assert_eq!(
+            host.workspace_notes(&host.skill_states().unwrap()).unwrap(),
+            []
+        );
         assert_eq!(
             current(&host),
             [before.text.as_bytes(), before.base.as_bytes()]
@@ -2867,7 +2870,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
             (Some(&question), None)
         );
         let note = WorkspaceNote::SkillQuestion(question.clone());
-        assert_eq!(host.workspace_notes().unwrap(), [note]);
+        assert_eq!(
+            host.workspace_notes(&host.skill_states().unwrap()).unwrap(),
+            [note]
+        );
 
         // No second run, now, at the next start or on Merge v1 in.
         assert!(!host.skill_merge_due(skill).unwrap());
@@ -2916,7 +2922,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
             (kept.question, kept.merge_note.unwrap().entry),
             (None, entry.clone())
         );
-        assert_eq!(host.workspace_notes().unwrap(), []);
+        assert_eq!(
+            host.workspace_notes(&host.skill_states().unwrap()).unwrap(),
+            []
+        );
 
         // Undone, the question stays closed, and v2's wording is still a merge away.
         execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
@@ -3040,7 +3049,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         write_entry(&mut host, "2090-01-01T00-00-00.000Z", &asked(&other));
         let state = coordinating_state(&host);
         assert_eq!(
-            (state.question, host.workspace_notes().unwrap()),
+            (
+                state.question,
+                host.workspace_notes(&host.skill_states().unwrap()).unwrap()
+            ),
             (None, vec![])
         );
         let answer = Command::AnswerSkillQuestion {
@@ -3073,7 +3085,10 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         based_on_an_earlier_release(&host, &newer);
         let state = coordinating_state(&host);
         assert_eq!(
-            (state.question, host.workspace_notes().unwrap()),
+            (
+                state.question,
+                host.workspace_notes(&host.skill_states().unwrap()).unwrap()
+            ),
             (None, vec![])
         );
     }

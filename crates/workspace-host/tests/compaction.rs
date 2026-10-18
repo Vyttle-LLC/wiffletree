@@ -292,15 +292,21 @@ impl World {
         serde_json::from_value(self.request(Command::Snapshot)).unwrap()
     }
 
+    fn archive(&self) -> Archive {
+        serde_json::from_value(self.request(Command::Archive)).unwrap()
+    }
+
+    /// Archived or not.
     fn status(&self, session: &str) -> Status {
-        let sessions = self.snapshot().sessions;
-        sessions.iter().find(|s| s.id == session).unwrap().status
+        let sessions = self.snapshot().sessions.into_iter();
+        let mut sessions = sessions.chain(self.archive().sessions);
+        sessions.find(|s| s.id == session).unwrap().status
     }
 
     fn runtime(&self, session: &str) -> SessionRuntime {
-        let runtimes = self.snapshot().runtimes;
-        let runtime = runtimes.into_iter().find(|r| r.session_id == session);
-        runtime.unwrap()
+        let runtimes = self.snapshot().runtimes.into_iter();
+        let mut runtimes = runtimes.chain(self.archive().runtimes);
+        runtimes.find(|r| r.session_id == session).unwrap()
     }
 
     /// The coordinator's compaction request, if it has one.
@@ -1431,8 +1437,9 @@ fn archiving_a_worker_while_it_compacts_lets_it_finish_and_runs_no_turn_after() 
             archived: true,
         });
     });
-    let sessions = world.snapshot().sessions;
-    assert!(sessions.iter().find(|s| s.id == worker).unwrap().archived);
+    let sessions = world.snapshot().sessions.into_iter();
+    let mut sessions = sessions.chain(world.archive().sessions);
+    assert!(sessions.find(|s| s.id == worker).unwrap().archived);
 }
 
 #[test]

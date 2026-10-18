@@ -3,6 +3,9 @@ CREATE TABLE IF NOT EXISTS runtimes (session_id TEXT PRIMARY KEY REFERENCES sess
 CREATE TABLE IF NOT EXISTS tickets (id TEXT PRIMARY KEY, coordinator_id TEXT NOT NULL REFERENCES sessions(id), data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS provider_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), messages TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER, outcome TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS tickets_coordinator ON tickets(coordinator_id);
+-- The snapshot reads open tickets and unarchived sessions, the archive the others.
+CREATE INDEX IF NOT EXISTS tickets_state ON tickets(json_extract(data,'$.state'));
+CREATE INDEX IF NOT EXISTS sessions_archived ON sessions(coalesce(json_extract(data,'$.archived'),0));
 -- Each turn start counts the session's runs since its parent's last message.
 CREATE INDEX IF NOT EXISTS provider_runs_session_started ON provider_runs(session_id, started_at);
 -- Tickets whose worktree removal waits for an agent's turn to end. Only rows here are swept.

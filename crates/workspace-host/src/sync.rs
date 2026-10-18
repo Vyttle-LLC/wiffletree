@@ -1309,8 +1309,8 @@ impl Host {
     }
     /// One note per paused setting, a skill's rules, rewrite and base being one: two machines'
     /// changes first, then edits made outside Wiffletree, then what this machine cannot read.
-    /// Then one per skill question.
-    pub(crate) fn workspace_notes(&self) -> Result<Vec<WorkspaceNote>> {
+    /// Then one per skill question, from `skills`, which are the skill states.
+    pub(crate) fn workspace_notes(&self, skills: &[SkillState]) -> Result<Vec<WorkspaceNote>> {
         let rows: Vec<(String, String)> = (self.db.prepare("SELECT path,why FROM sync_paused")?)
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
@@ -1348,7 +1348,7 @@ impl Host {
             Paused::OutsideWiffletree => 1,
             Paused::CannotBeRead { .. } => 2,
         });
-        let questions = (self.skill_states()?.into_iter()).filter_map(|state| state.question);
+        let questions = (skills.iter()).filter_map(|state| state.question.clone());
         let notes = notes.into_iter().map(WorkspaceNote::Paused);
         Ok(notes
             .chain(questions.map(WorkspaceNote::SkillQuestion))

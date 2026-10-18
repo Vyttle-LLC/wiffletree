@@ -31,11 +31,33 @@ The fixture adds 101 finished runs with 4,000 stored steps: one run at the 2,000
 
 Peak resident memory was 16,596,992 bytes (~15.8 MiB). Not measured: the service actor's in-memory merge per streamed update, eight simultaneous streams, and the desktop's per-batch main-thread time against the 8 ms p95 target. In a manual run, a replayed recorded Claude turn of 129 stream events produced 73 paced step fetches and no step-triggered snapshot reloads; the snapshot reloads that did occur came from per-request usage events.
 
+## Bounded snapshot — October 17, 2026
+
+The snapshot now holds only live work, the archive is read apart from it and only while a view needs it, and the desktop joins the two in `WorkspaceIndex`. The fixture gains a finished store's shape: 140 tickets, ten of them open, each with an implementer and four verifiers, so 750 sessions with the coordinators and workers, 690 of them archived, and a runtime for every ticket agent. Ticket rows are sized like the human's (a 4,400-character brief, two cycles, up to 18 ledger entries). Before is Phase 1's head (`87b85177`) with this fixture, after is this change; both ran on the Apple M4 above (macOS 27.0.1, Rust 1.97.0, release build) on the same day.
+
+| Operation | Before p50 | Before p95 | After p50 | After p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Snapshot JSON size | 3,641,867 B | | 192,494 B | |
+| Workspace snapshot, host build | 37.127 ms | 38.709 ms | 8.284 ms | 9.298 ms |
+| Snapshot with JSON round trip | 40.783 ms | 42.195 ms | 7.947 ms | 8.485 ms |
+| Archive with JSON round trip (3,484,471 B), read only while a view needs it | | | 17.587 ms | 18.710 ms |
+| Index of snapshot and archive | | | 0.211 ms | 0.225 ms |
+| Sidebar tree rows | 25.986 ms | 26.076 ms | 0.005 ms | 0.006 ms |
+| Sidebar tree rows, Show archived | 50.822 ms | 51.187 ms | 0.090 ms | 0.098 ms |
+| Host restart and snapshot | 104.830 ms | 110.962 ms | 88.353 ms | 158.524 ms |
+
+The after column was measured once more after review kept open tickets' archived agents, such as an earlier cycle's verifiers, in the snapshot, so that the default sidebar needs no archive. That added 40 sessions and their runtimes to the fixture's snapshot. Other builds were running on the Mac by then, so after times run a little high; the restart p95 in particular was noisy. Before that change, on a quiet machine, the snapshot was 152,783 bytes and built in 5.498 ms p50.
+
+On a read-only copy of the human's store (137 tickets, 718 sessions, 714 archived), measured before that review change, the snapshot went from 2,148,697 to 100,681 bytes and its round trip from 14.357 to 4.325 ms p50; the archive is 2,081,614 bytes and round-trips in 5.590 ms. Tree rows with Show archived went from 54.480 to 0.098 ms p50, and without it from 0.816 to 0.001 ms.
+
+Of the old host build, 19 ms was `questions_waiting` scanning every message and 15 ms `undelivered` doing the same; both now go through existing indexes (message ids, and each session's outbox). Accepted and closed tickets and archived sessions are found through two expression indexes. Most of what remains is hashing the archive's stored rows for `archive_stamp`, about 4.5 ms, and finding open tickets' agents. Tree rows and the snapshot sizes and round trips on the desktop side come from the ignored `tree_rows_benchmark` test, pointed at a kept fixture or store copy; the other rows come from the benchmark. The desktop decodes the snapshot and builds the index on its main thread; that is the round trip's decode plus the index, under 1 ms here.
+
 Reproduce with:
 
 ```sh
 cargo build --locked --release -p workspace-host --example benchmark
-/usr/bin/time -l target/release/examples/benchmark
+/usr/bin/time -l target/release/examples/benchmark [folder to keep the fixture in]
+WIFFLETREE_BENCH_DIR=<kept folder or a store copy> cargo test --locked --release -p workspace-desktop tree_rows_benchmark -- --ignored --nocapture
 ```
 
 The native GPUI release build succeeds and the development process launches. An idle debug process with five empty sessions was observed at ~79 MiB RSS and a point-in-time 0.0% CPU reading; that observation is not a sustained idle, streaming or renderer-memory benchmark. The Mac was locked, which prevented manual visual QA.

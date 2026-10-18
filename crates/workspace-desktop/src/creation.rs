@@ -110,34 +110,30 @@ impl CreationForm {
 
     pub fn new(
         kind: Creation,
-        snapshot: &Snapshot,
+        index: &WorkspaceIndex,
         selected: Option<&Session>,
         ticket: Option<&str>,
         bridge: Bridge,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let snapshot = index.snapshot();
         let project_id = selected.map(|s| s.project_id.clone());
-        let project = snapshot
-            .projects
-            .iter()
-            .find(|p| Some(&p.id) == project_id.as_ref());
+        let project = project_id.as_deref().and_then(|id| index.project(id));
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let chosen_repositories = project
             .and_then(|p| p.repositories.as_ref())
             .map(|ids| ids.iter().cloned().collect());
-        let root_id = snapshot
-            .sessions
-            .iter()
+        let root_id = index
+            .sessions()
             .find(|s| {
                 Some(&s.project_id) == project_id.as_ref() && s.role == Role::ProjectOrchestrator
             })
             .map(|s| s.id.clone());
         let choices: Vec<Choice> = if kind == Creation::Agent {
-            snapshot
-                .tickets
-                .iter()
-                .filter(|t| Some(&t.coordinator_id) == root_id.as_ref() && t.is_open())
+            (root_id.iter())
+                .flat_map(|root| index.tickets_owned_by(root))
+                .filter(|t| t.is_open())
                 .map(|t| Choice {
                     id: t.id.clone(),
                     label: super::tree::ticket_label(snapshot, t),

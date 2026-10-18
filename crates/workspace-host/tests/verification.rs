@@ -273,7 +273,7 @@ fn one_call_starts_every_verifier_on_the_same_commit() {
 
     let ticket = f.verify().unwrap();
 
-    assert_eq!(ticket.state, "verifying");
+    assert_eq!(ticket.state, TicketState::Verifying);
     let verification = ticket.verification.unwrap();
     assert_eq!(verification.outcome, VerificationOutcome::Running);
     assert_eq!(verification.max_rounds, 2);
@@ -349,7 +349,7 @@ fn verify_ticket_refuses_dirty_and_running_cycles_but_starts_any_number_of_verif
             run.session_id
         );
     }
-    assert_eq!(f.current().state, "verifying");
+    assert_eq!(f.current().state, TicketState::Verifying);
     let running = f.verify().unwrap_err().to_string();
     assert!(running.contains("already running"), "{running}");
 }
@@ -380,7 +380,7 @@ fn a_first_pass_neither_passes_the_ticket_nor_allows_acceptance() {
 
     f.report(&claude, "pass", "passed").unwrap();
 
-    assert_eq!(f.current().state, "verifying");
+    assert_eq!(f.current().state, TicketState::Verifying);
     let agents: Vec<Session> = f.host.sessions().unwrap();
     let refused = f
         .host
@@ -392,7 +392,7 @@ fn a_first_pass_neither_passes_the_ticket_nor_allows_acceptance() {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("cycle 1 is still running"), "{refused}");
-    assert_eq!(f.current().state, "verifying");
+    assert_eq!(f.current().state, TicketState::Verifying);
     assert_eq!(f.host.sessions().unwrap(), agents);
     assert!(f.worktree().exists());
 }
@@ -410,7 +410,7 @@ fn everyone_passing_wakes_the_coordinator_once_with_each_verifier_and_the_commit
     }
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.state, TicketState::Passed);
     assert_eq!(
         ticket.verification.as_ref().unwrap().outcome,
         VerificationOutcome::Passed
@@ -438,7 +438,7 @@ fn everyone_passing_wakes_the_coordinator_once_with_each_verifier_and_the_commit
             json!({"ticket_id":f.ticket.id}),
         )
         .unwrap();
-    assert_eq!(f.current().state, "accepted");
+    assert_eq!(f.current().state, TicketState::Accepted);
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn a_failure_goes_to_the_implementer_and_only_failed_verifiers_re_run() {
     f.fail(&codex, "fail").unwrap();
     f.report(&style, "pass", "passed").unwrap();
 
-    assert_eq!(f.current().state, "failed");
+    assert_eq!(f.current().state, TicketState::Failed);
     assert!(
         f.waking(&f.coordinator.id).is_empty(),
         "the coordinator has no turn started by the reports"
@@ -488,7 +488,7 @@ fn a_failure_goes_to_the_implementer_and_only_failed_verifiers_re_run() {
         .unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "verifying");
+    assert_eq!(ticket.state, TicketState::Verifying);
     let round = f.round();
     assert_eq!((round.round, round.commit.as_str()), (2, fixed.as_str()));
     assert_eq!(
@@ -506,7 +506,7 @@ fn a_failure_goes_to_the_implementer_and_only_failed_verifiers_re_run() {
 
     f.report(&codex, "pass-2", "passed").unwrap();
     let ticket = f.current();
-    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.state, TicketState::Passed);
     let summary = &f.waking(&f.coordinator.id)[0].body;
     assert!(summary.contains(&fixed), "{summary}");
 }
@@ -532,7 +532,7 @@ fn the_round_cap_blocks_the_ticket_and_wakes_the_coordinator_once() {
     f.fail(&codex, "fail-2").unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "blocked");
+    assert_eq!(ticket.state, TicketState::Blocked);
     assert_eq!(
         ticket.verification.unwrap().outcome,
         VerificationOutcome::Blocked
@@ -584,7 +584,7 @@ fn a_cap_of_three_allows_a_third_round() {
         .unwrap();
     }
     assert_eq!(f.round().round, 3);
-    assert_eq!(f.current().state, "verifying");
+    assert_eq!(f.current().state, TicketState::Verifying);
 }
 
 #[test]
@@ -597,7 +597,7 @@ fn a_blocked_verifier_blocks_the_ticket_after_its_round_without_another_round() 
     f.report(&f.verifier("Style"), "blocked", "blocked")
         .unwrap();
 
-    assert_eq!(f.current().state, "blocked");
+    assert_eq!(f.current().state, TicketState::Blocked);
     assert_eq!(f.current().verification.unwrap().rounds.len(), 1);
     let waking = f.waking(&f.coordinator.id);
     assert_eq!(waking.len(), 1);
@@ -646,7 +646,7 @@ fn an_implementer_blocked_between_rounds_ends_the_cycle_and_wakes_the_coordinato
         .unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "blocked");
+    assert_eq!(ticket.state, TicketState::Blocked);
     let verification = ticket.verification.unwrap();
     assert_eq!(verification.outcome, VerificationOutcome::Blocked);
     assert_eq!(verification.rounds.len(), 1, "no further round");
@@ -674,7 +674,7 @@ fn a_verdict_after_its_cycle_ended_is_recorded_without_moving_the_ticket() {
     f.fail(&codex, "late").unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "blocked");
+    assert_eq!(ticket.state, TicketState::Blocked);
     let verification = ticket.verification.unwrap();
     assert_eq!(verification.outcome, VerificationOutcome::Blocked);
     let run = verification.rounds[0]
@@ -718,7 +718,7 @@ fn acceptance_refuses_commits_after_the_verified_one() {
         refused.contains(&verified) && refused.contains(&moved),
         "{refused}"
     );
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
     assert!(f.worktree().exists());
 }
 
@@ -791,7 +791,7 @@ fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
             .unwrap_err();
         assert!(format!("{error:#}").contains(message), "{error:#}");
         assert_eq!(f.host.sessions().unwrap().len(), sessions, "no verifier");
-        assert_eq!(f.current().state, "ready_for_testing");
+        assert_eq!(f.current().state, TicketState::ReadyForTesting);
         assert!(f.current().verification.is_none());
     }
     let rejected: Vec<_> = f
@@ -819,7 +819,7 @@ fn each_verifier_runs_the_coordinators_exact_choice_and_nothing_else() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(started.state, "verifying");
+    assert_eq!(started.state, TicketState::Verifying);
     for (focus, expected) in [
         ("Claude", profile(Provider::Claude, "sonnet", "high")),
         ("Codex", profile(Provider::Codex, "gpt-6.1-sol", "medium")),
@@ -908,7 +908,7 @@ fn a_verdict_answering_an_earlier_cycle_cannot_pass_the_next_one() {
         .unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "verifying");
+    assert_eq!(ticket.state, TicketState::Verifying);
     let verification = ticket.verification.unwrap();
     assert_eq!(verification.outcome, VerificationOutcome::Running);
     assert_eq!(
@@ -925,7 +925,7 @@ fn a_verdict_answering_an_earlier_cycle_cannot_pass_the_next_one() {
 
     // Cycle 2 runs in a fresh session; its verdict is the one that counts.
     f.report(&f.verifier("Codex"), "pass-2", "passed").unwrap();
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
 }
 
 #[test]
@@ -940,7 +940,7 @@ fn a_verdict_after_the_cycle_passed_changes_nothing_and_wakes_no_one() {
     f.report(&codex, "second-thoughts", "failed").unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.state, TicketState::Passed);
     assert_eq!(ticket.verification, passed);
     assert!(f.waking(&f.coordinator.id).is_empty());
     assert!(
@@ -987,7 +987,7 @@ fn a_verifier_dropped_from_the_settings_stays_quiet_when_it_reports_late() {
         .unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.state, TicketState::Passed);
     assert_eq!(ticket.verification, passed);
     assert!(f.waking(&f.coordinator.id).is_empty());
     assert!(
@@ -1096,7 +1096,7 @@ fn passed_verifiers_retire_after_their_round_and_the_rest_when_the_cycle_ends() 
         .unwrap();
     f.report(&codex, "pass-2", "passed").unwrap();
 
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
     assert!(f.archived(&codex));
     assert!(!f.archived(&f.implementer.id), "the implementer stays");
 }
@@ -1120,7 +1120,7 @@ fn a_cycle_blocked_by_its_implementer_retires_even_pending_verifiers() {
     f.coordinator_reads();
     f.fail(&codex, "late").unwrap();
     let ticket = f.current();
-    assert_eq!(ticket.state, "blocked");
+    assert_eq!(ticket.state, TicketState::Blocked);
     let verification = ticket.verification.unwrap();
     assert_eq!(verification.outcome, VerificationOutcome::Blocked);
     assert_eq!(verification.rounds.len(), 1, "no new round");
@@ -1333,7 +1333,7 @@ fn findings_in_a_late_verdict_are_ignored() {
     .unwrap();
 
     assert!(f.ledger().is_empty());
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
 }
 
 #[test]
@@ -1471,7 +1471,7 @@ fn a_blocking_finding_not_reported_again_is_fixed() {
     f.report(&codex, "pass-2", "passed").unwrap();
 
     assert_eq!(f.entry("F1").status, EntryStatus::Fixed);
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
 }
 
 #[test]
@@ -1505,7 +1505,7 @@ fn a_re_check_that_cannot_run_leaves_the_entry_open() {
     f.report(&codex, "cannot", "blocked").unwrap();
 
     assert_eq!(f.entry("F1").status, EntryStatus::Open);
-    assert_eq!(f.current().state, "blocked");
+    assert_eq!(f.current().state, TicketState::Blocked);
 }
 
 #[test]
@@ -1689,7 +1689,7 @@ fn overruling_a_routed_finding_mid_cycle_lets_its_re_report_pass() {
 
     assert_eq!(f.run("Codex").result, VerifierResult::Passed);
     assert_eq!(f.entry("F1").status, EntryStatus::WontFix);
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
 }
 
 #[test]
@@ -1970,11 +1970,11 @@ fn a_report_after_a_passed_cycle_does_not_block_acceptance() {
     f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
     let implementer = f.implementer.id.clone();
     f.report(&implementer, "pr-opened", "completed").unwrap();
-    assert_eq!(f.current().state, "completed");
+    assert_eq!(f.current().state, TicketState::Completed);
 
     f.accept(None).unwrap();
 
-    assert_eq!(f.current().state, "accepted");
+    assert_eq!(f.current().state, TicketState::Accepted);
 }
 
 #[test]
@@ -1991,7 +1991,7 @@ fn a_squash_after_verification_is_accepted_without_a_new_cycle() {
     f.accept(None).unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "accepted");
+    assert_eq!(ticket.state, TicketState::Accepted);
     assert_eq!(ticket.verification.unwrap().cycle, 1);
 }
 
@@ -2013,7 +2013,7 @@ fn a_moved_head_without_a_comparable_patch_is_refused_with_the_reason() {
         refused.contains("could not be compared") && refused.contains("origin/gone"),
         "{refused}"
     );
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
 }
 
 #[test]
@@ -2034,14 +2034,14 @@ fn untriaged_findings_block_acceptance_until_triaged() {
     )]))
     .unwrap();
     f.accept(None).unwrap();
-    assert_eq!(f.current().state, "accepted");
+    assert_eq!(f.current().state, TicketState::Accepted);
 }
 
 /// A cycle blocked at a round cap of 1 with F1 open.
 fn blocked_at_the_cap() -> Fixture {
     let mut f = one_tester(1);
     f.fail(&f.verifier("Codex"), "Busy line").unwrap();
-    assert_eq!(f.current().state, "blocked");
+    assert_eq!(f.current().state, TicketState::Blocked);
     f
 }
 
@@ -2053,7 +2053,7 @@ fn a_waiver_accepts_a_blocked_cycle_and_records_the_open_findings() {
     f.accept(Some(waiver)).unwrap();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "accepted");
+    assert_eq!(ticket.state, TicketState::Accepted);
     assert_eq!(ticket.waiver.as_deref(), Some(waiver));
     assert_eq!(
         ticket.verification.unwrap().outcome,
@@ -2101,7 +2101,7 @@ fn a_waiver_is_refused_without_a_fully_checked_blocked_cycle() {
 
     for f in [&blocked, &cannot, &passed] {
         let ticket = f.current();
-        assert_ne!(ticket.state, "accepted");
+        assert_ne!(ticket.state, TicketState::Accepted);
         assert_eq!(ticket.waiver, None);
         assert!(f.worktree().exists());
     }
@@ -2163,7 +2163,7 @@ fn a_closed_ticket_cannot_be_accepted() {
     let refused = f.accept(None).unwrap_err().to_string();
 
     assert!(refused.contains("already closed"), "{refused}");
-    assert_eq!(f.current().state, "closed");
+    assert_eq!(f.current().state, TicketState::Closed);
 }
 
 fn level(name: &str, kind: LevelKind, verifiers: &[&str]) -> ReviewLevel {
@@ -2300,7 +2300,7 @@ fn a_re_check_after_a_passed_full_review_starts_only_its_verifiers() {
     let ticket = f.verify_at(" light ", &["Correctness"]).unwrap();
 
     let second = ticket.verification.unwrap();
-    assert_eq!((second.cycle, ticket.state.as_str()), (2, "verifying"));
+    assert_eq!((second.cycle, ticket.state.name()), (2, "verifying"));
     assert_eq!(f.cycle_level(), ("Light".into(), LevelKind::Recheck));
     let focuses: Vec<&str> = second.rounds[0]
         .verifiers
@@ -2327,7 +2327,7 @@ fn a_passed_re_check_wakes_the_coordinator_once_and_allows_acceptance() {
     f.pass_round();
 
     let ticket = f.current();
-    assert_eq!(ticket.state, "passed");
+    assert_eq!(ticket.state, TicketState::Passed);
     assert_eq!(
         ticket.verification.unwrap().outcome,
         VerificationOutcome::Passed
@@ -2357,7 +2357,7 @@ fn a_passed_re_check_wakes_the_coordinator_once_and_allows_acceptance() {
     );
     f.pass_round();
     f.accept(None).unwrap();
-    assert_eq!(f.current().state, "accepted");
+    assert_eq!(f.current().state, TicketState::Accepted);
 }
 
 #[test]
@@ -2451,7 +2451,7 @@ fn a_re_check_cannot_be_the_first_review_or_follow_a_blocked_one() {
     let first = f.refused_at("Light", &["Correctness"]);
     f.verify_at("Full", &FOUR).unwrap();
     f.fail_one("Correctness");
-    assert_eq!(f.current().state, "blocked");
+    assert_eq!(f.current().state, TicketState::Blocked);
     f.fix("fixed");
     let after_blocked = f.refused_at("Light", &["Correctness"]);
 
@@ -2617,7 +2617,7 @@ fn an_open_finding_of_a_removed_verifier_awaits_triage_after_the_next_cycle() {
     f.pass_round();
 
     assert_eq!(f.entry("F1").status, EntryStatus::Untriaged);
-    assert_eq!(f.current().state, "passed");
+    assert_eq!(f.current().state, TicketState::Passed);
 }
 
 /// Under a cap of two full reviews: cycle 1 a passed full review, cycles 2 and 3 passed
@@ -2739,7 +2739,7 @@ fn the_host_does_not_judge_whether_a_level_suits_the_ticket() {
     // The ticket changes code; "Docs" is a full review, so the coordinator may name it.
     let ticket = f.verify_at("Docs", &["Style"]).unwrap();
 
-    assert_eq!(ticket.state, "verifying");
+    assert_eq!(ticket.state, TicketState::Verifying);
     assert_eq!(f.cycle_level(), ("Docs".into(), LevelKind::FullReview));
 }
 
@@ -2796,7 +2796,7 @@ fn queue(host: &mut Host, coordinator: &str, ticket: &str) {
 
 fn assert_queued(host: &Host, ticket: &str) {
     let ticket = host.ticket(ticket).unwrap();
-    assert_eq!(ticket.state, "verifying");
+    assert_eq!(ticket.state, TicketState::Verifying);
     assert!(ticket.queued_since().is_some());
     let run = &ticket.verification.unwrap().rounds[0].verifiers[0];
     assert!(
@@ -2807,7 +2807,7 @@ fn assert_queued(host: &Host, ticket: &str) {
 
 fn assert_started(host: &Host, ticket: &str) {
     let ticket = host.ticket(ticket).unwrap();
-    assert_eq!(ticket.state, "verifying");
+    assert_eq!(ticket.state, TicketState::Verifying);
     assert!(ticket.queued_since().is_none());
     let run = &ticket.verification.unwrap().rounds[0].verifiers[0];
     assert_eq!(
@@ -2854,7 +2854,7 @@ fn a_cycle_rerunning_after_a_failed_round_keeps_its_slot() {
     let (mut f, tickets) = two_cycles_running();
     let tester = f.verifier("Tests");
     f.fail(&tester, "busy line").unwrap();
-    assert_eq!(f.current().state, "failed");
+    assert_eq!(f.current().state, TicketState::Failed);
     let coordinator = f.coordinator.id.clone();
     queue(&mut f.host, &coordinator, &tickets[2].id);
 
@@ -2959,7 +2959,7 @@ fn a_queued_cycle_that_cannot_start_ends_blocked_without_stopping_the_queue() {
     assert!(f.host.start_queued_cycles().unwrap());
 
     let ticket = f.host.ticket(&tickets[2].id).unwrap();
-    assert_eq!(ticket.state, "blocked");
+    assert_eq!(ticket.state, TicketState::Blocked);
     assert_eq!(
         ticket.verification.unwrap().outcome,
         VerificationOutcome::Blocked
@@ -3004,7 +3004,7 @@ fn a_running_cycle_whose_verifier_was_archived_ends_blocked_and_frees_its_slot()
     assert!(f.host.start_queued_cycles().unwrap());
 
     let first = f.current();
-    assert_eq!(first.state, "blocked");
+    assert_eq!(first.state, TicketState::Blocked);
     assert_eq!(
         first.verification.unwrap().outcome,
         VerificationOutcome::Blocked
@@ -3038,7 +3038,7 @@ fn a_queued_cycle_starts_at_the_current_head_and_only_on_a_clean_worktree() {
         let ticket = f.host.ticket(&tickets[2].id).unwrap();
         let verification = ticket.verification.clone().unwrap();
         if dirty {
-            assert_eq!(ticket.state, "blocked");
+            assert_eq!(ticket.state, TicketState::Blocked);
             assert_eq!(verification.outcome, VerificationOutcome::Blocked);
             assert_eq!(verification.rounds.len(), 1, "no failed round");
             let told = f.waking(&coordinator);

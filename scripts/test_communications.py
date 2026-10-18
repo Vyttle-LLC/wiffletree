@@ -23,10 +23,11 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         assert not value.get('error'),value
         return value['result']
     def snapshot():return request({'type':'snapshot'})
-    def until(predicate,seconds=10):
+    def archive():return request({'type':'archive'})
+    def until(predicate,seconds=10,read=snapshot):
         deadline=time.monotonic()+seconds
         while time.monotonic()<deadline:
-            value=snapshot()
+            value=read()
             if predicate(value):return value
             time.sleep(.02)
         raise AssertionError(value)
@@ -48,8 +49,8 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         start_time=time.monotonic()
         request({'type':'send','id':'start','sender':None,'recipient':main['id'],'body':'START_HANDOFF'})
         assert project['id'] in snapshot()['live_projects'],'A human message starts its project'
-        # Acceptance removes the worktree once the tester's turn ends.
-        done=until(lambda s:any(t['state']=='accepted' and not Path(t['worktree']).exists() for t in s['tickets']))
+        # Acceptance removes the worktree once the tester's turn ends, and archives the ticket's agents.
+        done=until(lambda a:any(t['state']=='accepted' and not Path(t['worktree']).exists() for t in a['tickets']),read=archive)
         ticket=done['tickets'][0]
         assert subprocess.run(['git','show',f"{ticket['branch']}:result.txt"],cwd=repo,check=True,capture_output=True,text=True).stdout=='verified','The branch keeps the work'
         assert not (repo/'result.txt').exists()

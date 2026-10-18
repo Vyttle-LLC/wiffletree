@@ -167,9 +167,9 @@ fn agent_count(agent: &AgentProcesses) -> usize {
 
 /// The rail's count for the panel of `session`: what the record holds for that agent, or for
 /// a coordinator for every agent of its project that is not archived.
-fn rail_count(snapshot: &Snapshot, session: &Session) -> u32 {
+fn rail_count(index: &WorkspaceIndex, session: &Session) -> u32 {
     let listed = |id: &str| {
-        let Some(agent) = snapshot.sessions.iter().find(|s| s.id == id) else {
+        let Some(agent) = index.session(id) else {
             return false;
         };
         match session.role {
@@ -177,9 +177,7 @@ fn rail_count(snapshot: &Snapshot, session: &Session) -> u32 {
             _ => agent.id == session.id,
         }
     };
-    snapshot
-        .running_processes
-        .iter()
+    (index.snapshot().running_processes.iter())
         .filter(|count| listed(&count.session_id))
         .map(|count| count.count)
         .sum()
@@ -189,13 +187,13 @@ impl Workspace {
     /// The count on the rail's Processes entry, if anything runs: the open panel's live count,
     /// or else the record's.
     pub(super) fn processes_badge(&self) -> Option<usize> {
-        let (snapshot, session) = (self.snapshot.as_ref()?, self.selected_session()?);
+        let (index, session) = (self.index.as_ref()?, self.selected_session()?);
         let count = match self
             .processes()
             .filter(|_| self.panel == Some(Panel::Processes))
         {
             Some(open) => open.listing.iter().map(agent_count).sum(),
-            None => rail_count(snapshot, session) as usize,
+            None => rail_count(index, session) as usize,
         };
         (count > 0).then_some(count)
     }
@@ -647,7 +645,8 @@ mod tests {
             "sessions": sessions, "running_processes": counts,
         }))
         .unwrap();
-        assert_eq!(rail_count(&snapshot, &tester), 8);
-        assert_eq!(rail_count(&snapshot, &coordinator), 9);
+        let index = WorkspaceIndex::new(snapshot, Default::default());
+        assert_eq!(rail_count(&index, &tester), 8);
+        assert_eq!(rail_count(&index, &coordinator), 9);
     }
 }

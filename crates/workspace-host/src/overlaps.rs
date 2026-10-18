@@ -75,12 +75,12 @@ impl Host {
     }
     /// Cached warnings about open tickets, without those about tickets finished since.
     pub(crate) fn open_branch_warnings(&self) -> Result<Vec<BranchWarnings>> {
-        let open: HashSet<String> = self
-            .tickets()?
-            .into_iter()
-            .filter(Ticket::is_open)
-            .map(|t| t.id)
-            .collect();
+        let open: HashSet<String> = (self.db.prepare(&format!(
+            "SELECT id FROM tickets WHERE {}",
+            crate::tickets_where(true)
+        ))?)
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
         Ok(self
             .branch_warnings
             .values()

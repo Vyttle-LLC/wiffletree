@@ -79,6 +79,57 @@ enum PanelData {
     Git(Vec<inspector::Commit>),
 }
 
+/// A request sent again once, rather than once per ask, when asked for while it is answered.
+#[derive(Default)]
+struct Coalesced {
+    sent: bool,
+    again: bool,
+}
+impl Coalesced {
+    /// Whether to send the request now; otherwise it goes again once the one sent is answered.
+    fn send(&mut self) -> bool {
+        if self.sent {
+            self.again = true;
+            return false;
+        }
+        self.sent = true;
+        true
+    }
+    /// The request was answered; whether to send it again.
+    fn answered(&mut self) -> bool {
+        self.sent = false;
+        std::mem::take(&mut self.again)
+    }
+}
+
+/// What is shown, as far as reading the archive goes.
+struct ArchiveDemand<'a> {
+    show_archived: bool,
+    panel: Option<Panel>,
+    page: Page,
+    selected: Option<&'a str>,
+    messages: &'a [Message],
+}
+
+/// The archive is out of date and something shown needs it: Show archived, the Tickets, Crew or
+/// Events panel, the Repositories page or a publish request, or a selected session or message sender
+/// that the snapshot does not list, which only the archive holds.
+fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
+    let snapshot = index.snapshot();
+    let live: BTreeSet<&str> = snapshot.sessions.iter().map(|s| s.id.as_str()).collect();
+    let archived = |id: &str| !live.contains(id);
+    index.archive_is_stale()
+        && (shown.show_archived
+            || matches!(shown.panel, Some(Panel::Team | Panel::Crew | Panel::Events))
+            || shown.page == Page::Repositories
+            || snapshot.attention.iter().any(Attention::is_publish)
+            || shown.selected.is_some_and(archived)
+            || shown
+                .messages
+                .iter()
+                .any(|m| m.sender.as_deref().is_some_and(archived)))
+}
+
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -95,8 +146,14 @@ fn button(id: impl Into<ElementId>) -> Button {
 
 struct Workspace {
     bridge: Bridge,
-    /// Shared so that a frame's transcript rows can hold it without a copy.
-    snapshot: Option<Rc<Snapshot>>,
+    /// The latest snapshot joined with the archive; shared so that a frame's transcript rows
+    /// can hold it without a copy.
+    index: Option<Rc<WorkspaceIndex>>,
+    /// The snapshot request sent and not yet answered, so that a burst of changes asks for one
+    /// more, not one per change.
+    snapshot_request: Coalesced,
+    /// An archive request is on its way.
+    archive_pending: bool,
     load_error: Option<String>,
     selected: Option<String>,
     messages: Rc<Vec<Message>>,
@@ -276,7 +333,9 @@ impl Workspace {
         });
         let mut view = Self {
             bridge,
-            snapshot: None,
+            index: None,
+            snapshot_request: Coalesced::default(),
+            archive_pending: false,
             load_error: None,
             selected: None,
             messages: Rc::new(vec![]),
@@ -387,7 +446,7 @@ impl Workspace {
                     if cx
                         .update(|window, cx| {
                             this.update(cx, |view, cx| {
-                                view.request(Command::Snapshot, window, cx);
+                                view.refresh(window, cx);
                             })
                         })
                         .is_err()
@@ -400,7 +459,7 @@ impl Workspace {
         }
         view.watch_steps(window, cx);
         view.watch_progress(window, cx);
-        view.request(Command::Snapshot, window, cx);
+        view.refresh(window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
         // New clones show up when you come back to the app; there is no file watcher.
@@ -441,23 +500,23 @@ impl Workspace {
         view
     }
     fn live_enabled(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(|s| {
+        self.index.as_ref().is_some_and(|index| {
             self.project_id()
-                .is_some_and(|id| s.live_projects.contains(&id))
+                .is_some_and(|id| index.snapshot().live_projects.contains(&id))
         })
+    }
+    /// The latest snapshot of the live workspace; `index` also has the archive.
+    fn snapshot(&self) -> Option<&Snapshot> {
+        self.index.as_deref().map(WorkspaceIndex::snapshot)
     }
     fn selected_session(&self) -> Option<&Session> {
         self.session(self.selected.as_deref()?)
     }
     fn session(&self, id: &str) -> Option<&Session> {
-        self.snapshot.as_ref()?.sessions.iter().find(|s| s.id == id)
+        self.index.as_ref()?.session(id)
     }
     fn runtime(&self, session_id: &str) -> Option<&SessionRuntime> {
-        self.snapshot
-            .as_ref()?
-            .runtimes
-            .iter()
-            .find(|runtime| runtime.session_id == session_id)
+        self.index.as_ref()?.runtime(session_id)
     }
     /// Where a session's relative file references resolve: its ticket worktree or directory,
     /// then its project's home.
@@ -465,13 +524,8 @@ impl Workspace {
         let runtime = self.runtime(session_id);
         let directory = runtime.and_then(|r| r.workdir.as_ref().or(r.directory.as_ref()));
         let home = self.session(session_id).and_then(|session| {
-            self.snapshot
-                .as_ref()?
-                .projects
-                .iter()
-                .find(|project| project.id == session.project_id)?
-                .home
-                .as_ref()
+            let project = self.index.as_ref()?.project(&session.project_id)?;
+            project.home.as_ref()
         });
         directory
             .into_iter()
@@ -484,15 +538,17 @@ impl Workspace {
     }
     fn project_attention(&self) -> Vec<&Attention> {
         let project = self.project_id();
-        self.snapshot
+        self.index
             .iter()
-            .flat_map(|s| &s.attention)
+            .flat_map(|index| &index.snapshot().attention)
             .filter(|a| Some(&a.project_id) == project.as_ref())
             .collect()
     }
     /// The notes about the whole workspace, which every project's Inbox lists first.
     fn workspace_notes(&self) -> &[WorkspaceNote] {
-        self.snapshot.as_ref().map_or(&[], |s| &s.workspace_notes)
+        self.index
+            .as_ref()
+            .map_or(&[], |index| &index.snapshot().workspace_notes)
     }
     fn toast(&self, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
         window.push_notification(Notification::success(message), cx);
@@ -515,7 +571,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         workspace_notes::compare_failed(&mut self.compared, command);
-        if self.snapshot.is_none() {
+        if self.index.is_none() {
             self.load_error = Some(error);
         } else if !self.form_failed(command, &error, cx) {
             self.toast_error(error, window, cx);
@@ -525,7 +581,7 @@ impl Workspace {
     fn request(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = match self.bridge.request(command.clone()) {
             Ok(r) => r,
-            Err(e) => return self.fail(&command, e, window, cx),
+            Err(e) => return self.accept(command, Err(e), window, cx),
         };
         if let Command::Send { recipient, .. } = &command {
             self.sending.insert(recipient.clone());
@@ -578,8 +634,13 @@ impl Workspace {
                 Err(error) => eprintln!("Repository refresh: {error}"),
             }
             // Also picks up folders that went missing since the last snapshot.
-            self.request(Command::Snapshot, window, cx);
+            self.refresh(window, cx);
             return;
+        }
+        match &command {
+            Command::Snapshot if self.snapshot_request.answered() => self.refresh(window, cx),
+            Command::Archive => self.archive_pending = false,
+            _ => {}
         }
         if matches!(&command, Command::RecordQuota { .. }) {
             self.quota_pending = false;
@@ -611,7 +672,6 @@ impl Workspace {
                 }
                 Err(error) => self.fail(&command, error.to_string(), window, cx),
             }
-            self.request(Command::Snapshot, window, cx);
             return;
         }
         if matches!(
@@ -630,6 +690,10 @@ impl Workspace {
                 Ok(snapshot) => self.accept_snapshot(snapshot, window, cx),
                 Err(e) => self.fail(&Command::Snapshot, e.to_string(), window, cx),
             },
+            Command::Archive => match serde_json::from_value::<Archive>(value) {
+                Ok(archive) => self.accept_archive(archive, window, cx),
+                Err(e) => self.fail(&Command::Archive, e.to_string(), window, cx),
+            },
             Command::Messages {
                 session_id, before, ..
             } => {
@@ -637,6 +701,7 @@ impl Workspace {
                     match serde_json::from_value::<Vec<Message>>(value) {
                         Ok(rows) => {
                             self.replace_messages(rows);
+                            self.sync_archive(window, cx);
                             self.load_run_summaries(window, cx);
                             if before.is_none() {
                                 self.cached_pages
@@ -736,27 +801,22 @@ impl Workspace {
             Command::CreateSession { .. } | Command::AssignTicket { .. } => {
                 if let Ok(session) = serde_json::from_value::<Session>(value) {
                     let id = session.id.clone();
-                    if let Some(snapshot) = self.snapshot.as_mut().map(Rc::make_mut) {
-                        snapshot.sessions.push(session);
-                    }
+                    self.amend_snapshot(|snapshot| snapshot.sessions.push(session));
                     self.select(id, window, cx);
                 }
-                self.request(Command::Snapshot, window, cx);
             }
             Command::CreateTicket { coordinator_id, .. } => {
                 self.select(coordinator_id, window, cx);
                 self.panel = Some(Panel::Team);
-                self.request(Command::Snapshot, window, cx);
             }
             Command::CreateProject { .. } => {
                 if let Ok(project) = serde_json::from_value::<Project>(value) {
                     self.pending_project_selection = Some(project.id);
                 }
-                self.request(Command::Snapshot, window, cx);
             }
             Command::RenameProject { project_id, .. } => {
                 if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    if let Some(snapshot) = self.snapshot.as_mut().map(Rc::make_mut) {
+                    self.amend_snapshot(|snapshot| {
                         if let Some(saved) =
                             snapshot.projects.iter_mut().find(|p| p.id == project_id)
                         {
@@ -769,7 +829,7 @@ impl Workspace {
                                 session.name = project.name.clone();
                             }
                         }
-                    }
+                    });
                     if self
                         .project_edit
                         .as_ref()
@@ -778,14 +838,10 @@ impl Workspace {
                         self.project_edit = None;
                     }
                 }
-                self.request(Command::Snapshot, window, cx);
             }
             Command::MoveProjects { .. } => {
-                if let (Some(snapshot), Ok(projects)) = (
-                    self.snapshot.as_mut().map(Rc::make_mut),
-                    serde_json::from_value(value),
-                ) {
-                    snapshot.projects = projects;
+                if let Ok(projects) = serde_json::from_value(value) {
+                    self.amend_snapshot(|snapshot| snapshot.projects = projects);
                 }
             }
             Command::SetArchived { archived, .. } => {
@@ -808,9 +864,9 @@ impl Workspace {
                 if hidden {
                     // Step out to the owner that is still listed, or to any remaining session.
                     let owner = affected[0].parent_id.clone().or_else(|| {
-                        self.snapshot
+                        self.index
                             .iter()
-                            .flat_map(|s| &s.sessions)
+                            .flat_map(|index| index.sessions())
                             .find(|s| !s.archived && affected.iter().all(|a| a.id != s.id))
                             .map(|s| s.id.clone())
                     });
@@ -819,23 +875,19 @@ impl Workspace {
                         None => self.selected = None,
                     }
                 }
-                self.request(Command::Snapshot, window, cx);
             }
             Command::ResolveAttention { .. } => {
                 self.answering = None;
                 self.answer
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                self.request(Command::Snapshot, window, cx);
             }
             Command::DismissAttention { id } => {
                 if self.answering.as_ref() == Some(&id) {
                     self.answering = None;
                 }
-                self.request(Command::Snapshot, window, cx);
             }
             Command::CompactContext { session_id, .. } => {
                 self.compact_accepted(&session_id);
-                self.request(Command::Snapshot, window, cx);
             }
             Command::SetModelSelection { selection, .. } => {
                 // The host answers with the saved selection at its new revision, so the store
@@ -853,7 +905,6 @@ impl Workspace {
                 self.verifiers
                     .update(cx, |editor, cx| editor.setup_saved(cx));
                 self.toast("Models saved", window, cx);
-                self.request(Command::Snapshot, window, cx);
             }
             Command::AppendLog { .. } => {
                 self.memory_title
@@ -867,7 +918,6 @@ impl Workspace {
                 self.brain_path
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.toast("Markdown brain attached", window, cx);
-                self.request(Command::Snapshot, window, cx);
             }
             Command::ExportLogs { .. } => {
                 let exported = value["exported"].as_u64().unwrap_or_default();
@@ -889,26 +939,19 @@ impl Workspace {
                     Err(error) => eprintln!("Saved skill: {error}"),
                 }
                 self.toast(skills_view::saved_toast(&command), window, cx);
-                self.request(Command::Snapshot, window, cx);
             }
             Command::ResetSkill { .. }
             | Command::RestoreSkill { .. }
             | Command::StartSkillRewrite { .. }
             | Command::MergeSkillUpdate { .. }
-            | Command::UndoSkillMerge { .. } => {
-                match serde_json::from_value(value) {
-                    Ok(state) => self.skill_replaced(state, &command, window, cx),
-                    Err(error) => eprintln!("Reset, restored, rewrote or merged skill: {error}"),
-                }
-                self.request(Command::Snapshot, window, cx);
-            }
-            Command::DismissSkillMerge { .. } => {
-                match serde_json::from_value(value) {
-                    Ok(state) => self.skill_saved(state),
-                    Err(error) => eprintln!("Dismissed skill merge: {error}"),
-                }
-                self.request(Command::Snapshot, window, cx);
-            }
+            | Command::UndoSkillMerge { .. } => match serde_json::from_value(value) {
+                Ok(state) => self.skill_replaced(state, &command, window, cx),
+                Err(error) => eprintln!("Reset, restored, rewrote or merged skill: {error}"),
+            },
+            Command::DismissSkillMerge { .. } => match serde_json::from_value(value) {
+                Ok(state) => self.skill_saved(state),
+                Err(error) => eprintln!("Dismissed skill merge: {error}"),
+            },
             Command::SkillMergeReview { skill, .. } => match serde_json::from_value(value) {
                 Ok(review) => self.review_arrived(skill, review),
                 Err(error) => eprintln!("Skill merge review: {error}"),
@@ -927,51 +970,104 @@ impl Workspace {
             },
             Command::SettlePausedFile { .. } => {
                 self.compared = None;
-                self.request(Command::Snapshot, window, cx);
             }
             Command::SetRepositoryChecks { .. } => {
                 self.checks_edit = None;
-                self.request(Command::Snapshot, window, cx);
             }
-            _ => {
-                self.page = None;
-                self.request(Command::Snapshot, window, cx);
+            // The change signal brings the snapshot; the transcript goes back to its newest page.
+            _ if !command.is_read() && self.page.take().is_some() => {
+                self.load_messages(window, cx);
             }
+            _ => {}
+        }
+    }
+    /// Asks for the latest snapshot, or, while one is on its way, for one more after it.
+    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.snapshot_request.send() {
+            self.request(Command::Snapshot, window, cx);
+        }
+    }
+    /// Reads the archive again when what is shown needs it and the one held is out of date.
+    fn sync_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.index.as_ref().is_some_and(|index| {
+            let shown = ArchiveDemand {
+                show_archived: self.show_archived,
+                panel: self.panel,
+                page: self.view,
+                selected: self.selected.as_deref(),
+                messages: &self.messages,
+            };
+            wants_archive(index, &shown)
+        });
+        if wanted && !self.archive_pending {
+            self.archive_pending = true;
+            self.request(Command::Archive, window, cx);
+        }
+    }
+    fn accept_archive(&mut self, archive: Archive, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = &self.index else {
+            return;
+        };
+        let snapshot = index.snapshot().clone();
+        self.index = Some(Rc::new(WorkspaceIndex::new(snapshot, Rc::new(archive))));
+        // A selection the archive does not hold either is gone.
+        if self.selected_session().is_none() {
+            let first = self
+                .index
+                .as_ref()
+                .and_then(|index| index.sessions().find(|s| !s.archived).map(|s| s.id.clone()));
+            match first {
+                Some(id) => self.select(id, window, cx),
+                None => self.selected = None,
+            }
+        }
+        self.place_links();
+        // A snapshot that arrived meanwhile may have moved the stamp again.
+        self.sync_archive(window, cx);
+    }
+    /// Shows a change the host confirmed before the snapshot that has it arrives.
+    fn amend_snapshot(&mut self, change: impl FnOnce(&mut Snapshot)) {
+        if let Some(index) = &self.index {
+            let mut snapshot = index.snapshot().clone();
+            change(&mut snapshot);
+            let archive = index.archive().clone();
+            self.index = Some(Rc::new(WorkspaceIndex::new(snapshot, archive)));
         }
     }
     fn accept_snapshot(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+        let archive = self
+            .index
+            .as_ref()
+            .map_or_else(Rc::default, |index| index.archive().clone());
+        let index = WorkspaceIndex::new(snapshot, archive);
         let new_root = self.pending_project_selection.as_ref().and_then(|project| {
-            snapshot
-                .sessions
-                .iter()
+            index
+                .sessions()
                 .find(|s| &s.project_id == project && s.role == Role::ProjectOrchestrator)
                 .map(|s| s.id.clone())
         });
-        if !snapshot
-            .sessions
-            .iter()
-            .any(|s| Some(&s.id) == self.selected.as_ref())
-        {
-            self.selected = snapshot
-                .sessions
-                .iter()
-                .find(|s| !s.archived)
-                .map(|s| s.id.clone());
+        // A selected session the held archive is out of date for may be in the next one, which
+        // `accept_archive` checks.
+        let gone = |id: &String| index.session(id).is_none() && !index.archive_is_stale();
+        if self.selected.as_ref().is_none_or(gone) {
+            self.selected = index.sessions().find(|s| !s.archived).map(|s| s.id.clone());
         }
+        let snapshot = index.snapshot();
         self.sync_model_selection(&snapshot.model_selection, window, cx);
-        self.follow_saved_rules(&snapshot, window, cx);
+        self.follow_saved_rules(snapshot, window, cx);
         if snapshot.model_selection.is_saved() {
             self.verifiers
                 .update(cx, |editor, cx| editor.setup_saved(cx));
         }
         conversation::forget_settled(&mut self.minimized_decisions, &snapshot.attention);
-        settings::share_sync(&snapshot, cx);
+        settings::share_sync(snapshot, cx);
         let synced = |s: &Snapshot| (s.settings_sync.clone(), s.workspace_notes.clone());
-        let resynced = self.snapshot.as_deref().map(synced) != Some(synced(&snapshot));
+        let previous = self.index.as_ref().map(|index| synced(index.snapshot()));
+        let resynced = previous != Some(synced(snapshot));
         let recompare = resynced
             .then(|| workspace_notes::recompare(&mut self.compared, snapshot.paused_settings()))
             .flatten();
-        self.snapshot = Some(Rc::new(snapshot));
+        self.index = Some(Rc::new(index));
         self.place_links();
         self.list_chat_models();
         if let Some(command) = recompare {
@@ -1007,6 +1103,7 @@ impl Workspace {
         }
         self.sync_activity_clock(window, cx);
         self.sync_context(window, cx);
+        self.sync_archive(window, cx);
     }
     /// Transcript rows are the loaded messages plus a trailing activity row while the agent works.
     fn transcript_rows(&self) -> usize {
@@ -1125,6 +1222,7 @@ impl Workspace {
         self.fetch_steps(window, cx);
         self.sync_activity_clock(window, cx);
         self.sync_crew_clock(window, cx);
+        self.sync_archive(window, cx);
         cx.notify();
     }
     /// Adds dropped files to the selected session's draft. Each refused file is named with
@@ -1235,8 +1333,7 @@ impl Workspace {
                     return None;
                 }
                 let model = self
-                    .snapshot
-                    .as_ref()?
+                    .snapshot()?
                     .model_selection
                     .allowed(session.provider)
                     .first()?
@@ -1260,12 +1357,14 @@ impl Workspace {
         self.panel = Some(panel);
         self.panel_data = PanelData::Loading;
         self.load_panel(window, cx);
+        self.sync_archive(window, cx);
         self.sync_crew_clock(window, cx);
         cx.notify();
     }
     /// Opens a workspace page in place of the conversation.
     fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.view = page;
+        self.sync_archive(window, cx);
         match page {
             Page::Usage => {
                 self.request(Command::Quotas, window, cx);
@@ -1489,9 +1588,9 @@ impl Workspace {
     /// Restarts into the staged release, confirming first if agents would be interrupted.
     fn restart_to_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let working = self
-            .snapshot
+            .index
             .iter()
-            .flat_map(|s| &s.sessions)
+            .flat_map(|index| index.sessions())
             .any(|s| s.status == Status::Working);
         if !working {
             return self.install_update(window, cx);
@@ -1566,13 +1665,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(snapshot) = &self.snapshot else {
+        let Some(index) = &self.index else {
             return;
         };
         let project = self.project_id();
         let has_repository = project
             .as_ref()
-            .is_some_and(|id| !snapshot.project_repositories(id).is_empty());
+            .is_some_and(|id| !index.snapshot().project_repositories(id).is_empty());
         // A ticket needs a repository, so start with the step that is actually missing.
         let kind = if kind == Creation::Ticket && !has_repository {
             window.push_notification(
@@ -1590,7 +1689,7 @@ impl Workspace {
         let form = cx.new(|cx| {
             CreationForm::new(
                 kind,
-                snapshot,
+                index,
                 context,
                 ticket,
                 self.bridge.clone(),
@@ -1971,4 +2070,113 @@ fn main() -> anyhow::Result<()> {
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArchiveDemand, Coalesced, Page, Panel, wants_archive};
+    use serde_json::json;
+    use std::rc::Rc;
+    use workspace_core::*;
+
+    fn session(id: &str, archived: bool) -> Session {
+        serde_json::from_value(json!({
+            "id":id,"project_id":"p","parent_id":null,"repository_id":null,"name":id,
+            "role":"project_orchestrator","provider":"claude","status":"ready",
+            "archived":archived
+        }))
+        .unwrap()
+    }
+
+    /// A live coordinator and an archived one only the archive holds, read at stamp 1; the
+    /// snapshot's stamp is `stamp`.
+    fn index(stamp: u64) -> WorkspaceIndex {
+        let snapshot = Snapshot {
+            sessions: vec![session("live", false)],
+            archive_stamp: stamp,
+            ..Default::default()
+        };
+        let archive = Archive {
+            sessions: vec![session("old", true)],
+            session_order: vec!["old".into(), "live".into()],
+            stamp: 1,
+            ..Default::default()
+        };
+        WorkspaceIndex::new(snapshot, Rc::new(archive))
+    }
+
+    fn shown(selected: &str) -> ArchiveDemand<'_> {
+        ArchiveDemand {
+            show_archived: false,
+            panel: None,
+            page: Page::Conversation,
+            selected: Some(selected),
+            messages: &[],
+        }
+    }
+
+    #[test]
+    fn the_archive_is_read_again_only_when_it_moved_and_something_shown_needs_it() {
+        let moved = index(2);
+        assert!(!wants_archive(&moved, &shown("live")), "the default view");
+        let demands = [
+            ArchiveDemand {
+                show_archived: true,
+                ..shown("live")
+            },
+            ArchiveDemand {
+                panel: Some(Panel::Team),
+                ..shown("live")
+            },
+            ArchiveDemand {
+                panel: Some(Panel::Crew),
+                ..shown("live")
+            },
+            // It names the agents behind each event.
+            ArchiveDemand {
+                panel: Some(Panel::Events),
+                ..shown("live")
+            },
+            ArchiveDemand {
+                page: Page::Repositories,
+                ..shown("live")
+            },
+            // An archived session already in the held archive, whose status may have moved.
+            shown("old"),
+        ];
+        for demand in &demands {
+            assert!(wants_archive(&moved, demand));
+            assert!(
+                !wants_archive(&index(1), demand),
+                "the archive held is current"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_from_an_archived_sender_needs_the_archive_once_it_moved() {
+        let message: Message = serde_json::from_value(json!({
+            "sequence":1,"id":"m","project_id":"p","sender":"old","recipient":"live",
+            "body":"Done","receipt":"completed","created_at":0
+        }))
+        .unwrap();
+        let messages = [message];
+        let shown = ArchiveDemand {
+            messages: &messages,
+            ..shown("live")
+        };
+        assert!(wants_archive(&index(2), &shown));
+        assert!(!wants_archive(&index(1), &shown));
+    }
+
+    #[test]
+    fn asks_while_a_request_is_answered_send_it_once_more_after() {
+        let mut request = Coalesced::default();
+        assert!(request.send());
+        assert!(!request.send() && !request.send(), "one is on its way");
+        assert!(request.answered(), "the asks during it go as one more");
+        assert!(request.send());
+        assert!(!request.answered(), "nothing was asked meanwhile");
+        assert!(request.send());
+    }
 }

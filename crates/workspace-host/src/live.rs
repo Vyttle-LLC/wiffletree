@@ -191,7 +191,7 @@ impl Host {
             brief: brief.into(),
             worktree: path.to_string_lossy().into(),
             branch,
-            state: "planned".into(),
+            state: TicketState::Planned,
             verification: None,
             previous_cycles: vec![],
             ledger: vec![],
@@ -257,7 +257,7 @@ impl Host {
         )?;
         // A verification cycle alone moves the ticket while it runs.
         if ticket.running_cycle().is_none() {
-            ticket.state = "assigned".into();
+            ticket.state = TicketState::Assigned;
             self.save_ticket(&ticket)?;
         }
         Ok(session)
@@ -381,7 +381,7 @@ impl Host {
     /// branch are kept. Refuses while an agent is working or the worktree holds unsaved work.
     pub fn close_ticket(&mut self, ticket_id: &str) -> Result<Ticket> {
         let ticket = self.ticket(ticket_id)?;
-        if ticket.state == "closed" {
+        if ticket.state == TicketState::Closed {
             return Ok(ticket);
         }
         if let Some(busy) = self
@@ -394,7 +394,7 @@ impl Host {
                 busy.name
             );
         }
-        self.finish_ticket(ticket, "closed", "ticket_closed")
+        self.finish_ticket(ticket, TicketState::Closed, "ticket_closed")
     }
     /// Accepts a ticket on its latest verification cycle: one that passed, or, with a waiver
     /// reason, one blocked only by findings it checked. No cycle may be running or finding
@@ -403,7 +403,7 @@ impl Host {
     /// archives the agents and removes the worktree, keeping the branch.
     pub fn accept_ticket(&mut self, ticket_id: &str, waived: Option<&str>) -> Result<Ticket> {
         let mut ticket = self.ticket(ticket_id)?;
-        if ticket.state == "accepted" {
+        if ticket.state == TicketState::Accepted {
             return Ok(ticket);
         }
         ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
@@ -450,7 +450,7 @@ impl Host {
         let verified = verification.verified_commit().context("No round")?;
         self.check_verified_head(&ticket, verified)?;
         ticket.waiver = waived.map(Into::into);
-        self.finish_ticket(ticket, "accepted", "ticket_accepted")
+        self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
     }
     /// HEAD is the verified commit, or has the same patch id against the repository's base, as
     /// after a squash or a clean rebase, and the keeper adopted no commit no review has checked.
@@ -462,7 +462,7 @@ impl Host {
     fn finish_ticket(
         &mut self,
         mut ticket: Ticket,
-        state: &str,
+        state: TicketState,
         milestone: &str,
     ) -> Result<Ticket> {
         // The agents' processes are stopped before the worktree goes, and not at all when the
@@ -476,7 +476,7 @@ impl Host {
             for agent in host.ticket_agents(&ticket.id)? {
                 host.set_archived(&agent.id, true)?;
             }
-            ticket.state = state.into();
+            ticket.state = state;
             host.save_ticket(&ticket)?;
             let coordinator = host.session(&ticket.coordinator_id)?;
             let body = match &ticket.waiver {

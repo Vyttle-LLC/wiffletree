@@ -6,11 +6,8 @@ use ui::{age, card, empty_state, hint, icon, mono, pill, section, segment};
 impl Workspace {
     fn project_brain(&self) -> Option<String> {
         let project = self.project_id();
-        self.snapshot
-            .iter()
-            .flat_map(|s| &s.projects)
-            .find(|p| Some(&p.id) == project.as_ref())
-            .and_then(|p| p.brain.clone())
+        let index = self.index.as_ref()?;
+        index.project(project.as_ref()?)?.brain.clone()
     }
 
     fn choose_brain(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -20,6 +20,16 @@ fn snapshot(service: &Service) -> Snapshot {
     serde_json::from_value(request(service, Command::Snapshot)).unwrap()
 }
 
+/// The snapshot with the archive's sessions, tickets and runtimes added.
+fn everything(service: &Service) -> Snapshot {
+    let mut snapshot = snapshot(service);
+    let archive: Archive = serde_json::from_value(request(service, Command::Archive)).unwrap();
+    snapshot.sessions.extend(archive.sessions);
+    snapshot.tickets.extend(archive.tickets);
+    snapshot.runtimes.extend(archive.runtimes);
+    snapshot
+}
+
 fn until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while !done() {
@@ -115,7 +125,7 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
         ticket = snapshot(&service)
             .tickets
             .into_iter()
-            .find(|t| t.state == "verifying");
+            .find(|t| t.state == TicketState::Verifying);
         ticket.is_some()
     });
     let ticket = ticket.unwrap();
@@ -136,17 +146,17 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
     );
 
     until("acceptance and a quiet host", || {
-        let snapshot = snapshot(&service);
+        let snapshot = everything(&service);
         snapshot
             .tickets
             .iter()
-            .any(|t| t.state == "accepted" && !Path::new(&t.worktree).exists())
+            .any(|t| t.state == TicketState::Accepted && !Path::new(&t.worktree).exists())
             && snapshot
                 .sessions
                 .iter()
                 .all(|s| s.status != Status::Working)
     });
-    let snapshot = snapshot(&service);
+    let snapshot = everything(&service);
     assert_eq!(snapshot.tickets.len(), 1);
     let ticket = snapshot.tickets[0].clone();
     let verification = ticket.verification.clone().unwrap();

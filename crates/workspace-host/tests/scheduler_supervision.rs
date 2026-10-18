@@ -145,7 +145,11 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
     // The coordinator starts a round while the implementer holds the worktree.
     let mut ticket = None;
     until(&service, "a round waiting on the implementer", |s| {
-        ticket = s.tickets.iter().find(|t| t.state == "verifying").cloned();
+        ticket = s
+            .tickets
+            .iter()
+            .find(|t| t.state == TicketState::Verifying)
+            .cloned();
         ticket.is_some() && runs(&db, &other.id) == 1
     });
     assert_eq!(status(&snapshot(&service), &writer.id), Status::Working);

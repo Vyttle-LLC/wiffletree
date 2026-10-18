@@ -424,7 +424,7 @@ pub(super) struct OpenPeers {
 }
 
 /// Who sent a peer message: the sending agent, or a timer's label.
-fn peer_sender(message: &Message, sessions: &[Session]) -> String {
+fn peer_sender(message: &Message, sender: Option<&Session>) -> String {
     let timer = message
         .body
         .strip_prefix("[timer] ")
@@ -432,10 +432,7 @@ fn peer_sender(message: &Message, sessions: &[Session]) -> String {
         .and_then(|body| body.lines().next());
     match timer {
         Some(label) => label.to_owned(),
-        None => sessions
-            .iter()
-            .find(|s| Some(&s.id) == message.sender.as_ref())
-            .map_or("Agent".to_owned(), |s| s.name.clone()),
+        None => sender.map_or("Agent".to_owned(), |s| s.name.clone()),
     }
 }
 
@@ -458,16 +455,16 @@ impl LinkBases {
 
 /// A run of peer messages as one line where a turn summary would be. Opened, it lists a line
 /// per message, and an opened line shows that message in full.
-fn peer_run(
+fn peer_run<'a>(
     run: &[Message],
-    sessions: &[Session],
+    sender: impl Fn(&Message) -> Option<&'a Session>,
     open: &OpenPeers,
     links: &LinkBases,
     p: Palette,
     view: WeakEntity<Workspace>,
 ) -> Div {
     let head = run[0].id.clone();
-    let senders: Vec<String> = run.iter().map(|m| peer_sender(m, sessions)).collect();
+    let senders: Vec<String> = run.iter().map(|m| peer_sender(m, sender(m))).collect();
     let (first, last) = (age(run[0].created_at), age(run[run.len() - 1].created_at));
     let span = if first == last {
         first
@@ -645,9 +642,9 @@ impl Workspace {
 
     /// Stop is offered only while some agent in the project is mid-turn.
     fn project_working(&self, session: &Session) -> bool {
-        self.snapshot
+        self.index
             .iter()
-            .flat_map(|s| &s.sessions)
+            .flat_map(|index| index.sessions())
             .any(|s| s.project_id == session.project_id && s.status == Status::Working)
     }
 
@@ -1131,20 +1128,20 @@ impl Workspace {
         let summaries = self.run_summaries.clone();
         let minimized = cx.global::<Preferences>().minimize_activity;
         let view = cx.entity().downgrade();
-        let snapshot = self.snapshot.clone();
+        let index = self.index.clone();
         let current = session.clone();
         let placements = self.placements.clone();
         let open = self.open_peers.clone();
         let links = self.transcript_links.clone();
         let transcript = list(self.list.clone(), move |ix, _, _| {
-            let sessions = snapshot.as_deref().map_or(&[][..], |s| &s.sessions);
+            let sender = |message: &Message| index.as_deref()?.session(message.sender.as_deref()?);
             let placement = placements.get(ix).copied().unwrap_or(Placement::Alone);
             let content = match (placement, messages.get(ix)) {
                 // A run draws in its head's row; the rest of its rows stay empty.
                 (Placement::Folded, _) => return div().into_any_element(),
                 (Placement::Heads(count), _) => {
                     let run = &messages[ix..(ix + count).min(messages.len())];
-                    peer_run(run, sessions, &open, &links, p, view.clone())
+                    peer_run(run, sender, &open, &links, p, view.clone())
                 }
                 (_, Some(message)) if from_human(message) => {
                     human_message(message, links.of(message), p)
@@ -1156,9 +1153,7 @@ impl Workspace {
                     compaction_line(message).map_or_else(div, |line| compaction_message(line, p))
                 }
                 (_, Some(message)) => {
-                    let sender = sessions
-                        .iter()
-                        .find(|s| Some(&s.id) == message.sender.as_ref());
+                    let sender = sender(message);
                     // Timer fires, also sent by the session itself, are drawn in a peer run.
                     let own = message.sender.as_ref() == Some(&current.id);
                     let reply = agent_message(message, sender, own, links.of(message), p);
@@ -1255,7 +1250,7 @@ impl Workspace {
             .iter()
             .map(|model| ((model.provider, model.model.clone()), model.label.clone()))
             .collect();
-        if let Some(snapshot) = &self.snapshot {
+        if let Some(snapshot) = self.snapshot() {
             for provider in PROVIDERS {
                 for allowed in snapshot.model_selection.allowed(provider) {
                     models
@@ -1402,7 +1397,7 @@ impl Workspace {
     /// Who chose this agent's model and why, above the composer's model pills.
     fn chosen_by_line(&self, session: &Session, p: Palette) -> Option<Div> {
         let selection = self.runtime(&session.id)?.selection.as_ref()?;
-        let sessions = &self.snapshot.as_ref()?.sessions;
+        let index = self.index.as_ref()?;
         Some(
             div()
                 .w_full()
@@ -1411,7 +1406,7 @@ impl Workspace {
                 .text_size(px(12.))
                 .text_color(p.subtle)
                 .text_ellipsis()
-                .child(models::chosen_by(selection, sessions)),
+                .child(models::chosen_by(selection, index)),
         )
     }
     fn composer(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {

@@ -153,21 +153,14 @@ impl Appearance {
 impl Workspace {
     pub(super) fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let dark = is_dark(cx);
-        let roots = || {
-            self.snapshot
-                .iter()
-                .flat_map(|s| &s.sessions)
-                .filter(|s| s.parent_id.is_none())
-        };
-        let projects = roots().filter(|s| !s.archived).count();
+        // The snapshot lists every session that is not archived.
+        let projects = (self.snapshot().iter())
+            .flat_map(|s| &s.sessions)
+            .filter(|s| s.parent_id.is_none() && !s.archived)
+            .count();
         let offers_new_project = self.offers_new_project();
         let grouped = cx.global::<Preferences>().group_projects;
-        let archived = self
-            .snapshot
-            .iter()
-            .flat_map(|s| &s.sessions)
-            .filter(|s| s.archived)
-            .count();
+        let archived = self.snapshot().map_or(0, |s| s.archived_sessions);
         div()
             .size_full()
             .flex()
@@ -261,8 +254,9 @@ impl Workspace {
                                             "Archived"
                                         })
                                         .tooltip(format!("{archived} archived sessions"))
-                                        .on_click(cx.listener(|v, _, _, c| {
+                                        .on_click(cx.listener(|v, _, w, c| {
                                             v.show_archived = !v.show_archived;
+                                            v.sync_archive(w, c);
                                             c.notify();
                                         })),
                                 )
@@ -424,7 +418,7 @@ impl Workspace {
 
     /// While a settings repository is chosen, how sync is doing; it opens Settings at its section.
     fn sync_mark(&self, p: Palette) -> Option<Stateful<Div>> {
-        let snapshot = self.snapshot.as_ref()?;
+        let snapshot = self.snapshot()?;
         let status = snapshot.settings_sync.as_ref()?;
         let (notes, now) = (
             snapshot.paused_settings().cloned().collect::<Vec<_>>(),
@@ -559,10 +553,10 @@ impl Workspace {
 
     fn tree(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut tree = div().flex().flex_col().gap(px(1.));
-        let Some(snapshot) = &self.snapshot else {
+        let Some(index) = &self.index else {
             return tree;
         };
-        if snapshot.projects.is_empty() {
+        if index.snapshot().projects.is_empty() {
             return tree.child(div().px_2().py_3().child(hint(
                 if self.offers_new_project() {
                     "No projects yet. Create one to brief a coordinator."
@@ -572,12 +566,9 @@ impl Workspace {
                 p,
             )));
         }
-        let mut has_tickets = std::collections::BTreeSet::new();
-        for ticket in &snapshot.tickets {
-            has_tickets.insert(ticket.coordinator_id.clone());
-        }
+        let has_tickets = &index.snapshot().tickets_owned;
         let grouping = cx.global::<Preferences>().group_projects;
-        let entries = tree::entries(snapshot, self.show_archived, grouping);
+        let entries = tree::entries(index, self.show_archived, grouping);
         let drag = self.project_drag.as_ref().and_then(|drag| drag.upgrade());
         let (moving, target) = drag
             .map(|drag| {
@@ -600,7 +591,7 @@ impl Workspace {
         let mut group = None;
         let mut in_group = false;
         for row in tree::rows(
-            snapshot,
+            index,
             self.show_archived,
             grouping,
             &self.collapsed_projects,
@@ -616,7 +607,7 @@ impl Workspace {
             if let Some(top_level) = top_level {
                 if let Some(previous) = project.take() {
                     let under = under.take();
-                    tree = self.close_project(tree, previous, in_group, under, &has_tickets, cx);
+                    tree = self.close_project(tree, previous, in_group, under, has_tickets, cx);
                 }
                 if let Some(key) = group.take_if(|_| top_level) {
                     tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
@@ -661,7 +652,7 @@ impl Workspace {
             }
         }
         if let Some(last) = project {
-            tree = self.close_project(tree, last, in_group, under, &has_tickets, cx);
+            tree = self.close_project(tree, last, in_group, under, has_tickets, cx);
         }
         if let Some(key) = group {
             tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
@@ -756,11 +747,7 @@ impl Workspace {
                 self.toggle_project(project_id, cx)
             }
             (tree::Movable::Project(project_id), release) => {
-                let root = self
-                    .snapshot
-                    .iter()
-                    .flat_map(|s| &s.sessions)
-                    .find(|s| s.project_id == *project_id && s.parent_id.is_none());
+                let root = (self.index.as_ref()).and_then(|i| i.roots(project_id).next());
                 if let Some(id) = root.map(|root| root.id.clone()) {
                     self.select(id, window, cx);
                     if release == tree::OwnRelease::Rename {
@@ -866,11 +853,11 @@ impl Workspace {
         let Some(target) = drag.and_then(|drag| drag.read(cx).target.clone()) else {
             return;
         };
-        let Some(snapshot) = &self.snapshot else {
+        let Some(index) = &self.index else {
             return;
         };
         let grouping = cx.global::<Preferences>().group_projects;
-        let entries = tree::entries(snapshot, self.show_archived, grouping);
+        let entries = tree::entries(index, self.show_archived, grouping);
         if let Some(moved) = tree::project_move(&entries, moving, &target) {
             let command = Command::MoveProjects {
                 project_ids: moved.project_ids,
@@ -895,9 +882,7 @@ impl Workspace {
         let detail = format!("{count} projects starting with “{}”", group.label);
         let state = collapsed
             .then(|| {
-                let needs_you = self
-                    .snapshot
-                    .iter()
+                let needs_you = (self.snapshot().iter())
                     .flat_map(|s| &s.attention)
                     .filter(|a| group.members.iter().any(|m| m.project_id == a.project_id))
                     .count();
@@ -966,10 +951,10 @@ impl Workspace {
         root: &Session,
         grouped: bool,
         under: Option<Halves>,
-        has_tickets: &std::collections::BTreeSet<String>,
+        has_tickets: &BTreeMap<String, u32>,
         cx: &mut Context<Self>,
     ) -> Div {
-        if !has_tickets.contains(&root.id)
+        if !has_tickets.contains_key(&root.id)
             && !self.collapsed_projects.contains(&root.project_id)
             && self.selected.as_ref() == Some(&root.id)
         {
@@ -985,8 +970,10 @@ impl Workspace {
     }
 
     pub(super) fn shown_status(&self, session: &Session) -> Status {
-        let sessions = self.snapshot.as_ref().map_or(&[][..], |s| &s.sessions);
-        shown_status(session, sessions)
+        match &self.index {
+            Some(index) => shown_status(session, index),
+            None => session.status,
+        }
     }
 
     fn status_detail(&self, session: &Session) -> String {
@@ -1006,8 +993,7 @@ impl Workspace {
     /// turn, or queued while it is idle.
     fn waiting_input(&self, session: &Session) -> Option<&'static str> {
         let input = self
-            .snapshot
-            .as_ref()?
+            .snapshot()?
             .undelivered
             .iter()
             .find(|u| u.session_id == session.id)?;
@@ -1064,10 +1050,9 @@ impl Workspace {
             .filter(|e| e.project_id == project_id);
         let editing = edit.is_some();
         let live = self
-            .snapshot
-            .as_ref()
+            .snapshot()
             .is_some_and(|s| s.live_projects.contains(&project_id));
-        let attention = self.snapshot.as_ref().map_or(0, |s| {
+        let attention = self.snapshot().map_or(0, |s| {
             needs_you(&s.attention, &s.workspace_notes, &project_id)
         });
         let detail = format!(
@@ -1276,8 +1261,7 @@ impl Workspace {
         let selected = self.view == Page::Conversation && self.selected.as_ref() == Some(&id);
         let status = self.shown_status(session);
         let questions = self
-            .snapshot
-            .as_ref()
+            .snapshot()
             .map_or(0, |s| s.questions_waiting(&session.id));
         let detail = format!(
             "{} · {} · {:?} · {}",
@@ -1336,7 +1320,9 @@ impl Workspace {
     ) -> Stateful<Div> {
         let coordinator = ticket.coordinator_id.clone();
         let waiver = tree::waiver_note(ticket);
-        let state = waiver.clone().unwrap_or_else(|| humanize(&ticket.state));
+        let state = waiver
+            .clone()
+            .unwrap_or_else(|| humanize(ticket.state.name()));
         let waiting = tree::publish_waiting(ticket);
         // A PR or a waiting publish step adds a second line.
         let two_lines = ticket.pull_request.is_some() || waiting.is_some();
@@ -1348,11 +1334,7 @@ impl Workspace {
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
             detail.push_str(&tree::pr_sentence(pr));
-            if let Some(checked) = self
-                .snapshot
-                .as_ref()
-                .and_then(|s| tree::pr_checked(s, ticket))
-            {
+            if let Some(checked) = self.snapshot().and_then(|s| tree::pr_checked(s, ticket)) {
                 detail.push('\n');
                 detail.push_str(&checked);
             }
@@ -1367,7 +1349,7 @@ impl Workspace {
                 .size(px(6.))
                 .mr(px(3.))
                 .rounded_full()
-                .bg(ticket_state_color(&ticket.state, p))
+                .bg(ticket_state_color(ticket.state, p))
                 .into_any_element(),
         };
         self.row(
@@ -1395,10 +1377,7 @@ impl Workspace {
                 .min_w_0()
                 .child(div().text_ellipsis().text_color(p.text).child(label))
                 .children(ticket.pull_request.as_ref().map(|pr| {
-                    let keeper = self
-                        .snapshot
-                        .as_ref()
-                        .and_then(|s| s.keeper_parts.get(&ticket.id));
+                    let keeper = self.snapshot().and_then(|s| s.keeper_parts.get(&ticket.id));
                     let keeper = ticket.try_part().or(keeper.copied());
                     let comments = ticket.waiting_comments();
                     pr_line(pr, ticket.unreviewed(), keeper, comments, p)
@@ -1498,29 +1477,13 @@ fn pr_line(
 }
 
 /// An idle coordinator shows its team's work, so a collapsed or quiet parent never hides it.
-fn shown_status(session: &Session, sessions: &[Session]) -> Status {
+fn shown_status(session: &Session, index: &WorkspaceIndex) -> Status {
     let idle = matches!(session.status, Status::Ready | Status::Done);
-    if idle && team_working(&session.id, sessions) {
+    if idle && index.team_working(&session.id) {
         Status::Working
     } else {
         session.status
     }
-}
-
-fn team_working(coordinator_id: &str, sessions: &[Session]) -> bool {
-    let parent_of = |id: &str| {
-        sessions
-            .iter()
-            .find(|s| s.id == id)
-            .and_then(|s| s.parent_id.as_deref())
-    };
-    let reports_to = |session: &Session| {
-        std::iter::successors(session.parent_id.as_deref(), |id| parent_of(id))
-            .any(|id| id == coordinator_id)
-    };
-    sessions
-        .iter()
-        .any(|s| !s.archived && s.status == Status::Working && reports_to(s))
 }
 
 /// What a project's badge counts: its attention items, and the workspace notes, as the Inbox rail does.
@@ -1535,7 +1498,18 @@ fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str)
 #[cfg(test)]
 mod tests {
     use super::{needs_you, shown_status};
-    use workspace_core::{Attention, Paused, Provider, Role, Session, Status, WorkspaceNote};
+    use workspace_core::{
+        Attention, Paused, Provider, Role, Session, Snapshot, Status, WorkspaceIndex, WorkspaceNote,
+    };
+
+    fn index(sessions: &[Session]) -> WorkspaceIndex {
+        let sessions = sessions.to_vec();
+        let snapshot = Snapshot {
+            sessions,
+            ..Default::default()
+        };
+        WorkspaceIndex::new(snapshot, Default::default())
+    }
 
     fn session(id: &str, parent: Option<&str>, status: Status) -> Session {
         Session {
@@ -1559,9 +1533,10 @@ mod tests {
             session("implementer", Some("team"), Status::Working),
             session("other-team", Some("main"), Status::Ready),
         ];
-        assert_eq!(shown_status(&sessions[0], &sessions), Status::Working);
-        assert_eq!(shown_status(&sessions[1], &sessions), Status::Working);
-        assert_eq!(shown_status(&sessions[3], &sessions), Status::Ready);
+        let index = index(&sessions);
+        assert_eq!(shown_status(&sessions[0], &index), Status::Working);
+        assert_eq!(shown_status(&sessions[1], &index), Status::Working);
+        assert_eq!(shown_status(&sessions[3], &index), Status::Ready);
     }
 
     #[test]
@@ -1570,11 +1545,14 @@ mod tests {
             session("team", None, Status::Blocked),
             session("implementer", Some("team"), Status::Working),
         ];
-        assert_eq!(shown_status(&sessions[0], &sessions), Status::Blocked);
+        assert_eq!(
+            shown_status(&sessions[0], &index(&sessions)),
+            Status::Blocked
+        );
 
         sessions[0].status = Status::Ready;
         sessions[1].archived = true;
-        assert_eq!(shown_status(&sessions[0], &sessions), Status::Ready);
+        assert_eq!(shown_status(&sessions[0], &index(&sessions)), Status::Ready);
     }
 
     #[test]

@@ -1090,21 +1090,7 @@ impl Actor {
                         return false;
                     }
                 }
-                let read = matches!(
-                    command,
-                    Command::Snapshot
-                        | Command::Messages { .. }
-                        | Command::Steps { .. }
-                        | Command::Progress { .. }
-                        | Command::RunSummaries { .. }
-                        | Command::Logs { .. }
-                        | Command::Activity { .. }
-                        | Command::GitHistory { .. }
-                        | Command::Quotas
-                        | Command::Usage { .. }
-                        | Command::Settings
-                        | Command::Processes { .. }
-                );
+                let read = command.is_read();
                 let result = (|| -> Result<Value> {
                     // Sessions this command stops on the human's behalf.
                     let mut human_stops = Vec::new();
@@ -4043,7 +4029,7 @@ mod tests {
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
             .unwrap();
-        ticket.state = state.into();
+        ticket.state = TicketState::named(state).unwrap();
         host.save_ticket(&ticket).unwrap();
         let (mut actor, _, _) = idle_actor(host);
         let input = actor.host.messages(&implementer.id, None, 10).unwrap();
@@ -4079,7 +4065,7 @@ mod tests {
     fn shown_ticket_state(host: &Host, coordinator: &Session) -> (String, Value) {
         let context = host.agent_context(&coordinator.id).unwrap();
         (
-            host.snapshot().unwrap().tickets[0].state.clone(),
+            host.snapshot().unwrap().tickets[0].state.to_string(),
             context["tickets"][0]["state"].clone(),
         )
     }
@@ -4127,7 +4113,10 @@ mod tests {
         let bar = |actor: &mut Actor| actor.host.progress(0).unwrap().tickets[0].state;
         assert_ne!(bar(&mut actor), BarState::Blocked);
         // Ticket operations still see the report.
-        assert_eq!(actor.host.ticket(&ticket.id).unwrap().state, "blocked");
+        assert_eq!(
+            actor.host.ticket(&ticket.id).unwrap().state,
+            TicketState::Blocked
+        );
 
         finish_turn(&mut actor, &implementer, "run");
         let blocked = ("blocked".to_string(), json!("blocked"));
@@ -4177,7 +4166,32 @@ mod tests {
             .unwrap();
         assert_eq!(shown_ticket_state(&actor.host, &coordinator).0, "assigned");
         actor.host.close_ticket(&ticket.id).unwrap();
-        assert_eq!(actor.host.snapshot().unwrap().tickets[0].state, "closed");
+        assert_eq!(
+            actor.host.archive().unwrap().tickets[0].state,
+            TicketState::Closed
+        );
+    }
+
+    #[test]
+    fn an_agent_archived_in_its_turn_shows_working_in_the_snapshot_until_it_ends() {
+        let (_home, mut actor, ticket, implementer, _) = implementer_in_turn("assigned");
+        let report = json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        actor.host.close_ticket(&ticket.id).unwrap();
+        let shown = |actor: &Actor| {
+            let snapshot = actor.host.snapshot().unwrap();
+            (snapshot.sessions.into_iter())
+                .find(|s| s.id == implementer.id)
+                .map(|s| (s.archived, s.status))
+        };
+        assert_eq!(shown(&actor), Some((true, Status::Working)));
+
+        finish_turn(&mut actor, &implementer, "run");
+
+        assert_eq!(shown(&actor), None, "it is left to the archive");
     }
 
     #[test]
@@ -7627,7 +7641,7 @@ mod tests {
         assert!(!page.complete);
         // A closed ticket is gone from the board, so the next page is the whole board again.
         let mut ticket = crew.actor.host.ticket(&crew.ticket.id).unwrap();
-        ticket.state = "closed".into();
+        ticket.state = TicketState::Closed;
         crew.actor.host.save_ticket(&ticket).unwrap();
         let closed = crew.actor.host.progress(page.revision).unwrap();
         assert!(closed.complete && closed.tickets.is_empty());
@@ -7717,7 +7731,7 @@ mod tests {
         crew.actor.active.remove(&reviewer.id);
         let host = &mut crew.actor.host;
         let mut ticket = host.ticket(&crew.ticket.id).unwrap();
-        ticket.state = "blocked".into();
+        ticket.state = TicketState::Blocked;
         ticket.verification = Some(Verification {
             cycle: 1,
             level: None,

@@ -8,20 +8,17 @@ use ui::{
 
 impl Workspace {
     pub(super) fn team_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let (Some(session), Some(snapshot)) = (self.selected_session(), self.snapshot.as_ref())
-        else {
+        let (Some(session), Some(index)) = (self.selected_session(), self.index.as_ref()) else {
             return div();
         };
         // Every ticket belongs to the project's coordinator; its agents show the same list.
         let owner = match session.parent_id.as_ref() {
-            Some(parent) if session.role != Role::ProjectOrchestrator => snapshot
-                .sessions
-                .iter()
-                .find(|s| &s.id == parent)
-                .unwrap_or(session),
+            Some(parent) if session.role != Role::ProjectOrchestrator => {
+                index.session(parent).unwrap_or(session)
+            }
             _ => session,
         };
-        self.tickets(owner, snapshot, p, cx)
+        self.tickets(owner, index, p, cx)
     }
 
     fn session_link(
@@ -61,7 +58,7 @@ impl Workspace {
     fn ticket_agent(
         &self,
         agent: &Session,
-        snapshot: &Snapshot,
+        index: &WorkspaceIndex,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -78,7 +75,7 @@ impl Workspace {
                 runtime.and_then(|r| r.selection.as_ref()).map(|selection| {
                     match selection.chosen_by {
                         Chooser::Coordinator { .. } => selection.reason.clone(),
-                        _ => models::chosen_by(selection, &snapshot.sessions),
+                        _ => models::chosen_by(selection, index),
                     }
                 });
             entry = entry.child(
@@ -99,15 +96,12 @@ impl Workspace {
     fn tickets(
         &self,
         coordinator: &Session,
-        snapshot: &Snapshot,
+        index: &WorkspaceIndex,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let tickets: Vec<_> = snapshot
-            .tickets
-            .iter()
-            .filter(|t| t.coordinator_id == coordinator.id)
-            .collect();
+        let snapshot = index.snapshot();
+        let tickets: Vec<_> = index.tickets_owned_by(&coordinator.id).collect();
         let mut body = div().flex().flex_col().gap_3().child(
             section("TICKETS", p).child(
                 button("new-ticket-panel")
@@ -127,12 +121,10 @@ impl Workspace {
                 p,
             ));
         }
+        // Archived agents appear only while the sidebar is showing them.
         let agents_of = |ticket: &Ticket| {
-            self.shown(snapshot)
-                .filter(|s| {
-                    self.runtime(&s.id)
-                        .is_some_and(|r| r.ticket_id.as_ref() == Some(&ticket.id))
-                })
+            (index.agents(&ticket.id))
+                .filter(|s| self.listed(s))
                 .collect::<Vec<_>>()
         };
         for ticket in tickets {
@@ -140,8 +132,8 @@ impl Workspace {
             let (state, state_color) = match tree::waiver_note(ticket) {
                 Some(_) => ("Accepted with waiver".to_owned(), p.yellow),
                 None => (
-                    humanize(&ticket.state),
-                    ticket_state_color(&ticket.state, p),
+                    humanize(ticket.state.name()),
+                    ticket_state_color(ticket.state, p),
                 ),
             };
             let mut entry = card(p)
@@ -206,7 +198,7 @@ impl Workspace {
             if !agents.is_empty() {
                 let mut list = div().flex().flex_col().mx(px(-8.));
                 for agent in agents {
-                    list = list.child(self.ticket_agent(agent, snapshot, p, cx));
+                    list = list.child(self.ticket_agent(agent, index, p, cx));
                 }
                 entry = entry.child(list);
             }
@@ -226,10 +218,9 @@ impl Workspace {
             body = body.child(entry);
         }
         // Older stores can contain workers created before ticket ownership existed.
-        let unassigned: Vec<_> = self
-            .shown(snapshot)
+        let unassigned: Vec<_> = (index.children(&coordinator.id))
             .filter(|s| {
-                s.parent_id.as_ref() == Some(&coordinator.id)
+                self.listed(s)
                     && s.role != Role::TaskOrchestrator
                     && self.runtime(&s.id).is_none_or(|r| r.ticket_id.is_none())
             })

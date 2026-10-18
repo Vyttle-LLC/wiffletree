@@ -361,10 +361,10 @@ impl Workspace {
     }
 
     fn overview(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let (Some(session), Some(snapshot)) = (self.selected_session(), self.snapshot.as_ref())
-        else {
+        let (Some(session), Some(index)) = (self.selected_session(), self.index.as_ref()) else {
             return div();
         };
+        let snapshot = index.snapshot();
         let live = self.live_enabled();
         let profile = self.selected_profile();
         let mut body = div()
@@ -428,14 +428,17 @@ impl Workspace {
         body = body.child(self.context_card(session, p, cx));
         if session.role == Role::ProjectOrchestrator {
             let in_project = |s: &&Session| s.project_id == session.project_id;
-            let tickets: Vec<_> = snapshot
-                .tickets
-                .iter()
-                .filter(|t| t.coordinator_id == session.id)
-                .collect();
-            let open = tickets.iter().filter(|t| t.is_open()).count();
-            let agents = self
-                .shown(snapshot)
+            // Open tickets are live; the snapshot counts the others.
+            let tickets = snapshot
+                .tickets_owned
+                .get(&session.id)
+                .copied()
+                .unwrap_or(0);
+            let open = (index.tickets_owned_by(&session.id))
+                .filter(|t| t.is_open())
+                .count();
+            let agents = (index.sessions())
+                .filter(|s| self.listed(s))
                 .filter(in_project)
                 .filter(|s| s.role.is_worker())
                 .count();
@@ -443,7 +446,7 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
-                    .child(Self::stat(tickets.len(), "Tickets", p))
+                    .child(Self::stat(tickets as usize, "Tickets", p))
                     .child(Self::stat(open, "Open", p))
                     .child(Self::stat(agents, "Agents", p)),
             );
@@ -849,8 +852,9 @@ impl Workspace {
     /// The card for a publish step waiting on this item, drawn from the ticket's frozen request,
     /// its review and ledger, and the repository's facts. `None` for any other item.
     fn publish_card(&self, item: &Attention) -> Option<PublishCard> {
-        let snapshot = self.snapshot.as_ref()?;
-        let (ticket, request) = snapshot.tickets.iter().find_map(|ticket| {
+        let index = self.index.as_ref()?;
+        let snapshot = index.snapshot();
+        let (ticket, request) = index.tickets().find_map(|ticket| {
             let request = ticket.publishing.as_ref()?;
             (request.waiting.as_deref() == Some(item.id.as_str())).then_some((ticket, request))
         })?;
