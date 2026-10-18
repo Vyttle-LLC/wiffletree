@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Quiet notices study</title>
+<!--
+  Static study for folding Wiffletree's own notices into the chat's coordination rows.
+  No script, no network. The folded rows open with <details>, so they can be clicked.
+  (a) Today: five PR watcher notices, each a full message.
+  (b) Proposed: the same notices fold into one row, closed.
+  (c) Proposed: a mixed run of agent messages and notices, opened, one line opened.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:780px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;align-items:start}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:500}
+/* The chat column, mirroring transcript.rs: 26px avatars, 12px gap, detail text for runs. */
+.chat{background:var(--surface);border:1px solid var(--edge);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:14px;min-height:420px}
+.msg{display:flex;gap:12px}
+.avatar{flex:none;width:26px;height:26px;border-radius:7px;background:var(--overlay);display:grid;place-items:center;font-size:12px;color:var(--subtle)}
+.avatar.human{background:var(--focus);color:var(--base)}
+.avatar.own{background:var(--accent);color:var(--base)}
+.col{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.head{display:flex;align-items:center;gap:8px;min-height:26px}
+.head b{font-weight:600}
+.head .meta{margin-left:auto;font-size:11px;color:var(--muted)}
+.body{font-size:13px}
+/* A run: one subtle line 38px in, opening to a ruled list of one-line messages. */
+details.run{margin-left:38px;font-size:11.5px;color:var(--subtle)}
+details.run>summary{list-style:none;display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap}
+details.run>summary::-webkit-details-marker{display:none}
+details.run>summary:hover{color:var(--text)}
+.chev::before{content:"▸";display:inline-block;width:10px}
+details[open]>summary .chev::before{content:"▾"}
+.names{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.lines{margin:4px 0 0 18px;padding-left:10px;border-left:2px solid var(--overlay);display:flex;flex-direction:column;gap:3px}
+details.line>summary{list-style:none;display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+details.line>summary::-webkit-details-marker{display:none}
+details.line>summary:hover{color:var(--text)}
+.sender{flex:none;max-width:160px;overflow:hidden;text-overflow:ellipsis;font-weight:600;color:var(--text)}
+.pill{flex:none;font-size:10px;padding:0 6px;border-radius:9px;border:1px solid var(--focus);color:var(--focus)}
+.pill.notice{border-color:var(--muted);color:var(--muted)}
+.first{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.full{margin:4px 0 6px;padding:8px 10px;border-radius:6px;background:color-mix(in srgb,var(--overlay) 50%,transparent);color:var(--text);font-size:13px;white-space:normal}
+.new{outline:2px dashed color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:4px;border-radius:4px}
+.notes{max-width:780px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+@media(max-width:1100px){.grid{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<header class="intro">
+  <div class="eyebrow">Design study · quiet notices</div>
+  <h1>Wiffletree's notices fold away like agent traffic</h1>
+  <p>The chat already folds messages between agents into one quiet "N agent messages" row you can open. Wiffletree's own notices are addressed to the coordinator, not to you, yet each one draws as a full message. Here they fold into the same row, so the chat holds your messages and the coordinator's replies. Nothing is hidden: open the row to read every line, and open a line to read it in full. Click the rows in (b) and (c).</p>
+</header>
+
+<div class="grid">
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(a) Today</div>
+    <div class="chat" aria-label="Chat today">
+      <div class="msg"><div class="avatar">▤</div><div class="col"><div class="head"><b>Wiffletree PR watcher</b><span class="meta">Delivered · just now</span></div><div class="body">PR #118 for ticket "Desktop quick performance: cap the spinner, typed panel data, no per-frame transcript clones" (dd6edeaf-…) merged into main as f94ffd0. Its head 00ec956 is the ticket worktree's HEAD. Accept the ticket with accept_ticket.</div></div></div>
+      <div class="msg"><div class="avatar">▤</div><div class="col"><div class="head"><b>Wiffletree PR watcher</b><span class="meta">Delivered · just now</span></div><div class="body">PR #119 for ticket "Phase 2: bounded, indexed workspace snapshot; typed ticket state; …" (03dbeae3-…) merged into wiffletree/desktop-quick-performance-cap-the-spinner-typed as 3dce378. Its head 340feb4 is the ticket worktree's HEAD. Accept the ticket with accept_ticket.</div></div></div>
+      <div class="msg"><div class="avatar">▤</div><div class="col"><div class="head"><b>Wiffletree PR watcher</b><span class="meta">Delivered · just now</span></div><div class="body">PR #120 for ticket "Phase 3a: render-scoped desktop views, …" (07e277a0-…) merged into wiffletree/phase-2-bounded-indexed-workspace-snapshot-typed as 531db8a. …</div></div></div>
+      <div class="msg"><div class="avatar">▤</div><div class="col"><div class="head"><b>Wiffletree PR watcher</b><span class="meta">Delivered · just now</span></div><div class="body">PR #121 for ticket "Phase 4a: duplication sweep, …" merged into … as 10a5a5f. …</div></div></div>
+      <div class="msg"><div class="avatar">▤</div><div class="col"><div class="head"><b>Wiffletree PR watcher</b><span class="meta">Delivered · just now</span></div><div class="body">PR #122 for ticket "Show a toast when the host refuses …" merged into … as 461e911. …</div></div></div>
+    </div>
+    <p class="caption"><b>(a)</b> Five notices, each a full message with an avatar, push your conversation off screen. Each also breaks the folded row of agent messages around it.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(b) Proposed · the same five, folded</div>
+    <div class="chat" aria-label="Chat proposed, closed">
+      <div class="msg"><div class="avatar human">M</div><div class="col"><div class="head"><b>You</b><span class="meta">8:41 PM</span></div><div class="body">Land the cleanup stack once the PRs merge.</div></div></div>
+      <details class="run new">
+        <summary><span class="chev"></span>⇄ <span class="names">5 notices · Wiffletree PR watcher</span><span>· just now</span></summary>
+        <div class="lines">
+          <details class="line"><summary><span class="sender">Wiffletree PR watcher</span><span class="pill notice">merged</span><span class="first">PR #118 for ticket "Desktop quick performance: cap the spinner, …" merged into main as f94ffd0.</span><span>just now</span></summary><div class="full">PR #118 for ticket "Desktop quick performance: cap the spinner, typed panel data, no per-frame transcript clones" (dd6edeaf-…) merged into main as f94ffd0. Its head 00ec956 is the ticket worktree's HEAD. Accept the ticket with accept_ticket.</div></details>
+          <details class="line"><summary><span class="sender">Wiffletree PR watcher</span><span class="pill notice">merged</span><span class="first">PR #119 for ticket "Phase 2: bounded, indexed workspace snapshot; …" merged into …</span><span>just now</span></summary><div class="full">PR #119 … merged as 3dce378. Its head 340feb4 is the ticket worktree's HEAD. Accept the ticket with accept_ticket.</div></details>
+          <details class="line"><summary><span class="sender">Wiffletree PR watcher</span><span class="pill notice">merged</span><span class="first">PR #120 for ticket "Phase 3a: render-scoped desktop views, …" merged into …</span><span>just now</span></summary><div class="full">PR #120 … merged as 531db8a.</div></details>
+          <details class="line"><summary><span class="sender">Wiffletree PR watcher</span><span class="pill notice">merged</span><span class="first">PR #121 for ticket "Phase 4a: duplication sweep, …" merged into …</span><span>just now</span></summary><div class="full">PR #121 … merged as 10a5a5f.</div></details>
+          <details class="line"><summary><span class="sender">Wiffletree PR watcher</span><span class="pill notice">merged</span><span class="first">PR #122 for ticket "Show a toast when the host refuses …" merged into …</span><span>just now</span></summary><div class="full">PR #122 … merged as 461e911.</div></details>
+        </div>
+      </details>
+      <div class="msg"><div class="avatar own">◆</div><div class="col"><div class="head"><b>Coordinator</b><span class="meta">just now</span></div><div class="body">All five PRs merged, so I accepted their tickets. The cleanup stack is on main at 461e911.</div></div></div>
+    </div>
+    <p class="caption"><b>(b)</b> One line where five messages were. The coordinator's reply, which already sums up what the notices meant, is what you read.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(c) Proposed · a mixed run, opened</div>
+    <div class="chat" aria-label="Chat proposed, opened">
+      <details class="run new" open>
+        <summary><span class="chev"></span>⇄ <span class="names">2 agent messages, 2 notices · Implementer, Wiffletree, Wiffletree PR keeper</span><span>· 8:50 – 8:57 PM</span></summary>
+        <div class="lines">
+          <details class="line"><summary><span class="sender">Implementer</span><span class="pill">ready for testing</span><span class="first">Fixed the two findings; tests pass at 29c3280.</span><span>8:50 PM</span></summary><div class="full">Fixed the two findings; tests pass at 29c3280.</div></details>
+          <details class="line" open><summary><span class="sender">Wiffletree</span><span class="pill notice">verification</span><span class="first">Review cycle 2 passed at 29c3280: Tests, Claude, Codex, Style.</span><span>8:54 PM</span></summary><div class="full">Review cycle 2 passed at 29c3280: Tests, Claude, Codex and Style found nothing blocking. Accept the ticket with accept_ticket once its acceptance criteria are met.</div></details>
+          <details class="line"><summary><span class="sender">Implementer</span><span class="pill">progress</span><span class="first">Squashed to one commit, same patch.</span><span>8:55 PM</span></summary><div class="full">Squashed to one commit, same patch.</div></details>
+          <details class="line"><summary><span class="sender">Wiffletree PR keeper</span><span class="pill notice">rebased</span><span class="first">Rebased PR #121 onto main and pushed it; the patch is unchanged.</span><span>8:57 PM</span></summary><div class="full">Rebased PR #121 onto main and pushed it; the patch is unchanged.</div></details>
+        </div>
+      </details>
+      <div class="msg"><div class="avatar own">◆</div><div class="col"><div class="head"><b>Coordinator</b><span class="meta">8:58 PM</span></div><div class="body">Phase 4a passed review and the keeper rebased its PR. It's ready for you to merge.</div></div></div>
+    </div>
+    <p class="caption"><b>(c)</b> Notices and agent messages that arrive together share one row instead of interrupting it. The heading counts each kind and names each sender once.</p>
+  </section>
+</div>
+
+<ul class="notes">
+  <li>Folds: every message Wiffletree sends the coordinator itself, today the PR watcher's and PR keeper's notices, review results, kept worktrees, migration notices, publish results and process notices.</li>
+  <li>Stays a full message: what you write, and the coordinator's own replies. Questions for you keep going to the card above the composer and the Inbox, as today.</li>
+  <li>A notice's pill names what happened (merged, rebased, verification…). If a notice says something failed, such as failing checks or a conflict, the row shows it in red as it does for a failed or blocked report.</li>
+  <li>The dashed outline marks what's new and isn't part of the design.</li>
+</ul>
+</body>
+</html>

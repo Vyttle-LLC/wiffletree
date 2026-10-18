@@ -2,7 +2,11 @@
 //! the functions here and the desktop classifies stored messages with `MessageKind::of`, so the
 //! two sides read the same format. The stored text is what agents read, so it never changes
 //! shape: a kind is told by its id prefix or by the tag on its first line.
-use crate::{CompactionResult, compact_tokens};
+use crate::{
+    CompactionResult, KEEPER_NOTICE_PREFIX, MIGRATION_PREFIX, PR_NOTICE_PREFIX,
+    PROCESS_NOTICE_PREFIX, PUBLISH_PREFIX, VERIFICATION_NOTICE_PREFIX, WORKTREE_KEPT_PREFIX,
+    compact_tokens, host_notice,
+};
 use serde::{Deserialize, Serialize};
 
 /// The id prefix of a session's reply at the end of a turn; the rest is the run's id.
@@ -17,6 +21,9 @@ pub const TURN_RESULT_PREFIX: &str = "turn-result:";
 const TIMER_TAG: &str = "[timer] ";
 const CHECK_IN_TAG: &str = "[check-in] ";
 const TURN_ERROR: &str = " stopped with an error: ";
+/// The host's words in a blocked verification's outcome and around a failed publish's reason.
+const VERIFICATION_BLOCKED: &str = ") is blocked after ";
+const PUBLISH_FAILED: (&str, &str) = ("Publishing ", " failed: ");
 
 /// What an agent reports to its parent with the `report` tool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,12 +162,16 @@ pub enum MessageKind {
     Reply,
     /// The line a compaction left.
     Compaction,
-    /// Anything else: the human's messages, direct messages, assignments and host notices.
+    /// One of Wiffletree's own notices.
+    Notice(Notice),
+    /// Anything else: the human's messages, direct messages and assignments.
     Plain,
 }
 impl MessageKind {
     pub fn of(id: &str, body: &str) -> Self {
-        if id.starts_with(REPLY_PREFIX) {
+        if let Some(notice) = Notice::of(id, body) {
+            Self::Notice(notice)
+        } else if id.starts_with(REPLY_PREFIX) {
             Self::Reply
         } else if id.starts_with(COMPACTION_LINE_PREFIX) {
             Self::Compaction
@@ -183,6 +194,7 @@ impl MessageKind {
             Self::Timer => Some("timer"),
             Self::CheckIn => Some("check_in"),
             Self::TurnResult { .. } => Some("turn_result"),
+            Self::Notice(notice) => Some(notice.name()),
             Self::Reply | Self::Compaction | Self::Plain => None,
         }
     }
@@ -199,6 +211,111 @@ impl MessageKind {
     pub fn timer_label(self, body: &str) -> Option<&str> {
         let label = body.strip_prefix(TIMER_TAG)?.lines().next()?;
         (self == Self::Timer).then_some(label)
+    }
+}
+
+/// What a Wiffletree notice says happened, told from its id and, where needed, its words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Merged,
+    Closed,
+    ChecksFailing,
+    Conflict,
+    Comments,
+    NotPushed,
+    RebaseFailed,
+    Verification,
+    VerificationFailed,
+    VerificationBlocked,
+    Publish,
+    PublishFailed,
+    Processes,
+    WorktreeKept,
+    Migration,
+    /// A notice whose words cannot be told reliably.
+    Other,
+}
+impl Notice {
+    /// `None` for a message that is not a host notice.
+    pub fn of(id: &str, body: &str) -> Option<Self> {
+        host_notice(id)?;
+        // After the prefix, the watcher's and keeper's ids go on `ticket:kind:…`.
+        fn kind(rest: &str) -> &str {
+            rest.split(':').nth(1).unwrap_or_default()
+        }
+        Some(if let Some(rest) = id.strip_prefix(PR_NOTICE_PREFIX) {
+            match kind(rest) {
+                "merged" => Self::Merged,
+                "closed" => Self::Closed,
+                "checks" => Self::ChecksFailing,
+                "conflict" => Self::Conflict,
+                _ => Self::Other,
+            }
+        } else if let Some(rest) = id.strip_prefix(KEEPER_NOTICE_PREFIX) {
+            match kind(rest) {
+                "comments" => Self::Comments,
+                "try" | "conflict" => Self::Conflict,
+                "fix" | "checks" => Self::ChecksFailing,
+                "push" => Self::NotPushed,
+                "failed" => Self::RebaseFailed,
+                _ => Self::Other,
+            }
+        } else if let Some(rest) = id.strip_prefix(VERIFICATION_NOTICE_PREFIX) {
+            // `ticket:cycle:round` sends an implementer a failed round's findings.
+            match rest.split(':').nth(2).unwrap_or_default() {
+                "outcome" if body.contains(VERIFICATION_BLOCKED) => Self::VerificationBlocked,
+                "outcome" => Self::Verification,
+                "unstartable" => Self::VerificationBlocked,
+                round if round.parse::<u32>().is_ok() => Self::VerificationFailed,
+                _ => Self::Other,
+            }
+        } else if id.starts_with(PUBLISH_PREFIX) {
+            match body.starts_with(PUBLISH_FAILED.0) && body.contains(PUBLISH_FAILED.1) {
+                true => Self::PublishFailed,
+                false => Self::Publish,
+            }
+        } else if id.starts_with(PROCESS_NOTICE_PREFIX) {
+            Self::Processes
+        } else if id.starts_with(WORKTREE_KEPT_PREFIX) {
+            Self::WorktreeKept
+        } else if id.starts_with(MIGRATION_PREFIX) {
+            Self::Migration
+        } else {
+            Self::Other
+        })
+    }
+    /// The pill's words as an identifier, such as `checks_failing`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+            Self::ChecksFailing => "checks_failing",
+            Self::Conflict => "conflict",
+            Self::Comments => "comments",
+            Self::NotPushed => "not_pushed",
+            Self::RebaseFailed => "rebase_failed",
+            Self::Verification => "verification",
+            Self::VerificationFailed => "verification_failed",
+            Self::VerificationBlocked => "verification_blocked",
+            Self::Publish => "publish",
+            Self::PublishFailed => "publish_failed",
+            Self::Processes => "processes",
+            Self::WorktreeKept => "worktree_kept",
+            Self::Migration => "migration",
+            Self::Other => "notice",
+        }
+    }
+    /// The report a failing notice counts as: `Failed`, or `Blocked` for a blocked review.
+    pub fn trouble(self) -> Option<ReportKind> {
+        match self {
+            Self::ChecksFailing
+            | Self::Conflict
+            | Self::RebaseFailed
+            | Self::VerificationFailed
+            | Self::PublishFailed => Some(ReportKind::Failed),
+            Self::VerificationBlocked => Some(ReportKind::Blocked),
+            _ => None,
+        }
     }
 }
 
@@ -375,5 +492,57 @@ mod tests {
             assert_eq!(serde_json::to_value(kind).unwrap(), kind.name());
         }
         assert_eq!(ReportKind::named("timer"), None);
+    }
+
+    /// Each host notice as the host writes it, and the words its pill shows.
+    #[test]
+    fn a_notice_is_named_from_its_id_and_words() {
+        let passed = "Wiffletree verification of ticket \"Fix\" (t) passed in cycle 2, full review 1 of 3, 1 of 3 rounds; verified commit 29c3280.";
+        let blocked = "Wiffletree verification of ticket \"Fix\" (t) is blocked after cycle 1, full review 1 of 3, 3 of 3 rounds: the round cap of 3 was reached.";
+        let pushed = "Pushed wiffletree/fix at 29c3280 to org/app and opened PR #45: https://github.com/org/app/pull/45";
+        let refused = "Publishing wiffletree/fix to org/app failed: git push failed: rejected. Nothing was pushed.";
+        for (id, body, notice) in [
+            ("pr:t:merged:141", "", Notice::Merged),
+            ("pr:t:closed:141", "", Notice::Closed),
+            ("pr:t:checks:141:9e03c1b", "", Notice::ChecksFailing),
+            ("pr:t:conflict:141:9e03c1b", "", Notice::Conflict),
+            ("pr:t:budget:141", "", Notice::Other),
+            ("keeper:t:comments:900", "", Notice::Comments),
+            ("keeper:t:checks:9e03c1b", "", Notice::ChecksFailing),
+            ("keeper:t:try:9e03c1b", "", Notice::Conflict),
+            ("keeper:t:push:9e03c1b:4a1c2e9", "", Notice::NotPushed),
+            ("keeper:t:failed:9e03c1b:4a1c2e9", "", Notice::RebaseFailed),
+            ("keeper:t:diverged:9e03c1b", "", Notice::Other),
+            ("verification:t:2:outcome", passed, Notice::Verification),
+            (
+                "verification:t:1:outcome",
+                blocked,
+                Notice::VerificationBlocked,
+            ),
+            (
+                "verification:t:1:unstartable",
+                "",
+                Notice::VerificationBlocked,
+            ),
+            ("verification:t:1:2", "", Notice::VerificationFailed),
+            ("publish:r1", pushed, Notice::Publish),
+            ("publish:r1", refused, Notice::PublishFailed),
+            ("processes:left:r1", "", Notice::Processes),
+            ("worktree-kept:t:100", "", Notice::WorktreeKept),
+            ("migration:p", "", Notice::Migration),
+        ] {
+            assert_eq!(Notice::of(id, body), Some(notice), "{id}");
+            assert_eq!(MessageKind::of(id, body), MessageKind::Notice(notice));
+        }
+        assert_eq!(Notice::ChecksFailing.trouble(), Some(ReportKind::Failed));
+        assert_eq!(
+            Notice::VerificationBlocked.trouble(),
+            Some(ReportKind::Blocked)
+        );
+        assert_eq!(Notice::Merged.trouble(), None);
+        assert_eq!(Notice::Other.name(), "notice");
+        for id in ["answer:a", "m1", "report:s:1"] {
+            assert_eq!(Notice::of(id, "[passed] Tester\nfine"), None, "{id}");
+        }
     }
 }
