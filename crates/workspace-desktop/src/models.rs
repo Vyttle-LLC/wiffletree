@@ -190,12 +190,19 @@ fn set_first(line: &mut Line, first: ModelProfile) {
     line.first = first;
 }
 
-/// Providers detection found missing or signed out; none detected yet is usable.
+/// Providers detection has not confirmed signed in, as the host counts them: one not checked
+/// yet is not usable either.
 pub(crate) fn unusable(detection: &Detection) -> BTreeSet<Provider> {
-    (detection.iter())
-        .filter(|(_, status)| !status.usable())
-        .map(|(provider, _)| *provider)
+    PROVIDERS
+        .into_iter()
+        .filter(|provider| !detection.get(provider).is_some_and(ProviderStatus::usable))
         .collect()
+}
+/// Whether detection has answered for every provider.
+pub(crate) fn all_checked(detection: &Detection) -> bool {
+    PROVIDERS
+        .iter()
+        .all(|provider| detection.contains_key(provider))
 }
 /// What a row's line would start on now, as the host would resolve it.
 pub(crate) fn right_now(
@@ -233,8 +240,18 @@ pub(crate) enum Now {
     /// Every choice is spent: waits until this time, if known.
     Waits(Option<String>),
     Cannot,
+    /// A provider's sign-in is still being checked, so the pick is not known.
+    Checking,
 }
-pub(crate) fn now_of(row: &JobRow, small: bool, pick: &Result<Pick, String>) -> Now {
+pub(crate) fn now_of(
+    row: &JobRow,
+    small: bool,
+    pick: &Result<Pick, String>,
+    detection: &Detection,
+) -> Now {
+    if !all_checked(detection) {
+        return Now::Checking;
+    }
     let line = match (&row.small, small) {
         (Some(line), true) => line,
         _ => &row.main,
@@ -652,7 +669,7 @@ mod tests {
         let pick = |job, quotas: &[QuotaReading], detection: &Detection| {
             let row = row(job);
             let pick = right_now(&selection, &row, false, quotas, detection, now);
-            now_of(&row, false, &pick)
+            now_of(&row, false, &pick, detection)
         };
         assert_eq!(
             pick(Job::Implementer, &[], &both),
@@ -686,6 +703,26 @@ mod tests {
             ),
             Now::Cannot
         );
+    }
+    #[test]
+    fn a_provider_not_checked_yet_is_unusable_and_shows_as_checking() {
+        let selection = suggested().selection;
+        let row = selection.row(&Job::Coordinator).unwrap();
+        let nothing_yet = Detection::new();
+        assert_eq!(unusable(&nothing_yet), PROVIDERS.into_iter().collect());
+        let pick = right_now(&selection, row, false, &[], &nothing_yet, 1_000_000);
+        assert!(pick.is_err());
+        assert_eq!(now_of(row, false, &pick, &nothing_yet), Now::Checking);
+        // Only Codex has answered, signed in: Claude is not assumed usable meanwhile.
+        let mut codex_checked = nothing_yet.clone();
+        codex_checked.extend(
+            detected(&[Provider::Codex])
+                .into_iter()
+                .filter(|(p, _)| *p == Provider::Codex),
+        );
+        assert_eq!(unusable(&codex_checked), [Provider::Claude].into());
+        let pick = right_now(&selection, row, false, &[], &codex_checked, 1_000_000);
+        assert_eq!(pick.unwrap().profile.provider, Provider::Codex);
     }
     #[test]
     fn the_picker_starts_on_the_rows_pick_and_still_offers_every_model() {

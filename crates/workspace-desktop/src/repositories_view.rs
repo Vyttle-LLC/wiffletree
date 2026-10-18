@@ -411,12 +411,15 @@ impl RepositoriesPage {
             .child(section("WHEN A TICKET’S PR IS OPEN", p))
             .child(hint(KEEP, p))
             .children(
-                held.iter()
-                    .map(|line| hint(line.clone(), p).text_color(p.yellow)),
+                held_lines(held)
+                    .into_iter()
+                    .map(|line| hint(line, p).text_color(p.yellow)),
             )
             .when(!held.is_empty(), |d| d.child(hint(HELD, p)))
             .child(trigger(
-                Checkbox::new("keeper-watch").checked(true).disabled(true),
+                // Not `disabled`: its tick is half-faded on a half-faded box, unreadable in both
+                // themes. With no click handler it still cannot change.
+                Checkbox::new("keeper-watch").checked(true),
                 "Watch it",
                 vec![hint(WATCH, p).into_any_element()],
             ))
@@ -690,12 +693,10 @@ impl RepositoriesPage {
     }
 }
 
-/// Whether the one trigger for tries is shown on: both of the triggers it writes are on.
 fn fixes_are_on(keeper: &KeeperSettings) -> bool {
     keeper.conflicts && keeper.checks
 }
 
-/// The keeper's settings with both triggers for tries set the same way.
 fn with_fixes(keeper: &KeeperSettings, on: bool) -> KeeperSettings {
     KeeperSettings {
         conflicts: on,
@@ -719,8 +720,27 @@ fn page_words(error: &str) -> String {
     if error.contains("needs a PR keeper model: choose") {
         return "Choose a PR keeper model in Models first.".into();
     }
-    error
-        .replace("Try to resolve conflicts", FIXES)
+    card_names(error)
+}
+
+/// The held triggers' lines in the page's words; the one trigger for tries is held once.
+fn held_lines(held: &[String]) -> Vec<String> {
+    let mut lines: Vec<String> = held.iter().map(|line| held_words(line)).collect();
+    lines.dedup();
+    lines
+}
+
+/// Rewords a held trigger's line from the host in the Repositories page's words.
+fn held_words(line: &str) -> String {
+    card_names(line).replace(
+        " needs a PR keeper model: choose one in Models first",
+        ". Choose a PR keeper model in Models first.",
+    )
+}
+
+/// `text` with the old trigger names replaced by the names of the card's rows.
+fn card_names(text: &str) -> String {
+    text.replace("Try to resolve conflicts", FIXES)
         .replace("Try to fix failed checks", FIXES)
         .replace("Rebase when the base branch moves", "Keep it rebased")
 }
@@ -839,7 +859,8 @@ impl Render for RepositoriesPage {
 mod tests {
     use super::{
         FIXES, NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on,
-        page_words, partly_on_hint, pr_check_status, repository_counts, with_fixes,
+        held_lines, held_words, page_words, partly_on_hint, pr_check_status, repository_counts,
+        with_fixes,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1138,6 +1159,41 @@ mod tests {
         assert_eq!(
             page_words("\"Try to fix failed checks\" needs \"Rebase when the base branch moves\""),
             format!("\"{FIXES}\" needs \"Keep it rebased\"")
+        );
+    }
+
+    #[test]
+    fn held_lines_use_the_names_on_the_card() {
+        assert_eq!(
+            held_words(
+                "On from another machine, off on this Mac: \"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first"
+            ),
+            format!(
+                "On from another machine, off on this Mac: \"{FIXES}\". Choose a PR keeper model in Models first."
+            )
+        );
+        let held = |name: &str| {
+            format!(
+                "On from another machine, off on this Mac: \"{name}\" needs a re-check level to review with: add one in Models → Reviews"
+            )
+        };
+        // One trigger on the card writes both, so it is held once.
+        assert_eq!(
+            held_lines(&[
+                held("Try to resolve conflicts"),
+                held("Try to fix failed checks")
+            ]),
+            [format!(
+                "On from another machine, off on this Mac: \"{FIXES}\" needs a re-check level to review with: add one in Models → Reviews"
+            )]
+        );
+        assert_eq!(
+            held_words(
+                "On from another machine, off on this Mac: \"Try to fix failed checks\" needs a re-check level to review with: add one in Models → Reviews"
+            ),
+            format!(
+                "On from another machine, off on this Mac: \"{FIXES}\" needs a re-check level to review with: add one in Models → Reviews"
+            )
         );
     }
 }

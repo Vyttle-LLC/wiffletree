@@ -24,7 +24,7 @@ pub fn signed_in(signed_in: &[Provider]) -> impl Fn(Provider) -> ProviderReport 
 }
 
 /// `verify_ticket`'s arguments for the level "Full".
-pub fn verify_args(_host: &Host, ticket_id: &str) -> Value {
+pub fn verify_args(ticket_id: &str) -> Value {
     json!({"ticket_id": ticket_id, "level": "Full"})
 }
 

@@ -519,12 +519,8 @@ fn a_ticket_migrated_as_passed_is_verified_before_it_can_be_accepted() {
 
     common::one_tester(&mut host);
     let cycle: Ticket = serde_json::from_value(
-        host.agent_tool(
-            &f.main.id,
-            "verify_ticket",
-            common::verify_args(&host, &f.open.id),
-        )
-        .unwrap(),
+        host.agent_tool(&f.main.id, "verify_ticket", common::verify_args(&f.open.id))
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(cycle.state, TicketState::Verifying);

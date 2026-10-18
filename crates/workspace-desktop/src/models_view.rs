@@ -592,12 +592,13 @@ impl ModelsPage {
             Ok(pick) => pick.reason.clone(),
             Err(why) => why.clone(),
         };
-        let shown = match models::now_of(row, small, &pick) {
+        let shown = match models::now_of(row, small, &pick, &self.detection) {
             Now::First(provider) => pill(provider.label(), p.green),
             Now::Moved(provider) => pill(provider.label(), p.blue),
             Now::Waits(Some(at)) => pill(format!("Waits · {at}"), p.yellow),
             Now::Waits(None) => pill("Waits", p.yellow),
             Now::Cannot => pill("Cannot start", p.red),
+            Now::Checking => pill("Checking…", p.subtle),
         };
         div()
             .id(SharedString::from(format!(

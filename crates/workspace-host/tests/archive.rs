@@ -86,7 +86,7 @@ fn verifying(host: &mut Host, ticket: &Ticket) -> Session {
         host.agent_tool(
             &ticket.coordinator_id,
             "verify_ticket",
-            common::verify_args(host, &ticket.id),
+            common::verify_args(&ticket.id),
         )
         .unwrap(),
     )

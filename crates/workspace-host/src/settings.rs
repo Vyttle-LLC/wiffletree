@@ -517,7 +517,7 @@ mod tests {
         let saved = host.settings();
         let no_recheck = refusal(host.set_keeper(conflicts("Full")));
         assert!(
-            no_recheck.contains("add one in Models → Review"),
+            no_recheck.contains("add one in Models → Reviews"),
             "{no_recheck}"
         );
         with_light(&mut host);

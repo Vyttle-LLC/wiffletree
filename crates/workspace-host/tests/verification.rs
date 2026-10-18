@@ -173,7 +173,7 @@ impl Fixture {
         Ok(serde_json::from_value(self.host.agent_tool(
             &coordinator,
             "verify_ticket",
-            common::verify_args(&self.host, &id),
+            common::verify_args(&id),
         )?)?)
     }
     fn current(&self) -> Ticket {
@@ -917,7 +917,7 @@ fn verify_review(f: &mut Fixture, chosen: ModelProfile) -> anyhow::Result<Value>
     f.host.agent_tool(
         &coordinator,
         "verify_ticket",
-        common::verify_args(&f.host, &f.ticket.id),
+        common::verify_args(&f.ticket.id),
     )
 }
 
@@ -2684,7 +2684,7 @@ fn two_cycles_running() -> (Fixture, Vec<Ticket>) {
         tickets.push(ready_ticket(&mut f, &coordinator, &repository, title));
     }
     let second = &tickets[1].id;
-    let args = common::verify_args(&f.host, second);
+    let args = common::verify_args(second);
     let coordinator = f.coordinator.id.clone();
     let started = f
         .host
@@ -2717,7 +2717,7 @@ fn ready_ticket(f: &mut Fixture, coordinator: &str, repository: &str, title: &st
 /// Verifies `ticket` and checks that its cycle queued: the coordinator is told, and its
 /// verifier has nothing to take.
 fn queue(host: &mut Host, coordinator: &str, ticket: &str) {
-    let args = common::verify_args(host, ticket);
+    let args = common::verify_args(ticket);
     let result = host.agent_tool(coordinator, "verify_ticket", args).unwrap();
     let note = result["queued"].as_str().unwrap();
     assert!(note.contains("verification slot"), "{note}");
@@ -2896,7 +2896,7 @@ fn an_archived_project_neither_holds_nor_takes_a_verification_slot() {
 
     f.host.set_archived(&coordinator, true).unwrap();
 
-    let args = common::verify_args(&f.host, &billing.id);
+    let args = common::verify_args(&billing.id);
     let result = f.host.agent_tool(&other.id, "verify_ticket", args).unwrap();
     assert!(result.get("queued").is_none(), "{result}");
     assert_started(&f.host, &billing.id);
@@ -2950,7 +2950,7 @@ fn a_paused_project_neither_holds_nor_takes_a_slot_until_it_is_live_again() {
     let project = f.coordinator.project_id.clone();
     f.host.set_live(&project, false).unwrap();
 
-    let args = common::verify_args(&f.host, &billing.id);
+    let args = common::verify_args(&billing.id);
     let result = f.host.agent_tool(&other.id, "verify_ticket", args).unwrap();
     assert!(result.get("queued").is_none(), "{result}");
     assert!(!f.host.start_queued_cycles().unwrap());

@@ -451,6 +451,17 @@ impl Host {
             .execute("INSERT INTO policy_migrations VALUES ('who-runs-what')", [])?;
         Ok(())
     }
+    /// Replaces a model guide that is still an earlier starter text with the current one; a guide
+    /// anyone edited, however slightly, is left as written.
+    pub(crate) fn refresh_starter_guide(&mut self) -> Result<()> {
+        let Some(guide) = self.shared().guide() else {
+            return Ok(());
+        };
+        if retired_starter_guides().contains(&guide) {
+            self.shared().set_guide(STARTER_GUIDE)?;
+        }
+        Ok(())
+    }
     fn migrated(&self, id: &str) -> Result<bool> {
         self.db
             .execute_batch("CREATE TABLE IF NOT EXISTS policy_migrations (id TEXT PRIMARY KEY)")?;
@@ -775,10 +786,7 @@ pub(crate) mod legacy {
         verifier_sizes: &[(VerifierConfig, Option<Provider>, String)],
         date: &str,
     ) -> String {
-        let mut out = format!(
-            "{}\n## Previous settings (migrated {date})\n",
-            starter_guide(&PROVIDERS)
-        );
+        let mut out = format!("{STARTER_GUIDE}\n## Previous settings (migrated {date})\n");
         let same = |a: &Policy, b: &Policy| {
             Policy {
                 role: b.role,

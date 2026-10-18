@@ -317,6 +317,7 @@ impl Host {
         host.move_into_shared_folder()?;
         // After the move, so the shared review settings and guide are where it reads them.
         host.migrate_who_runs_what(detect)?;
+        host.refresh_starter_guide()?;
         sync::remove_staging(&host.home)?;
         host.backfill_usage()?;
         if let Err(error) = host.skills().record_new_stock_versions() {

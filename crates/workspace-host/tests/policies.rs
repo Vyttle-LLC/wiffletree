@@ -225,10 +225,7 @@ fn current_big_small_policies_become_the_approved_table() {
     );
     // The tiers' prose is gone; the rest of the guide stays.
     let guide = &selection.guide;
-    assert!(
-        guide.starts_with("Pick the model by the size and risk of the work."),
-        "{guide}"
-    );
+    assert!(guide.starts_with(STARTER_GUIDE), "{guide}");
     assert!(!guide.contains("Previous settings"), "{guide}");
     // What the table does not hold is in the one-time note.
     assert_eq!(selection.notes[0], MIGRATED);
@@ -744,6 +741,31 @@ fn reopening_a_migrated_store_changes_nothing() {
     let before = (stored(home.path()), settings());
     drop(Host::open(home.path()).unwrap());
     assert_eq!((stored(home.path()), settings()), before);
+}
+
+#[test]
+fn an_unedited_old_starter_guide_gets_the_current_one_and_an_edited_one_stays() {
+    let guide_file = |home: &Path| home.join("shared/settings/model-guide.md");
+    for (old, edited) in [(true, false), (true, true), (false, false)] {
+        let home = tempfile::tempdir().unwrap();
+        drop(Host::open_set_up(home.path()).unwrap());
+        let retired = retired_starter_guides();
+        let mut guide = match old {
+            true => retired[0].clone(),
+            false => STARTER_GUIDE.to_owned(),
+        };
+        if edited {
+            guide.push_str("Prefer Opus for migrations.\n");
+        }
+        std::fs::write(guide_file(home.path()), &guide).unwrap();
+        let host = Host::open(home.path()).unwrap();
+        let expected = if old && !edited {
+            STARTER_GUIDE
+        } else {
+            &guide
+        };
+        assert_eq!(host.model_selection().unwrap().guide, expected);
+    }
 }
 
 #[test]

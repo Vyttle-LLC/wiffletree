@@ -29,21 +29,25 @@ pub struct Setup {
     pub verification: VerificationSettings,
 }
 
-/// The starter guide, with a line for each of `providers`.
-pub fn starter_guide(providers: &[Provider]) -> String {
-    let lines: Vec<&str> = providers
-        .iter()
-        .map(|provider| match provider {
-            Provider::Claude => {
-                "Claude: small, contained change → Sonnet; large or cross-cutting → Opus."
-            }
-            Provider::Codex => "Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high.",
-        })
-        .collect();
-    format!(
-        "Pick the model by the size and risk of the work. {} Raise effort for migrations, data or security changes.\n",
-        lines.join(" ")
-    )
+/// The starter notes: when the coordinator should pass `small: true`.
+pub const STARTER_GUIDE: &str = "Pass small: true for small, contained work, such as a typo, a copy or config tweak or a fix in one file. Leave it off for migrations, data or security changes and anything that crosses repositories.\n";
+
+/// Every earlier starter text, which is replaced by `STARTER_GUIDE` when it was never edited:
+/// they told coordinators to pick models, which Wiffletree now does.
+pub fn retired_starter_guides() -> Vec<String> {
+    let claude = "Claude: small, contained change → Sonnet; large or cross-cutting → Opus.";
+    let codex = "Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high.";
+    [
+        format!("{claude} {codex}"),
+        claude.to_owned(),
+        codex.to_owned(),
+    ]
+    .map(|lines| {
+        format!(
+            "Pick the model by the size and risk of the work. {lines} Raise effort for migrations, data or security changes.\n"
+        )
+    })
+    .into()
 }
 
 /// The stock "Use it" line of the re-check level "Light".
@@ -264,7 +268,7 @@ pub fn suggest(detection: &Detection, catalog: &[ModelOption]) -> Setup {
             guide: if usable.is_empty() {
                 String::new()
             } else {
-                starter_guide(&usable)
+                STARTER_GUIDE.to_owned()
             },
             switch_at: DEFAULT_SWITCH_AT,
             notes: vec![],
