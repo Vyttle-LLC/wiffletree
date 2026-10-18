@@ -716,7 +716,7 @@ fn partly_on_hint(keeper: &KeeperSettings) -> Option<&'static str> {
 
 /// Rewords a refusal from the host in the Repositories page's words.
 fn page_words(error: &str) -> String {
-    if error.contains("needs a PR keeper model: choose one in Models first") {
+    if error.contains("needs a PR keeper model: choose") {
         return "Choose a PR keeper model in Models first.".into();
     }
     error
@@ -1126,6 +1126,12 @@ mod tests {
         assert_eq!(
             page_words(
                 "\"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first"
+            ),
+            "Choose a PR keeper model in Models first."
+        );
+        assert_eq!(
+            page_words(
+                "Sorting comments needs a PR keeper model: choose a Claude model in Models first"
             ),
             "Choose a PR keeper model in Models first."
         );
