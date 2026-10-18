@@ -271,7 +271,8 @@ impl Host {
         Ok(())
     }
     /// Makes the record's members the processes that are in the group now. While a run is live
-    /// its members only gather, exited ones included; between turns the record is exact.
+    /// its members gather, exited ones included until a sighting's confirmation finds them
+    /// gone; between turns the record is exact.
     fn replace_members(&self, record: &str, processes: &[ProcessInfo]) -> Result<()> {
         self.db.execute(
             "DELETE FROM process_group_members WHERE group_id=?1",
@@ -369,13 +370,9 @@ impl Host {
             .optional()?;
         let mut provider = false;
         if let Some((record, its_run, its_provider)) = open {
-            let members: Vec<Member> = self
-                .db
-                .prepare("SELECT pid,started FROM process_group_members WHERE group_id=?1")?
-                .query_map([&record], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let group = i64::from(process.group);
-            if processes::confirmed_members(group, &members).is_some() {
+            if processes::recorded_group_runs(i64::from(process.group))
+                && self.confirms_group(&record, process.group)?
+            {
                 return Ok(record);
             }
             self.forget_process_group(&record)?;
@@ -388,6 +385,38 @@ impl Host {
             params![id, session, run, process.group, provider, now()],
         )?;
         Ok(id)
+    }
+    /// Whether a member the row recorded is still alive in `group`. The members are probed
+    /// one at a time, and those found to have exited are deleted as they are passed: they
+    /// can never confirm anything again, and a build's thousands of short-lived processes
+    /// would otherwise be probed again at every sighting. So each member is probed as gone
+    /// at most once, and a sighting costs about one probe.
+    fn confirms_group(&self, record: &str, group: i32) -> Result<bool> {
+        let mut exited: Vec<Member> = vec![];
+        let confirmed = {
+            let mut members = self
+                .db
+                .prepare("SELECT pid,started FROM process_group_members WHERE group_id=?1")?;
+            let mut members = members.query_map([record], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            loop {
+                let Some(member) = members.next().transpose()? else {
+                    break false;
+                };
+                match processes::recorded_alive(member) {
+                    Some(process) if process.group == group => break true,
+                    // It left the group, so it does not confirm it, but it lives.
+                    Some(_) => {}
+                    None => exited.push(member),
+                }
+            }
+        };
+        for (pid, started) in exited {
+            self.db.execute(
+                "DELETE FROM process_group_members WHERE group_id=?1 AND pid=?2 AND started=?3",
+                params![record, pid, started],
+            )?;
+        }
+        Ok(confirmed)
     }
     /// A run has ended and its provider thread has stopped the provider's group.
     pub(crate) fn provider_process_ended(&mut self, run: &str) -> Result<()> {

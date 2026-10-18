@@ -245,16 +245,28 @@ pub(crate) fn recorded_group_runs(group: i64) -> bool {
 /// A recorded member of a process group: its process id and start time.
 pub(crate) type Member = (i64, i64);
 
+#[cfg(test)]
+thread_local! {
+    /// How many recorded members this thread has probed, for tests that bound the work.
+    pub(crate) static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The recorded member's process, while it lives. One that has exited never comes back: its
+/// id can be given out again, but never with its start time.
+pub(crate) fn recorded_alive((pid, started): Member) -> Option<ProcessInfo> {
+    #[cfg(test)]
+    PROBES.with(|probes| probes.set(probes.get() + 1));
+    i32::try_from(pid)
+        .ok()
+        .and_then(read)
+        .filter(|process| process.started == started)
+}
+
 /// The processes now in the group, if one of the recorded members is still alive in it.
 /// Everything in a group that never emptied belongs to it.
 pub(crate) fn confirmed_members(group: i64, recorded: &[Member]) -> Option<Vec<ProcessInfo>> {
     let group = running_group(group)?;
-    let alive = |&(pid, started): &Member| {
-        i32::try_from(pid)
-            .ok()
-            .and_then(read)
-            .is_some_and(|process| process.started == started && process.group == group)
-    };
+    let alive = |member: &Member| recorded_alive(*member).is_some_and(|p| p.group == group);
     let members = recorded.iter().any(alive).then(|| group_members(group));
     // The member seen alive can have exited before the group was listed.
     members.filter(|members| !members.is_empty())
