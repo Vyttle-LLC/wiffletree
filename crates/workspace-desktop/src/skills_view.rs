@@ -987,13 +987,18 @@ impl SkillsPage {
 
     fn read_history(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
         let ask = ask::skill_history(skill);
-        self.ask(ask, window, cx, move |view, history, _, _| match history {
-            Ok(history) if view.skill_view == SkillView::History(skill) => {
-                view.skill_history = history
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("Skill history: {error}"),
-        });
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, history, window, cx| match history {
+                Ok(history) if view.skill_view == SkillView::History(skill) => {
+                    view.skill_history = history
+                }
+                Ok(_) => {}
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
 
     fn read_review(
@@ -1004,22 +1009,34 @@ impl SkillsPage {
         cx: &mut Context<Self>,
     ) {
         let ask = ask::skill_merge_review(skill, entry);
-        self.ask(ask, window, cx, move |view, review, _, _| match review {
-            Ok(review) if view.skill_view == SkillView::Review(skill) => {
-                view.merge_review = Some(review)
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("Skill merge review: {error}"),
-        });
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, review, window, cx| match review {
+                Ok(review) if view.skill_view == SkillView::Review(skill) => {
+                    view.merge_review = Some(review)
+                }
+                Ok(_) => {}
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
 
     fn read_stock_changes(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
         let ask = ask::skill_stock_changes(skill);
-        self.ask(ask, window, cx, move |view, lines, _, _| match lines {
-            Ok(lines) if view.skill_view == SkillView::Skill(skill) => view.stock_changes = lines,
-            Ok(_) => {}
-            Err(error) => eprintln!("Skill stock changes: {error}"),
-        });
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, lines, window, cx| match lines {
+                Ok(lines) if view.skill_view == SkillView::Skill(skill) => {
+                    view.stock_changes = lines
+                }
+                Ok(_) => {}
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
 
     /// Before `snapshot` replaces the current one: an editor without unsaved edits follows the
