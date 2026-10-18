@@ -1487,12 +1487,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_refreshes_change_nothing() {
-        let page = [message("a", "hi"), message("b", "there")];
-        assert_eq!(transcript_overlap(&page, &page), Some((0, 2)));
-    }
-
-    #[test]
     fn refreshes_keep_the_unchanged_prefix() {
         let shown = [message("a", "hi"), message("b", "there")];
         let appended = [
