@@ -14,6 +14,17 @@ pub(crate) const REVIEW: &str = "settings/review.json";
 pub(crate) const GUIDE: &str = "settings/model-guide.md";
 pub(crate) const CHECK_INS: &str = "settings/check-ins.json";
 pub(crate) const KEEPER: &str = "settings/pr-keeper.json";
+pub(crate) const MODELS: &str = "settings/models.json";
+
+/// The switch threshold as `settings/models.json` holds it.
+#[derive(Serialize, Deserialize)]
+struct Models {
+    #[serde(default = "default_switch_at")]
+    switch_at: u32,
+}
+fn default_switch_at() -> u32 {
+    DEFAULT_SWITCH_AT
+}
 
 /// The check-in thresholds as `settings/check-ins.json` holds them.
 #[derive(Serialize, Deserialize)]
@@ -100,6 +111,16 @@ pub(crate) fn check(path: &str, content: &[u8]) -> Result<()> {
             HostSettings::validate_check_ins(child, human)
         }
         KEEPER => serde_json::from_str::<KeeperSettings>(text)?.validate(),
+        MODELS => {
+            let switch_at = serde_json::from_str::<Models>(text)?.switch_at;
+            ensure!(
+                SWITCH_AT.contains(&switch_at),
+                "it moves on at {switch_at}%, outside {}–{}%",
+                SWITCH_AT.start(),
+                SWITCH_AT.end()
+            );
+            Ok(())
+        }
         FORMAT => {
             let format = format(content)?;
             ensure!(
@@ -200,6 +221,16 @@ impl SharedStore<'_> {
     }
     pub(crate) fn set_keeper(&self, keeper: &KeeperSettings) -> Result<()> {
         self.write_json(KEEPER, keeper)
+    }
+    /// Where a subscription counts as spent, in percent; 95 unless saved.
+    pub(crate) fn switch_at(&self) -> u32 {
+        let models: Option<Models> = self.read_json(MODELS);
+        (models.map(|m| m.switch_at))
+            .filter(|at| SWITCH_AT.contains(at))
+            .unwrap_or(DEFAULT_SWITCH_AT)
+    }
+    pub(crate) fn set_switch_at(&self, switch_at: u32) -> Result<()> {
+        self.write_json(MODELS, &Models { switch_at })
     }
     /// `None` when no guide was saved; an empty guide is a saved one.
     pub(crate) fn guide(&self) -> Option<String> {
@@ -450,7 +481,10 @@ mod tests {
             signed_in: true,
             plan: None,
         };
-        let mut setup = suggest(&PROVIDERS.map(|p| (p, signed_in.clone())).into());
+        let mut setup = suggest(
+            &PROVIDERS.map(|p| (p, signed_in.clone())).into(),
+            &fallback_catalog(),
+        );
         setup.selection.guide = shown.guide;
         host.set_setup(&setup.selection, Some(setup.verification))
             .unwrap();

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use workspace_core::*;
 
 fn status(installed: bool, signed_in: bool) -> ProviderStatus {
@@ -11,148 +10,102 @@ fn status(installed: bool, signed_in: bool) -> ProviderStatus {
 fn detected(claude: ProviderStatus, codex: ProviderStatus) -> Detection {
     [(Provider::Claude, claude), (Provider::Codex, codex)].into()
 }
-fn models(setup: &Setup, provider: Provider) -> Vec<(&str, &str)> {
-    setup.selection.providers[&provider]
-        .models
-        .iter()
-        .map(|m| (m.model.as_str(), m.effort.as_str()))
-        .collect()
-}
-fn verifiers(setup: &Setup) -> Vec<(Role, &str, Option<Provider>)> {
-    setup
-        .verification
-        .verifiers
-        .iter()
-        .map(|v| (v.role, v.focus.as_str(), v.provider))
-        .collect()
-}
-fn levels(setup: &Setup) -> Vec<(&str, LevelKind, Vec<&str>, &str)> {
-    setup
-        .verification
-        .levels
-        .iter()
-        .map(|level| {
-            (
-                level.name.as_str(),
-                level.kind,
-                level.verifiers.iter().map(String::as_str).collect(),
-                level.use_when.as_str(),
+/// Each row as "job: first → then | small first → small then", with "wait" for no then.
+fn rows(setup: &Setup) -> Vec<String> {
+    let line = |line: &Line| {
+        let then = line
+            .then
+            .as_ref()
+            .map_or("wait".into(), ToString::to_string);
+        format!("{} → {then}", line.first)
+    };
+    (setup.selection.jobs.iter())
+        .map(|row| {
+            let small = row.small.as_ref().map(|s| format!(" | {}", line(s)));
+            format!(
+                "{}: {}{}",
+                row.job.name(),
+                line(&row.main),
+                small.unwrap_or_default()
             )
         })
         .collect()
 }
-fn roles(setup: &Setup) -> Vec<(Role, Vec<Provider>)> {
-    setup
-        .selection
-        .role_providers
-        .iter()
-        .map(|(role, providers)| (*role, providers.iter().copied().collect()))
+fn levels(setup: &Setup) -> Vec<(&str, LevelKind, Vec<&str>)> {
+    (setup.verification.levels.iter())
+        .map(|level| {
+            let verifiers = level.verifiers.iter().map(String::as_str).collect();
+            (level.name.as_str(), level.kind, verifiers)
+        })
         .collect()
 }
-const CLAUDE_MODELS: [(&str, &str); 4] = [
-    ("opus", "high"),
-    ("opus", "medium"),
-    ("sonnet", "high"),
-    ("sonnet", "medium"),
-];
-const CODEX_MODELS: [(&str, &str); 2] = [("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "medium")];
 
 #[test]
-fn both_signed_in_splits_the_roles_and_keeps_the_default_verifiers() {
-    let setup = suggest(&detected(status(true, true), status(true, true)));
+fn both_signed_in_is_the_approved_table() {
+    let setup = suggest(
+        &detected(status(true, true), status(true, true)),
+        &fallback_catalog(),
+    );
     setup.selection.validate().unwrap();
+    setup.verification.validate().unwrap();
     assert!(!setup.selection.is_saved());
-    assert_eq!(models(&setup, Provider::Claude), CLAUDE_MODELS);
-    assert_eq!(models(&setup, Provider::Codex), CODEX_MODELS);
+    assert_eq!(setup.selection.switch_at, 95);
     assert_eq!(
-        roles(&setup),
+        rows(&setup),
         [
-            (Role::ProjectOrchestrator, vec![Provider::Claude]),
-            (Role::Implementer, vec![Provider::Claude]),
-            (Role::Tester, vec![Provider::Codex]),
+            "Coordinator: claude · opus · high → codex · gpt-6.1-sol · high",
+            "Implementer: claude · opus · medium → codex · gpt-6.1-sol · high | claude · sonnet · high → codex · gpt-6.1-sol · medium",
+            "Tester: claude · sonnet · high → codex · gpt-6.1-sol · medium",
+            "Tests: claude · sonnet · high → codex · gpt-6.1-sol · medium",
+            // The provider lenses keep their second opinion: they wait rather than switch.
+            "Correctness: claude · opus · high → wait",
+            "Regressions: codex · gpt-6.1-sol · high → wait",
+            "PR keeper: claude · sonnet · medium → codex · gpt-6.1-sol · medium",
         ]
     );
-    let default = VerificationSettings::default();
-    assert_eq!(setup.verification.verifiers, default.verifiers);
     assert_eq!(
-        (setup.verification.max_rounds, setup.verification.max_cycles),
-        (default.max_rounds, default.max_cycles)
+        setup.verification.verifiers,
+        VerificationSettings::default().verifiers
     );
-    setup.verification.validate().unwrap();
     assert_eq!(
         levels(&setup),
         [
             (
                 "Full",
                 LevelKind::FullReview,
-                vec!["Tests", "Correctness", "Regressions"],
-                "for a ticket's first review, and after any change to what the code does."
+                vec!["Tests", "Correctness", "Regressions"]
             ),
-            (
-                "Light",
-                LevelKind::Recheck,
-                vec!["Correctness"],
-                "after a rebase, a resolved merge conflict or a small fix, on a ticket whose last review passed."
-            ),
+            ("Light", LevelKind::Recheck, vec!["Correctness"]),
         ]
     );
-    assert_eq!(
-        setup.selection.guide,
-        "Pick the model by the size and risk of the work. Claude: small, contained change → Sonnet; large or cross-cutting → Opus. Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high. Raise effort for migrations, data or security changes.\n"
-    );
+    assert!(setup.selection.guide.starts_with("Pick the model"));
 }
 
 #[test]
-fn one_signed_in_provider_takes_every_role_and_the_only_review() {
-    for (provider, other, expected, review) in [
-        (
-            Provider::Claude,
-            Provider::Codex,
-            &CLAUDE_MODELS[..],
-            "Correctness",
-        ),
-        (
-            Provider::Codex,
-            Provider::Claude,
-            &CODEX_MODELS[..],
-            "Regressions",
-        ),
+fn one_signed_in_provider_runs_every_row_alone() {
+    for (provider, other, review) in [
+        (Provider::Claude, Provider::Codex, "Correctness"),
+        (Provider::Codex, Provider::Claude, "Regressions"),
     ] {
         // Installed but signed out counts as unavailable, like a missing CLI.
         for unavailable in [status(false, false), status(true, false)] {
             let detection: Detection =
                 [(provider, status(true, true)), (other, unavailable)].into();
-            let setup = suggest(&detection);
+            let setup = suggest(&detection, &fallback_catalog());
             setup.selection.validate().unwrap();
             setup.verification.validate().unwrap();
-            assert_eq!(models(&setup, provider), expected);
-            assert_eq!(setup.selection.providers[&other], ProviderAccess::default());
-            assert!(
-                roles(&setup)
-                    .iter()
-                    .all(|(_, providers)| providers == &[provider]),
-                "{:?}",
-                roles(&setup)
-            );
-            assert_eq!(roles(&setup).len(), PROVIDER_ROLES.len());
-            assert_eq!(
-                setup.selection.keeper, None,
-                "only the human picks the PR keeper's model"
-            );
-            assert_eq!(
-                verifiers(&setup),
-                [
-                    (Role::Tester, "Tests", None),
-                    (Role::Reviewer, review, Some(provider)),
-                ]
-            );
-            // Full runs the tester and the one reviewer; Light, a re-check, runs that reviewer.
-            let levels: Vec<_> = levels(&setup)
-                .into_iter()
-                .map(|(name, kind, verifiers, _)| (name, kind, verifiers))
+            for row in &setup.selection.jobs {
+                for line in std::iter::once(&row.main).chain(&row.small) {
+                    assert_eq!(line.first.provider, provider, "{:?}", row.job);
+                    assert_eq!(line.then, None, "{:?}", row.job);
+                }
+            }
+            let focuses: Vec<_> = (setup.verification.verifiers.iter())
+                .map(|v| v.focus.as_str())
                 .collect();
+            assert_eq!(focuses, ["Tests", review]);
             assert_eq!(
-                levels,
+                levels(&setup),
                 [
                     ("Full", LevelKind::FullReview, vec!["Tests", review]),
                     ("Light", LevelKind::Recheck, vec![review]),
@@ -165,30 +118,17 @@ fn one_signed_in_provider_takes_every_role_and_the_only_review() {
 }
 
 #[test]
-fn neither_signed_in_disables_both_and_cannot_be_saved() {
+fn neither_signed_in_has_no_table_and_cannot_be_saved() {
     for detection in [
         Detection::new(),
         detected(status(false, false), status(true, false)),
         // A status that claims sign-in without a CLI is not usable either.
         detected(status(false, true), status(false, false)),
     ] {
-        let setup = suggest(&detection);
-        assert!(PROVIDERS.iter().all(|p| !setup.selection.is_enabled(*p)));
-        assert_eq!(
-            setup
-                .selection
-                .providers
-                .keys()
-                .copied()
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(PROVIDERS)
-        );
-        assert!(setup.selection.role_providers.is_empty());
+        let setup = suggest(&detection, &fallback_catalog());
+        assert!(setup.selection.jobs.is_empty());
         assert!(setup.selection.guide.is_empty());
-        assert_eq!(
-            setup.selection.validate().unwrap_err().to_string(),
-            "Enable at least one provider"
-        );
+        assert!(setup.selection.validate().is_err());
     }
 }
 
@@ -199,7 +139,57 @@ fn the_plan_does_not_change_the_suggestion() {
         ..status(true, true)
     };
     assert_eq!(
-        suggest(&detected(with_plan("max"), with_plan("plus"))),
-        suggest(&detected(status(true, true), status(true, true)))
+        suggest(
+            &detected(with_plan("max"), with_plan("plus")),
+            &fallback_catalog()
+        ),
+        suggest(
+            &detected(status(true, true), status(true, true)),
+            &fallback_catalog()
+        )
+    );
+}
+
+#[test]
+fn a_model_the_catalog_does_not_list_becomes_the_closest_one() {
+    let option = |provider, model: &str, efforts: &[&str]| ModelOption {
+        provider,
+        model: model.into(),
+        label: model.into(),
+        efforts: efforts.iter().map(|e| (*e).into()).collect(),
+    };
+    let catalog = [
+        option(
+            Provider::Claude,
+            "claude-opus-5-5",
+            &["low", "medium", "max"],
+        ),
+        option(Provider::Claude, "claude-sonnet-5-5", &[]),
+        option(Provider::Codex, "gpt-7-sol", &["minimal", "xhigh"]),
+    ];
+    let profile = |provider, model: &str, effort: &str| ModelProfile {
+        provider,
+        model: model.into(),
+        effort: effort.into(),
+    };
+    // A model whose ID contains the seed's, at the nearest effort it offers.
+    assert_eq!(
+        closest(Provider::Claude, "opus", "high", &catalog),
+        profile(Provider::Claude, "claude-opus-5-5", "medium")
+    );
+    // A model with no efforts listed offers its provider's usual ones.
+    assert_eq!(
+        closest(Provider::Claude, "sonnet", "high", &catalog),
+        profile(Provider::Claude, "claude-sonnet-5-5", "high")
+    );
+    // Nothing alike: the provider's first model.
+    assert_eq!(
+        closest(Provider::Codex, "gpt-6.1-sol", "high", &catalog),
+        profile(Provider::Codex, "gpt-7-sol", "xhigh")
+    );
+    // A catalog without the provider changes nothing.
+    assert_eq!(
+        closest(Provider::Codex, "gpt-6.1-sol", "high", &catalog[..2]),
+        profile(Provider::Codex, "gpt-6.1-sol", "high")
     );
 }

@@ -1117,7 +1117,7 @@ fn a_compactions_process_the_start_cannot_confirm_holds_the_agent_until_its_note
     unsafe { libc::killpg(group, libc::SIGKILL) };
 }
 
-/// The project's ticket has a Claude reviewer whose model the coordinator chose; its
+/// The project's ticket has a Claude reviewer whose model Wiffletree chose; its
 /// assignment is one quick turn. The coordinator itself is paused for good.
 fn ticket_with_a_reviewer(host: &mut Host, project: &Project, main: &Session, scratch: &Path) {
     assign_a_reviewer(host, project, main, scratch);
@@ -1145,15 +1145,18 @@ fn assign_a_reviewer_on(
     let ticket = host
         .create_ticket(&main.id, &repository.id, "Review", "Check")
         .unwrap();
-    let model = host.model_selection().unwrap().allowed(provider)[0].clone();
-    let profile = json!({"provider":provider,"model":model.model,"effort":model.effort});
-    let assignment = json!({"ticket_id":ticket.id,"role":"reviewer","instruction":"JUST_REPLY start","profile":profile,"reason":"Routine review"});
+    // Each provider's lens reviewer starts on that provider.
+    let like = match provider {
+        Provider::Claude => "Correctness",
+        Provider::Codex => "Regressions",
+    };
+    let assignment = json!({"ticket_id":ticket.id,"role":"reviewer","instruction":"JUST_REPLY start","like":like});
     host.agent_tool(&main.id, "assign_ticket", assignment)
         .unwrap();
 }
 
 #[test]
-fn a_disabled_provider_holds_an_agent_with_a_request_and_enabling_it_compacts_then_runs_the_turn() {
+fn a_wait_for_a_reset_holds_an_agent_with_a_request_and_the_reset_compacts_then_runs_the_turn() {
     let mut world = World::prepared(ticket_with_a_reviewer);
     let main = world.main.id.clone();
     let sessions = world.snapshot().sessions;
@@ -1166,33 +1169,25 @@ fn a_disabled_provider_holds_an_agent_with_a_request_and_enabling_it_compacts_th
     };
     until("the reviewer's first turn", || replies(&world) == 1);
 
-    // Claude is disabled in Models while the reviewer has a request and a message waiting.
+    // The reviewer waits for Claude's reset while it has a request and a message waiting.
     world.stop();
-    let enabled = {
+    {
         let mut host = world.host();
-        let enabled = host.model_selection().unwrap();
-        let mut disabled = enabled.clone();
-        disabled
-            .providers
-            .get_mut(&Provider::Claude)
-            .unwrap()
-            .enabled = false;
-        for providers in disabled.role_providers.values_mut() {
-            *providers = [Provider::Codex].into();
-        }
-        host.set_model_selection(&disabled).unwrap();
+        let mut runtime = host.session_runtime(&reviewer).unwrap();
+        runtime.waiting = true;
+        host.save_runtime(&runtime).unwrap();
+        claude_weekly(&host, 99.);
         host.request_compaction(&reviewer, None).unwrap();
         host.send("next", Some(&main), &reviewer, "JUST_REPLY next")
             .unwrap();
-        enabled
-    };
+    }
     world.start();
     world.several_passes();
 
     // Held as without a request: blocked with the reason, its parent told once, nothing run.
     assert_eq!(world.status(&reviewer), Status::Blocked);
     let held = world.runtime(&reviewer);
-    assert!(held.last_error.unwrap().starts_with("Claude is disabled"));
+    assert!(held.last_error.unwrap().starts_with("Waits for Claude"));
     assert_eq!(
         held.compaction.map(|c| c.state),
         Some(CompactionState::Queued)
@@ -1200,18 +1195,13 @@ fn a_disabled_provider_holds_an_agent_with_a_request_and_enabling_it_compacts_th
     assert!(world.compactions(&reviewer).is_empty());
     assert_eq!(world.turns(&reviewer).len(), 1);
     let told = world.messages(&main);
-    let told = told.iter().filter(|m| m.id.contains(":turn-held:"));
+    let told = told.iter().filter(|m| m.id.starts_with("wait:"));
     assert_eq!(told.count(), 1);
 
-    // Enabled again, the compaction runs first and the turn then takes the message.
+    // Once Claude reads below the threshold, the compaction runs first and the turn then
+    // takes the message.
     world.stop();
-    {
-        let mut host = world.host();
-        let mut selection = host.model_selection().unwrap();
-        selection.providers = enabled.providers;
-        selection.role_providers = enabled.role_providers;
-        host.set_model_selection(&selection).unwrap();
-    }
+    claude_weekly(&world.host(), 30.);
     world.start();
     until("the reviewer's next turn", || replies(&world) == 2);
 
@@ -1222,6 +1212,32 @@ fn a_disabled_provider_holds_an_agent_with_a_request_and_enabling_it_compacts_th
     let next = world.messages(&reviewer);
     let next = next.iter().find(|m| m.id == "next").unwrap();
     assert_eq!(next.receipt, Receipt::Completed);
+}
+
+/// Records Claude's weekly window at `used` percent, resetting in a day.
+fn claude_weekly(host: &Host, used: f64) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let window = QuotaWindow {
+        key: "seven_day".into(),
+        label: "Weekly".into(),
+        used_percent: Some(used),
+        observed_at: at,
+        duration_mins: Some(10080),
+        resets_at: Some(at + 86_400_000),
+        status: None,
+    };
+    host.record_quota(QuotaReading {
+        provider: Provider::Claude,
+        account: None,
+        observed_at: at,
+        source: "Claude stream".into(),
+        windows: vec![window],
+        error: None,
+    })
+    .unwrap();
 }
 
 /// The repository's ticket has a verification round of two Claude testers waiting. The second
@@ -1242,7 +1258,6 @@ fn round_with_a_paused_verifier(
         role: Role::Tester,
         focus: focus.into(),
         instruction: None,
-        provider: Some(Provider::Claude),
     };
     host.set_verification(VerificationSettings::one_level(
         vec![tester("First"), tester("Second")],
@@ -1250,11 +1265,6 @@ fn round_with_a_paused_verifier(
         2,
     ))
     .unwrap();
-    let mut selection = host.model_selection().unwrap();
-    selection
-        .role_providers
-        .insert(Role::Tester, [Provider::Claude, Provider::Codex].into());
-    host.set_model_selection(&selection).unwrap();
     let repository = host
         .attach_repository(&project.id, repo.to_str().unwrap(), "HEAD")
         .unwrap();
@@ -1266,19 +1276,7 @@ fn round_with_a_paused_verifier(
         .unwrap();
     let ready = json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"});
     host.agent_tool(&implementer.id, "report", ready).unwrap();
-    let model = host.model_selection().unwrap().allowed(Provider::Claude)[0].clone();
-    let choices: Vec<_> = ["First", "Second"]
-        .map(|focus| VerifierChoice {
-            focus: focus.into(),
-            profile: ModelProfile {
-                provider: Provider::Claude,
-                model: model.model.clone(),
-                effort: model.effort.clone(),
-            },
-            reason: "Routine check".into(),
-        })
-        .into();
-    let ticket = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
+    let ticket = host.verify_ticket(&ticket.id, "Full", false).unwrap();
     let verifiers = ticket.verification.unwrap().rounds[0].verifiers.clone();
     for session in [&main.id, &implementer.id, &verifiers[1].session_id] {
         host.set_status(session, Status::Paused).unwrap();

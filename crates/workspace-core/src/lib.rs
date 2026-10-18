@@ -1162,12 +1162,12 @@ impl KeeperSettings {
         }
     }
 }
-/// Refuses a trigger for tries unless the rebase trigger is on, the PR keeper's model is chosen
+/// Refuses a trigger for tries unless the rebase trigger is on, the table has a PR keeper row
 /// and the review level names a configured re-check level: a try waits for the keeper's own
 /// rebase, and what the keeper makes is reviewed at that level.
 pub fn check_tries(
     keeper: &KeeperSettings,
-    model: Option<&ModelProfile>,
+    model: Option<&JobRow>,
     verification: &VerificationSettings,
 ) -> Result<()> {
     let rechecks: Vec<&str> = verification
@@ -1188,7 +1188,7 @@ pub fn check_tries(
         );
         ensure!(
             !rechecks.is_empty(),
-            "{trigger} needs a re-check level to review with: add one in Models → Review"
+            "{trigger} needs a re-check level to review with: add one in Models → Reviews"
         );
         let named = keeper.review_level.as_deref().unwrap_or_default();
         ensure!(
@@ -1199,17 +1199,16 @@ pub fn check_tries(
     }
     Ok(())
 }
-/// Refuses a PR keeper model that cannot sort comments: sorting runs with every tool turned
-/// off, which only Claude can be started with.
-pub fn check_sorting_model(keeper: Option<&ModelProfile>) -> Result<()> {
-    let provider = keeper.map(|k| k.provider);
+/// Refuses a PR keeper row that cannot sort comments: sorting runs with every tool turned off,
+/// which only Claude can be started with, so it needs a Claude choice in the row.
+pub fn check_sorting_model(keeper: Option<&JobRow>) -> Result<()> {
     ensure!(
-        provider.is_some(),
+        keeper.is_some(),
         "Sorting comments needs a PR keeper model: choose a Claude model in Models first"
     );
     ensure!(
-        provider == Some(Provider::Claude),
-        "Sorting comments needs a Claude model: it runs with every tool turned off, and Codex cannot be started that way"
+        keeper.is_some_and(|row| row.main.choices().any(|p| p.provider == Provider::Claude)),
+        "Sorting comments needs a Claude model in the PR keeper's row: it runs with every tool turned off, and Codex cannot be started that way"
     );
     Ok(())
 }
@@ -1259,26 +1258,23 @@ impl Default for VerificationSettings {
     /// A tester and a Claude and a Codex review with their lenses, all run by the one level
     /// "Full"; three rounds and two full reviews.
     fn default() -> Self {
-        let verifier = |role, focus: &str, instruction: Option<&str>, provider| VerifierConfig {
+        let verifier = |role, focus: &str, instruction: Option<&str>| VerifierConfig {
             role,
             focus: focus.into(),
             instruction: instruction.map(Into::into),
-            provider,
         };
         Self::one_level(
             vec![
-                verifier(Role::Tester, "Tests", None, None),
+                verifier(Role::Tester, "Tests", None),
                 verifier(
                     Role::Reviewer,
                     "Correctness",
                     Some("Correctness against the ticket's acceptance criteria."),
-                    Some(Provider::Claude),
                 ),
                 verifier(
                     Role::Reviewer,
                     "Regressions",
                     Some("Regressions and test coverage."),
-                    Some(Provider::Codex),
                 ),
             ],
             3,
@@ -1287,7 +1283,7 @@ impl Default for VerificationSettings {
     }
 }
 /// Names and focuses are compared ignoring surrounding spaces and ASCII case.
-fn same_name(a: &str, b: &str) -> bool {
+pub fn same_name(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 /// Such as "Full, Light or Docs".
@@ -1405,7 +1401,7 @@ impl VerificationSettings {
         let configured = |focus: &str| self.verifiers.iter().find(|v| same_name(&v.focus, focus));
         if let Some(missing) = level.verifiers.iter().find(|f| configured(f).is_none()) {
             bail!(
-                "{} runs \"{missing}\", which is not a configured verifier. Choose its verifiers again in Models → Review.",
+                "{} runs \"{missing}\", which is not a configured verifier. Choose its verifiers again in Models → Reviews.",
                 level.name
             );
         }
@@ -1447,8 +1443,7 @@ pub enum LevelKind {
     /// Starts only on a ticket whose latest review passed.
     Recheck,
 }
-/// One configured verifier. The coordinator picks its exact model when it calls
-/// `verify_ticket`; a configured `provider` limits that choice to the provider's models.
+/// One configured verifier. Its model comes from its row in the Who runs what table.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifierConfig {
     pub role: Role,
@@ -1456,16 +1451,6 @@ pub struct VerifierConfig {
     pub focus: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Provider>,
-}
-
-/// The coordinator's exact model for one configured verifier, named by its focus.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifierChoice {
-    pub focus: String,
-    pub profile: ModelProfile,
-    pub reason: String,
 }
 
 /// Where a ticket is in its life, stored and sent as its snake_case name. Reports move an open
@@ -2119,6 +2104,10 @@ pub struct Verification {
     /// round's verifiers have been chosen but sent nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_at: Option<i64>,
+    /// The coordinator asked for small work, so a queued cycle's verifiers resolve their
+    /// small-work lines when it starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub small: bool,
     /// Started by the host for the PR keeper.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keeper: bool,
@@ -2471,10 +2460,14 @@ pub struct SessionRuntime {
     /// How `profile` was chosen; `None` for sessions pinned before model selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<Selection>,
-    /// A turn was held (no model, or its provider disabled) and its queued input is retained.
+    /// A turn was held (no model, or waiting for a reset) and its queued input is retained.
     /// Cleared when Skip cancels that input or a turn starts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    /// Pinned while every choice of its job was spent: its turns wait until its provider is
+    /// not. Cleared when a turn starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
     /// Who stopped the session, while it stays paused or interrupted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by: Option<Stopper>,
@@ -2640,7 +2633,7 @@ pub enum Command {
         title: String,
         brief: String,
     },
-    /// The human assigns an agent; `profile` is never limited by the model selection.
+    /// The human assigns an agent; `profile` is never limited by the Who runs what table.
     AssignTicket {
         ticket_id: String,
         role: Role,
@@ -2725,14 +2718,16 @@ pub enum Command {
         session_id: String,
         run_ids: Vec<String>,
     },
-    /// Saves providers, role providers, reviews and the guide together; answered with the saved
-    /// `ModelSelection` at its next revision.
+    /// Saves the Who runs what table, the switch threshold and the guide together; answered with
+    /// the saved `ModelSelection` at its next revision. The saved one-time notes are kept.
     SetModelSelection {
         selection: Box<ModelSelection>,
         /// The verifiers to save with it: the first save of a suggested setup sends them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verification: Option<VerificationSettings>,
     },
+    /// Clears the Models page's one-time notes; answered with the `ModelSelection`.
+    DismissModelNotes,
     ResolveAttention {
         id: String,
         answer: String,
@@ -2989,6 +2984,7 @@ impl Command {
             | Self::SetArchived { .. }
             | Self::Send { .. }
             | Self::SetModelSelection { .. }
+            | Self::DismissModelNotes
             | Self::ResolveAttention { .. }
             | Self::DismissAttention { .. }
             | Self::AppendLog { .. }

@@ -37,9 +37,8 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         try:request({'type':'create_project','name':'Too early'})
         except AssertionError as refusal:assert 'Open Models' in str(refusal),refusal
         else:raise AssertionError('A project started before a setup was saved')
-        models=lambda model:[{'model':model,'effort':effort} for effort in ('high','medium')]
-        selection={'revision':0,'guide':'','providers':{'claude':{'enabled':True,'models':models('opus')+models('sonnet')},'codex':{'enabled':True,'models':models('gpt-6.1-sol')}},
-            'role_providers':{'project_orchestrator':['claude'],'implementer':['codex'],'tester':['claude']}}
+        row=lambda kind,provider,model:{'job':{'kind':kind},'main':{'first':{'provider':provider,'model':model,'effort':'high'}}}
+        selection={'revision':0,'guide':'','jobs':[row('coordinator','claude','opus'),row('implementer','codex','gpt-6.1-sol'),row('tester','claude','sonnet')]}
         request({'type':'set_model_selection','selection':selection})
         request({'type':'set_workspaces_dir','path':str(tmp/'workspaces')})
         project=request({'type':'create_project','name':'Protocol fixture'})

@@ -120,7 +120,7 @@ impl Host {
         verification: &VerificationSettings,
     ) -> Vec<(Switch, String)> {
         let saved = self.saved_selection().ok().flatten();
-        let model = saved.and_then(|selection| selection.keeper);
+        let model = saved.as_ref().and_then(ModelSelection::keeper);
         let switches: [Switch; 3] = [|k| &mut k.comments, |k| &mut k.conflicts, |k| &mut k.checks];
         let alone = |switch: Switch| {
             let mut alone = KeeperSettings {
@@ -133,8 +133,8 @@ impl Host {
             alone
         };
         let needs = |alone: KeeperSettings| match alone.comments {
-            true => check_sorting_model(model.as_ref()),
-            false => check_tries(&alone, model.as_ref(), verification),
+            true => check_sorting_model(model),
+            false => check_tries(&alone, model, verification),
         };
         (switches.into_iter())
             .filter_map(|switch| Some((switch, format!("{:#}", needs(alone(switch)).err()?))))
@@ -151,11 +151,7 @@ impl Host {
     pub fn set_verification(&mut self, verification: VerificationSettings) -> Result<HostSettings> {
         verification.validate()?;
         let keeper = self.settings().keeper;
-        check_tries(
-            &keeper,
-            self.model_selection()?.keeper.as_ref(),
-            &verification,
-        )?;
+        check_tries(&keeper, self.model_selection()?.keeper(), &verification)?;
         self.shared().set_review(&verification)?;
         Ok(self.settings())
     }
@@ -189,12 +185,12 @@ impl Host {
     /// checked as any other, and still needs the rebase trigger.
     pub fn set_keeper(&mut self, keeper: KeeperSettings) -> Result<HostSettings> {
         keeper.validate()?;
-        let model = self.model_selection()?.keeper;
+        let selection = self.model_selection()?;
         if keeper.comments {
-            check_sorting_model(model.as_ref())?;
+            check_sorting_model(selection.keeper())?;
         }
         let settings = self.settings();
-        check_tries(&keeper, model.as_ref(), &settings.verification)?;
+        check_tries(&keeper, selection.keeper(), &settings.verification)?;
         if keeper.comments && !settings.keeper.comments {
             self.restart_comments()?;
         }
@@ -482,12 +478,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(home.path()).unwrap();
         let mut selection = host.model_selection().unwrap();
-        let allowed = selection.allowed(Provider::Claude)[0].clone();
-        selection.keeper = Some(ModelProfile {
-            provider: Provider::Claude,
-            model: allowed.model,
-            effort: allowed.effort,
-        });
+        selection.set_keeper(Some(crate::keeper::tests::keeper_line(Provider::Claude)));
         host.set_model_selection(&selection).unwrap();
         host.set_verification(VerificationSettings::default())
             .unwrap();
@@ -552,10 +543,10 @@ mod tests {
         assert_eq!(host.settings().keeper, conflicts("Light"));
         // Without a keeper model.
         let mut selection = host.model_selection().unwrap();
-        selection.keeper = None;
+        selection.set_keeper(None);
         let dropped = refusal(host.set_model_selection(&selection));
         assert!(dropped.contains("needs a PR keeper model"), "{dropped}");
-        assert!(host.model_selection().unwrap().keeper.is_some());
+        assert!(host.model_selection().unwrap().keeper().is_some());
     }
 
     #[test]
@@ -563,7 +554,7 @@ mod tests {
         let (_home, mut host) = rebasing();
         with_light(&mut host);
         let mut selection = host.model_selection().unwrap();
-        selection.keeper = None;
+        selection.set_keeper(None);
         host.set_model_selection(&selection).unwrap();
         let checks = |rebase| KeeperSettings {
             rebase,
@@ -597,7 +588,7 @@ mod tests {
             "the rebase trigger stays on"
         );
         let mut selection = host.model_selection().unwrap();
-        selection.keeper = None;
+        selection.set_keeper(None);
         assert!(host.set_model_selection(&selection).is_err());
         assert_eq!(host.settings().keeper, checks(true));
     }
@@ -727,17 +718,12 @@ mod tests {
         let refused = refusal(host.set_keeper(on));
         assert!(refused.contains("needs a PR keeper model"), "{refused}");
         assert_eq!(saved(), kept);
-        let allowed = selection.allowed(Provider::Claude)[0].clone();
-        selection.keeper = Some(ModelProfile {
-            provider: Provider::Claude,
-            model: allowed.model,
-            effort: allowed.effort,
-        });
+        selection.set_keeper(Some(crate::keeper::tests::keeper_line(Provider::Claude)));
         host.set_model_selection(&selection).unwrap();
         let keeper = host.settings().keeper;
         assert!(keeper.conflicts && keeper.checks && keeper.comments);
         assert!(host.snapshot().unwrap().keeper_held.is_empty());
-        selection.keeper = None;
+        selection.set_keeper(None);
         let removed = refusal(host.set_model_selection(&selection));
         assert!(removed.contains("PR keeper model"), "{removed}");
     }

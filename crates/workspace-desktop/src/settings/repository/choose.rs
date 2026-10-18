@@ -5,16 +5,16 @@ use gpui_component::input::Input;
 
 const INTRO: &str = "Keep your settings the same on every Mac you use Wiffletree on. Name a private GitHub repository: an empty one to set up, or the one your other Mac already uses.";
 const NO_REPOSITORY: &str = "No repository yet? Create an empty private repository on GitHub, then name it here. Wiffletree doesn’t create repositories for you.";
-const SHARED: [&str; 5] = [
+const SHARED: [&str; 6] = [
     "Skills: your rules, rewrites and their history",
-    "Review: verifiers, levels, rounds and reviews per ticket",
-    "The model guide",
+    "Reviews: verifiers, levels, rounds and reviews per ticket",
+    "The model notes",
+    "Where a subscription counts as spent",
     "Check-in thresholds",
     "PR keeper triggers",
 ];
-const STAYS: [&str; 6] = [
-    "Providers and allowed models",
-    "The PR keeper’s model",
+const STAYS: [&str; 5] = [
+    "Who runs what, the PR keeper’s model among it",
     "Workspace folder",
     "Owners allowed to get pull requests",
     "Repositories and their checks",

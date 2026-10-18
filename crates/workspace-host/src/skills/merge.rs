@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn both_sides_inserting_at_one_place_overlap() {
-        let after_second = "and give a reason that names the deciding factor.\n\n";
+        let after_second = "only when the change is small, contained and low-risk.\n\n";
         let stock = edit(
             coordinating(),
             after_second,

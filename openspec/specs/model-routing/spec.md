@@ -1,7 +1,7 @@
 # model-routing Specification
 
 ## Purpose
-Let the human decide which providers and models run on this machine, and make coordinators choose exact models within those limits.
+Let the human decide who runs each job on this machine, and let Wiffletree move a job to its next choice when a subscription runs low. Coordinators name jobs, never models.
 
 ## Requirements
 
@@ -12,120 +12,34 @@ A read-only Codex feasibility probe SHALL initialize app-server, paginate the mo
 - **WHEN** the probe runs with an installed supported CLI
 - **THEN** it reports model capabilities without creating a thread or turn
 
-### Requirement: Providers on this machine
-The host SHALL persist, per machine:
-- whether each provider (Claude, Codex) is enabled;
-- which model and effort pairs are allowed for it.
-
-A disabled provider SHALL make none of its models available to coordinator choices. Edits SHALL save atomically with role providers, and a save that also changes the guide SHALL change both or neither. A save of the setup together with the review settings SHALL be checked whole before anything is written, and SHALL change the selection, the guide and the review settings all or none. The providers and their models SHALL NOT be shared through the settings repository.
-
-#### Scenario: Codex disabled on this machine
-- **WHEN** the human disables Codex and saves
-- **THEN** no coordinator can assign a Codex model for any role, including reviewers
-
-#### Scenario: Invalid configuration is not saved
-- **WHEN** a save has any of the following:
-  - no enabled provider;
-  - an enabled provider with no allowed model;
-  - a duplicate model and effort pair;
-  - a role without an enabled provider
-- **THEN** the host rejects the whole save and keeps the previous configuration, the guide included
-
-#### Scenario: A refused combined save
-- **WHEN** comment sorting is on with a Claude PR keeper model, and the human saves a changed Review card together with a selection that removes the PR keeper model
-- **THEN** the save is refused, and the review settings, the guide and the selection are all as they were
-
-### Requirement: Providers per role
-The host SHALL persist a non-empty set of enabled providers for each of the project coordinator, implementer and tester roles. A coordinator's choice for these roles SHALL use one of the role's providers. A configured verifier's provider limits its choice; an ad-hoc reviewer may use any enabled provider.
-
-#### Scenario: Two providers allowed for implementers
-- **WHEN** the Implementer role lists Claude and Codex
-- **THEN** a coordinator may assign an implementer any allowed model from either provider
-
 ### Requirement: Model preferences guide
-The host SHALL persist a Markdown guide of at most 32 KiB, written by the human, in the shared folder's `settings/model-guide.md` (see settings-repository), so that it is shared with every machine that uses the same settings repository. The guide SHALL explain how to choose a model and effort within a provider by the size and risk of the work. The host SHALL NOT parse it to choose or permit models. The suggested setup of a machine with no saved model selection SHALL keep a guide that is already in the shared folder rather than suggest a starter guide.
+The host SHALL persist a Markdown guide of at most 32 KiB, written by the human, in the shared folder's `settings/model-guide.md` (see settings-repository), so that it is shared with every machine that uses the same settings repository. The guide SHALL be optional notes for coordinators; the host SHALL NOT parse it to choose models. The suggested setup of a machine with no saved model selection SHALL keep a guide that is already in the shared folder rather than suggest a starter guide.
 
 #### Scenario: Guide delivered unchanged
 - **WHEN** a coordinator reads its workspace context
-- **THEN** it receives the guide exactly as saved, with this machine's current revision
+- **THEN** it receives the guide exactly as saved as `notes`, with this machine's current revision
 
 #### Scenario: A guide from another machine
 - **WHEN** a machine with no saved model selection joins a settings repository that has a guide, and the human opens Models
 - **THEN** the suggested setup shows the repository's guide, and saving it keeps that guide
 
-### Requirement: Coordinator selection within providers
-A coordinator assigning an agent or starting a verifier SHALL name an exact provider, model and effort and a one-line reason. The host SHALL reject the choice in any of these cases:
-- the provider is disabled, or the model and effort are not allowed for that provider;
-- for roles other than reviewer, the provider is not configured for the assigned role;
-- for a configured verifier that names a provider, the choice uses another provider.
-
-The host SHALL reject without fallback, substitution or provider switch. On success it SHALL record the profile, reason, chooser and configuration revision on the new session.
-
-#### Scenario: Allowed choice is recorded
-- **WHEN** the project coordinator assigns an implementer Claude · sonnet · high with the reason "Small, contained CLI flag; Sonnet is enough"
-- **THEN** the implementer is pinned to that profile, and its selection records the coordinator, the reason and the revision
-
-#### Scenario: Wrong provider for the role
-- **WHEN** a coordinator assigns an implementer Codex · gpt-6.1-sol · high while Implementer uses only Claude
-- **THEN** the call fails with "Codex is not configured for Implementer on this machine"
-- **AND** no session is created and a `model_rejected` activity is recorded
-
-#### Scenario: Model not allowed
-- **WHEN** a coordinator assigns Claude · opus · max and that pair is not allowed
-- **THEN** the call fails, listing the allowed Claude models
-- **AND** no session is created and no other model is used
-
-#### Scenario: Assignment is all or nothing
-- **WHEN** recording the chosen model fails while a coordinator assigns an agent
-- **THEN** no session, instruction, ticket change or `model_selected` event remains, and a retry creates the agent with its model
-
-#### Scenario: Missing reason
-- **WHEN** a coordinator assigns an allowed profile with an empty or multi-line reason
-- **THEN** the call fails and no session is created
-
 ### Requirement: Human model choice wins
-The human's model choices SHALL NOT be limited by providers, role providers, verifier providers or allowed models. This covers the new-agent dialog and the chat override. Pickers SHALL be pre-filled as follows:
-- the role's first configured provider, in the order Claude then Codex;
-- for a reviewer, or a role whose providers have no allowed model, the first enabled provider with an allowed model;
-- then that provider's first allowed model.
-
-A started conversation SHALL still refuse a provider change.
+The human's model choices SHALL NOT be limited by the table. This covers the new-agent dialog and the chat override. The dialog SHALL be pre-filled with what the role's row would use right now, and SHALL record the chooser as the table when the human keeps it and as the human otherwise. A human's choice SHALL end a wait for a reset. A started conversation SHALL still refuse a provider change.
 
 #### Scenario: Human picks a model outside the role's providers
-- **WHEN** the human creates a tester with a Codex model while Tester uses only Claude
+- **WHEN** the human creates a tester with a Codex model while the Tester row names only Claude
 - **THEN** the agent is created with that model, and its selection records the human as the chooser
 
-### Requirement: Held turns for disabled providers
-At each turn start of a coordinator-chosen session, the host SHALL check that the session's provider is still enabled on this machine. If it is not, the host SHALL:
-- not start the turn;
-- keep the input queued;
-- set the session Blocked with an error naming the provider;
-- never switch models.
-
-Human-chosen sessions SHALL NOT be held.
-
-#### Scenario: Provider disabled after assignment
-- **WHEN** the human disables Codex while a coordinator-chosen Codex reviewer has queued input
-- **THEN** the reviewer's turn does not start, and it is Blocked with "Codex is disabled on this machine"
-
-#### Scenario: Agent without a pinned model
-- **WHEN** an agent below the project coordinator has queued input but no pinned model
-- **THEN** its turn does not start, it is Blocked with an error naming the missing model, and no other model is used
-
-#### Scenario: Skip a held turn
-- **WHEN** the human chooses Skip on a held agent
-- **THEN** the input it was holding is cancelled and does not run later
-
 ### Requirement: Held turns wake the parent
-When the host holds a turn, it SHALL deliver a `blocked` report to the agent's parent on the agent's behalf. The report SHALL carry the same text as the session's `last_error` and SHALL wake the parent like any blocked report. Holding again on the same input SHALL NOT send a duplicate.
+When the host holds a turn for a reason other than waiting for a reset, it SHALL deliver a `blocked` report to the agent's parent on the agent's behalf. The report SHALL carry the same text as the session's `last_error` and SHALL wake the parent like any blocked report. Holding again on the same input SHALL NOT send a duplicate. A turn waiting for a reset SHALL tell the parent as "Waiting for the earliest reset" says.
 
 #### Scenario: Parent learns of the hold
-- **WHEN** a Codex reviewer assigned by the project coordinator is held because Codex was disabled
-- **THEN** the project coordinator receives a `blocked` report from the reviewer naming the disabled provider, and is woken
+- **WHEN** an agent below the project coordinator has queued input but no pinned model
+- **THEN** its turn does not start, it is Blocked with an error naming the missing model, and the project coordinator receives one `blocked` report from it and is woken
 
 #### Scenario: Retry without a fix
-- **WHEN** the human retries the held reviewer without re-enabling Codex
-- **THEN** the reviewer is held again, and the coordinator receives no second report for the same input
+- **WHEN** the human retries the held agent without giving it a model
+- **THEN** it is held again, and the parent receives no second report for the same input
 
 ### Requirement: Model selection migration
 On first open after upgrade, after store schema 6 has retired repository coordinators, the host SHALL run one idempotent migration recorded in `policy_migrations`. It SHALL handle every saved policy shape:
@@ -170,33 +84,6 @@ Running it again SHALL change nothing. A store with no saved policy SHALL get no
 - **WHEN** a store with no saved policy is opened for the first time
 - **THEN** the migration is recorded and no model selection or settings file is saved
 
-### Requirement: The PR keeper's model
-The saved model selection SHALL hold at most one exact model for the PR keeper: a provider, a model and an effort. None SHALL be chosen until the human chooses one, also after an update, on a fresh install and in the suggested setup of a machine with no saved selection. A save SHALL be refused, whole, when the keeper's model is not an allowed model of an enabled provider, and the previous selection SHALL stay in effect. The Models page SHALL show a "PR keeper" card with that one choice, saying what the model is used for, that watching and rebasing use no model, and that a Claude model also merges the passages of a skill update that overlap a rewrite. Only the human's client SHALL change it. A PR keeper agent SHALL be pinned to the model saved when it is created, and the host SHALL never run the keeper, or a skill merge, on another model.
-
-#### Scenario: Nothing chosen at first
-- **WHEN** the app is updated or first started
-- **THEN** no PR keeper model is chosen, and the card says so
-
-#### Scenario: Choosing a model
-- **WHEN** the human picks Claude · haiku · medium, an allowed model, and saves
-- **THEN** the selection holds it, and the next PR keeper agent is pinned to it
-
-#### Scenario: A model that is not allowed
-- **WHEN** a save names a PR keeper model whose provider is disabled or that is not among its allowed models
-- **THEN** the whole save is refused and the previous selection stays in effect
-
-#### Scenario: Removing the model from the allowed list
-- **WHEN** the human removes the keeper's model from the allowed models without choosing another for the keeper
-- **THEN** the save is refused, naming the PR keeper
-
-#### Scenario: No fallback
-- **WHEN** the keeper's model cannot run because its provider is signed out
-- **THEN** the run fails and no other model is used
-
-#### Scenario: A Codex keeper model and a skill update
-- **WHEN** the PR keeper's model is a Codex model and a skill update overlaps a rewrite
-- **THEN** no model merges it, and the card says skill merges need a Claude model
-
 ### Requirement: Provider detection
 For each provider the app SHALL detect whether its CLI is installed, whether it is signed in, and its plan when known, without starting inference. Detection SHALL run off the UI thread and SHALL treat a missing CLI, one that fails, one whose output cannot be read and one that does not answer within 10 seconds as not signed in. The plan SHALL be best effort: any failure to read it means the plan is unknown. Token contents SHALL NOT be logged or shown. The Models page SHALL show each provider's status, and SHALL show the plan beside it when known.
 
@@ -212,44 +99,6 @@ For each provider the app SHALL detect whether its CLI is installed, whether it 
 - **WHEN** Codex is signed in and `~/.codex/auth.json` is missing, unreadable or malformed
 - **THEN** Codex is shown as signed in with no plan, and nothing fails
 
-### Requirement: Suggested setup on first run
-A store with no saved model selection SHALL save none on open. The Models page SHALL show a suggested setup as an unsaved draft, built only from providers that are installed and signed in, and SHALL enable Save without further edits when the suggestion is valid. Saving SHALL persist the model selection and the verifiers exactly as shown, together or not at all. The plan SHALL NOT change the suggestion. Until the first suggestion has arrived, the page SHALL NOT be editable and Save SHALL be disabled. A provider SHALL carry the Suggested tag only while it is enabled in the draft.
-
-- **Both providers:** Claude allows Opus and Sonnet at high and medium; Codex allows GPT 6.1 Sol at high and medium. The project coordinator and implementer use Claude and the tester uses Codex. The verifiers are a tester, a Claude reviewer and a Codex reviewer. The guide is the starter guide.
-- **One provider:** it is enabled with its models above and takes every role. The verifiers are a tester and one reviewer on it. The guide names only it. The other provider is disabled and shows a one-line fix.
-- **Neither:** both are disabled, the page says no signed-in CLI was found, and Save is disabled.
-
-Refresh SHALL run detection again. While the draft is still the suggestion as offered, it SHALL follow the new detection; once the human has edited it, their edits SHALL be kept.
-
-#### Scenario: Both signed in
-- **WHEN** a fresh store is opened with both CLIs signed in and the human presses Save without editing
-- **THEN** nothing was saved before the press
-- **AND** the saved selection and verifiers are the "both providers" suggestion
-
-#### Scenario: Only one signed in
-- **WHEN** a fresh store is opened with only Codex signed in
-- **THEN** the suggestion enables Codex alone, gives it every role, lists a tester and one Codex reviewer, and can be saved
-
-#### Scenario: Neither signed in
-- **WHEN** a fresh store is opened with no signed-in CLI
-- **THEN** Save is disabled and the page tells the human to install and sign in to a CLI, then press Refresh
-
-#### Scenario: Before the first suggestion
-- **WHEN** a fresh store is opened and detection has not finished
-- **THEN** the page shows "Checking CLI…" with its controls disabled and Save disabled
-
-#### Scenario: Suggested provider switched off
-- **WHEN** the human switches off a suggested provider
-- **THEN** it no longer carries the Suggested tag, and switching it back on restores the tag
-
-#### Scenario: Refresh after signing in
-- **WHEN** the human signs in to Codex and presses Refresh while the Claude-only suggestion is untouched
-- **THEN** the draft becomes the "both providers" suggestion
-
-#### Scenario: Refresh after editing
-- **WHEN** the human removes a suggested verifier and presses Refresh
-- **THEN** the draft keeps their edit
-
 ### Requirement: No agent before the first saved setup
 While no model selection is saved, the host SHALL refuse to create a project, and therefore any agent, with a message that points the human to the Models page. It SHALL NOT fall back to a built-in setup or substitute a provider, model or verifier.
 
@@ -262,7 +111,7 @@ While no model selection is saved, the host SHALL refuse to create a project, an
 - **THEN** its coordinator starts on a provider of the saved setup
 
 ### Requirement: Welcome on first run
-While no model selection is saved, the start screen SHALL show a welcome that leads to the Models page instead of offering a project, and detection SHALL start when the app opens so the welcome and the Models page share one result. A store with a saved model selection SHALL NOT show the welcome and SHALL NOT run detection before its Models page is opened.
+While no model selection is saved, the start screen SHALL show a welcome that leads to the Models page instead of offering a project. Detection SHALL start when the app opens, on every store, so the welcome, the Models page and the host share one result.
 
 - **A CLI signed in:** two steps, Set up your models and Start a project; each provider as detected, signed in with its plan when known or with its one-line fix; and a Review suggested setup button that opens the Models page.
 - **No CLI signed in:** three steps, Sign in to a CLI, Set up your models and Start a project; each provider's one-line fix; and a Check again button that runs detection again.
@@ -295,4 +144,161 @@ While no model selection is saved, New project SHALL NOT be offered: the start s
 
 #### Scenario: Saved store
 - **WHEN** a store with a saved setup and no projects is opened
-- **THEN** the start screen reads "Start with a project.", the sidebar is unmarked and no CLI status command has run
+- **THEN** the start screen reads "Start with a project.", the sidebar is unmarked, and the host learns which CLIs are signed in
+
+### Requirement: Who runs what
+The host SHALL persist, per machine, one row per job: Coordinator, Implementer, Tester, one per configured verifier keyed by its focus, and optionally PR keeper. Each row SHALL have a first choice (provider, model, effort), an optional then choice, where none means wait, and an optional small-work line with its own first and optional then. A save SHALL be refused, whole, with the previous table kept, when a row of Coordinator, Implementer or Tester is missing or doubled, two rows name one verifier or two PR keeper rows exist, a model or effort is empty or too long, or a then choice uses the same provider as its first choice. The table SHALL NOT be shared through the settings repository. A save that also changes the guide or the switch threshold SHALL change all of them or none, and a save together with the review settings SHALL be checked whole before anything is written.
+
+The table SHALL match the configured verifiers whenever it is read: a row for a verifier that is no longer configured SHALL be left out, and a configured verifier without a row SHALL use a copy of the first reviewer's row, or of the Tester row with no reviewer row, and SHALL be named in the table's `copied` list until a save stores its row.
+
+#### Scenario: A then on the same subscription
+- **WHEN** the human saves Implementer with Opus · medium then Sonnet · high
+- **THEN** the save is refused, saying both choices use the Claude subscription, and the previous table stays
+
+#### Scenario: A verifier from another machine
+- **WHEN** a pulled review setting adds the reviewer Security, which has no row on this machine
+- **THEN** Security resolves with a copy of the first reviewer's row, the Models page notes it, and saving the page stores the row
+
+### Requirement: Switch threshold
+The host SHALL keep one switch threshold, a whole percentage from 50 to 100, default 95, in the shared folder's `settings/models.json`, so every machine with the same settings repository uses it. It SHALL be saved with the Models page's Save.
+
+#### Scenario: A threshold from another machine
+- **WHEN** another machine saves a threshold of 90 and this machine pulls it
+- **THEN** resolutions on this machine move on at 90%
+
+### Requirement: When a provider counts as spent
+A provider SHALL count as spent when its latest quota reading has any window, 5-hour, weekly or any other reported, whose reset has not passed or is unknown, and whose use is at or above the threshold or whose status reports the limit reached. A reading at or above the threshold with an unknown reset SHALL count until a later reading of that window is below the threshold. A provider with no reading, or a reading with no windows, SHALL NOT count as spent. A provider whose CLI the last detection found missing or signed out SHALL NOT be chosen. The host SHALL read each CLI's sign-in status when it starts, without inference and before any agent can start, and SHALL NOT choose a provider it has not found signed in. The host SHALL use only the providers' own telemetry and SHALL NEVER estimate quota from token counts.
+
+#### Scenario: Over the threshold
+- **WHEN** Claude's weekly window reads 96% with a reset next Monday and the threshold is 95
+- **THEN** Claude counts as spent until Monday
+
+#### Scenario: Below the threshold or no reading
+- **WHEN** Claude's windows read 41% and 80%, or Claude has no reading
+- **THEN** Claude does not count as spent
+
+#### Scenario: The reset has passed
+- **WHEN** Claude's weekly window read 99% with a reset that has now passed
+- **THEN** that window no longer counts
+
+#### Scenario: Unknown reset
+- **WHEN** a window reads 97% with no reset time
+- **THEN** the provider counts as spent until a reading of that window comes in below the threshold
+
+#### Scenario: Limit reached
+- **WHEN** Claude reports a window with the status `rejected` and no percentage
+- **THEN** Claude counts as spent until that window resets
+
+### Requirement: Resolution when an agent starts
+Wiffletree SHALL resolve a job's row only when an agent starts: an `assign_ticket` that creates an agent, each verifier a review cycle starts, a new project coordinator, and each PR keeper model run. A cycle queued for a verification slot SHALL resolve its verifiers when it starts, not when it queues. It SHALL use the small-work line when the coordinator asked for small work and the row has one, and the main line otherwise. It SHALL pick the first choice unless it is spent, then the then choice unless it is spent, leaving out choices whose provider cannot be chosen; with none left, the start SHALL be refused, naming why. When every remaining choice is spent, it SHALL pin the one whose reset comes earliest, an unknown reset counting as last, and the agent SHALL wait for it. A running agent SHALL NEVER switch provider, and a started provider conversation SHALL keep its provider. Wiffletree SHALL record on the agent its profile, the chooser Wiffletree, the configuration revision and a plain reason, and log `model_selected`.
+
+#### Scenario: First choice spent
+- **WHEN** Claude's weekly window is at 96%, the threshold is 95 and the Implementer row is Opus · medium then GPT 6.1 Sol · high
+- **THEN** a new implementer starts on GPT 6.1 Sol · high with the reason "Started on Codex: Claude's weekly limit was at 96% (moves on at 95%). First choice was Opus · medium."
+
+#### Scenario: A running agent is not switched
+- **WHEN** a Claude implementer is working when Claude's weekly window reaches 96%
+- **THEN** its next turns stay on its Claude model
+
+#### Scenario: First choice available
+- **WHEN** Claude reads below the threshold or has no reading
+- **THEN** a new implementer starts on its first choice with the reason "First choice"
+
+#### Scenario: Small work
+- **WHEN** the coordinator asks for small work and the Implementer row's small line is Sonnet · high then GPT 6.1 Sol · medium
+- **THEN** the implementer starts on Sonnet · high with the reason "First choice for small work"
+
+#### Scenario: Small work without a small line
+- **WHEN** the coordinator asks for small work and the Tester row has no small line
+- **THEN** the tester resolves its main line
+
+#### Scenario: Signed out
+- **WHEN** detection found Claude signed out and the Coordinator row is Opus · high then GPT 6.1 Sol · high
+- **THEN** a new project's coordinator starts on GPT 6.1 Sol · high, saying Claude is not signed in on this Mac
+
+### Requirement: Waiting for the earliest reset
+An agent pinned while every choice was spent SHALL wait: at each of its turn starts while its provider is still spent, the host SHALL keep the input queued, set the agent Blocked with a reason naming the provider, the window, its use, the threshold and the reset, and tell its parent once per held input with a message from Wiffletree, not as the agent's report. The host SHALL wake at the reset and re-check on every new quota reading. Once the provider is not spent, the turn SHALL start on the pinned model and the agent SHALL no longer wait. Other agents' work SHALL continue meanwhile.
+
+#### Scenario: The Claude reviewer waits
+- **WHEN** Claude is spent and a cycle starts the reviewer Correctness, whose row is Opus · high then wait
+- **THEN** Correctness is pinned to Opus · high and held with the reset time, the cycle's other verifiers run, no verdict is recorded for Correctness, and it reviews after the reset
+
+#### Scenario: Every choice spent
+- **WHEN** Claude resets Monday and Codex resets Thursday, both spent, and an implementer is assigned
+- **THEN** it is pinned to its Claude choice, held until Monday with its input kept, and the coordinator gets one message saying so
+
+### Requirement: Who runs what migration
+On first open after this release, after the `model-selection` migration, the host SHALL run one idempotent migration recorded in `policy_migrations` as `who-runs-what`. A store with no saved selection SHALL be left alone. Otherwise it SHALL:
+- seed the table from the suggested rows on the providers whose CLI is installed and signed in, read once at the upgrade without inference, or on the providers that were enabled when no CLI is signed in, replacing each model with the closest one its provider's CLI lists;
+- give each verifier whose saved provider was Claude or Codex that provider's lens row, which waits rather than switching;
+- make a saved PR keeper model the PR keeper row's first choice, and add no PR keeper row when none was saved;
+- remove the guide's `## Previous settings (migrated …)` section and keep the rest;
+- add a one-time Models page note, "Set up from your previous settings. Check it.", listing everything the table does not hold: every allowed model, a disabled provider's included, the providers per role, and the removed guide section line by line;
+- leave every pinned agent unchanged.
+
+Running it again SHALL change nothing, and the table SHALL survive a restart.
+
+#### Scenario: Michael's machine
+- **WHEN** a store with Claude and Codex enabled, the Correctness reviewer on Claude, Regressions on Codex and no PR keeper model is opened
+- **THEN** the table is the suggested one without a PR keeper row, Correctness and Regressions wait rather than switch, the guide has no previous-settings section, and the Models page shows the note
+
+#### Scenario: One provider signed in
+- **WHEN** only Codex's CLI is signed in at the upgrade
+- **THEN** every row uses Codex alone
+
+#### Scenario: A retired model and a disabled provider
+- **WHEN** Claude's only allowed model is one its CLI no longer lists, and Codex was disabled though its CLI is signed in
+- **THEN** the rows use the closest models the CLIs list, on both providers, and the note lists the retired model and Codex's saved models
+
+#### Scenario: Re-running
+- **WHEN** the migrated store is opened again
+- **THEN** the table, guide, notes and runtimes are unchanged
+
+### Requirement: Suggested table on first run
+A store with no saved model selection SHALL save none on open. The Models page SHALL show a suggested setup as an unsaved draft, built only from providers that are installed and signed in, and SHALL enable Save without further edits when the suggestion is valid. Saving SHALL persist the table and the verifiers exactly as shown, together or not at all. The plan SHALL NOT change the suggestion. Until the first suggestion has arrived, the page SHALL NOT be editable and Save SHALL be disabled.
+
+- **Both providers:** the table is the mockup's: Coordinator Opus · high then GPT 6.1 Sol · high; Implementer Opus · medium then GPT 6.1 Sol · high, small work Sonnet · high then GPT 6.1 Sol · medium; Tester Sonnet · high then GPT 6.1 Sol · medium; Correctness Opus · high then wait; Regressions GPT 6.1 Sol · high then wait; PR keeper Sonnet · medium then GPT 6.1 Sol · medium. The verifiers are a tester, a Claude reviewer and a Codex reviewer. Each model not in the CLI's catalog is replaced by that provider's closest listed model. The guide is the starter guide.
+- **One provider:** every row uses it alone, with no then choice. The verifiers are a tester and one reviewer on it. The guide names only it.
+- **Neither:** the table is empty, the page says no signed-in CLI was found, and Save is disabled.
+
+Refresh SHALL run detection again. While the draft is still the suggestion as offered, it SHALL follow the new detection; once the human has edited it, their edits SHALL be kept.
+
+#### Scenario: Both signed in
+- **WHEN** a fresh store is opened with both CLIs signed in and the human presses Save without editing
+- **THEN** nothing was saved before the press
+- **AND** the saved table and verifiers are the "both providers" suggestion
+
+#### Scenario: Only one signed in
+- **WHEN** a fresh store is opened with only Codex signed in
+- **THEN** every row uses Codex with no then choice, the verifiers are a tester and one Codex reviewer, and it can be saved
+
+#### Scenario: Before the first suggestion
+- **WHEN** a fresh store is opened and detection has not finished
+- **THEN** the page shows "Checking CLI…" with its controls disabled and Save disabled
+
+#### Scenario: Neither signed in
+- **WHEN** a fresh store is opened with no signed-in CLI
+- **THEN** Save is disabled and the page tells the human to install and sign in to a CLI, then press Refresh
+
+#### Scenario: Refresh after signing in
+- **WHEN** the human signs in to Codex and presses Refresh while the Claude-only suggestion is untouched
+- **THEN** the draft becomes the "both providers" suggestion
+
+#### Scenario: Refresh after editing
+- **WHEN** the human removes a suggested verifier and presses Refresh
+- **THEN** the draft keeps their edit
+
+### Requirement: The PR keeper's row
+The PR keeper's model SHALL be the table's PR keeper row. With no row, no PR keeper model is chosen. Each PR keeper model run SHALL resolve the row like any agent start. Sorting comments and merging the passages of a skill update that overlap a rewrite SHALL use only the row's Claude choice in its main line, and sorting SHALL wait while Claude is spent, checked again when the comments have been read, which are then read again later; neither SHALL ever run on Codex. Only the human's client SHALL change the row. A PR keeper agent whose resolved provider differs from its own SHALL be replaced by a fresh one, and on the same provider it SHALL be pinned again before its run.
+
+#### Scenario: Nothing chosen
+- **WHEN** the table has no PR keeper row
+- **THEN** no PR keeper agent is created and the triggers that need a model say to choose one in Models first
+
+#### Scenario: Sorting while Claude is spent
+- **WHEN** the PR keeper row is Sonnet · medium then GPT 6.1 Sol · medium and Claude is spent
+- **THEN** new comments are not sorted until Claude is no longer spent, and no sorting run starts on Codex
+
+#### Scenario: A row with no Claude choice
+- **WHEN** the PR keeper row names only Codex models and a skill update overlaps a rewrite
+- **THEN** no model merges it, and the human chooses each wording

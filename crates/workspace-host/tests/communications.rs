@@ -113,38 +113,6 @@ fn codex(model: &str, effort: &str) -> ModelProfile {
         effort: effort.into(),
     }
 }
-fn access(models: &[(&str, &str)]) -> ProviderAccess {
-    ProviderAccess {
-        enabled: true,
-        models: models
-            .iter()
-            .map(|(model, effort)| AllowedModel {
-                model: (*model).into(),
-                effort: (*effort).into(),
-            })
-            .collect(),
-    }
-}
-/// Both subscriptions, with Claude for every role.
-fn configure(host: &mut Host) -> ModelSelection {
-    let mut selection = host.model_selection().unwrap();
-    selection.providers = [
-        (
-            Provider::Claude,
-            access(&[("opus", "high"), ("opus", "medium"), ("sonnet", "high")]),
-        ),
-        (
-            Provider::Codex,
-            access(&[("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "medium")]),
-        ),
-    ]
-    .into();
-    selection.role_providers = PROVIDER_ROLES
-        .into_iter()
-        .map(|role| (role, [Provider::Claude].into()))
-        .collect();
-    host.set_model_selection(&selection).unwrap()
-}
 fn events(host: &Host, project: &str, kind: &str) -> Vec<String> {
     host.activity(project, None, 100)
         .unwrap()
@@ -153,184 +121,223 @@ fn events(host: &Host, project: &str, kind: &str) -> Vec<String> {
         .map(|a| a.detail)
         .collect()
 }
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+/// Records Claude's weekly window at `used` percent, resetting in a day.
+fn spend_claude(host: &Host, used: f64) {
+    let at = now();
+    let window = QuotaWindow {
+        key: "seven_day".into(),
+        label: "Weekly".into(),
+        used_percent: Some(used),
+        observed_at: at,
+        duration_mins: Some(10080),
+        resets_at: Some(at + 86_400_000),
+        status: None,
+    };
+    host.record_quota(QuotaReading {
+        provider: Provider::Claude,
+        account: None,
+        observed_at: at,
+        source: "Claude stream".into(),
+        windows: vec![window],
+        error: None,
+    })
+    .unwrap();
+}
+fn assign(host: &mut Host, coordinator: &Session, args: Value) -> anyhow::Result<Session> {
+    let result = host.agent_tool(&coordinator.id, "assign_ticket", args)?;
+    Ok(serde_json::from_value(result)?)
+}
+
 #[test]
-fn every_coordinator_assignment_records_its_exact_model_and_reason() {
+fn every_coordinator_assignment_starts_on_its_row_with_the_reason() {
     let (_home, _repo, mut host, coordinator, repository) = fixture();
-    let configured = configure(&mut host);
     let ticket = host
-        .create_ticket(
-            &coordinator.id,
-            &repository.id,
-            "Add --json",
-            "Add a --json flag",
-        )
+        .create_ticket(&coordinator.id, &repository.id, "Add --json", "Add a flag")
         .unwrap();
-    let reason = "Small, contained CLI flag; Sonnet is enough";
+    let args = json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Implement"});
     let result = host
-        .agent_tool(
-            &coordinator.id,
-            "assign_ticket",
-            json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Implement",
-                "profile":claude("sonnet","high"),"reason":format!("  {reason} ")}),
-        )
+        .agent_tool(&coordinator.id, "assign_ticket", args.clone())
         .unwrap();
-    assert_eq!(result["profile"], json!(claude("sonnet", "high")));
-    assert_eq!(result["selection"]["reason"], reason);
+    assert_eq!(result["profile"], json!(claude("opus", "medium")));
+    assert_eq!(result["selection"]["reason"], "First choice");
     let worker: Session = serde_json::from_value(result).unwrap();
     assert_eq!(worker.provider, Provider::Claude);
-    let runtime = host.session_runtime(&worker.id).unwrap();
-    assert_eq!(runtime.profile, Some(claude("sonnet", "high")));
-    let selection = runtime.selection.unwrap();
-    assert_eq!(
-        selection.chosen_by,
-        Chooser::Coordinator {
-            session_id: coordinator.id.clone()
-        }
-    );
-    assert_eq!(selection.reason, reason);
-    assert_eq!(selection.revision, configured.revision);
+    let selection = host.session_runtime(&worker.id).unwrap().selection.unwrap();
+    assert_eq!(selection.chosen_by, Chooser::Wiffletree);
+    assert_eq!(selection.revision, host.model_selection().unwrap().revision);
+    // Newest first: the implementer's pick, then the coordinator's when the project started.
     assert_eq!(
         events(&host, &coordinator.project_id, "model_selected"),
-        [format!("claude · sonnet · high. {reason}")]
+        [
+            "claude · opus · medium. First choice",
+            "claude · opus · high. First choice"
+        ]
     );
     // Repeating the assignment returns the same agent without switching its model.
-    let retry: Session = serde_json::from_value(
-        host.agent_tool(
-            &coordinator.id,
-            "assign_ticket",
-            json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Implement",
-                "profile":claude("opus","high"),"reason":"Bigger"}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let mut small = args;
+    small["small"] = json!(true);
+    let retry = assign(&mut host, &coordinator, small).unwrap();
     assert_eq!(retry.id, worker.id);
     assert_eq!(
         host.session_runtime(&worker.id).unwrap().profile,
-        Some(claude("sonnet", "high"))
+        Some(claude("opus", "medium"))
+    );
+    // Small work uses the row's small-work line.
+    let tester = assign(
+        &mut host,
+        &coordinator,
+        json!({"ticket_id":ticket.id,"role":"implementer","focus":"Docs","instruction":"Docs","small":true}),
+    )
+    .unwrap();
+    let runtime = host.session_runtime(&tester.id).unwrap();
+    assert_eq!(runtime.profile, Some(claude("sonnet", "high")));
+    assert_eq!(
+        runtime.selection.unwrap().reason,
+        "First choice for small work"
     );
 }
 
 #[test]
-fn off_allowlist_and_wrong_provider_choices_are_refused_without_fallback() {
+fn a_spent_first_choice_starts_the_next_and_a_running_agent_keeps_its_model() {
     let (_home, _repo, mut host, coordinator, repository) = fixture();
-    configure(&mut host);
+    let first = host
+        .create_ticket(&coordinator.id, &repository.id, "First", "Before the limit")
+        .unwrap();
+    let running = assign(
+        &mut host,
+        &coordinator,
+        json!({"ticket_id":first.id,"role":"implementer","instruction":"Implement"}),
+    )
+    .unwrap();
+    spend_claude(&host, 96.);
+    let second = host
+        .create_ticket(&coordinator.id, &repository.id, "Second", "After the limit")
+        .unwrap();
+    let switched = assign(
+        &mut host,
+        &coordinator,
+        json!({"ticket_id":second.id,"role":"implementer","instruction":"Implement"}),
+    )
+    .unwrap();
+    assert_eq!(switched.provider, Provider::Codex);
+    let runtime = host.session_runtime(&switched.id).unwrap();
+    assert_eq!(runtime.profile, Some(codex("gpt-6.1-sol", "high")));
+    assert_eq!(
+        runtime.selection.unwrap().reason,
+        "Started on Codex: Claude's weekly limit was at 96% (moves on at 95%). First choice was Opus · medium."
+    );
+    assert_eq!(host.hold_reason(&switched).unwrap(), None);
+    // The agent that started on Claude keeps it and is not held.
+    let kept = host.session_runtime(&running.id).unwrap();
+    assert_eq!(kept.profile, Some(claude("opus", "medium")));
+    assert_eq!(host.hold_reason(&running).unwrap(), None);
+    // The coordinator sees the same pick before it assigns.
+    let context = host.agent_context(&coordinator.id).unwrap();
+    let implementer = (context["model_selection"]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter())
+    .find(|row| row["name"] == "Implementer")
+    .unwrap()
+    .clone();
+    assert_eq!(
+        implementer["right_now"]["profile"],
+        json!(codex("gpt-6.1-sol", "high"))
+    );
+    assert_eq!(
+        implementer["main"]["first"],
+        json!(claude("opus", "medium"))
+    );
+}
+
+#[test]
+fn assignment_refuses_the_old_arguments_and_an_unknown_like() {
+    let (_home, _repo, mut host, coordinator, repository) = fixture();
     let ticket = host
-        .create_ticket(
-            &coordinator.id,
-            &repository.id,
-            "Refusals",
-            "Nothing should be created",
-        )
+        .create_ticket(&coordinator.id, &repository.id, "Refusals", "Nothing")
         .unwrap();
     let sessions = host.sessions().unwrap().len();
     let runtimes = host.runtimes().unwrap().len();
-    let assign = |extra: Value| {
-        let mut args = json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Implement",
-            "profile":claude("sonnet","high"),"reason":"Small change"});
+    let with = |extra: Value| {
+        let mut args = json!({"ticket_id":ticket.id,"role":"reviewer","focus":"Security","instruction":"Review"});
         for (key, value) in extra.as_object().unwrap() {
-            if value.is_null() {
-                args.as_object_mut().unwrap().remove(key);
-            } else {
-                args[key] = value.clone();
-            }
+            args[key] = value.clone();
         }
         args
     };
     let cases = [
         (
-            assign(json!({"profile":codex("gpt-6.1-sol","high")})),
-            "Codex is not configured for Implementer on this machine. Implementer uses: Claude.",
+            with(json!({"profile":claude("opus","high")})),
+            "`profile` was removed: Wiffletree picks the model from Models → Who runs what.",
         ),
+        (with(json!({"reason":"Big"})), "`reason` was removed"),
+        (with(json!({"size":"big"})), "`size` was removed"),
         (
-            assign(json!({"profile":claude("opus","max")})),
-            "claude · opus · max is not allowed on this machine. Allowed Claude models: opus · high, opus · medium, sonnet · high.",
-        ),
-        (assign(json!({"size":"big"})), "`size` was removed"),
-        (
-            assign(json!({"complexity":"complex"})),
+            with(json!({"complexity":"complex"})),
             "`complexity` was removed",
         ),
+        (with(json!({"provider":"claude"})), "`provider` was removed"),
+        (with(json!({"small":"yes"})), "small must be true or false"),
         (
-            assign(json!({"provider":"claude"})),
-            "`provider` was removed",
+            with(json!({"like":"Speed"})),
+            "No verifier is named \"Speed\". Name one of Tests, Correctness or Regressions as `like`",
         ),
-        (assign(json!({"reason":null})), "Missing reason"),
-        (assign(json!({"reason":"one\ntwo"})), "one line"),
-        (assign(json!({"profile":null})), "Missing profile"),
+        (
+            with(json!({"focus":"Correctness","like":"Regressions"})),
+            "`like` is only for a reviewer whose focus is not a configured verifier",
+        ),
     ];
     for (args, message) in cases {
-        let error = host
-            .agent_tool(&coordinator.id, "assign_ticket", args)
-            .unwrap_err();
+        let error = assign(&mut host, &coordinator, args).unwrap_err();
         assert!(format!("{error:#}").contains(message), "{error:#}");
     }
     assert_eq!(host.sessions().unwrap().len(), sessions, "nothing created");
     assert_eq!(host.runtimes().unwrap().len(), runtimes, "nothing pinned");
-    let rejected = events(&host, &coordinator.project_id, "model_rejected");
-    assert_eq!(rejected.len(), 2, "{rejected:?}");
-    assert!(
-        rejected
-            .iter()
-            .all(|d| d.ends_with("No agent was created."))
-    );
 }
 
 #[test]
-fn reviewers_may_use_any_enabled_provider_but_only_allowed_models() {
+fn an_ad_hoc_reviewer_uses_the_row_it_is_like_or_the_first_reviewers() {
     let (_home, _repo, mut host, coordinator, repository) = fixture();
-    let mut selection = configure(&mut host);
     let ticket = host
-        .create_ticket(
-            &coordinator.id,
-            &repository.id,
-            "Review",
-            "Review the change",
-        )
+        .create_ticket(&coordinator.id, &repository.id, "Review", "Review it")
         .unwrap();
-    let review = |profile: ModelProfile, focus: &str| {
-        json!({"ticket_id":ticket.id,"role":"reviewer","focus":focus,
-            "instruction":"Run reviso:style on this ticket's branch and report findings.",
-            "profile":profile,"reason":"Custom review from the review instructions"})
+    let review = |focus: &str, like: Option<&str>| {
+        let mut args = json!({"ticket_id":ticket.id,"role":"reviewer","focus":focus,
+            "instruction":"Run reviso:style on this ticket's branch and report findings."});
+        if let Some(like) = like {
+            args["like"] = json!(like);
+        }
+        args
     };
-    let custom: Session = serde_json::from_value(
-        host.agent_tool(
-            &coordinator.id,
-            "assign_ticket",
-            review(codex("gpt-6.1-sol", "medium"), "Codex · reviso:style"),
-        )
-        .unwrap(),
+    let like = assign(
+        &mut host,
+        &coordinator,
+        review("Security", Some(" regressions ")),
     )
     .unwrap();
-    assert_eq!(custom.provider, Provider::Codex);
-    assert!(
-        host.agent_tool(
-            &coordinator.id,
-            "assign_ticket",
-            review(codex("gpt-6-luna", "medium"), "Luna")
-        )
-        .is_err()
+    assert_eq!(
+        host.session_runtime(&like.id).unwrap().profile,
+        Some(codex("gpt-6.1-sol", "high"))
     );
-    selection
-        .providers
-        .get_mut(&Provider::Codex)
-        .unwrap()
-        .enabled = false;
-    host.set_model_selection(&selection).unwrap();
-    let error = host
-        .agent_tool(
-            &coordinator.id,
-            "assign_ticket",
-            review(codex("gpt-6.1-sol", "high"), "Codex"),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("Codex is disabled"), "{error}");
+    let first = assign(&mut host, &coordinator, review("Docs", None)).unwrap();
+    assert_eq!(
+        host.session_runtime(&first.id).unwrap().profile,
+        Some(claude("opus", "high"))
+    );
+    // A configured focus uses its own row.
+    let own = assign(&mut host, &coordinator, review("Regressions", None)).unwrap();
+    assert_eq!(own.provider, Provider::Codex);
 }
 
 #[test]
 fn the_humans_choice_is_never_limited() {
     let (_home, _repo, mut host, coordinator, repository) = fixture();
-    configure(&mut host);
     let ticket = host
         .create_ticket(&coordinator.id, &repository.id, "Human", "The human picks")
         .unwrap();
@@ -350,19 +357,15 @@ fn the_humans_choice_is_never_limited() {
         let session: Session = serde_json::from_value(response.result.unwrap()).unwrap();
         host.session_runtime(&session.id).unwrap()
     };
-    // Codex is not configured for testers and Luna is not allowed at all.
+    // No row names Luna, and the Tester row names no Codex model first.
     let tester = assign(&mut host, Role::Tester, codex("gpt-6-luna", "medium"));
     assert_eq!(tester.profile, Some(codex("gpt-6-luna", "medium")));
     assert_eq!(tester.selection.unwrap().chosen_by, Chooser::Human);
-    let prefill = host
-        .model_selection()
-        .unwrap()
-        .prefill(Role::Implementer)
-        .unwrap();
-    let implementer = assign(&mut host, Role::Implementer, prefill);
+    // Keeping the pre-fill, what the row would use now, records the table as the chooser.
+    let implementer = assign(&mut host, Role::Implementer, claude("opus", "medium"));
     let selection = implementer.selection.unwrap();
     assert_eq!(selection.chosen_by, Chooser::Default);
-    assert_eq!(selection.reason, "Role default");
+    assert_eq!(selection.reason, "From Who runs what");
     // Re-assigning an existing agent never replaces a pinned model, but gives an unpinned one,
     // such as a pre-upgrade provider mismatch, the human's pick.
     let reassign = |host: &mut Host, focus: &str, profile: ModelProfile| {
@@ -413,7 +416,6 @@ fn the_humans_choice_is_never_limited() {
 #[test]
 fn a_closed_ticket_takes_no_coordinator_assignment_even_for_an_existing_agent() {
     let (_home, _repo, mut host, coordinator, repository) = fixture();
-    configure(&mut host);
     let ticket = host
         .create_ticket(&coordinator.id, &repository.id, "Closed", "Finished work")
         .unwrap();
@@ -431,8 +433,7 @@ fn a_closed_ticket_takes_no_coordinator_assignment_even_for_an_existing_agent() 
         .agent_tool(
             &coordinator.id,
             "assign_ticket",
-            json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Again",
-                "profile":claude("sonnet","high"),"reason":"Small change"}),
+            json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Again"}),
         )
         .unwrap_err();
     assert!(
@@ -444,11 +445,32 @@ fn a_closed_ticket_takes_no_coordinator_assignment_even_for_an_existing_agent() 
 #[test]
 fn the_coordinator_receives_the_model_configuration_and_workers_do_not() {
     let (_home, _repo, mut host, coordinator, repository) = fixture();
-    let mut selection = configure(&mut host);
+    let mut selection = host.model_selection().unwrap();
     let context = host.agent_context(&coordinator.id).unwrap();
     let model = &context["model_selection"];
     assert_eq!(model["revision"], selection.revision);
-    assert_eq!(model["providers"].as_array().unwrap().len(), 2);
+    assert_eq!(model["switch_at"], 95);
+    let names: Vec<&str> = (model["jobs"].as_array().unwrap().iter())
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Coordinator",
+            "Implementer",
+            "Tester",
+            "Tests",
+            "Correctness",
+            "Regressions"
+        ]
+    );
+    let correctness = &model["jobs"][4];
+    assert_eq!(correctness["main"]["then"], Value::Null, "it waits");
+    assert_eq!(correctness["right_now"]["reason"], "First choice");
+    assert_eq!(
+        model["jobs"][1]["right_now_small"]["reason"],
+        "First choice for small work"
+    );
     assert_eq!(
         model["verifiers"],
         json!(host.settings().verification.verifiers)
@@ -478,17 +500,17 @@ fn the_coordinator_receives_the_model_configuration_and_workers_do_not() {
     let model = host.agent_context(&coordinator.id).unwrap()["model_selection"].clone();
     assert_eq!(model["review_levels"][2]["name"], "Docs");
     selection.guide = "Raise effort for migrations.".into();
-    selection.role_providers.insert(
-        Role::Implementer,
-        [Provider::Claude, Provider::Codex].into(),
-    );
+    selection.switch_at = 90;
+    selection.row_mut(&Job::Tester).unwrap().main.first = codex("gpt-6.1-sol", "high");
+    selection.row_mut(&Job::Tester).unwrap().main.then = Some(claude("sonnet", "high"));
     let saved = host.set_model_selection(&selection).unwrap();
     let model = host.agent_context(&coordinator.id).unwrap()["model_selection"].clone();
     assert_eq!(model["revision"], saved.revision);
-    assert_eq!(model["guide"], "Raise effort for migrations.");
+    assert_eq!(model["notes"], "Raise effort for migrations.");
+    assert_eq!(model["switch_at"], 90);
     assert_eq!(
-        model["role_providers"]["implementer"],
-        json!(["codex", "claude"])
+        model["jobs"][2]["right_now"]["profile"],
+        json!(codex("gpt-6.1-sol", "high"))
     );
     let ticket = host
         .create_ticket(

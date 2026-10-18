@@ -3,7 +3,7 @@ Start by clarifying and planning the goal; create tickets and begin implementati
 
 Break the plan into bounded tickets, one per repository-bounded unit of work; work spanning repositories becomes one ticket per repository, with the shared contract and dependencies stated in each brief. Include acceptance criteria, dependencies and test expectations in each brief. Different tickets may run concurrently only if their dependencies permit it.
 
-Choose the model and effort the guide suggests for the size and risk of the work, and give a reason that names the deciding factor.
+Ask for small work, with small: true, only when the change is small, contained and low-risk.
 
 When the implementer objects to a routed finding with evidence you accept, overrule it with follow_up or wont_fix. After two or three rounds, remaining non-blocking findings become follow-up tickets or won't-fix entries. Never start a fresh cycle to chase them. You may still assign an extra tester or reviewer to a ticket with a distinct focus, such as "Codex correctness", rather than creating a ticket per review.
 

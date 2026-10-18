@@ -23,42 +23,51 @@ A persistent right-edge inspector rail SHALL follow the selected project, ticket
 - **THEN** the draft is retained and only bounded transcript pages are rendered
 
 ### Requirement: Configurable routing and memory
-Context panels SHALL show scoped logs, support milestone capture and show persisted activity and attention. Optional Git history SHALL show real read-only data. The Models page SHALL have four cards:
-- **Providers:** an enable toggle per provider; the CLI status that existing discovery reports; an Add row with a model dropdown that omits models already listed and an Add button, which allows the model at its first effort; and one line per allowed model with a checkbox for each effort it supports and Remove. Unticking a model's last effort removes it. The allowlist stays a set of exact model and effort pairs.
-- **Roles:** provider checkboxes for the project coordinator, implementer and tester.
-- **Review:** a Levels block, the verifier list (role, focus, provider or "Any", instruction), the round cap and the cycle cap, with "Run reviso:style with Codex" as example text. The Levels block SHALL show, for each review level, its name, its kind as a choice between "Full review" and "Re-check", one tick for each configured verifier, and its note on when to use it, labelled "Use it". It SHALL offer Add level, a control that opens a level's name and note for editing, and Remove. It SHALL say that a full review can be a ticket's only review, that a re-check starts only on a ticket whose last review passed, and that the workspace enforces this. A new level SHALL start as a re-check. While no level is a re-check, no level is named "Light" ignoring case and a reviewer is configured, the Add level form SHALL be filled in with the name "Light", the first configured reviewer ticked and the suggested Light note. Otherwise the form SHALL open empty, as a re-check. Adding a verifier SHALL tick it in every level whose kind is full review, and in no re-check level, in the same save. Removing a verifier SHALL remove it from every level in the same save. When the host refuses a change, the card SHALL show the host's reason and keep showing the saved setting. The round cap SHALL be labelled "Rounds per review", with the caption "The first review plus re-checks after the implementer's fixes. If the last round still finds blocking problems, the review stops and the coordinator decides. The same at every level." The cycle cap SHALL be labelled "Full reviews per ticket", with the caption "Reviews at a level marked Full review, with fresh reviewers. After the last one, the coordinator accepts, accepts with a waiver, closes the ticket or asks you. Re-checks are not counted." Each change saves at once. The card SHALL NOT warn about turn limits, because there are none. Settings SHALL NOT edit the verifier list.
-- **Guide:** a Markdown editor.
+Context panels SHALL show scoped logs, support milestone capture and show persisted activity and attention. Optional Git history SHALL show real read-only data. The Models page SHALL follow `ui/models.html` with these cards:
+- **Subscriptions:** each provider's CLI status and plan from detection, and a meter for each window of its latest quota reading, with a tick at the switch threshold, the percentage, the reset time and the reading's age. A provider without telemetry SHALL read "Unavailable", never 0%.
+- **When a subscription runs low:** the switch threshold, and that when every choice is past it Wiffletree waits for the earliest reset. It SHALL say the rule applies when an agent starts and that a running agent keeps its model.
+- **Who runs what:** one row per job with dropdowns for the first choice, the then choice (or wait) and the small-work line, built from the installed CLIs' catalogs plus saved values, and a Right now column with what each row would use now, or that it waits until a reset. A PR keeper row SHALL offer No model. The page SHALL show the table's one-time notes, with Dismiss, and a note for each row copied for a verifier without one.
+- **Reviews:** a Levels block, the verifier list (role, focus, instruction), the round cap and the cycle cap, with "Run reviso:style with Codex" as example text. The Levels block SHALL show, for each review level, its name, its kind as a choice between "Full review" and "Re-check", one tick for each configured verifier, and its note on when to use it, labelled "Use it". It SHALL offer Add level, a control that opens a level's name and note for editing, and Remove. It SHALL say that a full review can be a ticket's only review, that a re-check starts only on a ticket whose last review passed, and that the workspace enforces this. A new level SHALL start as a re-check. While no level is a re-check, no level is named "Light" ignoring case and a reviewer is configured, the Add level form SHALL be filled in with the name "Light", the first configured reviewer ticked and the suggested Light note. Otherwise the form SHALL open empty, as a re-check. Adding a verifier SHALL tick it in every level whose kind is full review, and in no re-check level, in the same save. Removing a verifier SHALL remove it from every level in the same save. When the host refuses a change, the card SHALL show the host's reason and keep showing the saved setting. The round cap SHALL be labelled "Rounds per review", with the caption "The first review plus re-checks after the implementer's fixes. If the last round still finds blocking problems, the review stops and the coordinator decides. The same at every level." The cycle cap SHALL be labelled "Full reviews per ticket", with the caption "Reviews at a level marked Full review, with fresh reviewers. After the last one, the coordinator accepts, accepts with a waiver, closes the ticket or asks you. Re-checks are not counted." Each change saves at once. Adding a verifier SHALL add its row to Who runs what, as a copy of the first reviewer's row until the page is saved. The card SHALL NOT warn about turn limits, because there are none. Settings SHALL NOT edit the verifier list.
+- **Notes:** the guide, a Markdown editor labelled as optional notes for coordinators.
 
-Providers, Roles and Guide SHALL save together with one Save.
+The table, the switch threshold and the notes SHALL save together with one Save.
 
-The page SHALL NOT offer routing tiers, Big/Small profiles or per-role default models.
+The page SHALL NOT offer a Providers allowlist, a Roles card, a verifier provider or a separate PR keeper model.
 
 #### Scenario: Unavailable integration
 - **WHEN** a user opens provider quota, semantic compilation or PR integration
 - **THEN** the UI identifies unavailable capability instead of presenting sample data as live
 
+#### Scenario: Right now
+- **WHEN** Claude's weekly window reads 96% with the threshold at 95
+- **THEN** the Subscriptions card shows the weekly meter past its tick, and Right now shows Codex for the Implementer row and "Waits" with the reset for the Claude reviewer
+
 #### Scenario: Configure a single-subscription machine
-- **WHEN** the human disables Claude, sets every role to Codex, edits the guide and saves
+- **WHEN** on a machine where only Codex is signed in, the human sets every row to Codex models, edits the notes and saves
 - **THEN** all of it survives restart and appears in the coordinator's next workspace context
 
 #### Scenario: Role left without a provider
-- **WHEN** the human disables the only provider a role uses
-- **THEN** that role shows an inline error and Save stays disabled until it has an enabled provider
+- **WHEN** the human sets a row's then choice to a model of the first choice's provider
+- **THEN** that row shows an inline error and Save stays disabled until the then choice uses another provider or is wait
+
+#### Scenario: Edit and save the table
+- **WHEN** the human changes the Tester row to GPT 6.1 Sol · high then Sonnet · high, sets the threshold to 90, edits the notes and saves
+- **THEN** all of it survives restart and appears in the coordinator's next workspace context
 
 #### Scenario: Cycle cap on the Review card
-- **WHEN** the human sets the cycle cap to 3 on the Review card
+- **WHEN** the human sets the cycle cap to 3 on the Reviews card
 - **THEN** it saves at once, survives restart and appears in the coordinator's next workspace context
 
 #### Scenario: Caps in plain words
-- **WHEN** the human opens the Review card
+- **WHEN** the human opens the Reviews card
 - **THEN** it shows "Rounds per review" and "Full reviews per ticket", each with its caption, and no control is labelled "Round cap" or "Cycle cap"
 
 #### Scenario: Long verifier list
-- **WHEN** the human adds a seventh verifier on the Review card
+- **WHEN** the human adds a seventh verifier on the Reviews card
 - **THEN** it saves at once and the card shows no turn-limit note
 
 #### Scenario: Levels on the Review card
-- **WHEN** the human opens the Review card with the levels "Full" and "Light" and four verifiers
+- **WHEN** the human opens the Reviews card with the levels "Full" and "Light" and four verifiers
 - **THEN** each level shows its name, whether it is a full review or a re-check, a tick for each of the four verifiers and its "Use it" line, above the verifier list
 
 #### Scenario: A tick saves at once
@@ -102,7 +111,7 @@ The page SHALL NOT offer routing tiers, Big/Small profiles or per-role default m
 - **THEN** Style disappears from the verifier list and from "Full" in one save
 
 #### Scenario: An existing setup after the update
-- **WHEN** the human first opens the Review card after updating, with four saved verifiers, a round cap of 2 and a cycle cap of 3
+- **WHEN** the human first opens the Reviews card after updating, with four saved verifiers, a round cap of 2 and a cycle cap of 3
 - **THEN** it shows one level, "Full", marked "Full review" with all four verifiers ticked, the same four verifiers and the same two caps
 
 ### Requirement: Bounded rendering and background IO
@@ -120,29 +129,30 @@ The implementation SHALL ship a repeatable release host benchmark for persisted 
 - **THEN** fixture, hardware, build mode, durability and p95 timings accompany the results
 
 ### Requirement: Model picker in creation dialogs
-The new-agent dialog SHALL include a model picker. It SHALL be pre-filled with the role's first configured provider and that provider's first allowed model. It SHALL list the role's configured providers' allowed models first and still offer every other catalog model.
+The new-agent dialog SHALL include a model picker, pre-filled with what the role's row in Who runs what would use right now. It SHALL list the row's choices first and still offer every other catalog model at every effort.
 
 #### Scenario: Pre-fill for Reviewer
-- **WHEN** the human opens the new-agent dialog for a Reviewer while Claude and Codex are enabled
-- **THEN** the picker shows Claude's first allowed model, grouped above Codex's allowed models and the other models
+- **WHEN** the human opens the new-agent dialog for a Reviewer while nothing is spent
+- **THEN** the picker shows the first reviewer row's first choice, above that row's then choice and every other model
+
+#### Scenario: Pre-fill while Claude is spent
+- **WHEN** the human opens the new-agent dialog for an Implementer while Claude is spent and the row is Opus · medium then GPT 6.1 Sol · high
+- **THEN** the picker shows GPT 6.1 Sol · high, with Opus · medium and every other model still offered
 
 ### Requirement: Agents show how their model was chosen
-An agent's chat SHALL show, above the composer's model pills, how its model was chosen: by which coordinator and its reason, by the human, or by role default. The Tickets panel SHALL show each assigned agent's model and reason under its ticket. The sidebar SHALL stay unchanged.
+An agent's chat SHALL show, above the composer's model pills, how its model was chosen: by Wiffletree with its reason, by the human, or by the table when the human kept the pre-fill. Agents pinned before this release SHALL keep showing their coordinator and reason. The Tickets panel SHALL show each assigned agent's model and reason under its ticket. The sidebar SHALL stay unchanged.
 
 #### Scenario: Custom review listed with its focus
 - **WHEN** a ticket has Claude, Codex and Style reviewers
 - **THEN** its Tickets panel card lists all three, each with its model and reason
 
 #### Scenario: Coordinator reason visible
-- **WHEN** the human opens an implementer assigned by the project coordinator
-- **THEN** the line above the composer reads "Chosen by ‹coordinator›: ‹reason›", and the ticket's card in the Tickets panel shows the same model and reason
+- **WHEN** the human opens an implementer a coordinator assigned before this release
+- **THEN** the line above the composer still reads "Chosen by ‹coordinator›: ‹reason›"
 
-### Requirement: Visible assignment rejection
-A coordinator's rejected assignment SHALL appear as a failed step in that coordinator's work stream and as a `model_rejected` entry in Events, carrying the host's message. No agent SHALL appear.
-
-#### Scenario: Wrong provider rejected
-- **WHEN** the project coordinator assigns an implementer a Codex model while Implementer uses only Claude
-- **THEN** its work stream shows the failed `assign_ticket` step saying Codex is not configured for Implementer, and neither the sidebar nor the Tickets panel shows a new implementer
+#### Scenario: A switched implementer
+- **WHEN** the human opens an implementer that started on Codex because Claude was spent
+- **THEN** the line above the composer reads "Chosen by Wiffletree: Started on Codex: Claude's weekly limit was at 96% (moves on at 95%). First choice was Opus · medium."
 
 ### Requirement: Check-in thresholds in Settings
 The Settings window SHALL have a Check-ins section under the workspace folder with two preset selectors that save at once. "Check in on an agent every" SHALL offer 10, 25, 50, 100 and 250, followed by "turns", with the caption "The coordinator hears about an agent that has worked this many turns without a message from it. Nothing pauses." "Check in with you every" SHALL offer 50, 100, 250, 500 and 1000, followed by "coordinator turns", with the caption "You get an inbox note when the coordinator has worked this many turns without hearing from you. Nothing pauses." The saved value SHALL be highlighted; a saved value outside the presets SHALL highlight none. A refused save SHALL show the host's error in the section and keep the saved values.

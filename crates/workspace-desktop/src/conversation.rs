@@ -502,7 +502,8 @@ impl Conversation {
                 .on_click(cx.listener(expand)),
         )
     }
-    /// The chat's model menu: every catalog model and every allowed one, by provider and model.
+    /// The chat's model menu: every catalog model and every one the table names, by provider
+    /// and model.
     pub(super) fn list_chat_models(&mut self) {
         let mut models: BTreeMap<(Provider, String), String> = self
             .shared
@@ -511,12 +512,10 @@ impl Conversation {
             .map(|model| ((model.provider, model.model.clone()), model.label.clone()))
             .collect();
         if let Some(snapshot) = self.shared.snapshot() {
-            for provider in PROVIDERS {
-                for allowed in snapshot.model_selection.allowed(provider) {
-                    models
-                        .entry((provider, allowed.model.clone()))
-                        .or_insert_with(|| allowed.model.clone());
-                }
+            for profile in models::table_profiles(&snapshot.model_selection) {
+                models
+                    .entry((profile.provider, profile.model.clone()))
+                    .or_insert_with(|| profile.model.clone());
             }
         }
         self.chat_models = Rc::new(models);
@@ -563,7 +562,7 @@ impl Conversation {
             .label(label)
             .dropdown_caret(true)
             .tooltip(if session.role == Role::Keeper {
-                "The PR keeper's model is chosen in Models"
+                "The PR keeper's model comes from its row in Models → Who runs what"
             } else if busy {
                 "Pause the active turn to change the model"
             } else {

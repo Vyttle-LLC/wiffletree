@@ -342,6 +342,7 @@ impl Workspace {
                 });
             }
             Intent::Catalog(catalog) => self.shared.catalog = catalog.clone(),
+            Intent::Detected(detection) => self.shared.detection = detection.clone(),
             Intent::Amend(amendment) => self.amend(amendment),
             Intent::Create { kind, ticket } => {
                 self.open_creation(*kind, ticket.as_deref(), window, cx)
@@ -781,6 +782,7 @@ impl Workspace {
         let context = (self.shared.page != Page::Repositories)
             .then(|| self.shared.selected_session())
             .flatten();
+        let verification = self.models.read(cx).verification(cx);
         let form = cx.new(|cx| {
             CreationForm::new(
                 kind,
@@ -791,7 +793,7 @@ impl Workspace {
                 window,
                 cx,
             )
-            .with_catalog(&self.shared.catalog)
+            .with_models(&self.shared, verification)
         });
         self.creation = Some(form.clone());
         let focused_form = form.clone();

@@ -105,15 +105,6 @@ fn remove_verifier(settings: &mut VerificationSettings, index: usize) {
     }
 }
 
-/// What a verifier's provider setting allows the coordinator to choose from.
-fn provider_note(verifier: &VerifierConfig) -> String {
-    match (verifier.provider, verifier.role) {
-        (Some(provider), _) => provider.label().into(),
-        (None, Role::Reviewer) => "Any enabled provider".into(),
-        (None, role) => format!("{}'s providers", role.label()),
-    }
-}
-
 impl VerifierEditor {
     pub(super) fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
@@ -125,7 +116,6 @@ impl VerifierEditor {
                 role: Role::Reviewer,
                 focus: String::new(),
                 instruction: None,
-                provider: None,
             },
             focus: cx.new(|cx| InputState::new(window, cx).placeholder("Focus, e.g. Style")),
             instruction: cx.new(|cx| {
@@ -625,7 +615,6 @@ impl Render for VerifierEditor {
                             .text_ellipsis()
                             .child(verifier.role.agent_label(Some(&verifier.focus))),
                     )
-                    .child(hint(provider_note(verifier), p).w(px(150.)).flex_none())
                     .child(
                         hint(verifier.instruction.clone().unwrap_or_default(), p)
                             .flex_1()
@@ -659,24 +648,6 @@ impl Render for VerifierEditor {
                 })),
             );
         }
-        let mut providers = div().flex().gap_1();
-        for (label, provider) in [
-            ("Any", None),
-            ("Claude", Some(Provider::Claude)),
-            ("Codex", Some(Provider::Codex)),
-        ] {
-            providers = providers.child(
-                segment(
-                    SharedString::from(format!("verifier-provider-{label}")),
-                    label,
-                    draft.provider == provider,
-                )
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    view.draft.provider = provider;
-                    cx.notify();
-                })),
-            );
-        }
         div()
             .flex()
             .flex_col()
@@ -705,7 +676,6 @@ impl Render for VerifierEditor {
                     .items_center()
                     .gap_2()
                     .child(roles)
-                    .child(providers)
                     .child(Input::new(&self.focus).w(px(180.)))
                     .child(Input::new(&self.instruction).flex_1().min_w_0())
                     .child(
@@ -731,7 +701,7 @@ impl Render for VerifierEditor {
             ))
             .child(hint(
                 format!(
-                    "verify_ticket starts every verifier of the level the coordinator names, at once, on the ticket's current commit, each on the model the coordinator picks by the guide within its provider. {}",
+                    "verify_ticket starts every verifier of the level the coordinator names, at once, on the ticket's current commit, each on its row in Who runs what. {}",
                     if self.unsaved {
                         "Changes here are saved with the setup."
                     } else {
@@ -755,7 +725,6 @@ mod tests {
             role,
             focus: focus.into(),
             instruction: None,
-            provider: None,
         }
     }
 

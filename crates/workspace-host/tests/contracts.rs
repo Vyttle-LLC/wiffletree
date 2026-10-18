@@ -228,7 +228,7 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
 fn the_readme_says_what_the_settings_repository_shares_and_who_it_lets_change_agents() {
     let readme = include_str!("../../../README.md");
     for stated in [
-        "the skills with your rules, rewrites and their history, the review settings, the model guide, the check-in thresholds and the PR keeper's triggers",
+        "the skills with your rules, rewrites and their history, the review settings, the model notes, the switch threshold, the check-in thresholds and the PR keeper's triggers",
         "What belongs to one Mac stays there",
         "Choosing the repository on a Mac is what lets Wiffletree push to it",
         "whoever can push to the repository can change how your agents work on every Mac",
@@ -340,7 +340,7 @@ fn verify_ticket_requires_a_level_and_states_the_level_rules() {
         .unwrap();
     assert_eq!(
         verify["inputSchema"]["required"],
-        json!(["ticket_id", "level", "verifiers"])
+        json!(["ticket_id", "level"])
     );
     assert_eq!(
         verify["inputSchema"]["properties"]["level"],
@@ -352,6 +352,55 @@ fn verify_ticket_requires_a_level_and_states_the_level_rules() {
     }
     assert!(description.contains("all of them must pass"));
     assert!(!description.contains("every configured verifier"));
+}
+
+#[test]
+fn the_assignment_tools_ask_for_a_job_and_small_work_never_a_model() {
+    let tools = mcp::tools();
+    let tool = |name: &str| {
+        (tools.as_array().unwrap().iter())
+            .find(|tool| tool["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let (assign, verify) = (tool("assign_ticket"), tool("verify_ticket"));
+    assert_eq!(
+        assign["inputSchema"]["required"],
+        json!(["ticket_id", "role", "instruction"])
+    );
+    for schema in [&assign, &verify] {
+        let properties = &schema["inputSchema"]["properties"];
+        assert_eq!(properties["small"]["type"], "boolean");
+        for removed in ["profile", "reason", "verifiers"] {
+            assert!(properties.get(removed).is_none(), "{removed}");
+        }
+        let description = schema["description"].as_str().unwrap();
+        assert!(description.contains("Who runs what"), "{description}");
+        assert!(description.contains("small: true"), "{description}");
+    }
+    assert_eq!(
+        assign["inputSchema"]["properties"]["like"]["type"],
+        "string"
+    );
+    assert!(
+        assign["description"]
+            .as_str()
+            .unwrap()
+            .contains("give like:")
+    );
+    let context = tool("workspace_context");
+    assert!(
+        context["description"]
+            .as_str()
+            .unwrap()
+            .contains("then null means it waits")
+    );
+    // The coordinator's fixed core says the same, and no longer asks for exact models.
+    let core = core(Role::ProjectOrchestrator);
+    assert!(core.contains("You never choose models."), "{core}");
+    assert!(!core.contains("pass them as profile"));
+    let coordinating = provider::skill(Role::ProjectOrchestrator);
+    assert!(!coordinating.contains("give a reason that names the deciding factor"));
 }
 
 #[test]

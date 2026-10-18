@@ -585,7 +585,7 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
         .unwrap();
     }
     db.execute_batch(
-        "DELETE FROM policy_migrations WHERE id='model-selection'; DELETE FROM model_selection;
+        "DELETE FROM policy_migrations WHERE id IN ('model-selection','who-runs-what'); DELETE FROM model_selection;
          UPDATE runtimes SET data=json_remove(data,'$.profile','$.selection');",
     )
     .unwrap();
@@ -593,40 +593,29 @@ fn model_selection_migrates_a_pre_flatten_store_after_schema_6() {
     // A store from before the shared folder, too.
     std::fs::remove_dir_all(f.home.join("shared")).unwrap();
 
-    let host = Host::open_set_up(&f.home).unwrap();
+    // The upgrade to the table reads stand-in CLIs, never the machine's own.
+    let host = Host::open_detecting(&f.home, &common::signed_in(&PROVIDERS)).unwrap();
     assert_eq!(version(&f.home), 7);
     // Schema 6 ran first: the team is retired and its ticket belongs to the coordinator.
     assert!(host.session(f.team).unwrap().archived);
     assert_eq!(host.ticket(&f.open.id).unwrap().coordinator_id, f.main.id);
     let selection = host.model_selection().unwrap();
     selection.validate().unwrap();
-    assert_eq!(
-        selection.role_providers.keys().copied().collect::<Vec<_>>(),
-        PROVIDER_ROLES.to_vec(),
-        "no repository coordinator role"
-    );
-    // Its models stay allowed and its settings survive as prose.
-    selection
-        .permits(
-            Role::Reviewer,
-            &ModelProfile {
-                provider: Provider::Codex,
-                model: "gpt-6.1-sol".into(),
-                effort: "high".into(),
-            },
-        )
-        .unwrap();
+    // Then the table replaced the allowlist: the tiers' prose is gone, and what the table does
+    // not hold, such as the team's Codex models, is in the one-time note.
     assert!(
-        selection.guide.contains(
-            "### Repository coordinator\n- Default: codex · gpt-6.1-sol · high (coordinators could choose within its list).\n"
-        ),
+        !selection.guide.contains("## Previous settings"),
         "{}",
         selection.guide
     );
+    assert_eq!(
+        selection.notes[0],
+        "Set up from your previous settings. Check it."
+    );
     assert!(
-        selection
-            .guide
-            .contains("### Maintenance\n- Was fixed to codex · gpt-6.1-sol · medium")
+        (selection.notes.iter()).any(|n| n == "Allowed before: Codex gpt-6-astra at high."),
+        "{:?}",
+        selection.notes
     );
     // The retired Codex team keeps the model it would have used; agents keep theirs too.
     let pinned = |id: &str| host.session_runtime(id).unwrap().profile;

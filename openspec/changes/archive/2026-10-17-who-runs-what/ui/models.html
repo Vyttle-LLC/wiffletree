@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wiffletree · Models, simplified (proposal)</title>
+<style>
+  :root {
+    --base:#F3F2ED; --surface:#FFFDF7; --overlay:#E4E9E3; --text:#1A262D; --subtle:#526865;
+    --muted:#748781; --edge:#C4CFCA; --accent:#902818; --on-accent:#FFFDF7; --focus:#2D5A5A;
+    --green:#326348; --red:#A3213E; --yellow:#77551C; --blue:#365E78; --claude:#902818; --codex:#365E78;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--base); color:var(--text); font:13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  .window { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
+  nav { background:var(--overlay); border-right:1px solid var(--edge); padding:16px 10px; }
+  nav h4 { margin:14px 8px 6px; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  nav a { display:block; padding:5px 8px; border-radius:6px; color:var(--text); text-decoration:none; }
+  nav a.on { background:var(--surface); font-weight:600; }
+  main { padding:24px 32px 64px; max-width:1040px; }
+  h1 { font-size:18px; margin:0 0 2px; }
+  .lede { color:var(--subtle); margin:0 0 20px; }
+  .card { background:var(--surface); border:1px solid var(--edge); border-radius:10px; padding:16px 18px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 4px; }
+  .card .hint { color:var(--subtle); margin:0 0 12px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .sub { flex:1; min-width:280px; border:1px solid var(--edge); border-radius:8px; padding:10px 12px; }
+  .sub .name { font-weight:600; display:flex; gap:8px; align-items:center; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
+  .meter { display:grid; grid-template-columns:70px 1fr 44px; gap:8px; align-items:center; margin-top:6px; font-size:12px; color:var(--subtle); }
+  .bar { height:7px; background:var(--overlay); border-radius:4px; position:relative; overflow:hidden; }
+  .bar i { position:absolute; inset:0 auto 0 0; background:var(--green); border-radius:4px; }
+  .bar i.warn { background:var(--yellow); } .bar i.over { background:var(--red); }
+  .bar b { position:absolute; top:-2px; bottom:-2px; left:95%; width:2px; background:var(--text); opacity:.55; }
+  .pct { text-align:right; font-variant-numeric:tabular-nums; color:var(--text); }
+  .rule { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; font-size:13px; }
+  .num { display:inline-block; border:1px solid var(--edge); border-radius:6px; padding:2px 8px; background:var(--base); font-weight:600; }
+  .select { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--edge); border-radius:6px; padding:3px 8px; background:var(--surface); white-space:nowrap; }
+  .select::after { content:"▾"; color:var(--muted); font-size:10px; }
+  .select.none { color:var(--muted); font-style:italic; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; font-weight:600; padding:6px 8px; border-bottom:1px solid var(--edge); }
+  td { padding:9px 8px; border-bottom:1px solid var(--overlay); vertical-align:middle; }
+  tr:last-child td { border-bottom:0; }
+  td.role { font-weight:600; } td.role small { display:block; font-weight:400; color:var(--subtle); }
+  .now { font-size:12px; white-space:nowrap; }
+  .pill { display:inline-block; border-radius:10px; padding:1px 8px; font-size:11px; font-weight:600; }
+  .pill.ok { background:#E1ECE4; color:var(--green); }
+  .pill.sw { background:#E6EDF2; color:var(--blue); }
+  .pill.wait { background:#F3EBDD; color:var(--yellow); }
+  .tag { font-size:11px; color:var(--muted); }
+  .arrow { color:var(--muted); }
+  .note { border-left:3px solid var(--focus); background:var(--base); padding:8px 12px; border-radius:0 6px 6px 0; color:var(--subtle); margin-top:12px; }
+  .toggle { display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-bottom:1px solid var(--overlay); }
+  .toggle:last-child { border-bottom:0; }
+  .box { width:15px; height:15px; border:1.5px solid var(--focus); border-radius:4px; flex:none; margin-top:2px; position:relative; }
+  .box.on { background:var(--focus); } .box.on::after { content:"✓"; color:var(--on-accent); font-size:11px; position:absolute; left:2px; top:-2px; }
+  .toggle .t { font-weight:600; } .toggle .d { color:var(--subtle); }
+  .chat { border:1px solid var(--edge); border-radius:8px; padding:10px 12px; background:var(--base); font-size:12px; color:var(--subtle); }
+  .chat strong { color:var(--text); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .moves td, .moves th { font-size:12px; }
+  .proposal { background:var(--accent); color:var(--on-accent); font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; margin-left:8px; vertical-align:middle; }
+  .divider { margin:36px 0 16px; border:0; border-top:1px dashed var(--edge); }
+</style>
+</head>
+<body>
+<div class="window">
+<nav>
+  <h4>Workspace</h4>
+  <a>Repositories</a>
+  <a class="on">Models</a>
+  <a>Skills</a>
+  <a>Usage</a>
+  <a>Settings</a>
+</nav>
+<main>
+  <h1>Models <span class="proposal">Proposal · static mockup</span></h1>
+  <p class="lede">Who runs each job, and what happens when a subscription runs low. Saved for this Mac.</p>
+
+  <!-- 1. Subscriptions -->
+  <section class="card">
+    <h2>Subscriptions</h2>
+    <p class="hint">The CLIs signed in on this Mac and how much of each limit is used. The black tick on each bar is where Wiffletree moves on (95%).</p>
+    <div class="row">
+      <div class="sub">
+        <div class="name"><span class="dot" style="background:var(--claude)"></span>Claude <span class="tag">Max · signed in as mhohlios</span></div>
+        <div class="meter"><span>5-hour</span><span class="bar"><i style="width:41%"></i><b></b></span><span class="pct">41%</span></div>
+        <div class="meter"><span>Weekly</span><span class="bar"><i class="over" style="width:96%"></i><b></b></span><span class="pct">96%</span></div>
+        <div class="tag" style="margin-top:6px">Weekly resets Mon 09:00 · read 2 min ago</div>
+      </div>
+      <div class="sub">
+        <div class="name"><span class="dot" style="background:var(--codex)"></span>Codex <span class="tag">Pro · signed in</span></div>
+        <div class="meter"><span>5-hour</span><span class="bar"><i style="width:12%"></i><b></b></span><span class="pct">12%</span></div>
+        <div class="meter"><span>Weekly</span><span class="bar"><i style="width:30%"></i><b></b></span><span class="pct">30%</span></div>
+        <div class="tag" style="margin-top:6px">Weekly resets Thu 14:00 · read just now</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. The one rule -->
+  <section class="card">
+    <h2>When a subscription runs low</h2>
+    <div class="rule">
+      Move to the next choice once any limit (5-hour or weekly) passes <span class="num">95%</span>.
+      When every choice is past it, <span class="select">wait for the earliest reset</span>
+    </div>
+    <div class="note">Applies when an agent starts. An agent that is already running keeps its model; if it hits a hard limit it waits for the reset, as today. Fresh reviewers start each review, so they pick up a switch on the next review.</div>
+  </section>
+
+  <!-- 3. Who runs what -->
+  <section class="card">
+    <h2>Who runs what</h2>
+    <p class="hint">First choice is used until its subscription passes 95%. "Small work" is the lighter model the coordinator may ask for; leave it empty to always use the first line.</p>
+    <table>
+      <thead><tr><th style="width:22%">Job</th><th>First choice</th><th></th><th>Then</th><th>Small work</th><th>Right now</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="role">Coordinator<small>Plans, talks to you</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Opus · high</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select"><span class="dot" style="background:var(--codex)"></span>GPT 6.1 Sol · high</span></td>
+          <td><span class="select none">same</span></td>
+          <td class="now"><span class="pill sw">Codex</span></td>
+        </tr>
+        <tr>
+          <td class="role">Implementer<small>Writes the change</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Opus · medium</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select"><span class="dot" style="background:var(--codex)"></span>GPT 6.1 Sol · high</span></td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Sonnet · high</span> <span class="arrow">→</span> <span class="select"><span class="dot" style="background:var(--codex)"></span>Sol · medium</span></td>
+          <td class="now"><span class="pill sw">Codex</span></td>
+        </tr>
+        <tr>
+          <td class="role">Tester<small>Runs build, lint, tests</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Sonnet · high</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select"><span class="dot" style="background:var(--codex)"></span>GPT 6.1 Sol · medium</span></td>
+          <td><span class="select none">same</span></td>
+          <td class="now"><span class="pill sw">Codex</span></td>
+        </tr>
+        <tr>
+          <td class="role">Reviewer · Claude<small>Correctness, Claude's eyes</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Opus · high</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select none">wait (keeps a second opinion)</span></td>
+          <td><span class="select none">same</span></td>
+          <td class="now"><span class="pill wait">Waits · Mon 09:00</span></td>
+        </tr>
+        <tr>
+          <td class="role">Reviewer · Codex<small>Correctness, Codex's eyes</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--codex)"></span>GPT 6.1 Sol · high</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select none">wait (keeps a second opinion)</span></td>
+          <td><span class="select none">same</span></td>
+          <td class="now"><span class="pill ok">Codex</span></td>
+        </tr>
+        <tr>
+          <td class="role">Reviewer · Style<small>Runs reviso:style</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--codex)"></span>GPT 6.1 Sol · medium</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Sonnet · medium</span></td>
+          <td><span class="select none">same</span></td>
+          <td class="now"><span class="pill ok">Codex</span></td>
+        </tr>
+        <tr>
+          <td class="role">PR keeper<small>Fixes conflicts, sorts comments</small></td>
+          <td><span class="select"><span class="dot" style="background:var(--claude)"></span>Sonnet · medium</span></td>
+          <td class="arrow">→</td>
+          <td><span class="select"><span class="dot" style="background:var(--codex)"></span>GPT 6.1 Sol · medium</span></td>
+          <td><span class="select none">same</span></td>
+          <td class="now"><span class="pill sw">Codex</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">The coordinator no longer picks exact models from prose. It asks for a job and, optionally, "small work"; Wiffletree picks the line from this table. You can still change any one agent from its chat.</div>
+  </section>
+
+  <!-- 4. Reviews -->
+  <section class="card">
+    <h2>Reviews</h2>
+    <p class="hint">Which reviewers run, and how many tries a ticket gets.</p>
+    <table>
+      <thead><tr><th>Level</th><th>Runs</th><th>Coordinator uses it</th></tr></thead>
+      <tbody>
+        <tr><td class="role">Full</td><td>Tester, Reviewer · Claude, Reviewer · Codex, Reviewer · Style</td><td>for every review</td></tr>
+        <tr><td class="role">Light</td><td>Reviewer · Codex</td><td>after a rebase or a small fix, when the last review passed</td></tr>
+      </tbody>
+    </table>
+    <div class="rule" style="margin-top:12px">Fix rounds per review <span class="num">2</span> · Full reviews per ticket <span class="num">2</span></div>
+  </section>
+
+  <!-- What an agent shows -->
+  <section class="card">
+    <h2>What you see on an agent that switched</h2>
+    <div class="chat"><strong>Implementer · SH-1204</strong> — GPT 6.1 Sol · high<br>
+      Started on Codex: Claude's weekly limit was at 96% (moves on at 95%). First choice was Opus · medium.</div>
+  </section>
+
+  <hr class="divider">
+
+  <h1>Repositories · PR automation <span class="proposal">Proposal</span></h1>
+  <p class="lede">One card for everything Wiffletree does to an open PR. The model it uses is the "PR keeper" line above.</p>
+  <section class="card">
+    <h2>When a ticket's PR is open</h2>
+    <div class="toggle"><span class="box on"></span><div><div class="t">Watch it</div><div class="d">Always on. Tells the coordinator when it merges, closes, fails checks or conflicts.</div></div></div>
+    <div class="toggle"><span class="box on"></span><div><div class="t">Keep it rebased</div><div class="d">After the base has been quiet for <span class="num">2</span> minutes. Pushes only when the change is the same as the reviewed one.</div></div></div>
+    <div class="toggle"><span class="box on"></span><div><div class="t">Try once to fix a conflict or failed checks</div><div class="d">Then runs the Light review before pushing.</div></div></div>
+    <div class="toggle"><span class="box"></span><div><div class="t">Sort new comments</div><div class="d">Tells the coordinator which need a change or an answer.</div></div></div>
+  </section>
+  <section class="card">
+    <h2>Opening PRs without asking</h2>
+    <p class="hint">For repositories owned by these accounts. Everything else asks you first.</p>
+    <div class="row"><span class="select">Sage-Social</span><span class="select">Vyttle-LLC</span><span class="select">MHohlios</span><span class="select">celadon-theme</span><span class="tag">+ Add</span></div>
+  </section>
+
+  <hr class="divider">
+
+  <h2 style="font-size:14px">What moves where (today → proposal)</h2>
+  <section class="card moves">
+    <table>
+      <thead><tr><th>Today</th><th>Proposal</th></tr></thead>
+      <tbody>
+        <tr><td>Providers card: enable each CLI, then add allowed models and tick efforts</td><td>Subscriptions card shows sign-in and limits. The allowlist is whatever the table uses</td></tr>
+        <tr><td>Roles card: providers per role, no models</td><td>Who runs what: provider and model per job, first choice and then</td></tr>
+        <tr><td>Guide: prose the coordinator reads to choose Sonnet vs Opus, plus 40 lines of migrated tiers</td><td>"Small work" column. Guide stays only as optional notes; migrated tiers removed</td></tr>
+        <tr><td>Verifiers: role, focus, instruction, optional provider; models chosen by the coordinator each review</td><td>Each reviewer is a row in the table. Reviews card only says which run</td></tr>
+        <tr><td>PR keeper model on the Models page; keeper triggers, quiet period and review level on Repositories</td><td>Keeper model is a row in the table. Triggers sit in one "When a ticket's PR is open" card</td></tr>
+        <tr><td>Usage limits: hold the agent, never switch provider</td><td>Switch at 95% when an agent starts; hold only when every choice is spent</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</div>
+</body>
+</html>

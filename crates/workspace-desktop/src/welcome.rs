@@ -141,10 +141,7 @@ impl Workspace {
                 .flex_col()
                 .gap(px(2.))
                 .child(Self::detected_providers(&detection, p))
-                .child(hint(
-                    "Review which models your agents may use, then Save.",
-                    p,
-                ));
+                .child(hint("Review who runs each job, then Save.", p));
             content
                 .child(hint(
                     "Two steps and you are ready. We found your signed-in CLIs and prepared a suggested setup for you to review.",

@@ -61,7 +61,7 @@ const CORE_HINT: &str = "Wiffletree depends on these instructions: the names of 
 const PR_RULES_HINT: &str = "Agents write pull requests by your repository's rules and your own, so put your PR rules here.";
 const APPLIES: &str =
     "Applies from each agent's next turn, and a Codex agent's from its next new session";
-const REWRITE_COST: &str = "When an update changes the stock text, Wiffletree merges the change into your rewrite and leaves a note you can review or undo. Where you also changed what the update changes, the PR keeper's Claude model merges that passage, or, without one, you choose the wording. Adding your own rules never needs a merge.";
+const REWRITE_COST: &str = "When an update changes the stock text, Wiffletree merges the change into your rewrite and leaves a note you can review or undo. Where you also changed what the update changes, the PR keeper's Claude choice in Models merges that passage, or, without one, you choose the wording. Adding your own rules never needs a merge.";
 const OUT_OF_DATE: &str = "Your rewrite keeps running exactly as you wrote it. Look at what changed, then merge it in, or copy in what you want and mark it up to date.";
 const NOT_ENFORCED: &str = "Not enforced: an agent's shell isn't sandboxed, so it can still run git push or gh with your credentials.";
 
@@ -374,7 +374,7 @@ fn rewrite_banner(state: &SkillState) -> Option<([String; 2], Offers)> {
                 _ => ("them", "each passage"),
             };
             let chosen = match codex {
-                true => "the one chosen is a Codex model",
+                true => "its row has only Codex models",
                 false => "none is chosen",
             };
             (
@@ -2133,20 +2133,20 @@ impl SkillsPage {
                 });
                 (
                     "When the coordinator uses each level",
-                    "from Models → Review ·",
+                    "from Models → Reviews ·",
                     lines.collect(),
                 )
             }
             Skill::Coordinating => {
                 let guide = (self.shared.snapshot()).map_or("", |s| s.model_selection.guide.trim());
                 let guide = if guide.is_empty() {
-                    "No guide yet."
+                    "No notes yet."
                 } else {
                     guide
                 };
                 (
-                    "How the coordinator picks a model and effort",
-                    "from Models → Guide ·",
+                    "Your notes on models for the coordinator",
+                    "from Models → Notes ·",
                     vec![guide.to_owned()],
                 )
             }
@@ -2632,7 +2632,7 @@ mod tests {
                 },
                 [
                     "v1 and your rewrite both change 2 passages",
-                    "Merging them needs a Claude model for the PR keeper, and the one chosen is a Codex model. Your rewrite runs as you wrote it. Choose a model, or choose a wording for each passage.",
+                    "Merging them needs a Claude model for the PR keeper, and its row has only Codex models. Your rewrite runs as you wrote it. Choose a model, or choose a wording for each passage.",
                 ],
                 Offers::Wordings,
             ),

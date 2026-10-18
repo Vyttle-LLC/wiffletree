@@ -182,14 +182,14 @@ fn settings_saved_before_verification_use_the_default_lenses_and_caps() {
         .verification
         .verifiers
         .iter()
-        .map(|v| (v.role.agent_label(Some(&v.focus)), v.provider))
+        .map(|v| v.role.agent_label(Some(&v.focus)))
         .collect();
     assert_eq!(
         verifiers,
         [
-            ("Tester · Tests".to_owned(), None),
-            ("Reviewer · Correctness".to_owned(), Some(Provider::Claude)),
-            ("Reviewer · Regressions".to_owned(), Some(Provider::Codex)),
+            "Tester · Tests",
+            "Reviewer · Correctness",
+            "Reviewer · Regressions"
         ]
     );
     let instructions: Vec<_> = settings
@@ -234,7 +234,6 @@ fn two_levels() -> VerificationSettings {
         role,
         focus: focus.into(),
         instruction: None,
-        provider: None,
     };
     let mut settings = VerificationSettings::one_level(
         vec![
@@ -266,10 +265,12 @@ fn a_setting_saved_before_levels_keeps_everything_and_reads_as_one_full_level() 
     let settings: VerificationSettings =
         serde_json::from_value(json!({"verifiers":verifiers,"max_rounds":2,"max_cycles":3}))
             .unwrap();
-    assert_eq!(
-        serde_json::to_value(&settings.verifiers).unwrap(),
-        verifiers
-    );
+    // A verifier's provider moved to its row in Who runs what; the rest is kept as saved.
+    let mut kept = verifiers.clone();
+    for verifier in kept.as_array_mut().unwrap() {
+        verifier.as_object_mut().unwrap().remove("provider");
+    }
+    assert_eq!(serde_json::to_value(&settings.verifiers).unwrap(), kept);
     assert_eq!((settings.max_rounds, settings.max_cycles), (2, 3));
     // One level and no other: no Light is added on update.
     assert_eq!(
@@ -394,7 +395,7 @@ fn a_level_is_found_by_name_and_becomes_its_verifiers_in_configured_order() {
     settings.levels[2].verifiers = vec!["Prose".into()];
     assert_eq!(
         settings.level("Docs").unwrap_err().to_string(),
-        "Docs runs \"Prose\", which is not a configured verifier. Choose its verifiers again in Models → Review."
+        "Docs runs \"Prose\", which is not a configured verifier. Choose its verifiers again in Models → Reviews."
     );
 }
 
@@ -411,6 +412,7 @@ fn cycle(
         }),
         max_rounds: 3,
         queued_at: None,
+        small: false,
         keeper: false,
         outcome,
         rounds: vec![],
@@ -490,12 +492,12 @@ fn a_saved_setting_without_a_cycle_cap_keeps_its_verifiers_and_uses_two_cycles()
 }
 
 #[test]
-fn a_saved_verifier_size_is_ignored() {
+fn a_saved_verifier_size_and_provider_are_ignored() {
     let verifier: VerifierConfig = serde_json::from_value(
         json!({"role":"reviewer","focus":"Codex","provider":"codex","size":"small"}),
     )
     .unwrap();
-    assert_eq!(verifier.provider, Some(Provider::Codex));
+    assert_eq!(verifier.focus, "Codex");
 }
 
 #[test]
@@ -504,7 +506,6 @@ fn verification_settings_reject_duplicate_focus_and_out_of_range_caps() {
         role,
         focus: focus.into(),
         instruction: None,
-        provider: None,
     };
     let mut settings = VerificationSettings::one_level(
         vec![
@@ -549,6 +550,7 @@ fn latest_results_keep_each_verifiers_last_round() {
         level: None,
         max_rounds: 2,
         queued_at: None,
+        small: false,
         keeper: false,
         outcome: VerificationOutcome::Running,
         rounds: vec![

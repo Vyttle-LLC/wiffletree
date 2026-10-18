@@ -191,6 +191,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
         level: None,
         max_rounds: 3,
         queued_at: None,
+        small: false,
         keeper: false,
         outcome: VerificationOutcome::Passed,
         rounds: vec![round(
@@ -216,6 +217,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
         level: None,
         max_rounds: 3,
         queued_at: None,
+        small: false,
         keeper: false,
         outcome: VerificationOutcome::Blocked,
         rounds: vec![

@@ -1,10 +1,11 @@
-//! The setup suggested on first run, from the provider CLIs signed in on this machine.
+//! The setup suggested on first run, from the provider CLIs signed in on this machine, and the
+//! rows of the "Who runs what" table it and the upgrade start from.
 use crate::{
-    LevelKind, ModelSelection, PROVIDER_ROLES, PROVIDERS, Provider, ProviderAccess, ReviewLevel,
-    Role, VerificationSettings, VerifierConfig, suggested_models,
+    DEFAULT_SWITCH_AT, Job, JobRow, LevelKind, Line, ModelOption, ModelProfile, ModelSelection,
+    PROVIDERS, Provider, ReviewLevel, Role, VerificationSettings, VerifierConfig, usual_efforts,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// What detection found for one provider's CLI.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +22,7 @@ impl ProviderStatus {
 }
 pub type Detection = BTreeMap<Provider, ProviderStatus>;
 
-/// Everything the Models page saves: the model selection and who verifies tickets.
+/// Everything the Models page saves: the table and who verifies tickets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Setup {
     pub selection: ModelSelection,
@@ -72,57 +73,201 @@ fn suggested_levels(verifiers: &[VerifierConfig]) -> Vec<ReviewLevel> {
         .collect()
 }
 
-/// A setup that uses only the providers found installed and signed in: Claude coordinates and
-/// implements and Codex tests when both are, otherwise the one found does everything. With
-/// neither, both providers are disabled and the setup cannot be saved.
-pub fn suggest(detection: &Detection) -> Setup {
+/// The kind of row a job starts with, as drawn in the approved mockup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seed {
+    Coordinator,
+    Implementer,
+    Tester,
+    /// A reviewer that is one provider's second opinion: it waits rather than switching.
+    Lens(Provider),
+    /// Any other reviewer, such as a style pass.
+    Reviewer,
+    Keeper,
+}
+/// Each provider's model and effort for a line, and which provider comes first.
+struct Pair {
+    claude: (&'static str, &'static str),
+    codex: (&'static str, &'static str),
+    first: Provider,
+}
+const OPUS_HIGH: (&str, &str) = ("opus", "high");
+const SOL_HIGH: (&str, &str) = ("gpt-6.1-sol", "high");
+const SOL_MEDIUM: (&str, &str) = ("gpt-6.1-sol", "medium");
+impl Seed {
+    fn lines(self) -> (Pair, Option<Pair>) {
+        let pair = |claude, codex, first| Pair {
+            claude,
+            codex,
+            first,
+        };
+        let claude_first = Provider::Claude;
+        match self {
+            Self::Coordinator => (pair(OPUS_HIGH, SOL_HIGH, claude_first), None),
+            Self::Implementer => (
+                pair(("opus", "medium"), SOL_HIGH, claude_first),
+                Some(pair(("sonnet", "high"), SOL_MEDIUM, claude_first)),
+            ),
+            Self::Tester => (pair(("sonnet", "high"), SOL_MEDIUM, claude_first), None),
+            Self::Lens(provider) => (pair(OPUS_HIGH, SOL_HIGH, provider), None),
+            Self::Reviewer => (
+                pair(("sonnet", "medium"), SOL_MEDIUM, Provider::Codex),
+                None,
+            ),
+            Self::Keeper => (pair(("sonnet", "medium"), SOL_MEDIUM, claude_first), None),
+        }
+    }
+    /// The seed of a configured verifier: a tester is seeded as the Tester job, and a reviewer
+    /// with a provider's lens waits for that provider.
+    pub fn of_verifier(verifier: &VerifierConfig, lens: Option<Provider>) -> Self {
+        match (verifier.role, lens) {
+            (Role::Tester, _) => Self::Tester,
+            (_, Some(provider)) => Self::Lens(provider),
+            _ => Self::Reviewer,
+        }
+    }
+}
+
+/// `job`'s seeded row on the `usable` providers, with each model replaced by the provider's
+/// closest one in `available` when that lists the provider; `None` with no usable provider.
+pub fn seed_row(
+    job: Job,
+    seed: Seed,
+    usable: &[Provider],
+    available: &[ModelOption],
+) -> Option<JobRow> {
+    let waits = matches!(seed, Seed::Lens(_));
+    let line = |pair: Pair| {
+        let order = match pair.first {
+            Provider::Claude => [Provider::Claude, Provider::Codex],
+            Provider::Codex => [Provider::Codex, Provider::Claude],
+        };
+        let mut choices = order
+            .into_iter()
+            .filter(|p| usable.contains(p))
+            .map(|provider| {
+                let (model, effort) = match provider {
+                    Provider::Claude => pair.claude,
+                    Provider::Codex => pair.codex,
+                };
+                closest(provider, model, effort, available)
+            });
+        let first = choices.next()?;
+        let then = choices.next().filter(|_| !waits);
+        Some(Line { first, then })
+    };
+    let (main, small) = seed.lines();
+    Some(JobRow {
+        job,
+        main: line(main)?,
+        small: small.and_then(line),
+    })
+}
+
+/// The provider's model closest to `model` among `available`: the same model, else the first
+/// whose ID contains it, else the provider's first; at `effort`, else the nearest effort it
+/// offers. Unchanged when `available` lists nothing for the provider.
+pub fn closest(
+    provider: Provider,
+    model: &str,
+    effort: &str,
+    available: &[ModelOption],
+) -> ModelProfile {
+    let options: Vec<&ModelOption> = available
+        .iter()
+        .filter(|m| m.provider == provider)
+        .collect();
+    let option = (options.iter())
+        .find(|m| m.model == model)
+        .or_else(|| options.iter().find(|m| m.model.contains(model)))
+        .or(options.first());
+    let Some(option) = option else {
+        return ModelProfile {
+            provider,
+            model: model.into(),
+            effort: effort.into(),
+        };
+    };
+    let usual: Vec<String> = usual_efforts(provider)
+        .iter()
+        .map(|e| (*e).into())
+        .collect();
+    let efforts = if option.efforts.is_empty() {
+        &usual
+    } else {
+        &option.efforts
+    };
+    let rank = |e: &str| usual.iter().position(|u| u == e).unwrap_or(usual.len()) as i64;
+    let effort = (efforts.iter())
+        .min_by_key(|e| (rank(e) - rank(effort)).abs())
+        .cloned()
+        .unwrap_or_else(|| effort.into());
+    ModelProfile {
+        provider,
+        model: option.model.clone(),
+        effort,
+    }
+}
+
+/// The seeded rows for every job, the verifiers' with their lens.
+pub fn seed_jobs(
+    verifiers: &[(VerifierConfig, Option<Provider>)],
+    keeper: bool,
+    usable: &[Provider],
+    available: &[ModelOption],
+) -> Vec<JobRow> {
+    let fixed = [
+        (Job::Coordinator, Seed::Coordinator),
+        (Job::Implementer, Seed::Implementer),
+        (Job::Tester, Seed::Tester),
+    ];
+    let verifiers = verifiers.iter().map(|(verifier, lens)| {
+        let job = Job::Verifier {
+            focus: verifier.focus.clone(),
+        };
+        (job, Seed::of_verifier(verifier, *lens))
+    });
+    let keeper = keeper.then_some((Job::Keeper, Seed::Keeper));
+    (fixed.into_iter().chain(verifiers).chain(keeper))
+        .filter_map(|(job, seed)| seed_row(job, seed, usable, available))
+        .collect()
+}
+
+/// A setup that uses only the providers found installed and signed in, with the mockup's rows
+/// and each model replaced by the closest one `catalog` lists. With neither provider, the table
+/// is empty and the setup cannot be saved.
+pub fn suggest(detection: &Detection, catalog: &[ModelOption]) -> Setup {
     let usable: Vec<Provider> = PROVIDERS
         .into_iter()
         .filter(|p| detection.get(p).is_some_and(ProviderStatus::usable))
         .collect();
-    let providers = PROVIDERS
-        .into_iter()
-        .map(|provider| {
-            let enabled = usable.contains(&provider);
-            let models = if enabled {
-                suggested_models(provider)
-            } else {
-                vec![]
-            };
-            (provider, ProviderAccess { enabled, models })
-        })
-        .collect();
-    let role_providers: BTreeMap<Role, BTreeSet<Provider>> = PROVIDER_ROLES
-        .into_iter()
-        .filter_map(|role| {
-            let preferred = if role == Role::Tester {
-                Provider::Codex
-            } else {
-                Provider::Claude
-            };
-            let provider = usable
-                .iter()
-                .find(|&&p| p == preferred)
-                .or(usable.first())?;
-            Some((role, BTreeSet::from([*provider])))
-        })
-        .collect();
     let mut verification = VerificationSettings::default();
-    verification
-        .verifiers
-        .retain(|v| v.provider.is_none_or(|p| usable.contains(&p)));
+    // The default reviewers are Claude's and Codex's second opinions, in that order.
+    let lenses = [None, Some(Provider::Claude), Some(Provider::Codex)];
+    let verifiers: Vec<(VerifierConfig, Option<Provider>)> = (verification.verifiers.iter())
+        .cloned()
+        .zip(lenses)
+        .filter(|(_, lens)| lens.is_none_or(|p| usable.contains(&p)))
+        .collect();
+    verification.verifiers = verifiers.iter().map(|(v, _)| v.clone()).collect();
     verification.levels = suggested_levels(&verification.verifiers);
+    let jobs = if usable.is_empty() {
+        vec![]
+    } else {
+        seed_jobs(&verifiers, true, &usable, catalog)
+    };
     Setup {
         selection: ModelSelection {
             revision: 0,
-            providers,
-            role_providers,
+            jobs,
             guide: if usable.is_empty() {
                 String::new()
             } else {
                 starter_guide(&usable)
             },
-            keeper: None,
+            switch_at: DEFAULT_SWITCH_AT,
+            notes: vec![],
+            copied: vec![],
         },
         verification,
     }

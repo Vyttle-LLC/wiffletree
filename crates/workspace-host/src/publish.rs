@@ -1094,6 +1094,7 @@ pub(crate) mod tests {
                 level: None,
                 max_rounds: 3,
                 queued_at: None,
+                small: false,
                 keeper: false,
                 outcome,
                 rounds: vec![VerificationRound {
@@ -3323,37 +3324,15 @@ pub(crate) mod tests {
         host.agent_tool(session, "report", report).unwrap();
     }
 
-    /// Starts a full review of the ticket with each verifier's first allowed model, as the
-    /// coordinator would, and returns the verifiers' sessions.
+    /// Starts a full review of the ticket, as the coordinator would, and returns the verifiers'
+    /// sessions.
     pub(crate) fn start_review(f: &mut Fixture) -> Vec<String> {
-        let selection = f.host.model_selection().unwrap();
-        let verifiers: Vec<VerifierChoice> = f
-            .host
-            .settings()
-            .verification
-            .verifiers
-            .iter()
-            .map(|verifier| {
-                let provider = verifier
-                    .provider
-                    .unwrap_or_else(|| selection.providers_for(verifier.role)[0]);
-                VerifierChoice {
-                    focus: verifier.focus.clone(),
-                    profile: ModelProfile {
-                        provider,
-                        model: selection.allowed(provider)[0].model.clone(),
-                        effort: selection.allowed(provider)[0].effort.clone(),
-                    },
-                    reason: "Test verifier".into(),
-                }
-            })
-            .collect();
         let coordinator = f.coordinator.id.clone();
         f.host
             .agent_tool(
                 &coordinator,
                 "verify_ticket",
-                json!({"ticket_id": f.ticket, "level": "Full", "verifiers": verifiers}),
+                json!({"ticket_id": f.ticket, "level": "Full"}),
             )
             .unwrap();
         f.ticket().verification.unwrap().rounds[0]
