@@ -7966,16 +7966,16 @@ mod tests {
                 .unwrap()
         };
 
-        // A build's short-lived compilers, each gone by the time it is next looked for. Their
-        // ids sort before the long-lived member's, as once the id counter has wrapped, so a
-        // look in id order passes all of them before it reaches one that is alive.
+        // Old identities of a known readable pid are provably gone and sort before its live
+        // identity. Arbitrary pids could instead be unreadable live system processes, whose
+        // records must stay. A look still passes every stale entry before the live one.
         let batch = 500;
         for round in 0..8 {
             let seen: Vec<_> = (0..batch)
                 .map(|n| {
                     let count = round * batch + n;
                     processes::Sighting::Member(processes::ProcessInfo {
-                        pid: 2 + count % (group - 2),
+                        pid: group,
                         parent: group,
                         group,
                         started: i64::from(count) + 1,
