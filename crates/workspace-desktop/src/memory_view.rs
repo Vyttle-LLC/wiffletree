@@ -148,9 +148,8 @@ impl Workspace {
             format!("SHARED ACROSS {}", self.project_name().to_uppercase()),
             p,
         ));
-        match serde_json::from_value::<Vec<WorkLog>>(self.panel_data.clone()) {
-            Err(_) => entries = entries.child(hint("Loading memory…", p)),
-            Ok(logs) if logs.is_empty() => {
+        match &self.panel_data {
+            PanelData::Memory(logs) if logs.is_empty() => {
                 entries = entries.child(empty_state(
                     "memory",
                     "Keep the decisions that matter",
@@ -158,7 +157,7 @@ impl Workspace {
                     p,
                 ));
             }
-            Ok(logs) => {
+            PanelData::Memory(logs) => {
                 for log in logs {
                     let decision = log.input.kind == LogKind::Decision;
                     entries = entries.child(
@@ -179,11 +178,16 @@ impl Workspace {
                                         p,
                                     )),
                             )
-                            .child(div().font_weight(FontWeight::MEDIUM).child(log.input.title))
-                            .child(hint(log.input.changed, p)),
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(log.input.title.clone()),
+                            )
+                            .child(hint(log.input.changed.clone(), p)),
                     );
                 }
             }
+            _ => entries = entries.child(hint("Loading memory…", p)),
         }
         div()
             .flex()

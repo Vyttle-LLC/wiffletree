@@ -240,7 +240,7 @@ impl Workspace {
         let Some(selected) = self.selected_session() else {
             return div();
         };
-        let Ok(events) = serde_json::from_value::<Vec<Activity>>(self.panel_data.clone()) else {
+        let PanelData::Events(events) = &self.panel_data else {
             return hint("Loading events…", p);
         };
         let in_scope = |event: &Activity| {

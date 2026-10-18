@@ -1,8 +1,8 @@
 //! The first screen on a machine with no saved model setup: it leads to the Models page
 //! instead of offering a project the host would refuse.
 use super::*;
-use gpui_component::{Disableable, button::ButtonVariants, spinner::Spinner};
-use ui::{hint, humanize, icon};
+use gpui_component::{Disableable, button::ButtonVariants};
+use ui::{Spinner, hint, humanize, icon};
 
 /// What fills the main area while no session can be selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

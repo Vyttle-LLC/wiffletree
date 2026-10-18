@@ -23,7 +23,7 @@ impl Workspace {
                 .update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        let name = next_name(self.snapshot.as_ref());
+        let name = next_name(self.snapshot.as_deref());
         self.creating_project = true;
         self.request(Command::CreateProject { name }, window, cx);
         cx.notify();

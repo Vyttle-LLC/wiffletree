@@ -3,7 +3,7 @@
 use super::*;
 use activity::{StepFetch, paced_reply};
 use std::time::Duration;
-use ui::{empty_state, hint, icon, pill, segment};
+use ui::{ANIMATION_FPS, empty_state, hint, icon, pill, segment};
 
 /// File fetches start no closer together than this; each one reads Git off the host thread.
 const FILES_PACE: Duration = Duration::from_millis(500);
@@ -350,7 +350,8 @@ fn pulse(id: String, color: Hsla) -> impl IntoElement {
             SharedString::from(id),
             Animation::new(Duration::from_millis(1100))
                 .repeat()
-                .with_easing(pulsating_between(0.25, 1.)),
+                .with_easing(pulsating_between(0.25, 1.))
+                .with_max_fps(ANIMATION_FPS),
             |dot, opacity| dot.opacity(opacity),
         )
 }

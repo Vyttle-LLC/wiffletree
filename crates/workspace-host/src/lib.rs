@@ -973,56 +973,6 @@ impl Host {
         tx.commit()?;
         self.message(id)
     }
-    /// Explicit local adapter. The transaction models receipts without claiming provider execution.
-    pub fn simulate(&mut self, id: &str) -> Result<Message> {
-        let message = self.message(id)?;
-        ensure!(
-            message.sender.is_none(),
-            "Simulator accepts human input only"
-        );
-        let reply_id = format!("sim:{id}");
-        if message.receipt == Receipt::Completed {
-            return self.message(&reply_id);
-        }
-        ensure!(
-            message.receipt == Receipt::Queued,
-            "Uncertain message requires reconciliation"
-        );
-        let session = self.session(&message.recipient)?;
-        ensure!(
-            !matches!(session.status, Status::Paused | Status::Disconnected),
-            "Session must be ready before delivery"
-        );
-        let earliest: i64 = self.db.query_row("SELECT MIN(sequence) FROM messages WHERE recipient=?1 AND receipt IN ('queued','held')", [&message.recipient], |r| r.get(0))?;
-        ensure!(
-            earliest == message.sequence,
-            "Earlier queued input must be delivered first"
-        );
-        let profile = self.turn_profile(&session)?;
-        let body = format!(
-            "Local simulation · {}\n\nInstruction recorded durably for {}. Selected {profile}.\n\nNo provider turn or repository change was performed. Configure providers, roles and the guide in Models; capture decisions in Memory for replacement sessions.",
-            session.role.label(),
-            session.name,
-        );
-        let tx = self.db.transaction()?;
-        for receipt in [
-            Receipt::Delivered,
-            Receipt::Acknowledged,
-            Receipt::Completed,
-        ] {
-            Self::event(
-                &tx,
-                &session.project_id,
-                Some(&session.id),
-                "simulation_receipt",
-                &format!("{id}: {receipt:?}"),
-            )?;
-        }
-        tx.execute("UPDATE messages SET receipt='completed' WHERE id=?1", [id])?;
-        tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5)", params![reply_id, session.project_id, session.id, body, now()])?;
-        tx.commit()?;
-        self.message(&reply_id)
-    }
     pub fn request_attention(
         &mut self,
         session: &str,
@@ -1258,7 +1208,6 @@ impl Host {
                 }
                 serde_json::to_value(session)?
             }
-            Command::ProviderCheck => provider::check(),
             Command::Quotas => serde_json::to_value(self.quotas()?)?,
             Command::RecordQuota { reading } => {
                 self.record_quota(reading)?;
@@ -1367,20 +1316,10 @@ impl Host {
                 before,
                 limit,
             } => serde_json::to_value(self.messages(&session_id, before, limit)?)?,
-            Command::Simulate { message_id } => serde_json::to_value(self.simulate(&message_id)?)?,
             Command::SetModelSelection {
                 selection,
                 verification,
             } => serde_json::to_value(self.set_setup(&selection, verification)?)?,
-            Command::RequestAttention {
-                session_id,
-                host,
-                operation_id,
-                prompt,
-            } => serde_json::to_value({
-                ensure_unreserved(&operation_id)?;
-                self.request_attention(&session_id, &host, &operation_id, &prompt, &[])?
-            })?,
             Command::ResolveAttention { id, answer } => {
                 serde_json::to_value(self.resolve_attention(&id, &answer)?)?
             }

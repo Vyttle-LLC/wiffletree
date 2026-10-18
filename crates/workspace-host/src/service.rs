@@ -1100,7 +1100,6 @@ impl Actor {
                         | Command::Logs { .. }
                         | Command::Activity { .. }
                         | Command::GitHistory { .. }
-                        | Command::ProviderCheck
                         | Command::Quotas
                         | Command::Usage { .. }
                         | Command::Settings
@@ -5674,13 +5673,6 @@ mod tests {
             .agent_tool(&session, "ask_user", ask("check-in:deploy"))
             .unwrap_err();
         assert!(refused.to_string().contains("reserved"), "{refused}");
-        let command = Command::RequestAttention {
-            session_id: session.clone(),
-            host: "local".into(),
-            operation_id: "check-in:deploy".into(),
-            prompt: "Deploy?".into(),
-        };
-        assert!(actor.host.execute(command).is_err());
         let open = |actor: &Actor| {
             actor
                 .host

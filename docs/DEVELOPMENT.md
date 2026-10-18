@@ -318,21 +318,13 @@ bash scripts/package_macos.sh
 
 `test_communications.py` uses explicit fake provider CLIs with the real host, MCP subprocess, socket, SQLite and Git worktrees. It covers cross-provider handoff, permission/answer routing, coordinator timers, exact-session resume, cancellation, restart and held-input reconciliation without inference.
 
-These optional checks make bounded real model calls in disposable workspaces:
-
-```sh
-python3 scripts/smoke_live.py --provider codex
-python3 scripts/smoke_live.py --provider claude
-python3 scripts/smoke_handoff.py
-python3 scripts/smoke_handoff.py --coordinator claude --implementer codex --tester claude
-python3 scripts/smoke_handoff.py --coordinator codex --implementer claude --tester codex
-```
+The deterministic communications harness is the maintained integration check. Historical live-provider observations below are single-run evidence, not current validation commands.
 
 The October 5 branding integration passed desktop tests, warnings-as-errors desktop Clippy, formatting, shell syntax and release packaging. The macOS plist, ICNS representations and bundle signature were verified. Live native inspection in an isolated demo store confirmed the red symbol and two-tone wordmark in light and dark appearances and a non-clipping header at the 240 px sidebar minimum.
 
 The Wiffletree release bundle built successfully and all 18 Rust tests, warnings-as-errors Clippy and deterministic communication tests pass. The rename adds coverage for preserving legacy data and selecting the new default directory. The October 4 native Markdown visual check was blocked because the Mac was locked; no new visual verification is claimed.
 
-The October 5 Claude tool/resume probe completed in 4.73 seconds then 7.41 seconds with the same provider session. The Claude-led mixed-provider ticket, including completed delivery to the main coordinator, passed in 100.94 seconds. The reverse arrangement passed in 113.88 seconds, with all recorded queue waits at 1–2 ms. In the Claude-led run, most queue waits were 1–2 ms and one was 4.277 seconds. Queue timing includes waits for an occupied recipient or ticket workspace, not just dispatch overhead. The fixture also exercised blocker escalation; an overly specific test instruction was subsequently made provider-neutral. The smoke harness approves only a short exact allowlist of fixture inspection/test commands; this approval allowlist is confined to the test harness.
+The October 5 Claude tool/resume probe completed in 4.73 seconds then 7.41 seconds with the same provider session. The Claude-led mixed-provider ticket, including completed delivery to the main coordinator, passed in 100.94 seconds. The reverse arrangement passed in 113.88 seconds, with all recorded queue waits at 1–2 ms. In the Claude-led run, most queue waits were 1–2 ms and one was 4.277 seconds. Queue timing includes waits for an occupied recipient or ticket workspace, not just dispatch overhead. The fixture also exercised blocker escalation; an overly specific test instruction was subsequently made provider-neutral.
 
 The live Codex tool/resume probe completed in 11.11 seconds then 9.43 seconds on October 4. A complete Codex fixture fixed a Python bug, ran independent tests and accepted the ticket in 123.13 seconds. Recorded queue-to-scheduling times in that fixture were 1–3 ms; the original checkout was unchanged. These are single-run observations, not latency guarantees or a cross-provider benchmark.
 

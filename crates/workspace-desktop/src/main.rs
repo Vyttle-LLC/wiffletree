@@ -71,6 +71,14 @@ enum Panel {
     Crew,
 }
 
+/// What the open Memory, Events or Git panel loaded, decoded once when its reply arrives.
+enum PanelData {
+    Loading,
+    Memory(Vec<WorkLog>),
+    Events(Vec<Activity>),
+    Git(Vec<inspector::Commit>),
+}
+
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -87,13 +95,16 @@ fn button(id: impl Into<ElementId>) -> Button {
 
 struct Workspace {
     bridge: Bridge,
-    snapshot: Option<Snapshot>,
+    /// Shared so that a frame's transcript rows can hold it without a copy.
+    snapshot: Option<Rc<Snapshot>>,
     load_error: Option<String>,
     selected: Option<String>,
     messages: Rc<Vec<Message>>,
     /// Where each loaded message sits in the transcript, recomputed whenever they change.
     placements: Rc<Vec<conversation::Placement>>,
-    open_peers: conversation::OpenPeers,
+    open_peers: Rc<conversation::OpenPeers>,
+    /// Where the loaded messages' file references resolve, recomputed with their placements.
+    transcript_links: Rc<conversation::LinkBases>,
     list: ListState,
     drafts: BTreeMap<String, String>,
     /// Files dropped on each session's conversation, waiting to go with its draft.
@@ -144,11 +155,13 @@ struct Workspace {
     /// The model each provider's Add row on the Providers card shows.
     model_drafts: BTreeMap<Provider, String>,
     model_catalog: Vec<workspace_host::runtime::ModelOption>,
+    /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
+    chat_models: Rc<BTreeMap<(Provider, String), String>>,
     catalog_pending: usize,
     catalog_loaded: bool,
     catalog_notice: String,
     panel: Option<Panel>,
-    panel_data: Value,
+    panel_data: PanelData,
     view: Page,
     creation: Option<Entity<CreationForm>>,
     pending_project_selection: Option<String>,
@@ -197,7 +210,7 @@ struct Workspace {
     /// The open turn history, which follows step changes while it is shown.
     history: Option<WeakEntity<history_sheet::HistorySheet>>,
     /// Finished runs' durations and step counts, keyed by run.
-    run_summaries: BTreeMap<String, RunSummary>,
+    run_summaries: Rc<BTreeMap<String, RunSummary>>,
     /// What the Files panel shows; fetched only while that panel is open.
     files: files_view::Files,
     /// What the Processes panel shows; read only while that panel is open.
@@ -268,7 +281,8 @@ impl Workspace {
             selected: None,
             messages: Rc::new(vec![]),
             placements: Rc::new(vec![]),
-            open_peers: conversation::OpenPeers::default(),
+            open_peers: Rc::default(),
+            transcript_links: Rc::default(),
             list: ListState::new(0, ListAlignment::Bottom, px(300.)),
             drafts: BTreeMap::new(),
             attached: BTreeMap::new(),
@@ -312,11 +326,12 @@ impl Workspace {
             suggested: None,
             model_drafts: BTreeMap::new(),
             model_catalog: models::fallback(),
+            chat_models: Rc::default(),
             catalog_pending: 0,
             catalog_loaded: false,
             catalog_notice: String::new(),
             panel: None,
-            panel_data: Value::Null,
+            panel_data: PanelData::Loading,
             view: Page::Conversation,
             creation: None,
             pending_project_selection: None,
@@ -359,7 +374,7 @@ impl Workspace {
             step_fetch: Default::default(),
             activity_clock: false,
             history: None,
-            run_summaries: BTreeMap::new(),
+            run_summaries: Rc::default(),
             files: Default::default(),
             processes: Default::default(),
             progress: Default::default(),
@@ -672,7 +687,8 @@ impl Workspace {
             },
             Command::Logs { project_id, .. } => {
                 if self.panel == Some(Panel::Memory) && self.project_id() == Some(project_id) {
-                    self.panel_data = value;
+                    let logs = serde_json::from_value(value).map(PanelData::Memory);
+                    self.accept_panel_data(logs, window, cx);
                 }
             }
             Command::Quotas | Command::RecordQuota { .. } => {
@@ -702,7 +718,8 @@ impl Workspace {
             }
             Command::Activity { project_id, .. } => {
                 if self.panel == Some(Panel::Events) && self.project_id() == Some(project_id) {
-                    self.panel_data = value;
+                    let events = serde_json::from_value(value).map(PanelData::Events);
+                    self.accept_panel_data(events, window, cx);
                 }
             }
             Command::GitHistory { repository_id, .. } => {
@@ -712,13 +729,14 @@ impl Workspace {
                         .and_then(|s| s.repository_id.clone())
                         == Some(repository_id)
                 {
-                    self.panel_data = value;
+                    let history = inspector::commits(value).map(PanelData::Git);
+                    self.accept_panel_data(history, window, cx);
                 }
             }
             Command::CreateSession { .. } | Command::AssignTicket { .. } => {
                 if let Ok(session) = serde_json::from_value::<Session>(value) {
                     let id = session.id.clone();
-                    if let Some(snapshot) = &mut self.snapshot {
+                    if let Some(snapshot) = self.snapshot.as_mut().map(Rc::make_mut) {
                         snapshot.sessions.push(session);
                     }
                     self.select(id, window, cx);
@@ -738,7 +756,7 @@ impl Workspace {
             }
             Command::RenameProject { project_id, .. } => {
                 if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    if let Some(snapshot) = &mut self.snapshot {
+                    if let Some(snapshot) = self.snapshot.as_mut().map(Rc::make_mut) {
                         if let Some(saved) =
                             snapshot.projects.iter_mut().find(|p| p.id == project_id)
                         {
@@ -763,9 +781,10 @@ impl Workspace {
                 self.request(Command::Snapshot, window, cx);
             }
             Command::MoveProjects { .. } => {
-                if let (Some(snapshot), Ok(projects)) =
-                    (&mut self.snapshot, serde_json::from_value(value))
-                {
+                if let (Some(snapshot), Ok(projects)) = (
+                    self.snapshot.as_mut().map(Rc::make_mut),
+                    serde_json::from_value(value),
+                ) {
                     snapshot.projects = projects;
                 }
             }
@@ -948,11 +967,13 @@ impl Workspace {
         conversation::forget_settled(&mut self.minimized_decisions, &snapshot.attention);
         settings::share_sync(&snapshot, cx);
         let synced = |s: &Snapshot| (s.settings_sync.clone(), s.workspace_notes.clone());
-        let resynced = self.snapshot.as_ref().map(synced) != Some(synced(&snapshot));
+        let resynced = self.snapshot.as_deref().map(synced) != Some(synced(&snapshot));
         let recompare = resynced
             .then(|| workspace_notes::recompare(&mut self.compared, snapshot.paused_settings()))
             .flatten();
-        self.snapshot = Some(snapshot);
+        self.snapshot = Some(Rc::new(snapshot));
+        self.place_links();
+        self.list_chat_models();
         if let Some(command) = recompare {
             self.request(command, window, cx);
         }
@@ -1026,9 +1047,27 @@ impl Workspace {
     }
     /// Places the loaded messages in the transcript; returns where they were placed before.
     fn place_messages(&mut self) -> Rc<Vec<conversation::Placement>> {
+        self.place_links();
         let placements =
             conversation::placements(&self.messages, self.selected.as_deref().unwrap_or_default());
         std::mem::replace(&mut self.placements, Rc::new(placements))
+    }
+    /// Works out where the loaded messages' file references resolve, once per page or snapshot.
+    fn place_links(&mut self) {
+        let senders: BTreeSet<&String> = self
+            .messages
+            .iter()
+            .filter_map(|m| m.sender.as_ref())
+            .collect();
+        self.transcript_links = Rc::new(conversation::LinkBases {
+            senders: senders
+                .into_iter()
+                .map(|id| (id.clone(), self.link_bases(id)))
+                .collect(),
+            current: (self.selected.as_deref())
+                .map(|id| self.link_bases(id))
+                .unwrap_or_default(),
+        });
     }
     fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match self.selected_session().map(|s| s.role) {
@@ -1074,7 +1113,7 @@ impl Workspace {
         self.view = Page::Conversation;
         self.page = None;
         self.list.reset(self.transcript_rows());
-        self.panel_data = Value::Null;
+        self.panel_data = PanelData::Loading;
         if let Some(role) = self.selected_session().map(|s| s.role) {
             self.panel = self.panel.map(|panel| panel.kept_for(role));
         }
@@ -1219,7 +1258,7 @@ impl Workspace {
     }
     fn show_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = Some(panel);
-        self.panel_data = Value::Null;
+        self.panel_data = PanelData::Loading;
         self.load_panel(window, cx);
         self.sync_crew_clock(window, cx);
         cx.notify();
@@ -1238,6 +1277,17 @@ impl Workspace {
             _ => {}
         }
         cx.notify();
+    }
+    fn accept_panel_data(
+        &mut self,
+        data: serde_json::Result<PanelData>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match data {
+            Ok(data) => self.panel_data = data,
+            Err(error) => self.toast_error(error.to_string(), window, cx),
+        }
     }
     fn load_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project_id) = self.project_id() else {
@@ -1311,6 +1361,7 @@ impl Workspace {
                                 view.model_catalog
                                     .retain(|model| model.provider != provider);
                                 view.model_catalog.extend(models);
+                                view.list_chat_models();
                             }
                             _ => {
                                 if !view.catalog_notice.is_empty() {

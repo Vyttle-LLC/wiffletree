@@ -6,6 +6,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
+use serde::Deserialize;
 use ui::{
     card, empty_state, eyebrow, from_now, hint, icon, mono, pill, property, section, session_icon,
 };
@@ -887,7 +888,7 @@ impl Workspace {
         if let Some(repository) = self.repository() {
             body = body.child(Self::repository_row(repository, p));
         }
-        let Some(commits) = self.panel_data["commits"].as_array() else {
+        let PanelData::Git(commits) = &self.panel_data else {
             return body.child(hint("Loading local history…", p));
         };
         if commits.is_empty() {
@@ -903,12 +904,7 @@ impl Workspace {
             .flex_col()
             .child(section("LOCAL HISTORY · READ ONLY", p));
         for commit in commits {
-            let sha: String = commit["sha"]
-                .as_str()
-                .unwrap_or_default()
-                .chars()
-                .take(7)
-                .collect();
+            let sha: String = commit.sha.chars().take(7).collect();
             history = history.child(
                 div()
                     .flex()
@@ -931,13 +927,29 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(12.5))
-                            .child(commit["subject"].as_str().unwrap_or_default().to_owned()),
+                            .child(commit.subject.clone()),
                     )
                     .child(mono(sha, p).flex_none().text_color(p.accent)),
             );
         }
         body.child(history)
     }
+}
+
+/// A commit in the Git panel's local history.
+#[derive(Deserialize)]
+pub(super) struct Commit {
+    sha: String,
+    subject: String,
+}
+
+/// The commits in a `git_history` reply.
+pub(super) fn commits(reply: Value) -> serde_json::Result<Vec<Commit>> {
+    #[derive(Deserialize)]
+    struct History {
+        commits: Vec<Commit>,
+    }
+    serde_json::from_value::<History>(reply).map(|history| history.commits)
 }
 
 /// A publish approval: what would leave the machine, then Deny and the step's own approve button.
@@ -1018,8 +1030,9 @@ fn publish_approval(
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::Panel;
+    use super::{Panel, commits};
     use workspace_core::Role;
+    use workspace_host::Host;
 
     #[test]
     fn the_crew_panel_stays_open_whichever_agent_is_selected() {
@@ -1029,5 +1042,33 @@ mod tests {
         // A panel the selected session does not have still gives way to Overview.
         assert!(Panel::Attention.kept_for(Role::Implementer) == Panel::Overview);
         assert!(Panel::Git.kept_for(Role::ProjectOrchestrator) == Panel::Overview);
+    }
+
+    /// The host's history reply is untyped JSON; the Git panel reads it into commits once.
+    #[test]
+    fn the_git_panel_reads_the_hosts_history_reply() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("web");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Base"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Add the toolbar"]);
+        let mut host = Host::open(directory.path().join("home")).unwrap();
+        let repository = host.add_repository(repo.to_str().unwrap(), "HEAD").unwrap();
+
+        let history = commits(host.git_history(&repository.id, 0, 30).unwrap()).unwrap();
+
+        let subjects: Vec<&str> = history.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["Add the toolbar", "Base"]);
+        assert!(history.iter().all(|c| c.sha.len() == 40));
     }
 }

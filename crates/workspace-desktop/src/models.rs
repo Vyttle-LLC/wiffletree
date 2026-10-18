@@ -368,7 +368,7 @@ pub fn picker_groups(
             });
         }
     }
-    let mut seen = listed.clone();
+    let mut seen = listed;
     others.retain(|p| {
         let new = !seen.contains(p);
         seen.push(p.clone());

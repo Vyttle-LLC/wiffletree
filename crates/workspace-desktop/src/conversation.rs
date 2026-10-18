@@ -441,9 +441,10 @@ fn peer_sender(message: &Message, sessions: &[Session]) -> String {
 
 /// Where relative file references in a message resolve: under its sender's directories, or the
 /// selected session's for messages from the human and Wiffletree.
-struct LinkBases {
-    senders: BTreeMap<String, Vec<PathBuf>>,
-    current: Vec<PathBuf>,
+#[derive(Default)]
+pub(super) struct LinkBases {
+    pub(super) senders: BTreeMap<String, Vec<PathBuf>>,
+    pub(super) current: Vec<PathBuf>,
 }
 impl LinkBases {
     fn of(&self, message: &Message) -> &[PathBuf] {
@@ -619,9 +620,10 @@ fn peer_line_row(
 impl Workspace {
     /// Opens or closes a peer-message run, or one line within it, and measures its row again.
     pub(super) fn toggle_peers(&mut self, head: &str, line: Option<&str>, cx: &mut Context<Self>) {
+        let peers = Rc::make_mut(&mut self.open_peers);
         let (open, id) = match line {
-            Some(line) => (&mut self.open_peers.lines, line),
-            None => (&mut self.open_peers.runs, head),
+            Some(line) => (&mut peers.lines, line),
+            None => (&mut peers.runs, head),
         };
         if !open.remove(id) {
             open.insert(id.to_owned());
@@ -1126,35 +1128,23 @@ impl Workspace {
     fn transcript(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let messages = self.messages.clone();
         let card = self.activity_card();
-        let summaries = Rc::new(self.run_summaries.clone());
+        let summaries = self.run_summaries.clone();
         let minimized = cx.global::<Preferences>().minimize_activity;
         let view = cx.entity().downgrade();
-        let sessions = self
-            .snapshot
-            .as_ref()
-            .map(|s| s.sessions.clone())
-            .unwrap_or_default();
+        let snapshot = self.snapshot.clone();
         let current = session.clone();
         let placements = self.placements.clone();
-        let open = Rc::new(self.open_peers.clone());
-        let links = LinkBases {
-            senders: messages
-                .iter()
-                .filter_map(|m| m.sender.as_ref())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .map(|id| (id.clone(), self.link_bases(id)))
-                .collect(),
-            current: self.link_bases(&current.id),
-        };
+        let open = self.open_peers.clone();
+        let links = self.transcript_links.clone();
         let transcript = list(self.list.clone(), move |ix, _, _| {
+            let sessions = snapshot.as_deref().map_or(&[][..], |s| &s.sessions);
             let placement = placements.get(ix).copied().unwrap_or(Placement::Alone);
             let content = match (placement, messages.get(ix)) {
                 // A run draws in its head's row; the rest of its rows stay empty.
                 (Placement::Folded, _) => return div().into_any_element(),
                 (Placement::Heads(count), _) => {
                     let run = &messages[ix..(ix + count).min(messages.len())];
-                    peer_run(run, &sessions, &open, &links, p, view.clone())
+                    peer_run(run, sessions, &open, &links, p, view.clone())
                 }
                 (_, Some(message)) if from_human(message) => {
                     human_message(message, links.of(message), p)
@@ -1258,6 +1248,25 @@ impl Workspace {
         })
     }
 
+    /// The chat's model menu: every catalog model and every allowed one, by provider and model.
+    pub(super) fn list_chat_models(&mut self) {
+        let mut models: BTreeMap<(Provider, String), String> = self
+            .model_catalog
+            .iter()
+            .map(|model| ((model.provider, model.model.clone()), model.label.clone()))
+            .collect();
+        if let Some(snapshot) = &self.snapshot {
+            for provider in PROVIDERS {
+                for allowed in snapshot.model_selection.allowed(provider) {
+                    models
+                        .entry((provider, allowed.model.clone()))
+                        .or_insert_with(|| allowed.model.clone());
+                }
+            }
+        }
+        self.chat_models = Rc::new(models);
+    }
+
     fn model_controls(&self, session: &Session, cx: &mut Context<Self>) -> Div {
         // An agent without a model is held; its menu asks for one instead of naming a model.
         let pinned = self.selected_profile();
@@ -1277,26 +1286,17 @@ impl Workspace {
         let busy = session.status == Status::Working;
         // A PR keeper agent keeps the model chosen in Models when it was created.
         let fixed = busy || session.role == Role::Keeper;
-        let mut models: BTreeMap<(Provider, String), String> = self
-            .model_catalog
-            .iter()
-            .map(|model| ((model.provider, model.model.clone()), model.label.clone()))
-            .collect();
-        if let Some(snapshot) = &self.snapshot {
-            for provider in PROVIDERS {
-                for allowed in snapshot.model_selection.allowed(provider) {
-                    models
-                        .entry((provider, allowed.model.clone()))
-                        .or_insert_with(|| allowed.model.clone());
-                }
-            }
-        }
+        let models = self.chat_models.clone();
+        // A model pinned before it left the catalog and the allowed list is still listed.
+        let pinned = (!unchosen)
+            .then(|| (profile.provider, profile.model.clone()))
+            .filter(|key| !models.contains_key(key));
         let label = if unchosen {
             "Choose a model".to_owned()
         } else {
             let model = models
-                .entry((profile.provider, profile.model.clone()))
-                .or_insert_with(|| profile.model.clone());
+                .get(&(profile.provider, profile.model.clone()))
+                .unwrap_or(&profile.model);
             format!("{:?} · {model}", profile.provider)
         };
         let session_id = session.id.clone();
@@ -1315,7 +1315,11 @@ impl Workspace {
                 "Model for this agent only"
             })
             .dropdown_menu(move |mut menu, _, _| {
-                for ((provider, model), label) in &models {
+                let mut entries: Vec<_> = (models.iter())
+                    .chain(pinned.iter().map(|key| (key, &key.1)))
+                    .collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                for ((provider, model), label) in entries {
                     let next = ModelProfile {
                         provider: *provider,
                         model: model.clone(),

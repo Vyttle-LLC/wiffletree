@@ -2884,7 +2884,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn no_agent_or_client_can_raise_an_item_under_a_host_approval_prefix() {
+    fn no_agent_can_raise_an_item_under_a_host_approval_prefix() {
         let mut f = fixture();
         let coordinator = f.coordinator.id.clone();
         for prefix in ["publish:", "permission:"] {
@@ -2901,13 +2901,6 @@ pub(crate) mod tests {
                     .contains("reserved for the workspace"),
                 "{prefix}"
             );
-            let commanded = f.host.execute(Command::RequestAttention {
-                session_id: coordinator.clone(),
-                host: "local".into(),
-                operation_id: request,
-                prompt: "Push?".into(),
-            });
-            assert!(commanded.is_err(), "{prefix}");
         }
         assert!(f.open_items().is_empty());
     }

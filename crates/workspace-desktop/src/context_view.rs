@@ -1,8 +1,8 @@
 //! How full the selected session's context window is, and with what; and the Compact action
 //! that asks the agent's provider to replace the conversation with a summary.
 use super::*;
-use gpui_component::{Disableable, Sizable, button::ButtonVariants, spinner::Spinner};
-use ui::{age, card, hint, icon, progress_bar, section};
+use gpui_component::{Disableable, Sizable, button::ButtonVariants};
+use ui::{Spinner, age, card, hint, icon, progress_bar, section};
 use workspace_host::compaction::REASON_LIMIT;
 use workspace_host::context::{ContextUsage, Probe};
 
