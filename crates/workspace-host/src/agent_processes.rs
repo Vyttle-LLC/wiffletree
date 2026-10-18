@@ -3,6 +3,9 @@
 //! and across its turns. A row without `ended_at` is a group the host believes is running. A
 //! group that exits on its own, or a provider's group stopped at its turn's end, is deleted,
 //! so the tables hold what runs now and what the host stopped, when and why.
+//! During a run the watcher and lazy group confirmation remove only proven exited process
+//! identities; a live member that changes groups stays recorded in a still-running earlier
+//! group, for the confirmation rule.
 //!
 //! What an agent starts keeps running between its turns. The host stops it when the agent is
 //! archived or stopped, at a quit and at startup, always through `processes::stop_group`.
@@ -270,9 +273,9 @@ impl Host {
         }
         Ok(())
     }
-    /// Makes the record's members the processes that are in the group now. While a run is live
-    /// its members gather, exited ones included until a sighting's confirmation finds them
-    /// gone; between turns the record is exact.
+    /// Makes the record's members the confirmed processes in the group, between turns or
+    /// when stopped. During a run, sightings add live members; the watcher and lazy group
+    /// confirmation remove only identities proven to have exited.
     fn replace_members(&self, record: &str, processes: &[ProcessInfo]) -> Result<()> {
         self.db.execute(
             "DELETE FROM process_group_members WHERE group_id=?1",
@@ -314,8 +317,8 @@ impl Host {
             Ok(())
         })
     }
-    /// Records what the watcher saw of a run's tree: each process under its group, and each
-    /// group whose every process has exited no longer.
+    /// Records what the watcher saw of a run's tree: each process under its group, removing
+    /// exited identities and groups whose every process has exited.
     pub(crate) fn record_sightings(
         &mut self,
         session: &str,
@@ -328,6 +331,15 @@ impl Host {
                     Sighting::Member(process) => {
                         let record = host.record_for_sighting(session, run, process)?;
                         host.record_members(&record, std::slice::from_ref(process))?;
+                    }
+                    Sighting::MemberExited { pid, started } => {
+                        // A live process can move between groups. Only its exit removes
+                        // its identity from every open group it was recorded in.
+                        host.db.execute(
+                            "DELETE FROM process_group_members WHERE pid=?1 AND started=?2 AND group_id IN
+                             (SELECT id FROM process_groups WHERE session_id=?3 AND ended_at IS NULL)",
+                            params![pid, started, session],
+                        )?;
                     }
                     Sighting::GroupExited(group) => {
                         host.db.execute(
@@ -387,10 +399,11 @@ impl Host {
         Ok(id)
     }
     /// Whether a member the row recorded is still alive in `group`. The members are probed
-    /// one at a time, and those found to have exited are deleted as they are passed: they
+    /// one at a time, and those proven to have exited are deleted as they are passed: they
     /// can never confirm anything again, and a build's thousands of short-lived processes
     /// would otherwise be probed again at every sighting. So each member is probed as gone
-    /// at most once, and a sighting costs about one probe.
+    /// at most once, and a sighting costs about one probe. A failed read without proof of
+    /// exit keeps the member, as does a live member that moved to another group.
     fn confirms_group(&self, record: &str, group: i32) -> Result<bool> {
         let mut exited: Vec<Member> = vec![];
         let confirmed = {
@@ -406,7 +419,8 @@ impl Host {
                     Some(process) if process.group == group => break true,
                     // It left the group, so it does not confirm it, but it lives.
                     Some(_) => {}
-                    None => exited.push(member),
+                    None if processes::recorded_exited(member) => exited.push(member),
+                    None => {}
                 }
             }
         };
@@ -755,6 +769,113 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lazy_confirmation_prunes_an_exited_identity_but_keeps_a_live_member_outside_the_group() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.create_project("Confirmation").unwrap();
+        let session = host.sessions().unwrap().remove(0).id;
+        let live = processes::read(std::process::id() as i32).unwrap();
+        host.db.execute(
+            "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at) VALUES ('group',?1,'run',?2,0)",
+            params![session, live.group],
+        ).unwrap();
+        let exited = ProcessInfo {
+            started: live.started - 1,
+            ..live.clone()
+        };
+        host.record_members("group", &[exited, live.clone()])
+            .unwrap();
+
+        // The old start time sorts first, but the live identity cannot confirm this group.
+        assert!(!host.confirms_group("group", live.group + 1).unwrap());
+        let remaining: Vec<Member> = host
+            .db
+            .prepare("SELECT pid,started FROM process_group_members WHERE group_id='group'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(remaining, [(i64::from(live.pid), live.started)]);
+        assert!(host.confirms_group("group", live.group).unwrap());
+    }
+
+    #[test]
+    fn an_exit_removes_only_that_identity_from_the_agents_open_groups() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.create_project("Exits").unwrap();
+        let session = host.sessions().unwrap().remove(0).id;
+        host.create_project("Unrelated").unwrap();
+        let other = host
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id != session)
+            .unwrap()
+            .id;
+        for (id, owner, group, ended) in [
+            ("original", &session, 10, None),
+            ("moved", &session, 20, None),
+            ("stopped", &session, 30, Some(1)),
+            ("unrelated", &other, 10, None),
+        ] {
+            host.db.execute(
+                "INSERT INTO process_groups(id,session_id,run_id,process_group,seen_at,ended_at) VALUES (?1,?2,'earlier',?3,0,?4)",
+                params![id, owner, group, ended],
+            ).unwrap();
+            host.record_members(
+                id,
+                &[
+                    process(100, "exited", 1),
+                    process(100, "reused pid", 2),
+                    process(101, "still alive", 1),
+                ],
+            )
+            .unwrap();
+        }
+        // Even if the last group was never recorded, an exit clears its earlier groups.
+        host.record_sightings(
+            &session,
+            "current",
+            &[
+                Sighting::MemberExited {
+                    pid: 100,
+                    started: 1,
+                },
+                Sighting::MemberExited {
+                    pid: 999,
+                    started: 1,
+                },
+            ],
+        )
+        .unwrap();
+        let remaining: Vec<(String, i64, i64)> = host.db
+            .prepare("SELECT group_id,pid,started FROM process_group_members ORDER BY group_id,pid,started")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            [
+                ("moved".into(), 100, 2),
+                ("moved".into(), 101, 1),
+                ("original".into(), 100, 2),
+                ("original".into(), 101, 1),
+                ("stopped".into(), 100, 1),
+                ("stopped".into(), 100, 2),
+                ("stopped".into(), 101, 1),
+                ("unrelated".into(), 100, 1),
+                ("unrelated".into(), 100, 2),
+                ("unrelated".into(), 101, 1),
+            ]
+        );
+    }
 
     fn process(pid: i32, command: &str, started: i64) -> ProcessInfo {
         ProcessInfo {

@@ -49,25 +49,40 @@ mod os {
     use super::ProcessInfo;
     use std::ffi::{CStr, c_char, c_int, c_void};
 
-    /// The kernel's account of a live process. A zombie has exited.
-    fn info(pid: i32) -> Option<libc::proc_bsdinfo> {
+    /// The kernel's account of a process, or why it could not be read.
+    fn info(pid: i32) -> std::io::Result<libc::proc_bsdinfo> {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
         let read = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        (read == size && info.pbi_status != libc::SZOMB).then_some(info)
+        if read == size {
+            Ok(info)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    /// A failed read, as during an exec, is not proof that a process exited.
+    pub(crate) fn exited(pid: i32) -> bool {
+        match info(pid) {
+            Ok(info) => info.pbi_status == libc::SZOMB,
+            // macOS also reports ESRCH for zombies, even while a signal probe finds the id.
+            Err(error) => error.raw_os_error() == Some(libc::ESRCH),
+        }
     }
 
     /// Whether the process has stopped, as on SIGSTOP. A process stops on its way back to
     /// user mode, so one that has stopped is not part way through a fork.
     pub(crate) fn stopped(pid: i32) -> bool {
-        info(pid).is_some_and(|info| info.pbi_status == libc::SSTOP)
+        info(pid).is_ok_and(|info| info.pbi_status == libc::SSTOP)
     }
 
     /// The process, unless it has exited or belongs to another user.
     pub(crate) fn read(pid: i32) -> Option<ProcessInfo> {
-        let info = info(pid)?;
+        let info = info(pid)
+            .ok()
+            .filter(|info| info.pbi_status != libc::SZOMB)?;
         let name = |text: &[c_char]| {
             // SAFETY: the kernel ends both names with a NUL inside their arrays.
             let text = unsafe { CStr::from_ptr(text.as_ptr()) };
@@ -122,6 +137,9 @@ mod os {
 
     pub(crate) fn read(_pid: i32) -> Option<ProcessInfo> {
         None
+    }
+    pub(crate) fn exited(_pid: i32) -> bool {
+        false
     }
     pub(crate) fn stopped(_pid: i32) -> bool {
         false
@@ -262,6 +280,18 @@ pub(crate) fn recorded_alive((pid, started): Member) -> Option<ProcessInfo> {
         .filter(|process| process.started == started)
 }
 
+/// Whether the recorded identity is proven to have exited. An unreadable live process may
+/// confirm its group later, so a failed read alone must never remove its record.
+pub(crate) fn recorded_exited((pid, started): Member) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    match read(pid) {
+        Some(process) => process.started != started,
+        None => os::exited(pid),
+    }
+}
+
 /// The processes now in the group, if one of the recorded members is still alive in it.
 /// Everything in a group that never emptied belongs to it.
 pub(crate) fn confirmed_members(group: i64, recorded: &[Member]) -> Option<Vec<ProcessInfo>> {
@@ -322,6 +352,8 @@ pub(crate) fn stop_group(group: i64, recorded: &[Member]) -> Stop {
 pub enum Sighting {
     /// A process of the tree, when first seen and whenever its group or command changes.
     Member(ProcessInfo),
+    /// This process identity is no longer alive, in any group.
+    MemberExited { pid: i32, started: i64 },
     /// Every process of this group has exited.
     GroupExited(i32),
 }
@@ -402,7 +434,14 @@ impl Tree {
                 *known = now;
                 true
             }
+            // Keep an unreadable identity for the next scan. Removing a live member could
+            // take away the host's proof that its earlier group is safe to stop.
+            None if !os::exited(*pid) => true,
             _ => {
+                self.pending.push(Sighting::MemberExited {
+                    pid: *pid,
+                    started: known.started,
+                });
                 left.insert(known.group);
                 false
             }
@@ -434,6 +473,9 @@ impl Tree {
             .collect();
         sightings.retain(|sighting| match sighting {
             Sighting::Member(process) => !exited.contains(&process.group),
+            // An identity may have been recorded in an earlier group before moving. Keep
+            // its exit even if its last group was never told; deleting no row is harmless.
+            Sighting::MemberExited { .. } => true,
             Sighting::GroupExited(group) => self.told.remove(group),
         });
         for sighting in &sightings {
@@ -650,6 +692,31 @@ pub(crate) mod tests {
 
     fn member(process: &ProcessInfo) -> Member {
         (i64::from(process.pid), process.started)
+    }
+
+    fn exited(process: &ProcessInfo) -> Sighting {
+        Sighting::MemberExited {
+            pid: process.pid,
+            started: process.started,
+        }
+    }
+
+    #[test]
+    fn an_exit_is_proved_for_zombies_and_reaped_processes_but_not_live_ones() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let _started = Started(vec![pid]);
+        let recorded = member(&read(pid).unwrap());
+        assert!(!os::exited(pid));
+        assert!(!recorded_exited(recorded));
+        assert!(recorded_exited((recorded.0, recorded.1 - 1)));
+        child.kill().unwrap();
+        until("the process to become a zombie", || os::exited(pid));
+        assert!(read(pid).is_none());
+        assert!(recorded_exited(recorded));
+        child.wait().unwrap();
+        assert!(os::exited(pid));
+        assert!(recorded_exited(recorded));
     }
 
     /// The ids of the processes a stop stopped; anything else fails the test.
@@ -1022,9 +1089,51 @@ sys.stdin.readline()
             .iter()
             .filter_map(|sighting| match sighting {
                 Sighting::Member(process) => Some((process.group, process.pid)),
-                Sighting::GroupExited(_) => None,
+                Sighting::MemberExited { .. } | Sighting::GroupExited(_) => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_live_member_that_changes_groups_is_not_reported_exited() {
+        let mut provider = Provider::start();
+        let gate = Gate::new();
+        let mut watcher = Watcher::default();
+        let key = watcher.add(provider.pid());
+        watcher.take(key);
+        let tool: i32 = provider
+            .run(&format!(
+                "python3 -c 'import os,sys,time; print(os.getpid(),flush=True); open(sys.argv[1]).readline(); os.setpgid(0,int(sys.argv[2])); print(\"moved\",flush=True); time.sleep(30)' {} {} & :",
+                gate.path(), provider.pid()
+            ))
+            .parse()
+            .unwrap();
+        let _started = Started(vec![tool]);
+        let process = read(tool).unwrap();
+        assert_eq!(process.group, tool);
+        watcher.scan();
+        assert_eq!(members(&watcher.take(key)), [(tool, tool)]);
+
+        gate.open();
+        let mut line = String::new();
+        provider.output.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "moved");
+        watcher.scan();
+        let seen = watcher.take(key);
+        assert_eq!(members(&seen), [(provider.pid(), tool)]);
+        assert!(
+            !seen
+                .iter()
+                .any(|s| matches!(s, Sighting::MemberExited { .. }))
+        );
+        assert_eq!(read(tool).unwrap().started, process.started);
+
+        unsafe {
+            libc::kill(tool, libc::SIGKILL);
+        }
+        until("the moved tool to exit", || read(tool).is_none());
+        watcher.scan();
+        assert_eq!(watcher.take(key), [exited(&process)]);
     }
 
     #[test]
@@ -1054,12 +1163,14 @@ sys.stdin.readline()
         let seen = members(&watcher.take(key));
         assert!(seen.contains(&(shell, shell)), "{seen:?}");
         assert!(seen.contains(&(shell, sleep)), "{seen:?}");
+        let shell_exit = exited(&read(shell).unwrap());
+        let sleep_exit = exited(&read(sleep).unwrap());
 
         // The shell exits; its orphan stays in the tree and in the group.
         gate.open();
         until("the tool shell to exit", || read(shell).is_none());
         watcher.scan();
-        assert_eq!(watcher.take(key), []);
+        assert_eq!(watcher.take(key), [shell_exit]);
         assert!(watcher.trees[&key].members.contains_key(&sleep));
 
         // Once the orphan has gone too, the group is reported gone.
@@ -1068,7 +1179,10 @@ sys.stdin.readline()
         }
         until("the orphan to exit", || read(sleep).is_none());
         watcher.scan();
-        assert_eq!(watcher.take(key), [Sighting::GroupExited(shell)]);
+        assert_eq!(
+            watcher.take(key),
+            [sleep_exit, Sighting::GroupExited(shell)]
+        );
     }
 
     #[test]
@@ -1117,6 +1231,7 @@ sys.stdin.readline()
         let mut started = Started(vec![shell]);
         watcher.scan();
         assert!(members(&watcher.take(key)).contains(&(shell, shell)));
+        let shell_exit = exited(&read(shell).unwrap());
 
         // The watcher does not look for over a second, as when the machine stalls. Meanwhile
         // the shell starts a child nobody saw and exits.
@@ -1132,7 +1247,7 @@ sys.stdin.readline()
         // After so long the group's id could be another group's, so its member is not taken
         // for the agent's. But something has that id, so the group is not said to have exited:
         // its record stays, for the host to stop or to ask the human about.
-        assert_eq!(watcher.take(key), []);
+        assert_eq!(watcher.take(key), [shell_exit]);
         assert!(!watcher.trees[&key].members.contains_key(&sleep));
 
         // A group nothing is in any more has exited, however long the watcher was away.
@@ -1143,13 +1258,14 @@ sys.stdin.readline()
         started.0.push(gone);
         watcher.scan();
         assert!(members(&watcher.take(key)).contains(&(gone, gone)));
+        let gone_exit = exited(&read(gone).unwrap());
         unsafe {
             libc::kill(gone, libc::SIGKILL);
         }
         until("the command to exit", || read(gone).is_none());
         watcher.scanned_at = Instant::now().checked_sub(CONTINUITY * 2);
         watcher.scan();
-        assert_eq!(watcher.take(key), [Sighting::GroupExited(gone)]);
+        assert_eq!(watcher.take(key), [gone_exit, Sighting::GroupExited(gone)]);
     }
 
     #[test]
@@ -1210,7 +1326,7 @@ sys.stdin.readline()
     }
 
     #[test]
-    fn a_command_that_came_and_went_between_two_takes_is_not_told() {
+    fn a_group_that_came_and_went_between_two_takes_is_not_told() {
         let mut provider = Provider::start();
         let mut watcher = Watcher::default();
         let key = watcher.add(provider.pid());
@@ -1223,12 +1339,13 @@ sys.stdin.readline()
         let _started = Started(vec![shell]);
         watcher.scan();
         assert!(watcher.trees[&key].members.contains_key(&shell));
+        let shell_exit = exited(&read(shell).unwrap());
         unsafe {
             libc::kill(shell, libc::SIGKILL);
         }
         until("the command to exit", || read(shell).is_none());
         watcher.scan();
-        assert_eq!(watcher.take(key), []);
+        assert_eq!(watcher.take(key), [shell_exit]);
     }
 
     #[test]

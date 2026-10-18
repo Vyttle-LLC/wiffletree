@@ -49,6 +49,34 @@ case "$prompt" in
 *TOOL_THEN_LINGER*)
   tool sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; touch "$0"; exec sleep 300' "$ready"
   started;;
+*CHURN_CHILDREN*)
+  tool python3 -c '
+import os, signal, sys, time
+ready = sys.argv[1]
+with open(os.environ["WORKSPACE_TEST_PIDS"], "a") as saved:
+    saved.write(str(os.getpid()) + "\n")
+for batch in range(3):
+    children = []
+    for _ in range(12):
+        child = os.fork()
+        if child == 0:
+            while True:
+                signal.pause()
+        children.append(child)
+        with open(os.environ["WORKSPACE_TEST_PIDS"], "a") as saved:
+            saved.write(str(child) + "\n")
+    gate = ready + "." + str(batch)
+    while not os.path.exists(gate + ".reap"):
+        time.sleep(0.01)
+    for child in children:
+        os.kill(child, signal.SIGTERM)
+        os.waitpid(child, 0)
+    open(gate + ".reaped", "w").close()
+    while not os.path.exists(gate + ".next"):
+        time.sleep(0.01)
+while True:
+    signal.pause()
+' "$ready";;
 *LEAVE_ORPHANS*)
   # The tool shell leads the group and starts two children. It exits when the test has seen
   # them recorded, and the turn ends after it has: whether the watcher lists a short-lived
@@ -1228,6 +1256,78 @@ fn rail_count(service: &Service, session: &Session) -> u32 {
     let counts = snapshot(service).running_processes;
     let count = counts.iter().find(|c| c.session_id == session.id);
     count.map_or(0, |c| c.count)
+}
+
+#[test]
+fn a_live_runs_record_and_rail_count_drop_reaped_children_and_the_group_still_stops() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = install_provider(scratch.path());
+    let (_, main) = project(home.path(), scratch.path(), "Churn");
+    let service = start(home.path());
+    send(&service, "churn", &main, "CHURN_CHILDREN");
+    let tool = until_tool_running(home.path(), &main);
+    let ready = format!("{}.{}", provider.pids.display(), groups(&provider)[0]);
+
+    for batch in 0..3 {
+        until(&service, "all twelve children to be recorded", |s| {
+            s.running_processes
+                .iter()
+                .any(|c| c.session_id == main.id && c.count == 13)
+                && recorded(home.path(), &main)
+                    .iter()
+                    .any(|r| r.group == tool && r.members.len() == 13)
+        });
+        let gate = format!("{ready}.{batch}");
+        std::fs::write(format!("{gate}.reap"), "").unwrap();
+        common::until("the tool to reap its children", || {
+            Path::new(&format!("{gate}.reaped")).exists()
+        });
+        // The run stays live, with just its long-lived tool. No between-turn replacement
+        // or panel refresh can be responsible for shrinking the record or the badge.
+        until(
+            &service,
+            "only the long-lived tool to remain recorded",
+            |s| {
+                s.running_processes
+                    .iter()
+                    .any(|c| c.session_id == main.id && c.count == 1)
+                    && recorded(home.path(), &main)
+                        .iter()
+                        .any(|r| r.group == tool && r.members == [tool])
+            },
+        );
+        assert_eq!(status(&snapshot(&service), &main.id), Status::Working);
+        assert_eq!(run_result(home.path(), &main.id).0, None);
+        if batch < 2 {
+            std::fs::write(format!("{gate}.next"), "").unwrap();
+        }
+    }
+
+    let listing = panel(&service, &main);
+    let [group] = &listing[0].groups[..] else {
+        panic!("one tool group: {listing:?}")
+    };
+    assert!(group.confirmed);
+    assert_eq!(group.processes.len(), 1);
+    assert_eq!(group.processes[0].pid, tool);
+    assert!(
+        stop_from_panel(&service, &main, &[&group.id])[0]
+            .groups
+            .is_empty()
+    );
+    assert!(!group_runs(tool));
+    assert_eq!(rail_count(&service, &main), 0);
+    assert_tool_stopped(
+        recorded(home.path(), &main)
+            .iter()
+            .find(|r| r.group == tool)
+            .unwrap(),
+        tool,
+        "stopped_by_human",
+    );
+    assert!(snapshot(&service).attention.is_empty());
 }
 
 #[test]
