@@ -27,13 +27,14 @@ pub(super) fn transcript_overlap(
 
 /// A peer message is coordination traffic rather than conversation: anything another session
 /// sent this one (reports and verdicts, turn results, check-ins, direct messages, a
-/// coordinator's assignments) and this session's own timer fires. The human's messages,
-/// Wiffletree's notices and the session's own replies, errors and compaction lines are not.
+/// coordinator's assignments), this session's own timer fires and Wiffletree's notices. The
+/// human's messages and the session's own replies, errors and compaction lines are not.
 fn peer_message(message: &Message, session_id: &str) -> bool {
-    message.sender.as_deref().is_some_and(|sender| {
-        (sender != session_id && host_notice(&message.id).is_none())
-            || message.id.starts_with(TIMER_PREFIX)
-    })
+    host_notice(&message.id).is_some()
+        || message
+            .sender
+            .as_deref()
+            .is_some_and(|sender| sender != session_id || message.id.starts_with(TIMER_PREFIX))
 }
 
 /// Where a message sits in the transcript. Every message keeps its own list row, so the list's
@@ -81,6 +82,7 @@ fn peer_line(message: &Message) -> PeerLine<'_> {
         MessageKind::Report(ReportKind::Failed) => Some("failed"),
         MessageKind::Report(ReportKind::Blocked) => Some("blocked"),
         MessageKind::TurnResult { failed: true } => Some("error"),
+        MessageKind::Notice(notice) => notice.trouble().map(ReportKind::name),
         _ => None,
     };
     PeerLine {
@@ -108,15 +110,20 @@ fn run_troubles(run: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// "3 agent messages · Implementer, Tester", the start of a run's row.
-fn run_heading(count: usize, senders: &[SharedString]) -> String {
+/// "2 agent messages, 1 notice · Implementer, Wiffletree", the start of a run's row.
+fn run_heading(agent_messages: usize, notices: usize, senders: &[SharedString]) -> String {
     let mut names: Vec<&str> = vec![];
     for sender in senders {
         if !names.contains(&sender.as_ref()) {
             names.push(sender);
         }
     }
-    format!("{} · {}", counted(count, "agent message"), names.join(", "))
+    let counts: Vec<String> = [(agent_messages, "agent message"), (notices, "notice")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, noun)| counted(count, noun))
+        .collect();
+    format!("{} · {}", counts.join(", "), names.join(", "))
 }
 
 /// Messages without a sender are the human's, apart from Wiffletree's own notices.
@@ -124,17 +131,32 @@ fn from_human(message: &Message) -> bool {
     message.sender.is_none() && host_notice(&message.id).is_none()
 }
 
-/// How a row not in a run of peer messages draws.
+/// How a row not in a run of peer messages draws. Wiffletree's notices are always in a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shape {
     Human,
-    /// From Wiffletree itself, such as the PR watcher.
-    Notice,
     Compaction,
     /// From an agent: this session's own reply, or another agent's report.
     Agent {
         own: bool,
     },
+}
+
+/// How a kind's pill is colored: an agent message's kind, a notice's, or trouble in red.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Kind,
+    Notice,
+    Trouble,
+}
+impl Tone {
+    fn color(self, p: Palette) -> Hsla {
+        match self {
+            Self::Kind => p.focus,
+            Self::Notice => p.subtle,
+            Self::Trouble => p.red,
+        }
+    }
 }
 
 /// A message as the transcript draws it. Everything here is worked out when its page arrives,
@@ -145,8 +167,8 @@ pub(super) struct Row {
     /// The sending agent's name, a timer's label, or the notice's sender.
     sender: SharedString,
     role: Option<Role>,
-    /// The kind's label, and whether it says something went wrong.
-    pill: Option<(SharedString, bool)>,
+    /// The kind's label and color.
+    pill: Option<(SharedString, Tone)>,
     receipt: SharedString,
     /// The first line of what it says, for its line in an opened run.
     first_line: SharedString,
@@ -207,8 +229,6 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
             let own = message.sender.as_deref() == Some(senders.session_id.as_str());
             let shape = if from_human(message) {
                 Shape::Human
-            } else if message.sender.is_none() {
-                Shape::Notice
             } else if kind == MessageKind::Compaction {
                 Shape::Compaction
             } else {
@@ -219,25 +239,28 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
             let tagged = matches!(kind, MessageKind::Report(_) | MessageKind::Timer);
             let (pill, text) = match shape {
                 _ if peer => {
-                    let pill = line
-                        .kind
-                        .map(|kind| (humanize(kind).into(), line.trouble.is_some()));
+                    let tone = match (line.trouble, kind) {
+                        (Some(_), _) => Tone::Trouble,
+                        (None, MessageKind::Notice(_)) => Tone::Notice,
+                        (None, _) => Tone::Kind,
+                    };
+                    let pill = line.kind.map(|kind| (humanize(kind).into(), tone));
                     (pill, line.text)
                 }
                 Shape::Agent { own: false } if tagged => {
-                    let pill = kind.name().map(|kind| (humanize(kind).into(), false));
+                    let pill = kind.name().map(|kind| (humanize(kind).into(), Tone::Kind));
                     (pill, kind.text(&message.body))
                 }
                 _ => (None, message.body.as_str()),
             };
             let shown = match shape {
                 _ if peer => true,
-                Shape::Notice => true,
                 Shape::Compaction => false,
                 Shape::Human | Shape::Agent { .. } => !text.trim().is_empty(),
             };
-            let sender = match (shape, kind.timer_label(&message.body), named(message)) {
-                (Shape::Notice, ..) => host_notice(&message.id).unwrap_or("Wiffletree").into(),
+            let notice = host_notice(&message.id);
+            let sender = match (notice, kind.timer_label(&message.body), named(message)) {
+                (Some(notice), ..) => notice.into(),
                 (_, Some(label), _) => label.to_owned().into(),
                 (_, None, Some((name, _))) => name.clone(),
                 _ => "Agent".into(),
@@ -264,7 +287,11 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
                 .iter()
                 .map(|row| row.sender.clone())
                 .collect();
-            rows[head].run = Some((run_heading(run.len(), &names), run_troubles(&messages[run])));
+            let notices = (messages[run.clone()].iter())
+                .filter(|m| host_notice(&m.id).is_some())
+                .count();
+            let heading = run_heading(run.len() - notices, notices, &names);
+            rows[head].run = Some((heading, run_troubles(&messages[run])));
         }
     }
     rows
@@ -342,40 +369,6 @@ fn human_message(message: &Message, row: &Row, p: Palette) -> Div {
         )
 }
 
-/// A notice from Wiffletree itself, such as the PR watcher's.
-fn notice_message(message: &Message, row: &Row, p: Palette) -> Div {
-    div()
-        .w_full()
-        .flex()
-        .gap_3()
-        .child(avatar("server", p.subtle))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .min_h(px(26.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(font::MESSAGE))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(row.sender.clone()),
-                        )
-                        .child(div().flex_1())
-                        .child(receipt(message, row, p))
-                        .child(meta(age(message.created_at), p)),
-                )
-                .children(row.body.as_ref().map(Linked::view)),
-        )
-}
-
 /// One line where a finished turn's summary would be, never a bubble; red when it failed.
 fn compaction_message(line: CompactionLine, p: Palette) -> Div {
     let CompactionLine {
@@ -449,8 +442,8 @@ fn agent_message(message: &Message, row: &Row, own: bool, p: Palette) -> Div {
                         .when_some(row.role.filter(|_| !own), |d, role| {
                             d.child(meta(role.label(), p))
                         })
-                        .when_some(row.pill.as_ref(), |d, (kind, _)| {
-                            d.child(pill(kind.clone(), p.focus))
+                        .when_some(row.pill.as_ref(), |d, (kind, tone)| {
+                            d.child(pill(kind.clone(), tone.color(p)))
                         })
                         .child(div().flex_1())
                         .when(!own, |d| d.child(receipt(message, row, p)))
@@ -580,8 +573,8 @@ fn peer_line_row(
                         .text_color(p.text)
                         .child(row.sender.clone()),
                 )
-                .when_some(row.pill.as_ref(), |d, (kind, trouble)| {
-                    d.child(pill(kind.clone(), if *trouble { p.red } else { p.focus }))
+                .when_some(row.pill.as_ref(), |d, (kind, tone)| {
+                    d.child(pill(kind.clone(), tone.color(p)))
                 })
                 .child(
                     div()
@@ -1268,7 +1261,6 @@ impl Transcript {
                         peer_run(&messages[run.clone()], &rows[run], &open, p, view.clone())
                     }
                     (_, Shape::Human) => human_message(message, row, p),
-                    (_, Shape::Notice) => notice_message(message, row, p),
                     (_, Shape::Compaction) => {
                         compaction_message(CompactionLine::parse(&message.body), p)
                     }
@@ -1389,8 +1381,8 @@ mod tests {
     use super::{
         MessageRevisions, PageAsk,
         Placement::{Alone, Folded, Heads},
-        Senders, Shape, from_human, peer_line, placements, prepare, run_heading, run_troubles,
-        transcript_overlap,
+        Senders, Shape, Tone, from_human, peer_line, peer_message, placements, prepare,
+        run_heading, run_troubles, transcript_overlap,
     };
     use crate::shared::Shared;
     use gpui::SharedString;
@@ -1420,6 +1412,14 @@ mod tests {
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!from_human(&reply));
+        assert!(peer_message(
+            &message("pr:t:merged:141", "PR #141 merged."),
+            "s"
+        ));
+        assert!(!peer_message(
+            &message("answer:a", "Human answer to Q: yes"),
+            "s"
+        ));
     }
 
     #[test]
@@ -1558,7 +1558,7 @@ mod tests {
         ];
         assert_eq!(placements(&transcript, "me"), [Alone, Heads(1)]);
         assert_eq!(
-            run_heading(1, &[SharedString::from("Coordinator")]),
+            run_heading(1, 0, &[SharedString::from("Coordinator")]),
             "1 agent message · Coordinator"
         );
     }
@@ -1611,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    fn wiffletree_notices_and_the_humans_messages_break_a_run() {
+    fn wiffletree_notices_fold_but_the_humans_messages_break_a_run() {
         let transcript = [
             from(
                 Some("impl"),
@@ -1625,11 +1625,35 @@ mod tests {
                 "[completed] Implementer\nDone",
             ),
             from(None, "m1", "Nice"),
+            from(None, "keeper:t:push:e21f0aa:4a1c2e9", "Not pushed."),
+            from(None, "answer:q1", "Human answer to Q: yes"),
+            from(None, "verification:t:1:outcome", "Passed."),
         ];
         assert_eq!(
             placements(&transcript, "me"),
-            [Heads(1), Alone, Heads(1), Alone]
+            [Heads(3), Folded, Folded, Alone, Heads(1), Alone, Heads(1)]
         );
+    }
+
+    #[test]
+    fn a_notice_that_reports_a_failure_is_trouble() {
+        let run = [
+            from(None, "pr:t:checks:141:9e03c1b", "PR #141: checks failed."),
+            from(
+                None,
+                "verification:t:1:outcome",
+                "Wiffletree verification of ticket \"Fix\" (t) is blocked after cycle 1: a verifier could not verify.",
+            ),
+            from(None, "pr:t:merged:142", "PR #142 merged."),
+            from(Some("b"), "report:b:1", "[failed] Tester\nBlocking: y"),
+        ];
+        assert_eq!(run_troubles(&run), ["2 failed", "1 blocked"]);
+        let checks = peer_line(&run[0]);
+        assert_eq!(
+            (checks.kind, checks.trouble),
+            (Some("checks_failing"), Some("failed"))
+        );
+        assert_eq!(peer_line(&run[2]).trouble, None);
     }
 
     #[test]
@@ -1660,8 +1684,24 @@ mod tests {
     fn a_runs_heading_names_each_sender_once() {
         let senders = ["Implementer", "Tester", "Implementer"].map(SharedString::from);
         assert_eq!(
-            run_heading(3, &senders),
+            run_heading(3, 0, &senders),
             "3 agent messages · Implementer, Tester"
+        );
+        let watcher = ["Wiffletree PR watcher"; 5].map(SharedString::from);
+        assert_eq!(
+            run_heading(0, 5, &watcher),
+            "5 notices · Wiffletree PR watcher"
+        );
+        let mixed = [
+            "Implementer",
+            "Wiffletree",
+            "Implementer",
+            "Wiffletree PR keeper",
+        ]
+        .map(SharedString::from);
+        assert_eq!(
+            run_heading(2, 2, &mixed),
+            "2 agent messages, 2 notices · Implementer, Wiffletree, Wiffletree PR keeper"
         );
     }
 
@@ -1746,8 +1786,8 @@ mod tests {
             shapes,
             [
                 (Alone, Shape::Human),
-                (Alone, Shape::Notice),
-                (Heads(2), Shape::Agent { own: false }),
+                (Heads(3), Shape::Agent { own: false }),
+                (Folded, Shape::Agent { own: false }),
                 (Folded, Shape::Agent { own: true }),
                 (Alone, Shape::Agent { own: true }),
                 (Alone, Shape::Compaction),
@@ -1756,16 +1796,19 @@ mod tests {
         // The file the human named is a link already, so drawing it reads nothing from disk.
         let linked = rows[0].body.as_ref().unwrap().text();
         assert!(linked.starts_with("Look at [`notes.md`](<") && linked.contains("notes.md>)"));
+        // A run's lines: a notice names what happened; a report says it failed; a timer is
+        // named by its label.
         assert_eq!(rows[1].sender.as_ref(), "Wiffletree PR watcher");
-        // A run's lines: a report says it failed; a timer is named by its label.
-        assert_eq!(rows[2].pill, Some(("Failed".into(), true)));
+        assert_eq!(rows[1].pill, Some(("Merged".into(), Tone::Notice)));
+        assert_eq!(rows[1].first_line.as_ref(), "PR #141 merged.");
+        assert_eq!(rows[2].pill, Some(("Failed".into(), Tone::Trouble)));
         assert_eq!(rows[2].body.as_ref().unwrap().text(), "Blocking");
         assert_eq!(rows[3].sender.as_ref(), "Watch CI");
         assert_eq!(rows[3].first_line.as_ref(), "Your timer fired.");
         assert_eq!(
-            rows[2].run,
+            rows[1].run,
             Some((
-                "2 agent messages · Implementer, Watch CI".into(),
+                "2 agent messages, 1 notice · Wiffletree PR watcher, Implementer, Watch CI".into(),
                 vec!["1 failed".into()]
             ))
         );

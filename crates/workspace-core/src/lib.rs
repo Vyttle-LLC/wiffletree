@@ -2092,13 +2092,16 @@ pub const PERMISSION_PREFIX: &str = "permission:";
 /// The id prefix of the notices about the processes an agent left running and the ones the
 /// host stopped. Only the host creates them.
 pub const PROCESS_NOTICE_PREFIX: &str = "processes:";
+const VERIFICATION_NOTICE_PREFIX: &str = "verification:";
+const WORKTREE_KEPT_PREFIX: &str = "worktree-kept:";
+const MIGRATION_PREFIX: &str = "migration:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
 /// worktrees, migration notices, publish results and process notices. Inbox answers (`answer:`)
 /// carry the human's words.
 const HOST_NOTICE_PREFIXES: [&str; 5] = [
-    "verification:",
-    "worktree-kept:",
-    "migration:",
+    VERIFICATION_NOTICE_PREFIX,
+    WORKTREE_KEPT_PREFIX,
+    MIGRATION_PREFIX,
     PUBLISH_PREFIX,
     PROCESS_NOTICE_PREFIX,
 ];
