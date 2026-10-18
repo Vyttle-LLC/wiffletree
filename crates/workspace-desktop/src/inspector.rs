@@ -49,6 +49,12 @@ pub(super) fn copyable(label: &'static str, value: &str, p: Palette) -> Div {
         ))
 }
 
+/// A stacked ticket's parent branch, which its branch started from and its PR opens into.
+pub(super) fn parent_branch(index: &WorkspaceIndex, ticket: &Ticket, p: Palette) -> Option<Div> {
+    let parent = index.ticket(ticket.stacked_on.as_ref()?)?;
+    Some(copyable("Parent", &parent.branch, p))
+}
+
 impl Panel {
     pub(super) fn available(self, role: Role) -> bool {
         match self {
@@ -601,6 +607,10 @@ impl Inspector {
                                         .child(ticket.title.clone()),
                                 )
                                 .child(copyable("Branch", &ticket.branch, p))
+                                .children(
+                                    (self.shared.index.as_deref())
+                                        .and_then(|index| parent_branch(index, ticket, p)),
+                                )
                                 .child(copyable("Worktree", &ticket.worktree, p)),
                         ),
                 );

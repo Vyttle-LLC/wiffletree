@@ -1539,6 +1539,10 @@ pub struct Ticket {
     pub brief: String,
     pub worktree: String,
     pub branch: String,
+    /// The ticket this one is stacked on, in the same repository: its branch started from the
+    /// parent's branch, is measured against it, and its pull request opens into it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacked_on: Option<String>,
     pub state: TicketState,
     /// The latest verification cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]

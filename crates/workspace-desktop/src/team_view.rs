@@ -1,7 +1,7 @@
 //! A project's tickets with their repository, agents, verification cycles and decision ledger.
 use super::*;
 use gpui_component::button::ButtonVariants;
-use inspector::copyable;
+use inspector::{copyable, parent_branch};
 use ui::{card, empty_state, hint, icon, mono, pill, section, session_icon, ticket_state_color};
 use wording::humanize;
 
@@ -160,6 +160,7 @@ impl Inspector {
                     )
                     .child(hint(ticket.brief.clone(), p).line_clamp(4))
                     .child(copyable("Branch", &ticket.branch, p))
+                    .children(parent_branch(index, ticket, p))
                     .children(
                         ticket
                             .waiver

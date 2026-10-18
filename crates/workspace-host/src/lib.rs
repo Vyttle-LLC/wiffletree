@@ -28,6 +28,7 @@ pub mod service;
 mod settings;
 pub(crate) mod shared;
 pub mod skills;
+mod stacks;
 mod steps;
 mod stream;
 mod sync;

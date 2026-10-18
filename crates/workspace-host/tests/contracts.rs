@@ -249,7 +249,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v1"));
+    assert!(coordinator.contains("Project coordinator core — v2"));
     for role in Role::ALL {
         let core = core(role);
         assert!(core.contains("Wiffletree communication contract — v9"));

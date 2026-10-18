@@ -65,7 +65,8 @@ impl History {
 /// application rechecks the repository, tickets and watched base before making work due.
 pub(crate) struct KeeperPoll {
     pub(crate) repository: Repository,
-    tickets: Vec<(Ticket, Option<String>)>,
+    /// Each ticket with an open PR, the base commit the keeper last saw for it, and its base.
+    tickets: Vec<(Ticket, Option<String>, stacks::Base)>,
 }
 #[derive(Default)]
 pub(crate) struct Ancestry {
@@ -83,9 +84,10 @@ impl KeeperPoll {
                 .filter(|t| t.repository_id == repository.id && t.open_pull_request().is_some())
                 .map(|t| {
                     let base = host.keeper_base(&t).map(str::to_owned);
-                    (t, base)
+                    let ticket_base = host.ticket_base(&t)?;
+                    Ok((t, base, ticket_base))
                 })
-                .collect()
+                .collect::<Result<_>>()?
         } else {
             vec![]
         };
@@ -125,7 +127,7 @@ impl KeeperPoll {
     }
     pub(crate) fn run(&self, git: &publish::GitTool) -> Ancestry {
         let mut result = Ancestry::default();
-        for (ticket, base) in &self.tickets {
+        for (ticket, base, ticket_base) in &self.tickets {
             let pr = ticket.open_pull_request().expect("prepared open PR");
             let worktree = Path::new(&ticket.worktree);
             if let Ok(head) = git_output(git, worktree, &["rev-parse", "HEAD"]) {
@@ -144,10 +146,8 @@ impl KeeperPoll {
                         .filter(|v| v.outcome == VerificationOutcome::Passed)
                         .and_then(Verification::verified_commit)
                         .is_some_and(|verified| {
-                            live::verified_head(ticket, verified, || {
-                                Ok(self.repository.base.clone())
-                            })
-                            .is_ok()
+                            live::verified_head(ticket, verified, || Ok(ticket_base.clone()))
+                                .is_ok()
                         })
                 {
                     result.may_change.insert(ticket.id.clone());
@@ -195,12 +195,17 @@ pub(crate) struct Creation {
     repository: Repository,
     title: String,
     brief: String,
+    stack_on: Option<String>,
+    /// The parent's branch, which a stacked ticket's branch starts from.
+    parent_branch: Option<String>,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReservedCreation {
     pub ticket: Ticket,
     repository: Repository,
     project_id: String,
+    #[serde(default)]
+    parent_branch: Option<String>,
 }
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -218,6 +223,7 @@ impl Creation {
         repository_id: &str,
         title: &str,
         brief: &str,
+        stack_on: Option<&str>,
     ) -> Result<Prepared> {
         text(title, 128)?;
         text(brief, MAX_TEXT_BYTES)?;
@@ -248,14 +254,23 @@ impl Creation {
                 ticket.brief == brief,
                 "Ticket title already exists with a different brief"
             );
+            ensure!(
+                ticket.stacked_on.as_deref() == stack_on,
+                "Ticket title already exists stacked differently"
+            );
             return Ok(Prepared::Existing(Box::new(ticket)));
         }
-
+        let parent = match stack_on {
+            Some(id) => Some(host.stack_parent(&coordinator, &repo, id)?),
+            None => None,
+        };
         Ok(Prepared::Create(Box::new(Self {
             owner: owner.into(),
             repository: repo,
             title: title.into(),
             brief: brief.into(),
+            stack_on: parent.as_ref().map(|p| p.id.clone()),
+            parent_branch: parent.map(|p| p.branch),
         })))
     }
     pub(crate) fn existing(&self, host: &Host) -> Result<Option<Ticket>> {
@@ -266,6 +281,7 @@ impl Creation {
                 &self.repository.id,
                 &self.title,
                 &self.brief,
+                self.stack_on.as_deref(),
             )? {
                 Prepared::Existing(ticket) => Some(*ticket),
                 Prepared::Create(_) => None,
@@ -297,6 +313,7 @@ impl Creation {
             &self.repository.id,
             &self.title,
             &self.brief,
+            self.stack_on.as_deref(),
         )?;
         if let Prepared::Existing(_) = prepared {
             bail!("Ticket was created while its checkout was being prepared; repeat the request");
@@ -313,6 +330,10 @@ impl Creation {
             ensure!(
                 pending.ticket.brief == self.brief,
                 "Ticket title already exists with a different brief"
+            );
+            ensure!(
+                pending.ticket.stacked_on == self.stack_on,
+                "Ticket title already exists stacked differently"
             );
             if same_repository(&pending.repository, &self.repository) {
                 return Ok(pending);
@@ -334,6 +355,7 @@ impl Creation {
             brief: self.brief.clone(),
             worktree: path.to_string_lossy().into(),
             branch,
+            stacked_on: self.stack_on,
             state: TicketState::Planned,
             verification: None,
             previous_cycles: vec![],
@@ -349,6 +371,7 @@ impl Creation {
             ticket,
             repository: self.repository,
             project_id: coordinator.project_id,
+            parent_branch: self.parent_branch,
         };
         host.db.execute(
             "INSERT INTO checkout_creations VALUES (?1,?2)",
@@ -359,11 +382,15 @@ impl Creation {
 }
 impl ReservedCreation {
     pub(crate) fn run(&self, git: &publish::GitTool) -> Result<()> {
+        let start = match &self.parent_branch {
+            Some(branch) => format!("refs/heads/{branch}"),
+            None => self.repository.base.clone(),
+        };
         worktrees::ensure_worktree_with(
             Path::new(&self.repository.path),
             Path::new(&self.ticket.worktree),
             &self.ticket.branch,
-            Some(&self.repository.base),
+            Some(&start),
             git,
         )
     }
@@ -375,6 +402,7 @@ impl ReservedCreation {
                 &self.repository.id,
                 &self.ticket.title,
                 &self.ticket.brief,
+                self.ticket.stacked_on.as_deref(),
             )?;
             if matches!(prepared, Prepared::Create(_)) {
                 ensure!(
@@ -502,23 +530,31 @@ impl Worktree {
 pub(crate) struct Publication {
     ticket: Ticket,
     repository: Repository,
+    base: stacks::Base,
 }
 pub(crate) struct PublicationResult {
     ticket: Ticket,
     repository: Repository,
+    base: stacks::Base,
     checked: std::result::Result<publish::Checked, String>,
 }
 impl Publication {
     pub(crate) fn prepare(host: &Host, ticket: &str) -> Result<Self> {
         let ticket = host.ticket(ticket)?;
         let repository = host.ticket_repository(&ticket)?;
-        Ok(Self { ticket, repository })
+        let base = host.ticket_base(&ticket)?;
+        Ok(Self {
+            ticket,
+            repository,
+            base,
+        })
     }
     pub(crate) fn run(&self) -> PublicationResult {
         PublicationResult {
             ticket: self.ticket.clone(),
             repository: self.repository.clone(),
-            checked: publish::check_with_size(&self.ticket, self.repository.clone())
+            base: self.base.clone(),
+            checked: publish::check_with_size(&self.ticket, self.repository.clone(), &self.base)
                 .map_err(|error| format!("{error:#}")),
         }
     }
@@ -526,6 +562,7 @@ impl Publication {
         PublicationResult {
             ticket: self.ticket.clone(),
             repository: self.repository.clone(),
+            base: self.base.clone(),
             checked: Err("The publish inspection stopped unexpectedly".into()),
         }
     }
@@ -534,7 +571,12 @@ impl PublicationResult {
     pub(crate) fn ticket_id(&self) -> &str {
         &self.ticket.id
     }
-    pub(crate) fn get(&self, ticket: &Ticket, repository: &Repository) -> Result<publish::Checked> {
+    pub(crate) fn get(
+        &self,
+        ticket: &Ticket,
+        repository: &Repository,
+        base: &stacks::Base,
+    ) -> Result<publish::Checked> {
         // Publishing advances these fields when a push reports back. They are not inputs
         // to the verification/branch check, which is shared by both publish steps.
         let inputs = |ticket: &Ticket| {
@@ -542,7 +584,9 @@ impl PublicationResult {
             "worktree":ticket.worktree,"branch":ticket.branch,"unreviewed":ticket.unreviewed()})
         };
         ensure!(
-            inputs(ticket) == inputs(&self.ticket) && repository == &self.repository,
+            inputs(ticket) == inputs(&self.ticket)
+                && repository == &self.repository
+                && base == &self.base,
             "The ticket or repository changed during its publish inspection; call publish_ticket again for what is current"
         );
         self.checked.clone().map_err(anyhow::Error::msg)
@@ -739,6 +783,7 @@ pub(crate) enum KeeperAction {
 pub(crate) struct KeeperCheckout {
     pub(crate) ticket: Ticket,
     repository: Repository,
+    base: stacks::Base,
     pub(crate) action: KeeperAction,
     movement: Option<Movement>,
     allowed: std::result::Result<(), String>,
@@ -761,6 +806,7 @@ impl KeeperCheckout {
     pub(crate) fn prepare(host: &mut Host, id: &str, action: KeeperAction) -> Result<Self> {
         let ticket = host.ticket(id)?;
         let repository = host.ticket_repository(&ticket)?;
+        let base = host.ticket_base(&ticket)?;
         let mut allowed = Ok(());
         let movement = match &action {
             KeeperAction::Waiting => {
@@ -831,6 +877,7 @@ impl KeeperCheckout {
         Ok(Self {
             ticket,
             repository,
+            base,
             action,
             movement,
             allowed,
@@ -847,10 +894,7 @@ impl KeeperCheckout {
             .is_some_and(|(verified, pr)| {
                 self.ticket.publishing.is_none()
                     && verification::head(&self.ticket).is_ok_and(|head| head == pr.head)
-                    && live::verified_head(&self.ticket, verified, || {
-                        Ok(self.repository.base.clone())
-                    })
-                    .is_ok()
+                    && live::verified_head(&self.ticket, verified, || Ok(self.base.clone())).is_ok()
             });
         let allowed = self
             .allowed
@@ -913,6 +957,7 @@ impl KeeperCheckout {
         let publication = Publication {
             ticket: self.ticket.clone(),
             repository: self.repository.clone(),
+            base: self.base.clone(),
         }
         .run();
         KeeperResult {
@@ -946,6 +991,7 @@ impl KeeperCheckout {
             publication: Publication {
                 ticket: self.ticket.clone(),
                 repository: self.repository.clone(),
+                base: self.base.clone(),
             }
             .failed(),
         }
@@ -985,6 +1031,7 @@ impl KeeperCheckout {
             publication: Publication {
                 ticket: self.ticket.clone(),
                 repository: self.repository.clone(),
+                base: self.base.clone(),
             }
             .failed(),
             ..result
@@ -1168,6 +1215,7 @@ mod tests {
             &repository,
             title,
             "Do",
+            None,
         )
         .unwrap()
         {
@@ -1216,7 +1264,8 @@ mod tests {
         let mut f = publish::tests::fixture();
         let repository = f.ticket().repository_id;
         let Prepared::Create(plan) =
-            Creation::prepare(&f.host, &f.coordinator.id, &repository, "Later", "Do").unwrap()
+            Creation::prepare(&f.host, &f.coordinator.id, &repository, "Later", "Do", None)
+                .unwrap()
         else {
             panic!()
         };
@@ -1360,7 +1409,11 @@ mod tests {
         f.host.save_ticket(&ticket).unwrap();
         assert!(
             observed
-                .get(&ticket, &f.host.ticket_repository(&ticket).unwrap())
+                .get(
+                    &ticket,
+                    &f.host.ticket_repository(&ticket).unwrap(),
+                    &f.host.ticket_base(&ticket).unwrap()
+                )
                 .is_err()
         );
     }
@@ -1369,9 +1422,15 @@ mod tests {
         let mut f = publish::tests::fixture();
         let mut repository = f.host.ticket_repository(&f.ticket()).unwrap();
         let git = publish::Tools::default().git;
-        let Prepared::Create(plan) =
-            Creation::prepare(&f.host, &f.coordinator.id, &repository.id, "Retry", "Do").unwrap()
-        else {
+        let Prepared::Create(plan) = Creation::prepare(
+            &f.host,
+            &f.coordinator.id,
+            &repository.id,
+            "Retry",
+            "Do",
+            None,
+        )
+        .unwrap() else {
             panic!()
         };
         let branches = plan.inspect(&git).unwrap();
