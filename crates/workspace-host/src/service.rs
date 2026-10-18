@@ -739,17 +739,6 @@ impl Service {
             .spawn(move || {
                 let setup = (|| -> Result<_> {
                     let mut host = Host::open(home)?;
-                    // Which CLIs are installed and signed in is known before any agent can
-                    // start: each CLI's own status, read at once and without inference.
-                    let detected: Vec<_> = PROVIDERS
-                        .map(|provider| std::thread::spawn(move || detection::detect(provider)))
-                        .into_iter()
-                        .zip(PROVIDERS)
-                        .collect();
-                    for (detecting, provider) in detected {
-                        let status = detecting.join().unwrap_or_default();
-                        host.record_detection(provider, &status);
-                    }
                     recover_unfinished_turns(&mut host)?;
                     checkout::recover_moves(&mut host)?;
                     host.delete_removed_worktrees()?;
@@ -760,7 +749,7 @@ impl Service {
                     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
                     Ok((host, directory, socket, listener))
                 })();
-                let (host, directory, socket, listener) = match setup {
+                let (mut host, directory, socket, listener) = match setup {
                     Ok(v) => {
                         let _ = ready.send(Ok(()));
                         v
@@ -770,6 +759,15 @@ impl Service {
                         return;
                     }
                 };
+                // Which CLIs are signed in is known before any request is handled, so nothing
+                // is ever pinned to a provider that is not: each CLI's own status, read in
+                // parallel and without inference. The client is not held up meanwhile; its
+                // requests wait in the queue.
+                let detected = PROVIDERS.map(|p| std::thread::spawn(move || detection::detect(p)));
+                for (detecting, provider) in detected.into_iter().zip(PROVIDERS) {
+                    let status = detecting.join().unwrap_or_default();
+                    host.record_detection(provider, &status);
+                }
                 let connections = Arc::new(AtomicUsize::new(0));
                 let socket_sender = worker.clone();
                 let stop_listener = Arc::new(AtomicBool::new(false));

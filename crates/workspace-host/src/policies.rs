@@ -418,7 +418,8 @@ impl Host {
             if let (Some(model), Some(row)) = (&old.keeper, keeper) {
                 let then = (row.main.choices()).find(|p| p.provider != model.provider);
                 row.main.then = then.cloned();
-                row.main.first = model.clone();
+                // As every seeded model: the closest one its CLI lists; the note keeps the old.
+                row.main.first = closest(model.provider, &model.model, &model.effort, &available);
             }
             let (guide, mut previous) = legacy::without_previous_settings(&old.guide);
             if let Some(shared) = self.shared().guide() {
@@ -646,6 +647,14 @@ pub(crate) mod legacy {
                         or_list(&providers)
                     ));
                 }
+            }
+            if let Some(keeper) = &self.keeper {
+                lines.push(format!(
+                    "The PR keeper used {} {} at {} before.",
+                    keeper.provider.label(),
+                    keeper.model,
+                    keeper.effort
+                ));
             }
             lines
         }

@@ -863,10 +863,12 @@ impl Host {
         let sorting = agents
             .iter()
             .any(|a| a.role == Role::Keeper && self.in_turn.contains(&a.id));
-        // Sorting runs only on Claude, so new comments wait while Claude is spent.
+        // Sorting runs only on Claude, so new comments wait while Claude is spent or not found
+        // signed in.
         if sorting
             || self.keeper.sorting.contains_key(&ticket.id)
             || !self.kept(ticket, repository, &coordinator)?
+            || self.detected.get(&Provider::Claude) != Some(&true)
             || self.spent(Provider::Claude)?.is_some()
         {
             return Ok(());

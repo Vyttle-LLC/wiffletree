@@ -182,6 +182,16 @@ fn a_model_the_catalog_does_not_list_becomes_the_closest_one() {
         closest(Provider::Claude, "sonnet", "high", &catalog),
         profile(Provider::Claude, "claude-sonnet-5-5", "high")
     );
+    // A retired ID that names a listed model takes that model.
+    assert_eq!(
+        closest(
+            Provider::Claude,
+            "retired-claude-sonnet-5-5-x",
+            "high",
+            &catalog
+        ),
+        profile(Provider::Claude, "claude-sonnet-5-5", "high")
+    );
     // Nothing alike: the provider's first model.
     assert_eq!(
         closest(Provider::Codex, "gpt-6.1-sol", "high", &catalog),

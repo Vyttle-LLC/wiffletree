@@ -433,6 +433,12 @@ fn a_saved_keeper_model_becomes_the_keeper_rows_first_choice() {
         .clone();
     assert_eq!(keeper.first, claude("sonnet", "low"));
     assert_eq!(keeper.then, Some(codex("gpt-6.1-sol", "medium")));
+    let notes = host.model_selection().unwrap().notes;
+    assert!(
+        notes
+            .iter()
+            .any(|n| n == "The PR keeper used Claude sonnet at low before.")
+    );
 }
 
 #[test]
@@ -442,7 +448,7 @@ fn signed_in_clis_and_their_catalogs_seed_the_table_and_every_old_setting_is_not
     // A selection from the last release: a retired Claude model, Codex disabled though its CLI
     // is signed in now, and the section an earlier upgrade wrote into the guide.
     let guide = "Mine.\n\n## Previous settings (migrated 2026-10-09)\n\n### Tester\n- Claude: small work → sonnet · low.\n";
-    let legacy = json!({"revision":4,"guide":guide,
+    let legacy = json!({"revision":4,"guide":guide,"keeper":claude("retired-sonnet-model","medium"),
         "providers":{"claude":{"enabled":true,"models":[{"model":"retired-opus-model","effort":"high"}]},
             "codex":{"enabled":false,"models":[{"model":"gpt-6.1-sol","effort":"high"}]}},
         "role_providers":{"tester":["claude"]}});
@@ -460,12 +466,16 @@ fn signed_in_clis_and_their_catalogs_seed_the_table_and_every_old_setting_is_not
     assert_eq!(coordinator.main.first, claude("opus", "high"));
     assert_eq!(coordinator.main.then, Some(codex("gpt-6.1-sol", "high")));
     assert_eq!(selection.guide, "Mine.\n");
+    // A retired PR keeper model moves to the closest one the CLI lists, and the note keeps it.
+    let keeper = selection.keeper().unwrap();
+    assert_eq!(keeper.main.first, claude("sonnet", "medium"));
     for line in [
         "Allowed before: Claude retired-opus-model at high.",
         "Allowed before: Codex gpt-6.1-sol at high, then disabled.",
         "Tester used Claude before.",
         "From the guide: ### Tester",
         "From the guide: - Claude: small work → sonnet · low.",
+        "The PR keeper used Claude retired-sonnet-model at medium before.",
     ] {
         assert!(
             selection.notes.iter().any(|n| n == line),

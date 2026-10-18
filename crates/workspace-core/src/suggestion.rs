@@ -165,8 +165,8 @@ pub fn seed_row(
 }
 
 /// The provider's model closest to `model` among `available`: the same model, else the first
-/// whose ID contains it, else the provider's first; at `effort`, else the nearest effort it
-/// offers. Unchanged when `available` lists nothing for the provider.
+/// whose ID contains it or is contained in it, else the provider's first; at `effort`, else the
+/// nearest effort it offers. Unchanged when `available` lists nothing for the provider.
 pub fn closest(
     provider: Provider,
     model: &str,
@@ -180,6 +180,7 @@ pub fn closest(
     let option = (options.iter())
         .find(|m| m.model == model)
         .or_else(|| options.iter().find(|m| m.model.contains(model)))
+        .or_else(|| options.iter().find(|m| model.contains(m.model.as_str())))
         .or(options.first());
     let Some(option) = option else {
         return ModelProfile {

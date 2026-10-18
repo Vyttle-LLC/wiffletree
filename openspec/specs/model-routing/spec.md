@@ -167,7 +167,7 @@ The host SHALL keep one switch threshold, a whole percentage from 50 to 100, def
 - **THEN** resolutions on this machine move on at 90%
 
 ### Requirement: When a provider counts as spent
-A provider SHALL count as spent when its latest quota reading has any window, 5-hour, weekly or any other reported, whose reset has not passed or is unknown, and whose use is at or above the threshold or whose status reports the limit reached. A reading at or above the threshold with an unknown reset SHALL count until a later reading of that window is below the threshold. A provider with no reading, or a reading with no windows, SHALL NOT count as spent. A provider whose CLI the last detection found missing or signed out SHALL NOT be chosen. The host SHALL read each CLI's sign-in status when it starts, without inference and before any agent can start, and SHALL NOT choose a provider it has not found signed in. The host SHALL use only the providers' own telemetry and SHALL NEVER estimate quota from token counts.
+A provider SHALL count as spent when its latest quota reading has any window, 5-hour, weekly or any other reported, whose reset has not passed or is unknown, and whose use is at or above the threshold or whose status reports the limit reached. A reading at or above the threshold with an unknown reset SHALL count until a later reading of that window is below the threshold. A provider with no reading, or a reading with no windows, SHALL NOT count as spent. A provider whose CLI the last detection found missing or signed out SHALL NOT be chosen. The host SHALL read each CLI's sign-in status when it starts, without inference and before it handles any request, without holding up its client, and SHALL NOT choose a provider it has not found signed in. The host SHALL use only the providers' own telemetry and SHALL NEVER estimate quota from token counts.
 
 #### Scenario: Over the threshold
 - **WHEN** Claude's weekly window reads 96% with a reset next Monday and the threshold is 95
@@ -231,9 +231,9 @@ An agent pinned while every choice was spent SHALL wait: at each of its turn sta
 On first open after this release, after the `model-selection` migration, the host SHALL run one idempotent migration recorded in `policy_migrations` as `who-runs-what`. A store with no saved selection SHALL be left alone. Otherwise it SHALL:
 - seed the table from the suggested rows on the providers whose CLI is installed and signed in, read once at the upgrade without inference, or on the providers that were enabled when no CLI is signed in, replacing each model with the closest one its provider's CLI lists;
 - give each verifier whose saved provider was Claude or Codex that provider's lens row, which waits rather than switching;
-- make a saved PR keeper model the PR keeper row's first choice, and add no PR keeper row when none was saved;
+- make a saved PR keeper model, or the closest one its CLI lists, the PR keeper row's first choice, and add no PR keeper row when none was saved;
 - remove the guide's `## Previous settings (migrated …)` section and keep the rest;
-- add a one-time Models page note, "Set up from your previous settings. Check it.", listing everything the table does not hold: every allowed model, a disabled provider's included, the providers per role, and the removed guide section line by line;
+- add a one-time Models page note, "Set up from your previous settings. Check it.", listing everything the table does not hold: every allowed model, a disabled provider's included, the providers per role, the saved PR keeper model, and the removed guide section line by line;
 - leave every pinned agent unchanged.
 
 Running it again SHALL change nothing, and the table SHALL survive a restart.
