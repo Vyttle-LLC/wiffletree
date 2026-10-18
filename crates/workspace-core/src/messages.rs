@@ -226,6 +226,8 @@ pub enum Notice {
     ChecksFailing,
     Conflict,
     Comments,
+    /// The keeper's brief to its own agent for one try at a conflict or failed checks.
+    KeeperTry,
     NotPushed,
     RebaseFailed,
     Verification,
@@ -241,7 +243,7 @@ pub enum Notice {
 }
 impl Notice {
     /// `None` for a message that is not a host notice.
-    pub fn of(id: &str, body: &str) -> Option<Self> {
+    pub(crate) fn of(id: &str, body: &str) -> Option<Self> {
         host_notice(id)?;
         // After the prefix, the watcher's and keeper's ids go on `ticket:kind:…`.
         fn kind(rest: &str) -> &str {
@@ -264,8 +266,9 @@ impl Notice {
         } else if let Some(rest) = id.strip_prefix(KEEPER_NOTICE_PREFIX) {
             match kind(rest) {
                 "comments" => Self::Comments,
-                "try" | "conflict" => Self::Conflict,
-                "fix" | "checks" => Self::ChecksFailing,
+                "try" | "fix" => Self::KeeperTry,
+                "conflict" => Self::Conflict,
+                "checks" => Self::ChecksFailing,
                 "push" => Self::NotPushed,
                 "failed" => Self::RebaseFailed,
                 "changed"
@@ -304,13 +307,14 @@ impl Notice {
         })
     }
     /// The pill's words as an identifier, such as `checks_failing`.
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Merged => "merged",
             Self::Closed => "closed",
             Self::ChecksFailing => "checks_failing",
             Self::Conflict => "conflict",
             Self::Comments => "comments",
+            Self::KeeperTry => "keeper_try",
             Self::NotPushed => "not_pushed",
             Self::RebaseFailed => "rebase_failed",
             Self::Verification => "verification",
@@ -541,7 +545,9 @@ mod tests {
             ("pr:t:budget:141", "", Notice::Other),
             ("keeper:t:comments:900", "", Notice::Comments),
             ("keeper:t:checks:9e03c1b", "", Notice::ChecksFailing),
-            ("keeper:t:try:9e03c1b", "", Notice::Conflict),
+            ("keeper:t:try:9e03c1b", "", Notice::KeeperTry),
+            ("keeper:t:fix:9e03c1b", "", Notice::KeeperTry),
+            ("keeper:t:conflict:9e03c1b", "", Notice::Conflict),
             ("keeper:t:push:9e03c1b:4a1c2e9", "", Notice::NotPushed),
             ("keeper:t:failed:9e03c1b:4a1c2e9", "", Notice::RebaseFailed),
             ("keeper:t:diverged:9e03c1b", "", Notice::Other),
@@ -587,6 +593,7 @@ mod tests {
             Some(ReportKind::Blocked)
         );
         assert_eq!(Notice::Merged.trouble(), None);
+        assert_eq!(Notice::KeeperTry.trouble(), None);
         assert_eq!(Notice::Other.name(), "notice");
         for id in ["answer:a", "m1", "report:s:1"] {
             assert_eq!(Notice::of(id, "[passed] Tester\nfine"), None, "{id}");
