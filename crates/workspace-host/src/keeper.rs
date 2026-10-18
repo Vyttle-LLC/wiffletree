@@ -763,10 +763,35 @@ impl Host {
             }
         }
     }
+    pub(crate) fn keeper_base(&self, ticket: &Ticket) -> Option<&str> {
+        let pr = ticket.open_pull_request()?;
+        self.keeper
+            .bases
+            .get(&(ticket.repository_id.clone(), pr.base.clone()))
+            .map(|(base, _)| base.as_str())
+    }
+    #[cfg(test)]
+    pub(crate) fn keeper_due(&mut self, repository: &str, at: i64) -> Result<Due> {
+        let plan = checkout::KeeperPoll::prepare(self, repository)?;
+        let ancestry = plan.run(&publish::Tools::default().git);
+        plan.apply_due(self, &ancestry, at)
+    }
+    #[cfg(test)]
+    pub(crate) fn keeper_reproduced(&mut self, reproduced: Reproduced) -> Result<()> {
+        let ticket = self.ticket(&reproduced.ticket_id)?;
+        let plan = checkout::KeeperPoll::prepare(self, &ticket.repository_id)?;
+        let ancestry = plan.run(&publish::Tools::default().git);
+        plan.apply_reproduced(self, &ancestry, reproduced)
+    }
     /// After a pass of the repository: the rebases due, the results waiting to be moved and each
     /// ticket's part of its PR line. An error for one ticket is logged and leaves every other
     /// ticket's work as it is.
-    pub(crate) fn keeper_due(&mut self, repository_id: &str, at: i64) -> Result<Due> {
+    pub(crate) fn keeper_due_checked(
+        &mut self,
+        repository_id: &str,
+        at: i64,
+        ancestry: &checkout::Ancestry,
+    ) -> Result<Due> {
         let settings = self.settings();
         let repository = self.repository(repository_id)?;
         let mut due = Due::default();
@@ -780,8 +805,10 @@ impl Host {
                 due.waiting.push(ticket.id.clone());
             }
             let part = self
-                .fetch_due(&ticket, &repository, &settings, &mut due)
-                .and_then(|()| self.ticket_due(&ticket, &repository, &settings, at, &mut due))
+                .fetch_due(&ticket, &repository, &settings, &mut due, ancestry)
+                .and_then(|()| {
+                    self.ticket_due(&ticket, &repository, &settings, at, &mut due, ancestry)
+                })
                 .unwrap_or_else(|e| {
                     eprintln!("Workspace PR keeper: {}: {e:#}", ticket.id);
                     None
@@ -1028,6 +1055,7 @@ impl Host {
         repository: &Repository,
         settings: &HostSettings,
         due: &mut Due,
+        ancestry: &checkout::Ancestry,
     ) -> Result<()> {
         let Some(pr) = ticket
             .open_pull_request()
@@ -1042,16 +1070,16 @@ impl Host {
             || self.keeper.running.contains(&ticket.id)
             || self.keeper.reviews_ended.contains(&ticket.id);
         let worktree = Path::new(&ticket.worktree);
-        let Some(head) = verification::head(ticket).ok().filter(|_| !busy) else {
+        let Some(head) = ancestry.head(ticket).filter(|_| !busy) else {
             return Ok(());
         };
-        let pair = (pr.head.clone(), head.clone());
+        let pair = (pr.head.clone(), head.to_owned());
         // The keeper's own rebase that it did not push is no one else's commit.
         let unpushed = ticket.keeper.as_ref().and_then(|k| k.last.as_ref());
         let unpushed =
             unpushed.is_some_and(|l| !l.pushed && pair == (l.before.clone(), l.after.clone()));
         if unpushed
-            || publish::is_ancestor(worktree, &pr.head, &head)
+            || ancestry.contains(worktree, &pr.head, head)
             || self.keeper.diverged.get(&ticket.id) == Some(&pair)
             || !self.kept(ticket, repository, &self.session(&ticket.coordinator_id)?)?
             || self
@@ -1061,18 +1089,17 @@ impl Host {
         {
             return Ok(());
         }
-        let repositories::Origin::GitHub { push_url, .. } = repositories::read_origin(worktree)
-        else {
+        let Some(repositories::Origin::GitHub { push_url, .. }) = ancestry.origin(ticket) else {
             bail!("origin is not one place on GitHub");
         };
         self.keeper.running.insert(ticket.id.clone());
         due.fetches.push(Fetch {
             ticket_id: ticket.id.clone(),
             repository: repository.path.clone().into(),
-            push_url,
+            push_url: push_url.clone(),
             branch: ticket.branch.clone(),
             expected: pr.head.clone(),
-            from: head,
+            from: head.into(),
         });
         Ok(())
     }
@@ -1087,6 +1114,7 @@ impl Host {
         settings: &HostSettings,
         at: i64,
         due: &mut Due,
+        ancestry: &checkout::Ancestry,
     ) -> Result<Option<KeeperPart>> {
         let Some(pr) = ticket
             .open_pull_request()
@@ -1094,7 +1122,9 @@ impl Host {
         else {
             return Ok(None);
         };
-        if !self.keeps_branch(ticket, repository)? {
+        if !self.kept(ticket, repository, &self.session(&ticket.coordinator_id)?)?
+            || !ancestry.may_change(ticket)
+        {
             return Ok(None);
         }
         let record = ticket.keeper.clone().unwrap_or_default();
@@ -1106,7 +1136,7 @@ impl Host {
             return Ok(None);
         };
         let path = Path::new(&repository.path);
-        let up_to_date = publish::is_ancestor(path, &base, &pr.head);
+        let up_to_date = ancestry.contains(path, &base, &pr.head);
         let rebased = record
             .rebased
             .as_ref()
@@ -1114,7 +1144,7 @@ impl Host {
         let busy = ticket.running_try().is_some() || self.keeper.running.contains(&ticket.id);
         if !busy
             && pr.checks == CheckState::Failure
-            && self.no_rebase_due(ticket, repository)
+            && self.no_rebase_due(ticket, repository, ancestry)
             && self.would_try(ticket, repository, KeeperProblem::Checks)
         {
             self.keeper.running.insert(ticket.id.clone());
@@ -1175,7 +1205,12 @@ impl Host {
     /// Whether the keeper has no rebase to do for the PR's head, which comes before a try at
     /// failed checks: the head contains the base the keeper last saw, or that head and base
     /// were rebased already.
-    fn no_rebase_due(&self, ticket: &Ticket, repository: &Repository) -> bool {
+    fn no_rebase_due(
+        &self,
+        ticket: &Ticket,
+        repository: &Repository,
+        ancestry: &checkout::Ancestry,
+    ) -> bool {
         let Some(pr) = ticket.open_pull_request() else {
             return false;
         };
@@ -1185,7 +1220,7 @@ impl Host {
         };
         let rebased = ticket.keeper.as_ref().and_then(|k| k.rebased.as_ref());
         rebased.is_some_and(|r| r.head == pr.head && r.base == *base)
-            || publish::is_ancestor(Path::new(&repository.path), base, &pr.head)
+            || ancestry.contains(Path::new(&repository.path), base, &pr.head)
     }
     /// The keeper's checkout for the ticket's rebase or try.
     fn checkout(&self, ticket_id: &str) -> PathBuf {
@@ -1396,7 +1431,11 @@ impl Host {
     /// Takes a reproduction of the PR's failed checks, while the keeper still will try them.
     /// Checks that pass here are recorded as a try thrown away, and the coordinator is told;
     /// checks that fail here too start the try in the reproduction's checkout.
-    pub(crate) fn keeper_reproduced(&mut self, reproduced: Reproduced) -> Result<()> {
+    pub(crate) fn keeper_reproduced_checked(
+        &mut self,
+        reproduced: Reproduced,
+        ancestry: Option<&checkout::Ancestry>,
+    ) -> Result<()> {
         self.keeper.running.remove(&reproduced.ticket_id);
         let mut ticket = self.ticket(&reproduced.ticket_id)?;
         let repository = self.ticket_repository(&ticket)?;
@@ -1406,7 +1445,7 @@ impl Host {
         // The trigger, the checks command, the branch or the base may have changed while the
         // checks ran.
         let tries = same_head
-            && self.no_rebase_due(&ticket, &repository)
+            && ancestry.is_some_and(|a| self.no_rebase_due(&ticket, &repository, a))
             && self.will_try(&ticket, KeeperProblem::Checks)?;
         let (Some(checks), true) = (repository.checks, tries) else {
             if reproduced.checkout.exists() {

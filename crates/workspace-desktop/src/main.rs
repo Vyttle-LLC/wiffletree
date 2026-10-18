@@ -9,6 +9,7 @@ mod conversation_header;
 mod creation;
 mod crew_panel;
 mod data_dir;
+mod events_view;
 mod file_links;
 mod files_view;
 mod history_sheet;
@@ -24,6 +25,7 @@ mod preferences;
 mod processes_view;
 mod progress;
 mod project_name;
+mod quotas;
 mod render_counts;
 mod repositories_view;
 mod settings;
@@ -31,6 +33,8 @@ mod shared;
 mod sidebar;
 mod skills_view;
 mod team_view;
+#[cfg(test)]
+mod test_support;
 mod transcript;
 mod tree;
 mod ui;
@@ -38,6 +42,7 @@ mod update;
 mod usage_view;
 mod verifiers;
 mod welcome;
+mod wording;
 mod workspace_notes;
 use bridge::Bridge;
 use creation::{Creation, CreationForm};
@@ -52,7 +57,8 @@ use gpui_component::{
 use palette::{Palette, palette};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
-use shared::{Amendment, Intent, Requests, Shared, toast, toast_error};
+use shared::{Amendment, HumanWrote, Intent, Requests, Shared, toast, toast_error};
+use ui::{button, edge, font};
 // GPUI has an `Inspector` too; ours wins over its glob.
 use inspector::Inspector;
 use std::{
@@ -62,6 +68,7 @@ use std::{
 };
 // GPUI exports an accessibility `Role` too; ours wins over both globs.
 use workspace_core::Role;
+use workspace_core::ask::Ask;
 use workspace_core::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +91,7 @@ enum PanelData {
     Loading,
     Memory(Vec<WorkLog>),
     Events(Vec<Activity>),
-    Git(Vec<inspector::Commit>),
+    Git(Vec<Commit>),
 }
 
 /// A request sent again once, rather than once per ask, when asked for while it is answered.
@@ -138,6 +145,14 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 .any(|m| m.sender.as_deref().is_some_and(archived)))
 }
 
+/// Replaces the readings held only when a read brings different ones: the same readings again
+/// would only redraw what draws them.
+fn keep_quotas(held: &mut Rc<Vec<QuotaReading>>, read: Vec<QuotaReading>) {
+    if **held != read {
+        *held = Rc::new(read);
+    }
+}
+
 /// What fills the main area: one session's conversation, or a page about the whole workspace.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -146,10 +161,6 @@ enum Page {
     Models,
     Skills,
     Repositories,
-}
-
-fn button(id: impl Into<ElementId>) -> Button {
-    Button::new(id).small()
 }
 
 struct Workspace {
@@ -187,7 +198,7 @@ impl Workspace {
             .new(|cx| skills_view::SkillsPage::new(bridge.clone(), verifiers.clone(), window, cx));
         Self::adopt(&skills, window, cx);
         let inbox = cx.new(|cx| inbox::Inbox::new(bridge.clone(), window, cx));
-        let contexts = cx.new(|_| context_view::Contexts::default());
+        let contexts = cx.new(|_| context_view::Contexts::new(bridge.clone()));
         let conversation = cx.new(|cx| {
             conversation::Conversation::new(
                 bridge.clone(),
@@ -452,7 +463,21 @@ impl Workspace {
             .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60));
         if now || !recent {
             self.last_repository_refresh = Some(std::time::Instant::now());
-            self.request(Command::RefreshRepositories, window, cx);
+            let ask = ask::refresh_repositories();
+            self.ask(ask, window, cx, |view, refresh, window, cx| {
+                // A background check; an unreadable root is not worth interrupting anyone for.
+                match refresh {
+                    Ok(refresh) if !refresh.added.is_empty() => {
+                        let names: Vec<_> = refresh.added.iter().map(|r| r.name.as_str()).collect();
+                        let found = format!("Found new repositories: {}", names.join(", "));
+                        toast(found, window, cx);
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("Repository refresh: {error}"),
+                }
+                // Also picks up folders that went missing since the last snapshot.
+                view.refresh(window, cx);
+            });
         }
     }
     /// Step changes go to the transcript, for its activity card, and to the Files panel.
@@ -477,43 +502,72 @@ impl Workspace {
         })
         .detach();
     }
-    /// Handles a reply to one of the shell's own requests: snapshots, quotas and creations.
-    fn accept_reply(
+    /// Reads the stored usage again whenever a provider reports some. A new reading redraws
+    /// the quota strip, and the Usage page reloads its report with it.
+    fn watch_usage(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(changes) = self.bridge.usage_changes() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                let read = cx
+                    .update(|window, cx| this.update(cx, |view, cx| view.read_quotas(window, cx)));
+                if !matches!(read, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Asks for the stored quota readings, or, while a read is on its way, for one more after it.
+    fn read_quotas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quota_request.send() {
+            self.ask(ask::quotas(), window, cx, |view, quotas, window, cx| {
+                if view.quota_request.answered() {
+                    view.read_quotas(window, cx);
+                }
+                view.quotas_read(Command::Quotas, quotas, window, cx);
+            });
+        }
+    }
+    /// Reads Codex's account limits again, one reading at a time.
+    fn refresh_quota(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_quotas(window, cx);
+        if self.shared.quota_pending {
+            return;
+        }
+        self.shared.quota_pending = true;
+        self.ask(
+            ask::refresh_codex_quota(),
+            window,
+            cx,
+            |view, quotas, window, cx| {
+                view.shared.quota_pending = false;
+                view.quotas_read(Command::RefreshCodexQuota, quotas, window, cx);
+            },
+        );
+    }
+    fn quotas_read(
+        &mut self,
+        command: Command,
+        quotas: Result<Vec<QuotaReading>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match quotas {
+            Ok(quotas) => keep_quotas(&mut self.shared.quotas, quotas),
+            Err(error) => self.fail(&command, error, window, cx),
+        }
+        self.share(window, cx);
+    }
+    /// Handles a reply to a creation form's command.
+    fn accept_creation(
         &mut self,
         command: Command,
         result: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(command, Command::RefreshRepositories) {
-            // A background check; an unreadable root is not worth interrupting anyone for.
-            match result.and_then(|v| {
-                serde_json::from_value::<RepositoryRefresh>(v).map_err(|e| e.to_string())
-            }) {
-                Ok(refresh) if !refresh.added.is_empty() => {
-                    let names: Vec<_> = refresh.added.iter().map(|r| r.name.as_str()).collect();
-                    toast(
-                        format!("Found new repositories: {}", names.join(", ")),
-                        window,
-                        cx,
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => eprintln!("Repository refresh: {error}"),
-            }
-            // Also picks up folders that went missing since the last snapshot.
-            self.refresh(window, cx);
-            return;
-        }
-        match &command {
-            Command::Snapshot if self.snapshot_request.answered() => self.refresh(window, cx),
-            Command::Quotas if self.quota_request.answered() => self.read_quotas(window, cx),
-            Command::Archive => self.archive_pending = false,
-            _ => {}
-        }
-        if matches!(&command, Command::RecordQuota { .. }) {
-            self.shared.quota_pending = false;
-        }
         let value = match result {
             Ok(v) => v,
             Err(e) => return self.fail(&command, e, window, cx),
@@ -540,30 +594,10 @@ impl Workspace {
             }
             return;
         }
-        if matches!(
-            command,
-            Command::CreateSession { .. }
-                | Command::CreateTicket { .. }
-                | Command::AssignTicket { .. }
-                | Command::AttachRepository { .. }
-                | Command::SetProjectRepositories { .. }
-        ) && self.creation.take().is_some()
-        {
+        if self.creation.take().is_some() {
             window.close_dialog(cx);
         }
         match command {
-            Command::Snapshot => match serde_json::from_value::<Snapshot>(value) {
-                Ok(snapshot) => self.accept_snapshot(snapshot, window, cx),
-                Err(e) => self.fail(&Command::Snapshot, e.to_string(), window, cx),
-            },
-            Command::Archive => match serde_json::from_value::<Archive>(value) {
-                Ok(archive) => self.accept_archive(archive, window, cx),
-                Err(e) => self.fail(&Command::Archive, e.to_string(), window, cx),
-            },
-            Command::Quotas | Command::RecordQuota { .. } => match serde_json::from_value(value) {
-                Ok(quotas) => self.shared.quotas = quotas,
-                Err(error) => toast_error(error.to_string(), window, cx),
-            },
             Command::CreateSession { .. } | Command::AssignTicket { .. } => {
                 if let Ok(session) = serde_json::from_value::<Session>(value) {
                     let id = session.id.clone();
@@ -581,7 +615,15 @@ impl Workspace {
     /// Asks for the latest snapshot, or, while one is on its way, for one more after it.
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.snapshot_request.send() {
-            self.request(Command::Snapshot, window, cx);
+            self.ask(ask::snapshot(), window, cx, |view, snapshot, window, cx| {
+                if view.snapshot_request.answered() {
+                    view.refresh(window, cx);
+                }
+                match snapshot {
+                    Ok(snapshot) => view.accept_snapshot(snapshot, window, cx),
+                    Err(error) => view.fail(&Command::Snapshot, error, window, cx),
+                }
+            });
         }
     }
     /// Reads the archive again when what is shown needs it and the one held is out of date.
@@ -599,7 +641,13 @@ impl Workspace {
         });
         if wanted && !self.archive_pending {
             self.archive_pending = true;
-            self.request(Command::Archive, window, cx);
+            self.ask(ask::archive(), window, cx, |view, archive, window, cx| {
+                view.archive_pending = false;
+                match archive {
+                    Ok(archive) => view.accept_archive(archive, window, cx),
+                    Err(error) => view.fail(&Command::Archive, error, window, cx),
+                }
+            });
         }
     }
     fn accept_archive(&mut self, archive: Archive, window: &mut Window, cx: &mut Context<Self>) {
@@ -815,7 +863,7 @@ impl Requests for Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.accept_reply(command, reply, window, cx);
+        self.accept_creation(command, reply, window, cx);
         self.share(window, cx);
     }
 }
@@ -869,7 +917,7 @@ fn apply_theme(cx: &mut App) {
         theme.font_size = px(14.);
         theme.colors.background = p.base;
         theme.colors.foreground = p.text;
-        theme.colors.border = p.edge.opacity(0.5);
+        theme.colors.border = p.edge.opacity(edge::HALF);
         theme.colors.popover = p.surface;
         theme.colors.popover_foreground = p.text;
         theme.colors.list_active = p.overlay;
@@ -901,7 +949,7 @@ fn apply_theme(cx: &mut App) {
         theme.colors.input = p.edge;
         theme.colors.ring = p.focus;
         theme.colors.title_bar = p.surface;
-        theme.colors.title_bar_border = p.edge.opacity(0.35);
+        theme.colors.title_bar_border = p.edge.opacity(edge::LIGHT);
         theme.colors.danger = p.red;
         theme.colors.success = p.green;
         theme.colors.warning = p.yellow;
@@ -1113,7 +1161,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveDemand, Coalesced, Page, Panel, wants_archive};
+    use super::{ArchiveDemand, Coalesced, Page, Panel, keep_quotas, wants_archive};
     use serde_json::json;
     use std::rc::Rc;
     use workspace_core::*;
@@ -1206,6 +1254,72 @@ mod tests {
         };
         assert!(wants_archive(&index(2), &shown));
         assert!(!wants_archive(&index(1), &shown));
+    }
+
+    #[test]
+    fn a_pending_publish_request_needs_the_archive_once_it_moved() {
+        // Its card is drawn from its ticket, which the archive holds once accepted.
+        let publish = Attention {
+            id: "a".into(),
+            project_id: "p".into(),
+            session_id: "live".into(),
+            host: "local".into(),
+            operation_id: format!("{PUBLISH_PREFIX}t:push"),
+            prompt: "Push?".into(),
+            options: vec![],
+            answer: None,
+        };
+        let with_publish = |stamp| {
+            let index = index(stamp);
+            let snapshot = Snapshot {
+                attention: vec![publish.clone()],
+                ..index.snapshot().clone()
+            };
+            WorkspaceIndex::new(snapshot, index.archive().clone())
+        };
+        assert!(wants_archive(&with_publish(2), &shown("live")));
+        assert!(!wants_archive(&with_publish(1), &shown("live")));
+        let question = Attention {
+            operation_id: "question:q".into(),
+            ..publish
+        };
+        let index = index(2);
+        let snapshot = Snapshot {
+            attention: vec![question],
+            ..index.snapshot().clone()
+        };
+        let asked = WorkspaceIndex::new(snapshot, index.archive().clone());
+        assert!(!wants_archive(&asked, &shown("live")), "a question is not");
+    }
+
+    #[test]
+    fn the_same_quota_readings_again_keep_the_ones_held() {
+        let reading = |used| QuotaReading {
+            provider: Provider::Codex,
+            account: None,
+            observed_at: 1,
+            source: "Codex app-server".into(),
+            windows: vec![QuotaWindow {
+                key: "weekly".into(),
+                label: "Weekly".into(),
+                used_percent: Some(used),
+                observed_at: 1,
+                duration_mins: Some(10080),
+                resets_at: None,
+                status: None,
+            }],
+            error: None,
+        };
+        let mut held = Rc::new(vec![reading(40.)]);
+        let before = held.clone();
+        keep_quotas(&mut held, vec![reading(40.)]);
+        assert!(
+            Rc::ptr_eq(&held, &before),
+            "nothing that draws them redraws"
+        );
+        keep_quotas(&mut held, vec![reading(41.)]);
+        assert!(!Rc::ptr_eq(&held, &before));
+        assert_eq!(*held, vec![reading(41.)]);
     }
 
     #[test]

@@ -55,7 +55,7 @@ impl Linked {
                         cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()))
                     })
             })
-            .text_size(px(14.))
+            .text_size(px(font::BODY))
             .line_height(relative(1.5))
     }
 }

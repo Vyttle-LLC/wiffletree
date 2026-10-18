@@ -2,26 +2,13 @@
 //! verification round waiting on its implementer holds no other worker back, and a coordinator
 //! runs past 100 turns without the human, raising a check-in instead of stopping. Kept in its
 //! own test binary because it sets the provider environment for the process.
-use serde_json::{Value, json};
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+mod common;
+// Direct store writes below notify admission explicitly; `until` only reads snapshots.
+use common::{git, request, snapshot, until_snapshot as until};
+use serde_json::json;
+use std::time::Duration;
 use workspace_core::*;
-use workspace_host::{Host, now, service::Service};
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
-
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
+use workspace_host::{Host, now};
 
 fn status(snapshot: &Snapshot, session: &str) -> Status {
     snapshot
@@ -32,15 +19,6 @@ fn status(snapshot: &Snapshot, session: &str) -> Status {
         .status
 }
 
-/// Observes snapshots; direct store writes below notify admission explicitly.
-fn until(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !done(&snapshot(service)) {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn runs(db: &rusqlite::Connection, session: &str) -> i64 {
     db.query_row(
         "SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND finished_at IS NOT NULL",
@@ -48,16 +26,6 @@ fn runs(db: &rusqlite::Connection, session: &str) -> i64 {
         |r| r.get(0),
     )
     .unwrap()
-}
-
-fn git(path: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success());
 }
 
 fn implementer(
@@ -126,18 +94,12 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
         host.set_live(&busy.id, true).unwrap();
         (reviewing, writer, other, busy)
     };
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .start()
+    };
     let db = rusqlite::Connection::open(home.path().join("workspace.sqlite3")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
 

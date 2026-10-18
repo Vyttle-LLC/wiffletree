@@ -1,8 +1,9 @@
 //! The model's part of a merge: what it is told and sent, and the check of its answer before
 //! the host puts any of it into the plain merge.
 use anyhow::{Context as _, Result, bail, ensure};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
+pub(crate) use workspace_core::skills::PassageAnswer;
 use workspace_core::{MergePassage, Skill};
 
 /// The merge run's instructions, which hold none of the fixed core.
@@ -40,14 +41,6 @@ struct Answer {
 enum Answered {
     Merged { id: String, merged: String },
     Question { id: String, question: String },
-}
-
-/// A passage's answer, once checked: the model's merged text, or its one-sentence question.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PassageAnswer {
-    Merged(String),
-    Question(String),
 }
 
 /// Each passage's answer, in order, once the answer is checked. Nothing of an answer is used

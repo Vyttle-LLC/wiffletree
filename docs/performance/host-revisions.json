@@ -1,0 +1,222 @@
+{
+  "environment": {
+    "date": "2026-10-17",
+    "cpu": "Apple M4",
+    "memory_gib": 24,
+    "logical_cpus": 10,
+    "macos": "27.0.1",
+    "rust": "1.97.0"
+  },
+  "before_runtime_commit": "91823f59648a2bdf467c360c35585f5c6644bffa",
+  "after_revisions_commit": "b71ddaed",
+  "before": {
+    "build": "release",
+    "durability": "SQLite WAL / synchronous=FULL",
+    "excluded": "native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak",
+    "fixture": {
+      "activity": 100000,
+      "archive_bytes": 3484472,
+      "messages": 100000,
+      "projects": 5,
+      "repositories": "10 metadata fixtures; no Git history benchmark",
+      "sessions": 750,
+      "snapshot_bytes": 192495,
+      "source_logs": 100000,
+      "step_runs": 101,
+      "steps": 4000,
+      "tickets": 140
+    },
+    "recovery": {
+      "max_ms": 100.432041,
+      "measure": "host restart and cached snapshot",
+      "p50_ms": 81.052584,
+      "p95_ms": 93.71745800000001,
+      "samples": 100
+    },
+    "results": [
+      {
+        "max_ms": 0.108625,
+        "measure": "indexed transcript page (100 rows)",
+        "p50_ms": 0.057042,
+        "p95_ms": 0.060375,
+        "samples": 1000
+      },
+      {
+        "max_ms": 12.356916,
+        "measure": "workspace snapshot (750 sessions, 140 tickets)",
+        "p50_ms": 8.174875,
+        "p95_ms": 9.034083,
+        "samples": 200
+      },
+      {
+        "max_ms": 16.865791,
+        "measure": "workspace snapshot with JSON round trip",
+        "p50_ms": 8.565708,
+        "p95_ms": 9.654542000000001,
+        "samples": 200
+      },
+      {
+        "max_ms": 21.708458,
+        "measure": "archive with JSON round trip",
+        "p50_ms": 17.707957999999998,
+        "p95_ms": 19.385791,
+        "samples": 200
+      },
+      {
+        "max_ms": 0.38458299999999995,
+        "measure": "workspace index of snapshot and archive",
+        "p50_ms": 0.20408300000000001,
+        "p95_ms": 0.216667,
+        "samples": 200
+      },
+      {
+        "max_ms": 0.11,
+        "measure": "indexed activity page (100 rows)",
+        "p50_ms": 0.033459,
+        "p95_ms": 0.035042000000000004,
+        "samples": 1000
+      },
+      {
+        "max_ms": 0.130458,
+        "measure": "indexed source-memory page (100 rows)",
+        "p50_ms": 0.076375,
+        "p95_ms": 0.08287499999999999,
+        "samples": 1000
+      },
+      {
+        "max_ms": 2.83575,
+        "measure": "step page, whole 2,000-step run",
+        "p50_ms": 2.225291,
+        "p95_ms": 2.2837500000000004,
+        "samples": 1000
+      },
+      {
+        "max_ms": 0.233041,
+        "measure": "step page after cursor, nothing new",
+        "p50_ms": 0.12279200000000001,
+        "p95_ms": 0.128959,
+        "samples": 1000
+      },
+      {
+        "max_ms": 1.6945409999999999,
+        "measure": "reply summaries (100 runs)",
+        "p50_ms": 1.276709,
+        "p95_ms": 1.3024580000000001,
+        "samples": 1000
+      },
+      {
+        "max_ms": 1.056209,
+        "measure": "durable 4 KiB enqueue (FULL sync)",
+        "p50_ms": 0.095,
+        "p95_ms": 0.148125,
+        "samples": 200
+      }
+    ],
+    "seed_ms": 1029.255375
+  },
+  "after": {
+    "build": "release",
+    "durability": "SQLite WAL / synchronous=FULL",
+    "excluded": "native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak",
+    "fixture": {
+      "activity": 100000,
+      "archive_bytes": 3484454,
+      "messages": 100000,
+      "projects": 5,
+      "repositories": "10 metadata fixtures; no Git history benchmark",
+      "sessions": 750,
+      "snapshot_bytes": 196599,
+      "source_logs": 100000,
+      "step_runs": 101,
+      "steps": 4000,
+      "tickets": 140
+    },
+    "recovery": {
+      "max_ms": 146.457125,
+      "measure": "host restart and cached snapshot",
+      "p50_ms": 82.105792,
+      "p95_ms": 115.377458,
+      "samples": 100
+    },
+    "results": [
+      {
+        "max_ms": 0.164417,
+        "measure": "indexed transcript page (100 rows)",
+        "p50_ms": 0.056625,
+        "p95_ms": 0.06129199999999999,
+        "samples": 1000
+      },
+      {
+        "max_ms": 3.118708,
+        "measure": "workspace snapshot (750 sessions, 140 tickets)",
+        "p50_ms": 2.7119169999999997,
+        "p95_ms": 2.933542,
+        "samples": 200
+      },
+      {
+        "max_ms": 3.276333,
+        "measure": "workspace snapshot with JSON round trip",
+        "p50_ms": 2.9099579999999996,
+        "p95_ms": 3.163,
+        "samples": 200
+      },
+      {
+        "max_ms": 20.439334,
+        "measure": "archive with JSON round trip",
+        "p50_ms": 12.079167,
+        "p95_ms": 14.733917,
+        "samples": 200
+      },
+      {
+        "max_ms": 0.33925,
+        "measure": "workspace index of snapshot and archive",
+        "p50_ms": 0.204791,
+        "p95_ms": 0.215042,
+        "samples": 200
+      },
+      {
+        "max_ms": 0.098917,
+        "measure": "indexed activity page (100 rows)",
+        "p50_ms": 0.033125,
+        "p95_ms": 0.034749999999999996,
+        "samples": 1000
+      },
+      {
+        "max_ms": 0.135708,
+        "measure": "indexed source-memory page (100 rows)",
+        "p50_ms": 0.075917,
+        "p95_ms": 0.081042,
+        "samples": 1000
+      },
+      {
+        "max_ms": 41.046541999999995,
+        "measure": "step page, whole 2,000-step run",
+        "p50_ms": 3.060542,
+        "p95_ms": 8.143166,
+        "samples": 1000
+      },
+      {
+        "max_ms": 13.807416,
+        "measure": "step page after cursor, nothing new",
+        "p50_ms": 0.16025,
+        "p95_ms": 0.669625,
+        "samples": 1000
+      },
+      {
+        "max_ms": 19.441416999999998,
+        "measure": "reply summaries (100 runs)",
+        "p50_ms": 2.475375,
+        "p95_ms": 7.062417,
+        "samples": 1000
+      },
+      {
+        "max_ms": 1.218208,
+        "measure": "durable 4 KiB enqueue (FULL sync)",
+        "p50_ms": 0.1115,
+        "p95_ms": 0.16875,
+        "samples": 200
+      }
+    ],
+    "seed_ms": 1066.189167
+  }
+}

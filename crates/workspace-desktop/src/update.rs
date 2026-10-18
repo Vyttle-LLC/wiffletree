@@ -15,12 +15,12 @@ use std::{
 };
 use workspace_host::runtime::OwnDescriptors as _;
 
-pub const VERSION: Option<&str> = option_env!("WIFFLETREE_VERSION");
+pub(crate) const VERSION: Option<&str> = option_env!("WIFFLETREE_VERSION");
 const LATEST_RELEASE: &str = "https://api.github.com/repos/Vyttle-LLC/wiffletree/releases/latest";
 
 /// A verified bundle waiting to replace the running one.
 #[derive(Clone)]
-pub struct Staged {
+pub(crate) struct Staged {
     pub version: String,
     /// The release notes' `## Summary` section.
     pub summary: Option<String>,
@@ -46,7 +46,7 @@ struct Asset {
 }
 
 /// The running bundle, when this build may update itself in place.
-pub fn installed_bundle() -> Option<PathBuf> {
+pub(crate) fn installed_bundle() -> Option<PathBuf> {
     VERSION?;
     // Releases are the stable app; installing one over the beta would replace it.
     if crate::data_dir::is_beta() {
@@ -57,7 +57,7 @@ pub fn installed_bundle() -> Option<PathBuf> {
 }
 
 /// Downloads and verifies the latest release when it is newer than `current`.
-pub fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
+pub(crate) fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
     let release = latest_release()?;
     let version = release.tag_name.trim_start_matches('v');
     if !newer(version, current)? {
@@ -116,7 +116,7 @@ pub fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
 
 impl Staged {
     /// Swaps the bundle once this process exits, then optionally reopens it.
-    pub fn install_after_exit(&self, relaunch: bool) -> Result<()> {
+    pub(crate) fn install_after_exit(&self, relaunch: bool) -> Result<()> {
         command("/bin/sh")
             .args(["-c", SWAP, "swap"])
             .arg(std::process::id().to_string())

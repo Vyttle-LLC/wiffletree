@@ -1,12 +1,13 @@
 //! The setup suggested on first run, from the provider CLIs signed in on this machine.
 use crate::{
-    AllowedModel, LevelKind, ModelSelection, PROVIDER_ROLES, PROVIDERS, Provider, ProviderAccess,
-    ReviewLevel, Role, VerificationSettings, VerifierConfig,
+    LevelKind, ModelSelection, PROVIDER_ROLES, PROVIDERS, Provider, ProviderAccess, ReviewLevel,
+    Role, VerificationSettings, VerifierConfig, suggested_models,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What detection found for one provider's CLI.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     pub installed: bool,
     pub signed_in: bool,
@@ -25,25 +26,6 @@ pub type Detection = BTreeMap<Provider, ProviderStatus>;
 pub struct Setup {
     pub selection: ModelSelection,
     pub verification: VerificationSettings,
-}
-
-fn models(provider: Provider) -> Vec<AllowedModel> {
-    let pairs: &[(&str, &str)] = match provider {
-        Provider::Claude => &[
-            ("opus", "high"),
-            ("opus", "medium"),
-            ("sonnet", "high"),
-            ("sonnet", "medium"),
-        ],
-        Provider::Codex => &[("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "medium")],
-    };
-    pairs
-        .iter()
-        .map(|(model, effort)| AllowedModel {
-            model: (*model).into(),
-            effort: (*effort).into(),
-        })
-        .collect()
 }
 
 /// The starter guide, with a line for each of `providers`.
@@ -102,7 +84,11 @@ pub fn suggest(detection: &Detection) -> Setup {
         .into_iter()
         .map(|provider| {
             let enabled = usable.contains(&provider);
-            let models = if enabled { models(provider) } else { vec![] };
+            let models = if enabled {
+                suggested_models(provider)
+            } else {
+                vec![]
+            };
             (provider, ProviderAccess { enabled, models })
         })
         .collect();

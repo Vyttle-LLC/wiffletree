@@ -3,6 +3,8 @@
 //! `git worktree prune` in a repository holding a `fail-prune` mark, after pruning in one holding
 //! a `fail-after-prune` mark, or after deleting the worktrees' administrative file the
 //! `fail-mid-prune` mark names, as a prune cut off partway can.
+mod common;
+use common::git;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -44,22 +46,6 @@ fn stand_in_git() {
         // SAFETY: set once, before any test in this binary runs Git.
         unsafe { std::env::set_var("PATH", path) };
     });
-}
-
-fn git(path: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(path)
-        .args([
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=f@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8(output.stdout).unwrap()
 }
 
 /// A host with the `web` repository and a ticket whose worktree holds committed work and

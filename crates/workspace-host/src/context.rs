@@ -12,26 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use workspace_core::{ModelProfile, Provider};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContextCategory {
-    pub name: String,
-    pub tokens: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContextUsage {
-    pub model: Option<String>,
-    pub used: u64,
-    pub window: u64,
-    /// Where the provider compacts the conversation, when it says.
-    pub compacts_at: Option<u64>,
-    pub categories: Vec<ContextCategory>,
-    /// True when the categories are sized by this app rather than reported by the provider.
-    pub estimated: bool,
-    pub observed_at: i64,
-}
+use workspace_core::{ContextCategory, ContextUsage, ModelProfile, Provider};
 
 /// The session to inspect, as the host last ran it.
 pub struct Probe<'a> {
@@ -40,6 +21,43 @@ pub struct Probe<'a> {
     pub directory: &'a Path,
     /// The instructions the session's turns are sent.
     pub instructions: &'a str,
+}
+
+/// A session's context to measure, read from the store so it can be measured off the host
+/// thread.
+pub struct Measurement {
+    profile: ModelProfile,
+    provider_session: String,
+    directory: PathBuf,
+    instructions: String,
+}
+impl Measurement {
+    pub fn run(&self) -> Result<ContextUsage> {
+        usage(&Probe {
+            profile: &self.profile,
+            provider_session: &self.provider_session,
+            directory: &self.directory,
+            instructions: &self.instructions,
+        })
+    }
+}
+impl crate::Host {
+    /// Measuring `session_id`'s context with `profile`, once it has run a turn.
+    pub fn measurement(&self, session_id: &str, profile: ModelProfile) -> Result<Measurement> {
+        let session = self.session(session_id)?;
+        let runtime = self.session_runtime(session_id)?;
+        let (Some(provider_session), Some(directory)) =
+            (runtime.provider_session_id, runtime.directory)
+        else {
+            bail!("This session has not run a turn yet");
+        };
+        Ok(Measurement {
+            profile,
+            provider_session,
+            directory: directory.into(),
+            instructions: self.instructions(session.role),
+        })
+    }
 }
 
 pub fn usage(probe: &Probe) -> Result<ContextUsage> {

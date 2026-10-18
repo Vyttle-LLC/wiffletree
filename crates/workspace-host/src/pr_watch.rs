@@ -679,6 +679,7 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::git;
 
     const HEAD: &str = "7c1c59eda70e41456e62530280eed9e930a140c8";
     const BASE: &str = "4a1c2e9d1f0b8c7a6e5d4c3b2a19087f6e5d4c3b";
@@ -876,16 +877,6 @@ mod tests {
         }
     }
 
-    fn git(path: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .current_dir(path)
-            .args(["-c", "user.name=F", "-c", "user.email=f@example.invalid"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
     fn repository(remote: Option<&str>) -> tempfile::TempDir {
         let folder = tempfile::tempdir().unwrap();
         git(folder.path(), &["init", "-q", "-b", "main"]);

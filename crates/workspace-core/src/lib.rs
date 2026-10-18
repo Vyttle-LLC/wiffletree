@@ -1,18 +1,24 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
+pub mod ask;
+mod context;
 mod files;
 mod index;
 mod messages;
+mod models;
 mod owners;
 mod progress;
 mod publishing;
 mod selection;
+pub mod skills;
 mod steps;
 mod suggestion;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
+pub use context::*;
 pub use files::*;
 pub use index::WorkspaceIndex;
 pub use messages::*;
+pub use models::*;
 pub use owners::*;
 pub use progress::*;
 pub use publishing::*;
@@ -441,6 +447,18 @@ pub enum Receipt {
     Held,
     Cancelled,
 }
+impl Receipt {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Delivered => "Delivered",
+            Self::Acknowledged => "Acknowledged",
+            Self::Completed => "Completed",
+            Self::Held => "Held",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub sequence: i64,
@@ -454,6 +472,23 @@ pub struct Message {
     /// Only the human's messages carry attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+}
+/// A page of a repository's local history, newest first, read from Git without changing it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GitHistory {
+    pub repository: Repository,
+    pub commits: Vec<Commit>,
+    /// Where the next page starts.
+    pub next_skip: usize,
+    pub observed_at: i64,
+    pub source: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Commit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub subject: String,
 }
 /// A file on a message: before sending, the dropped file; after, the stored read-only copy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +504,11 @@ impl Attachment {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     }
+}
+/// Whether two file names would name the same file. macOS volumes ignore case by default,
+/// so neither may `Notes.txt` and `notes.txt` share a message.
+pub fn same_file_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
 }
 /// Image formats both providers accept as images rather than files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -585,6 +625,13 @@ pub struct Snapshot {
     /// only then.
     #[serde(default)]
     pub archive_stamp: u64,
+    /// Opaque, durable message revisions for sessions included in this snapshot. Compare for
+    /// equality only. A revision changes on any insert, edit, receipt change or deletion in
+    /// that session's `Messages` pages; unrelated sessions and no-op writes leave it alone.
+    /// Missing entries mean unknown: fetch on first selection or when the entry is absent.
+    /// Older hosts omit this field; older clients may ignore it and keep refetching.
+    #[serde(default)]
+    pub message_revisions: BTreeMap<String, u64>,
     /// How many sessions are archived, the archive's included.
     #[serde(default)]
     pub archived_sessions: u32,
@@ -2458,6 +2505,20 @@ pub struct CompactionOutcome {
     pub reason: Option<String>,
     pub at: i64,
 }
+/// The longest reason the host builds from a provider's own text, in characters. The Context
+/// card cuts every reason it shows at the same length.
+pub const REASON_LIMIT: usize = 200;
+
+/// The first line of `text`, cut at `limit` characters and ended with "…" when it was.
+pub fn first_line(text: &str, limit: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    if line.chars().count() > limit {
+        format!("{}…", line.chars().take(limit).collect::<String>())
+    } else {
+        line.to_owned()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionResult {
@@ -2543,8 +2604,21 @@ pub enum Command {
         session_id: String,
     },
     Quotas,
-    RecordQuota {
-        reading: QuotaReading,
+    /// Reads Codex's account limits, records them and answers with every reading. Claude's
+    /// arrive with its turns.
+    RefreshCodexQuota,
+    /// What a provider's CLI says about itself on the host: a `ProviderReport`.
+    InspectProvider {
+        provider: Provider,
+    },
+    /// How full a session's context window is, measured with `profile`: a `ContextUsage`.
+    MeasureContext {
+        session_id: String,
+        profile: ModelProfile,
+    },
+    /// Whether each file can be attached to a message: the `Attachment` it would be, or why not.
+    InspectAttachments {
+        paths: Vec<PathBuf>,
     },
     Usage {
         days: u16,
@@ -2864,6 +2938,9 @@ impl Command {
             | Self::Archive
             | Self::DiscoverRepositories { .. }
             | Self::Quotas
+            | Self::InspectProvider { .. }
+            | Self::MeasureContext { .. }
+            | Self::InspectAttachments { .. }
             | Self::Usage { .. }
             | Self::Messages { .. }
             | Self::Steps { .. }
@@ -2893,7 +2970,7 @@ impl Command {
             | Self::CompactContext { .. }
             | Self::CancelCompaction { .. }
             | Self::DismissCompaction { .. }
-            | Self::RecordQuota { .. }
+            | Self::RefreshCodexQuota
             | Self::CreateTicket { .. }
             | Self::AssignTicket { .. }
             | Self::CreateProject { .. }

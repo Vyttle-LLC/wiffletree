@@ -1,7 +1,7 @@
 use gpui::{AssetSource, SharedString};
 use std::borrow::Cow;
 
-pub struct Assets;
+pub(crate) struct Assets;
 
 const BRAND: &[(&str, &[u8])] = &[
     (

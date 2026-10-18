@@ -1,6 +1,6 @@
 //! What the shell shares with every view, and how a view talks to the host.
 use super::*;
-use workspace_host::runtime::ModelOption;
+use serde::de::DeserializeOwned;
 
 /// The host's latest workspace joined with its archive, what is selected, which page and panel
 /// show, and the figures several views draw. The shell owns it and hands each view a copy when
@@ -34,7 +34,7 @@ impl Default for Shared {
             progress: Rc::default(),
             quotas: Rc::default(),
             quota_pending: false,
-            catalog: Rc::new(models::fallback()),
+            catalog: Rc::new(fallback_catalog()),
         }
     }
 }
@@ -54,6 +54,11 @@ impl Shared {
     }
     pub(super) fn session(&self, id: &str) -> Option<&Session> {
         self.index.as_ref()?.session(id)
+    }
+    /// The revision of a session's messages in the latest snapshot; `None` when it has none,
+    /// as for a session only the archive holds, or from an older host.
+    pub(super) fn message_revision(&self, session_id: &str) -> Option<u64> {
+        self.snapshot()?.message_revisions.get(session_id).copied()
     }
     pub(super) fn runtime(&self, session_id: &str) -> Option<&SessionRuntime> {
         self.index.as_ref()?.runtime(session_id)
@@ -219,26 +224,36 @@ pub(super) enum Amendment {
 /// A view that asks the host for things and handles the replies itself.
 pub(super) trait Requests: Sized + 'static {
     fn bridge(&self) -> &Bridge;
-    /// Handles the host's reply to a command this view sent; the view redraws after it.
+    /// Handles the host's reply to a command this view sent with `request`; the view redraws
+    /// after it. A view that only sends asks handles each reply where it asks, and needs none.
     fn accept(
         &mut self,
-        command: Command,
-        reply: Result<Value, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    );
+        _command: Command,
+        _reply: Result<Value, String>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+    /// Archives or restores a session, and says which were.
     fn set_archived(
         &mut self,
         session_id: String,
         archived: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let command = Command::SetArchived {
-            session_id,
-            archived,
-        };
-        self.request(command, window, cx);
+    ) where
+        Self: EventEmitter<Intent>,
+    {
+        let ask = ask::set_archived(session_id, archived);
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |_, affected, window, cx| match affected {
+                Ok(affected) => cx.emit(Intent::Archived { archived, affected }),
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
     /// Starts or stops a project's agents.
     fn set_live(
@@ -256,24 +271,73 @@ pub(super) trait Requests: Sized + 'static {
     }
     /// Sends `command` to the host; its reply comes back to `accept`.
     fn request(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = match self.bridge().request(command.clone()) {
-            Ok(receiver) => receiver,
-            Err(error) => return self.accept(command, Err(error), window, cx),
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            let reply = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()));
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |view, cx| {
-                    view.accept(command, reply, window, cx);
-                    cx.notify();
-                })
-            });
-        })
-        .detach();
+        let sent = command.clone();
+        send(self, sent, window, cx, move |view, reply, window, cx| {
+            view.accept(command, reply, window, cx)
+        });
     }
+    /// Sends `ask`; its reply, decoded as what the host answers it with, comes back to `then`.
+    fn ask<R: DeserializeOwned + 'static>(
+        &mut self,
+        ask: Ask<R>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Result<R, String>, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let command = ask.command().clone();
+        send(self, command, window, cx, move |view, reply, window, cx| {
+            then(view, reply.and_then(|reply| ask.decode(reply)), window, cx)
+        });
+    }
+}
+
+/// Sends `command` to the host and hands its reply to `then`; the view redraws after it.
+fn send<V: Requests>(
+    view: &mut V,
+    command: Command,
+    window: &mut Window,
+    cx: &mut Context<V>,
+    then: impl FnOnce(&mut V, Result<Value, String>, &mut Window, &mut Context<V>) + 'static,
+) {
+    let sent = command.clone();
+    let reply = match view.bridge().send(command) {
+        Ok(reply) => reply,
+        Err(error) => return then(view, Err(error), window, cx),
+    };
+    cx.spawn_in(window, async move |this, cx| {
+        let reply = reply.await;
+        let wrote = reply.is_ok();
+        let _ = cx.update(|window, cx| {
+            let _ = this.update(cx, |view, cx| {
+                then(view, reply, window, cx);
+                cx.notify();
+            });
+            replied(&sent, wrote, cx);
+        });
+    })
+    .detach();
+}
+
+/// Set after each change the human made, so its observers hear of every one. A reader of an
+/// older transcript page goes back to the newest after any of them.
+pub(super) struct HumanWrote;
+impl Global for HumanWrote {}
+
+/// After a reply to `command`, tells the transcript of a write the human asked for that
+/// `succeeded`. Views that send outside `Requests` call it too.
+pub(super) fn replied(command: &Command, succeeded: bool, cx: &mut App) {
+    if succeeded && human_write(command) {
+        cx.set_global(HumanWrote);
+    }
+}
+
+/// A write the human asked for, unlike the refreshes the app makes by itself.
+fn human_write(command: &Command) -> bool {
+    !command.is_read()
+        && !matches!(
+            command,
+            Command::RefreshCodexQuota | Command::RefreshRepositories
+        )
 }
 
 pub(super) fn toast(message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
@@ -288,4 +352,59 @@ pub(super) fn toast_error(message: impl Into<SharedString>, window: &mut Window,
             .id::<RequestFailed>(),
         cx,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_write;
+    use workspace_core::*;
+
+    #[test]
+    fn only_the_writes_the_human_asks_for_send_a_reader_back_to_the_newest_page() {
+        let session_id = || "s".to_owned();
+        let human = [
+            Command::Send {
+                id: "m".into(),
+                sender: None,
+                recipient: session_id(),
+                body: "Go".into(),
+                attachments: vec![],
+            },
+            Command::SetArchived {
+                session_id: session_id(),
+                archived: true,
+            },
+            Command::StopProcesses {
+                session_id: session_id(),
+                groups: vec![],
+            },
+            Command::SetCheckIns {
+                child_turns: 25,
+                human_turns: 100,
+            },
+            Command::CancelCompaction {
+                session_id: session_id(),
+            },
+        ];
+        for command in &human {
+            assert!(human_write(command), "{command:?}");
+        }
+        let not = [
+            // The app refreshes these by itself.
+            Command::RefreshCodexQuota,
+            Command::RefreshRepositories,
+            // Reads change nothing.
+            Command::Snapshot,
+            Command::Quotas,
+            Command::Messages {
+                session_id: session_id(),
+                before: None,
+                limit: 100,
+            },
+            Command::InspectAttachments { paths: vec![] },
+        ];
+        for command in &not {
+            assert!(!human_write(command), "{command:?}");
+        }
+    }
 }

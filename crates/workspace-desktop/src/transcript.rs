@@ -2,11 +2,12 @@
 //! older pages, and the live activity row while the agent works.
 use super::*;
 use activity::{Card, RunActivity, STEP_PACE, StepFetch, paced_reply};
-use conversation::{COLUMN, first_line};
+use conversation::COLUMN;
 use file_links::Linked;
 use gpui_component::button::ButtonVariants;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use ui::{age, brand_image, humanize, icon, pill, session_icon};
+use ui::{brand_image, icon, pill, session_icon};
+use wording::{age, counted, humanize};
 
 /// How a refreshed transcript page lines up with the one on screen: how many leading messages
 /// fell off the page and how many after them are unchanged. `None` when the pages don't overlap.
@@ -115,11 +116,7 @@ fn run_heading(count: usize, senders: &[SharedString]) -> String {
             names.push(sender);
         }
     }
-    format!(
-        "{count} agent message{} · {}",
-        if count == 1 { "" } else { "s" },
-        names.join(", ")
-    )
+    format!("{} · {}", counted(count, "agent message"), names.join(", "))
 }
 
 /// Messages without a sender are the human's, apart from Wiffletree's own notices.
@@ -162,6 +159,7 @@ pub(super) struct Row {
 }
 
 /// Who may have sent the messages on a page, and where each one's file references resolve.
+#[derive(Default, PartialEq)]
 struct Senders {
     session_id: String,
     names: HashMap<String, (SharedString, Role)>,
@@ -250,7 +248,7 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
                 sender,
                 role: named(message).map(|(_, role)| *role),
                 pill,
-                receipt: format!("{:?}", message.receipt).into(),
+                receipt: message.receipt.label().into(),
                 first_line: first_line(line.text, 160).into(),
                 body: shown.then(|| Linked::new(&message.id, text, senders.bases(message))),
                 run: None,
@@ -277,6 +275,8 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
 struct Loaded {
     messages: Rc<Vec<Message>>,
     rows: Rc<Vec<Row>>,
+    /// The names and link bases the rows were prepared with.
+    senders: Arc<Senders>,
 }
 
 fn avatar(icon_name: &'static str, color: Hsla) -> Div {
@@ -294,7 +294,7 @@ fn avatar(icon_name: &'static str, color: Hsla) -> Div {
 
 fn meta(text: impl Into<SharedString>, p: Palette) -> Div {
     div()
-        .text_size(px(10.5))
+        .text_size(px(font::META))
         .text_color(p.subtle)
         .child(text.into())
 }
@@ -364,7 +364,7 @@ fn notice_message(message: &Message, row: &Row, p: Palette) -> Div {
                         .gap_2()
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(font::MESSAGE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.sender.clone()),
                         )
@@ -394,7 +394,7 @@ fn compaction_message(line: CompactionLine, p: Palette) -> Div {
         .flex()
         .flex_col()
         .gap(px(1.))
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(color)
         .child(
             div()
@@ -442,7 +442,7 @@ fn agent_message(message: &Message, row: &Row, own: bool, p: Palette) -> Div {
                             div()
                                 .min_w_0()
                                 .text_ellipsis()
-                                .text_size(px(12.5))
+                                .text_size(px(font::MESSAGE))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.sender.clone()),
                         )
@@ -497,7 +497,7 @@ fn peer_run(
         .flex()
         .flex_col()
         .gap_1()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(p.subtle)
         .child(
             div()
@@ -606,10 +606,59 @@ fn peer_line_row(
                     .children(
                         row.body
                             .as_ref()
-                            .map(|body| body.view().text_size(px(12.5))),
+                            .map(|body| body.view().text_size(px(font::MESSAGE))),
                     ),
             )
         })
+}
+
+/// A page of messages being prepared: which ask it answers, for which session and page.
+struct PageAsk {
+    number: u64,
+    session_id: String,
+    page: Option<i64>,
+}
+impl PageAsk {
+    /// Shown only if no page was asked for since and the reader is still on its session and page.
+    fn wanted(&self, latest: u64, selected: Option<&str>, page: Option<i64>) -> bool {
+        self.number == latest && selected == Some(self.session_id.as_str()) && self.page == page
+    }
+}
+
+/// Which revision of the selected session's messages the shown page was fetched at, and which
+/// one a fetch on its way was asked at, so a snapshot that left them alone fetches nothing.
+/// Revisions are compared for equality only.
+#[derive(Default)]
+struct MessageRevisions {
+    shown: Option<(String, u64)>,
+    asking: Option<(String, u64)>,
+}
+impl MessageRevisions {
+    /// Whether `session_id`'s messages at `revision` are neither shown nor on their way. An
+    /// unknown revision always is wanted.
+    fn wanted(&self, session_id: &str, revision: Option<u64>) -> bool {
+        let Some(revision) = revision else {
+            return true;
+        };
+        let at = Some((session_id.to_owned(), revision));
+        at != self.shown && at != self.asking
+    }
+    /// A fetch goes out while the snapshot says `revision`.
+    fn asking(&mut self, session_id: &str, revision: Option<u64>) {
+        self.asking = revision.map(|revision| (session_id.to_owned(), revision));
+    }
+    /// The fetch asked at `revision` arrived; only now does the page count as that revision.
+    fn fetched(&mut self, session_id: &str, revision: Option<u64>) {
+        let at = revision.map(|revision| (session_id.to_owned(), revision));
+        if self.asking == at {
+            self.asking = None;
+        }
+        self.shown = at;
+    }
+    /// The fetch on its way failed; the next snapshot asks again.
+    fn failed(&mut self) {
+        self.asking = None;
+    }
 }
 
 /// The selected session's messages, a page at a time, and its live activity.
@@ -626,8 +675,11 @@ pub(super) struct Transcript {
     cache_order: VecDeque<String>,
     /// The older page being read, by the sequence it ends before; `None` for the newest.
     page: Option<i64>,
-    /// Pages are prepared off the UI thread; only the latest one asked for is shown.
+    revisions: MessageRevisions,
+    /// Pages are prepared off the UI thread; counts the asks so only the latest is shown.
     preparing: u64,
+    /// The latest preparation that finished, shown or not.
+    finished: u64,
     /// The selected session's latest run, shown as the activity card while it works.
     activity: Option<RunActivity>,
     step_fetch: StepFetch,
@@ -639,7 +691,16 @@ pub(super) struct Transcript {
 }
 impl EventEmitter<Intent> for Transcript {}
 impl Transcript {
-    pub(super) fn new(bridge: Bridge, input: Entity<TextareaState>) -> Self {
+    pub(super) fn new(
+        bridge: Bridge,
+        input: Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe_global_in::<HumanWrote>(window, |view, window, cx| {
+            view.back_to_latest(window, cx)
+        })
+        .detach();
         Self {
             bridge,
             shared: Shared::default(),
@@ -650,7 +711,9 @@ impl Transcript {
             cached_pages: BTreeMap::new(),
             cache_order: VecDeque::new(),
             page: None,
+            revisions: MessageRevisions::default(),
             preparing: 0,
+            finished: 0,
             activity: None,
             step_fetch: StepFetch::default(),
             activity_clock: false,
@@ -659,8 +722,8 @@ impl Transcript {
         }
     }
 
-    /// A new selection shows its last page at once and loads its newest; each snapshot loads
-    /// the shown page again and follows the agent's work.
+    /// A new selection shows its last page at once and loads its newest; a snapshot loads the
+    /// shown page again if its messages moved, and follows the agent's work.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (selection, moved) = shared.moved_from(&self.shared);
         self.shared = shared;
@@ -668,7 +731,7 @@ impl Transcript {
             self.show_selected(window, cx);
         } else if moved {
             self.sync_transcript_rows();
-            self.load_messages(window, cx);
+            self.reload_if_moved(window, cx);
             // A turn that just started has no steps yet; ask before the first one arrives.
             if self.selected_working() && !self.activity.as_ref().is_some_and(|a| a.running) {
                 self.fetch_steps(window, cx);
@@ -687,7 +750,8 @@ impl Transcript {
         self.shown = self.cached_pages.get(&id).cloned().unwrap_or_default();
         self.page = None;
         self.list.reset(self.transcript_rows());
-        self.load_messages(window, cx);
+        self.revisions = MessageRevisions::default();
+        self.reload_if_moved(window, cx);
         self.activity = None;
         self.fetch_steps(window, cx);
         self.sync_activity_clock(window, cx);
@@ -721,16 +785,59 @@ impl Transcript {
     }
 
     pub(super) fn load_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.shared.selected.clone() {
-            self.request(
-                Command::Messages {
-                    session_id,
-                    before: self.page,
-                    limit: MAX_PAGE,
-                },
-                window,
-                cx,
-            );
+        let Some(session_id) = self.shared.selected.clone() else {
+            return;
+        };
+        let before = self.page;
+        // The revision the snapshot gives now; the page is credited with it once it arrives.
+        let revision = self.shared.message_revision(&session_id);
+        self.revisions.asking(&session_id, revision);
+        let ask = ask::messages(session_id.clone(), before, MAX_PAGE);
+        self.ask(
+            ask,
+            window,
+            cx,
+            move |view, messages, window, cx| match messages {
+                Ok(messages)
+                    if view.shared.selected.as_deref() == Some(&session_id)
+                        && view.page == before =>
+                {
+                    view.revisions.fetched(&session_id, revision);
+                    view.prepare(session_id, before, messages, window, cx)
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    view.revisions.failed();
+                    toast_error(error, window, cx)
+                }
+            },
+        );
+    }
+
+    /// Loads the shown page again if the selected session's messages may have changed.
+    fn reload_if_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.shared.selected.as_deref() else {
+            return;
+        };
+        if self.revisions.wanted(id, self.shared.message_revision(id)) {
+            self.load_messages(window, cx);
+        } else {
+            self.name_senders_again(window, cx);
+        }
+    }
+
+    /// Prepares the shown page again, without asking the host, when the workspace now names its
+    /// senders or finds their files differently, as after a rename or once the archive arrives.
+    fn name_senders_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A fetch or a preparation on its way names them as the workspace is when it lands.
+        let busy = self.finished != self.preparing || self.revisions.asking.is_some();
+        let Some(id) = self.shared.selected.clone().filter(|_| !busy) else {
+            return;
+        };
+        let messages = &self.shown.messages;
+        if *self.shown.senders != Senders::of(&self.shared, &id, messages) {
+            let messages = messages.to_vec();
+            self.prepare(id, self.page, messages, window, cx);
         }
     }
 
@@ -741,7 +848,7 @@ impl Transcript {
     }
 
     /// After a change the human made, a reader of an older page goes back to the newest.
-    pub(super) fn back_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn back_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page.take().is_some() {
             self.load_messages(window, cx);
         }
@@ -757,31 +864,37 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) {
         self.preparing += 1;
-        let preparing = self.preparing;
-        let senders = Senders::of(&self.shared, &session_id, &messages);
+        let ask = PageAsk {
+            number: self.preparing,
+            session_id,
+            page,
+        };
+        let senders = Arc::new(Senders::of(&self.shared, &ask.session_id, &messages));
+        let prepared_with = senders.clone();
         let rows = cx.background_spawn(async move {
-            let rows = prepare(&messages, &senders);
+            let rows = prepare(&messages, &prepared_with);
             (messages, rows)
         });
         cx.spawn_in(window, async move |this, cx| {
             let (messages, rows) = rows.await;
             let _ = this.update_in(cx, |view, window, cx| {
-                let wanted = view.preparing == preparing
-                    && view.page == page
-                    && view.shared.selected.as_deref() == Some(&session_id);
-                if !wanted {
+                view.finished = view.finished.max(ask.number);
+                if !ask.wanted(view.preparing, view.shared.selected.as_deref(), view.page) {
                     return;
                 }
                 let shown = Loaded {
                     messages: Rc::new(messages),
                     rows: Rc::new(rows),
+                    senders,
                 };
                 view.replace_page(shown.clone());
                 cx.emit(Intent::MessagesShown);
                 view.load_run_summaries(window, cx);
-                if page.is_none() {
-                    view.cache(session_id, shown);
+                if ask.page.is_none() {
+                    view.cache(ask.session_id, shown);
                 }
+                // The workspace may have moved while the rows were prepared.
+                view.name_senders_again(window, cx);
                 cx.notify();
             });
         })
@@ -854,14 +967,10 @@ impl Transcript {
             .as_ref()
             .filter(|a| a.session_id == session_id)
             .map_or(0, |a| a.revision);
-        let command = Command::Steps {
-            session_id: session_id.clone(),
-            run_id: None,
-            after,
-        };
+        let ask = ask::steps(session_id.clone(), None, after);
         let page = paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             wait,
             cx.background_executor().clone(),
         );
@@ -956,13 +1065,15 @@ impl Transcript {
             .map(str::to_owned)
             .collect();
         if !run_ids.is_empty() {
-            self.request(
-                Command::RunSummaries {
-                    session_id,
-                    run_ids,
-                },
+            let ask = ask::run_summaries(session_id, run_ids);
+            self.ask(
+                ask,
                 window,
                 cx,
+                |view, summaries, window, cx| match summaries {
+                    Ok(summaries) => view.accept_run_summaries(summaries),
+                    Err(error) => toast_error(error, window, cx),
+                },
             );
         }
     }
@@ -1123,14 +1234,14 @@ impl Transcript {
                     .child(
                         div()
                             .mt_3()
-                            .text_size(px(26.))
+                            .text_size(px(font::HERO))
                             .font_weight(FontWeight::MEDIUM)
                             .line_height(relative(1.2))
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(13.5))
+                            .text_size(px(font::LEAD))
                             .line_height(relative(1.6))
                             .text_color(p.subtle)
                             .child(description),
@@ -1140,7 +1251,7 @@ impl Transcript {
     }
 
     fn transcript(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
-        let Loaded { messages, rows } = self.shown.clone();
+        let Loaded { messages, rows, .. } = self.shown.clone();
         let card = self.activity_card();
         let summaries = self.run_summaries.clone();
         let minimized = cx.global::<Preferences>().minimize_activity;
@@ -1220,7 +1331,7 @@ impl Transcript {
                 .justify_center()
                 .gap_2()
                 .border_b_1()
-                .border_color(p.edge.opacity(0.3))
+                .border_color(p.edge.opacity(edge::SEPARATOR))
                 .when(older, |d| {
                     d.child(
                         button("older")
@@ -1250,33 +1361,6 @@ impl Requests for Transcript {
     fn bridge(&self) -> &Bridge {
         &self.bridge
     }
-    fn accept(
-        &mut self,
-        command: Command,
-        reply: Result<Value, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
-        };
-        match command {
-            Command::Messages {
-                session_id, before, ..
-            } if self.shared.selected.as_deref() == Some(&session_id) && self.page == before => {
-                match serde_json::from_value::<Vec<Message>>(value) {
-                    Ok(messages) => self.prepare(session_id, before, messages, window, cx),
-                    Err(error) => toast_error(error.to_string(), window, cx),
-                }
-            }
-            Command::RunSummaries { .. } => match serde_json::from_value(value) {
-                Ok(summaries) => self.accept_run_summaries(summaries),
-                Err(error) => toast_error(error.to_string(), window, cx),
-            },
-            _ => {}
-        }
-    }
 }
 
 impl Render for Transcript {
@@ -1303,13 +1387,15 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::{
+        MessageRevisions, PageAsk,
         Placement::{Alone, Folded, Heads},
         Senders, Shape, from_human, peer_line, placements, prepare, run_heading, run_troubles,
         transcript_overlap,
     };
+    use crate::shared::Shared;
     use gpui::SharedString;
-    use std::{collections::HashMap, sync::Arc};
-    use workspace_core::{Message, Receipt, Role};
+    use std::{collections::HashMap, rc::Rc, sync::Arc};
+    use workspace_core::{Archive, Message, Receipt, Role, Session, Snapshot, WorkspaceIndex};
 
     fn message(id: &str, body: &str) -> Message {
         Message {
@@ -1334,6 +1420,70 @@ mod tests {
         let mut reply = message("output:r", "Done");
         reply.sender = Some("agent".into());
         assert!(!from_human(&reply));
+    }
+
+    #[test]
+    fn a_prepared_page_is_shown_only_if_it_is_still_the_one_wanted() {
+        let ask = PageAsk {
+            number: 2,
+            session_id: "s".into(),
+            page: Some(40),
+        };
+        assert!(ask.wanted(2, Some("s"), Some(40)));
+        assert!(
+            !ask.wanted(3, Some("s"), Some(40)),
+            "a later page was asked for"
+        );
+        assert!(
+            !ask.wanted(2, Some("t"), Some(40)),
+            "another session is selected"
+        );
+        assert!(
+            !ask.wanted(2, Some("s"), None),
+            "the reader went back to the newest"
+        );
+        assert!(!ask.wanted(2, None, Some(40)), "nothing is selected");
+    }
+
+    #[test]
+    fn messages_are_fetched_again_only_when_their_revision_moved_or_is_unknown() {
+        let mut revisions = MessageRevisions::default();
+        assert!(
+            revisions.wanted("s", Some(0)),
+            "nothing shown yet; 0 is a revision too"
+        );
+        revisions.asking("s", Some(0));
+        assert!(!revisions.wanted("s", Some(0)), "the fetch is on its way");
+        revisions.fetched("s", Some(0));
+        assert!(
+            !revisions.wanted("s", Some(0)),
+            "a snapshot that left them alone"
+        );
+        assert!(revisions.wanted("s", Some(4)));
+        assert!(
+            revisions.wanted("t", Some(0)),
+            "another session at the same number"
+        );
+        assert!(revisions.wanted("s", None), "a host that gives none");
+
+        // A newer snapshot is not credited before its own fetch arrives.
+        revisions.asking("s", Some(4));
+        revisions.failed();
+        assert!(
+            revisions.wanted("s", Some(4)),
+            "the failed fetch is asked for again"
+        );
+        revisions.asking("s", Some(4));
+        assert!(
+            revisions.wanted("s", Some(5)),
+            "a snapshot newer than the fetch"
+        );
+        revisions.asking("s", Some(5));
+        revisions.fetched("s", Some(4));
+        assert!(!revisions.wanted("s", Some(5)), "still on its way");
+        assert!(!revisions.wanted("s", Some(4)));
+        revisions.fetched("s", Some(5));
+        assert!(!revisions.wanted("s", Some(5)));
     }
 
     #[test]
@@ -1531,6 +1681,43 @@ mod tests {
             current: bases,
         };
         prepare(messages, &senders)
+    }
+
+    #[test]
+    fn a_rename_or_the_archive_arriving_names_the_senders_anew() {
+        let session = |id: &str, name: &str, archived: bool| -> Session {
+            serde_json::from_value(serde_json::json!({
+                "id":id,"project_id":"p","parent_id":null,"repository_id":null,"name":name,
+                "role":"implementer","provider":"codex","status":"done","archived":archived
+            }))
+            .unwrap()
+        };
+        let shared = |live: Vec<Session>, archived: Vec<Session>| Shared {
+            index: Some(Rc::new(WorkspaceIndex::new(
+                Snapshot {
+                    sessions: live,
+                    ..Default::default()
+                },
+                Rc::new(Archive {
+                    session_order: archived.iter().map(|s| s.id.clone()).collect(),
+                    sessions: archived,
+                    ..Default::default()
+                }),
+            ))),
+            ..Default::default()
+        };
+        let page = [from(Some("impl"), "report:impl:1", "Done")];
+        let senders = |shared: &Shared| Senders::of(shared, "me", &page);
+        let before_archive = senders(&shared(vec![], vec![]));
+        let archived = senders(&shared(vec![], vec![session("impl", "Implementer", true)]));
+        assert!(
+            before_archive != archived,
+            "the archive names an archived sender"
+        );
+        let renamed = senders(&shared(vec![], vec![session("impl", "Builder", true)]));
+        assert!(archived != renamed);
+        let same = senders(&shared(vec![], vec![session("impl", "Builder", true)]));
+        assert!(renamed == same, "nothing to prepare again");
     }
 
     #[test]

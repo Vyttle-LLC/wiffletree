@@ -144,7 +144,10 @@ fn candidate(path: &Path, known: &BTreeSet<String>) -> Result<RepositoryCandidat
 
 /// Finds Git repositories in each folder, or the folder itself when it is one. Read-only, so it
 /// can run off the host thread; `known` marks repositories already in the workspace.
-pub fn discover(folders: &[String], known: &BTreeSet<String>) -> Result<RepositoryDiscovery> {
+pub(crate) fn discover(
+    folders: &[String],
+    known: &BTreeSet<String>,
+) -> Result<RepositoryDiscovery> {
     ensure!(
         !folders.is_empty() && folders.len() <= 32,
         "Choose 1–32 folders"
@@ -189,7 +192,7 @@ pub fn discover(folders: &[String], known: &BTreeSet<String>) -> Result<Reposito
 /// Lists each root's immediate children and runs Git only for repositories not in `skip`, so a
 /// refresh with nothing new costs one directory listing per root. Linked worktrees (whose `.git`
 /// is a file) and empty repositories are left out; they can still be added by hand.
-pub fn scan_roots(
+pub(crate) fn scan_roots(
     roots: &[String],
     skip: &BTreeSet<String>,
 ) -> (Vec<RepositoryCandidate>, Vec<String>) {
@@ -807,17 +810,10 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::git;
     use std::cell::RefCell;
     use std::os::unix::process::ExitStatusExt;
 
-    fn git(path: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .current_dir(path)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
     /// A scratch repository under `root` whose `origin` is `url`, if any.
     fn scratch(root: &Path, name: &str, url: Option<&str>) -> PathBuf {
         let path = root.join(name);

@@ -7,9 +7,10 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use ui::{
-    bar_color, brand_image, card, eyebrow, hint, humanize, icon, needs_you_badge, now, pill,
-    progress_bar, session_icon, status_glyph, status_label, ticket_state_color,
+    bar_color, brand_image, card, eyebrow, hint, icon, needs_you_badge, now, pill, progress_bar,
+    session_icon, status_glyph, ticket_state_color,
 };
+use wording::{humanize, plural, status_label};
 
 const INDENT: f32 = 14.;
 
@@ -54,7 +55,7 @@ impl Render for ProjectDrag {
             .border_color(p.edge)
             .bg(p.surface)
             .shadow_md()
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .text_color(p.text)
             .child(
                 div()
@@ -156,7 +157,7 @@ pub(super) struct Sidebar {
     bridge: Bridge,
     pub(super) shared: Shared,
     /// The project created by New project, until its first snapshot selects and names it.
-    pending_project_selection: Option<String>,
+    pub(super) pending_project_selection: Option<String>,
     pub(super) creating_project: bool,
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
@@ -533,7 +534,7 @@ impl Sidebar {
                     .vertical_scrollbar(&self.tree_scroll),
             )
             .child(self.workspace_nav(p, cx))
-            .child(usage_view::quota_strip(&self.shared.quotas, p, cx))
+            .child(quotas::quota_strip(&self.shared.quotas, p, cx))
             .child(
                 self.sidebar_footer(p, cx)
                     .relative()
@@ -551,7 +552,7 @@ impl Sidebar {
             .flex_col()
             .gap(px(1.))
             .border_t_1()
-            .border_color(p.edge.opacity(0.35))
+            .border_color(p.edge.opacity(edge::LIGHT))
             .child(div().px_2().pb_1().child(eyebrow("WORKSPACE", p)));
         for (page, label, glyph) in [
             (Page::Repositories, "Repositories", "folder"),
@@ -595,7 +596,7 @@ impl Sidebar {
             .items_center()
             .justify_between()
             .border_t_1()
-            .border_color(p.edge.opacity(0.35))
+            .border_color(p.edge.opacity(edge::LIGHT))
             .child(
                 match self.update.as_ref().filter(|_| self.update_card_dismissed) {
                     Some(staged) => button("restart-to-update")
@@ -611,7 +612,7 @@ impl Sidebar {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.subtle)
                         .child(div().flex_none().size(px(6.)).rounded_full().bg(p.green))
                         .child(div().min_w_0().truncate().child("Local workspace"))
@@ -631,7 +632,7 @@ impl Sidebar {
                             .px_1()
                             .rounded_sm()
                             .cursor_pointer()
-                            .text_size(px(11.))
+                            .text_size(px(font::CAPTION))
                             .text_color(p.subtle)
                             .hover(|d| d.text_color(p.text))
                             .child(if self.checking_update {
@@ -668,7 +669,7 @@ impl Sidebar {
                 .py(px(2.))
                 .rounded_md()
                 .cursor_pointer()
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .text_color(tint.unwrap_or(p.subtle))
                 .when_some(tint, |d, tint| d.bg(tint.opacity(0.12)))
                 .child(icon(mark.icon()).size(px(13.)))
@@ -707,7 +708,7 @@ impl Sidebar {
                                 .justify_between()
                                 .child(
                                     div()
-                                        .text_size(px(12.))
+                                        .text_size(px(font::SMALL))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(format!("Wiffletree {} is ready", staged.version)),
                                 )
@@ -726,7 +727,7 @@ impl Sidebar {
                         .when_some(staged.summary.clone(), |d, summary| {
                             d.child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(px(font::SMALL))
                                     .line_height(relative(1.45))
                                     .text_color(p.subtle)
                                     .line_clamp(4)
@@ -739,7 +740,7 @@ impl Sidebar {
                                 div()
                                     .id("changelog")
                                     .cursor_pointer()
-                                    .text_size(px(12.))
+                                    .text_size(px(font::SMALL))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(p.accent)
                                     .hover(|d| d.underline())
@@ -1089,11 +1090,11 @@ impl Sidebar {
         let grouping = cx.global::<Preferences>().group_projects;
         let entries = tree::entries(index, self.shared.show_archived, grouping);
         if let Some(moved) = tree::project_move(&entries, moving, &target) {
-            let command = Command::MoveProjects {
-                project_ids: moved.project_ids,
-                before: moved.before,
-            };
-            self.request(command, window, cx);
+            let ask = ask::move_projects(moved.project_ids, moved.before);
+            self.ask(ask, window, cx, |_, projects, window, cx| match projects {
+                Ok(projects) => cx.emit(Intent::Amend(Amendment::Projects(projects))),
+                Err(error) => toast_error(error, window, cx),
+            });
         }
     }
 
@@ -1133,7 +1134,7 @@ impl Sidebar {
         let row = self
             .row(SharedString::from(format!("group-{key}")), 0, false, p)
             .pl(inset(0, false) - px(4.))
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .on_click(cx.listener(move |v, _, _, c| v.toggle_group(&toggle, c)))
@@ -1166,7 +1167,7 @@ impl Sidebar {
                 div()
                     .flex_none()
                     .font_family(".SystemMonoFont")
-                    .text_size(px(10.5))
+                    .text_size(px(font::META))
                     .child(count.to_string()),
             )
             .children(state.map(|state| div().flex_none().child(state)));
@@ -1248,7 +1249,7 @@ impl Sidebar {
             .pl(inset(depth, false))
             .pr_2()
             .rounded_md()
-            .text_size(px(12.5))
+            .text_size(px(font::MESSAGE))
             .when(selected, |d| d.bg(p.overlay))
             .text_color(if depth >= 2 && !selected {
                 p.subtle
@@ -1293,8 +1294,7 @@ impl Sidebar {
             if live { " · Running" } else { " · Stopped" },
             match attention {
                 0 => String::new(),
-                1 => " · 1 item needs you".to_owned(),
-                n => format!(" · {n} items need you"),
+                n => format!(" · {n} {} you", plural(n, "item needs", "items need")),
             }
         );
         let project = self.shared.progress.project(&project_id);
@@ -1313,7 +1313,7 @@ impl Sidebar {
             .flex_wrap()
             .gap_y(px(3.))
             .pl(inset(0, grouped) - px(4.))
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .when(root.archived, |d| d.opacity(0.55))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .capture_any_mouse_down(cx.listener(|v, event: &MouseDownEvent, _, _| {
@@ -1340,7 +1340,7 @@ impl Sidebar {
                     .justify_center()
                     .rounded_sm()
                     .text_color(p.subtle)
-                    .hover(move |d| d.bg(p.edge.opacity(0.5)))
+                    .hover(move |d| d.bg(p.edge.opacity(edge::HALF)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|v, _, _, _| v.row_press.on_chevron = true),
@@ -1461,7 +1461,7 @@ impl Sidebar {
                 )
             })
             .children(figure(
-                project.and_then(tree::project_figure),
+                project.and_then(wording::project_figure),
                 project.map(|project| project.state),
                 p,
             ))
@@ -1503,10 +1503,10 @@ impl Sidebar {
             .snapshot()
             .map_or(0, |s| s.questions_waiting(&session.id));
         let detail = format!(
-            "{} · {} · {:?} · {}",
+            "{} · {} · {} · {}",
             session.name,
             session.role.label(),
-            session.provider,
+            session.provider.label(),
             self.status_detail(session)
         );
         self.row(SharedString::from(format!("tree-{id}")), depth, selected, p)
@@ -1533,16 +1533,16 @@ impl Sidebar {
                 d.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.subtle)
                         .child(waiting),
                 )
             })
-            .when_some(tree::questions_figure(questions), |d, questions| {
+            .when_some(wording::questions_figure(questions), |d, questions| {
                 d.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.subtle)
                         .child(questions),
                 )
@@ -1558,11 +1558,11 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let coordinator = ticket.coordinator_id.clone();
-        let waiver = tree::waiver_note(ticket);
+        let waiver = wording::waiver_note(ticket);
         let state = waiver
             .clone()
             .unwrap_or_else(|| humanize(ticket.state.name()));
-        let waiting = tree::publish_waiting(ticket);
+        let waiting = wording::publish_waiting(ticket);
         // A PR or a waiting publish step adds a second line.
         let two_lines = ticket.pull_request.is_some() || waiting.is_some();
         let mut detail = format!("{label} · {state}");
@@ -1572,11 +1572,11 @@ impl Sidebar {
         }
         if let Some(pr) = &ticket.pull_request {
             detail.push('\n');
-            detail.push_str(&tree::pr_sentence(pr));
+            detail.push_str(&wording::pr_sentence(pr));
             if let Some(checked) = self
                 .shared
                 .snapshot()
-                .and_then(|s| tree::pr_checked(s, ticket))
+                .and_then(|s| wording::pr_checked(s, ticket))
             {
                 detail.push('\n');
                 detail.push_str(&checked);
@@ -1630,7 +1630,7 @@ impl Sidebar {
                 }))
                 .children(waiting.map(|waiting| {
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(font::CAPTION))
                         .text_color(p.yellow)
                         .text_ellipsis()
                         .child(waiting)
@@ -1652,61 +1652,14 @@ impl Requests for Sidebar {
     }
     fn accept(
         &mut self,
-        command: Command,
+        _: Command,
         reply: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return self.failed(&command, error, window, cx),
-        };
-        match command {
-            Command::CreateProject { .. } => {
-                if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    self.pending_project_selection = Some(project.id);
-                }
-            }
-            Command::RenameProject { project_id, .. } => {
-                if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    cx.emit(Intent::Amend(Amendment::Project(project)));
-                    if self
-                        .project_edit
-                        .as_ref()
-                        .is_some_and(|e| e.project_id == project_id)
-                    {
-                        self.project_edit = None;
-                    }
-                }
-            }
-            Command::MoveProjects { .. } => {
-                if let Ok(projects) = serde_json::from_value(value) {
-                    cx.emit(Intent::Amend(Amendment::Projects(projects)));
-                }
-            }
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                cx.emit(Intent::Archived { archived, affected });
-            }
-            _ => {}
+        if let Err(error) = reply {
+            toast_error(error, window, cx);
         }
-    }
-}
-impl Sidebar {
-    /// A rename's failure shows in its field; anything else as a toast.
-    fn failed(&mut self, command: &Command, error: String, window: &mut Window, cx: &mut App) {
-        if matches!(command, Command::CreateProject { .. }) {
-            self.creating_project = false;
-        }
-        if let Command::RenameProject { project_id, .. } = command
-            && let Some(edit) = &mut self.project_edit
-            && edit.project_id == *project_id
-        {
-            edit.saving = false;
-            edit.error = error;
-            return;
-        }
-        toast_error(error, window, cx);
     }
 }
 impl Render for Sidebar {
@@ -1737,7 +1690,7 @@ fn figure(text: Option<String>, state: Option<BarState>, p: Palette) -> Option<D
     Some(
         div()
             .flex_none()
-            .text_size(px(11.))
+            .text_size(px(font::CAPTION))
             .text_color(color)
             .child(text?),
     )
@@ -1770,10 +1723,10 @@ fn pr_line(
         .gap(px(5.))
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .text_color(p.subtle)
         .child(icon(glyph).size(px(11.)));
-    for (i, part) in tree::pr_line(pr, unreviewed, keeper, comments, now())
+    for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, now())
         .into_iter()
         .enumerate()
     {
@@ -1781,12 +1734,12 @@ fn pr_line(
             line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
         }
         let color = match part.tone {
-            tree::Tone::Muted => p.subtle,
-            tree::Tone::Good => p.green,
-            tree::Tone::Bad => p.red,
-            tree::Tone::Merged => p.focus,
-            tree::Tone::Warn => p.yellow,
-            tree::Tone::Busy => p.focus,
+            wording::Tone::Muted => p.subtle,
+            wording::Tone::Good => p.green,
+            wording::Tone::Bad => p.red,
+            wording::Tone::Merged => p.focus,
+            wording::Tone::Warn => p.yellow,
+            wording::Tone::Busy => p.focus,
         };
         line = line.child(div().text_color(color).child(part.text));
     }

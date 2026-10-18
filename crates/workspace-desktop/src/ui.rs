@@ -13,6 +13,49 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How strongly an edge shows over what is behind it, as `p.edge.opacity(edge::SEPARATOR)`.
+/// These are the values the app has always drawn with; two merge only where the pixels match.
+pub(super) mod edge {
+    pub(crate) const HAIRLINE: f32 = 0.25;
+    /// Under a header, between sections and around rows.
+    pub(crate) const SEPARATOR: f32 = 0.3;
+    pub(crate) const LIGHT: f32 = 0.35;
+    /// Around a card.
+    pub(crate) const CARD: f32 = 0.4;
+    pub(crate) const SOFT: f32 = 0.45;
+    pub(crate) const HALF: f32 = 0.5;
+    /// Around boxed text, such as a diff or a comparison.
+    pub(crate) const BOX: f32 = 0.55;
+    pub(crate) const STRONG: f32 = 0.6;
+    pub(crate) const FIRM: f32 = 0.7;
+}
+
+/// Text sizes in pixels, from the largest figure to the smallest mark. These are the sizes the
+/// app has always drawn with; two merge only where the pixels match.
+pub(super) mod font {
+    /// An empty conversation's or page's greeting.
+    pub(crate) const HERO: f32 = 26.;
+    pub(crate) const FIGURE: f32 = 22.;
+    pub(crate) const FIGURE_SMALL: f32 = 20.;
+    /// A page's, a panel's or the conversation's title.
+    pub(crate) const TITLE: f32 = 18.;
+    pub(crate) const HEADING: f32 = 16.;
+    pub(crate) const HEADING_SMALL: f32 = 15.;
+    /// The app's own size, which the theme sets.
+    pub(crate) const BODY: f32 = 14.;
+    pub(crate) const LEAD: f32 = 13.5;
+    pub(crate) const TEXT: f32 = 13.;
+    pub(crate) const MESSAGE: f32 = 12.5;
+    pub(crate) const SMALL: f32 = 12.;
+    pub(crate) const DETAIL: f32 = 11.5;
+    /// The line above a title, and most hints.
+    pub(crate) const CAPTION: f32 = 11.;
+    pub(crate) const META: f32 = 10.5;
+    pub(crate) const TINY: f32 = 10.;
+    pub(crate) const MICRO: f32 = 9.5;
+    pub(crate) const NANO: f32 = 9.;
+}
+
 /// Each animation step redraws the views that show one, so the spinners and pulses step at this
 /// rate instead of the display's.
 const ANIMATION_FPS: u32 = 15;
@@ -158,14 +201,14 @@ pub(super) fn brand_image(path: &'static str, width: f32, height: f32) -> Img {
 }
 pub(super) fn eyebrow(text: impl Into<SharedString>, p: Palette) -> Div {
     div()
-        .text_size(px(10.))
+        .text_size(px(font::TINY))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(p.subtle)
         .child(text.into())
 }
 pub(super) fn hint(text: impl Into<SharedString>, p: Palette) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .line_height(relative(1.5))
         .text_color(p.subtle)
         .child(text.into())
@@ -208,7 +251,7 @@ pub(super) fn progress_bar(position: Option<u16>, state: BarState, height: f32, 
         .h(px(height))
         .rounded_full()
         .overflow_hidden()
-        .bg(p.edge.opacity(0.6));
+        .bg(p.edge.opacity(edge::STRONG));
     if state == BarState::Indeterminate {
         let stripes = pattern_slash(p.subtle.opacity(0.75), height, height * 2.);
         return track.child(div().size_full().bg(stripes));
@@ -245,7 +288,7 @@ pub(super) fn card(p: Palette) -> Div {
         .gap_2()
         .rounded_lg()
         .border_1()
-        .border_color(p.edge.opacity(0.4))
+        .border_color(p.edge.opacity(edge::CARD))
         .bg(p.base)
 }
 pub(super) fn property(label: &'static str, value: impl Into<SharedString>, p: Palette) -> Div {
@@ -253,7 +296,7 @@ pub(super) fn property(label: &'static str, value: impl Into<SharedString>, p: P
         .flex()
         .gap_3()
         .justify_between()
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(div().flex_none().text_color(p.subtle).child(label))
         .child(div().min_w_0().text_right().child(value.into()))
 }
@@ -275,7 +318,7 @@ pub(super) fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
         .rounded_full()
         .bg(color.opacity(0.12))
         .text_color(color)
-        .text_size(px(10.5))
+        .text_size(px(font::META))
         .font_weight(FontWeight::MEDIUM)
         .child(text.into())
 }
@@ -283,7 +326,7 @@ pub(super) fn mono(text: impl Into<SharedString>, p: Palette) -> Div {
     div()
         .min_w_0()
         .font_family(".SystemMonoFont")
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .text_color(p.subtle)
         .text_ellipsis()
         .child(text.into())
@@ -306,11 +349,90 @@ pub(super) fn empty_state(
         .child(icon(icon_name).size(px(22.)).text_color(p.subtle))
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(px(font::TEXT))
                 .font_weight(FontWeight::MEDIUM)
                 .child(title),
         )
         .child(hint(body, p))
+}
+/// The app's button, at its small size.
+pub(super) fn button(id: impl Into<ElementId>) -> Button {
+    Button::new(id).small()
+}
+pub(super) const HEADER_HEIGHT: f32 = 64.;
+/// The head over a page, a panel or the conversation: `eyebrow` above `title`. Callers set the
+/// padding and the gap, and add what follows on the right.
+pub(super) fn page_header(eyebrow: Div, title: Div, p: Palette) -> Div {
+    div()
+        .flex_none()
+        .h(px(HEADER_HEIGHT))
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(p.edge.opacity(edge::SEPARATOR))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .child(eyebrow.text_size(px(font::CAPTION)).text_color(p.subtle))
+                .child(
+                    title
+                        .text_size(px(font::TITLE))
+                        .font_weight(FontWeight::SEMIBOLD),
+                ),
+        )
+}
+/// A question over a dimmed page: `ask`, the `lines` that explain it, then Cancel and `act`.
+pub(super) fn confirm_card(
+    ask: impl Into<SharedString>,
+    lines: impl IntoIterator<Item = String>,
+    cancel: Button,
+    act: Button,
+    p: Palette,
+) -> Div {
+    div()
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .rounded_xl()
+        .border_1()
+        .border_color(p.edge)
+        .bg(p.surface)
+        .shadow_lg()
+        .child(
+            div()
+                .text_size(px(font::BODY))
+                .font_weight(FontWeight::MEDIUM)
+                .child(ask.into()),
+        )
+        .children(lines.into_iter().map(|line| hint(line, p)))
+        .child(
+            div()
+                .pt_2()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(cancel.ghost().label("Cancel"))
+                .child(act),
+        )
+}
+/// `page` dimmed under `dialog`, which takes every click until it closes.
+pub(super) fn over_dimmed(page: impl Styled + IntoElement, dialog: Div) -> Div {
+    div().relative().child(page.opacity(0.35)).child(
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(120.))
+            .child(dialog),
+    )
 }
 /// A tinted, full-width notice. Callers add the message and its actions.
 pub(super) fn banner(color: Hsla) -> Div {
@@ -325,7 +447,20 @@ pub(super) fn banner(color: Hsla) -> Div {
         .border_1()
         .border_color(color.opacity(0.35))
         .bg(color.opacity(0.08))
-        .text_size(px(12.5))
+        .text_size(px(font::MESSAGE))
+}
+/// A tinted notice of a few lines, stacked: a head, its text and actions.
+pub(super) fn stacked_banner(color: Hsla) -> Div {
+    div()
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(color.opacity(0.45))
+        .bg(color.opacity(0.09))
+        .text_size(px(font::SMALL))
 }
 /// One option in a small either/or control.
 pub(super) fn segment(
@@ -345,44 +480,6 @@ pub(super) fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
-}
-pub(super) fn age(at: i64) -> String {
-    let minutes = (now() - at).max(0) / 60_000;
-    if minutes == 0 {
-        "Just now".into()
-    } else if minutes < 60 {
-        format!("{minutes}m ago")
-    } else if minutes < 1440 {
-        format!("{}h ago", minutes / 60)
-    } else {
-        format!("{}d ago", minutes / 1440)
-    }
-}
-/// Time until a future moment, "in 25m"; "now" once it has come.
-pub(super) fn from_now(at: i64) -> String {
-    let minutes = ((at - now()).max(0) as u64).div_ceil(60_000);
-    match minutes {
-        0 => "now".into(),
-        1..60 => format!("in {minutes}m"),
-        60..1440 => format!("in {}h {:02}m", minutes / 60, minutes % 60),
-        _ => format!("in {}d", minutes / 1440),
-    }
-}
-/// Turns a host identifier such as `ready_for_testing` into a readable label.
-pub(super) fn humanize(identifier: &str) -> String {
-    let text = identifier.replace('_', " ");
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-/// Reasoning effort as shown in menus; provider identifiers such as `xhigh` are not words.
-pub(super) fn effort_label(effort: &str) -> String {
-    match effort {
-        "xhigh" => "Extra high".into(),
-        other => humanize(other),
-    }
 }
 pub(super) fn session_icon(role: Role) -> &'static str {
     match role {
@@ -407,14 +504,6 @@ fn status_icon(status: Status) -> &'static str {
         Status::Done => "check",
         Status::Paused => "pause",
         Status::Disconnected => "disconnected",
-    }
-}
-/// The host calls a session whose turn was cut short "disconnected"; to the person who pressed
-/// Stop or Pause, it was interrupted.
-pub(super) fn status_label(status: Status) -> &'static str {
-    match status {
-        Status::Disconnected => "Interrupted",
-        other => other.label(),
     }
 }
 /// Working spins so activity is visible at a glance; reduced motion leaves it still.
@@ -446,7 +535,7 @@ pub(super) fn needs_you_badge(count: usize, p: Palette) -> Div {
         .rounded_full()
         .bg(p.yellow)
         .text_color(p.on_accent)
-        .text_size(px(10.5))
+        .text_size(px(font::META))
         .font_weight(FontWeight::BOLD)
         .child(icon("attention").size(px(12.)))
         .child(count.to_string())
@@ -463,7 +552,7 @@ fn status_badge(status: Status, label: String, p: Palette) -> Div {
         .rounded_full()
         .bg(color.opacity(0.10))
         .text_color(color)
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .child(status_glyph(status, 12., p))
         .child(label)
 }
@@ -473,7 +562,7 @@ fn badge_state(own: Status, shown: Status, compacting: bool) -> (Status, &'stati
     if compacting {
         (Status::Working, "Compacting")
     } else if shown == own {
-        (shown, status_label(shown))
+        (shown, wording::status_label(shown))
     } else {
         (shown, "Team working")
     }
@@ -498,7 +587,7 @@ pub(super) fn session_badge(shared: &Shared, session: &Session, p: Palette) -> D
     let questions = shared
         .snapshot()
         .map_or(0, |s| s.questions_waiting(&session.id));
-    status_badge(status, crate::tree::badge_label(label, questions), p)
+    status_badge(status, crate::wording::badge_label(label, questions), p)
 }
 
 /// How a cached child view is laid out: it fills its slot, which its parent sizes.
@@ -522,44 +611,22 @@ pub(super) fn page<V: EventEmitter<Intent>>(
         .flex_col()
         .bg(p.base)
         .child(
-            div()
-                .flex_none()
-                .h(px(64.))
-                .px_6()
-                .flex()
-                .items_center()
-                .gap_3()
-                .border_b_1()
-                .border_color(p.edge.opacity(0.3))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(p.subtle)
-                                .child(format!("Workspace  ›  {subtitle}")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(18.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
-                        ),
-                )
-                .child(
-                    button("close-page")
-                        .ghost()
-                        .icon(icon("close"))
-                        .tooltip("Back to the conversation")
-                        .on_click(
-                            cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Conversation))),
-                        ),
-                ),
+            page_header(
+                div().child(format!("Workspace  ›  {subtitle}")),
+                div().child(title),
+                p,
+            )
+            .px_6()
+            .gap_3()
+            .child(
+                button("close-page")
+                    .ghost()
+                    .icon(icon("close"))
+                    .tooltip("Back to the conversation")
+                    .on_click(
+                        cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Conversation))),
+                    ),
+            ),
         )
         .child(
             div()
@@ -577,7 +644,7 @@ pub(super) fn page<V: EventEmitter<Intent>>(
                     .px_6()
                     .py_3()
                     .border_t_1()
-                    .border_color(p.edge.opacity(0.3))
+                    .border_color(p.edge.opacity(edge::SEPARATOR))
                     .child(footer.w_full().max_w(px(COLUMN)).mx_auto()),
             )
         })
@@ -625,7 +692,7 @@ impl Workspace {
                 .child(
                     div()
                         .mt_2()
-                        .text_size(px(26.))
+                        .text_size(px(font::HERO))
                         .font_weight(FontWeight::MEDIUM)
                         .child(if welcome {
                             "Welcome to Wiffletree."
@@ -685,7 +752,7 @@ impl Render for Workspace {
             .bg(p.base)
             .text_color(p.text)
             .font_family(".SystemUIFont")
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .flex()
             .flex_col()
             .child(TitleBar::new())
@@ -743,7 +810,7 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_state, humanize};
+    use super::badge_state;
     use workspace_core::Status;
 
     #[test]
@@ -768,14 +835,5 @@ mod tests {
             badge_state(Status::Ready, Status::Working, false),
             (Status::Working, "Team working")
         );
-    }
-
-    #[test]
-    fn host_identifiers_read_as_labels() {
-        assert_eq!(humanize("ready_for_testing"), "Ready for testing");
-        assert_eq!(humanize("accepted"), "Accepted");
-        assert_eq!(humanize(""), "");
-        assert_eq!(super::effort_label("xhigh"), "Extra high");
-        assert_eq!(super::effort_label("medium"), "Medium");
     }
 }

@@ -24,7 +24,7 @@ use std::{
 
 #[derive(Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
-pub enum Step {
+pub(crate) enum Step {
     Click {
         x: f64,
         y: f64,
@@ -80,7 +80,7 @@ pub enum Step {
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Button {
+pub(crate) enum Button {
     #[default]
     Left,
     Right,
@@ -105,7 +105,7 @@ fn single() -> isize {
     1
 }
 
-pub type Request = (Step, Sender<Result<Value, String>>);
+pub(crate) type Request = (Step, Sender<Result<Value, String>>);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -190,7 +190,7 @@ const LEFT_MOUSE_DRAGGED: usize = 6;
 const SCROLL_UNIT_PIXEL: u32 = 0;
 
 /// The application's one visible, main-capable window.
-pub struct NativeWindow {
+pub(crate) struct NativeWindow {
     window: *mut Object,
     number: isize,
 }
@@ -218,7 +218,7 @@ impl NativeWindow {
 
     /// Keeps the window composited at full size when another application is in front, so it can
     /// be captured without taking focus. Stage Manager otherwise shrinks it to a thumbnail.
-    pub fn stay_on_stage() -> Result<(), String> {
+    pub(crate) fn stay_on_stage() -> Result<(), String> {
         const STATIONARY: usize = 1 << 4;
         const IGNORES_CYCLE: usize = 1 << 6;
         let native = Self::find()?;
@@ -319,7 +319,7 @@ impl NativeWindow {
 }
 
 impl Step {
-    pub fn perform(self, window: &mut Window, cx: &mut App) -> Result<Value, String> {
+    pub(crate) fn perform(self, window: &mut Window, cx: &mut App) -> Result<Value, String> {
         // GPUI stops drawing a window that is covered by others; draw this one on request.
         // Notifying the root asks for a frame without discarding the cached views, so a step
         // redraws what a person's input would.
@@ -401,7 +401,7 @@ impl Step {
 }
 
 /// Accepts connections on `path` and yields each step with a channel for its outcome.
-pub fn listen(path: &Path) -> anyhow::Result<Receiver<Request>> {
+pub(crate) fn listen(path: &Path) -> anyhow::Result<Receiver<Request>> {
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path).context("Bind automation socket")?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;

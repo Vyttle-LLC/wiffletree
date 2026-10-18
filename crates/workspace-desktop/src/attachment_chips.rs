@@ -2,25 +2,28 @@
 //! sent with a message.
 use super::*;
 use ui::icon;
-use workspace_host::attachments::same_name;
 
 const THUMBNAIL: f32 = 56.;
 
-/// Adds dropped files to a draft's attachments and returns why any were refused. A file
-/// whose name is already attached, ignoring case, is refused (the same file again included),
-/// since a message stores its files by name.
-pub(super) fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
+/// Adds dropped files, as the host `inspected` them, to a draft's attachments and returns why
+/// any were refused. A file whose name is already attached, ignoring case, is refused (the same
+/// file again included), since a message stores its files by name.
+pub(super) fn add_dropped(
+    attached: &mut Vec<Attachment>,
+    paths: &[PathBuf],
+    inspected: Vec<Result<Attachment, String>>,
+) -> Vec<String> {
     let mut refused = vec![];
-    for path in paths {
+    for (path, file) in paths.iter().zip(inspected) {
         let name = path.file_name().map(|n| n.to_string_lossy());
-        let taken = |name: &str| attached.iter().any(|a| same_name(&a.name(), name));
+        let taken = |name: &str| attached.iter().any(|a| same_file_name(&a.name(), name));
         if let Some(name) = name.filter(|n| taken(n)) {
             refused.push(format!("{name}: a file with this name is already attached"));
             continue;
         }
-        match workspace_host::attachments::inspect(path) {
+        match file {
             Ok(file) => attached.push(file),
-            Err(error) => refused.push(error.to_string()),
+            Err(error) => refused.push(error),
         }
     }
     refused
@@ -47,7 +50,7 @@ pub(super) fn chip(id: impl Into<ElementId>, attachment: &Attachment, p: Palette
         .flex_none()
         .rounded_lg()
         .border_1()
-        .border_color(p.edge.opacity(0.7))
+        .border_color(p.edge.opacity(edge::FIRM))
         .bg(p.overlay)
         .overflow_hidden();
     if attachment.image.is_some() {
@@ -83,14 +86,14 @@ pub(super) fn chip(id: impl Into<ElementId>, attachment: &Attachment, p: Palette
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(font::MESSAGE))
                             .text_color(p.text)
                             .truncate()
                             .child(attachment.name()),
                     )
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(px(font::META))
                             .text_color(p.subtle)
                             .child(file_size(attachment.size)),
                     ),
@@ -116,8 +119,14 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_dropped, file_size};
-    use std::fs;
+    use super::file_size;
+    use std::{fs, path::PathBuf};
+    use workspace_core::Attachment;
+    use workspace_host::attachments::inspect_all;
+
+    fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
+        super::add_dropped(attached, paths, inspect_all(paths))
+    }
 
     #[test]
     fn a_file_with_an_attached_name_is_refused_and_the_rest_attach() {

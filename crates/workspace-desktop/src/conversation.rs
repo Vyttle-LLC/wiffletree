@@ -8,7 +8,46 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use transcript::Transcript;
-use ui::{banner, effort_label, hint, icon};
+use ui::{banner, hint, icon};
+use wording::{effort_label, plural};
+
+/// The files dropped on each session's draft that the host is still checking, and the send
+/// pressed on each meanwhile, with the text it was pressed on.
+#[derive(Default)]
+struct DropChecks {
+    checking: BTreeMap<String, usize>,
+    waiting: BTreeMap<String, String>,
+}
+impl DropChecks {
+    fn started(&mut self, session: &str) {
+        *self.checking.entry(session.to_owned()).or_default() += 1;
+    }
+    /// Whether a send of `body` must wait for `session`'s dropped files; it waits with that text.
+    fn hold(&mut self, session: &str, body: &str) -> bool {
+        let holds = self.checking.contains_key(session);
+        if holds {
+            self.waiting.insert(session.to_owned(), body.to_owned());
+        }
+        holds
+    }
+    /// One of `session`'s checks came back. Returns the text of the send to make now: one that
+    /// waited for this, the last check. A failed check drops the waiting send for good.
+    fn finished(&mut self, session: &str, succeeded: bool) -> Option<String> {
+        if let Some(count) = self.checking.get_mut(session) {
+            *count -= 1;
+            if *count == 0 {
+                self.checking.remove(session);
+            }
+        }
+        if !succeeded {
+            self.waiting.remove(session);
+            return None;
+        }
+        (!self.checking.contains_key(session))
+            .then(|| self.waiting.remove(session))
+            .flatten()
+    }
+}
 
 /// Wide enough for the composer, narrow enough that message lines stay readable.
 pub(super) const COLUMN: f32 = 720.;
@@ -17,15 +56,6 @@ pub(super) const COLUMN: f32 = 720.;
 /// brings starts expanded. A decision that merely arrives or changes leaves the card as it is.
 pub(super) fn forget_settled(minimized: &mut BTreeSet<String>, open: &[Attention]) {
     minimized.retain(|project| open.iter().any(|item| &item.project_id == project));
-}
-
-pub(super) fn first_line(text: &str, limit: usize) -> String {
-    let line = text.lines().next().unwrap_or_default();
-    if line.chars().count() > limit {
-        format!("{}…", line.chars().take(limit).collect::<String>())
-    } else {
-        line.to_owned()
-    }
 }
 
 /// The selected session's conversation. The transcript is its own view, cached, so a keystroke in
@@ -43,6 +73,7 @@ pub(super) struct Conversation {
     /// Why files in the selected conversation's last drop were not attached.
     refused_files: Vec<String>,
     sending: BTreeSet<String>,
+    drop_checks: DropChecks,
     /// Projects whose decision card is folded to one row. Kept in memory only.
     minimized_decisions: BTreeSet<String>,
     /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
@@ -67,9 +98,8 @@ impl Conversation {
         .detach();
         // The decision card draws the inbox's answer box.
         cx.observe(&inbox, |_, _, cx| cx.notify()).detach();
-        let transcript = cx.new(|_| Transcript::new(bridge.clone(), input.clone()));
-        let header =
-            cx.new(|cx| ConversationHeader::new(bridge.clone(), contexts, transcript.clone(), cx));
+        let transcript = cx.new(|cx| Transcript::new(bridge.clone(), input.clone(), window, cx));
+        let header = cx.new(|cx| ConversationHeader::new(bridge.clone(), contexts, cx));
         cx.subscribe(&header, |_, _, intent: &Intent, cx| cx.emit(intent.clone()))
             .detach();
         cx.subscribe(&transcript, |_, _, intent: &Intent, cx| {
@@ -87,6 +117,7 @@ impl Conversation {
             attached: BTreeMap::new(),
             refused_files: vec![],
             sending: BTreeSet::new(),
+            drop_checks: DropChecks::default(),
             minimized_decisions: BTreeSet::new(),
             chat_models: Rc::default(),
         }
@@ -139,13 +170,31 @@ impl Conversation {
     }
     /// Adds dropped files to the selected session's draft. Each refused file is named with
     /// its reason; the rest are still attached.
-    fn attach_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+    fn attach_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.shared.selected.clone() else {
             return;
         };
-        self.refused_files =
-            attachment_chips::add_dropped(self.attached.entry(session).or_default(), paths);
-        cx.notify();
+        self.drop_checks.started(&session);
+        let ask = ask::inspect_attachments(paths.clone());
+        self.ask(ask, window, cx, move |view, inspected, window, cx| {
+            let inspected = match inspected {
+                Ok(inspected) => inspected,
+                Err(error) => {
+                    // A send pressed meanwhile is not made; its draft stays to send again.
+                    view.drop_checks.finished(&session, false);
+                    return toast_error(error, window, cx);
+                }
+            };
+            let attached = view.attached.entry(session.clone()).or_default();
+            let refused = attachment_chips::add_dropped(attached, &paths, inspected);
+            // Why files were refused shows only with the conversation they were dropped on.
+            if view.shared.selected.as_ref() == Some(&session) {
+                view.refused_files = refused;
+            }
+            if let Some(body) = view.drop_checks.finished(&session, true) {
+                view.send_draft(session, body, window, cx);
+            }
+        });
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(files) = self
@@ -158,11 +207,25 @@ impl Conversation {
         }
         cx.notify();
     }
+    /// Sends the selected session's draft as it reads now, or once its dropped files are checked.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let body = self.input.read(cx).value().to_string();
         let Some(recipient) = self.shared.selected.clone() else {
             return;
         };
+        if !self.drop_checks.hold(&recipient, &body) {
+            self.send_draft(recipient, body, window, cx);
+        }
+    }
+    /// Sends `body` with the files attached to `recipient`'s draft, whichever session is
+    /// selected by then.
+    fn send_draft(
+        &mut self,
+        recipient: String,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let attachments = self
             .attached
             .get(&recipient)
@@ -171,9 +234,12 @@ impl Conversation {
         if (body.trim().is_empty() && attachments.is_empty()) || self.sending.contains(&recipient) {
             return;
         }
-        self.drafts.insert(recipient.clone(), body.clone());
+        // Another session's saved draft is what was typed after; the reply leaves it.
+        if self.shared.selected.as_ref() == Some(&recipient) {
+            self.drafts.insert(recipient.clone(), body.clone());
+            self.refused_files.clear();
+        }
         self.sending.insert(recipient.clone());
-        self.refused_files.clear();
         self.request(
             Command::Send {
                 id: new_id(),
@@ -277,11 +343,7 @@ impl Conversation {
                     .child(icon("pause").text_color(p.focus))
                     .child(div().flex_1().child(format!(
                         "This project is stopped. {waiting} {} waiting.",
-                        if waiting == 1 {
-                            "message is"
-                        } else {
-                            "messages are"
-                        }
+                        plural(waiting, "message is", "messages are")
                     )))
                     .child(button("notice-resume").primary().label("Resume").on_click(
                         cx.listener(|v, _, w, c| {
@@ -424,7 +486,7 @@ impl Conversation {
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(12.5))
+                        .text_size(px(font::MESSAGE))
                         .child(first_line(&item.prompt, 200)),
                 )
                 .when(total > 1, |d| {
@@ -490,7 +552,7 @@ impl Conversation {
             let model = models
                 .get(&(profile.provider, profile.model.clone()))
                 .unwrap_or(&profile.model);
-            format!("{:?} · {model}", profile.provider)
+            format!("{} · {model}", profile.provider.label())
         };
         let session_id = session.id.clone();
         let current = profile.clone();
@@ -525,7 +587,7 @@ impl Conversation {
                     let session_id = session_id.clone();
                     let weak = weak.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(format!("{provider:?} · {label}"))
+                        PopupMenuItem::new(format!("{} · {label}", provider.label()))
                             .checked(*provider == current.provider && *model == current.model)
                             .disabled(started && *provider != current.provider)
                             .on_click(move |_, w, c| {
@@ -600,7 +662,7 @@ impl Conversation {
                 .w_full()
                 .max_w(px(COLUMN))
                 .px_1()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .text_color(p.subtle)
                 .text_ellipsis()
                 .child(models::chosen_by(selection, index)),
@@ -646,7 +708,7 @@ impl Conversation {
                     .flex_col()
                     .rounded_xl()
                     .border_1()
-                    .border_color(p.edge.opacity(0.7))
+                    .border_color(p.edge.opacity(edge::FIRM))
                     .bg(p.surface)
                     .px_3()
                     .pt_2()
@@ -675,7 +737,7 @@ impl Conversation {
                                     .items_center()
                                     .child(
                                         div()
-                                            .text_size(px(10.5))
+                                            .text_size(px(font::META))
                                             .text_color(p.subtle)
                                             .child("⏎ send · ⇧⏎ newline"),
                                     )
@@ -744,46 +806,36 @@ impl Requests for Conversation {
         if let Command::Send { recipient, .. } = &command {
             self.sending.remove(recipient);
         }
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
+        if let Err(error) = reply {
+            return toast_error(error, window, cx);
+        }
+        let Command::Send {
+            recipient,
+            body,
+            attachments,
+            ..
+        } = command
+        else {
+            return;
         };
-        match command {
-            Command::Send {
-                recipient,
-                body,
-                attachments,
-                ..
-            } => {
-                if self
-                    .attached
-                    .get(&recipient)
-                    .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
-                {
-                    self.attached.remove(&recipient);
-                }
-                let selected = self.shared.selected.as_deref() == Some(&recipient);
-                if selected && self.input.read(cx).value().as_str() == body {
-                    self.input
-                        .update(cx, |input, cx| input.set_value("", window, cx));
-                }
-                if self.drafts.get(&recipient) == Some(&body) {
-                    self.drafts.remove(&recipient);
-                }
-                if selected {
-                    self.transcript
-                        .update(cx, |transcript, cx| transcript.show_latest(window, cx));
-                }
-            }
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                cx.emit(Intent::Archived { archived, affected });
-            }
-            // The change signal brings the snapshot; the transcript goes back to its newest page.
-            _ if !command.is_read() => self
-                .transcript
-                .update(cx, |transcript, cx| transcript.back_to_latest(window, cx)),
-            _ => {}
+        if self
+            .attached
+            .get(&recipient)
+            .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
+        {
+            self.attached.remove(&recipient);
+        }
+        let selected = self.shared.selected.as_deref() == Some(&recipient);
+        if selected && self.input.read(cx).value().as_str() == body {
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        if self.drafts.get(&recipient) == Some(&body) {
+            self.drafts.remove(&recipient);
+        }
+        if selected {
+            self.transcript
+                .update(cx, |transcript, cx| transcript.show_latest(window, cx));
         }
     }
 }
@@ -800,7 +852,9 @@ impl Render for Conversation {
             .flex_col()
             .bg(p.base)
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(p.overlay))
-            .on_drop(cx.listener(|v, paths: &ExternalPaths, _, c| v.attach_files(paths.paths(), c)))
+            .on_drop(cx.listener(|v, paths: &ExternalPaths, w, c| {
+                v.attach_files(paths.paths().to_vec(), w, c)
+            }))
             .child(self.header.clone().cached(conversation_header::style()))
             .child(
                 (self.transcript.clone())
@@ -812,18 +866,9 @@ impl Render for Conversation {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_line, forget_settled};
+    use super::{DropChecks, forget_settled};
     use std::collections::BTreeSet;
     use workspace_core::Attention;
-
-    #[test]
-    fn long_errors_show_only_a_bounded_first_line() {
-        assert_eq!(
-            first_line("Provider exited\nTraceback…", 80),
-            "Provider exited"
-        );
-        assert_eq!(first_line("abcdef", 3), "abc…");
-    }
 
     fn decision(id: &str, project: &str) -> Attention {
         Attention {
@@ -836,6 +881,42 @@ mod tests {
             options: Vec::new(),
             answer: None,
         }
+    }
+
+    #[test]
+    fn a_send_pressed_while_files_are_checked_goes_with_its_own_text_after_the_last_check() {
+        let mut checks = DropChecks::default();
+        assert!(!checks.hold("s", "Now"), "nothing is being checked");
+        checks.started("s");
+        checks.started("s");
+        assert!(checks.hold("s", "Look at these"));
+        assert!(
+            !checks.hold("t", "Elsewhere"),
+            "another session's send goes at once"
+        );
+        assert_eq!(
+            checks.finished("s", true),
+            None,
+            "a check is still on its way"
+        );
+        assert_eq!(checks.finished("s", true).as_deref(), Some("Look at these"));
+        assert_eq!(checks.finished("s", true), None, "it went once");
+    }
+
+    #[test]
+    fn a_failed_check_drops_the_waiting_send_and_no_later_drop_makes_it() {
+        let mut checks = DropChecks::default();
+        checks.started("s");
+        checks.started("s");
+        assert!(checks.hold("s", "Look at these"));
+        assert_eq!(checks.finished("s", false), None);
+        assert_eq!(
+            checks.finished("s", true),
+            None,
+            "the other check sends nothing"
+        );
+        checks.started("s");
+        assert_eq!(checks.finished("s", true), None, "nor does a later drop");
     }
 
     #[test]

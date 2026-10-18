@@ -219,19 +219,9 @@ fn worktree_files(worktree: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::git;
     use serde_json::json;
     use std::time::Instant;
-
-    fn git(path: &Path, args: &[&str]) {
-        let identity = ["-c", "user.name=F", "-c", "user.email=f@example.invalid"];
-        let status = std::process::Command::new("git")
-            .current_dir(path)
-            .args(identity)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?}");
-    }
 
     /// A project whose repository tracks `notes.txt` on `main`, and its coordinator.
     fn project() -> (tempfile::TempDir, Host, Session, Repository) {

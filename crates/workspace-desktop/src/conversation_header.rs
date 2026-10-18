@@ -3,10 +3,8 @@
 //! keystroke in the composer or frame of another view's spinner.
 use super::*;
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
-use transcript::Transcript;
-use ui::{icon, progress_bar, segmented_bar};
+use ui::{HEADER_HEIGHT, icon, page_header, progress_bar, segmented_bar};
 
-const HEADER_HEIGHT: f32 = 64.;
 /// The progress strip never changes height, so the transcript below it never moves.
 const STRIP_HEIGHT: f32 = 36.;
 const STRIP_BAR: f32 = 6.;
@@ -23,15 +21,12 @@ pub(super) struct ConversationHeader {
     bridge: Bridge,
     shared: Shared,
     contexts: Entity<context_view::Contexts>,
-    /// Goes back to its newest page after a change made here.
-    transcript: Entity<Transcript>,
 }
 impl EventEmitter<Intent> for ConversationHeader {}
 impl ConversationHeader {
     pub(super) fn new(
         bridge: Bridge,
         contexts: Entity<context_view::Contexts>,
-        transcript: Entity<Transcript>,
         cx: &mut Context<Self>,
     ) -> Self {
         // The context chip draws the selected session's measurement.
@@ -40,7 +35,6 @@ impl ConversationHeader {
             bridge,
             shared: Shared::default(),
             contexts,
-            transcript,
         }
     }
     /// Draws again for a new selection, workspace, progress or panel.
@@ -105,37 +99,10 @@ impl ConversationHeader {
         } else {
             session.name.clone()
         };
-        div()
-            .flex_none()
-            .h(px(64.))
+        let eyebrow = div().text_ellipsis().child(self.breadcrumb(session));
+        page_header(eyebrow, div().text_ellipsis().child(title), p)
             .px_6()
-            .flex()
-            .items_center()
             .gap_3()
-            .border_b_1()
-            .border_color(p.edge.opacity(0.3))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(p.subtle)
-                            .text_ellipsis()
-                            .child(self.breadcrumb(session)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_ellipsis()
-                            .child(title),
-                    ),
-            )
             .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
                 chip.on_click(cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Overview))))
             }))
@@ -221,8 +188,8 @@ impl ConversationHeader {
             .gap_3()
             .bg(p.surface)
             .border_b_1()
-            .border_color(p.edge.opacity(0.3))
-            .text_size(px(12.));
+            .border_color(p.edge.opacity(edge::SEPARATOR))
+            .text_size(px(font::SMALL));
         let (label, bar, figure) = match project {
             Some(project) => self.project_strip(project, p),
             None => self.agent_strip(session, p),
@@ -243,7 +210,7 @@ impl ConversationHeader {
                 button("crew")
                     .outline()
                     .xsmall()
-                    .label(tree::crew_label(crew))
+                    .label(wording::crew_label(crew))
                     .selected(self.shared.panel == Some(Panel::Crew))
                     .tooltip("Every ticket and the agents working on it")
                     .on_click(cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Crew))))
@@ -262,7 +229,7 @@ impl ConversationHeader {
         (
             project.phase.label().into(),
             bar,
-            tree::project_summary(project),
+            wording::project_summary(project),
         )
     }
     /// An agent's own label and bar, or its ticket's stage and bar when it has nothing of
@@ -273,8 +240,8 @@ impl ConversationHeader {
             .shared
             .ticket_of(&session.id)
             .and_then(|ticket| self.shared.progress.ticket(&ticket.id));
-        let figure = tree::strip_figure(agent, ticket);
-        let own = agent.and_then(|agent| Some((tree::strip_label(agent)?, agent)));
+        let figure = wording::strip_figure(agent, ticket);
+        let own = agent.and_then(|agent| Some((wording::strip_label(agent)?, agent)));
         match (own, ticket) {
             (Some((label, agent)), _) => {
                 let bar = progress_bar(agent.position(), agent.state, STRIP_BAR, p);
@@ -297,22 +264,13 @@ impl Requests for ConversationHeader {
     }
     fn accept(
         &mut self,
-        command: Command,
+        _: Command,
         reply: Result<Value, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
-        };
-        if let Command::SetArchived { archived, .. } = command {
-            let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-            cx.emit(Intent::Archived { archived, affected });
-        } else {
-            // The change signal brings the snapshot; the transcript goes back to its newest page.
-            self.transcript
-                .update(cx, |transcript, cx| transcript.back_to_latest(window, cx));
+        if let Err(error) = reply {
+            toast_error(error, window, cx);
         }
     }
 }

@@ -2,9 +2,8 @@
 //! that asks the agent's provider to replace the conversation with a summary.
 use super::*;
 use gpui_component::{Disableable, Sizable, button::ButtonVariants};
-use ui::{Spinner, age, card, hint, icon, progress_bar, section};
-use workspace_host::compaction::REASON_LIMIT;
-use workspace_host::context::{ContextUsage, Probe};
+use ui::{Spinner, card, hint, icon, progress_bar, section};
+use wording::age;
 
 /// The Compact form on a session's Context card, while it is open.
 #[derive(Default)]
@@ -118,7 +117,7 @@ fn compaction_notice(
     outcome: &CompactionOutcome,
 ) -> Option<(&'static str, String, bool)> {
     let reason = outcome.reason.as_deref().map(|reason| {
-        let reason = conversation::first_line(reason, REASON_LIMIT);
+        let reason = first_line(reason, REASON_LIMIT);
         if reason.ends_with(['.', '!', '?', '…']) {
             format!("{reason} ")
         } else {
@@ -167,7 +166,7 @@ fn notice(color: Hsla) -> Div {
         .border_color(color)
         .rounded_r(px(6.))
         .bg(color.opacity(0.07))
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
 }
 
 fn notice_title(title: &'static str) -> Div {
@@ -183,7 +182,7 @@ fn below_measurement(p: Palette) -> Div {
     div()
         .pt(px(9.))
         .border_t_1()
-        .border_color(p.edge.opacity(0.4))
+        .border_color(p.edge.opacity(edge::CARD))
 }
 
 fn percent(tokens: u64, window: u64) -> u64 {
@@ -214,8 +213,8 @@ fn swatch(color: Hsla) -> Div {
 
 /// How full each session's context window is, measured on demand with no model call. The
 /// conversation's header chip and the Context card both show it.
-#[derive(Default)]
 pub(super) struct Contexts {
+    bridge: Bridge,
     shared: Shared,
     measured: BTreeMap<String, Result<ContextUsage, String>>,
     pending: BTreeSet<String>,
@@ -223,6 +222,15 @@ pub(super) struct Contexts {
     seen: BTreeMap<String, Measured>,
 }
 impl Contexts {
+    pub(super) fn new(bridge: Bridge) -> Self {
+        Self {
+            bridge,
+            shared: Shared::default(),
+            measured: BTreeMap::new(),
+            pending: BTreeSet::new(),
+            seen: BTreeMap::new(),
+        }
+    }
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         self.shared = shared;
         self.sync(window, cx);
@@ -262,15 +270,10 @@ impl Contexts {
             .cloned()
             .unwrap_or_default();
         self.seen.insert(session.id.clone(), Measured::of(&runtime));
-        let skill = Skill::for_role(session.role);
-        let instructions = (self.shared.snapshot())
-            .and_then(|snapshot| snapshot.skills.iter().find(|s| s.skill == skill))
-            .map(|state| workspace_host::provider::role_instructions(session.role, state));
-        let (Some(provider_session), Some(directory), Some(profile), Some(instructions)) = (
+        let (Some(_), Some(_), Some(profile)) = (
             runtime.provider_session_id,
             runtime.directory,
             self.shared.selected_profile(),
-            instructions,
         ) else {
             self.measured.insert(
                 session.id,
@@ -279,30 +282,14 @@ impl Contexts {
             return;
         };
         self.pending.insert(session.id.clone());
-        let (send, receive) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let probe = Probe {
-                profile: &profile,
-                provider_session: &provider_session,
-                directory: std::path::Path::new(&directory),
-                instructions: &instructions,
-            };
-            let usage = workspace_host::context::usage(&probe).map_err(|e| format!("{e:#}"));
-            let _ = send.send_blocking(usage);
+        let ask = ask::measure_context(session.id.clone(), profile);
+        self.ask(ask, window, cx, move |view, usage, window, cx| {
+            view.pending.remove(&session.id);
+            view.measured.insert(session.id, usage);
+            // A turn or a compaction that ended while this probe ran is measured now;
+            // no later snapshot may come to ask for it.
+            view.sync(window, cx);
         });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(usage) = receive.recv().await {
-                let _ = this.update_in(cx, |view, window, cx| {
-                    view.pending.remove(&session.id);
-                    view.measured.insert(session.id, usage);
-                    // A turn or a compaction that ended while this probe ran is measured now;
-                    // no later snapshot may come to ask for it.
-                    view.sync(window, cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
         cx.notify();
     }
     /// The fill level for the conversation header, which opens the full breakdown.
@@ -327,7 +314,7 @@ impl Contexts {
                 .cursor_pointer()
                 .bg(color.opacity(0.10))
                 .text_color(color)
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .hover(move |d| d.bg(color.opacity(0.18)))
                 .tooltip(move |w, c| {
                     gpui_component::tooltip::Tooltip::new("Context window in use").build(w, c)
@@ -357,6 +344,12 @@ impl Contexts {
                     )
                 }),
         )
+    }
+}
+
+impl Requests for Contexts {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
     }
 }
 
@@ -533,7 +526,7 @@ impl Inspector {
                             div()
                                 .flex()
                                 .gap_1()
-                                .text_size(px(12.))
+                                .text_size(px(font::SMALL))
                                 .child(div().font_weight(FontWeight::MEDIUM).child("What to keep"))
                                 .child(div().text_color(p.subtle).child("· optional")),
                         )
@@ -601,14 +594,14 @@ impl Inspector {
             .flex()
             .rounded(px(3.))
             .overflow_hidden()
-            .bg(p.edge.opacity(0.3));
+            .bg(p.edge.opacity(edge::SEPARATOR));
         let mut legend = div().flex().flex_wrap().gap_x_3().gap_y_1();
         let entry = |color: Hsla, name: &str, tokens: u64| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .child(swatch(color))
                 .child(div().text_color(p.subtle).child(name.to_lowercase()))
                 .child(
@@ -630,7 +623,7 @@ impl Inspector {
             legend = legend.child(entry(color, &category.name, category.tokens));
         }
         let free = usage.window.saturating_sub(usage.used);
-        legend = legend.child(entry(p.edge.opacity(0.6), "Free", free));
+        legend = legend.child(entry(p.edge.opacity(edge::STRONG), "Free", free));
         div().flex().flex_col().gap_2().child(bar).child(legend)
     }
 
@@ -695,7 +688,7 @@ impl Inspector {
                             .gap_2()
                             .child(
                                 div()
-                                    .text_size(px(15.))
+                                    .text_size(px(font::HEADING_SMALL))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(compact_tokens(usage.used)),
                             )
@@ -707,7 +700,7 @@ impl Inspector {
                                     .rounded_md()
                                     .bg(color.opacity(0.15))
                                     .text_color(color)
-                                    .text_size(px(12.))
+                                    .text_size(px(font::SMALL))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(format!("{filled}%")),
                             ),

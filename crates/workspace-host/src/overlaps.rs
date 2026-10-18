@@ -278,17 +278,8 @@ fn paths(output: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::git;
 
-    fn git(path: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .current_dir(path)
-            .args(["-c", "user.name=F", "-c", "user.email=f@example.invalid"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        String::from_utf8(output.stdout).unwrap()
-    }
     /// Runs the Git commands on a new branch from `main` and commits the result.
     fn on_branch(repository: &Path, branch: &str, commands: &[&[&str]]) {
         git(repository, &["checkout", "-q", "-b", branch, "main"]);

@@ -726,21 +726,7 @@ pub(crate) fn ensure_worktree_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .current_dir(path)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-    }
+    use crate::test_support::git;
 
     #[test]
     fn a_squash_keeps_its_patch_id_and_an_extra_change_does_not() {

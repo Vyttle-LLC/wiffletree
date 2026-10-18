@@ -3,7 +3,8 @@
 use super::*;
 use gpui_component::button::ButtonVariants;
 use std::time::{Duration, Instant};
-use ui::{Spinner, icon, mono, now};
+use ui::{Spinner, icon, mono};
+use wording::{clock, counted, duration};
 
 /// Step fetches start no closer together than this, about 30 a second.
 pub(super) const STEP_PACE: Duration = Duration::from_millis(33);
@@ -26,14 +27,14 @@ pub(super) struct RunActivity {
     pub steps: Vec<Step>,
 }
 impl RunActivity {
-    pub fn new(session_id: &str) -> Self {
+    pub(crate) fn new(session_id: &str) -> Self {
         Self {
             session_id: session_id.into(),
             ..Default::default()
         }
     }
     /// Applies a page of changes; a different run replaces the steps shown.
-    pub fn merge(&mut self, page: StepPage) {
+    pub(crate) fn merge(&mut self, page: StepPage) {
         if page.run_id != self.run_id {
             self.steps.clear();
             self.run_id = page.run_id;
@@ -51,7 +52,7 @@ impl RunActivity {
         self.steps.sort_by_key(|s| s.seq);
     }
     /// What the card shows; nothing from a previous run while the next one starts.
-    pub fn card(&self) -> Card {
+    pub(crate) fn card(&self) -> Card {
         if !self.running {
             return Card::default();
         }
@@ -96,7 +97,7 @@ pub(super) struct StepFetch {
 impl StepFetch {
     /// Claims the next request and says how long to wait to keep `pace`, or records that
     /// one more is owed when a request is already out.
-    pub fn begin(&mut self, pace: Duration) -> Option<Duration> {
+    pub(crate) fn begin(&mut self, pace: Duration) -> Option<Duration> {
         if self.in_flight {
             self.dirty = true;
             return None;
@@ -109,7 +110,7 @@ impl StepFetch {
         Some(wait)
     }
     /// Ends the request; true when changes arrived meanwhile and another is owed.
-    pub fn finish(&mut self) -> bool {
+    pub(crate) fn finish(&mut self) -> bool {
         self.in_flight = false;
         std::mem::take(&mut self.dirty)
     }
@@ -118,19 +119,14 @@ impl StepFetch {
 /// Waits out the pace, then asks the host and decodes its reply.
 pub(super) async fn paced_reply<T: serde::de::DeserializeOwned>(
     bridge: Bridge,
-    command: Command,
+    ask: Ask<T>,
     wait: Duration,
     executor: BackgroundExecutor,
 ) -> Result<T, String> {
     if !wait.is_zero() {
         executor.timer(wait).await;
     }
-    let value = bridge
-        .request(command)?
-        .recv()
-        .await
-        .map_err(|_| "Host disconnected".to_string())??;
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    bridge.ask(ask)?.await
 }
 
 pub(super) fn kind_icon(kind: StepKind) -> &'static str {
@@ -193,32 +189,11 @@ pub(super) fn step_row(step: &Step, p: Palette) -> Div {
             d.child(
                 div()
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size(px(font::META))
                     .text_color(p.subtle)
                     .child(note),
             )
         })
-}
-
-/// Elapsed time of a running turn, "4:18".
-pub(super) fn clock(started_at: Option<i64>) -> String {
-    let seconds = started_at.map_or(0, |at| (now() - at).max(0) / 1000);
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
-/// How long a finished turn took, "42s", "9m 12s" or "1h 04m".
-pub(super) fn duration(milliseconds: i64) -> String {
-    let seconds = milliseconds.max(0) / 1000;
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
-    }
-}
-
-/// "23 steps", "1 step".
-pub(super) fn step_count(actions: usize) -> String {
-    format!("{actions} step{}", if actions == 1 { "" } else { "s" })
 }
 
 /// "Worked 9m 12s · 23 steps", above a finished turn's reply; it opens that turn's history.
@@ -241,12 +216,12 @@ pub(super) fn turn_summary(
         .flex()
         .items_center()
         .gap_1()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(p.subtle)
         .cursor_pointer()
         .hover(|style| style.text_color(p.text))
         .child(icon("chevron-right").size(px(12.)))
-        .child(format!("{took}{}", step_count(summary.actions)))
+        .child(format!("{took}{}", counted(summary.actions, "step")))
         .when(summary.failed > 0, |d| {
             d.child(
                 div()
@@ -269,7 +244,7 @@ pub(super) fn activity_row(
     let stats = format!(
         "· {} · {}",
         clock(card.started_at),
-        step_count(card.actions)
+        counted(card.actions, "step")
     );
     let current = card
         .current
@@ -309,14 +284,14 @@ pub(super) fn activity_row(
         .child(
             div()
                 .flex_none()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Working"),
         )
         .child(
             div()
                 .flex_none()
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .text_color(p.subtle)
                 .child(stats),
         )
@@ -325,7 +300,7 @@ pub(super) fn activity_row(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .child(format!("· {current}")),
@@ -337,7 +312,7 @@ pub(super) fn activity_row(
                     .flex_none()
                     .flex()
                     .items_center()
-                    .text_size(px(11.5))
+                    .text_size(px(font::DETAIL))
                     .text_color(p.subtle)
                     .child("View all")
                     .child(icon("chevron-right").size(px(12.))),
@@ -353,7 +328,7 @@ pub(super) fn activity_row(
             div()
                 .h(px(22.))
                 .mt_1()
-                .text_size(px(13.))
+                .text_size(px(font::TEXT))
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .child(card.headline.clone().unwrap_or_else(|| "Starting…".into())),
@@ -375,7 +350,7 @@ pub(super) fn activity_row(
         .py(px(7.))
         .rounded_xl()
         .border_1()
-        .border_color(p.edge.opacity(0.45))
+        .border_color(p.edge.opacity(edge::SOFT))
         .bg(p.surface)
         .flex()
         .flex_col()

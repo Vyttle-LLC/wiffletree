@@ -4,6 +4,13 @@ use std::{io::Read, os::unix::fs::PermissionsExt};
 
 pub const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Each file as `inspect` describes it, or why it cannot be attached.
+pub fn inspect_all(paths: &[PathBuf]) -> Vec<std::result::Result<Attachment, String>> {
+    (paths.iter())
+        .map(|path| inspect(path).map_err(|e| e.to_string()))
+        .collect()
+}
+
 /// Describes a file that can be attached, or says why it cannot.
 pub fn inspect(path: &Path) -> Result<Attachment> {
     let name = path.file_name().map_or_else(
@@ -74,12 +81,6 @@ pub fn directory(home: &Path, project: &str, message: &str) -> Result<PathBuf> {
         .join(message))
 }
 
-/// Whether two file names would name the same file. macOS volumes ignore case by default,
-/// so neither may `Notes.txt` and `notes.txt` share a message.
-pub fn same_name(a: &str, b: &str) -> bool {
-    a.to_lowercase() == b.to_lowercase()
-}
-
 /// The path Codex is given for a message's `index`th attachment. Codex splits `--image`
 /// values at commas, so an image named with one is reached through a comma-free hard link
 /// that `store` makes beside it: `.codex-<index>.<ext>`, with underscores added after the
@@ -92,7 +93,7 @@ pub(crate) fn codex_image_path(attachments: &[Attachment], index: usize) -> Path
             let mut stem = format!(".codex-{index}");
             while attachments
                 .iter()
-                .any(|a| same_name(&a.name(), &format!("{stem}.{extension}")))
+                .any(|a| same_file_name(&a.name(), &format!("{stem}.{extension}")))
             {
                 stem.push('_');
             }
@@ -114,7 +115,7 @@ pub(crate) fn store(directory: &Path, sources: &[PathBuf]) -> Result<Vec<Attachm
             ensure!(
                 !stored
                     .iter()
-                    .any(|a| same_name(&a.name(), &original.name())),
+                    .any(|a| same_file_name(&a.name(), &original.name())),
                 "Two attachments are named {}",
                 original.name()
             );
@@ -305,7 +306,7 @@ mod tests {
         let error = store(&other, &[lower, capital]).unwrap_err().to_string();
         assert_eq!(error, "Two attachments are named Notes.txt");
         assert!(!other.exists());
-        assert!(same_name("Notes.TXT", "notes.txt") && !same_name("a.txt", "b.txt"));
+        assert!(same_file_name("Notes.TXT", "notes.txt") && !same_file_name("a.txt", "b.txt"));
     }
 
     #[test]

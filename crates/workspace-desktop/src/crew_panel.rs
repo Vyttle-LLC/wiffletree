@@ -46,9 +46,9 @@ impl Inspector {
                                 .min_w_0()
                                 .text_ellipsis()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(tree::ticket_label(index.snapshot(), ticket)),
+                                .child(wording::ticket_label(index.snapshot(), ticket)),
                         )
-                        .child(hint(tree::stage_figure(progress), p).flex_none()),
+                        .child(hint(wording::stage_figure(progress), p).flex_none()),
                 )
                 .child(progress_bar(Some(progress.position), progress.state, 3., p));
             for agent in progress
@@ -74,15 +74,13 @@ impl Inspector {
     ) -> Option<Stateful<Div>> {
         let session = self.shared.session(&agent.session_id)?;
         let runtime = self.shared.runtime(&session.id);
-        let label = session
-            .role
-            .agent_label(runtime.and_then(|r| r.focus.as_deref()));
+        let label = self.shared.index.as_ref()?.agent_label(session);
         let model = runtime
             .and_then(|r| r.profile.as_ref())
             .map(|profile| models::profile_label(&self.shared.catalog, profile));
         let figure = [
-            tree::agent_figure(agent),
-            tree::elapsed_label(agent, ui::now()),
+            wording::agent_figure(agent),
+            wording::elapsed_label(agent, ui::now()),
         ];
         let figure = figure.into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let id = session.id.clone();
@@ -115,7 +113,7 @@ impl Inspector {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.))
+                                .text_size(px(font::CAPTION))
                                 .text_color(ui::bar_color(agent.state, p.subtle, p))
                                 .child(figure),
                         ),

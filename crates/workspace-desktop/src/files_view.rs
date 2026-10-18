@@ -386,16 +386,13 @@ impl Files {
         panel: Option<Panel>,
         session_id: &str,
         agent: bool,
-    ) -> Option<(Command, Duration)> {
+    ) -> Option<(Ask<Vec<TicketFiles>>, Duration)> {
         if panel != Some(Panel::Files) {
             return None;
         }
         let wait = self.fetch.begin(FILES_PACE)?;
-        let command = Command::Files {
-            session_id: session_id.to_owned(),
-            whole_tree: agent && self.whole_tree,
-        };
-        Some((command, wait))
+        let ask = ask::files(session_id.to_owned(), agent && self.whole_tree);
+        Some((ask, wait))
     }
     /// The title and text of the empty state standing in for the tree, if it has no rows.
     fn blank(&self) -> Option<(&'static str, String)> {
@@ -492,7 +489,7 @@ fn file_name(name: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .min_w_0()
         .font_family(".SystemMonoFont")
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .text_color(color)
         .text_ellipsis()
         .child(name.into())
@@ -532,13 +529,12 @@ impl Inspector {
             return;
         };
         let (session_id, agent) = (session.id.clone(), session.role.is_worker());
-        let Some((command, wait)) = self.files.request(self.shared.panel, &session_id, agent)
-        else {
+        let Some((ask, wait)) = self.files.request(self.shared.panel, &session_id, agent) else {
             return;
         };
         let reply = paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             wait,
             cx.background_executor().clone(),
         );
@@ -623,7 +619,7 @@ impl Inspector {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .text_size(px(13.))
+                .text_size(px(font::TEXT))
                 .child(tree)
                 .vertical_scrollbar(&files.list),
         )
@@ -664,7 +660,7 @@ impl Inspector {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(px(font::META))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(p.subtle)
                         .child(stat.clone()),
@@ -712,7 +708,7 @@ impl Inspector {
             .gap(px(6.))
             .rounded_md()
             .cursor_pointer()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .hover(move |d| d.bg(p.overlay))
             .on_click(move |_, _, cx| {
@@ -751,7 +747,7 @@ impl Inspector {
                         .flex_none()
                         .flex()
                         .gap_1()
-                        .text_size(px(10.5))
+                        .text_size(px(font::META))
                         .child(div().text_color(p.green).child(format!("+{added}")))
                         .child(div().text_color(p.red).child(format!("−{removed}"))),
                 )
@@ -771,7 +767,7 @@ impl Inspector {
                         .rounded_sm()
                         .bg(fill)
                         .text_color(text)
-                        .text_size(px(10.5))
+                        .text_size(px(font::META))
                         .text_ellipsis()
                         .child(who),
                 )
@@ -821,7 +817,7 @@ impl Inspector {
                 .flex_col()
                 .gap_2()
                 .border_b_1()
-                .border_color(p.edge.opacity(0.3))
+                .border_color(p.edge.opacity(edge::SEPARATOR))
                 .child(hint(summary, p))
                 .child(choices),
         )
@@ -841,8 +837,8 @@ impl Inspector {
             .flex()
             .flex_col()
             .border_t_1()
-            .border_color(p.edge.opacity(0.3))
-            .text_size(px(11.5))
+            .border_color(p.edge.opacity(edge::SEPARATOR))
+            .text_size(px(font::DETAIL))
             .text_color(p.subtle);
         for entry in live.iter().take(MAX_LIVE) {
             let (verb, color) = doing(entry.writing, p);
@@ -871,6 +867,7 @@ impl Inspector {
 #[cfg(test)]
 mod tests {
     use super::{Files, Group, Live, Node, Panel, groups, live, row_key, summary, tree};
+    use gpui::{ListOffset, px};
     use workspace_core::{AgentFiles, Command, FileActivity, LineCount, Role, TicketFiles};
 
     /// The tree as indented names, directories ending in "/".
@@ -1086,6 +1083,40 @@ mod tests {
     }
 
     #[test]
+    fn a_refresh_keeps_the_place_of_a_reader_scrolled_down_the_tree() {
+        let mut report = [ticket(
+            "Panel",
+            "web",
+            vec![agent("Implementer", &[("src/a.rs", 1, 0)])],
+        )];
+        report[0].tree = Some(vec!["src/a.rs".into(), "src/b.rs".into()]);
+        let mut files = Files {
+            report: report.into(),
+            ..Default::default()
+        };
+        files.regroup();
+        let b = row_key(&files.groups[0], "src/b.rs");
+        let row_of = |files: &Files, key: &str| files.rows.iter().position(|r| r.key == key);
+        let place = ListOffset {
+            item_ix: row_of(&files, &b).unwrap(),
+            offset_in_item: px(5.),
+        };
+        let top = |files: &Files| {
+            let top = files.list.logical_scroll_top();
+            (top.item_ix, top.offset_in_item)
+        };
+        files.list.scroll_to(place);
+        files.regroup();
+        assert_eq!(top(&files), (place.item_ix, px(5.)), "the same rows");
+        // A row added above the reader moves their place down with the row they were on.
+        (files.report[0].tree.as_mut().unwrap()).push("docs/x.md".into());
+        files.regroup();
+        let moved = row_of(&files, &b).unwrap();
+        assert!(moved > place.item_ix);
+        assert_eq!(top(&files), (moved, px(5.)));
+    }
+
+    #[test]
     fn a_verifier_sees_only_its_own_files_while_the_implementer_and_rollup_see_every_change() {
         let changes = || {
             let count = |path: &str| LineCount {
@@ -1207,9 +1238,9 @@ mod tests {
         assert!(files.request(None, "agent", true).is_none());
         assert!(files.request(Some(Panel::Git), "agent", true).is_none());
         // Opening the panel afterwards still gets its request at once.
-        let (command, wait) = files.request(Some(Panel::Files), "agent", true).unwrap();
+        let (ask, wait) = files.request(Some(Panel::Files), "agent", true).unwrap();
         assert!(matches!(
-            command,
+            ask.command(),
             Command::Files {
                 whole_tree: false,
                 ..
@@ -1223,7 +1254,7 @@ mod tests {
         files.whole_tree = true;
         let (agent_asks, _) = files.request(Some(Panel::Files), "agent", true).unwrap();
         assert!(matches!(
-            agent_asks,
+            agent_asks.command(),
             Command::Files {
                 whole_tree: true,
                 ..
@@ -1232,7 +1263,7 @@ mod tests {
         files.fetch.finish();
         let (coordinator_asks, _) = files.request(Some(Panel::Files), "pm", false).unwrap();
         assert!(matches!(
-            coordinator_asks,
+            coordinator_asks.command(),
             Command::Files {
                 whole_tree: false,
                 ..

@@ -6,17 +6,18 @@ use gpui_component::{
 };
 use std::collections::BTreeSet;
 use ui::{hint, mono, pill, section};
+use wording::counted;
 
 /// What the human has selected from a listing. Nothing starts selected, and only clean or
 /// unpushed rows can be.
-pub struct LeftoverSelection {
+pub(crate) struct LeftoverSelection {
     listing: Vec<LeftoverWorktree>,
     selected: BTreeSet<String>,
     confirming: bool,
 }
 
 impl LeftoverSelection {
-    pub fn new(listing: Vec<LeftoverWorktree>) -> Self {
+    pub(crate) fn new(listing: Vec<LeftoverWorktree>) -> Self {
         Self {
             listing,
             selected: BTreeSet::new(),
@@ -24,7 +25,7 @@ impl LeftoverSelection {
         }
     }
     /// Rows by project, in listing order; worktrees no ticket records come last.
-    pub fn groups(&self) -> Vec<(String, Vec<&LeftoverWorktree>)> {
+    pub(crate) fn groups(&self) -> Vec<(String, Vec<&LeftoverWorktree>)> {
         let mut groups: Vec<(String, Vec<&LeftoverWorktree>)> = vec![];
         for leftover in &self.listing {
             let project = if leftover.project.is_empty() {
@@ -39,11 +40,11 @@ impl LeftoverSelection {
         }
         groups
     }
-    pub fn selectable(leftover: &LeftoverWorktree) -> bool {
+    pub(crate) fn selectable(leftover: &LeftoverWorktree) -> bool {
         leftover.ticket_id.is_some() && leftover.class.is_removable()
     }
     /// Selects or clears a removable row; protected rows never change.
-    pub fn toggle(&mut self, ticket_id: &str) {
+    pub(crate) fn toggle(&mut self, ticket_id: &str) {
         let removable = self
             .listing
             .iter()
@@ -53,32 +54,30 @@ impl LeftoverSelection {
         }
         self.confirming = false;
     }
-    pub fn is_selected(&self, ticket_id: &str) -> bool {
+    pub(crate) fn is_selected(&self, ticket_id: &str) -> bool {
         self.selected.contains(ticket_id)
     }
     /// Asks for confirmation, naming the count; `None` when nothing is selected.
-    pub fn confirm(&mut self) -> Option<String> {
+    pub(crate) fn confirm(&mut self) -> Option<String> {
         self.confirming = !self.selected.is_empty();
         self.confirmation()
     }
-    pub fn confirmation(&self) -> Option<String> {
+    pub(crate) fn confirmation(&self) -> Option<String> {
         let count = self.selected.len();
         (self.confirming && count > 0).then(|| {
             format!(
-                "Remove {count} leftover {}? Their branches and commits are kept.",
-                if count == 1 { "worktree" } else { "worktrees" }
+                "Remove {}? Their branches and commits are kept.",
+                counted(count, "leftover worktree")
             )
         })
     }
-    pub fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         self.confirming = false;
     }
     /// The removal the human confirmed, or `None` before confirmation.
-    pub fn command(&self) -> Option<Command> {
+    pub(crate) fn removal(&self) -> Option<Ask<Vec<LeftoverRemoval>>> {
         self.confirmation()
-            .map(|_| Command::RemoveLeftoverWorktrees {
-                ticket_ids: self.selected.iter().cloned().collect(),
-            })
+            .map(|_| ask::remove_leftover_worktrees(self.selected.iter().cloned().collect()))
     }
 }
 
@@ -104,33 +103,32 @@ impl LeftoverSheet {
     }
 
     fn list(&mut self, cx: &mut Context<Self>) {
-        self.ask(Command::LeftoverWorktrees, false, cx, |sheet, value| {
-            sheet.selection = Some(LeftoverSelection::new(serde_json::from_value(value)?));
-            Ok(())
+        self.ask(ask::leftover_worktrees(), false, cx, |sheet, listing| {
+            sheet.selection = Some(LeftoverSelection::new(listing));
         });
     }
 
     fn remove(&mut self, cx: &mut Context<Self>) {
-        let Some(command) = self.selection.as_ref().and_then(LeftoverSelection::command) else {
+        let Some(removal) = self.selection.as_ref().and_then(LeftoverSelection::removal) else {
             return;
         };
         // The listing after removal shows what was kept.
-        self.ask(command, true, cx, |sheet, value| {
-            sheet.outcomes = serde_json::from_value(value)?;
+        self.ask(removal, true, cx, |sheet, outcomes| {
+            sheet.outcomes = outcomes;
             sheet.selection = None;
-            Ok(())
         });
     }
 
-    fn ask(
+    fn ask<R: serde::de::DeserializeOwned + 'static>(
         &mut self,
-        command: Command,
+        ask: Ask<R>,
         then_list: bool,
         cx: &mut Context<Self>,
-        apply: impl FnOnce(&mut Self, serde_json::Value) -> serde_json::Result<()> + 'static,
+        apply: impl FnOnce(&mut Self, R) + 'static,
     ) {
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+        let command = ask.command().clone();
+        let answer = match self.bridge.ask(ask) {
+            Ok(answer) => answer,
             Err(error) => {
                 self.error = Some(error);
                 return;
@@ -138,14 +136,10 @@ impl LeftoverSheet {
         };
         self.pending = true;
         cx.spawn(async move |this, cx| {
-            let answer = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()));
+            let answer = answer.await;
             let _ = this.update(cx, |sheet, cx| {
-                sheet.error = answer
-                    .and_then(|value| apply(sheet, value).map_err(|e| e.to_string()))
-                    .err();
+                shared::replied(&command, answer.is_ok(), cx);
+                sheet.error = answer.map(|answer| apply(sheet, answer)).err();
                 sheet.pending = false;
                 if then_list {
                     sheet.list(cx);
@@ -293,19 +287,10 @@ impl Render for LeftoverSheet {
 mod tests {
     // Only what the tests need: the parent's glob would bring GPUI's own `test` attribute.
     use super::LeftoverSelection;
+    use crate::test_support::git;
     use std::path::Path;
     use workspace_core::*;
     use workspace_host::Host;
-
-    fn git(path: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .current_dir(path)
-            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-    }
 
     /// A temporary store whose closed "Kept clean" and "Has notes" tickets left their worktrees.
     fn store() -> (tempfile::TempDir, Host, Ticket, Ticket) {
@@ -348,7 +333,7 @@ mod tests {
         assert_eq!(groups[0].1.len(), 2);
         assert!(!selection.is_selected(&clean.id) && !selection.is_selected(&dirty.id));
         assert_eq!(selection.confirm(), None, "nothing to confirm");
-        assert!(selection.command().is_none());
+        assert!(selection.removal().is_none());
 
         selection.toggle(&dirty.id);
         assert!(!selection.is_selected(&dirty.id), "dirty work is protected");
@@ -363,18 +348,19 @@ mod tests {
         let (_directory, mut host, clean, dirty) = store();
         let mut selection = LeftoverSelection::new(host.leftover_worktrees().unwrap());
         selection.toggle(&clean.id);
-        assert!(selection.command().is_none(), "not before confirmation");
+        assert!(selection.removal().is_none(), "not before confirmation");
 
         assert_eq!(
             selection.confirm().as_deref(),
             Some("Remove 1 leftover worktree? Their branches and commits are kept.")
         );
-        let Some(Command::RemoveLeftoverWorktrees { ticket_ids }) = selection.command() else {
+        let removal = selection.removal().map(|ask| ask.command().clone());
+        let Some(Command::RemoveLeftoverWorktrees { ticket_ids }) = removal else {
             panic!("removal command")
         };
         assert_eq!(ticket_ids, std::slice::from_ref(&clean.id));
         selection.cancel();
-        assert!(selection.command().is_none(), "cancelling withdraws it");
+        assert!(selection.removal().is_none(), "cancelling withdraws it");
 
         let outcomes = host.remove_leftover_worktrees(&ticket_ids).unwrap();
         assert!(outcomes[0].removed);

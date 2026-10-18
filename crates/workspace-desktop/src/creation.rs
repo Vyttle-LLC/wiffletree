@@ -1,5 +1,5 @@
 use super::bridge::Bridge;
-use super::ui::Spinner;
+use super::ui::{Spinner, font};
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, IconName, IndexPath, Selectable, Sizable,
@@ -15,7 +15,7 @@ use workspace_core::Role;
 use workspace_core::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Creation {
+pub(crate) enum Creation {
     Ticket,
     Agent,
     Repository,
@@ -24,7 +24,7 @@ pub enum Creation {
 }
 
 impl Creation {
-    pub fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Ticket => "New ticket",
             Self::Agent => "Assign ticket agent",
@@ -33,7 +33,7 @@ impl Creation {
             Self::ProjectRepositories => "Project repositories",
         }
     }
-    pub fn action(self) -> &'static str {
+    pub(crate) fn action(self) -> &'static str {
         match self {
             Self::Ticket => "Create ticket",
             Self::Agent => "Assign agent",
@@ -59,7 +59,7 @@ impl SelectItem for Choice {
     }
 }
 
-pub struct CreationForm {
+pub(crate) struct CreationForm {
     kind: Creation,
     project_id: Option<String>,
     project_name: String,
@@ -73,7 +73,7 @@ pub struct CreationForm {
     options: Vec<Choice>,
     role: Role,
     model_selection: ModelSelection,
-    catalog: Vec<workspace_host::runtime::ModelOption>,
+    catalog: Vec<ModelOption>,
     /// The human's pick; `None` follows the role's pre-fill.
     profile: Option<ModelProfile>,
     pub pending: bool,
@@ -97,7 +97,7 @@ fn default_instruction(role: Role) -> &'static str {
 }
 
 impl CreationForm {
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.kind == Creation::ProjectRepositories {
             return;
         }
@@ -108,7 +108,7 @@ impl CreationForm {
         }
     }
 
-    pub fn new(
+    pub(crate) fn new(
         kind: Creation,
         index: &WorkspaceIndex,
         selected: Option<&Session>,
@@ -136,7 +136,7 @@ impl CreationForm {
                 .filter(|t| t.is_open())
                 .map(|t| Choice {
                     id: t.id.clone(),
-                    label: super::tree::ticket_label(snapshot, t),
+                    label: super::wording::ticket_label(snapshot, t),
                 })
                 .collect()
         } else {
@@ -213,7 +213,7 @@ impl CreationForm {
     }
 
     /// The installed CLIs' models, offered by the model picker beside the allowed ones.
-    pub fn with_catalog(mut self, catalog: &[workspace_host::runtime::ModelOption]) -> Self {
+    pub(crate) fn with_catalog(mut self, catalog: &[ModelOption]) -> Self {
         self.catalog = catalog.to_vec();
         self
     }
@@ -224,7 +224,7 @@ impl CreationForm {
             .or_else(|| self.model_selection.prefill(role))
     }
 
-    pub fn command(&self, cx: &App) -> Result<Command, String> {
+    pub(crate) fn command(&self, cx: &App) -> Result<Command, String> {
         if self.kind == Creation::Import {
             if self.scanning {
                 return Err("Wait for the folder scan to finish".into());
@@ -334,7 +334,7 @@ impl CreationForm {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .font_weight(FontWeight::MEDIUM)
                     .child(label),
             )
@@ -356,10 +356,9 @@ impl CreationForm {
             cx.notify();
             return;
         }
-        let receiver = match self.bridge.request(Command::DiscoverRepositories {
-            folders: self.folders.iter().cloned().collect(),
-        }) {
-            Ok(receiver) => receiver,
+        let ask = ask::discover_repositories(self.folders.iter().cloned().collect());
+        let discovery = match self.bridge.ask(ask) {
+            Ok(discovery) => discovery,
             Err(error) => {
                 self.error = error;
                 cx.notify();
@@ -372,13 +371,7 @@ impl CreationForm {
         self.error.clear();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()))
-                .and_then(|v| {
-                    serde_json::from_value::<RepositoryDiscovery>(v).map_err(|e| e.to_string())
-                });
+            let result = discovery.await;
             let _ = this.update(cx, |form, cx| {
                 form.scanning = false;
                 match result {
@@ -400,7 +393,7 @@ impl CreationForm {
     }
 
     /// Enter in the folder field means Add rather than import; true when it started a scan.
-    pub fn add_typed_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn add_typed_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.kind != Creation::Import || self.name.read(cx).value().trim().is_empty() {
             return false;
         }
@@ -465,7 +458,7 @@ impl CreationForm {
         .detach();
     }
 
-    pub fn import_finished(&mut self, result: &RepositoryImport, cx: &mut Context<Self>) {
+    pub(crate) fn import_finished(&mut self, result: &RepositoryImport, cx: &mut Context<Self>) {
         self.pending = false;
         for repo in &result.imported {
             self.selected_repositories.remove(&repo.path);
@@ -483,7 +476,7 @@ impl CreationForm {
 
     fn note(text: impl Into<SharedString>, cx: &App) -> Div {
         div()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .line_height(relative(1.5))
             .text_color(cx.theme().muted_foreground)
             .child(text.into())
@@ -712,7 +705,7 @@ impl CreationForm {
                     .rounded_md()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .child(div().min_w_0().text_ellipsis().child(path.clone()))
                     .child(
                         super::button(SharedString::from(format!("remove-folder-{path}")))
@@ -868,7 +861,7 @@ impl Render for CreationForm {
             .flex()
             .flex_col()
             .gap_4()
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .child(Self::note(
                 if self.project_id.is_some() {
                     format!("In {}", self.project_name)

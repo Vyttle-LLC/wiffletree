@@ -88,7 +88,6 @@ remaining synchronous paths as follow-up scope:
   single-writer ordering in [check_removable](../../crates/workspace-host/src/worktrees.rs#L161)
   and [remove_worktree](../../crates/workspace-host/src/worktrees.rs#L201). It runs rarely
   and remains synchronous for now.
-- Keeper polling's read-only ancestry checks at
-  [keeper.rs:1109](../../crates/workspace-host/src/keeper.rs#L1109) and
-  [keeper.rs:1178](../../crates/workspace-host/src/keeper.rs#L1178) remain unchanged
-  for Phase 4.
+- Keeper polling's read-only ancestry checks were left for Phase 4. They now run
+  through `checkout::KeeperPoll` off the actor; see the
+  [Phase 4b measurements and contract](host-revisions.md).

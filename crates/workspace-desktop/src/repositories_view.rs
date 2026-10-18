@@ -7,7 +7,8 @@ use gpui_component::{
     input::Input,
     menu::{DropdownMenu, PopupMenuItem},
 };
-use ui::{age, banner, empty_state, from_now, hint, icon, mono, pill, section};
+use ui::{banner, empty_state, hint, icon, mono, pill, section};
+use wording::{age, counted, from_now};
 
 const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
 const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
@@ -174,7 +175,7 @@ impl RepositoriesPage {
                             .children(pr_check_status(snapshot, repository).map(
                                 |(status, failed)| {
                                     div()
-                                        .text_size(px(10.5))
+                                        .text_size(px(font::META))
                                         .text_color(if failed { p.red } else { p.subtle })
                                         .child(status)
                                 },
@@ -219,7 +220,7 @@ impl RepositoriesPage {
                 div()
                     .py_2()
                     .border_b_1()
-                    .border_color(p.edge.opacity(0.25))
+                    .border_color(p.edge.opacity(edge::HAIRLINE))
                     .child(row)
                     .child(checks.pl(px(28.))),
             );
@@ -244,7 +245,7 @@ impl RepositoriesPage {
             )
             .child(hint(WITHOUT_ASKING, p))
             .child(hint(SETTINGS_REPOSITORY, p))
-            .child(div().text_size(px(12.)).child(NEVER));
+            .child(div().text_size(px(font::SMALL)).child(NEVER));
         if let Some(error) = &snapshot.github_error {
             block = block.child(
                 banner(p.yellow).child(
@@ -364,7 +365,7 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .child("Reviewed with")
             .child(picker)
@@ -373,7 +374,7 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .text_color(p.subtle)
             .child("Waits until the base has been quiet for")
             .child(step("less", "−", minutes - 1).on_click(save(quiet(minutes - 1))))
@@ -431,7 +432,7 @@ impl RepositoriesPage {
                 "Sort new comments",
                 vec![hint(SORT, p).into_any_element()],
             ))
-            .child(div().text_size(px(12.)).child(NEVER_KEEPER))
+            .child(div().text_size(px(font::SMALL)).child(NEVER_KEEPER))
     }
 
     /// The repository's checks command and its limit, or its editor while the human edits it.
@@ -447,7 +448,7 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(11.5))
+            .text_size(px(font::DETAIL))
             .text_color(p.subtle)
             .child("Checks");
         let id = repository.id.clone();
@@ -461,7 +462,7 @@ impl RepositoriesPage {
             let command = command.map(|command| {
                 div()
                     .font_family(".SystemMonoFont")
-                    .text_size(px(11.))
+                    .text_size(px(font::CAPTION))
                     .text_color(p.text)
                     .child(command)
             });
@@ -653,7 +654,7 @@ impl RepositoriesPage {
             .items_center()
             .gap_3()
             .border_b_1()
-            .border_color(p.edge.opacity(0.25))
+            .border_color(p.edge.opacity(edge::HAIRLINE))
             // A row without a box keeps its text in line with the others.
             .child(div().w(px(16.)).flex_none().children(tick))
             .child(
@@ -740,8 +741,8 @@ fn owners_heading(entries: &OwnerEntries, allowed: &[String]) -> String {
         total += 1;
         ticked += usize::from(is_entry_allowed(entry, allowed));
     }
-    let owners = if total == 1 { "owner" } else { "owners" };
-    format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {total} {owners} allowed")
+    let owners = counted(total, "owner");
+    format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {owners} allowed")
 }
 
 /// The repository's checks command, if it has one, and the line that goes with it: its limit,
@@ -769,13 +770,11 @@ fn open_tickets<'a>(
 
 /// "1 project · 6 open tickets · 5 open PRs", counting the open PRs of open tickets.
 fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usize) -> String {
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let tickets = open_tickets(snapshot, repository).count();
     let mut counts = format!(
         "{} · {}",
-        plural(projects, "project", "projects"),
-        plural(tickets, "open ticket", "open tickets")
+        counted(projects, "project"),
+        counted(tickets, "open ticket")
     );
     let prs = open_tickets(snapshot, repository)
         .filter(|t| {
@@ -785,7 +784,7 @@ fn repository_counts(snapshot: &Snapshot, repository: &Repository, projects: usi
         })
         .count();
     if tickets > 0 {
-        counts.push_str(&format!(" · {}", plural(prs, "open PR", "open PRs")));
+        counts.push_str(&format!(" · {}", counted(prs, "open PR")));
     }
     counts
 }

@@ -1,20 +1,13 @@
 //! A host restart through the real Service, with the fake provider standing in for the CLIs.
 //! Kept in its own test binary because it sets the provider environment for the process.
-use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+mod common;
+use common::{request, until};
+use serde_json::json;
+use std::path::Path;
 use workspace_core::*;
 use workspace_host::{Host, now, service::Service};
 
 const MINUTE: i64 = 60_000;
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
 
 fn messages(service: &Service, session: &str) -> Vec<Message> {
     let value = request(
@@ -26,14 +19,6 @@ fn messages(service: &Service, session: &str) -> Vec<Message> {
         },
     );
     serde_json::from_value(value).unwrap()
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 fn replied(service: &Service, session: &str) -> bool {
@@ -153,19 +138,13 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
         .unwrap();
     }
 
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-        std::env::set_var("WORKSPACE_TEST_PROMPT_DIR", scratch.path());
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .env("WORKSPACE_TEST_PROMPT_DIR", scratch.path())
+            .start()
+    };
 
     // The live project carries on: the idle coordinator's timer fires once, late, with no Go live.
     until("the idle coordinator's timer turn", || {

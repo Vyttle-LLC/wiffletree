@@ -59,7 +59,7 @@ pub struct CoordinatorUsage {
     pub own: TokenTotals,
     pub workers: TokenTotals,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaWindow {
     pub key: String,
     pub label: String,
@@ -69,7 +69,7 @@ pub struct QuotaWindow {
     pub resets_at: Option<i64>,
     pub status: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaReading {
     pub provider: Provider,
     pub account: Option<String>,

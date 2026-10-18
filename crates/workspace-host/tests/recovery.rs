@@ -330,9 +330,9 @@ fn repository_coordinators_cannot_be_created_and_workers_keep_ownership() {
                 && e.session_id.as_deref() == Some(&other_root.id))
     );
     assert_eq!(
-        host.git_history(&repository.id, 0, 10).unwrap()["commits"]
-            .as_array()
+        host.git_history(&repository.id, 0, 10)
             .unwrap()
+            .commits
             .len(),
         1
     );

@@ -1,28 +1,15 @@
 //! Pure helpers behind the Models page and the model pickers.
 use workspace_core::{
-    AllowedModel, Chooser, Detection, ModelProfile, ModelSelection, PROVIDERS, Provider,
-    ProviderStatus, Role, Selection, Setup, VerificationSettings, WorkspaceIndex, suggest,
+    AllowedModel, Chooser, Detection, ModelOption, ModelProfile, ModelSelection, PROVIDERS,
+    Provider, ProviderStatus, Role, Selection, Setup, VerificationSettings, WorkspaceIndex,
+    suggest, usual_efforts,
 };
-use workspace_host::runtime::ModelOption;
 
-pub fn fallback() -> Vec<ModelOption> {
-    [
-        (Provider::Claude, "opus", "Opus · latest"),
-        (Provider::Claude, "sonnet", "Sonnet · latest"),
-        (Provider::Codex, "gpt-6.1-sol", "GPT 6.1 Sol"),
-        (Provider::Codex, "gpt-6-astra", "GPT 6 Astra"),
-    ]
-    .into_iter()
-    .map(|(provider, model, label)| ModelOption {
-        provider,
-        model: model.into(),
-        label: label.into(),
-        efforts: vec![],
-    })
-    .collect()
-}
-
-pub fn choices(catalog: &[ModelOption], provider: Provider, saved: &[&str]) -> Vec<ModelOption> {
+pub(crate) fn choices(
+    catalog: &[ModelOption],
+    provider: Provider,
+    saved: &[&str],
+) -> Vec<ModelOption> {
     let mut choices: Vec<_> = catalog
         .iter()
         .filter(|m| m.provider == provider)
@@ -42,7 +29,7 @@ pub fn choices(catalog: &[ModelOption], provider: Provider, saved: &[&str]) -> V
 }
 
 /// The model's reported efforts, else the provider's usual ones, plus any saved effort.
-pub fn effort_choices(
+pub(crate) fn effort_choices(
     catalog: &[ModelOption],
     provider: Provider,
     model: &str,
@@ -54,12 +41,9 @@ pub fn effort_choices(
         .map(|option| option.efforts.clone())
         .filter(|efforts| !efforts.is_empty())
         .unwrap_or_else(|| {
-            let fallback = if provider == Provider::Claude {
-                vec!["low", "medium", "high", "xhigh", "max"]
-            } else {
-                vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-            };
-            fallback.into_iter().map(str::to_owned).collect()
+            (usual_efforts(provider).iter())
+                .map(|e| (*e).to_owned())
+                .collect()
         });
     for saved in saved {
         if !efforts.iter().any(|effort| effort == saved) {
@@ -69,7 +53,7 @@ pub fn effort_choices(
     efforts
 }
 
-pub fn model_label(catalog: &[ModelOption], provider: Provider, model: &str) -> String {
+pub(crate) fn model_label(catalog: &[ModelOption], provider: Provider, model: &str) -> String {
     catalog
         .iter()
         .find(|m| m.provider == provider && m.model == model)
@@ -77,24 +61,24 @@ pub fn model_label(catalog: &[ModelOption], provider: Provider, model: &str) -> 
 }
 
 /// "Claude · Opus · latest · High", as pickers show a profile.
-pub fn profile_label(catalog: &[ModelOption], profile: &ModelProfile) -> String {
+pub(crate) fn profile_label(catalog: &[ModelOption], profile: &ModelProfile) -> String {
     format!(
         "{} · {} · {}",
         profile.provider.label(),
         model_label(catalog, profile.provider, &profile.model),
-        crate::ui::effort_label(&profile.effort)
+        crate::wording::effort_label(&profile.effort)
     )
 }
 
 /// A model the Providers card offers to allow, with the efforts it supports.
 #[derive(Clone)]
-pub struct ModelRow {
+pub(crate) struct ModelRow {
     pub model: String,
     pub label: String,
     pub efforts: Vec<String>,
 }
 /// The catalog's models for a provider plus allowed ones the catalog no longer lists.
-pub fn model_rows(
+pub(crate) fn model_rows(
     catalog: &[ModelOption],
     provider: Provider,
     selection: &ModelSelection,
@@ -121,7 +105,7 @@ pub fn model_rows(
         .collect()
 }
 /// The provider's allowed models in first-listed order, each with its allowed efforts.
-pub fn allowed_models(
+pub(crate) fn allowed_models(
     selection: &ModelSelection,
     provider: Provider,
 ) -> Vec<(String, Vec<String>)> {
@@ -141,7 +125,7 @@ pub fn allowed_models(
 
 /// Allows a model at its first effort; the catalog reports no default effort. New entries go
 /// last, so pre-fill keeps its first model.
-pub fn add_model(selection: &mut ModelSelection, provider: Provider, row: &ModelRow) {
+pub(crate) fn add_model(selection: &mut ModelSelection, provider: Provider, row: &ModelRow) {
     let Some(effort) = row.efforts.first() else {
         return;
     };
@@ -153,7 +137,7 @@ pub fn add_model(selection: &mut ModelSelection, provider: Provider, row: &Model
     }
 }
 /// Ticks or unticks one effort. Unticking a model's last effort removes the model.
-pub fn toggle_effort(
+pub(crate) fn toggle_effort(
     selection: &mut ModelSelection,
     provider: Provider,
     model: &str,
@@ -174,13 +158,13 @@ pub fn toggle_effort(
     }
 }
 /// Removes every effort of a model.
-pub fn remove_model(selection: &mut ModelSelection, provider: Provider, model: &str) {
+pub(crate) fn remove_model(selection: &mut ModelSelection, provider: Provider, model: &str) {
     if let Some(access) = selection.providers.get_mut(&provider) {
         access.models.retain(|m| m.model != model);
     }
 }
 /// Disabling a provider keeps its allowed models but takes it out of every role.
-pub fn set_enabled(selection: &mut ModelSelection, provider: Provider, enabled: bool) {
+pub(crate) fn set_enabled(selection: &mut ModelSelection, provider: Provider, enabled: bool) {
     selection.providers.entry(provider).or_default().enabled = enabled;
     if !enabled {
         for providers in selection.role_providers.values_mut() {
@@ -188,7 +172,7 @@ pub fn set_enabled(selection: &mut ModelSelection, provider: Provider, enabled: 
         }
     }
 }
-pub fn toggle_role_provider(selection: &mut ModelSelection, role: Role, provider: Provider) {
+pub(crate) fn toggle_role_provider(selection: &mut ModelSelection, role: Role, provider: Provider) {
     let providers = selection.role_providers.entry(role).or_default();
     if !providers.remove(&provider) {
         providers.insert(provider);
@@ -196,7 +180,7 @@ pub fn toggle_role_provider(selection: &mut ModelSelection, role: Role, provider
 }
 
 /// "CLI found · signed in · Max plan", as the Providers card shows what detection found.
-pub fn status_label(status: &ProviderStatus) -> String {
+pub(crate) fn status_label(status: &ProviderStatus) -> String {
     if !status.installed {
         return "CLI not found".into();
     }
@@ -206,15 +190,15 @@ pub fn status_label(status: &ProviderStatus) -> String {
     let plan = status
         .plan
         .as_deref()
-        .map(|plan| format!(" · {} plan", crate::ui::humanize(plan)));
+        .map(|plan| format!(" · {} plan", crate::wording::humanize(plan)));
     format!("CLI found · signed in{}", plan.unwrap_or_default())
 }
 /// The one-line fix for a provider a suggested setup left out, or `None` when it is usable.
-pub fn fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
+pub(crate) fn fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
     fix(provider, status, ", then Refresh")
 }
 /// The same fix for the welcome, which has no Refresh to point at.
-pub fn welcome_fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
+pub(crate) fn welcome_fix_hint(provider: Provider, status: &ProviderStatus) -> Option<String> {
     fix(provider, status, "")
 }
 /// `next` is what a signed-out CLI's fix says to do after signing in.
@@ -233,12 +217,12 @@ fn fix(provider: Provider, status: &ProviderStatus, next: &str) -> Option<String
 /// A store with no saved setup cannot be edited or saved until its first suggestion is shown,
 /// so an early edit is never overwritten and the first save always carries the suggested
 /// verifiers.
-pub fn editable(saved: &ModelSelection, suggested: Option<&Setup>) -> bool {
+pub(crate) fn editable(saved: &ModelSelection, suggested: Option<&Setup>) -> bool {
     saved.is_saved() || suggested.is_some()
 }
 /// Whether a provider carries the "Suggested" tag: the suggestion enabled it and the draft
 /// still has it enabled.
-pub fn tagged_suggested(
+pub(crate) fn tagged_suggested(
     suggested: Option<&Setup>,
     draft: &ModelSelection,
     provider: Provider,
@@ -246,7 +230,7 @@ pub fn tagged_suggested(
     draft.is_enabled(provider) && suggested.is_some_and(|s| s.selection.is_enabled(provider))
 }
 /// Whether the draft still is the suggested setup, verifiers included.
-pub fn untouched(
+pub(crate) fn untouched(
     suggested: &Setup,
     selection: &ModelSelection,
     verification: Option<&VerificationSettings>,
@@ -255,7 +239,7 @@ pub fn untouched(
 }
 /// A setup to suggest after a detection pass.
 #[derive(Debug, PartialEq)]
-pub struct Offer {
+pub(crate) struct Offer {
     pub suggested: Setup,
     /// The draft follows it: it was untouched, or nothing was suggested before.
     pub replaces_draft: bool,
@@ -263,7 +247,7 @@ pub struct Offer {
 /// What a detection pass suggests for a store with no saved setup; `None` on a saved store,
 /// before every provider is detected, or when `shown` already is that suggestion. A draft the
 /// human edited is kept, and so is a guide already in the shared folder, even an empty one.
-pub fn offer(
+pub(crate) fn offer(
     saved: &ModelSelection,
     guide_saved: bool,
     shown: Option<&Setup>,
@@ -288,12 +272,17 @@ pub fn offer(
 }
 /// Save needs an editable page and a valid draft that differs from what is saved; a suggested
 /// setup is unsaved from the start, so it needs no edit first.
-pub fn can_save(editable: bool, suggested: bool, edited: bool, selection: &ModelSelection) -> bool {
+pub(crate) fn can_save(
+    editable: bool,
+    suggested: bool,
+    edited: bool,
+    selection: &ModelSelection,
+) -> bool {
     editable && (suggested || edited) && selection.validate().is_ok()
 }
 /// The draft once the host has saved `sent`: it takes the saved revision unless the human
 /// edited it meanwhile.
-pub fn after_save(
+pub(crate) fn after_save(
     draft: &ModelSelection,
     sent: &ModelSelection,
     saved: &ModelSelection,
@@ -306,7 +295,7 @@ pub fn after_save(
 }
 
 /// The PR keeper's choices: every allowed model of an enabled provider, in display order.
-pub fn keeper_choices(selection: &ModelSelection) -> Vec<ModelProfile> {
+pub(crate) fn keeper_choices(selection: &ModelSelection) -> Vec<ModelProfile> {
     PROVIDERS
         .into_iter()
         .flat_map(|provider| {
@@ -323,12 +312,12 @@ pub fn keeper_choices(selection: &ModelSelection) -> Vec<ModelProfile> {
 }
 
 /// A group of the human's model picker.
-pub struct PickerGroup {
+pub(crate) struct PickerGroup {
     pub heading: String,
     pub profiles: Vec<ModelProfile>,
 }
 /// The role's providers' allowed models first, then every other model the human may pick.
-pub fn picker_groups(
+pub(crate) fn picker_groups(
     selection: &ModelSelection,
     catalog: &[ModelOption],
     role: Role,
@@ -384,7 +373,7 @@ pub fn picker_groups(
 }
 
 /// How an agent's model was chosen, as its chat shows it.
-pub fn chosen_by(selection: &Selection, index: &WorkspaceIndex) -> String {
+pub(crate) fn chosen_by(selection: &Selection, index: &WorkspaceIndex) -> String {
     match &selection.chosen_by {
         Chooser::Coordinator { session_id } => {
             let name = (index.session(session_id)).map_or("its coordinator", |s| s.name.as_str());
@@ -399,7 +388,7 @@ pub fn chosen_by(selection: &Selection, index: &WorkspaceIndex) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use workspace_core::{PROVIDER_ROLES, ProviderAccess};
+    use workspace_core::{PROVIDER_ROLES, ProviderAccess, fallback_catalog};
 
     fn selection() -> ModelSelection {
         let access = |models: &[(&str, &str)]| ProviderAccess {
@@ -661,17 +650,20 @@ mod tests {
     #[test]
     fn refreshed_catalog_preserves_saved_models_without_crossing_providers() {
         let options = choices(
-            &fallback(),
+            &fallback_catalog(),
             Provider::Codex,
             &["gpt-6.1-sol", "custom-codex-version"],
         );
         assert!(options.iter().all(|m| m.provider == Provider::Codex));
         assert!(options.iter().any(|m| m.model == "custom-codex-version"));
-        assert_eq!(choices(&fallback(), Provider::Claude, &["opus"]).len(), 2);
+        assert_eq!(
+            choices(&fallback_catalog(), Provider::Claude, &["opus"]).len(),
+            2
+        );
     }
     #[test]
     fn efforts_follow_the_selected_model_and_preserve_saved_values() {
-        let mut catalog = fallback();
+        let mut catalog = fallback_catalog();
         catalog[2].efforts = vec!["high".into(), "ultra".into()];
         assert_eq!(
             effort_choices(&catalog, Provider::Codex, "gpt-6.1-sol", &["high"]),
@@ -699,7 +691,7 @@ mod tests {
             .models
             .push(saved);
         // Allowed models the catalog no longer lists stay offered with their saved effort.
-        let rows = model_rows(&fallback(), Provider::Claude, &selection);
+        let rows = model_rows(&fallback_catalog(), Provider::Claude, &selection);
         let legacy = rows.iter().find(|r| r.model == "opus-legacy").unwrap();
         assert_eq!(legacy.label, "Saved · opus-legacy");
         assert!(legacy.efforts.contains(&"medium".to_owned()));
@@ -779,7 +771,7 @@ mod tests {
     #[test]
     fn the_picker_lists_the_roles_providers_first_then_everything_else() {
         let selection = selection();
-        let groups = picker_groups(&selection, &fallback(), Role::Reviewer);
+        let groups = picker_groups(&selection, &fallback_catalog(), Role::Reviewer);
         let headings: Vec<_> = groups.iter().map(|g| g.heading.as_str()).collect();
         assert_eq!(
             headings,
@@ -789,7 +781,7 @@ mod tests {
             groups[0].profiles[0],
             selection.prefill(Role::Reviewer).unwrap()
         );
-        let implementer = picker_groups(&selection, &fallback(), Role::Implementer);
+        let implementer = picker_groups(&selection, &fallback_catalog(), Role::Implementer);
         assert_eq!(implementer[0].heading, "Implementer · Claude");
         let others = &implementer[1].profiles;
         assert_eq!(others[0].model, "gpt-6.1-sol");

@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::sync::OnceLock;
 
 #[derive(Clone, Deserialize)]
-pub struct Tokens {
+pub(crate) struct Tokens {
     pub base: String,
     pub surface: String,
     pub overlay: String,
@@ -30,7 +30,7 @@ struct ThemeFile {
     variants: Variants,
 }
 #[derive(Clone, Copy)]
-pub struct Palette {
+pub(crate) struct Palette {
     pub base: Hsla,
     pub surface: Hsla,
     pub overlay: Hsla,
@@ -46,7 +46,7 @@ pub struct Palette {
     pub blue: Hsla,
     pub magenta: Hsla,
 }
-pub fn palette(dark: bool) -> Palette {
+pub(crate) fn palette(dark: bool) -> Palette {
     static TOKENS: OnceLock<ThemeFile> = OnceLock::new();
     let file = TOKENS.get_or_init(|| {
         serde_json::from_str(include_str!("../../../design/themes/wiffletree-tidal.json"))

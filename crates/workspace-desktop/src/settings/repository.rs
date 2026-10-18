@@ -8,7 +8,7 @@ use super::*;
 use gpui_component::button::ButtonVariants;
 pub(crate) use join::Joined;
 pub(crate) use synced::{Mark, SyncShown, share_sync};
-use ui::pill;
+use ui::{confirm_card, pill};
 
 /// The section's place among the scrolled body's children: three sections and their rules.
 pub(super) const SECTION: usize = 6;
@@ -122,16 +122,17 @@ impl Settings {
         let checking = matches!(command, Command::CheckSettingsRepository { .. });
         let answers_settings = !checking && !matches!(command, Command::SyncNow);
         self.repository_error = None;
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+        let sent = command.clone();
+        let answer = match self.bridge.send(command) {
+            Ok(answer) => answer,
             Err(error) => return self.repository_error = Some(error),
         };
         self.asking = true;
         let input = self.repository_input.read(cx).value().to_string();
         cx.spawn(async move |this, cx| {
-            let answer =
-                (receiver.recv().await).unwrap_or_else(|_| Err("Host disconnected".into()));
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&sent, answer.is_ok(), cx);
                 view.asking = false;
                 let shown = answer.and_then(|value| {
                     if checking {
@@ -201,40 +202,9 @@ impl Settings {
             v.confirm(None, c);
             v.ask_repository(command.clone(), c);
         }));
-        Some(
-            div()
-                .w(px(400.))
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .rounded_xl()
-                .border_1()
-                .border_color(p.edge)
-                .bg(p.surface)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(ask),
-                )
-                .children(text.map(|line| hint(line, p)))
-                .child(
-                    div()
-                        .pt_2()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            button("cancel-repository")
-                                .ghost()
-                                .label("Cancel")
-                                .on_click(cx.listener(|v, _, _, c| v.confirm(None, c))),
-                        )
-                        .child(act),
-                ),
-        )
+        let cancel =
+            button("cancel-repository").on_click(cx.listener(|v, _, _, c| v.confirm(None, c)));
+        Some(confirm_card(ask, text, cancel, act, p).w(px(400.)))
     }
 }
 
@@ -266,7 +236,7 @@ fn repository_card(
         .gap_2()
         .rounded_lg()
         .border_1()
-        .border_color(p.edge.opacity(0.7))
+        .border_color(p.edge.opacity(edge::FIRM))
         .bg(p.surface)
         .child(
             div()
@@ -281,7 +251,7 @@ fn repository_card(
                 .child(
                     mono(repository.name.clone(), p)
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(px(font::SMALL))
                         .text_color(p.text),
                 )
                 .child(kind),
@@ -291,7 +261,7 @@ fn repository_card(
                 .flex()
                 .items_start()
                 .gap_2()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .text_color(who_color)
                 .child(
                     icon(who_icon)

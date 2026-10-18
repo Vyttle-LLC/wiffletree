@@ -1,7 +1,7 @@
 //! Joining a repository another Mac set up: what it holds beside this Mac, both ways to join,
 //! and afterwards what this Mac still needs.
 use super::*;
-use chrono::{DateTime, Local};
+use crate::wording::day_and_time;
 
 const STEPS: [&str; 3] = ["1 · Name it", "2 · Compare", "3 · What this Mac needs"];
 /// How this Mac joined, which says whose settings are in use.
@@ -30,9 +30,9 @@ impl Settings {
             joining.last_machine,
             day_and_time(joining.last_changed_at)
         );
-        let mut table = div().flex().flex_col().text_size(px(12.)).child(
+        let mut table = div().flex().flex_col().text_size(px(font::SMALL)).child(
             comparison_row(["SETTING", "IN THE REPOSITORY", "ON THIS MAC"], p)
-                .text_size(px(10.))
+                .text_size(px(font::TINY))
                 .text_color(p.subtle),
         );
         for setting in &joining.settings {
@@ -119,26 +119,19 @@ pub(super) fn steps(current: usize, p: Palette) -> Div {
             .px_2()
             .rounded_full()
             .border_1()
-            .border_color(if on { p.focus } else { p.edge.opacity(0.6) })
+            .border_color(if on {
+                p.focus
+            } else {
+                p.edge.opacity(edge::STRONG)
+            })
             .text_color(if on { p.text } else { p.subtle })
             .child(label)
     };
     div()
         .flex()
         .gap_1p5()
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .children(STEPS.into_iter().enumerate().map(step))
-}
-
-/// "today 14:41", or "12 Oct 14:41" on another day.
-fn day_and_time(at: i64) -> String {
-    let Some(at) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
-        return String::new();
-    };
-    match at.date_naive() == Local::now().date_naive() {
-        true => at.format("today %H:%M").to_string(),
-        false => at.format("%-d %b %H:%M").to_string(),
-    }
 }
 
 fn comparison_row(cells: [&str; 3], p: Palette) -> Div {
@@ -148,7 +141,7 @@ fn comparison_row(cells: [&str; 3], p: Palette) -> Div {
         .gap_2()
         .py_1()
         .border_b_1()
-        .border_color(p.edge.opacity(0.25))
+        .border_color(p.edge.opacity(edge::HAIRLINE))
         .child(
             div()
                 .w(px(150.))
@@ -201,9 +194,9 @@ fn need(icon_name: &'static str, what: StillNeed, why: Option<&'static str>, p: 
         .gap_2()
         .rounded_lg()
         .border_1()
-        .border_color(p.edge.opacity(0.55))
+        .border_color(p.edge.opacity(edge::BOX))
         .bg(p.surface)
-        .text_size(px(12.))
+        .text_size(px(font::SMALL))
         .child(icon(icon_name).size(px(14.)).mt(px(2.)).text_color(color))
         .child(
             div()
@@ -220,7 +213,7 @@ fn need(icon_name: &'static str, what: StillNeed, why: Option<&'static str>, p: 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Joined, SyncShown, day_and_time, in_use, needs};
+    use super::{Joined, SyncShown, in_use, needs};
     use workspace_core::{StillNeed, WorkspacePage};
 
     #[test]
@@ -248,13 +241,6 @@ mod tests {
             ..shown
         };
         assert_eq!(needs(&allowed).len(), 1);
-    }
-
-    #[test]
-    fn the_repositorys_last_change_is_a_time_in_milliseconds() {
-        let now = chrono::Utc::now().timestamp_millis();
-        assert!(day_and_time(now).starts_with("today "));
-        assert!(!day_and_time(now - 3 * 24 * 60 * 60_000).starts_with("today "));
     }
 
     #[test]

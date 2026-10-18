@@ -5,11 +5,11 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
-use serde::Deserialize;
 use ui::{
-    card, empty_state, eyebrow, from_now, hint, icon, mono, pill, property, section, session_icon,
+    card, empty_state, eyebrow, hint, icon, mono, page_header, pill, property, section,
+    session_icon,
 };
-use workspace_host::usage::local_time;
+use wording::{from_now, local_time};
 
 fn scope(role: Role) -> &'static str {
     match role {
@@ -38,7 +38,7 @@ pub(super) fn copyable(label: &'static str, value: &str, p: Palette) -> Div {
             div()
                 .flex_none()
                 .w(px(56.))
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .text_color(p.subtle)
                 .child(label),
         )
@@ -189,13 +189,13 @@ impl Inspector {
     }
     fn accept_panel_data(
         &mut self,
-        data: serde_json::Result<PanelData>,
+        data: Result<PanelData, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match data {
             Ok(data) => self.panel_data = data,
-            Err(error) => toast_error(error.to_string(), window, cx),
+            Err(error) => toast_error(error, window, cx),
         }
     }
     fn load_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -203,39 +203,41 @@ impl Inspector {
             return;
         };
         match self.shared.panel {
-            Some(Panel::Memory) => self.request(
-                Command::Logs {
-                    project_id,
-                    before: None,
-                    limit: 30,
-                },
-                window,
-                cx,
-            ),
-            Some(Panel::Events) => self.request(
-                Command::Activity {
-                    project_id,
-                    before: None,
-                    limit: 50,
-                },
-                window,
-                cx,
-            ),
+            Some(Panel::Memory) => {
+                let ask = ask::logs(project_id.clone(), None, 30);
+                self.ask(ask, window, cx, move |view, logs, window, cx| {
+                    let shown = view.shared.panel == Some(Panel::Memory)
+                        && view.shared.project_id() == Some(project_id);
+                    if shown {
+                        view.accept_panel_data(logs.map(PanelData::Memory), window, cx);
+                    }
+                })
+            }
+            Some(Panel::Events) => {
+                let ask = ask::activity(project_id.clone(), None, 50);
+                self.ask(ask, window, cx, move |view, events, window, cx| {
+                    let shown = view.shared.panel == Some(Panel::Events)
+                        && view.shared.project_id() == Some(project_id);
+                    if shown {
+                        view.accept_panel_data(events.map(PanelData::Events), window, cx);
+                    }
+                })
+            }
             Some(Panel::Git) => {
-                if let Some(repository_id) = self
-                    .shared
-                    .selected_session()
-                    .and_then(|s| s.repository_id.clone())
-                {
-                    self.request(
-                        Command::GitHistory {
-                            repository_id,
-                            skip: 0,
-                            limit: 30,
-                        },
-                        window,
-                        cx,
-                    )
+                let repository =
+                    (self.shared.selected_session()).and_then(|s| s.repository_id.clone());
+                if let Some(repository_id) = repository {
+                    let ask = ask::git_history(repository_id.clone(), 0, 30);
+                    self.ask(ask, window, cx, move |view, history, window, cx| {
+                        let shown = view.shared.panel == Some(Panel::Git)
+                            && (view.shared.selected_session())
+                                .and_then(|s| s.repository_id.as_ref())
+                                == Some(&repository_id);
+                        if shown {
+                            let commits = history.map(|history| PanelData::Git(history.commits));
+                            view.accept_panel_data(commits, window, cx);
+                        }
+                    })
                 }
             }
             Some(Panel::Files) => self.fetch_files(window, cx),
@@ -305,44 +307,23 @@ impl Inspector {
             .flex_col()
             .bg(p.surface)
             .child(
-                div()
-                    .flex_none()
-                    .h(px(64.))
-                    .pl_5()
-                    .pr_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(p.edge.opacity(0.3))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(p.subtle)
-                                    .text_ellipsis()
-                                    .child(format!("{scope}  ·  {subtitle}")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(18.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(panel.title()),
-                            ),
-                    )
-                    .child(
-                        button("close-inspector")
-                            .ghost()
-                            .icon(icon("close"))
-                            .tooltip("Close")
-                            .on_click(cx.listener(|_, _, _, c| c.emit(Intent::ClosePanel))),
-                    ),
+                page_header(
+                    div()
+                        .text_ellipsis()
+                        .child(format!("{scope}  ·  {subtitle}")),
+                    div().child(panel.title()),
+                    p,
+                )
+                .pl_5()
+                .pr_3()
+                .gap_2()
+                .child(
+                    button("close-inspector")
+                        .ghost()
+                        .icon(icon("close"))
+                        .tooltip("Close")
+                        .on_click(cx.listener(|_, _, _, c| c.emit(Intent::ClosePanel))),
+                ),
             )
             .children(head)
             .map(|d| match tree {
@@ -354,7 +335,7 @@ impl Inspector {
                         .min_h_0()
                         .overflow_y_scrollbar()
                         .p_5()
-                        .text_size(px(13.))
+                        .text_size(px(font::TEXT))
                         .child(body.w_full()),
                 ),
             })
@@ -367,7 +348,7 @@ impl Inspector {
             .gap_0()
             .child(
                 div()
-                    .text_size(px(20.))
+                    .text_size(px(font::FIGURE_SMALL))
                     .font_weight(FontWeight::MEDIUM)
                     .child(value.to_string()),
             )
@@ -383,7 +364,7 @@ impl Inspector {
             .gap_3()
             .py_2()
             .border_b_1()
-            .border_color(p.edge.opacity(0.25))
+            .border_color(p.edge.opacity(edge::HAIRLINE))
             .tooltip(move |w, c| Tooltip::new(path.clone()).build(w, c))
             .child(icon("folder").text_color(p.subtle))
             .child(
@@ -421,7 +402,7 @@ impl Inspector {
             .gap_3()
             .py_2()
             .border_b_1()
-            .border_color(p.edge.opacity(0.25))
+            .border_color(p.edge.opacity(edge::HAIRLINE))
             .child(icon("clock").text_color(p.subtle))
             .child(
                 div()
@@ -482,7 +463,7 @@ impl Inspector {
                             .flex_1()
                             .child(
                                 div()
-                                    .text_size(px(14.))
+                                    .text_size(px(font::BODY))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_ellipsis()
                                     .child(session.name.clone()),
@@ -497,8 +478,10 @@ impl Inspector {
                         d.child(property(
                             "Model",
                             format!(
-                                "{:?} · {} · {}",
-                                profile.provider, profile.model, profile.effort
+                                "{} · {} · {}",
+                                profile.provider.label(),
+                                profile.model,
+                                profile.effort
                             ),
                             p,
                         ))
@@ -754,7 +737,7 @@ impl Inspector {
                     .gap_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(p.edge.opacity(0.25))
+                    .border_color(p.edge.opacity(edge::HAIRLINE))
                     .child(
                         div()
                             .flex_none()
@@ -768,7 +751,7 @@ impl Inspector {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.5))
+                            .text_size(px(font::MESSAGE))
                             .child(commit.subject.clone()),
                     )
                     .child(mono(sha, p).flex_none().text_color(p.accent)),
@@ -800,39 +783,7 @@ impl Requests for Inspector {
             }
         };
         match command {
-            Command::Logs { project_id, .. } => {
-                if self.shared.panel == Some(Panel::Memory)
-                    && self.shared.project_id() == Some(project_id)
-                {
-                    let logs = serde_json::from_value(value).map(PanelData::Memory);
-                    self.accept_panel_data(logs, window, cx);
-                }
-            }
-            Command::Activity { project_id, .. } => {
-                if self.shared.panel == Some(Panel::Events)
-                    && self.shared.project_id() == Some(project_id)
-                {
-                    let events = serde_json::from_value(value).map(PanelData::Events);
-                    self.accept_panel_data(events, window, cx);
-                }
-            }
-            Command::GitHistory { repository_id, .. } => {
-                if self.shared.panel == Some(Panel::Git)
-                    && self
-                        .shared
-                        .selected_session()
-                        .and_then(|s| s.repository_id.clone())
-                        == Some(repository_id)
-                {
-                    let history = inspector::commits(value).map(PanelData::Git);
-                    self.accept_panel_data(history, window, cx);
-                }
-            }
             Command::CompactContext { session_id, .. } => self.compact_accepted(&session_id),
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                cx.emit(Intent::Archived { archived, affected });
-            }
             Command::AppendLog { .. } => {
                 self.memory_title
                     .update(cx, |input, cx| input.set_value("", window, cx));
@@ -888,7 +839,7 @@ impl Workspace {
             .py_2()
             .bg(p.surface)
             .border_l_1()
-            .border_color(p.edge.opacity(0.35));
+            .border_color(p.edge.opacity(edge::LIGHT));
         if self.shared.selected_session().is_none() {
             return rail;
         }
@@ -937,7 +888,7 @@ impl Workspace {
                     .child(icon(panel.icon()).size(px(18.)))
                     .child(
                         div()
-                            .text_size(px(10.))
+                            .text_size(px(font::TINY))
                             .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                             .child(panel.title()),
                     )
@@ -953,7 +904,7 @@ impl Workspace {
                                 .rounded_full()
                                 .bg(fill)
                                 .text_color(text)
-                                .text_size(px(9.5))
+                                .text_size(px(font::MICRO))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .flex()
                                 .items_center()
@@ -967,27 +918,12 @@ impl Workspace {
     }
 }
 
-/// A commit in the Git panel's local history.
-#[derive(Deserialize)]
-pub(super) struct Commit {
-    sha: String,
-    subject: String,
-}
-
-/// The commits in a `git_history` reply.
-pub(super) fn commits(reply: Value) -> serde_json::Result<Vec<Commit>> {
-    #[derive(Deserialize)]
-    struct History {
-        commits: Vec<Commit>,
-    }
-    serde_json::from_value::<History>(reply).map(|history| history.commits)
-}
-
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Panel, commits};
-    use workspace_core::Role;
+    use super::Panel;
+    use crate::test_support::git;
+    use workspace_core::{Role, ask};
     use workspace_host::Host;
 
     #[test]
@@ -1000,28 +936,23 @@ mod tests {
         assert!(Panel::Git.kept_for(Role::ProjectOrchestrator) == Panel::Overview);
     }
 
-    /// The host's history reply is untyped JSON; the Git panel reads it into commits once.
     #[test]
     fn the_git_panel_reads_the_hosts_history_reply() {
         let directory = tempfile::tempdir().unwrap();
         let repo = directory.path().join("web");
         std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(&repo)
-                .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
-        };
-        git(&["init", "-q"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "Base"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "Add the toolbar"]);
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "Base"]);
+        git(
+            &repo,
+            &["commit", "-q", "--allow-empty", "-m", "Add the toolbar"],
+        );
         let mut host = Host::open(directory.path().join("home")).unwrap();
         let repository = host.add_repository(repo.to_str().unwrap(), "HEAD").unwrap();
 
-        let history = commits(host.git_history(&repository.id, 0, 30).unwrap()).unwrap();
+        let ask = ask::git_history(repository.id, 0, 30);
+        let reply = host.execute(ask.command().clone()).unwrap();
+        let history = ask.decode(reply).unwrap().commits;
 
         let subjects: Vec<&str> = history.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, ["Add the toolbar", "Base"]);

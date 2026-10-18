@@ -1,14 +1,12 @@
 //! One turn's full history in a sheet over the right side of the window: each narration
 //! paragraph followed by the steps that came after it, updating live while the turn runs.
 use super::*;
-use activity::{
-    RunActivity, STEP_PACE, StepFetch, clock, duration, paced_reply, state_glyph, step_count,
-    step_row,
-};
+use activity::{RunActivity, STEP_PACE, StepFetch, paced_reply, state_glyph, step_row};
 use file_links::Linked;
 use gpui_component::ActiveTheme;
 use std::{collections::HashMap, sync::Arc};
 use ui::icon;
+use wording::{clock, counted, duration};
 
 pub(super) struct HistorySheet {
     bridge: Bridge,
@@ -25,7 +23,7 @@ pub(super) struct HistorySheet {
 }
 
 impl HistorySheet {
-    pub fn new(
+    pub(crate) fn new(
         bridge: Bridge,
         session_id: &str,
         run_id: String,
@@ -45,7 +43,7 @@ impl HistorySheet {
     }
 
     /// Loads the turn's steps changed since the last page; a finished turn loads once.
-    pub fn fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn fetch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let finished = self.run.run_id.is_some() && !self.run.running;
         if finished {
             return;
@@ -53,14 +51,14 @@ impl HistorySheet {
         let Some(wait) = self.fetch.begin(STEP_PACE) else {
             return;
         };
-        let command = Command::Steps {
-            session_id: self.session_id.clone(),
-            run_id: Some(self.run_id.clone()),
-            after: self.run.revision,
-        };
+        let ask = ask::steps(
+            self.session_id.clone(),
+            Some(self.run_id.clone()),
+            self.run.revision,
+        );
         let page = paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             wait,
             cx.background_executor().clone(),
         );
@@ -148,7 +146,7 @@ impl HistorySheet {
         } else {
             String::new()
         };
-        format!("{time} · {}{failed}", step_count(actions))
+        format!("{time} · {}{failed}", counted(actions, "step"))
     }
 
     fn row(&self, index: usize, p: Palette, view: WeakEntity<Self>) -> AnyElement {
@@ -165,7 +163,7 @@ impl HistorySheet {
             StepKind::Thinking => div()
                 .w_full()
                 .pt_2()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .italic()
                 .text_color(p.subtle)
                 .child(step.title.clone())
@@ -236,12 +234,17 @@ fn detail(step: &Step, p: Palette) -> Div {
         .flex_col()
         .gap_1()
         .when_some(omitted, |d, note| {
-            d.child(div().text_size(px(10.5)).text_color(p.subtle).child(note))
+            d.child(
+                div()
+                    .text_size(px(font::META))
+                    .text_color(p.subtle)
+                    .child(note),
+            )
         })
         .child(
             div()
                 .font_family(".SystemMonoFont")
-                .text_size(px(11.))
+                .text_size(px(font::CAPTION))
                 .text_color(p.subtle)
                 .child(step.detail.clone().unwrap_or_default()),
         )
@@ -263,7 +266,7 @@ impl Render for HistorySheet {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .text_color(p.subtle)
                     .child(if running {
                         state_glyph(StepState::Running, p)

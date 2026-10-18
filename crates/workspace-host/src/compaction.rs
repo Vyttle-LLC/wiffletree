@@ -6,20 +6,6 @@ use crate::*;
 const MAX_INSTRUCTIONS: usize = 1000;
 /// How Claude's error starts when the session has too little to summarize.
 const NOTHING_TO_COMPACT: &str = "Not enough messages to compact";
-/// The longest reason the host builds from a provider's own text, in characters. The Context
-/// card cuts every reason it shows at the same length.
-pub const REASON_LIMIT: usize = 200;
-
-/// One line of at most `REASON_LIMIT` characters, ended with "…" when it was cut.
-pub(crate) fn bounded(text: &str) -> String {
-    let line = text.lines().next().unwrap_or_default();
-    if line.chars().count() > REASON_LIMIT {
-        format!("{}…", line.chars().take(REASON_LIMIT).collect::<String>())
-    } else {
-        line.to_owned()
-    }
-}
-
 /// What the provider said about a compaction, as `provider::run` reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompactionRecord {
@@ -66,7 +52,7 @@ pub(crate) fn outcome(
         None => {
             let reason = error.map_or_else(
                 || format!("{} reported no compaction result.", provider.label()),
-                |error| bounded(&error),
+                |error| first_line(&error, REASON_LIMIT),
             );
             (CompactionResult::Failed, Some(reason))
         }

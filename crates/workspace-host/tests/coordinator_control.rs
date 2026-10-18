@@ -2,34 +2,11 @@
 //! provider standing in for the CLIs: stop_agents keeps a child paused while input queues,
 //! resume_agent releases it, and a human stop wakes the parent, which may then retry the held
 //! input. Kept in its own test binary because it sets the provider environment for the process.
+mod common;
+use common::{git, request, snapshot, until};
 use serde_json::Value;
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
 use workspace_core::*;
 use workspace_host::{Host, service::Service};
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
-
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 fn messages(service: &Service, session: &str) -> Vec<Message> {
     serde_json::from_value(request(
@@ -87,16 +64,6 @@ fn control(service: &Service, main: &str, command: &str) -> Value {
     serde_json::from_str(&reply.body["CONTROL ".len()..]).unwrap()
 }
 
-fn git(path: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success());
-}
-
 #[test]
 fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
     let home = tempfile::tempdir().unwrap();
@@ -136,21 +103,15 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
         host.set_live(&project.id, true).unwrap();
         (main, child)
     };
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
     let prompts = scratch.path().join("prompts");
     std::fs::create_dir(&prompts).unwrap();
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-        std::env::set_var("WORKSPACE_TEST_PROMPT_DIR", &prompts);
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .env("WORKSPACE_TEST_PROMPT_DIR", &prompts)
+            .start()
+    };
     let working = |service: &Service| status(service, &child.id) == Status::Working;
     until("the child's long turn", || working(&service));
 

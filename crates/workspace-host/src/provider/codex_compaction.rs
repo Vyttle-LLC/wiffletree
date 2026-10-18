@@ -2,7 +2,7 @@
 //! server's messages say it ended. The protocol is experimental, so only a turn that completed
 //! is a success; everything else is a failure with a reason a person can read.
 use super::*;
-use crate::compaction::bounded;
+use workspace_core::{REASON_LIMIT, first_line};
 
 /// The requests in the order they are written. A request's id is its place, from 1.
 const REQUESTS: [&str; 3] = ["initialize", "thread/resume", "thread/compact/start"];
@@ -64,7 +64,7 @@ fn refusal(request: &str, text: &str) -> String {
     if text.starts_with(&format!("Invalid request: unknown variant `{request}`")) {
         format!("Codex refused {request}: this Codex has no such method")
     } else {
-        bounded(&format!("Codex refused {request}: {text}"))
+        first_line(&format!("Codex refused {request}: {text}"), REASON_LIMIT)
     }
 }
 
@@ -80,7 +80,10 @@ pub(super) struct Ended {
 impl Ended {
     fn failed(reason: &str, reported: Option<&str>) -> Self {
         Self {
-            records: vec![CompactionRecord::Status(Err(bounded(reason)))],
+            records: vec![CompactionRecord::Status(Err(first_line(
+                reason,
+                REASON_LIMIT,
+            )))],
             reported: reported.map(str::to_owned),
         }
     }
@@ -145,7 +148,7 @@ impl Messages {
         let said = turn["error"]["message"].as_str();
         let said = said.filter(|said| !said.trim().is_empty());
         // A message whose first line is blank gives no reason to show.
-        let message = said.filter(|said| !bounded(said).trim().is_empty());
+        let message = said.filter(|said| !first_line(said, REASON_LIMIT).trim().is_empty());
         let mut ended = match (turn["status"].as_str(), message) {
             (Some("completed"), _) => Ended {
                 records: vec![CompactionRecord::Status(Ok(()))],
@@ -172,7 +175,6 @@ impl Messages {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::REASON_LIMIT;
     use CompactionRecord::{Boundary, Status, Turn as TurnId};
 
     /// The server's side of a recorded exchange.

@@ -3,7 +3,7 @@
 use super::*;
 use gpui_component::button::ButtonVariants;
 use ui::hint;
-use workspace_host::skills::Line;
+use workspace_core::skills::Line;
 
 /// What the human chose on a note.
 #[derive(Clone, Copy)]
@@ -165,7 +165,7 @@ pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) 
             .min_w_0()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.55))
+            .border_color(p.edge.opacity(edge::BOX))
             .bg(p.base)
             .overflow_hidden()
             .child(
@@ -173,9 +173,9 @@ pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) 
                     .px_2()
                     .py(px(3.))
                     .border_b_1()
-                    .border_color(p.edge.opacity(0.45))
+                    .border_color(p.edge.opacity(edge::SOFT))
                     .bg(p.surface)
-                    .text_size(px(11.))
+                    .text_size(px(font::CAPTION))
                     .text_color(p.subtle)
                     .child(title),
             )
@@ -183,7 +183,7 @@ pub(crate) fn comparison(note: &PausedSetting, compared: &Compared, p: Palette) 
                 div()
                     .py_1()
                     .font_family(".SystemMonoFont")
-                    .text_size(px(11.5))
+                    .text_size(px(font::DETAIL))
                     .line_height(relative(1.55))
                     .children(rows),
             )
@@ -219,8 +219,8 @@ pub(crate) fn kept_note(note: &PausedSetting, compared: &Compared) -> Option<Str
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{choices, compare_failed, kept_note, recompare, short};
+    use workspace_core::skills::Line;
     use workspace_core::*;
-    use workspace_host::skills::Line;
 
     fn note(paused: Paused) -> PausedSetting {
         PausedSetting {

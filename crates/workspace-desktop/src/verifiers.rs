@@ -164,28 +164,24 @@ impl VerifierEditor {
     pub(super) fn setup_saved(&mut self, cx: &mut Context<Self>) {
         if self.unsaved {
             self.unsaved = false;
-            self.ask_host(Command::Settings, cx);
+            self.ask_host(ask::settings(), cx);
         }
     }
 
     /// Shows the host's saved setting, or its error beside the setting it still uses.
-    fn ask_host(&mut self, command: Command, cx: &mut Context<Self>) {
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+    fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
+        let command = ask.command().clone();
+        let answer = match self.bridge.ask(ask) {
+            Ok(answer) => answer,
             Err(error) => {
                 self.error = Some(error);
                 return;
             }
         };
         cx.spawn(async move |this, cx| {
-            let answer = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()))
-                .and_then(|value| {
-                    serde_json::from_value::<HostSettings>(value).map_err(|e| e.to_string())
-                });
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&command, answer.is_ok(), cx);
                 match answer {
                     // An unsaved draft is not replaced by the host's defaults.
                     Ok(_) if view.unsaved => {}
@@ -218,7 +214,7 @@ impl VerifierEditor {
             cx.notify();
             return;
         }
-        self.ask_host(Command::SetVerification { verification }, cx);
+        self.ask_host(ask::set_verification(verification), cx);
     }
 
     fn add_verifier(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -406,7 +402,7 @@ impl VerifierEditor {
                 div()
                     .flex()
                     .gap(px(6.))
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .child(lead("Use it", p))
                     .child(div().min_w_0().child(level.use_when.clone())),
             )
@@ -485,7 +481,7 @@ impl VerifierEditor {
             .flex_col()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .bg(p.surface);
         for (index, level) in verification.levels.iter().enumerate() {
             levels = levels.child(match &self.level_form {
@@ -520,7 +516,7 @@ fn level_group(p: Palette) -> Div {
         .flex_col()
         .gap(px(7.))
         .border_b_1()
-        .border_color(p.edge.opacity(0.25))
+        .border_color(p.edge.opacity(edge::HAIRLINE))
 }
 
 /// The label that starts a level's "Runs" and "Use it" rows.
@@ -528,7 +524,7 @@ fn lead(label: &'static str, p: Palette) -> Div {
     div()
         .w(px(54.))
         .flex_none()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .text_color(p.subtle)
         .child(label)
 }
@@ -553,7 +549,7 @@ fn chip(id: SharedString, focus: &str, on: bool, p: Palette) -> Stateful<Div> {
         .py(px(2.))
         .rounded_full()
         .border_1()
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .cursor_pointer()
         .map(|chip| match on {
             true => chip

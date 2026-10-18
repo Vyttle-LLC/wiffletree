@@ -9,7 +9,7 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use workspace_core::Provider;
+use workspace_core::{ModelOption, Provider};
 
 struct Process(Child);
 impl Drop for Process {
@@ -332,14 +332,6 @@ pub(crate) fn run_limited(mut command: Command, limit: Duration) -> Result<Optio
     Ok(status)
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct ModelOption {
-    pub provider: Provider,
-    pub model: String,
-    pub label: String,
-    pub efforts: Vec<String>,
-}
-
 pub fn models(provider: Provider) -> Result<Vec<ModelOption>> {
     match provider {
         Provider::Claude => claude_models(),
@@ -423,6 +415,18 @@ fn with_codex<T>(
         json!({"clientInfo":{"name":"agent_workspace_probe","title":"Wiffletree feasibility","version":"0.1.0"},"capabilities":{"experimentalApi":false}}),
     )?;
     read(&mut request)
+}
+
+/// Codex's account limits, or a reading that says why they could not be read.
+pub fn codex_reading() -> workspace_core::QuotaReading {
+    codex_quota().unwrap_or_else(|error| workspace_core::QuotaReading {
+        provider: Provider::Codex,
+        account: None,
+        observed_at: crate::now(),
+        source: "Codex app-server".into(),
+        windows: vec![],
+        error: Some(error.to_string()),
+    })
 }
 
 pub fn codex_quota() -> Result<workspace_core::QuotaReading> {

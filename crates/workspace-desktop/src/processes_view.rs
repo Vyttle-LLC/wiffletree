@@ -104,28 +104,15 @@ fn cpu_label(cpu: f64) -> String {
     }
 }
 
-/// How long a group has run: "12 s", "41 min", "1 h 16".
-fn running_label(started_micros: i64, now_millis: i64) -> String {
-    let seconds = (now_millis - started_micros / 1000).max(0) / 1000;
-    match seconds {
-        0..60 => format!("{seconds} s"),
-        60..3600 => format!("{} min", seconds / 60),
-        _ => format!("{} h {:02}", seconds / 3600, seconds % 3600 / 60),
-    }
-}
-
 fn started_label(started_micros: i64) -> String {
     chrono::DateTime::from_timestamp_micros(started_micros)
-        .map(|at| at.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .map(|at| wording::time_of_day(at.with_timezone(&chrono::Local)))
         .unwrap_or_default()
 }
 
 /// "1 process", "8 processes".
 fn process_count(count: usize) -> String {
-    match count {
-        1 => "1 process".into(),
-        many => format!("{many} processes"),
-    }
+    format!("{count} {}", wording::plural(count, "process", "processes"))
 }
 
 /// What the panel's head says: "8 processes running", or "Nothing running".
@@ -219,11 +206,9 @@ impl Inspector {
                 let Ok(Some((session_id, bridge))) = next else {
                     break;
                 };
-                let command = Command::Processes {
-                    session_id: session_id.clone(),
-                };
+                let ask = ask::processes(session_id.clone());
                 let executor = cx.background_executor().clone();
-                let result = activity::paced_reply(bridge, command, Duration::ZERO, executor).await;
+                let result = activity::paced_reply(bridge, ask, Duration::ZERO, executor).await;
                 let _ = this.update(cx, |view, cx| {
                     view.accept_processes(&session_id, result);
                     cx.notify();
@@ -253,14 +238,12 @@ impl Inspector {
         if self.processes.stopping.is_some() {
             return;
         }
-        let command = Command::StopProcesses {
-            session_id: session_id.clone(),
-            groups: groups.clone(),
-        };
+        let ask = ask::stop_processes(session_id.clone(), groups.clone());
+        let command = ask.command().clone();
         self.processes.stopping = Some(groups);
         let reply = activity::paced_reply(
             self.bridge.clone(),
-            command,
+            ask,
             Duration::ZERO,
             cx.background_executor().clone(),
         );
@@ -269,6 +252,7 @@ impl Inspector {
             let _ = cx.update(|window, cx| {
                 this.update(cx, |view, cx| {
                     view.processes.stopping = None;
+                    shared::replied(&command, result.is_ok(), cx);
                     match result {
                         Ok(listing) => view.processes.accept(&session_id, listing, Instant::now()),
                         Err(error) => toast_error(error, window, cx),
@@ -313,7 +297,7 @@ impl Inspector {
                 .justify_between()
                 .gap_2()
                 .border_b_1()
-                .border_color(p.edge.opacity(0.3))
+                .border_color(p.edge.opacity(edge::SEPARATOR))
                 .child(hint(running_count(count), p))
                 .children(stop_all),
         )
@@ -350,7 +334,7 @@ impl Inspector {
                         .flex()
                         .justify_between()
                         .gap_2()
-                        .text_size(px(12.))
+                        .text_size(px(font::SMALL))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(p.subtle)
                         .child(div().min_w_0().text_ellipsis().child(agent.name.clone()))
@@ -383,7 +367,7 @@ impl Inspector {
             return line(p)
                 .py(px(6.))
                 .flex_col()
-                .child(div().text_size(px(12.5)).child(format!("Process group {}", group.group)))
+                .child(div().text_size(px(font::MESSAGE)).child(format!("Process group {}", group.group)))
                 .child(hint(
                     "Wiffletree can't confirm these are still this agent's processes, so it won't stop them.",
                     p,
@@ -409,7 +393,7 @@ impl Inspector {
                     .text_ellipsis()
                     .child(programs(group)),
             )
-            .child(figure(RUNNING_WIDTH, p).child(running_label(group.started, ui::now())))
+            .child(figure(RUNNING_WIDTH, p).child(wording::running_time(group.started, ui::now())))
             .child(
                 figure(CPU_WIDTH, p)
                     .when(hot, |d| {
@@ -436,7 +420,7 @@ impl Inspector {
             );
         line(p).py(px(6.)).flex_col().child(figures).child(
             div()
-                .text_size(px(11.5))
+                .text_size(px(font::DETAIL))
                 .text_color(p.subtle)
                 .child(group_detail(group)),
         )
@@ -449,8 +433,8 @@ fn line(p: Palette) -> Div {
         .w_full()
         .flex()
         .border_t_1()
-        .border_color(p.edge.opacity(0.4))
-        .text_size(px(12.5))
+        .border_color(p.edge.opacity(edge::CARD))
+        .text_size(px(font::MESSAGE))
 }
 
 fn figure(width: f32, p: Palette) -> Div {
@@ -466,7 +450,7 @@ fn column_heads(p: Palette) -> Div {
         .flex()
         .gap(px(10.))
         .pb_1()
-        .text_size(px(11.))
+        .text_size(px(font::CAPTION))
         .text_color(p.subtle)
         .child(div().flex_1().child("Program"))
         .child(figure(RUNNING_WIDTH, p).child("Running"))
@@ -479,7 +463,7 @@ mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
         Duration, HashMap, Instant, Page, Panel, Processes, cpu_percent, programs, rail_count,
-        reading, running_count, running_label,
+        reading, running_count,
     };
     use workspace_core::*;
 
@@ -606,16 +590,6 @@ mod tests {
         assert_eq!(programs(&build), "node, esbuild");
         let yes = group("yes", (1..=8).map(|pid| process(pid, "yes", 0)).collect());
         assert_eq!(programs(&yes), "yes");
-    }
-
-    #[test]
-    fn running_time_reads_in_seconds_minutes_then_hours() {
-        let started = 1_000_000_000_000_000;
-        let at = |seconds: i64| started / 1000 + seconds * 1000;
-        assert_eq!(running_label(started, at(12)), "12 s");
-        assert_eq!(running_label(started, at(41 * 60 + 5)), "41 min");
-        assert_eq!(running_label(started, at(76 * 60)), "1 h 16");
-        assert_eq!(running_label(started, at(125 * 60)), "2 h 05");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use super::*;
 use gpui_component::{ActiveTheme, Disableable};
 use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
-use ui::{hint, icon, mono, section, segment, setting};
+use ui::{hint, icon, mono, over_dimmed, section, segment, setting};
 
 /// The open Settings window, so ⌘, focuses it instead of opening a second one.
 #[derive(Clone)]
@@ -89,7 +89,7 @@ impl Settings {
                         confirming: None,
                         compared: None,
                     };
-                    view.ask_host(Command::Settings, cx);
+                    view.ask_host(ask::settings(), cx);
                     view.refresh_sync(cx);
                     cx.observe_global::<repository::SyncShown>(|view, cx| view.sync_shown(cx))
                         .detach();
@@ -129,12 +129,10 @@ impl Settings {
             };
             let _ = this.update(cx, |view, cx| {
                 match chosen {
-                    Some(path) => view.ask_host(
-                        Command::SetWorkspacesDir {
-                            path: path.to_string_lossy().into_owned(),
-                        },
-                        cx,
-                    ),
+                    Some(path) => {
+                        let path = path.to_string_lossy().into_owned();
+                        view.ask_host(ask::set_workspaces_dir(path), cx)
+                    }
                     None => view.choosing_folder = false,
                 }
                 cx.notify();
@@ -144,10 +142,11 @@ impl Settings {
     }
 
     /// Shows the host's answer, or its error beside the setting it still uses.
-    fn ask_host(&mut self, command: Command, cx: &mut Context<Self>) {
+    fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
+        let command = ask.command().clone();
         let check_ins = matches!(command, Command::SetCheckIns { .. });
-        let receiver = match self.bridge.request(command) {
-            Ok(receiver) => receiver,
+        let answer = match self.bridge.ask(ask) {
+            Ok(answer) => answer,
             Err(error) => {
                 self.show_error(check_ins, error);
                 self.choosing_folder = false;
@@ -155,14 +154,9 @@ impl Settings {
             }
         };
         cx.spawn(async move |this, cx| {
-            let answer = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()))
-                .and_then(|value| {
-                    serde_json::from_value::<HostSettings>(value).map_err(|e| e.to_string())
-                });
+            let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
+                shared::replied(&command, answer.is_ok(), cx);
                 match answer {
                     Ok(settings) => {
                         view.host = Some(settings);
@@ -241,7 +235,7 @@ impl Settings {
             )
             .children(self.folder_error.clone().map(|error| {
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(font::SMALL))
                     .line_height(relative(1.5))
                     .text_color(p.red)
                     .child(error)
@@ -320,13 +314,9 @@ fn threshold_selector(
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(mut chosen) = view.host.clone() {
                     set(&mut chosen, n);
-                    view.ask_host(
-                        Command::SetCheckIns {
-                            child_turns: chosen.checkin_child_turns,
-                            human_turns: chosen.checkin_human_turns,
-                        },
-                        cx,
-                    );
+                    let ask =
+                        ask::set_check_ins(chosen.checkin_child_turns, chosen.checkin_human_turns);
+                    view.ask_host(ask, cx);
                 }
             })),
         );
@@ -347,7 +337,7 @@ impl Render for Settings {
             .bg(p.base)
             .text_color(p.text)
             .font_family(".SystemUIFont")
-            .text_size(px(13.))
+            .text_size(px(font::TEXT))
             .flex()
             .flex_col()
             .child(
@@ -361,7 +351,7 @@ impl Render for Settings {
                 ),
             )
             .child({
-                let rule = || div().h(px(1.)).bg(p.edge.opacity(0.25));
+                let rule = || div().h(px(1.)).bg(p.edge.opacity(edge::HAIRLINE));
                 let body = div()
                     .id("settings-body")
                     .size_full()
@@ -380,20 +370,9 @@ impl Render for Settings {
                     .child(self.repository_section(p, cx));
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
-                let shown = div().flex_1().min_h_0().relative();
                 match dialog {
-                    Some(dialog) => shown.child(body.opacity(0.35)).child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .occlude()
-                            .flex()
-                            .items_start()
-                            .justify_center()
-                            .pt(px(120.))
-                            .child(dialog),
-                    ),
-                    None => shown.child(body),
+                    Some(dialog) => over_dimmed(body, dialog).flex_1().min_h_0(),
+                    None => div().flex_1().min_h_0().relative().child(body),
                 }
             })
     }

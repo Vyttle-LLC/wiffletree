@@ -5,6 +5,7 @@
 //! confirm. Kept in its own test binary because it sets the provider environment for the
 //! process.
 mod common;
+use common::{request, snapshot, until_snapshot as until};
 use std::{
     os::unix::{
         fs::PermissionsExt,
@@ -122,32 +123,8 @@ fn install_provider(scratch: &Path) -> Provider {
 }
 
 fn start(home: &Path) -> Service {
-    Service::start(
-        home.to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap()
-}
-
-fn request(service: &Service, command: Command) -> serde_json::Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
-
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
-
-fn until(service: &Service, what: &str, mut done: impl FnMut(&Snapshot) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !done(&snapshot(service)) {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // SAFETY: callers hold ENVIRONMENT while this service runs.
+    unsafe { common::ServiceFixture::new(home).start() }
 }
 
 fn status(snapshot: &Snapshot, id: &str) -> Status {

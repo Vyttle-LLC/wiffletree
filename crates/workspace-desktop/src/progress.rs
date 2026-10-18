@@ -14,7 +14,7 @@ pub(super) struct ProgressBoard {
 impl ProgressBoard {
     /// Applies a page of changes. A complete page replaces the board, which is how entries
     /// the host no longer derives, such as a closed ticket, leave it.
-    pub fn merge(&mut self, page: ProgressPage) {
+    pub(crate) fn merge(&mut self, page: ProgressPage) {
         if page.complete {
             *self = Self::default();
         }
@@ -26,22 +26,22 @@ impl ProgressBoard {
         let keyed = |project: ProjectProgress| (project.project_id.clone(), project);
         self.projects.extend(page.projects.into_iter().map(keyed));
     }
-    pub fn agent(&self, session_id: &str) -> Option<&AgentProgress> {
+    pub(crate) fn agent(&self, session_id: &str) -> Option<&AgentProgress> {
         self.agents.get(session_id)
     }
-    pub fn ticket(&self, ticket_id: &str) -> Option<&TicketProgress> {
+    pub(crate) fn ticket(&self, ticket_id: &str) -> Option<&TicketProgress> {
         self.tickets.get(ticket_id)
     }
-    pub fn project(&self, project_id: &str) -> Option<&ProjectProgress> {
+    pub(crate) fn project(&self, project_id: &str) -> Option<&ProjectProgress> {
         self.projects.get(project_id)
     }
     /// The project's counted tickets, in the order its bar draws them.
-    pub fn tickets_of(&self, project: &ProjectProgress) -> Vec<&TicketProgress> {
+    pub(crate) fn tickets_of(&self, project: &ProjectProgress) -> Vec<&TicketProgress> {
         let listed = project.tickets.iter();
         listed.filter_map(|id| self.ticket(id)).collect()
     }
     /// The agents the crew panel lists for a project, each ticket's in turn.
-    pub fn crew(&self, project: &ProjectProgress) -> Vec<&AgentProgress> {
+    pub(crate) fn crew(&self, project: &ProjectProgress) -> Vec<&AgentProgress> {
         let ids = self.tickets_of(project).into_iter().flat_map(|t| &t.agents);
         ids.filter_map(|id| self.agent(id)).collect()
     }
@@ -76,7 +76,7 @@ impl Workspace {
         let after = self.shared.progress.revision;
         let page = paced_reply(
             self.bridge.clone(),
-            Command::Progress { after },
+            ask::progress(after),
             wait,
             cx.background_executor().clone(),
         );

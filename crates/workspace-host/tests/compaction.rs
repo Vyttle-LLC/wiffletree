@@ -2,11 +2,13 @@
 //! for the CLI: it answers Claude's `/compact` with recorded streams and plays Codex's
 //! app-server from recorded exchanges. Kept in its own test binary because it sets the
 //! provider environment for the process.
+mod common;
+use common::{git, until};
 use serde_json::{Value, json};
 use std::{
     path::Path,
     sync::{Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use workspace_core::*;
 use workspace_host::{Host, service::Service};
@@ -49,16 +51,6 @@ struct World {
     _environment: MutexGuard<'static, ()>,
 }
 
-fn git(path: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success());
-}
-
 fn claude() -> ModelProfile {
     ModelProfile {
         provider: Provider::Claude,
@@ -93,14 +85,6 @@ fn group_runs(group: i32) -> bool {
     unsafe { libc::killpg(group, 0) == 0 }
 }
 
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 impl World {
     /// A store with one project, set up by `prepare` before the host starts.
     fn prepared(prepare: impl FnOnce(&mut Host, &Project, &Session, &Path)) -> Self {
@@ -109,15 +93,8 @@ impl World {
         let scratch = tempfile::tempdir().unwrap();
         let prompts = scratch.path().join("prompts");
         std::fs::create_dir(&prompts).unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
-        // SAFETY: the caller holds ENVIRONMENT, and no earlier test's host is still running.
+        // SAFETY: the caller holds ENVIRONMENT and the previous service has stopped.
         unsafe {
-            std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-            std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-            std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-            std::env::set_var("WORKSPACE_TEST_PROMPT_DIR", &prompts);
-            // Codex's session records are read from here, never from the real home.
-            std::env::set_var("CODEX_HOME", scratch.path().join("codex"));
             std::env::remove_var(CODEX_LIMIT);
         }
         let main = {
@@ -271,8 +248,17 @@ impl World {
     }
 
     fn start(&mut self) {
-        let helper = env!("CARGO_BIN_EXE_workspace-host").into();
-        self.service = Some(Service::start(self.home.path().to_path_buf(), helper).unwrap());
+        // SAFETY: World holds ENVIRONMENT until its service stops.
+        self.service = Some(unsafe {
+            common::ServiceFixture::new(self.home.path())
+                .fake_provider(self.scratch.path())
+                .env(
+                    "WORKSPACE_TEST_PROMPT_DIR",
+                    &self.scratch.path().join("prompts"),
+                )
+                .env("CODEX_HOME", &self.scratch.path().join("codex"))
+                .start()
+        });
     }
 
     fn stop(&mut self) {

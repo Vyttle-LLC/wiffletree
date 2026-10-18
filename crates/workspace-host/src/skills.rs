@@ -3,11 +3,13 @@
 //! write here; no agent tool reaches it. A missing file means none, so a fresh install or an
 //! update needs nothing.
 use crate::*;
-use serde::Deserialize;
 use std::io::{ErrorKind, Write as _};
 
 pub mod merge;
 pub(crate) mod model;
+pub use workspace_core::skills::{
+    Change, Edits, Entry, Line, MergeReview, Recorded, Reviewed, Rewritten, version,
+};
 
 const RULES: &str = "additions.md";
 const REWRITE: &str = "rewrite.md";
@@ -28,11 +30,6 @@ pub fn stock(skill: Skill) -> &'static str {
 }
 pub fn stock_version(skill: Skill) -> &'static str {
     version(stock(skill))
-}
-/// The version on a bundled text's first line, as "v1" in "# Implementing — v1".
-pub fn version(text: &str) -> &str {
-    let first = text.lines().next().unwrap_or_default();
-    first.rsplit_once(" — ").map_or("", |(_, version)| version)
 }
 /// Whether `base` is a newer stock version of `skill` than this release's.
 fn is_newer(base: &str, skill: Skill) -> bool {
@@ -120,91 +117,9 @@ pub(crate) fn is_edited_text(path: &str) -> bool {
         [Some("skills"), Some(_), Some(RULES | REWRITE), None]
     )
 }
-/// What the human has written for a skill: rules in Additions mode, or a rewrite.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Edits {
-    pub rules: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rewrite: Option<Rewritten>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Rewritten {
-    pub text: String,
-    /// The stock text the rewrite started from, or was last marked up to date against or merged
-    /// with.
-    pub base: String,
-}
-/// What a history entry records: the skill's whole state after a change, and the change.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Entry {
-    pub change: Change,
-    pub stock_version: String,
-    #[serde(flatten)]
-    pub edits: Edits,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Change {
-    SavedRules,
-    StartedRewrite,
-    SavedRewrite,
-    MarkedUpToDate,
-    ResetToStock,
-    /// `entry` names the entry whose state was restored.
-    Restored {
-        entry: String,
-    },
-    /// A release brought a stock version other than the one `previous` entry recorded.
-    NewStockVersion {
-        previous: String,
-    },
-    /// Stock version `to` merged into a rewrite based on `from`, by `machine`.
-    Merged {
-        from: String,
-        to: String,
-        /// The rewrite and base exactly as they were, which Undo writes back.
-        before: Rewritten,
-        changes: Vec<merge::MergedChange>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<MergeModel>,
-        machine: String,
-        /// The host merged on its own, not at the human's Merge v2 in.
-        #[serde(default)]
-        automatic: bool,
-    },
-    /// The merge `entry` names, which brought in stock version `to`, was undone.
-    UndidMerge {
-        entry: String,
-        to: String,
-    },
-    /// The model found that stock version `to` and the rewrite based on `from` want different
-    /// things in a passage, so the human is asked; the skill is unchanged. Holds the merge so
-    /// far, so an answer needs no model: the plain merge, and an answer for each passage that
-    /// overlaps. `stock` is the stock text it merges into, which only a machine with that text
-    /// shows and settles.
-    Asked {
-        from: String,
-        to: String,
-        stock: String,
-        merge: merge::Merge,
-        answers: Vec<model::PassageAnswer>,
-        model: MergeModel,
-        machine: String,
-    },
-}
-/// A history entry by its name, the time it was written, or why it could not be read.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Recorded {
-    pub name: String,
-    pub entry: Result<Entry, String>,
-}
-/// A line of what changed from one text to another, such as a rewrite's base to the stock text.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
-pub enum Line {
-    Unchanged(String),
-    Removed(String),
-    Added(String),
+/// The note of the "Merged" entry `name`, as this machine shows it.
+pub fn merge_note(name: &str, entry: &Entry) -> Option<MergeNote> {
+    workspace_core::skills::merge_note(name, entry, &sync::machine_name())
 }
 /// What changed, line by line, from `old` to `new`.
 pub(crate) fn line_diff(old: &str, new: &str) -> Vec<Line> {
@@ -611,10 +526,11 @@ impl SkillStore<'_> {
             .collect()
     }
     /// Newest first, as the skill's page lists them.
-    pub fn listing(&self, skill: Skill) -> Vec<Recorded> {
+    pub fn listing(&self, skill: Skill) -> workspace_core::skills::History {
         let mut entries = self.entries(skill);
         entries.reverse();
-        entries
+        let machine = sync::machine_name();
+        workspace_core::skills::History { entries, machine }
     }
     /// Oldest first, an entry that cannot be read with why. A history that cannot be read
     /// counts as none.
@@ -1113,44 +1029,6 @@ fn question(skill: Skill, asked: &Entry) -> Option<SkillQuestion> {
         passages,
     })
 }
-/// The note of the "Merged" entry `name`.
-pub fn merge_note(name: &str, entry: &Entry) -> Option<MergeNote> {
-    let Change::Merged {
-        from,
-        to,
-        changes,
-        model,
-        machine,
-        ..
-    } = &entry.change
-    else {
-        return None;
-    };
-    let count = |source| changes.iter().filter(|c| c.source == source).count();
-    Some(MergeNote {
-        entry: name.into(),
-        from: from.clone(),
-        to: to.clone(),
-        from_update: count(merge::Source::Update),
-        by_model: count(merge::Source::Model),
-        model: model.clone(),
-        machine: (*machine != sync::machine_name()).then(|| machine.clone()),
-    })
-}
-/// A merge's note, and the rewrite before and after it, line by line.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MergeReview {
-    pub note: MergeNote,
-    /// The skill still holds what the merge made, with every file read.
-    pub live: bool,
-    pub lines: Vec<Reviewed>,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reviewed {
-    pub line: Line,
-    /// Where a removed or added line's change came from.
-    pub source: Option<merge::Source>,
-}
 /// `before` with each change made in turn, matched against `after`: the text between changes is
 /// the same on both sides. None when the changes don't make `after`.
 fn reviewed(
@@ -1381,13 +1259,14 @@ mod tests {
         host.skills().reset(Skill::Implementing).unwrap();
         let history = host.home.join("shared/skills/implementing/history");
         fs::write(history.join("2000-01-01T00-00-00.000Z.json"), "not json").unwrap();
-        let listed: Vec<Recorded> = serde_json::from_value(
+        let listed: workspace_core::skills::History = serde_json::from_value(
             host.execute(Command::SkillHistory {
                 skill: Skill::Implementing,
             })
             .unwrap(),
         )
         .unwrap();
+        let listed = listed.entries;
         let changes: Vec<_> = (listed.iter())
             .map(|recorded| recorded.entry.as_ref().map(|entry| entry.change.clone()))
             .collect();

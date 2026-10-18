@@ -49,3 +49,12 @@ fn a_request_and_its_outcome_round_trip_in_snake_case() {
     assert_eq!(decoded.compaction, runtime.compaction);
     assert_eq!(decoded.last_compaction, runtime.last_compaction);
 }
+
+#[test]
+fn long_text_shows_only_a_bounded_first_line() {
+    assert_eq!(
+        first_line("Provider exited\nTraceback…", 80),
+        "Provider exited"
+    );
+    assert_eq!(first_line("abcdef", 3), "abc…");
+}

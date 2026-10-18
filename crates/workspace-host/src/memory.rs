@@ -53,7 +53,7 @@ impl Drop for BrainLock {
     }
 }
 
-pub fn render_log(log: &WorkLog) -> String {
+pub(crate) fn render_log(log: &WorkLog) -> String {
     let date = DateTime::<Utc>::from_timestamp_millis(log.created_at)
         .unwrap_or_default()
         .format("%Y-%m-%d");

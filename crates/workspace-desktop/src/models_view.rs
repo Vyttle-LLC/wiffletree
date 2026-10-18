@@ -8,7 +8,8 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     switch::Switch,
 };
-use ui::{card, effort_label, hint, icon};
+use ui::{card, hint, icon};
+use wording::effort_label;
 
 pub(super) fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
     div()
@@ -36,7 +37,7 @@ pub(super) struct ModelsPage {
     suggested: Option<Setup>,
     /// The model each provider's Add row on the Providers card shows.
     model_drafts: BTreeMap<Provider, String>,
-    catalog: Rc<Vec<workspace_host::runtime::ModelOption>>,
+    catalog: Rc<Vec<ModelOption>>,
     pub(super) catalog_pending: usize,
     catalog_loaded: bool,
     catalog_notice: String,
@@ -73,7 +74,7 @@ impl ModelsPage {
             detection: Detection::new(),
             suggested: None,
             model_drafts: BTreeMap::new(),
-            catalog: Rc::new(models::fallback()),
+            catalog: Rc::new(fallback_catalog()),
             catalog_pending: 0,
             catalog_loaded: false,
             catalog_notice: String::new(),
@@ -113,49 +114,44 @@ impl ModelsPage {
         self.catalog_pending = 2;
         self.catalog_loaded = true;
         self.catalog_notice.clear();
-        let (sender, receiver) = async_channel::bounded(2);
         for provider in PROVIDERS {
-            let sender = sender.clone();
-            std::thread::spawn(move || {
-                let status = workspace_host::detection::detect(provider);
-                let result = workspace_host::runtime::models(provider).map_err(|e| e.to_string());
-                let _ = sender.send_blocking((provider, status, result));
+            let ask = ask::inspect_provider(provider);
+            self.ask(ask, window, cx, move |view, report, window, cx| {
+                view.inspected(provider, report, window, cx)
             });
         }
-        drop(sender);
-        cx.spawn_in(window, async move |this, cx| {
-            while let Ok((provider, status, result)) = receiver.recv().await {
-                let updated = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| {
-                        view.catalog_pending -= 1;
-                        view.detection.insert(provider, status);
-                        match result {
-                            Ok(models) if !models.is_empty() => {
-                                let catalog = Rc::make_mut(&mut view.catalog);
-                                catalog.retain(|model| model.provider != provider);
-                                catalog.extend(models);
-                                cx.emit(Intent::Catalog(view.catalog.clone()));
-                            }
-                            _ => {
-                                if !view.catalog_notice.is_empty() {
-                                    view.catalog_notice.push(' ');
-                                }
-                                view.catalog_notice.push_str(&format!(
-                                    "{provider:?} list unavailable; showing built-in and saved models."
-                                ));
-                            }
-                        }
-                        view.offer_suggestion(window, cx);
-                        cx.notify();
-                    })
-                });
-                if updated.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
         cx.notify();
+    }
+    fn inspected(
+        &mut self,
+        provider: Provider,
+        report: Result<ProviderReport, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.catalog_pending -= 1;
+        let models = match report {
+            Ok(report) => {
+                self.detection.insert(provider, report.status);
+                report.models
+            }
+            Err(_) => vec![],
+        };
+        if models.is_empty() {
+            if !self.catalog_notice.is_empty() {
+                self.catalog_notice.push(' ');
+            }
+            self.catalog_notice.push_str(&format!(
+                "{} list unavailable; showing built-in and saved models.",
+                provider.label()
+            ));
+        } else {
+            let catalog = Rc::make_mut(&mut self.catalog);
+            catalog.retain(|model| model.provider != provider);
+            catalog.extend(models);
+            cx.emit(Intent::Catalog(self.catalog.clone()));
+        }
+        self.offer_suggestion(window, cx);
     }
     fn save_model_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A first save also sends the verifiers shown; afterwards they save on their own.
@@ -163,14 +159,33 @@ impl ModelsPage {
             .suggested
             .as_ref()
             .and_then(|_| self.verifiers.read(cx).verification().cloned());
-        self.request(
-            Command::SetModelSelection {
-                selection: Box::new(self.model_selection.clone()),
-                verification,
-            },
+        let selection = self.model_selection.clone();
+        let ask = ask::set_model_selection(selection.clone(), verification);
+        self.ask(
+            ask,
             window,
             cx,
+            move |view, saved, window, cx| match saved {
+                Ok(saved) => view.saved(&selection, saved, window, cx),
+                Err(error) => toast_error(error, window, cx),
+            },
         );
+    }
+    /// The host answers with the saved selection at its new revision, so the store reads as
+    /// saved before the next snapshot arrives.
+    fn saved(
+        &mut self,
+        selection: &ModelSelection,
+        saved: ModelSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model_selection = models::after_save(&self.model_selection, selection, &saved);
+        self.saved_model_selection = saved;
+        self.suggested = None;
+        self.verifiers
+            .update(cx, |editor, cx| editor.setup_saved(cx));
+        toast("Models saved", window, cx);
     }
     /// A fresh store waits for its first suggestion before anything can change.
     fn models_editable(&self) -> bool {
@@ -414,7 +429,7 @@ impl ModelsPage {
             .gap_3()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .bg(p.surface)
             .when(!enabled, |d| d.opacity(0.6))
             .child(
@@ -576,7 +591,7 @@ impl ModelsPage {
             div()
                 .flex()
                 .gap_3()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .child(
                     div()
                         .w(px(96.))
@@ -758,34 +773,6 @@ impl ModelsPage {
 impl Requests for ModelsPage {
     fn bridge(&self) -> &Bridge {
         &self.bridge
-    }
-    fn accept(
-        &mut self,
-        command: Command,
-        reply: Result<Value, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let value = match reply {
-            Ok(value) => value,
-            Err(error) => return toast_error(error, window, cx),
-        };
-        if let Command::SetModelSelection { selection, .. } = command {
-            // The host answers with the saved selection at its new revision, so the store
-            // reads as saved before the next snapshot arrives.
-            let saved: ModelSelection = serde_json::from_value(value)
-                .map_err(|e| e.to_string())
-                .unwrap_or_else(|e| {
-                    eprintln!("Saved model selection: {e}");
-                    *selection.clone()
-                });
-            self.model_selection = models::after_save(&self.model_selection, &selection, &saved);
-            self.saved_model_selection = saved;
-            self.suggested = None;
-            self.verifiers
-                .update(cx, |editor, cx| editor.setup_saved(cx));
-            toast("Models saved", window, cx);
-        }
     }
 }
 impl Render for ModelsPage {

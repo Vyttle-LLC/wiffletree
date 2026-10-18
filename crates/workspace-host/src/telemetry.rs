@@ -3,7 +3,7 @@ use crate::provider::ProviderEvent;
 use crate::*;
 use std::collections::BTreeMap;
 
-pub fn codex_quota(value: &Value, at: i64) -> Result<QuotaReading> {
+pub(crate) fn codex_quota(value: &Value, at: i64) -> Result<QuotaReading> {
     let mut windows = Vec::new();
     let mut account = None;
     let buckets: Vec<(String, &Value)> = if let Some(map) = value["rateLimitsByLimitId"]
@@ -89,7 +89,7 @@ fn claude_window(key: &str, value: &Value, at: i64) -> QuotaWindow {
         status: value["status"].as_str().map(str::to_owned),
     }
 }
-pub fn claude_quota(value: &Value, at: i64) -> Option<QuotaReading> {
+pub(crate) fn claude_quota(value: &Value, at: i64) -> Option<QuotaReading> {
     let info = &value["rate_limit_info"];
     if !info.is_object() {
         return None;
@@ -118,7 +118,7 @@ pub fn claude_quota(value: &Value, at: i64) -> Option<QuotaReading> {
     })
 }
 #[derive(Default)]
-pub struct ClaudeRequests {
+pub(crate) struct ClaudeRequests {
     active: BTreeMap<String, Request>,
 }
 struct Request {
@@ -128,7 +128,7 @@ struct Request {
     output_reported: bool,
 }
 impl ClaudeRequests {
-    pub fn event(&mut self, value: &Value) -> Option<ProviderEvent> {
+    pub(crate) fn event(&mut self, value: &Value) -> Option<ProviderEvent> {
         let event = &value["event"];
         let key = value["parent_tool_use_id"]
             .as_str()

@@ -3,16 +3,15 @@
 //! earlier version from its history, and reviews or undoes a merge of a new stock version. No
 //! agent tool reaches what this page changes.
 use super::*;
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDateTime};
 use gpui_component::{Disableable, Selectable, button::ButtonVariants};
-use ui::{card, eyebrow, hint, icon, pill};
-use workspace_host::{
-    provider::CORE,
-    skills::{
-        Change, Entry, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source, merge_note,
-        version,
-    },
+use ui::{card, confirm_card, eyebrow, hint, icon, over_dimmed, pill, stacked_banner};
+use wording::{counted, date_and_time, time_of_day, when};
+use workspace_core::skills::{
+    Change, Entry, History, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source,
+    merge_note, version,
 };
+use workspace_host::provider::CORE;
 
 /// What the Skills page shows: the list, the fixed core at one of its parts, one skill, its
 /// history or a review of its merge.
@@ -23,6 +22,13 @@ pub(super) enum SkillView {
     Skill(Skill),
     History(Skill),
     Review(Skill),
+}
+
+/// The page draws again for another workspace or catalog: merge notes and questions name their
+/// models from the catalog.
+fn redraws(old: &Shared, new: &Shared) -> bool {
+    let (_, moved) = new.moved_from(old);
+    moved || !Rc::ptr_eq(&old.catalog, &new.catalog)
 }
 
 /// What a skill's pages ask before they act.
@@ -481,19 +487,12 @@ fn list_who(state: &SkillState) -> String {
     };
     let when = match written_at(&note.entry) {
         Some(at) if at.date_naive() == Local::now().date_naive() => {
-            format!("today at {}", at.format("%H:%M"))
+            format!("today at {}", time_of_day(at))
         }
         Some(at) => format!("on {}", at.format("%-d %b at %H:%M")),
         None => format!("at {}", note.entry),
     };
     format!("{roles} · {} merged into your rewrite {when}", note.to)
-}
-
-fn counted(count: usize, noun: &str) -> String {
-    match count {
-        1 => format!("1 {noun}"),
-        count => format!("{count} {noun}s"),
-    }
 }
 
 /// "3 changes from v2, 1 passage merged by Claude · haiku · medium", the model as `model` names
@@ -665,7 +664,7 @@ pub(super) fn saved_toast(command: &Command) -> &'static str {
 /// "08:01" for an entry written today, otherwise as `entry_time`.
 fn time_or_date(name: &str) -> String {
     match written_at(name) {
-        Some(at) if at.date_naive() == Local::now().date_naive() => at.format("%H:%M").to_string(),
+        Some(at) if at.date_naive() == Local::now().date_naive() => time_of_day(at),
         _ => entry_time(name),
     }
 }
@@ -678,17 +677,7 @@ fn written_at(name: &str) -> Option<DateTime<Local>> {
 
 /// "14 Oct 09:12", or the entry's name when it is not a time.
 fn entry_time(name: &str) -> String {
-    written_at(name).map_or(name.into(), |at| at.format("%-d %b %H:%M").to_string())
-}
-
-/// "Today 08:00", "Yesterday 17:30" or "13 Oct 10:15".
-fn when(at: DateTime<Local>, today: NaiveDate) -> String {
-    let time = at.format("%H:%M");
-    match at.date_naive() {
-        day if day == today => format!("Today {time}"),
-        day if Some(day) == today.pred_opt() => format!("Yesterday {time}"),
-        _ => at.format("%-d %b %H:%M").to_string(),
-    }
+    written_at(name).map_or(name.into(), date_and_time)
 }
 
 /// What happened, as "New stock version v1 → v2".
@@ -718,8 +707,7 @@ fn entry_detail(entry: &Entry) -> String {
     }
     let rules = match rule_count(&entry.edits.rules) {
         0 => "No rules of your own".into(),
-        1 => "1 rule".into(),
-        count => format!("{count} rules"),
+        count => counted(count, "rule"),
     };
     format!("{rules} · stock {}", entry.stock_version)
 }
@@ -737,23 +725,11 @@ fn grouped(count: usize) -> String {
     text
 }
 
-/// A banner above a skill's text, in `color`.
-fn banner(color: Hsla) -> Div {
-    div()
-        .p_3()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .rounded_lg()
-        .border_1()
-        .border_color(color.opacity(0.45))
-        .bg(color.opacity(0.09))
-        .text_size(px(12.))
-}
-
 /// A banner that only says where things stand, with no color of its own.
 fn quiet_banner(p: Palette) -> Div {
-    banner(p.edge).border_color(p.edge.opacity(0.7)).bg(p.base)
+    stacked_banner(p.edge)
+        .border_color(p.edge.opacity(edge::FIRM))
+        .bg(p.base)
 }
 
 /// A banner's first line: its `glyph` in `color`, then the title.
@@ -774,11 +750,11 @@ fn diff_block(p: Palette) -> Div {
         .flex_col()
         .rounded_md()
         .border_1()
-        .border_color(p.edge.opacity(0.55))
+        .border_color(p.edge.opacity(edge::BOX))
         .bg(p.base)
         .overflow_hidden()
         .font_family(".SystemMonoFont")
-        .text_size(px(11.5))
+        .text_size(px(font::DETAIL))
         .line_height(relative(1.55))
 }
 
@@ -798,10 +774,7 @@ fn diff_row(line: &Line, added: Hsla, p: Palette) -> Div {
 
 /// "⋯ 4 lines unchanged ⋯".
 fn gap_row(count: usize, p: Palette) -> Div {
-    let unchanged = match count {
-        1 => "1 line unchanged".into(),
-        count => format!("{count} lines unchanged"),
-    };
+    let unchanged = format!("{} unchanged", counted(count, "line"));
     (div().px_2().bg(p.overlay))
         .text_color(p.subtle)
         .child(format!("⋯ {unchanged} ⋯"))
@@ -843,12 +816,12 @@ pub(super) struct SkillsPage {
     /// What the open skill's page is asking to confirm.
     confirming: Option<Confirm>,
     /// The open history, newest first, and the entry whose text is shown.
-    skill_history: Vec<workspace_host::skills::Recorded>,
+    skill_history: History,
     viewed_entry: Option<String>,
     /// What changed from the open rewrite's base to this release's stock text.
-    stock_changes: Vec<workspace_host::skills::Line>,
+    stock_changes: Vec<Line>,
     /// The merge open in Review changes.
-    merge_review: Option<workspace_host::skills::MergeReview>,
+    merge_review: Option<MergeReview>,
     /// Review changes was opened from a History entry, which Done returns to.
     review_from_history: bool,
     /// By skill, the wording chosen so far for each passage, until Apply.
@@ -883,7 +856,7 @@ impl SkillsPage {
             skill_text,
             stock_unfolded: false,
             confirming: None,
-            skill_history: vec![],
+            skill_history: History::default(),
             viewed_entry: None,
             stock_changes: vec![],
             merge_review: None,
@@ -895,11 +868,12 @@ impl SkillsPage {
     /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot.
     pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
         let (_, moved) = shared.moved_from(&self.shared);
+        let redraw = redraws(&self.shared, &shared);
         if moved && let Some(snapshot) = shared.snapshot() {
             self.follow_saved_rules(snapshot, window, cx);
         }
         self.shared = shared;
-        if moved {
+        if redraw {
             cx.notify();
         }
     }
@@ -931,13 +905,13 @@ impl SkillsPage {
             self.stock_unfolded = false;
             self.stock_changes.clear();
             if state.as_ref().is_some_and(out_of_date) {
-                self.request(Command::SkillStockChanges { skill }, window, cx);
+                self.read_stock_changes(skill, window, cx);
             }
         }
         if let SkillView::History(skill) = view {
-            self.skill_history.clear();
+            self.skill_history = History::default();
             self.viewed_entry = None;
-            self.request(Command::SkillHistory { skill }, window, cx);
+            self.read_history(skill, window, cx);
         }
         self.skill_view = view;
         cx.notify();
@@ -954,11 +928,7 @@ impl SkillsPage {
     ) {
         self.open_skill(SkillView::Review(skill), window, cx);
         self.review_from_history = !from_note;
-        let review = Command::SkillMergeReview {
-            skill,
-            entry: entry.clone(),
-        };
-        self.request(review, window, cx);
+        self.read_review(skill, entry.clone(), window, cx);
         if from_note {
             self.request(Command::DismissSkillMerge { skill, entry }, window, cx);
         }
@@ -986,7 +956,7 @@ impl SkillsPage {
             let text = saved_text(&state).to_owned();
             (self.skill_text).update(cx, |input, cx| input.set_value(text, window, cx));
             if out_of_date(&state) {
-                self.request(Command::SkillStockChanges { skill }, window, cx);
+                self.read_stock_changes(skill, window, cx);
             }
         }
         let restored_out_of_date = out_of_date(&state);
@@ -1011,26 +981,45 @@ impl SkillsPage {
         };
         toast(done, window, cx);
         if self.skill_view == SkillView::History(skill) {
-            self.request(Command::SkillHistory { skill }, window, cx);
+            self.read_history(skill, window, cx);
         }
     }
 
-    pub(super) fn history_arrived(&mut self, skill: Skill, history: Vec<Recorded>) {
-        if self.skill_view == SkillView::History(skill) {
-            self.skill_history = history;
-        }
+    fn read_history(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
+        let ask = ask::skill_history(skill);
+        self.ask(ask, window, cx, move |view, history, _, _| match history {
+            Ok(history) if view.skill_view == SkillView::History(skill) => {
+                view.skill_history = history
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Skill history: {error}"),
+        });
     }
 
-    pub(super) fn review_arrived(&mut self, skill: Skill, review: MergeReview) {
-        if self.skill_view == SkillView::Review(skill) {
-            self.merge_review = Some(review);
-        }
+    fn read_review(
+        &mut self,
+        skill: Skill,
+        entry: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ask = ask::skill_merge_review(skill, entry);
+        self.ask(ask, window, cx, move |view, review, _, _| match review {
+            Ok(review) if view.skill_view == SkillView::Review(skill) => {
+                view.merge_review = Some(review)
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Skill merge review: {error}"),
+        });
     }
 
-    pub(super) fn stock_changes_arrived(&mut self, skill: Skill, lines: Vec<Line>) {
-        if self.skill_view == SkillView::Skill(skill) {
-            self.stock_changes = lines;
-        }
+    fn read_stock_changes(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
+        let ask = ask::skill_stock_changes(skill);
+        self.ask(ask, window, cx, move |view, lines, _, _| match lines {
+            Ok(lines) if view.skill_view == SkillView::Skill(skill) => view.stock_changes = lines,
+            Ok(_) => {}
+            Err(error) => eprintln!("Skill stock changes: {error}"),
+        });
     }
 
     /// Before `snapshot` replaces the current one: an editor without unsaved edits follows the
@@ -1085,16 +1074,7 @@ impl SkillsPage {
             return page;
         };
         let unsaved = self.skill_draft(cx) != saved_text(state);
-        div().relative().child(page.opacity(0.35)).child(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .flex()
-                .justify_center()
-                .pt(px(120.))
-                .child(Self::confirm_dialog(state, confirm, unsaved, p, cx)),
-        )
+        over_dimmed(page, Self::confirm_dialog(state, confirm, unsaved, p, cx))
     }
 
     fn skills_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -1149,7 +1129,7 @@ impl SkillsPage {
             .gap_1()
             .rounded_lg()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .cursor_pointer()
             .hover(move |d| d.bg(p.overlay.opacity(0.6)))
             .on_click(cx.listener(move |v, _, w, c| v.open_skill(view, w, c)))
@@ -1163,7 +1143,7 @@ impl SkillsPage {
                     .child(state),
             )
             .child(hint(what, p))
-            .child(hint(who, p).text_size(px(11.)))
+            .child(hint(who, p).text_size(px(font::CAPTION)))
     }
 
     /// "Skills · <name>", where Skills goes back to the list, or "Skills · <skill> · History",
@@ -1180,7 +1160,7 @@ impl SkillsPage {
         let crumb = div()
             .flex()
             .gap_1()
-            .text_size(px(11.))
+            .text_size(px(font::CAPTION))
             .text_color(p.subtle)
             .child(link("skills-crumb", SkillView::List, "Skills"));
         let (skill, below) = match self.skill_view {
@@ -1202,7 +1182,7 @@ impl SkillsPage {
             .child(icon(glyph))
             .child(
                 div()
-                    .text_size(px(16.))
+                    .text_size(px(font::HEADING))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(name),
             )
@@ -1214,9 +1194,9 @@ impl SkillsPage {
             .p_3()
             .rounded_md()
             .border_1()
-            .border_color(p.edge.opacity(0.4))
+            .border_color(p.edge.opacity(edge::CARD))
             .bg(p.surface)
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .line_height(relative(1.5))
             .child(text.into())
     }
@@ -1372,7 +1352,7 @@ impl SkillsPage {
                 .border_1()
                 .border_color(p.edge)
                 .overflow_hidden()
-                .text_size(px(12.))
+                .text_size(px(font::SMALL))
                 .child(mode("rules-mode", "Add your own rules", !rewritten))
                 .child(rewrite.border_l_1().border_color(p.edge)),
         )
@@ -1401,40 +1381,8 @@ impl SkillsPage {
             Confirm::Undo { .. } => act.primary().label("Undo merge"),
             Confirm::Restore { .. } => act.primary().label("Restore"),
         };
-        div().w(px(380.)).h_full().flex().flex_col().child(
-            div()
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .rounded_xl()
-                .border_1()
-                .border_color(p.edge)
-                .bg(p.surface)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(ask),
-                )
-                .child(hint(what, p))
-                .child(hint(kept, p))
-                .child(
-                    div()
-                        .pt_2()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            button("cancel-skill")
-                                .ghost()
-                                .label("Cancel")
-                                .on_click(cx.listener(move |v, _, _, c| close(v, c))),
-                        )
-                        .child(act),
-                ),
-        )
+        let cancel = button("cancel-skill").on_click(cx.listener(move |v, _, _, c| close(v, c)));
+        confirm_card(ask, [what, kept], cancel, act, p).w(px(380.))
     }
 
     /// The note of the merge the skill holds now, with Review changes, Undo and Dismiss.
@@ -1450,7 +1398,7 @@ impl SkillsPage {
         let at = written_at(&note.entry)
             .map_or(note.entry.clone(), |at| when(at, Local::now().date_naive()));
         let (review, undo, dismiss) = (note.entry.clone(), note.clone(), note.entry.clone());
-        banner(p.green)
+        stacked_banner(p.green)
             .child(
                 div()
                     .flex()
@@ -1580,9 +1528,9 @@ impl SkillsPage {
                 (quiet_banner(p), Some(("git-merge", p.subtle)))
             }
             Some(MergeStanding::Failed { .. } | MergeStanding::NeedsModel { .. }) => {
-                (banner(p.yellow), Some(("alert", p.yellow)))
+                (stacked_banner(p.yellow), Some(("alert", p.yellow)))
             }
-            None => (banner(p.yellow), None),
+            None => (stacked_banner(p.yellow), None),
         };
         let title = match head {
             Some((glyph, color)) => banner_head(glyph, color, title),
@@ -1619,7 +1567,7 @@ impl SkillsPage {
         let passage = |index: usize, choice: &Choice<'_>| {
             let wording = |label: String, text: &str| {
                 (div().flex_1().min_w_0().flex().flex_col().gap_1())
-                    .child(hint(label, p).text_size(px(11.)))
+                    .child(hint(label, p).text_size(px(font::CAPTION)))
                     .child(Self::read_only_text(text.trim_end().to_owned(), p))
             };
             (div().flex().flex_col().gap_1())
@@ -1695,7 +1643,7 @@ impl SkillsPage {
             p,
             cx,
         );
-        (banner(p.yellow).child(banner_head("alert", p.yellow, title)))
+        (stacked_banner(p.yellow).child(banner_head("alert", p.yellow, title)))
             .child(hint(text, p))
             .child(wordings)
     }
@@ -1724,17 +1672,20 @@ impl SkillsPage {
                     .child(hint("Workspace · skill update", p))
                     .child(pill("Needs you", p.yellow)),
             )
-            .child(div().text_size(px(13.)).line_height(relative(1.5)).child(
-                StyledText::new(text).with_highlights([(
-                    0..setting.len(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                )]),
-            ))
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(StyledText::new(text).with_highlights([(
+                        0..setting.len(),
+                        HighlightStyle {
+                            font_weight: Some(FontWeight::SEMIBOLD),
+                            ..Default::default()
+                        },
+                    )])),
+            )
             .child(wordings)
-            .child(hint(either, p).text_size(px(11.)))
+            .child(hint(either, p).text_size(px(font::CAPTION)))
     }
 
     /// What changed from the rewrite's base to the stock text, as removed and added lines.
@@ -1883,14 +1834,14 @@ impl SkillsPage {
         let today = Local::now().date_naive();
         let crumb = self.skills_crumb(skill.name(), p, cx);
         let state = self.skill_state(skill);
-        let entries: Vec<_> = (self.skill_history.iter().enumerate())
+        let entries: Vec<_> = (self.skill_history.entries.iter().enumerate())
             .map(|(index, recorded)| {
                 let at =
                     written_at(&recorded.name).map_or(recorded.name.clone(), |at| when(at, today));
                 let live = (recorded.entry.as_ref().ok())
                     .zip(state)
                     .is_some_and(|(entry, state)| is_live(entry, state));
-                let merged_since = merged_since(&self.skill_history, index);
+                let merged_since = merged_since(&self.skill_history.entries, index);
                 let shown = (at, index == 0 && live, live, merged_since);
                 self.history_entry(skill, recorded, shown, p, cx)
             })
@@ -1905,7 +1856,7 @@ impl SkillsPage {
                 "History",
                 hint("newest first", p),
             ))
-            .when(self.skill_history.is_empty(), |d| {
+            .when(self.skill_history.entries.is_empty(), |d| {
                 d.child(hint(
                     "No changes yet. Each save, reset and restore adds an entry.",
                     p,
@@ -1951,7 +1902,7 @@ impl SkillsPage {
                             None => v.request(Command::RestoreSkill { skill, entry }, w, c),
                         }
                     }));
-                let merge = merge_note(&name, entry);
+                let merge = merge_note(&name, entry, &self.skill_history.machine);
                 let merge_actions = merge.clone().map(|note| {
                     let entry = note.entry.clone();
                     let undo = Confirm::Undo { note, later: !live };
@@ -2010,8 +1961,8 @@ impl SkillsPage {
             .flex_col()
             .gap_1()
             .border_t_1()
-            .border_color(p.edge.opacity(0.3))
-            .text_size(px(12.))
+            .border_color(p.edge.opacity(edge::SEPARATOR))
+            .text_size(px(font::SMALL))
             .child(
                 div()
                     .flex()
@@ -2020,7 +1971,7 @@ impl SkillsPage {
                         div()
                             .w(px(104.))
                             .flex_none()
-                            .text_size(px(11.))
+                            .text_size(px(font::CAPTION))
                             .text_color(p.subtle)
                             .child(at),
                     )
@@ -2193,7 +2144,7 @@ impl SkillsPage {
                     models_view::card_title(title, from, p).child(
                         div()
                             .id("edit-in-models")
-                            .text_size(px(12.))
+                            .text_size(px(font::SMALL))
                             .text_color(p.focus)
                             .cursor_pointer()
                             .on_click(
@@ -2244,18 +2195,6 @@ impl Requests for SkillsPage {
                 Ok(state) => self.skill_saved(state, cx),
                 Err(error) => eprintln!("Dismissed skill merge: {error}"),
             },
-            Command::SkillMergeReview { skill, .. } => match serde_json::from_value(value) {
-                Ok(review) => self.review_arrived(skill, review),
-                Err(error) => eprintln!("Skill merge review: {error}"),
-            },
-            Command::SkillHistory { skill } => match serde_json::from_value(value) {
-                Ok(history) => self.history_arrived(skill, history),
-                Err(error) => eprintln!("Skill history: {error}"),
-            },
-            Command::SkillStockChanges { skill } => match serde_json::from_value(value) {
-                Ok(lines) => self.stock_changes_arrived(skill, lines),
-                Err(error) => eprintln!("Skill stock changes: {error}"),
-            },
             _ => {}
         }
     }
@@ -2282,30 +2221,52 @@ mod tests {
         CORE, Choice, Chosen, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab,
         entry_detail, entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
         merge_note_text, merged_since, out_of_date, out_of_date_title, question, question_banner,
-        question_note, reset_question, rewrite_banner, rewrite_question, saved_text, shown_changes,
-        state_label, time_or_date, when, written_at,
+        question_note, redraws, reset_question, rewrite_banner, rewrite_question, saved_text,
+        shown_changes, state_label, time_or_date, written_at,
     };
-    use chrono::{Local, NaiveDate, TimeZone};
     use workspace_core::{
         Command, MergeModel, MergeNote, MergePassage, MergeStanding, ModelProfile, Provider,
         QuestionedPassage, Role, Skill, SkillQuestion, SkillState, Wording,
+        skills::{Change, Edits, Entry, History, Line, Recorded},
     };
-    use workspace_host::{
-        Host,
-        skills::{Change, Edits, Entry, Line, Recorded, stock},
-    };
+    use workspace_host::{Host, skills::stock};
 
     fn state(host: &mut Host, command: Command) -> SkillState {
         serde_json::from_value(host.execute(command).unwrap()).unwrap()
     }
 
     fn listing(host: &mut Host, skill: Skill) -> Vec<Recorded> {
-        serde_json::from_value(host.execute(Command::SkillHistory { skill }).unwrap()).unwrap()
+        let reply = host.execute(Command::SkillHistory { skill }).unwrap();
+        serde_json::from_value::<History>(reply).unwrap().entries
     }
 
     fn titles(history: &[Recorded]) -> Vec<String> {
         let title = |r: &Recorded| entry_title(r.entry.as_ref().unwrap());
         history.iter().map(title).collect()
+    }
+
+    #[test]
+    fn the_page_draws_again_for_a_new_catalog_or_workspace_only() {
+        use crate::shared::Shared;
+        use std::rc::Rc;
+        let old = Shared::default();
+        assert!(!redraws(&old, &old.clone()), "nothing moved");
+        let catalog = Shared {
+            catalog: Rc::new(vec![]),
+            ..old.clone()
+        };
+        assert!(
+            redraws(&old, &catalog),
+            "its labels name the catalog's models"
+        );
+        let workspace = Shared {
+            index: Some(Rc::new(workspace_core::WorkspaceIndex::new(
+                Default::default(),
+                Default::default(),
+            ))),
+            ..old.clone()
+        };
+        assert!(redraws(&old, &workspace));
     }
 
     #[test]
@@ -2383,16 +2344,7 @@ mod tests {
     }
 
     #[test]
-    fn entries_are_dated_today_yesterday_or_by_day() {
-        let today = NaiveDate::from_ymd_opt(2026, 10, 16).unwrap();
-        let at = |day, hour, minute| {
-            Local
-                .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
-                .unwrap()
-        };
-        assert_eq!(when(at(16, 8, 0), today), "Today 08:00");
-        assert_eq!(when(at(15, 17, 30), today), "Yesterday 17:30");
-        assert_eq!(when(at(13, 10, 15), today), "13 Oct 10:15");
+    fn an_entrys_name_is_the_time_it_was_written() {
         let written = written_at("2026-10-15T14-03-22.481Z").unwrap();
         assert_eq!(
             written.to_utc().to_rfc3339(),

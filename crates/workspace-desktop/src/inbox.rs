@@ -137,7 +137,7 @@ impl Inbox {
             return entry
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(px(font::TEXT))
                         .line_height(relative(1.5))
                         .child(item.prompt.clone()),
                 )
@@ -175,8 +175,8 @@ impl Inbox {
                     .py_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(p.edge.opacity(0.5))
-                    .text_size(px(13.))
+                    .border_color(p.edge.opacity(edge::HALF))
+                    .text_size(px(font::TEXT))
                     .line_height(relative(1.4))
                     .cursor_pointer()
                     .hover(|s| s.bg(p.overlay).border_color(p.accent))
@@ -260,15 +260,20 @@ impl Inbox {
                     .child(hint("Workspace · settings sync", p))
                     .child(pill("Paused", p.yellow)),
             )
-            .child(div().text_size(px(13.)).line_height(relative(1.5)).child(
-                StyledText::new(format!("{}{said}", note.setting)).with_highlights([(
-                    0..note.setting.len(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                )]),
-            ))
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(
+                        StyledText::new(format!("{}{said}", note.setting)).with_highlights([(
+                            0..note.setting.len(),
+                            HighlightStyle {
+                                font_weight: Some(FontWeight::SEMIBOLD),
+                                ..Default::default()
+                            },
+                        )]),
+                    ),
+            )
             .children(workspace_notes::comparison(note, compared, p))
             .child(
                 div()
@@ -289,7 +294,7 @@ impl Inbox {
             )
             .children(
                 workspace_notes::kept_note(note, compared)
-                    .map(|kept| hint(kept, p).text_size(px(11.))),
+                    .map(|kept| hint(kept, p).text_size(px(font::CAPTION))),
             )
     }
     /// The card for a publish step waiting on this item, drawn from the ticket's frozen request,
@@ -364,7 +369,7 @@ fn publish_approval(
         div()
             .flex()
             .gap_3()
-            .text_size(px(12.))
+            .text_size(px(font::SMALL))
             .line_height(relative(1.5))
             .child(
                 div()
@@ -397,7 +402,7 @@ fn publish_approval(
     entry
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(px(font::TEXT))
                 .font_weight(FontWeight::MEDIUM)
                 .child(card.title),
         )

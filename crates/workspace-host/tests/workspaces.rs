@@ -1,15 +1,8 @@
+mod common;
+use common::git;
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Command as Git};
 use workspace_core::{Command, HostSettings, Project};
 use workspace_host::Host;
-
-fn git(path: &Path, args: &[&str]) {
-    let output = Git::new("git")
-        .current_dir(path)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
 
 fn repository(path: &Path) {
     std::fs::create_dir_all(path).unwrap();

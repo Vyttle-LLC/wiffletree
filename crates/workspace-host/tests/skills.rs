@@ -1,44 +1,11 @@
 //! The human's rules for a skill reach a running agent from its next turn, through the real
 //! Service with the fake provider standing in for Claude, and the context probe sizes the same
 //! instructions. Kept in its own test binary because it sets the provider environment.
-use serde_json::Value;
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+mod common;
+use common::{git, request, snapshot, until};
+use std::path::Path;
 use workspace_core::*;
 use workspace_host::{Host, context, provider, service::Service};
-
-fn request(service: &Service, command: Command) -> Value {
-    service
-        .request(command)
-        .unwrap()
-        .recv_blocking()
-        .unwrap()
-        .unwrap()
-}
-
-fn snapshot(service: &Service) -> Snapshot {
-    serde_json::from_value(request(service, Command::Snapshot)).unwrap()
-}
-
-fn until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn git(path: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success());
-}
 
 #[test]
 fn a_running_implementer_gets_saved_rules_from_its_next_turn() {
@@ -79,21 +46,15 @@ fn a_running_implementer_gets_saved_rules_from_its_next_turn() {
         host.set_live(&project.id, true).unwrap();
         implementer
     };
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py");
     let prompts = scratch.path().join("prompts");
     std::fs::create_dir(&prompts).unwrap();
-    // SAFETY: this test binary holds one test, so nothing else reads the environment meanwhile.
-    unsafe {
-        std::env::set_var("WORKSPACE_CLAUDE_BIN", &fixture);
-        std::env::set_var("WORKSPACE_CODEX_BIN", &fixture);
-        std::env::set_var("WORKSPACE_TEST_USAGE_DIR", scratch.path());
-        std::env::set_var("WORKSPACE_TEST_PROMPT_DIR", &prompts);
-    }
-    let service = Service::start(
-        home.path().to_path_buf(),
-        env!("CARGO_BIN_EXE_workspace-host").into(),
-    )
-    .unwrap();
+    // SAFETY: this binary has one test and owns its provider environment.
+    let service = unsafe {
+        common::ServiceFixture::new(home.path())
+            .fake_provider(scratch.path())
+            .env("WORKSPACE_TEST_PROMPT_DIR", &prompts)
+            .start()
+    };
     let log = prompts.join(format!("{}.instructions.txt", implementer.id));
     let turns = || {
         let log = std::fs::read_to_string(&log).unwrap_or_default();

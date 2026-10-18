@@ -1,21 +1,12 @@
 //! Worktrees left by tickets finished before close and accept removed them: listed first,
 //! removed only when the human selects them, and never at the cost of unsaved work.
+mod common;
+use common::git;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use workspace_core::*;
 use workspace_host::Host;
-
-fn git(path: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(path)
-        .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{args:?}: {output:?}");
-    String::from_utf8(output.stdout).unwrap()
-}
 
 struct Fixture {
     _directory: tempfile::TempDir,
