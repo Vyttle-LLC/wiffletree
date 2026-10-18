@@ -2922,7 +2922,7 @@ pub(crate) mod tests {
         assert!(host.settings().keeper.rebase && !host.settings().keeper.checks);
         let held = host.snapshot().unwrap().keeper_held;
         assert!(
-            held[0].contains("\"Try to fix failed checks\" needs"),
+            held[0].contains(&format!("\"{KEEPER_TRIES}\" needs")),
             "{held:?}"
         );
         let file = home.path().join("shared").join(shared::KEEPER);

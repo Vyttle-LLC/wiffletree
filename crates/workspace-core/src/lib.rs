@@ -1144,7 +1144,7 @@ impl KeeperSettings {
         for problem in [KeeperProblem::Conflict, KeeperProblem::Checks] {
             ensure!(
                 self.rebase || !self.tries(problem),
-                "\"{}\" needs \"Rebase when the base branch moves\"",
+                "\"{}\" needs \"{KEEPER_REBASE}\"",
                 problem.trigger()
             );
         }
@@ -1184,7 +1184,7 @@ pub fn check_tries(
         let trigger = format!("\"{}\"", problem.trigger());
         ensure!(
             model.is_some(),
-            "{trigger} needs a PR keeper model: choose one in Models first"
+            "{trigger} needs a PR keeper model. Choose a PR keeper model in Models first."
         );
         ensure!(
             !rechecks.is_empty(),
@@ -1204,7 +1204,7 @@ pub fn check_tries(
 pub fn check_sorting_model(keeper: Option<&JobRow>) -> Result<()> {
     ensure!(
         keeper.is_some(),
-        "Sorting comments needs a PR keeper model: choose a Claude model in Models first"
+        "\"Sort new comments\" needs a PR keeper model with a Claude choice. Choose a PR keeper model in Models first."
     );
     ensure!(
         keeper.is_some_and(|row| row.main.choices().any(|p| p.provider == Provider::Claude)),
@@ -1586,6 +1586,9 @@ pub struct Keeper {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held_wakes: Vec<HeldWake>,
 }
+/// The Repositories page's names for the PR keeper's rebase trigger and its trigger for tries.
+pub const KEEPER_REBASE: &str = "Keep it rebased";
+pub const KEEPER_TRIES: &str = "Try once to fix a conflict or failed checks";
 /// What a try by the keeper's model fixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1594,12 +1597,9 @@ pub enum KeeperProblem {
     Checks,
 }
 impl KeeperProblem {
-    /// The trigger for tries at this problem, as the Repositories page names it.
+    /// The trigger for tries at this problem, as the Repositories page names it: one row for both.
     pub fn trigger(self) -> &'static str {
-        match self {
-            Self::Conflict => "Try to resolve conflicts",
-            Self::Checks => "Try to fix failed checks",
-        }
+        KEEPER_TRIES
     }
 }
 /// One try by the keeper's model at one problem at one PR head.

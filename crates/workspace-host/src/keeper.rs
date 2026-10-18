@@ -3683,7 +3683,7 @@ pub(crate) mod tests {
         };
         let refused = f.host.set_keeper(on.clone()).unwrap_err().to_string();
         assert!(
-            refused.contains("choose a Claude model in Models first"),
+            refused.contains("Choose a PR keeper model in Models first"),
             "{refused}"
         );
         set_keeper(&mut f.host, Some(Provider::Codex));
