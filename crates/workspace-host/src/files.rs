@@ -97,6 +97,7 @@ impl Host {
             let Ok(repository) = self.repository(&ticket.repository_id) else {
                 continue;
             };
+            let base = self.ticket_base(&ticket)?.measured().to_owned();
             let on_ticket = |s: &&Session| {
                 runtimes
                     .iter()
@@ -117,7 +118,7 @@ impl Host {
                 .collect::<Result<_>>()?;
             let checkout = Checkout {
                 worktree: PathBuf::from(&ticket.worktree),
-                base: repository.base,
+                base,
             };
             report.push((
                 TicketFiles {
@@ -445,6 +446,36 @@ mod tests {
             ("Lost", 0)
         );
         assert_eq!(files[1].tree, None);
+    }
+
+    #[test]
+    fn a_stacked_ticket_lists_only_its_own_changes() {
+        let (_home, mut host, coordinator, repository) = project();
+        let parent = host
+            .create_ticket(&coordinator.id, &repository.id, "Parent", "Do")
+            .unwrap();
+        let worktree = Path::new(&parent.worktree);
+        fs::write(worktree.join("p.txt"), "parent\n").unwrap();
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-q", "-m", "p"]);
+        let child = host
+            .create_stacked_ticket(
+                &coordinator.id,
+                &repository.id,
+                "Child",
+                "Do",
+                Some(&parent.id),
+            )
+            .unwrap();
+        let worktree = Path::new(&child.worktree);
+        fs::write(worktree.join("c.txt"), "child\n").unwrap();
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-q", "-m", "c"]);
+
+        let files = with_git(host.ticket_files(&coordinator.id).unwrap(), false);
+        let child = files.iter().find(|t| t.title == "Child").unwrap();
+        let paths: Vec<_> = child.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["c.txt"]);
     }
 
     /// Times the host-thread part of a Files request on stored steps. Run for the record with
