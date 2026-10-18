@@ -146,14 +146,13 @@ impl ModelsPage {
         cx: &mut Context<Self>,
     ) {
         self.catalog_pending -= 1;
-        let models = match report {
-            Ok(report) => {
-                self.detection.insert(provider, report.status);
-                cx.emit(Intent::Detected(Rc::new(self.detection.clone())));
-                report.models
-            }
-            Err(_) => vec![],
+        // A check that failed counts as not usable, so its pill reads "Cannot start".
+        let (status, models) = match report {
+            Ok(report) => (report.status, report.models),
+            Err(_) => (ProviderStatus::default(), vec![]),
         };
+        self.detection.insert(provider, status);
+        cx.emit(Intent::Detected(Rc::new(self.detection.clone())));
         if models.is_empty() {
             if !self.catalog_notice.is_empty() {
                 self.catalog_notice.push(' ');
@@ -592,12 +591,13 @@ impl ModelsPage {
             Ok(pick) => pick.reason.clone(),
             Err(why) => why.clone(),
         };
-        let shown = match models::now_of(row, small, &pick) {
+        let shown = match models::now_of(row, small, &pick, &self.detection) {
             Now::First(provider) => pill(provider.label(), p.green),
             Now::Moved(provider) => pill(provider.label(), p.blue),
             Now::Waits(Some(at)) => pill(format!("Waits · {at}"), p.yellow),
             Now::Waits(None) => pill("Waits", p.yellow),
             Now::Cannot => pill("Cannot start", p.red),
+            Now::Checking => pill("Checking…", p.subtle),
         };
         div()
             .id(SharedString::from(format!(

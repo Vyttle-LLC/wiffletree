@@ -60,7 +60,7 @@ fn verified(host: &mut Host, ticket: &Ticket, implementer: &Session) -> Session 
         host.agent_tool(
             &ticket.coordinator_id,
             "verify_ticket",
-            common::verify_args(host, &ticket.id),
+            common::verify_args(&ticket.id),
         )
         .unwrap(),
     )
@@ -609,7 +609,7 @@ fn ticket_agents_are_scoped_and_reports_are_immediate_and_idempotent() {
         host.agent_tool(
             &coordinator.id,
             "verify_ticket",
-            common::verify_args(&host, &ticket.id),
+            common::verify_args(&ticket.id),
         )
         .unwrap(),
     )
@@ -1033,7 +1033,7 @@ fn only_the_project_coordinator_manages_tickets() {
                 "assign_ticket",
                 json!({"ticket_id":ticket.id,"role":"tester","instruction":"Test"}),
             ),
-            ("verify_ticket", common::verify_args(&host, &ticket.id)),
+            ("verify_ticket", common::verify_args(&ticket.id)),
             (
                 "triage_findings",
                 json!({"ticket_id":ticket.id,"decisions":[]}),

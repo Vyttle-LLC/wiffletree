@@ -441,6 +441,6 @@ fn sorting_uses_only_the_keepers_claude_choice() {
         check_sorting_model(None)
             .unwrap_err()
             .to_string()
-            .contains("choose a Claude model in Models first")
+            .contains("Choose a PR keeper model in Models first")
     );
 }

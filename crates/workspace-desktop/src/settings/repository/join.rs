@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn after_joining_the_section_lists_what_this_mac_still_needs() {
         let held = StillNeed {
-            text: "On from another machine, off on this Mac: \"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first".into(),
+            text: "On from another machine, off on this Mac: \"Try once to fix a conflict or failed checks\" needs a PR keeper model. Choose a PR keeper model in Models first.".into(),
             page: WorkspacePage::Models,
         };
         let shown = SyncShown {

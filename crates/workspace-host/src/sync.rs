@@ -218,12 +218,8 @@ fn joining(held: &SharedStore, mine: &SharedStore, clone: &Path) -> Result<Joini
 
 /// A guide other than a starter one reads as when it was `edited`.
 fn guide_summary(guide: Option<String>, edited: Option<String>) -> String {
-    let starter = |guide: &str| {
-        let choices = [&PROVIDERS[..], &PROVIDERS[..1], &PROVIDERS[1..]];
-        choices
-            .into_iter()
-            .any(|providers| starter_guide(providers) == guide)
-    };
+    let starter =
+        |guide: &str| guide == STARTER_GUIDE || retired_starter_guides().iter().any(|g| g == guide);
     match guide {
         Some(guide) if !starter(&guide) => edited.unwrap_or_else(|| "Edited".into()),
         _ => "Starter guide".into(),
@@ -2926,7 +2922,7 @@ pub(crate) mod tests {
         assert!(host.settings().keeper.rebase && !host.settings().keeper.checks);
         let held = host.snapshot().unwrap().keeper_held;
         assert!(
-            held[0].contains("\"Try to fix failed checks\" needs"),
+            held[0].contains(&format!("\"{KEEPER_TRIES}\" needs")),
             "{held:?}"
         );
         let file = home.path().join("shared").join(shared::KEEPER);

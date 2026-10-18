@@ -23,7 +23,6 @@ const REBASE_AFTER: &str = "After the base has been quiet for";
 const REBASE_PUSH: &str = "minutes. Pushes only when the change is the same as the reviewed one.";
 const SORT: &str = "Tells the coordinator which need a change or an answer.";
 /// The name of the one trigger for tries at conflicts and failed checks.
-const FIXES: &str = "Try once to fix a conflict or failed checks";
 const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
 const OWNER_PLACEHOLDER: &str = "An owner, or owner/name for one fork";
 
@@ -34,8 +33,8 @@ pub(super) struct ChecksEdit {
 }
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
-fn trigger(checkbox: Checkbox, name: &'static str, details: Vec<AnyElement>) -> Div {
-    div().flex().items_start().gap_3().child(checkbox).child(
+fn trigger(mark: impl IntoElement, name: &'static str, details: Vec<AnyElement>) -> Div {
+    div().flex().items_start().gap_3().child(mark).child(
         div()
             .flex_1()
             .min_w_0()
@@ -411,12 +410,15 @@ impl RepositoriesPage {
             .child(section("WHEN A TICKET’S PR IS OPEN", p))
             .child(hint(KEEP, p))
             .children(
-                held.iter()
-                    .map(|line| hint(line.clone(), p).text_color(p.yellow)),
+                held_lines(held)
+                    .into_iter()
+                    .map(|line| hint(line, p).text_color(p.yellow)),
             )
             .when(!held.is_empty(), |d| d.child(hint(HELD, p)))
             .child(trigger(
-                Checkbox::new("keeper-watch").checked(true).disabled(true),
+                // A plain tick: a disabled checkbox fades its tick into its fill, unreadable in
+                // both themes, and an enabled one would look clickable.
+                icon("check").text_color(p.accent),
                 "Watch it",
                 vec![hint(WATCH, p).into_any_element()],
             ))
@@ -424,14 +426,14 @@ impl RepositoriesPage {
                 Checkbox::new("keeper-rebase")
                     .checked(keeper.rebase)
                     .on_click(rebase),
-                "Keep it rebased",
+                KEEPER_REBASE,
                 vec![period.into_any_element()],
             ))
             .child(trigger(
                 Checkbox::new("keeper-fixes")
                     .checked(fixes_are_on(keeper))
                     .on_click(fixes),
-                FIXES,
+                KEEPER_TRIES,
                 fix_details,
             ))
             .child(trigger(
@@ -690,12 +692,10 @@ impl RepositoriesPage {
     }
 }
 
-/// Whether the one trigger for tries is shown on: both of the triggers it writes are on.
 fn fixes_are_on(keeper: &KeeperSettings) -> bool {
     keeper.conflicts && keeper.checks
 }
 
-/// The keeper's settings with both triggers for tries set the same way.
 fn with_fixes(keeper: &KeeperSettings, on: bool) -> KeeperSettings {
     KeeperSettings {
         conflicts: on,
@@ -714,15 +714,11 @@ fn partly_on_hint(keeper: &KeeperSettings) -> Option<&'static str> {
     }
 }
 
-/// Rewords a refusal from the host in the Repositories page's words.
-fn page_words(error: &str) -> String {
-    if error.contains("needs a PR keeper model: choose") {
-        return "Choose a PR keeper model in Models first.".into();
-    }
-    error
-        .replace("Try to resolve conflicts", FIXES)
-        .replace("Try to fix failed checks", FIXES)
-        .replace("Rebase when the base branch moves", "Keep it rebased")
+/// The held triggers' lines; the one trigger for tries is held once.
+fn held_lines(held: &[String]) -> Vec<String> {
+    let mut lines = held.to_vec();
+    lines.dedup();
+    lines
 }
 
 /// The repository's checks command, if it has one, and the line that goes with it: its limit,
@@ -809,7 +805,7 @@ impl Requests for RepositoriesPage {
         cx: &mut Context<Self>,
     ) {
         match reply {
-            Err(error) => toast_error(page_words(&error), window, cx),
+            Err(error) => toast_error(error, window, cx),
             Ok(_) if matches!(command, Command::SetRepositoryChecks { .. }) => {
                 self.checks_edit = None
             }
@@ -838,8 +834,8 @@ impl Render for RepositoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        FIXES, NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on,
-        page_words, partly_on_hint, pr_check_status, repository_counts, with_fixes,
+        NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on, held_lines,
+        partly_on_hint, pr_check_status, repository_counts, with_fixes,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1122,22 +1118,11 @@ mod tests {
     }
 
     #[test]
-    fn refusals_use_the_names_on_the_page() {
+    fn the_one_trigger_for_tries_is_held_once() {
+        let held = |name: &str| format!("On another machine: \"{name}\" needs a PR keeper model.");
         assert_eq!(
-            page_words(
-                "\"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first"
-            ),
-            "Choose a PR keeper model in Models first."
-        );
-        assert_eq!(
-            page_words(
-                "Sorting comments needs a PR keeper model: choose a Claude model in Models first"
-            ),
-            "Choose a PR keeper model in Models first."
-        );
-        assert_eq!(
-            page_words("\"Try to fix failed checks\" needs \"Rebase when the base branch moves\""),
-            format!("\"{FIXES}\" needs \"Keep it rebased\"")
+            held_lines(&[held(KEEPER_TRIES), held(KEEPER_TRIES), "Another.".into()]),
+            [held(KEEPER_TRIES), "Another.".into()]
         );
     }
 }

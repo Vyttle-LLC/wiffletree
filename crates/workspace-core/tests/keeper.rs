@@ -106,7 +106,7 @@ fn sorting_needs_a_claude_model() {
     };
     let none = check_sorting_model(None).unwrap_err().to_string();
     assert!(
-        none.contains("choose a Claude model in Models first"),
+        none.contains("Choose a PR keeper model in Models first"),
         "{none}"
     );
     let codex = check_sorting_model(Some(&model(Provider::Codex)));

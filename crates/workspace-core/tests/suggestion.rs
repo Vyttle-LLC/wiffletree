@@ -78,7 +78,7 @@ fn both_signed_in_is_the_approved_table() {
             ("Light", LevelKind::Recheck, vec!["Correctness"]),
         ]
     );
-    assert!(setup.selection.guide.starts_with("Pick the model"));
+    assert_eq!(setup.selection.guide, STARTER_GUIDE);
 }
 
 #[test]
@@ -111,8 +111,7 @@ fn one_signed_in_provider_runs_every_row_alone() {
                     ("Light", LevelKind::Recheck, vec![review]),
                 ]
             );
-            assert!(setup.selection.guide.contains(provider.label()));
-            assert!(!setup.selection.guide.contains(other.label()));
+            assert_eq!(setup.selection.guide, STARTER_GUIDE);
         }
     }
 }

@@ -517,7 +517,7 @@ mod tests {
         let saved = host.settings();
         let no_recheck = refusal(host.set_keeper(conflicts("Full")));
         assert!(
-            no_recheck.contains("add one in Models → Review"),
+            no_recheck.contains("add one in Models → Reviews"),
             "{no_recheck}"
         );
         with_light(&mut host);
@@ -529,7 +529,7 @@ mod tests {
         };
         let alone = refusal(host.set_keeper(alone));
         assert!(
-            alone.contains("needs \"Rebase when the base branch moves\""),
+            alone.contains(&format!("needs \"{KEEPER_REBASE}\"")),
             "{alone}"
         );
         assert_eq!(host.settings().keeper, saved.keeper);
@@ -566,7 +566,7 @@ mod tests {
         let no_model = refusal(host.set_keeper(checks(true)));
         assert!(
             no_model.contains(
-                "\"Try to fix failed checks\" needs a PR keeper model: choose one in Models first"
+                &format!("\"{KEEPER_TRIES}\" needs a PR keeper model. Choose a PR keeper model in Models first.")
             ),
             "{no_model}"
         );
@@ -574,7 +574,7 @@ mod tests {
         with_light(&mut host);
         let alone = refusal(host.set_keeper(checks(false)));
         assert!(
-            alone.contains("needs \"Rebase when the base branch moves\""),
+            alone.contains(&format!("needs \"{KEEPER_REBASE}\"")),
             "{alone}"
         );
         let full = refusal(host.set_keeper(KeeperSettings {
@@ -603,7 +603,7 @@ mod tests {
         removed.levels.retain(|level| level.name != "Light");
         let refused = refusal(host.set_verification(removed));
         assert!(
-            refused.contains("\"Try to resolve conflicts\""),
+            refused.contains(&format!("\"{KEEPER_TRIES}\"")),
             "{refused}"
         );
         let mut full = saved.clone();
@@ -739,15 +739,15 @@ mod tests {
         };
         let refused = refusal(host.set_keeper(rebase_off));
         assert!(
-            refused.contains(
-                "needs \"Rebase when the base branch moves\", and is on from another machine"
-            ),
+            refused.contains(&format!(
+                "needs \"{KEEPER_REBASE}\", and is on from another machine"
+            )),
             "{refused}"
         );
         assert_eq!(fs::read(&file).unwrap(), before);
         // Nor is such a file pulled from another machine.
         let pulled = br#"{"rebase": false, "conflicts": true, "quiet_minutes": 2}"#;
         let refused = format!("{:#}", shared::check(shared::KEEPER, pulled).unwrap_err());
-        assert!(refused.contains("needs \"Rebase"), "{refused}");
+        assert!(refused.contains("needs \"Keep it rebased"), "{refused}");
     }
 }
