@@ -21,8 +21,12 @@ pub const TURN_RESULT_PREFIX: &str = "turn-result:";
 const TIMER_TAG: &str = "[timer] ";
 const CHECK_IN_TAG: &str = "[check-in] ";
 const TURN_ERROR: &str = " stopped with an error: ";
-/// The host's words in a blocked verification's outcome and around a failed publish's reason.
-const VERIFICATION_BLOCKED: &str = ") is blocked after ";
+/// The host's words after the ticket in a blocked verification's outcome, after the reviewed
+/// commit in a keeper notice whose changed patch failed the checks, and around a failed
+/// publish's reason.
+const VERIFICATION_BLOCKED: &str = "is blocked after ";
+const CHANGED_CHECKS_FAILED: (&str, &str) =
+    ("the reviewed commit. ", "The repository's checks failed ");
 const PUBLISH_FAILED: (&str, &str) = ("Publishing ", " failed: ");
 
 /// What an agent reports to its parent with the `report` tool.
@@ -243,6 +247,12 @@ impl Notice {
         fn kind(rest: &str) -> &str {
             rest.split(':').nth(1).unwrap_or_default()
         }
+        // What the host wrote after a ticket's title, which is free text, and id: `(ticket) …`.
+        let after_ticket = |rest: &str| {
+            let ticket = rest.split(':').next().unwrap_or_default();
+            body.split_once(&format!("({ticket}) "))
+                .map_or("", |(_, words)| words)
+        };
         Some(if let Some(rest) = id.strip_prefix(PR_NOTICE_PREFIX) {
             match kind(rest) {
                 "merged" => Self::Merged,
@@ -258,12 +268,21 @@ impl Notice {
                 "fix" | "checks" => Self::ChecksFailing,
                 "push" => Self::NotPushed,
                 "failed" => Self::RebaseFailed,
+                "changed"
+                    if after_ticket(rest)
+                        .split_once(CHANGED_CHECKS_FAILED.0)
+                        .is_some_and(|(_, did)| did.starts_with(CHANGED_CHECKS_FAILED.1)) =>
+                {
+                    Self::ChecksFailing
+                }
                 _ => Self::Other,
             }
         } else if let Some(rest) = id.strip_prefix(VERIFICATION_NOTICE_PREFIX) {
             // `ticket:cycle:round` sends an implementer a failed round's findings.
             match rest.split(':').nth(2).unwrap_or_default() {
-                "outcome" if body.contains(VERIFICATION_BLOCKED) => Self::VerificationBlocked,
+                "outcome" if after_ticket(rest).starts_with(VERIFICATION_BLOCKED) => {
+                    Self::VerificationBlocked
+                }
                 "outcome" => Self::Verification,
                 "unstartable" => Self::VerificationBlocked,
                 round if round.parse::<u32>().is_ok() => Self::VerificationFailed,
@@ -499,6 +518,19 @@ mod tests {
     fn a_notice_is_named_from_its_id_and_words() {
         let passed = "Wiffletree verification of ticket \"Fix\" (t) passed in cycle 2, full review 1 of 3, 1 of 3 rounds; verified commit 29c3280.";
         let blocked = "Wiffletree verification of ticket \"Fix\" (t) is blocked after cycle 1, full review 1 of 3, 3 of 3 rounds: the round cap of 3 was reached.";
+        let changed = |did: &str| {
+            format!(
+                "PR #45 for ticket \"Fix\" (t) rebases onto main at 4a1c2e9 without conflict, but the rebased change no longer reads the same as the reviewed commit. {did} It needs a rebase in the ticket's worktree and a re-check before it is pushed."
+            )
+        };
+        let changed_failed = &changed(
+            "The repository's checks failed on it, so the PR keeper did not move or push it.",
+        );
+        let changed_passed = &changed(
+            "The repository's checks passed on it, and the PR keeper moved it onto the branch as 7b1e0c2, but the review found a change.",
+        );
+        // A title is free text, so the host's words are read only after the ticket's id.
+        let tricky_title = "Wiffletree verification of ticket \"Fix rendering of ) is blocked after cycle\" (t) passed in cycle 1, full review 1 of 3, 1 of 3 rounds; verified commit abc.\n\nFollow-up: the run (t) is blocked after a retry.\n\nAccept the ticket.";
         let pushed = "Pushed wiffletree/fix at 29c3280 to org/app and opened PR #45: https://github.com/org/app/pull/45";
         let refused = "Publishing wiffletree/fix to org/app failed: git push failed: rejected. Nothing was pushed.";
         for (id, body, notice) in [
@@ -513,6 +545,21 @@ mod tests {
             ("keeper:t:push:9e03c1b:4a1c2e9", "", Notice::NotPushed),
             ("keeper:t:failed:9e03c1b:4a1c2e9", "", Notice::RebaseFailed),
             ("keeper:t:diverged:9e03c1b", "", Notice::Other),
+            (
+                "keeper:t:changed:9e03c1b:4a1c2e9",
+                changed_failed,
+                Notice::ChecksFailing,
+            ),
+            (
+                "keeper:t:changed:9e03c1b:4a1c2e9",
+                changed_passed,
+                Notice::Other,
+            ),
+            (
+                "verification:t:1:outcome",
+                tricky_title,
+                Notice::Verification,
+            ),
             ("verification:t:2:outcome", passed, Notice::Verification),
             (
                 "verification:t:1:outcome",
