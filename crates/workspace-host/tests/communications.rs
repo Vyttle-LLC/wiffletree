@@ -13,29 +13,8 @@ fn fixture() -> (
 ) {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
-    for args in [
-        vec!["init"],
-        vec![
-            "-c",
-            "user.name=Workspace Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
-    ] {
-        assert!(
-            std::process::Command::new("git")
-                .current_dir(repo.path())
-                .args(args)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-    }
+    common::git(repo.path(), &["init"]);
+    common::git(repo.path(), &["commit", "--allow-empty", "-m", "Initial"]);
     let mut host = Host::open_set_up(home.path()).unwrap();
     host.set_workspaces_dir(home.path().join("workspaces").to_str().unwrap())
         .unwrap();
