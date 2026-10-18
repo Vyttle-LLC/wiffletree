@@ -78,9 +78,8 @@ impl KeeperSession {
 pub(crate) struct Job {
     pub ticket_id: String,
     pub repository: PathBuf,
-    /// The repository's base, such as `origin/main`, against which patches compare as
-    /// publishing compares them.
-    pub base: String,
+    /// The ticket's base, against which patches compare as publishing compares them.
+    pub base: stacks::Base,
     /// The PR's base branch on `origin`, such as `origin/main`: fetched and rebased onto.
     pub pr_base: String,
     /// The base commit the quiet period was measured on.
@@ -627,8 +626,7 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
         return Ok(Rebased::Conflict(files));
     }
     let result = worktrees::head(checkout)?;
-    let patch = |commit| worktrees::patch_id(checkout, &job.base, commit);
-    let same = patch(&result)? == patch(&job.verified)?;
+    let same = job.base.same_patch(checkout, &result, &job.verified)?;
     let checked = match &job.checks {
         _ if same => None,
         None => return Ok(Rebased::Changed(None)),
@@ -1191,7 +1189,7 @@ impl Host {
         due.rebases.push(Job {
             ticket_id: ticket.id.clone(),
             repository: path.into(),
-            base: repository.base.clone(),
+            base: self.ticket_base(ticket)?,
             pr_base: format!("origin/{}", pr.base),
             base_commit: base,
             head: pr.head.clone(),
@@ -2598,6 +2596,50 @@ pub(crate) mod tests {
         keep(&mut f, &r, job);
         assert_eq!((worktree(&f), r.branch(BRANCH)), before);
         assert_eq!(notices(&f.host).len(), 1);
+    }
+
+    #[test]
+    fn a_stacked_pr_is_rebased_onto_its_parents_branch_and_never_onto_main() {
+        let mut parent = None;
+        let (mut f, r) = kept_with(|f, r| {
+            let repository = f.ticket().repository_id;
+            let coordinator = f.coordinator.id.clone();
+            let mut p = (f.host)
+                .create_ticket(&coordinator, &repository, "Parent", "Do")
+                .unwrap();
+            let worktree = Path::new(&p.worktree);
+            fs::write(worktree.join("p.txt"), "parent\n").unwrap();
+            git(worktree, &["add", "."]);
+            git(worktree, &["commit", "-q", "-m", "p"]);
+            let bare = r.bare.to_str().unwrap();
+            git(&f.repository, &["push", "-q", bare, &p.branch]);
+            p.pushed = Some(git(worktree, &["rev-parse", "HEAD"]));
+            f.host.save_ticket(&p).unwrap();
+            let mut child = f.ticket();
+            child.stacked_on = Some(p.id.clone());
+            f.host.save_ticket(&child).unwrap();
+            git(&f.worktree, &["rebase", "-q", &p.branch]);
+            parent = Some(p);
+        });
+        let parent = parent.unwrap();
+        let mut ticket = f.ticket();
+        ticket.pull_request.as_mut().unwrap().base = parent.branch.clone();
+        f.host.save_ticket(&ticket).unwrap();
+        // The parent gains a commit on GitHub, and main moves on too.
+        let worktree = Path::new(&parent.worktree);
+        fs::write(worktree.join("p.txt"), "parent, fixed\n").unwrap();
+        git(worktree, &["commit", "-q", "-am", "p fix"]);
+        let bare = r.bare.to_str().unwrap();
+        git(&f.repository, &["push", "-q", bare, &parent.branch]);
+        let moved = git(worktree, &["rev-parse", "HEAD"]);
+        let main = move_base(&f, &r, "other.txt", "1\n");
+        let job = due(&mut f, &moved);
+        assert_eq!(job.pr_base, format!("origin/{}", parent.branch));
+        keep(&mut f, &r, job);
+        let pushed = r.branch(BRANCH).unwrap();
+        assert_eq!(pushed, f.head());
+        assert!(publish::is_ancestor(&f.repository, &moved, &pushed));
+        assert!(!publish::is_ancestor(&f.repository, &main, &pushed));
     }
 
     #[test]

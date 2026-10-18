@@ -920,11 +920,12 @@ impl Host {
         Ok(())
     }
     /// The base commit and the diff from it to `commit`, or why they are unavailable.
-    fn diff_lines(&self, ticket: &Ticket, commit: &str) -> String {
+    pub(crate) fn diff_lines(&self, ticket: &Ticket, commit: &str) -> String {
         let worktree = Path::new(&ticket.worktree);
         let lines = || -> Result<String> {
-            let base = self.ticket_repository(ticket)?.base;
-            let merge_base = worktrees::merge_base(worktree, &base, commit)?;
+            let base = self.ticket_base(ticket)?;
+            let base = base.measured();
+            let merge_base = worktrees::merge_base(worktree, base, commit)?;
             let stat = worktrees::shortstat(worktree, &merge_base, commit)?;
             Ok(format!(
                 "Base: {merge_base} ({base})\nDiff: {merge_base}..{commit}, {stat}"

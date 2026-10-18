@@ -80,6 +80,8 @@ pub(crate) struct Job {
 pub(crate) struct Checked {
     size: Option<String>,
     repository: Repository,
+    /// The ref the ticket's size is measured against.
+    measured: String,
     /// GitHub's `owner/name`, or the URL's until GitHub has answered.
     name: String,
     push_url: String,
@@ -98,7 +100,7 @@ pub(crate) fn is_ancestor(worktree: &Path, older: &str, commit: &str) -> bool {
 }
 
 /// The commit's size against the older commit GitHub already has from the host, or else against
-/// the base: such as "2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)".
+/// the ticket's base: such as "2 commits · 3 files changed, 41 insertions(+), 7 deletions(-)".
 fn commit_size(worktree: &Path, base: &str, pushed: Option<&str>, commit: &str) -> Result<String> {
     let earlier = |pushed: &&str| *pushed != commit && is_ancestor(worktree, pushed, commit);
     let from = match pushed.filter(earlier) {
@@ -310,7 +312,18 @@ fn recheck_stored(job: &Job) -> Result<()> {
             |r| decode(r, 0),
         )
         .context("Repository not found")?;
-    recheck(&ticket, repository, &job.request).map(drop)
+    let parent: Option<Ticket> = match &ticket.stacked_on {
+        Some(id) => Some(
+            store
+                .query_row("SELECT data FROM tickets WHERE id=?1", [id], |r| {
+                    decode(r, 0)
+                })
+                .context("The parent ticket was not found")?,
+        ),
+        None => None,
+    };
+    let base = stacks::Base::of(&ticket, &repository, parent.as_ref());
+    recheck(&ticket, repository, &base, &job.request).map(drop)
 }
 
 /// Whether `commit` was once the branch's tip in this repository, as its reflog records. A
@@ -363,11 +376,15 @@ fn open_pull_request(job: &Job, tools: &Tools) -> StepResult {
     }
 }
 
-pub(crate) fn check_with_size(ticket: &Ticket, repository: Repository) -> Result<Checked> {
-    let mut checked = check(ticket, repository)?;
+pub(crate) fn check_with_size(
+    ticket: &Ticket,
+    repository: Repository,
+    base: &stacks::Base,
+) -> Result<Checked> {
+    let mut checked = check(ticket, repository, base)?;
     checked.size = Some(commit_size(
         Path::new(&ticket.worktree),
-        &checked.repository.base,
+        &checked.measured,
         ticket.pushed.as_deref(),
         &checked.commit,
     )?);
@@ -375,9 +392,10 @@ pub(crate) fn check_with_size(ticket: &Ticket, repository: Repository) -> Result
 }
 impl Host {
     fn check_publish(&self, ticket: &Ticket, repository: Repository) -> Result<Checked> {
+        let base = self.ticket_base(ticket)?;
         match &self.checked_publish {
-            Some(checked) => checked.get(ticket, &repository),
-            None => check(ticket, repository),
+            Some(checked) => checked.get(ticket, &repository, &base),
+            None => check(ticket, repository, &base),
         }
     }
     fn recheck_publish(
@@ -495,7 +513,7 @@ impl Host {
             Some(size) => size,
             None => commit_size(
                 worktree,
-                &checked.repository.base,
+                &checked.measured,
                 ticket.pushed.as_deref(),
                 &checked.commit,
             )?,
@@ -600,8 +618,13 @@ impl Host {
 
 /// The checks no answer from the human overrides: the ticket is open and reviewed with no
 /// cycle running, the worktree is on the ticket's branch at the reviewed commit or a
-/// patch-equivalent one, and `origin` is one checked place on GitHub that the base tracks.
-pub(crate) fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> {
+/// patch-equivalent one, `origin` is one checked place on GitHub that the base tracks, and a
+/// stacked ticket's pull request has a branch on GitHub to open into.
+pub(crate) fn check(
+    ticket: &Ticket,
+    repository: Repository,
+    base: &stacks::Base,
+) -> Result<Checked> {
     ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
     if let Some(cycle) = ticket.running_cycle() {
         bail!(
@@ -614,7 +637,7 @@ pub(crate) fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> 
         .and_then(|v| v.verified_commit().map(|commit| (v, commit)))
         .context("This ticket has not been reviewed. Verify it before publishing it.");
     let (review, verified) = verified?;
-    live::verified_head(ticket, verified, || Ok(repository.base.clone()))?;
+    live::verified_head(ticket, verified, || Ok(base.clone()))?;
     let worktree = Path::new(&ticket.worktree);
     let on = runtime::git_answer(worktree, &["symbolic-ref", "--short", "HEAD"])?;
     ensure!(
@@ -651,21 +674,17 @@ pub(crate) fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> 
             )
         })?;
     ensure_not_rewritten(worktree, &push_url)?;
-    let base = origin_branch(&repository.base).with_context(|| {
-        format!(
-            "The repository's base {} is not on origin, so the ticket's pull request would cross repositories",
-            repository.base
-        )
-    })?;
+    let pull_request_base = base.pull_request_base()?;
     Ok(Checked {
         size: None,
+        measured: base.measured().to_owned(),
         name: match &recorded.facts {
             Some(facts) => facts.name_with_owner.clone(),
             None => format!("{owner}/{name}"),
         },
         push_url,
         branch: ticket.branch.clone(),
-        base: base.to_owned(),
+        base: pull_request_base,
         commit: verification::head(ticket)?,
         cycle: review.cycle,
         outcome: review.outcome,
@@ -679,9 +698,10 @@ pub(crate) fn check(ticket: &Ticket, repository: Repository) -> Result<Checked> 
 fn recheck(
     ticket: &Ticket,
     repository: Repository,
+    base: &stacks::Base,
     request: &PublishRequest,
 ) -> Result<Repository> {
-    recheck_checked(check(ticket, repository)?, request)
+    recheck_checked(check(ticket, repository, base)?, request)
 }
 fn recheck_checked(now: Checked, request: &PublishRequest) -> Result<Repository> {
     // The request was decided on one review. A later one decides anew: whether it passed, and
@@ -706,7 +726,7 @@ fn recheck_checked(now: Checked, request: &PublishRequest) -> Result<Repository>
     for (what, frozen, current) in [
         ("push URL of origin", &request.push_url, &now.push_url),
         ("ticket's branch", &request.branch, &now.branch),
-        ("repository's base branch", &request.base, &now.base),
+        ("pull request's base branch", &request.base, &now.base),
     ] {
         ensure!(
             frozen == current,
@@ -3022,7 +3042,7 @@ pub(crate) mod tests {
         assert_eq!(
             results(&f.host).pop().unwrap().1,
             format!(
-                "The repository's base branch changed from main to release. The branch was pushed at {}; no pull request was opened. Call publish_ticket again for what is current.",
+                "The pull request's base branch changed from main to release. The branch was pushed at {}; no pull request was opened. Call publish_ticket again for what is current.",
                 short_sha(&f.head())
             )
         );

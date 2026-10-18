@@ -985,9 +985,10 @@ impl Actor {
         repository: &str,
         title: &str,
         brief: &str,
+        stack_on: Option<&str>,
         reply: Reply,
     ) -> Result<()> {
-        match checkout::Creation::prepare(&self.host, owner, repository, title, brief)? {
+        match checkout::Creation::prepare(&self.host, owner, repository, title, brief, stack_on)? {
             checkout::Prepared::Existing(ticket) => {
                 let _ = reply.try_send(Ok(serde_json::to_value(ticket)?));
             }
@@ -1044,7 +1045,14 @@ impl Actor {
                 title,
                 brief,
             } => {
-                self.create_ticket(coordinator_id, repository_id, title, brief, reply.clone())?;
+                self.create_ticket(
+                    coordinator_id,
+                    repository_id,
+                    title,
+                    brief,
+                    None,
+                    reply.clone(),
+                )?;
             }
             Command::GitHistory {
                 repository_id,
@@ -1732,6 +1740,7 @@ impl Actor {
                                 string("repository_id")?,
                                 string("title")?,
                                 string("brief")?,
+                                args["stack_on"].as_str(),
                                 reply.clone(),
                             )?;
                             return Ok(None);

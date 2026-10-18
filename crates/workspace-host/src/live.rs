@@ -153,7 +153,18 @@ impl Host {
         title: &str,
         brief: &str,
     ) -> Result<Ticket> {
-        match checkout::Creation::prepare(self, owner, repository_id, title, brief)? {
+        self.create_stacked_ticket(owner, repository_id, title, brief, None)
+    }
+    /// `create_ticket`, with the branch started from the `stack_on` ticket's branch when given.
+    pub fn create_stacked_ticket(
+        &mut self,
+        owner: &str,
+        repository_id: &str,
+        title: &str,
+        brief: &str,
+        stack_on: Option<&str>,
+    ) -> Result<Ticket> {
+        match checkout::Creation::prepare(self, owner, repository_id, title, brief, stack_on)? {
             checkout::Prepared::Existing(ticket) => Ok(*ticket),
             checkout::Prepared::Create(plan) => {
                 let branches = plan.inspect(&publish::Tools::default().git)?;
@@ -401,12 +412,10 @@ impl Host {
         ticket.waiver = waived.map(Into::into);
         self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
     }
-    /// HEAD is the verified commit, or has the same patch id against the repository's base, as
+    /// HEAD is the verified commit, or has the same patch id against the ticket's base, as
     /// after a squash or a clean rebase, and the keeper adopted no commit no review has checked.
     pub(crate) fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
-        verified_head(ticket, verified, || {
-            Ok(self.ticket_repository(ticket)?.base)
-        })
+        verified_head(ticket, verified, || self.ticket_base(ticket))
     }
     fn finish_ticket(
         &mut self,
@@ -530,6 +539,9 @@ impl Host {
             } else {
                 let mut short = json!({"id":ticket.id,"title":ticket.title,"state":ticket.state,
                     "repository":Self::repository_name(&repositories, &ticket),"branch":ticket.branch});
+                if let Some(parent) = &ticket.stacked_on {
+                    short["stacked_on"] = json!(parent);
+                }
                 if let Some(pr) = &ticket.pull_request {
                     short["pull_request"] = json!({"number":pr.number,"state":pr.state,"url":pr.url});
                 }
@@ -759,11 +771,12 @@ impl Host {
                     session.role == Role::ProjectOrchestrator,
                     "Only the project coordinator creates tickets"
                 );
-                Ok(serde_json::to_value(self.create_ticket(
+                Ok(serde_json::to_value(self.create_stacked_ticket(
                     id,
                     string("repository_id")?,
                     string("title")?,
                     string("brief")?,
+                    args["stack_on"].as_str(),
                 )?)?)
             }
             "assign_ticket" => {
@@ -929,12 +942,12 @@ impl Host {
     }
 }
 
-/// `Host::check_verified_head` for a caller that has the repository's base without the store,
+/// `Host::check_verified_head` for a caller that has the ticket's base without the store,
 /// as a publish step has on its own thread.
 pub(crate) fn verified_head(
     ticket: &Ticket,
     verified: &str,
-    base: impl FnOnce() -> Result<String>,
+    base: impl FnOnce() -> Result<stacks::Base>,
 ) -> Result<()> {
     // Whatever their patch id: `git patch-id` ignores whitespace, which can change behaviour.
     if let Some(unreviewed) = ticket.unreviewed() {
@@ -948,11 +961,7 @@ pub(crate) fn verified_head(
         return Ok(());
     }
     let worktree = Path::new(&ticket.worktree);
-    let same_patch = || -> Result<bool> {
-        let base = base()?;
-        Ok(worktrees::patch_id(worktree, &base, verified)?
-            == worktrees::patch_id(worktree, &base, &head)?)
-    };
+    let same_patch = || base()?.same_patch(worktree, verified, &head);
     match same_patch() {
         Ok(true) => Ok(()),
         Ok(false) => bail!(

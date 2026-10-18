@@ -21,14 +21,14 @@ pub fn tools() -> Value {
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and review levels with their round and cycle caps, and the guide. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and review levels with their round and cycle caps, and the guide. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, stacked_on, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
             json!({"ticket_id":string}),
             vec![]
         ),
         tool(
             "create_ticket",
-            "Coordinator: create a ticket in one of the project's repositories, with its own branch and worktree. Repeating the same repository and title returns the existing ticket.",
-            json!({"repository_id":string,"title":string,"brief":string}),
+            "Coordinator: create a ticket in one of the project's repositories, with its own branch and worktree. Repeating the same repository and title returns the existing ticket. For work that depends on another ticket's unmerged work in the same repository, give that ticket's id as stack_on: the new branch starts from its branch tip, reviews see only the new ticket's changes, and its pull request opens into that branch. The parent must not be closed.",
+            json!({"repository_id":string,"title":string,"brief":string,"stack_on":string}),
             vec!["repository_id", "title", "brief"]
         ),
         tool(
@@ -106,7 +106,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "publish_ticket",
-            "Coordinator or the ticket's implementer: push the ticket's branch to its repository's origin on GitHub and, when the ticket has no open pull request, open one into the repository's base branch with title and body, which are then required. When its pull request is open, this only pushes the new commits; leave out title and body. The workspace runs the push and opens the pull request itself; you never push or open one from your shell. It refuses unless the ticket's review has ended and the worktree is on the ticket's branch at the reviewed commit or one with the same changes. It runs without asking when the review passed and the human allowed the repository's owner, as publishes_without_asking in workspace_context shows; otherwise each step waits for the human's approval in their inbox, as does any publish after a review that ended blocked and any new pull request after an earlier one was closed or merged. Returns at once with the steps being run or the step that waits and why; the result arrives later as a message from Wiffletree, so finish your turn.",
+            "Coordinator or the ticket's implementer: push the ticket's branch to its repository's origin on GitHub and, when the ticket has no open pull request, open one into the repository's base branch with title and body, which are then required. A stacked ticket's pull request opens into its parent's branch instead, so publish the parent first, or into the repository's base once the parent's pull request has merged. When its pull request is open, this only pushes the new commits; leave out title and body. The workspace runs the push and opens the pull request itself; you never push or open one from your shell. It refuses unless the ticket's review has ended and the worktree is on the ticket's branch at the reviewed commit or one with the same changes. It runs without asking when the review passed and the human allowed the repository's owner, as publishes_without_asking in workspace_context shows; otherwise each step waits for the human's approval in their inbox, as does any publish after a review that ended blocked and any new pull request after an earlier one was closed or merged. Returns at once with the steps being run or the step that waits and why; the result arrives later as a message from Wiffletree, so finish your turn.",
             json!({"ticket_id":string,"title":string,"body":string}),
             vec!["ticket_id"]
         ),
