@@ -7944,6 +7944,52 @@ mod tests {
     }
 
     #[test]
+    fn a_sighting_in_a_busy_group_costs_the_same_however_many_processes_it_has_had() {
+        let (_home, mut actor, _, tester, _) = ticket_in_turn();
+        let build = LeftoverProcess::spawn();
+        started_by(&mut actor, &tester.id, "run", &build);
+        let (group, started) = (build.group() as i32, build.started());
+        let gone = |actor: &Actor| -> i64 {
+            let gone = "SELECT COUNT(*) FROM process_group_members m JOIN process_groups g ON g.id=m.group_id
+                        WHERE g.process_group=?1 AND m.started<?2";
+            let db = &actor.host.db;
+            db.query_row(gone, params![group, started], |r| r.get(0))
+                .unwrap()
+        };
+
+        // A build's short-lived compilers, each gone by the time it is next looked for. Their
+        // ids sort before the long-lived member's, as once the id counter has wrapped, so a
+        // look in id order passes all of them before it reaches one that is alive.
+        let batch = 500;
+        for round in 0..8 {
+            let seen: Vec<_> = (0..batch)
+                .map(|n| {
+                    let count = round * batch + n;
+                    processes::Sighting::Member(processes::ProcessInfo {
+                        pid: 2 + count % (group - 2),
+                        parent: group,
+                        group,
+                        started: i64::from(count) + 1,
+                        command: "rustc".into(),
+                    })
+                })
+                .collect();
+            processes::PROBES.with(|probes| probes.set(0));
+            actor
+                .host
+                .record_sightings(&tester.id, "run", &seen)
+                .unwrap();
+            // Each sighting probes the one recorded before it, gone, then the live member.
+            let probes = processes::PROBES.with(|probes| probes.get());
+            assert!(
+                probes <= 2 * batch as usize,
+                "round {round}: {probes} probes"
+            );
+            assert!(gone(&actor) <= 1, "round {round}: gone members are kept");
+        }
+    }
+
+    #[test]
     fn an_agent_archived_in_its_turn_keeps_its_processes_until_the_turn_ends() {
         let (_home, mut actor, ticket, tester, _) = ticket_in_turn();
         let mut tool = LeftoverProcess::spawn();
