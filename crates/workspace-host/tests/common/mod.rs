@@ -4,36 +4,28 @@ use serde_json::{Value, json};
 use workspace_core::*;
 use workspace_host::Host;
 
-/// A valid choice for every configured verifier: the first allowed model of its provider, or of
-/// its role's first provider.
-pub fn verifier_choices(host: &Host) -> Vec<VerifierChoice> {
-    let selection = host.model_selection().unwrap();
-    host.settings()
-        .verification
-        .verifiers
-        .iter()
-        .map(|verifier| {
-            let provider = verifier
-                .provider
-                .unwrap_or_else(|| selection.providers_for(verifier.role)[0]);
-            let model = &selection.allowed(provider)[0];
-            VerifierChoice {
-                focus: verifier.focus.clone(),
-                profile: ModelProfile {
-                    provider,
-                    model: model.model.clone(),
-                    effort: model.effort.clone(),
-                },
-                reason: "Test verifier".into(),
-            }
-        })
-        .collect()
+/// A detection that finds `signed_in` installed and signed in, each listing the built-in
+/// catalog, as the one-time upgrade to the Who runs what table reads it.
+pub fn signed_in(signed_in: &[Provider]) -> impl Fn(Provider) -> ProviderReport + use<> {
+    let signed_in = signed_in.to_vec();
+    move |provider| {
+        let found = signed_in.contains(&provider);
+        ProviderReport {
+            status: ProviderStatus {
+                installed: found,
+                signed_in: found,
+                plan: None,
+            },
+            models: (fallback_catalog().into_iter())
+                .filter(|m| found && m.provider == provider)
+                .collect(),
+        }
+    }
 }
 
-/// `verify_ticket`'s arguments for the level "Full", with a valid choice for every configured
-/// verifier.
-pub fn verify_args(host: &Host, ticket_id: &str) -> Value {
-    json!({"ticket_id": ticket_id, "level": "Full", "verifiers": verifier_choices(host)})
+/// `verify_ticket`'s arguments for the level "Full".
+pub fn verify_args(_host: &Host, ticket_id: &str) -> Value {
+    json!({"ticket_id": ticket_id, "level": "Full"})
 }
 
 /// Verification by the default tester alone, for tests that pass or fail one verifier.

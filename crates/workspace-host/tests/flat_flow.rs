@@ -18,21 +18,31 @@ fn everything(service: &Service) -> Snapshot {
     snapshot
 }
 
-fn verifier(role: Role, focus: &str, provider: Option<Provider>) -> VerifierConfig {
+fn verifier(role: Role, focus: &str) -> VerifierConfig {
     VerifierConfig {
         role,
         focus: focus.into(),
         instruction: None,
-        provider,
     }
 }
 
-/// Lets the tester role run on either provider.
+/// Starts the "Claude" tester on Claude and the "Codex" tester on Codex.
 fn testers_on_both_providers(host: &mut Host) {
     let mut selection = host.model_selection().unwrap();
-    selection
-        .role_providers
-        .insert(Role::Tester, [Provider::Claude, Provider::Codex].into());
+    for (focus, provider, model) in [
+        ("Claude", Provider::Claude, "sonnet"),
+        ("Codex", Provider::Codex, "gpt-6.1-sol"),
+    ] {
+        let first = ModelProfile {
+            provider,
+            model: model.into(),
+            effort: "high".into(),
+        };
+        let job = Job::Verifier {
+            focus: focus.into(),
+        };
+        selection.row_mut(&job).unwrap().main = Line { first, then: None };
+    }
     host.set_model_selection(&selection).unwrap();
 }
 
@@ -48,17 +58,17 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
         let mut host = Host::open_set_up(home.path()).unwrap();
         host.set_workspaces_dir(scratch.path().join("workspaces").to_str().unwrap())
             .unwrap();
-        testers_on_both_providers(&mut host);
         host.set_verification(VerificationSettings::one_level(
             vec![
-                verifier(Role::Tester, "Claude", Some(Provider::Claude)),
-                verifier(Role::Tester, "Codex", Some(Provider::Codex)),
-                verifier(Role::Reviewer, "Style", None),
+                verifier(Role::Tester, "Claude"),
+                verifier(Role::Tester, "Codex"),
+                verifier(Role::Reviewer, "Style"),
             ],
             2,
             2,
         ))
         .unwrap();
+        testers_on_both_providers(&mut host);
         let project = host.create_project("SH-1171").unwrap();
         let main = host.sessions().unwrap().remove(0);
         host.attach_repository(&project.id, repo.to_str().unwrap(), "HEAD")

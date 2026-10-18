@@ -747,6 +747,7 @@ fn names(paths: &[String]) -> Vec<String> {
             shared::GUIDE => "Model guide",
             shared::CHECK_INS => "Check-ins",
             shared::KEEPER => "PR keeper",
+            shared::MODELS => "Switch threshold",
             path => Skill::ALL
                 .into_iter()
                 .find(|skill| path.starts_with(&format!("skills/{}/", skill.folder())))
@@ -1493,16 +1494,10 @@ impl Host {
         }
         let selection = self.model_selection()?;
         needs.extend(self.keeper_held());
-        for verifier in &settings.verification.verifiers {
-            if let Some(provider) = verifier.provider
-                && !selection.is_enabled(provider)
-            {
-                needs.push(format!(
-                    "The {} verifier runs on {}, which is not enabled on this machine",
-                    verifier.focus,
-                    provider.label()
-                ));
-            }
+        for focus in &selection.copied {
+            needs.push(format!(
+                "The {focus} verifier has no row in Who runs what on this machine; it uses a copy of another row until you check it and save"
+            ));
         }
         let page = WorkspacePage::Models;
         Ok((needs.into_iter())
@@ -2142,7 +2137,6 @@ pub(crate) mod tests {
     fn set_up_elsewhere(github: &Arc<GitHub>) -> (tempfile::TempDir, Host) {
         let (home, mut host) = host();
         host.set_owner_allowed("Sage-Social", true).unwrap();
-        assert!(host.model_selection().unwrap().is_enabled(Provider::Codex));
         host.set_check_ins(10, 300).unwrap();
         save_rules(
             &mut host,
@@ -2294,10 +2288,11 @@ pub(crate) mod tests {
         let clone = first_home.path().join("shared");
         fs::write(clone.join("settings/pr-keeper.json"), keeper).unwrap();
         let mut review = first.settings().verification;
-        review
-            .verifiers
-            .iter_mut()
-            .for_each(|v| v.provider = Some(Provider::Codex));
+        review.verifiers.push(VerifierConfig {
+            role: Role::Reviewer,
+            focus: "Security".into(),
+            instruction: None,
+        });
         fs::write(
             clone.join("settings/review.json"),
             serde_json::to_string(&review).unwrap(),
@@ -2309,9 +2304,9 @@ pub(crate) mod tests {
             &clone,
             &["push", "-q", github.bare.to_str().unwrap(), "main"],
         );
-        // A machine with no saved setup: no PR keeper model and no Codex.
+        // A machine with a saved setup and no PR keeper model, which has no row for Security.
         let home = tempfile::tempdir().unwrap();
-        let mut host = Host::open(home.path()).unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
         assert!(host.still_needs().unwrap().is_empty());
         host.choose_settings_repository(NAME, Some(JoinWith::Repository), &github.tools())
             .unwrap();
@@ -2321,12 +2316,12 @@ pub(crate) mod tests {
             "{needs:?}"
         );
         assert!(
-            needs[1..]
-                .iter()
-                .all(|n| n.text.contains("Codex, which is not enabled")),
+            needs[1]
+                .text
+                .starts_with("The Security verifier has no row in Who runs what"),
             "{needs:?}"
         );
-        assert!(needs.len() > 1);
+        assert_eq!(needs.len(), 2);
         assert!(needs.iter().all(|n| n.page == WorkspacePage::Models));
     }
 
@@ -2941,7 +2936,7 @@ pub(crate) mod tests {
             guide: host.model_selection().unwrap().guide,
             ..suggested.model_selection().unwrap()
         };
-        assert_eq!(selection.keeper, None);
+        assert_eq!(selection.keeper(), None);
         let review = host.settings().verification;
         host.set_setup(&selection, Some(review)).unwrap();
         assert!(host.model_selection().unwrap().is_saved());
@@ -3491,12 +3486,7 @@ pub(crate) mod tests {
         let with_a_claude_keeper = |home: &tempfile::TempDir| {
             let mut host = Host::open(home.path()).unwrap();
             let mut selection = host.model_selection().unwrap();
-            let allowed = selection.allowed(Provider::Claude)[0].clone();
-            selection.keeper = Some(ModelProfile {
-                provider: Provider::Claude,
-                model: allowed.model,
-                effort: allowed.effort,
-            });
+            selection.set_keeper(Some(crate::keeper::tests::keeper_line(Provider::Claude)));
             host.set_model_selection(&selection).unwrap();
             host
         };

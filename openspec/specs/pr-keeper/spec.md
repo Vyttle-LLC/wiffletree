@@ -293,14 +293,14 @@ When the fetched head and the worktree's HEAD each have a commit the other lacks
 - **THEN** the worktree and GitHub's branch are unchanged, and the coordinator gets one message naming `aa11bb2` and `5f2e7a0`
 
 ### Requirement: The comments trigger needs a Claude model
-The keeper's settings SHALL refuse to turn the comments trigger on unless the PR keeper's model (see model-routing) is chosen and is a Claude model, saying that sorting runs with every tool turned off and that Codex cannot be started that way. A model selection that removes or replaces that model while the trigger is on SHALL be refused in the same way.
+The keeper's settings SHALL refuse to turn the comments trigger on unless the table's PR keeper row (see model-routing) has a Claude choice in its main line, saying that sorting runs with every tool turned off and that Codex cannot be started that way. A table that removes that row, or leaves it without a Claude choice, while the trigger is on SHALL be refused in the same way.
 
 #### Scenario: No model
-- **WHEN** the human ticks "Sort new comments" with no PR keeper model chosen
+- **WHEN** the human ticks "Sort new comments" with no PR keeper row
 - **THEN** the save is refused, saying to choose a Claude model in Models first
 
 #### Scenario: A Codex model
-- **WHEN** the PR keeper's model is a Codex model and the human ticks "Sort new comments"
+- **WHEN** the PR keeper row names only Codex models and the human ticks "Sort new comments"
 - **THEN** the save is refused, saying sorting needs a Claude model
 
 ### Requirement: New comments are read by the host, read-only
@@ -402,7 +402,7 @@ A ticket SHALL count its sorted comments that need a change and that are questio
 - **THEN** the line no longer names waiting comments
 
 ### Requirement: The PR keeper is an agent role no coordinator controls
-Each model run the keeper starts SHALL be a turn of an agent of the ticket with the role "PR keeper", whose parent is the ticket's coordinator and whose model is the PR keeper's model as saved when the agent was created; with no model saved, no PR keeper agent SHALL be created. A ticket's try session and its sorting session SHALL be distinct agents, so neither is ever given the other's conversation. A PR keeper agent SHALL NOT hold the ticket's worktree: no agent of the ticket SHALL wait to start a turn because a PR keeper agent is in one. No coordinator tool SHALL create, message, resume or assign a PR keeper agent, and the human's new-agent dialog SHALL NOT offer the role. The PR keeper's instructions SHALL be its own, bundled with the app.
+Each model run the keeper starts SHALL be a turn of an agent of the ticket with the role "PR keeper", whose parent is the ticket's coordinator and whose model is what the PR keeper row resolves to for that run, or the row's Claude choice for a sorting run; with no PR keeper row, no PR keeper agent SHALL be created. A ticket's try session and its sorting session SHALL be distinct agents, so neither is ever given the other's conversation. A PR keeper agent SHALL NOT hold the ticket's worktree: no agent of the ticket SHALL wait to start a turn because a PR keeper agent is in one. No coordinator tool SHALL create, message, resume or assign a PR keeper agent, and the human's new-agent dialog SHALL NOT offer the role. The PR keeper's instructions SHALL be its own, bundled with the app.
 
 #### Scenario: A coordinator cannot make one
 - **WHEN** a coordinator calls `assign_ticket` naming the PR keeper role
@@ -419,6 +419,10 @@ Each model run the keeper starts SHALL be a turn of an agent of the ticket with 
 #### Scenario: The worktree is not held
 - **WHEN** a PR keeper agent of a ticket is in a turn and the ticket's implementer has queued input
 - **THEN** the implementer's turn starts
+
+#### Scenario: A try while Claude is spent
+- **WHEN** the PR keeper row is Sonnet · medium then GPT 6.1 Sol · medium, Claude is spent and a conflict gets a try
+- **THEN** the try runs on GPT 6.1 Sol · medium in a Codex PR keeper agent
 
 ### Requirement: The keeper's model runs are ordinary agent runs
 The runs of a PR keeper agent SHALL be recorded as provider runs of a PR keeper agent, so Usage counts them in its coordinator's workers total, and its turns SHALL check in with the coordinator after 30 minutes as any agent's do. Sorting turns are the host's own work and SHALL NOT count toward the check-in after a number of turns without the coordinator. The agent SHALL appear under its ticket in the sidebar while it works.
@@ -443,11 +447,11 @@ Each workspace repository SHALL be able to hold one checks command and its time 
 - **THEN** no tool changes a repository's checks command
 
 ### Requirement: The conflicts trigger needs a model and a re-check level
-The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the rebase trigger is on, the PR keeper's model is chosen and the review level names a configured level whose kind is re-check, and SHALL refuse to turn the rebase trigger off while the conflicts trigger is on: a conflict is found by the keeper's own rebase, so without the rebase trigger no try could ever start. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
+The keeper's settings SHALL hold the review level a fix is reviewed at. They SHALL refuse to turn the conflicts trigger on unless the rebase trigger is on, the table has a PR keeper row and the review level names a configured level whose kind is re-check, and SHALL refuse to turn the rebase trigger off while the conflicts trigger is on: a conflict is found by the keeper's own rebase, so without the rebase trigger no try could ever start. A verification setting that removes that level or makes it a full review while the trigger is on SHALL be refused, naming the trigger.
 
 #### Scenario: No re-check level
 - **WHEN** the only review level is "Full" and the human ticks "Try to resolve conflicts"
-- **THEN** the save is refused, saying to add a re-check level in Models → Review
+- **THEN** the save is refused, saying to add a re-check level in Models → Reviews
 
 #### Scenario: Without the rebase trigger
 - **WHEN** the rebase trigger is off and the human ticks "Try to resolve conflicts"

@@ -21,6 +21,8 @@ pub(super) struct Shared {
     pub(super) quota_pending: bool,
     /// The models each provider offers, as the Models page last listed them.
     pub(super) catalog: Rc<Vec<ModelOption>>,
+    /// Whether each provider's CLI is installed and signed in, as the Models page last found.
+    pub(super) detection: Rc<Detection>,
 }
 impl Default for Shared {
     fn default() -> Self {
@@ -35,6 +37,7 @@ impl Default for Shared {
             quotas: Rc::default(),
             quota_pending: false,
             catalog: Rc::new(fallback_catalog()),
+            detection: Rc::default(),
         }
     }
 }
@@ -110,22 +113,17 @@ impl Shared {
         self.runtime(&session.id)
             .and_then(|runtime| runtime.profile.clone())
             .or_else(|| {
-                // Only an unpinned main coordinator runs on its provider's first allowed model;
-                // any other unpinned agent is held until it is given one.
+                // Only an unpinned main coordinator runs on its row's choice on its own
+                // provider; any other unpinned agent is held until it is given one.
                 if session.parent_id.is_some() {
                     return None;
                 }
-                let model = self
-                    .snapshot()?
-                    .model_selection
-                    .allowed(session.provider)
-                    .first()?
-                    .clone();
-                Some(ModelProfile {
-                    provider: session.provider,
-                    model: model.model,
-                    effort: model.effort,
-                })
+                let selection = &self.snapshot()?.model_selection;
+                let row = selection.row(&Job::Coordinator)?;
+                row.main
+                    .choices()
+                    .find(|profile| profile.provider == session.provider)
+                    .cloned()
             })
     }
     pub(super) fn owner_name(&self) -> String {
@@ -204,6 +202,7 @@ pub(super) enum Intent {
     /// Opens the Skills page on one skill.
     OpenSkill(Skill),
     Catalog(Rc<Vec<ModelOption>>),
+    Detected(Rc<Detection>),
     /// Shows a change the host confirmed before the snapshot that has it arrives.
     Amend(Amendment),
     /// Opens a creation dialog; `ticket` preselects the ticket when assigning an agent.

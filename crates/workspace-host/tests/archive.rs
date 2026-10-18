@@ -3,7 +3,7 @@ use common::git_output as git;
 use serde_json::json;
 use std::{fs, path::Path, process::Command};
 use workspace_core::{
-    PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket, TicketState,
+    Job, PROCESS_NOTICE_PREFIX, Provider, Receipt, Role, Session, Status, Ticket, TicketState,
 };
 use workspace_host::Host;
 
@@ -1012,17 +1012,16 @@ fn to_be_replaced(
         json!({"message_id":"ready again","kind":"ready_for_testing","body":"Committed"}),
     )
     .unwrap();
-    let mut choices = common::verifier_choices(host);
-    let pinned = choices[0].profile.clone();
-    let selection = host.model_selection().unwrap();
-    let allowed = selection.allowed(pinned.provider);
-    let other = allowed
-        .iter()
-        .find(|m| (&m.model, &m.effort) != (&pinned.model, &pinned.effort));
-    let other = other.expect("a second allowed model or effort");
-    choices[0].profile.model = other.model.clone();
-    choices[0].profile.effort = other.effort.clone();
-    let review = json!({"ticket_id": ticket.id, "level": "Full", "verifiers": choices});
+    // The verifier's row now names another effort, so the next review starts a fresh one.
+    let focus = host.settings().verification.verifiers[0].focus.clone();
+    let mut selection = host.model_selection().unwrap();
+    let row = selection.row_mut(&Job::Verifier { focus }).unwrap();
+    row.main.first.effort = match row.main.first.effort.as_str() {
+        "low" => "high".into(),
+        _ => "low".into(),
+    };
+    host.set_model_selection(&selection).unwrap();
+    let review = json!({"ticket_id": ticket.id, "level": "Full"});
     (verifier, left, review)
 }
 

@@ -92,10 +92,17 @@ fn rows_say_kept_or_not_kept_only_while_a_trigger_is_on() {
 
 #[test]
 fn sorting_needs_a_claude_model() {
-    let model = |provider| ModelProfile {
-        provider,
-        model: "m".into(),
-        effort: "low".into(),
+    let model = |provider| JobRow {
+        job: Job::Keeper,
+        main: Line {
+            first: ModelProfile {
+                provider,
+                model: "m".into(),
+                effort: "low".into(),
+            },
+            then: None,
+        },
+        small: None,
     };
     let none = check_sorting_model(None).unwrap_err().to_string();
     assert!(

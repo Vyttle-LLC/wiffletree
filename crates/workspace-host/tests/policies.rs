@@ -1,6 +1,8 @@
+mod common;
+use common::signed_in;
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, path::Path};
+use std::path::Path;
 use workspace_core::*;
 use workspace_host::Host;
 
@@ -17,15 +19,16 @@ fn claude(model: &str, effort: &str) -> ModelProfile {
 fn codex(model: &str, effort: &str) -> ModelProfile {
     profile(Provider::Codex, model, effort)
 }
-fn allowed(models: &[(&str, &str)]) -> Vec<AllowedModel> {
-    models
-        .iter()
-        .map(|(model, effort)| AllowedModel {
-            model: (*model).into(),
-            effort: (*effort).into(),
+/// Each row as "job: first → then", with "wait" for no then choice.
+fn rows(selection: &ModelSelection) -> Vec<String> {
+    (selection.jobs.iter())
+        .map(|row| {
+            let then = (row.main.then.as_ref()).map_or("wait".into(), ToString::to_string);
+            format!("{}: {} → {then}", row.job.name(), row.main.first)
         })
         .collect()
 }
+const MIGRATED: &str = "Set up from your previous settings. Check it.";
 
 // Saved policy rows in every shape a store can hold from before model selection.
 
@@ -115,6 +118,15 @@ fn current(role: Role) -> Value {
 /// each role gets its legacy row, pins and migrations are forgotten, and the shared folder,
 /// which came later, is removed.
 fn seed(home: &Path, rows: impl Fn(Role) -> Value, setup: impl FnOnce(&mut Host)) -> Host {
+    seed_detecting(home, rows, setup, &signed_in(&PROVIDERS))
+}
+/// `seed`, where the upgrade to the table finds the CLIs as `detect` says.
+fn seed_detecting(
+    home: &Path,
+    rows: impl Fn(Role) -> Value,
+    setup: impl FnOnce(&mut Host),
+    detect: &dyn Fn(Provider) -> ProviderReport,
+) -> Host {
     let mut host = Host::open_set_up(home).unwrap();
     setup(&mut host);
     drop(host);
@@ -137,7 +149,7 @@ fn seed(home: &Path, rows: impl Fn(Role) -> Value, setup: impl FnOnce(&mut Host)
     .unwrap();
     drop(db);
     std::fs::remove_dir_all(home.join("shared")).unwrap();
-    Host::open(home).unwrap()
+    Host::open_detecting(home, detect).unwrap()
 }
 fn git_repo() -> std::path::PathBuf {
     let dir = tempfile::tempdir().unwrap().keep();
@@ -182,149 +194,113 @@ fn stored(home: &Path) -> (String, Vec<String>, Vec<String>) {
         rows("SELECT data FROM policies ORDER BY role"),
     )
 }
-fn providers(selection: &ModelSelection, role: Role) -> BTreeSet<Provider> {
-    selection.role_providers[&role].clone()
-}
 
 #[test]
-fn current_big_small_policies_migrate_without_loss() {
+fn current_big_small_policies_become_the_approved_table() {
     let home = tempfile::tempdir().unwrap();
     let host = seed(home.path(), current, |_| {});
     let selection = host.model_selection().unwrap();
     selection.validate().unwrap();
-    assert_eq!(selection.revision, 1);
-    for role in PROVIDER_ROLES {
-        assert_eq!(
-            providers(&selection, role),
-            BTreeSet::from([Provider::Claude]),
-            "{role:?} keeps its default provider"
+    assert_eq!(
+        selection.revision, 2,
+        "the selection's migration, then the table's"
+    );
+    // No PR keeper model was chosen, so there is no PR keeper row; the default reviewers were
+    // Claude's and Codex's second opinions, so they wait.
+    assert_eq!(
+        rows(&selection),
+        [
+            "Coordinator: claude · opus · high → codex · gpt-6.1-sol · high",
+            "Implementer: claude · opus · medium → codex · gpt-6.1-sol · high",
+            "Tester: claude · sonnet · high → codex · gpt-6.1-sol · medium",
+            "Tests: claude · sonnet · high → codex · gpt-6.1-sol · medium",
+            "Correctness: claude · opus · high → wait",
+            "Regressions: codex · gpt-6.1-sol · high → wait",
+        ]
+    );
+    let implementer = selection.row(&Job::Implementer).unwrap();
+    assert_eq!(
+        implementer.small.as_ref().unwrap().first,
+        claude("sonnet", "high")
+    );
+    // The tiers' prose is gone; the rest of the guide stays.
+    let guide = &selection.guide;
+    assert!(
+        guide.starts_with("Pick the model by the size and risk of the work."),
+        "{guide}"
+    );
+    assert!(!guide.contains("Previous settings"), "{guide}");
+    // What the table does not hold is in the one-time note.
+    assert_eq!(selection.notes[0], MIGRATED);
+    for line in [
+        "Allowed before: Claude opus at high, medium.",
+        "Allowed before: Claude sonnet at high, medium.",
+        "Allowed before: Codex gpt-6.1-sol at high, medium, low.",
+        "Allowed before: Codex gpt-6-astra at high.",
+        "Coordinator used Claude before.",
+        "Tester used Claude before.",
+        // The guide's previous-settings section moved into the note.
+        "From the guide: - Claude: large work → opus · medium; small work → sonnet · high.",
+    ] {
+        assert!(
+            selection.notes.iter().any(|n| n == line),
+            "{line}: {:?}",
+            selection.notes
         );
     }
-    // Every previously allowed profile, in any role, is still allowed under its provider.
-    for role in Role::ALL {
-        for allowed in current(role)["allowed"].as_array().unwrap() {
-            let profile: ModelProfile = serde_json::from_value(allowed.clone()).unwrap();
-            selection.permits(Role::Reviewer, &profile).unwrap();
-        }
-    }
-    assert_eq!(
-        selection.allowed(Provider::Claude),
-        allowed(&[
-            ("opus", "high"),
-            ("opus", "medium"),
-            ("sonnet", "high"),
-            ("sonnet", "medium")
-        ])
-    );
-    assert_eq!(
-        selection.allowed(Provider::Codex),
-        allowed(&[
-            ("gpt-6.1-sol", "high"),
-            ("gpt-6.1-sol", "medium"),
-            ("gpt-6.1-sol", "low"),
-            ("gpt-6-astra", "high")
-        ])
-    );
-    let guide = &selection.guide;
-    assert!(guide.starts_with(
-        "Pick the model by the size and risk of the work. Claude: small, contained change → Sonnet; large or cross-cutting → Opus. Codex: small → GPT 6.1 Sol at medium; large → GPT 6.1 Sol at high. Raise effort for migrations, data or security changes.\n\n## Previous settings (migrated "
-    ));
-    for line in [
-        "### Coordinators (main and repository)",
-        "- Claude: large work → opus · high; small work → opus · medium.",
-        "### Implementer",
-        "- Claude: large work → opus · medium; small work → sonnet · high.",
-        "### Tester",
-        "- Claude: large work → opus · high; small work → sonnet · high.",
-        "### Reviewer",
-        "- Default: codex · gpt-6.1-sol · high (coordinators could choose within its list).",
-        "- Claude: large work → opus · high; small work → sonnet · medium.",
-        "- Codex: large work → gpt-6.1-sol · high; small work → gpt-6.1-sol · medium.",
-        "### Maintenance",
-        "- Was fixed to codex · gpt-6.1-sol · medium; coordinators could not choose another model.",
-        "- Tiers: small work → codex · gpt-6.1-sol · low; standard → codex · gpt-6.1-sol · medium; complex → codex · gpt-6-astra · high.",
-    ] {
-        assert!(guide.contains(line), "guide is missing {line:?}:\n{guide}");
-    }
+    // Re-running changes nothing, and the table survives a restart.
+    drop(host);
+    let again = Host::open(home.path()).unwrap().model_selection().unwrap();
+    assert_eq!(again, selection);
 }
 
 #[test]
-fn legacy_codex_store_takes_the_opus_migration_then_model_selection() {
+fn legacy_codex_store_takes_the_opus_migration_then_the_catalogs_models() {
     let home = tempfile::tempdir().unwrap();
     let host = seed(home.path(), codex_fixed, |_| {});
     let selection = host.model_selection().unwrap();
-    for role in [Role::ProjectOrchestrator, Role::Implementer] {
-        assert_eq!(
-            providers(&selection, role),
-            BTreeSet::from([Provider::Claude])
-        );
-    }
-    assert_eq!(
-        providers(&selection, Role::Tester),
-        BTreeSet::from([Provider::Codex])
-    );
-    assert!(
-        !selection
-            .role_providers
-            .contains_key(&Role::TaskOrchestrator)
-    );
-    assert_eq!(
-        selection.allowed(Provider::Claude),
-        allowed(&[("opus", "high"), ("opus", "medium"), ("opus", "low")])
-    );
-    assert_eq!(
-        selection.prefill(Role::ProjectOrchestrator),
-        Some(claude("opus", "high"))
-    );
-    assert!(selection.guide.contains(
-        "### Tester\n- Was fixed to codex · gpt-6.1-sol · medium; coordinators could not choose another model.\n- Tiers: small work → codex · gpt-6.1-sol · low; standard → codex · gpt-6.1-sol · medium; complex → codex · gpt-6-astra · high."
-    ));
+    selection.validate().unwrap();
+    let first = |job: Job| selection.row(&job).unwrap().main.first.clone();
+    assert_eq!(first(Job::Coordinator), claude("opus", "high"));
+    assert_eq!(first(Job::Implementer), claude("opus", "medium"));
+    // Sonnet was never allowed here, but the signed-in CLI lists it.
+    assert_eq!(first(Job::Tester), claude("sonnet", "high"));
+    let tester = selection.row(&Job::Tester).unwrap();
+    assert_eq!(tester.main.then, Some(codex("gpt-6.1-sol", "medium")));
 }
 
 #[test]
-fn fixed_opus_custom_fixed_and_automatic_tiers_become_allowlist_and_prose() {
+fn a_store_with_one_provider_runs_every_row_on_it() {
     let home = tempfile::tempdir().unwrap();
-    let host = seed(
+    let host = seed_detecting(
         home.path(),
-        |role| match role {
-            Role::ProjectOrchestrator | Role::TaskOrchestrator => opus_fixed(role, "high"),
-            Role::Implementer => automatic_tiers(role),
-            Role::Tester => {
-                let mut custom = opus_fixed(role, "high");
-                custom["default"] = json!(claude("sonnet", "high"));
-                custom["allowed"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!(claude("sonnet", "high")));
-                custom
-            }
-            _ => codex_fixed(role),
-        },
+        current,
         |_| {},
+        &signed_in(&[Provider::Claude]),
     );
     let selection = host.model_selection().unwrap();
+    selection.validate().unwrap();
+    for row in &selection.jobs {
+        assert_eq!(row.main.first.provider, Provider::Claude, "{:?}", row.job);
+        assert_eq!(row.main.then, None, "{:?}", row.job);
+    }
+    // With no CLI signed in at the upgrade, the providers that were enabled are used.
+    let home = tempfile::tempdir().unwrap();
+    let host = seed_detecting(home.path(), automatic_tiers, |_| {}, &signed_in(&[]));
+    let selection = host.model_selection().unwrap();
+    selection.validate().unwrap();
+    for row in &selection.jobs {
+        assert_eq!(row.main.first.provider, Provider::Claude, "{:?}", row.job);
+        assert_eq!(row.main.then, None, "{:?}", row.job);
+    }
     assert_eq!(
-        providers(&selection, Role::Tester),
-        BTreeSet::from([Provider::Claude])
+        selection.row(&Job::Coordinator).unwrap().main.first,
+        claude("opus", "high")
     );
-    selection
-        .permits(Role::Implementer, &claude("sonnet", "high"))
-        .unwrap();
-    let guide = &selection.guide;
-    assert!(
-        guide.contains(
-            "### Coordinators (main and repository)\n- Was fixed to claude · opus · high"
-        )
-    );
-    assert!(guide.contains(
-        "### Implementer\n- Default: claude · opus · medium (coordinators could choose within its list).\n- Tiers: small work → claude · sonnet · high; standard → claude · opus · medium; complex → claude · opus · high."
-    ));
-    assert!(guide.contains("### Tester\n- Was fixed to claude · sonnet · high"));
-    assert!(!guide.contains("Also listed"));
 }
 
 /// The largest settings the old validator accepted: 32 profiles per role, IDs at their length
-/// limits. The migration must never refuse them, or the host could not open.
+/// limits. The migrations must never refuse them, or the host could not open.
 #[test]
 fn the_largest_legacy_store_still_migrates() {
     let long = |role: Role, i: usize, width: usize| {
@@ -339,16 +315,12 @@ fn the_largest_legacy_store_still_migrates() {
         json!({"role":role,"mode":"fixed","default":allowed[0],"allowed":allowed,
             "small":allowed[1],"standard":allowed[2],"complex":allowed[3],"turn_budget_minutes":null})
     };
-    // Every role at 32 profiles on one provider: the per-provider maximum.
     let home = tempfile::tempdir().unwrap();
     let selection = seed(home.path(), fixed_with_32, |_| {})
         .model_selection()
         .unwrap();
     selection.validate().unwrap();
-    assert_eq!(
-        selection.allowed(Provider::Claude).len(),
-        MAX_MODELS_PER_PROVIDER
-    );
+    assert!(selection.notes.len() > 1);
     // Long Big/Small profiles on every role: the longest guide.
     let home = tempfile::tempdir().unwrap();
     let selection = seed(
@@ -374,11 +346,7 @@ fn the_largest_legacy_store_still_migrates() {
     .model_selection()
     .unwrap();
     selection.validate().unwrap();
-    assert!(
-        selection.guide.len() <= MAX_GUIDE_BYTES,
-        "{}",
-        selection.guide.len()
-    );
+    assert!(selection.guide.len() <= MAX_GUIDE_BYTES);
 }
 
 #[test]
@@ -406,30 +374,121 @@ fn rows_with_or_without_a_former_turn_budget_migrate() {
 }
 
 #[test]
-fn saved_verifier_sizes_become_guide_prose() {
+fn a_verifier_saved_with_a_provider_becomes_that_providers_waiting_lens() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("settings.json"),
         json!({"workspaces_dir":"/w","verification":{"max_rounds":2,"verifiers":[
             {"role":"tester","focus":"Tests"},
             {"role":"reviewer","focus":"Codex","provider":"codex","size":"small"},
-            {"role":"tester","focus":"Claude","size":"big"}]}})
+            {"role":"reviewer","focus":"Style"}]}})
         .to_string(),
     )
     .unwrap();
     let host = seed(home.path(), current, |_| {});
-    let guide = host.model_selection().unwrap().guide;
+    let selection = host.model_selection().unwrap();
+    let row = |focus: &str| {
+        let job = Job::Verifier {
+            focus: focus.into(),
+        };
+        selection.row(&job).unwrap().main.clone()
+    };
+    assert_eq!(row("Codex").first, codex("gpt-6.1-sol", "high"));
+    assert_eq!(row("Codex").then, None, "it waits for Codex");
+    assert_eq!(row("Style").first, codex("gpt-6.1-sol", "medium"));
+    assert_eq!(row("Style").then, Some(claude("sonnet", "medium")));
+    assert_eq!(row("Tests").first, claude("sonnet", "high"));
+    // The saved list itself is kept; only the size and provider are no longer read.
+    assert_eq!(host.settings().verification.verifiers.len(), 3);
+}
+
+#[test]
+fn a_saved_keeper_model_becomes_the_keeper_rows_first_choice() {
+    let home = tempfile::tempdir().unwrap();
+    let host = seed(home.path(), current, |_| {});
+    drop(host);
+    // Give the converted selection a keeper model, as a store from the last release had.
+    let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    let saved: String = db
+        .query_row("SELECT data FROM model_selection", [], |r| r.get(0))
+        .unwrap();
+    let mut legacy: Value = serde_json::from_str(&saved).unwrap();
+    assert!(legacy.get("jobs").is_some());
+    legacy = json!({"revision":1,"guide":"Mine.\n","keeper":claude("sonnet","low"),
+        "providers":{"claude":{"enabled":true,"models":[{"model":"sonnet","effort":"low"}]},
+            "codex":{"enabled":true,"models":[{"model":"gpt-6.1-sol","effort":"medium"}]}},
+        "role_providers":{"implementer":["claude"]}});
+    db.execute_batch("DELETE FROM policy_migrations WHERE id='who-runs-what'")
+        .unwrap();
+    db.execute("UPDATE model_selection SET data=?1", [legacy.to_string()])
+        .unwrap();
+    drop(db);
+    let host = Host::open_detecting(home.path(), &signed_in(&PROVIDERS)).unwrap();
+    let keeper = host
+        .model_selection()
+        .unwrap()
+        .keeper()
+        .unwrap()
+        .main
+        .clone();
+    assert_eq!(keeper.first, claude("sonnet", "low"));
+    assert_eq!(keeper.then, Some(codex("gpt-6.1-sol", "medium")));
+    let notes = host.model_selection().unwrap().notes;
     assert!(
-        guide.contains(
-            "### Verifiers\n- Reviewer · Codex: ran the small Codex profile, gpt-6.1-sol · medium.\n- Tester · Claude: ran the big Claude profile, opus · high.\n"
-        ),
-        "{guide}"
+        notes
+            .iter()
+            .any(|n| n == "The PR keeper used Claude sonnet at low before.")
     );
-    assert!(!guide.contains("Tester · Tests"));
-    // The saved list itself is kept; only the size is no longer read.
-    let verifiers = host.settings().verification.verifiers;
-    assert_eq!(verifiers.len(), 3);
-    assert_eq!(verifiers[1].provider, Some(Provider::Codex));
+}
+
+#[test]
+fn signed_in_clis_and_their_catalogs_seed_the_table_and_every_old_setting_is_noted() {
+    let home = tempfile::tempdir().unwrap();
+    drop(seed(home.path(), current, |_| {}));
+    // A selection from the last release: a retired Claude model, Codex disabled though its CLI
+    // is signed in now, and the section an earlier upgrade wrote into the guide.
+    let guide = "Mine.\n\n## Previous settings (migrated 2026-10-09)\n\n### Tester\n- Claude: small work → sonnet · low.\n";
+    let legacy = json!({"revision":4,"guide":guide,"keeper":claude("retired-sonnet-model","medium"),
+        "providers":{"claude":{"enabled":true,"models":[{"model":"retired-opus-model","effort":"high"}]},
+            "codex":{"enabled":false,"models":[{"model":"gpt-6.1-sol","effort":"high"}]}},
+        "role_providers":{"tester":["claude"]}});
+    let db = Connection::open(home.path().join("workspace.sqlite3")).unwrap();
+    db.execute_batch("DELETE FROM policy_migrations WHERE id='who-runs-what'")
+        .unwrap();
+    db.execute("UPDATE model_selection SET data=?1", [legacy.to_string()])
+        .unwrap();
+    drop(db);
+    std::fs::write(home.path().join("shared/settings/model-guide.md"), guide).unwrap();
+    let host = Host::open_detecting(home.path(), &signed_in(&PROVIDERS)).unwrap();
+    let selection = host.model_selection().unwrap();
+    selection.validate().unwrap();
+    let coordinator = selection.row(&Job::Coordinator).unwrap();
+    assert_eq!(coordinator.main.first, claude("opus", "high"));
+    assert_eq!(coordinator.main.then, Some(codex("gpt-6.1-sol", "high")));
+    assert_eq!(selection.guide, "Mine.\n");
+    // A retired PR keeper model moves to the closest one the CLI lists, and the note keeps it.
+    let keeper = selection.keeper().unwrap();
+    assert_eq!(keeper.main.first, claude("sonnet", "medium"));
+    for line in [
+        "Allowed before: Claude retired-opus-model at high.",
+        "Allowed before: Codex gpt-6.1-sol at high, then disabled.",
+        "Tester used Claude before.",
+        "From the guide: ### Tester",
+        "From the guide: - Claude: small work → sonnet · low.",
+        "The PR keeper used Claude retired-sonnet-model at medium before.",
+    ] {
+        assert!(
+            selection.notes.iter().any(|n| n == line),
+            "{line}: {:?}",
+            selection.notes
+        );
+    }
+    // Re-running changes nothing.
+    drop(host);
+    assert_eq!(
+        Host::open(home.path()).unwrap().model_selection().unwrap(),
+        selection
+    );
 }
 
 #[test]
@@ -498,7 +557,7 @@ fn unpinned_sessions_keep_the_model_they_would_have_used() {
     let selection = host.session_runtime(&ids[0]).unwrap().selection.unwrap();
     assert_eq!(selection.chosen_by, Chooser::Default);
     assert_eq!(selection.reason, "Kept the model it used before");
-    // The mismatched session now runs on its provider's first allowed model.
+    // The mismatched session runs on the Coordinator row's choice on its own provider.
     let mismatch = host.session(&ids[1]).unwrap();
     assert_eq!(
         host.turn_profile(&mismatch).unwrap(),
@@ -551,14 +610,14 @@ fn a_fresh_store_saves_nothing_and_starts_no_agent_until_a_setup_is_saved() {
     assert!(!home.path().join("settings.json").exists());
 
     // With neither CLI signed in the suggestion cannot be saved, so nothing can start.
-    assert!(save(&mut host, &suggest(&detected(&[]))).is_err());
+    assert!(save(&mut host, &suggest(&detected(&[]), &fallback_catalog())).is_err());
     assert!(host.create_project("Still too early").is_err());
     assert!(!home.path().join("settings.json").exists());
 
     for signed_in in [&[Provider::Claude][..], &[Provider::Codex], &PROVIDERS] {
         let home = tempfile::tempdir().unwrap();
         let mut host = Host::open(home.path()).unwrap();
-        let setup = suggest(&detected(signed_in));
+        let setup = suggest(&detected(signed_in), &fallback_catalog());
         let provider = signed_in[0];
         assert_eq!(setup.verification.verifiers.len(), signed_in.len() + 1);
         save(&mut host, &setup).unwrap();
@@ -574,6 +633,10 @@ fn a_fresh_store_saves_nothing_and_starts_no_agent_until_a_setup_is_saved() {
             }
         );
         assert_eq!(host.settings().verification, setup.verification);
+        // The app's host learns which CLIs are signed in as it starts.
+        for (provider, status) in detected(signed_in) {
+            host.record_detection(provider, &status);
+        }
         host.create_project("Ready").unwrap();
         let coordinator = host.sessions().unwrap().remove(0);
         assert_eq!(coordinator.provider, provider);
@@ -585,12 +648,12 @@ fn a_fresh_store_saves_nothing_and_starts_no_agent_until_a_setup_is_saved() {
 fn a_refused_first_save_keeps_the_verifiers_unsaved_too() {
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open(home.path()).unwrap();
-    let mut setup = suggest(&detected(&PROVIDERS));
+    let mut setup = suggest(&detected(&PROVIDERS), &fallback_catalog());
     setup.verification.verifiers.clear();
     assert!(save(&mut host, &setup).is_err());
     assert!(!host.model_selection().unwrap().is_saved());
-    let mut setup = suggest(&detected(&PROVIDERS));
-    setup.selection.role_providers.clear();
+    let mut setup = suggest(&detected(&PROVIDERS), &fallback_catalog());
+    setup.selection.jobs.clear();
     assert!(save(&mut host, &setup).is_err());
     assert!(!home.path().join("shared/settings/review.json").exists());
 }
@@ -610,9 +673,15 @@ fn a_first_save_whose_selection_write_fails_writes_no_shared_file() {
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open(home.path()).unwrap();
     refuse_selection_writes(home.path());
-    assert!(save(&mut host, &suggest(&detected(&PROVIDERS))).is_err());
+    assert!(
+        save(
+            &mut host,
+            &suggest(&detected(&PROVIDERS), &fallback_catalog())
+        )
+        .is_err()
+    );
     assert!(!host.model_selection().unwrap().is_saved());
-    for file in ["review.json", "model-guide.md"] {
+    for file in ["review.json", "model-guide.md", "models.json"] {
         assert!(!home.path().join("shared/settings").join(file).exists());
     }
 }
@@ -624,13 +693,14 @@ fn a_combined_save_whose_selection_write_fails_puts_the_review_settings_and_guid
     host.set_verification(VerificationSettings::default())
         .unwrap();
     let files = || {
-        ["review.json", "model-guide.md"]
+        ["review.json", "model-guide.md", "models.json"]
             .map(|file| std::fs::read(home.path().join("shared/settings").join(file)).unwrap())
     };
     let before = (files(), host.model_selection().unwrap());
     refuse_selection_writes(home.path());
-    let mut setup = suggest(&detected(&[Provider::Claude]));
+    let mut setup = suggest(&detected(&[Provider::Claude]), &fallback_catalog());
     setup.selection.guide = "A new guide.".into();
+    setup.selection.switch_at = 90;
     setup.verification.max_rounds += 1;
     assert!(save(&mut host, &setup).is_err());
     assert_eq!((files(), host.model_selection().unwrap()), before);
@@ -641,7 +711,8 @@ fn a_combined_save_refused_for_the_keeper_changes_nothing() {
     let home = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(home.path()).unwrap();
     let mut selection = host.model_selection().unwrap();
-    selection.keeper = Some(claude("sonnet", "medium"));
+    let first = claude("sonnet", "medium");
+    selection.set_keeper(Some(Line { first, then: None }));
     host.set_model_selection(&selection).unwrap();
     host.set_keeper(KeeperSettings {
         comments: true,
@@ -649,7 +720,8 @@ fn a_combined_save_refused_for_the_keeper_changes_nothing() {
     })
     .unwrap();
     let before = (host.settings(), host.model_selection().unwrap());
-    let mut setup = suggest(&detected(&PROVIDERS));
+    let mut setup = suggest(&detected(&PROVIDERS), &fallback_catalog());
+    setup.selection.set_keeper(None);
     setup.selection.guide = "A new guide.".into();
     setup.verification.max_rounds += 1;
     let refused = save(&mut host, &setup).unwrap_err().to_string();
@@ -665,10 +737,7 @@ fn reopening_a_migrated_store_changes_nothing() {
     });
     let mut edited = host.model_selection().unwrap();
     edited.guide.push_str("\nRaise effort for migrations.\n");
-    edited.role_providers.insert(
-        Role::Implementer,
-        BTreeSet::from([Provider::Claude, Provider::Codex]),
-    );
+    edited.row_mut(&Job::Implementer).unwrap().small = None;
     host.set_model_selection(&edited).unwrap();
     drop(host);
     let settings = || std::fs::read(home.path().join("settings.json")).ok();
@@ -683,7 +752,7 @@ fn saving_validates_the_whole_selection_and_bumps_the_revision() {
     let mut host = Host::open_set_up(home.path()).unwrap();
     let saved = host.model_selection().unwrap();
     let mut invalid = saved.clone();
-    invalid.role_providers.insert(Role::Tester, BTreeSet::new());
+    invalid.jobs.retain(|row| row.job != Job::Tester);
     invalid.guide = "A guide that is not saved.".into();
     assert!(host.set_model_selection(&invalid).is_err());
     assert_eq!(host.model_selection().unwrap(), saved);
@@ -700,14 +769,13 @@ fn chat_override_is_unlimited_and_preserves_provider_identity() {
     let root = host.sessions().unwrap().remove(0);
     let runtime = host.session_runtime(&root.id).unwrap();
     assert_eq!(runtime.profile, Some(claude("opus", "high")));
-    assert_eq!(runtime.selection.unwrap().reason, "Role default");
-    let unlisted = claude("sonnet", "max");
-    assert!(
-        host.model_selection()
-            .unwrap()
-            .permits(root.role, &unlisted)
-            .is_err()
+    let selection = runtime.selection.unwrap();
+    assert_eq!(
+        (selection.chosen_by, selection.reason.as_str()),
+        (Chooser::Wiffletree, "First choice")
     );
+    // No row names Sonnet at max.
+    let unlisted = claude("sonnet", "max");
     host.configure_session(&root.id, unlisted.clone()).unwrap();
     let runtime = host.session_runtime(&root.id).unwrap();
     assert_eq!(runtime.profile, Some(unlisted.clone()));

@@ -126,6 +126,8 @@ pub struct Host {
     merge_tries: [Option<skills::Tried>; 4],
     /// Model runs of merges, for the service to start off the host thread.
     merge_runs: Vec<skills::MergeRun>,
+    /// By provider, whether detection last found its CLI installed and signed in.
+    pub(crate) detected: std::collections::BTreeMap<Provider, bool>,
 }
 /// A report that set its ticket's state while the reporter's turn ran.
 pub(crate) struct MidTurnReport {
@@ -229,6 +231,14 @@ pub fn page_limit(limit: usize) -> Result<i64> {
 
 impl Host {
     pub fn open(home: impl AsRef<Path>) -> Result<Self> {
+        Self::open_detecting(home, &detection::report)
+    }
+    /// `open`, where the one-time upgrade to the Who runs what table learns which CLIs are
+    /// signed in and which models they list from `detect`. Only that upgrade calls it.
+    pub fn open_detecting(
+        home: impl AsRef<Path>,
+        detect: &dyn Fn(Provider) -> ProviderReport,
+    ) -> Result<Self> {
         let home = home.as_ref();
         fs::create_dir_all(home)?;
         let home = fs::canonicalize(home)?;
@@ -295,6 +305,7 @@ impl Host {
             merges_wait_for_sync: false,
             merge_tries: Default::default(),
             merge_runs: vec![],
+            detected: Default::default(),
         };
         host.recover()?;
         host.end_interrupted_publishes()?;
@@ -304,6 +315,8 @@ impl Host {
         // After the selection's migration, which may write the guide; nothing has read a shared
         // setting yet.
         host.move_into_shared_folder()?;
+        // After the move, so the shared review settings and guide are where it reads them.
+        host.migrate_who_runs_what(detect)?;
         sync::remove_staging(&host.home)?;
         host.backfill_usage()?;
         if let Err(error) = host.skills().record_new_stock_versions() {
@@ -504,9 +517,7 @@ impl Host {
         };
         let selection = self.model_selection()?;
         ensure!(selection.is_saved(), policies::NO_SETUP);
-        let prefill = selection
-            .prefill(Role::ProjectOrchestrator)
-            .context("Enable a provider in Models first")?;
+        let pick = self.resolve_job(&Job::Coordinator, false)?;
         let session = Session {
             id: new_id(),
             project_id: project.id.clone(),
@@ -514,7 +525,7 @@ impl Host {
             repository_id: None,
             name: project.name.clone(),
             role: Role::ProjectOrchestrator,
-            provider: prefill.provider,
+            provider: pick.profile.provider,
             status: Status::Ready,
             archived: false,
         };
@@ -532,7 +543,7 @@ impl Host {
             &project.name,
         )?;
         tx.commit()?;
-        self.pin(&session.id, prefill, Chooser::Default, "Role default")?;
+        self.pin_pick(&session, &pick)?;
         Ok(project)
     }
     pub fn rename_project(&mut self, id: &str, name: &str) -> Result<Project> {
@@ -1296,7 +1307,9 @@ impl Host {
                 serde_json::to_value(self.quotas()?)?
             }
             Command::InspectProvider { provider } => {
-                serde_json::to_value(detection::report(provider))?
+                let report = detection::report(provider);
+                self.record_detection(provider, &report.status);
+                serde_json::to_value(report)?
             }
             Command::MeasureContext {
                 session_id,
@@ -1413,6 +1426,7 @@ impl Host {
                 selection,
                 verification,
             } => serde_json::to_value(self.set_setup(&selection, verification)?)?,
+            Command::DismissModelNotes => serde_json::to_value(self.dismiss_model_notes()?)?,
             Command::ResolveAttention { id, answer } => {
                 serde_json::to_value(self.resolve_attention(&id, &answer)?)?
             }

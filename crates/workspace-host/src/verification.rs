@@ -154,7 +154,7 @@ fn level_may_start(
     }
     ensure!(
         level.kind == LevelKind::Recheck || full_reviews(ticket) < settings.max_cycles as usize,
-        "Ticket \"{}\" has used its {} full reviews; accept it with a waiver, close it or ask the human. Only the human can raise the limit, in Models → Review.",
+        "Ticket \"{}\" has used its {} full reviews; accept it with a waiver, close it or ask the human. Only the human can raise the limit, in Models → Reviews.",
         ticket.title,
         settings.max_cycles
     );
@@ -355,10 +355,10 @@ pub(crate) struct Slots {
     pub stalled: Vec<(Ticket, String)>,
 }
 
-/// Who starts a cycle: the coordinator with its choice of models, or the host for the PR keeper
-/// with what a withdrawal restores.
+/// Who starts a cycle: the coordinator, asking for small work or not, or the host for the PR
+/// keeper with what a withdrawal restores.
 enum Starter<'a> {
-    Coordinator(&'a [VerifierChoice]),
+    Coordinator { small: bool },
     Keeper(&'a KeeperReview),
 }
 
@@ -396,16 +396,11 @@ impl Host {
     /// cycle already waits for one, the cycle queues instead: its verifiers are chosen now and
     /// sent nothing until `start_queued_cycles` starts it. A re-check starts only on a ticket whose latest cycle
     /// passed, no level may leave out a configured verifier that has an open finding, and only
-    /// full reviews count against the cycle cap. `choices` gives each verifier of the level, by
-    /// focus, the coordinator's exact model and reason; a new verifier is pinned to it. An
-    /// existing one is reused only at the same profile; otherwise it is archived and a fresh one
-    /// takes the choice, so no pinned model ever changes.
-    pub fn verify_ticket(
-        &mut self,
-        ticket_id: &str,
-        level: &str,
-        choices: &[VerifierChoice],
-    ) -> Result<Ticket> {
+    /// full reviews count against the cycle cap. Each verifier of the level resolves its row in
+    /// Who runs what, for small work when `small`; a new verifier is pinned to what it resolves
+    /// to. An existing one is reused only at the same profile; otherwise it is archived and a
+    /// fresh one starts, so no pinned model ever changes.
+    pub fn verify_ticket(&mut self, ticket_id: &str, level: &str, small: bool) -> Result<Ticket> {
         let ticket = self.ticket(ticket_id)?;
         if let Some(cycle) = ticket.running_cycle() {
             bail!("Verification cycle {} is already running", cycle.cycle);
@@ -419,11 +414,11 @@ impl Host {
             "Ticket is {}; verify it once its implementer reports ready_for_testing",
             ticket.state
         );
-        self.start_cycle(ticket, level, Starter::Coordinator(choices))
+        self.start_cycle(ticket, level, Starter::Coordinator { small })
     }
     /// Starts the PR keeper's review of the commit it moved onto the ticket's branch, at the
-    /// keeper's re-check level, with one round and the models the coordinator last chose for
-    /// those verifiers on the ticket. `review` is what a withdrawal restores.
+    /// keeper's re-check level, with one round and the models those verifiers' rows resolve to.
+    /// `review` is what a withdrawal restores.
     pub(crate) fn keeper_review(
         &mut self,
         ticket_id: &str,
@@ -449,45 +444,20 @@ impl Host {
             !ticket.ledger.iter().any(|e| e.status == EntryStatus::Open),
             "the ticket has an open finding"
         );
-        self.keeper_choices(ticket, &verifiers)?;
+        self.verifier_picks(&verifiers, false)?;
         Ok(name)
     }
-    /// Each verifier's model as the coordinator last chose it on this ticket: the profile of
-    /// the session that last ran its focus, still allowed for it. No model is ever substituted.
-    fn keeper_choices(
-        &self,
-        ticket: &Ticket,
-        verifiers: &[&VerifierConfig],
-    ) -> Result<Vec<(ModelProfile, String)>> {
-        let selection = self.model_selection()?;
-        let cycles: Vec<&Verification> = ticket
-            .previous_cycles
-            .iter()
-            .chain(&ticket.verification)
-            .collect();
-        let mut chosen = vec![];
-        for verifier in verifiers {
-            let label = verifier.role.agent_label(Some(&verifier.focus));
-            let last = cycles
-                .iter()
-                .rev()
-                .flat_map(|cycle| cycle.rounds.iter().rev())
-                .flat_map(|round| &round.verifiers)
-                .find(|run| run.focus.eq_ignore_ascii_case(verifier.focus.trim()));
-            let profile = last
-                .map(|run| self.session_runtime(&run.session_id))
-                .transpose()?
-                .and_then(|runtime| runtime.profile)
-                .with_context(|| format!("{label} has never run on this ticket, so the coordinator chose no model for it"))?;
-            selection
-                .permits_verifier(verifier, &profile)
-                .map_err(|rejection| anyhow::anyhow!("{label}: {rejection}"))?;
-            let reason = format!(
-                "The model the coordinator last chose for {label} on this ticket, for the PR keeper's review"
-            );
-            chosen.push((profile, reason));
-        }
-        Ok(chosen)
+    /// What each verifier's row resolves to now, for small work when `small`. One that cannot
+    /// start on this machine starts none of them.
+    fn verifier_picks(&self, verifiers: &[&VerifierConfig], small: bool) -> Result<Vec<Pick>> {
+        (verifiers.iter())
+            .map(|verifier| {
+                let job = Job::Verifier {
+                    focus: verifier.focus.clone(),
+                };
+                self.resolve_job(&job, small)
+            })
+            .collect()
     }
     /// Starts a cycle at the level named `level` on a ticket with no running cycle; see
     /// `verify_ticket` and `keeper_review`.
@@ -499,19 +469,17 @@ impl Host {
         level_may_start(&ticket, &settings, level)?;
         let cycle = ticket.next_cycle();
         let coordinator = self.session(&ticket.coordinator_id)?;
-        let (chosen, review) = match by {
-            Starter::Coordinator(choices) => (
-                self.verifier_choices(&coordinator, level, &level_verifiers, choices)?,
-                None,
-            ),
+        let (small, review) = match by {
+            Starter::Coordinator { small } => (small, None),
             Starter::Keeper(review) => (
-                self.keeper_choices(&ticket, &level_verifiers)?,
+                false,
                 Some(KeeperReview {
                     cycle,
                     ..review.clone()
                 }),
             ),
         };
+        let chosen = self.verifier_picks(&level_verifiers, small)?;
         let keeper = review.is_some();
         let commit = self.checkout_head(&ticket)?;
         // A cycle queues behind every slot holder and every cycle queued before it.
@@ -520,14 +488,15 @@ impl Host {
         let mut replaced = vec![];
         let started = self.atomically(|host| {
             let mut verifiers = vec![];
-            for (config, (profile, reason)) in level_verifiers.into_iter().zip(chosen) {
+            for (config, pick) in level_verifiers.into_iter().zip(chosen) {
                 let existing =
                     host.existing_assignment(&ticket.id, config.role, Some(&config.focus))?;
                 // A verifier keeps its model: one pinned to another profile is retired, and a
-                // fresh session takes the coordinator's choice, as in a first cycle.
+                // fresh session takes what its row resolves to, as in a first cycle.
                 let reused = match existing {
                     Some(agent)
-                        if host.session_runtime(&agent.id)?.profile.as_ref() == Some(&profile) =>
+                        if host.session_runtime(&agent.id)?.profile.as_ref()
+                            == Some(&pick.profile) =>
                     {
                         Some(agent)
                     }
@@ -540,24 +509,20 @@ impl Host {
                     None => None,
                 };
                 let agent = match reused {
-                    Some(agent) => {
-                        // Never start a round that a verifier could only run on a substitute.
-                        if let Some(reason) = host.hold_reason(&agent)? {
-                            bail!("{}: {reason}", agent.name);
-                        }
-                        agent
-                    }
+                    Some(agent) => agent,
                     None => {
                         let (agent, _) = host.ticket_agent(
                             &ticket,
                             config.role,
-                            profile.provider,
+                            pick.profile.provider,
                             Some(&config.focus),
                         )?;
-                        host.record_choice(&coordinator, &agent, profile, &reason)?;
                         agent
                     }
                 };
+                // A reused verifier keeps its model and takes this cycle's reason, and waits
+                // when its provider is spent.
+                host.pin_pick(&agent, &pick)?;
                 verifiers.push(VerifierRun {
                     session_id: agent.id.clone(),
                     role: config.role,
@@ -588,6 +553,7 @@ impl Host {
                     verifiers,
                 }],
                 queued_at,
+                small,
                 keeper,
             });
             let milestone = if queued_at.is_some() {
@@ -672,9 +638,12 @@ impl Host {
                 break;
             }
             changed = true;
+            let mut replaced = vec![];
             let started = self.atomically(|host| {
                 ensure!(is_clean(&ticket)?, UNCOMMITTED);
                 let commit = head(&ticket)?;
+                // Its verifiers resolve their rows now, when they start, not when it queued.
+                replaced = host.resolve_queued_verifiers(&mut ticket)?;
                 let verification = ticket.verification.as_mut().context("No verification")?;
                 verification.queued_at = None;
                 verification.rounds[0].commit = commit;
@@ -690,11 +659,42 @@ impl Host {
                 )
             });
             match started {
-                Ok(()) => free -= 1,
+                Ok(()) => {
+                    free -= 1;
+                    self.stop_archived(&replaced);
+                }
                 Err(error) => self.end_unstartable(&ticket.id, &format!("{error:#}"))?,
             }
         }
         Ok(changed)
+    }
+    /// Pins each verifier of a queued cycle's first round to what its row resolves to now. One
+    /// whose row now resolves to another provider is retired and a fresh one takes its place,
+    /// so no pinned conversation changes provider. Returns the retired sessions.
+    fn resolve_queued_verifiers(&mut self, ticket: &mut Ticket) -> Result<Vec<Session>> {
+        let verification = ticket.verification.as_ref().context("No verification")?;
+        let (cycle, small) = (verification.cycle, verification.small);
+        let mut runs = verification.rounds[0].verifiers.clone();
+        let mut replaced = vec![];
+        for run in &mut runs {
+            let job = Job::Verifier {
+                focus: run.focus.clone(),
+            };
+            let pick = self.resolve_job(&job, small)?;
+            let mut agent = self.session(&run.session_id)?;
+            if agent.provider != pick.profile.provider {
+                replaced.extend(self.archive_in_change(&agent.id, Some("verifier_replaced"))?);
+                (agent, _) =
+                    self.ticket_agent(ticket, run.role, pick.profile.provider, Some(&run.focus))?;
+                run.session_id = agent.id.clone();
+                run.message_id = format!("verify:{}:{cycle}:1:{}", ticket.id, agent.id);
+            }
+            self.pin_pick(&agent, &pick)?;
+        }
+        if let Some(verification) = ticket.verification.as_mut() {
+            verification.rounds[0].verifiers = runs;
+        }
+        Ok(replaced)
     }
     /// Ends a cycle that cannot start or go on as blocked, and tells its coordinator why.
     fn end_unstartable(&mut self, ticket_id: &str, why: &str) -> Result<()> {
@@ -772,59 +772,6 @@ impl Host {
             )?;
             Ok(ticket)
         })
-    }
-    /// Pairs every verifier of `level` with the coordinator's choice for it, checking each
-    /// against the machine's model selection and the verifier's provider. Nothing is substituted:
-    /// one refusal starts no verifier.
-    fn verifier_choices(
-        &self,
-        coordinator: &Session,
-        level: &ReviewLevel,
-        verifiers: &[&VerifierConfig],
-        choices: &[VerifierChoice],
-    ) -> Result<Vec<(ModelProfile, String)>> {
-        let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
-        if let Some(outside) = choices
-            .iter()
-            .find(|c| !verifiers.iter().any(|v| same(&v.focus, &c.focus)))
-        {
-            let focuses: Vec<&str> = verifiers.iter().map(|v| v.focus.as_str()).collect();
-            bail!(
-                "{} is not part of {}. Choose a model only for {}.",
-                outside.focus.trim(),
-                level.name,
-                focuses.join(", ")
-            );
-        }
-        let selection = self.model_selection()?;
-        let mut chosen = vec![];
-        for verifier in verifiers {
-            let label = verifier.role.agent_label(Some(&verifier.focus));
-            let mut matching = choices.iter().filter(|c| same(&c.focus, &verifier.focus));
-            let choice = matching.next().with_context(|| {
-                format!(
-                    "Choose a profile and reason for {label}, which {} runs",
-                    level.name
-                )
-            })?;
-            ensure!(matching.next().is_none(), "Choose {label}'s model once");
-            let reason = Selection::check_reason(&choice.reason)?.to_owned();
-            if let Err(rejection) = selection.permits_verifier(verifier, &choice.profile) {
-                Self::event(
-                    &self.db,
-                    &coordinator.project_id,
-                    Some(&coordinator.id),
-                    "model_rejected",
-                    &format!(
-                        "{} asked for {} ({label}). {rejection} No verifier was started.",
-                        coordinator.name, choice.profile
-                    ),
-                )?;
-                bail!("{rejection} No verifier was started.");
-            }
-            chosen.push((choice.profile.clone(), reason));
-        }
-        Ok(chosen)
     }
     /// Sends the current round's messages and marks the ticket `verifying`. Each message carries
     /// the ticket's review memory: the diff under review, the entries already decided and the

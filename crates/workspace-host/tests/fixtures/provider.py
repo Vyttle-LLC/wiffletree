@@ -12,6 +12,10 @@ args=sys.argv[1:]
 if args[:2]==['auth','status']:
     print(json.dumps({'loggedIn':True,'email':'fixture@example.invalid','orgId':'fixture-org'}))
     sys.exit(0)
+if args[:2]==['login','status']:
+    # Codex prints its sign-in status on stderr.
+    print('Logged in using ChatGPT',file=sys.stderr)
+    sys.exit(0)
 if '/context' in args:
     assert args[args.index('--system-prompt-snapshot')+1]=='off', args
     if os.environ.get('WORKSPACE_TEST_PROMPT_DIR'):
@@ -159,11 +163,6 @@ def model_usage(sid,spent):
     # Replaced whole, so a turn stopped mid-write leaves the last total and not an empty file.
     fresh=path.with_suffix('.writing');fresh.write_text(json.dumps(total));os.replace(fresh,path);return total
 def emit(value):print(json.dumps(value),flush=True)
-def pick(ctx,role,provider=None):
-    # The first allowed model of the provider, or of the role's first provider.
-    ms=ctx['model_selection'];providers=[provider] if provider else ms['role_providers'].get(role) or [p['provider'] for p in ms['providers']]
-    access=next(p for p in ms['providers'] if p['provider'] in providers);model=access['models'][0]
-    return {'provider':access['provider'],'model':model['model'],'effort':model['effort']}
 try:
     rpc('initialize',{'protocolVersion':'2024-11-05','capabilities':{},'clientInfo':{'name':'test','version':'1'}})
     sid=resumed or str(uuid.uuid4())
@@ -235,13 +234,12 @@ try:
             # FAIL_CODEX_ROUND_1 makes the Codex verifier fail round 1, so the implementer fixes it.
             brief='Create result.txt containing verified'+(' FAIL_CODEX_ROUND_1' if 'FAIL_CODEX_ROUND_1' in prompt else '')
             ticket=tool('create_ticket',repository_id=ctx['repositories'][0]['id'],title='Fixture ticket',brief=brief)
-            tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture',profile=pick(ctx,'implementer'),reason='Fixture implementer')
+            tool('assign_ticket',ticket_id=ticket['id'],role='implementer',instruction='Implement fixture')
         for ticket in ctx['tickets']:
             if ticket['state']=='ready_for_testing':
                 assert 'Fixture planned' in prompt and 'Fixture written' in prompt,'Progress rides along with the ready report'
                 level=ctx['model_selection']['review_levels'][0]
-                verifiers=[{'focus':v['focus'],'profile':pick(ctx,v['role'],v.get('provider')),'reason':'Fixture verifier'} for v in ctx['model_selection']['verifiers'] if v['focus'] in level['verifiers']]
-                tool('verify_ticket',ticket_id=ticket['id'],level=level['name'],verifiers=verifiers)
+                tool('verify_ticket',ticket_id=ticket['id'],level=level['name'])
             elif ticket['state']=='passed':
                 tool('accept_ticket',ticket_id=ticket['id'])
         # Coordinator control: the tool results come back as the reply, for the test to read.

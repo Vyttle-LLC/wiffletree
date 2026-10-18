@@ -803,18 +803,16 @@ impl Host {
         self.recall_skill_histories();
     }
     /// Merges the skill's rewrite as plain text where nothing overlaps. Passages that overlap go
-    /// to the PR keeper's model when it is a Claude model, in a run the service starts off the
-    /// host thread; with none, the skill's page offers a wording for each.
+    /// to the PR keeper row's Claude choice, in a run the service starts off the host thread;
+    /// with none, the skill's page offers a wording for each.
     pub(crate) fn merge_skill(&mut self, skill: Skill, automatic: bool) -> Result<()> {
         self.merge_tries[skill as usize] = None;
         let Some((from, passages)) = self.skills().merge_update(skill, automatic)? else {
             return Ok(());
         };
-        let keeper = self
-            .saved_selection()?
-            .and_then(|selection| selection.keeper);
-        let standing = match keeper {
-            Some(profile) if profile.provider == Provider::Claude => {
+        let selection = self.saved_selection()?.unwrap_or_default();
+        let standing = match selection.sorting_model().cloned() {
+            Some(profile) => {
                 let count = passages.len();
                 self.merge_runs.push(MergeRun {
                     skill,
@@ -825,9 +823,9 @@ impl Host {
                 });
                 MergeStanding::Merging { passages: count }
             }
-            keeper => MergeStanding::NeedsModel {
+            None => MergeStanding::NeedsModel {
                 passages,
-                codex: keeper.is_some(),
+                codex: selection.keeper().is_some(),
             },
         };
         self.merge_tries[skill as usize] = Some(Tried { from, standing });
@@ -2332,18 +2330,10 @@ mod tests {
         before
     }
 
-    /// The PR keeper's model made the first allowed model of `provider`.
+    /// The PR keeper's row made one model of `provider`.
     fn keeper_model(host: &mut Host, provider: Provider) -> ModelProfile {
-        let mut selection = host.model_selection().unwrap();
-        let allowed = selection.allowed(provider)[0].clone();
-        let profile = ModelProfile {
-            provider,
-            model: allowed.model,
-            effort: allowed.effort,
-        };
-        selection.keeper = Some(profile.clone());
-        host.set_model_selection(&selection).unwrap();
-        profile
+        crate::keeper::tests::set_keeper(host, Some(provider));
+        crate::keeper::tests::keeper_line(provider).first
     }
 
     /// The one run this host has to start.

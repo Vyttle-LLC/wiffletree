@@ -1,7 +1,7 @@
 //! The models a provider's CLI offers on this machine, and the lineup this app knows without
 //! asking it: the catalog shown until a CLI lists its own, each provider's usual efforts and the
-//! models the first-run setup suggests.
-use crate::{AllowedModel, Provider, ProviderStatus};
+//! short names reasons use.
+use crate::{Provider, ProviderStatus};
 use serde::{Deserialize, Serialize};
 
 /// A model a provider offers, with the efforts it reports.
@@ -21,38 +21,38 @@ pub struct ProviderReport {
     pub models: Vec<ModelOption>,
 }
 
-/// A model this app knows without asking its CLI, and the efforts the first-run setup allows
-/// it at, none when the setup leaves it out.
+/// A model this app knows without asking its CLI.
 struct Known {
     provider: Provider,
     model: &'static str,
     label: &'static str,
-    suggested_efforts: &'static [&'static str],
+    /// What reasons call it.
+    name: &'static str,
 }
 const LINEUP: [Known; 4] = [
     Known {
         provider: Provider::Claude,
         model: "opus",
         label: "Opus · latest",
-        suggested_efforts: &["high", "medium"],
+        name: "Opus",
     },
     Known {
         provider: Provider::Claude,
         model: "sonnet",
         label: "Sonnet · latest",
-        suggested_efforts: &["high", "medium"],
+        name: "Sonnet",
     },
     Known {
         provider: Provider::Codex,
         model: "gpt-6.1-sol",
         label: "GPT 6.1 Sol",
-        suggested_efforts: &["high", "medium"],
+        name: "GPT 6.1 Sol",
     },
     Known {
         provider: Provider::Codex,
         model: "gpt-6-astra",
         label: "GPT 6 Astra",
-        suggested_efforts: &[],
+        name: "GPT 6 Astra",
     },
 ];
 
@@ -77,15 +77,9 @@ pub fn usual_efforts(provider: Provider) -> &'static [&'static str] {
     }
 }
 
-/// The models and efforts the first-run setup allows for `provider`, in the order it lists them.
-pub fn suggested_models(provider: Provider) -> Vec<AllowedModel> {
+/// "Opus" for `opus`, as reasons name a model; a model this app does not know by its ID.
+pub fn model_name(provider: Provider, model: &str) -> String {
     (LINEUP.iter())
-        .filter(|known| known.provider == provider)
-        .flat_map(|known| {
-            (known.suggested_efforts.iter()).map(|effort| AllowedModel {
-                model: known.model.into(),
-                effort: (*effort).into(),
-            })
-        })
-        .collect()
+        .find(|known| known.provider == provider && known.model == model)
+        .map_or_else(|| model.to_owned(), |known| known.name.to_owned())
 }

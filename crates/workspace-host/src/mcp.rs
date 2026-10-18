@@ -16,12 +16,12 @@ pub fn read_json(reader: &mut impl BufRead) -> Result<Option<Value>> {
 }
 pub fn tools() -> Value {
     let string = json!({"type":"string"});
-    let profile = json!({"type":"object","properties":{"provider":{"type":"string","enum":["claude","codex"]},"model":string,"effort":string},"required":["provider","model","effort"],"additionalProperties":false});
+    let small = json!({"type":"boolean","description":"Ask for small work: the row's small-work line, when it has one. Defaults to false."});
     let tool = |name: &str, description: &str, properties: Value, required: Vec<&str>| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}});
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the providers and models allowed on this machine, each role's providers, the configured verifiers and review levels with their round and cycle caps, and the guide. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, stacked_on, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the Who runs what table, with each job's first and then choices (then null means it waits), its small-work line and what each would start on right now and why; the switch threshold; the configured verifiers and review levels with their round and cycle caps; and the human's optional notes. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, stacked_on, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
             json!({"ticket_id":string}),
             vec![]
         ),
@@ -33,15 +33,15 @@ pub fn tools() -> Value {
         ),
         tool(
             "assign_ticket",
-            "Coordinator: assign a dedicated agent. Choose an exact profile from model_selection in workspace_context, within the role's providers (any enabled provider for a reviewer) and the models allowed on this machine, guided by its guide, and give a one-line reason naming the deciding factor. Other choices are refused and nothing is substituted. Existing assignments with the same role and focus are returned unchanged; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
-            json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"instruction":string,"profile":profile,"reason":string}),
-            vec!["ticket_id", "role", "instruction", "profile", "reason"]
+            "Coordinator: assign a dedicated agent. You never choose its model: Wiffletree starts it on its job's row in Who runs what, moving to the next choice when a subscription is past the switch threshold, or pinning the earliest reset and holding it when every choice is. A focus that names a configured verifier uses that verifier's row; for any other reviewer, give like: a configured verifier's focus to use its row, or leave it out for the first reviewer's. Pass small: true for small, contained work. The result names the model and the reason. Existing assignments with the same role and focus are returned unchanged; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
+            json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"instruction":string,"small":small,"like":string}),
+            vec!["ticket_id", "role", "instruction"]
         ),
         tool(
             "verify_ticket",
-            "Coordinator: once the implementer reports ready_for_testing, start a review at a level from model_selection.review_levels, chosen by each level's use_when line. Every verifier of that level starts on the ticket's current commit at once, and all of them must pass. Give the level's name and, for each verifier of that level and no other, its focus, an exact profile within its provider (or, without one, its role's providers) and the models allowed on this machine, guided by the guide, and a one-line reason. A re-check level starts only on a ticket whose last review passed, and no level may leave out a verifier that still has an open finding. Any refusal starts no verifier, and nothing is substituted. A verifier session that already exists under that focus is reused only if your profile matches its pinned one; otherwise it is archived and a fresh verifier starts on your choice. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. At most two cycles run across this machine at once: a further call queues, says so in its result, and starts by itself when a slot frees. You wake once, when the cycle passes or is blocked. A ticket may start only as many full reviews as the cycle cap allows; re-checks are not counted.",
-            json!({"ticket_id":string,"level":string,"verifiers":{"type":"array","items":{"type":"object","properties":{"focus":string,"profile":profile,"reason":string},"required":["focus","profile","reason"],"additionalProperties":false}}}),
-            vec!["ticket_id", "level", "verifiers"]
+            "Coordinator: once the implementer reports ready_for_testing, start a review at a level from model_selection.review_levels, chosen by each level's use_when line. Every verifier of that level starts on the ticket's current commit at once, and all of them must pass. Give the level's name; each verifier starts on its row in Who runs what, as assign_ticket does, and small: true asks the whole level for small work. A verifier whose every choice is spent waits for the reset and you are told; the rest run. A re-check level starts only on a ticket whose last review passed, and no level may leave out a verifier that still has an open finding. Any refusal starts no verifier. A verifier session that already exists under that focus is reused only if its row resolves to its pinned model; otherwise it is archived and a fresh verifier starts. Verifiers are read-only; failures go straight back to the implementer and only failed verifiers re-run, up to the round cap. At most two cycles run across this machine at once: a further call queues, says so in its result, and starts by itself when a slot frees. You wake once, when the cycle passes or is blocked. A ticket may start only as many full reviews as the cycle cap allows; re-checks are not counted.",
+            json!({"ticket_id":string,"level":string,"small":small}),
+            vec!["ticket_id", "level"]
         ),
         tool(
             "send_message",

@@ -96,6 +96,9 @@ pub fn set_model_selection(
         verification,
     })
 }
+pub fn dismiss_model_notes() -> Ask<ModelSelection> {
+    Ask::new(Command::DismissModelNotes)
+}
 pub fn skill_history(skill: Skill) -> Ask<skills::History> {
     Ask::new(Command::SkillHistory { skill })
 }

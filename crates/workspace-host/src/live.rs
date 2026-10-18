@@ -57,7 +57,7 @@ impl Host {
         let mut session = self.session(id)?;
         ensure!(
             session.role != Role::Keeper,
-            "A PR keeper agent keeps the model it was created with; choose the PR keeper's model in Models"
+            "A PR keeper agent takes its model from the PR keeper's row in Models → Who runs what"
         );
         ensure!(
             session.status != Status::Working,
@@ -70,6 +70,8 @@ impl Host {
         );
         session.provider = profile.provider;
         runtime.profile = Some(profile);
+        // The human's choice wins: it never waits for a reset.
+        runtime.waiting = false;
         runtime.selection = Some(Selection {
             chosen_by: Chooser::Human,
             reason: "Chosen by you".into(),
@@ -500,18 +502,7 @@ impl Host {
             "memory":self.logs(&session.project_id,None,10)?,
             "open_questions":self.open_questions(&session)?});
         if session.role == Role::ProjectOrchestrator {
-            let selection = self.model_selection()?;
-            let providers: Vec<_> = PROVIDERS
-                .into_iter()
-                .filter(|&p| selection.is_enabled(p))
-                .map(|p| json!({"provider": p, "models": selection.allowed(p)}))
-                .collect();
-            let verification = self.settings().verification;
-            context["model_selection"] = json!({"revision": selection.revision,
-                "providers": providers, "role_providers": selection.role_providers,
-                "verifiers": verification.verifiers, "review_levels": verification.levels,
-                "max_rounds": verification.max_rounds,
-                "max_cycles": verification.max_cycles, "guide": selection.guide});
+            context["model_selection"] = self.model_context()?;
         }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {
@@ -634,46 +625,75 @@ impl Host {
             })
             .collect())
     }
-    /// A coordinator's exact model and one-line reason, checked against the machine's model
-    /// selection. A refusal is logged on the coordinator; nothing is substituted.
-    fn coordinator_choice(
-        &self,
-        coordinator: &Session,
-        role: Role,
-        args: &Value,
-    ) -> Result<(ModelProfile, String)> {
-        for removed in ["size", "complexity", "provider"] {
+    /// The Who runs what table as the coordinator reads it: each row's lines and what each
+    /// would start on now and why, the threshold, the review settings and the guide as notes.
+    fn model_context(&self) -> Result<Value> {
+        let selection = self.model_selection()?;
+        let verification = self.settings().verification;
+        let (quotas, unusable, switch_at) = self.limits()?;
+        let limits = Limits {
+            quotas: &quotas,
+            unusable: &unusable,
+            switch_at,
+            now: now(),
+        };
+        let line = |line: &Line| json!({"first": line.first, "then": line.then});
+        let right_now =
+            |row: &JobRow, small: bool| match resolve(row, small, &limits, &policies::reset_time) {
+                Ok(pick) => {
+                    json!({"profile": pick.profile, "waits": pick.waits, "reason": pick.reason})
+                }
+                Err(error) => json!({"cannot_start": format!("{error:#}")}),
+            };
+        let jobs: Vec<Value> = (selection.jobs.iter())
+            .map(|row| {
+                let mut entry = json!({"job": row.job, "name": row.job.name(),
+                    "main": line(&row.main), "right_now": right_now(row, false)});
+                if let Some(small) = &row.small {
+                    entry["small"] = line(small);
+                    entry["right_now_small"] = right_now(row, true);
+                }
+                entry
+            })
+            .collect();
+        Ok(
+            json!({"revision": selection.revision, "switch_at": switch_at, "jobs": jobs,
+            "verifiers": verification.verifiers, "review_levels": verification.levels,
+            "max_rounds": verification.max_rounds, "max_cycles": verification.max_cycles,
+            "notes": selection.guide}),
+        )
+    }
+    /// The job an assignment resolves: the role's row, a configured verifier's when the focus
+    /// names one, and for an ad-hoc reviewer the row of the verifier `like` names, else the
+    /// first reviewer's.
+    fn assignment_job(&self, role: Role, focus: Option<&str>, like: Option<&str>) -> Result<Job> {
+        let verification = self.settings().verification;
+        let configured = |focus: &str| {
+            verification
+                .verifiers
+                .iter()
+                .find(|v| same_name(&v.focus, focus))
+        };
+        if let Some(like) = like {
             ensure!(
-                args.get(removed).is_none(),
-                "`{removed}` was removed; choose an exact profile within the role's providers from model_selection in workspace_context"
+                role == Role::Reviewer && focus.is_none_or(|f| configured(f).is_none()),
+                "`like` is only for a reviewer whose focus is not a configured verifier"
             );
+            let verifier = configured(like).with_context(|| {
+                let focuses: Vec<&str> =
+                    verification.verifiers.iter().map(|v| v.focus.as_str()).collect();
+                format!(
+                    "No verifier is named \"{}\". Name one of {} as `like`, or leave it out to use the first reviewer's row.",
+                    like.trim(),
+                    or_list(&focuses)
+                )
+            })?;
+            return Ok(Job::Verifier {
+                focus: verifier.focus.clone(),
+            });
         }
-        let profile: ModelProfile = serde_json::from_value(
-            args.get("profile")
-                .cloned()
-                .context("Missing profile: choose an exact provider, model and effort")?,
-        )?;
-        let reason = Selection::check_reason(
-            args["reason"]
-                .as_str()
-                .context("Missing reason: say in one line why this model")?,
-        )?
-        .to_owned();
-        if let Err(rejection) = self.model_selection()?.permits(role, &profile) {
-            Self::event(
-                &self.db,
-                &coordinator.project_id,
-                Some(&coordinator.id),
-                "model_rejected",
-                &format!(
-                    "{} asked for {profile} ({}). {rejection} No agent was created.",
-                    coordinator.name,
-                    role.label()
-                ),
-            )?;
-            bail!("{rejection} No agent was created.");
-        }
-        Ok((profile, reason))
+        Job::for_role(role, focus, &verification)
+            .with_context(|| format!("{} has no row in Models → Who runs what", role.label()))
     }
     /// A tool result: the session plus its pinned profile and how it was chosen.
     fn assignment_result(&self, session: &Session) -> Result<Value> {
@@ -682,29 +702,6 @@ impl Host {
         value["profile"] = json!(runtime.profile);
         value["selection"] = json!(runtime.selection);
         Ok(value)
-    }
-    pub(crate) fn record_choice(
-        &mut self,
-        coordinator: &Session,
-        session: &Session,
-        profile: ModelProfile,
-        reason: &str,
-    ) -> Result<()> {
-        self.pin(
-            &session.id,
-            profile.clone(),
-            Chooser::Coordinator {
-                session_id: coordinator.id.clone(),
-            },
-            reason,
-        )?;
-        Self::event(
-            &self.db,
-            &coordinator.project_id,
-            Some(&session.id),
-            "model_selected",
-            &format!("{profile}. {reason}"),
-        )
     }
     pub fn agent_tool(&mut self, id: &str, name: &str, args: Value) -> Result<Value> {
         let session = self.session(id)?;
@@ -787,18 +784,29 @@ impl Host {
                     role != Role::Keeper,
                     "Only Wiffletree starts PR keeper agents"
                 );
+                refuse_model_arguments(
+                    &args,
+                    &["profile", "reason", "size", "complexity", "provider"],
+                )?;
+                let small = small_work(&args)?;
                 let focus = args["focus"].as_str();
                 if let Some(existing) = self.existing_assignment(&ticket.id, role, focus)? {
                     return self.assignment_result(&existing);
                 }
-                let (profile, reason) = self.coordinator_choice(&session, role, &args)?;
+                let job = self.assignment_job(role, focus, args["like"].as_str())?;
+                let pick = self.resolve_job(&job, small)?;
                 let instruction = string("instruction")?;
                 // The agent, its instruction and the ticket update exist only with the agent's
                 // model and reason, or not at all.
                 let worker = self.atomically(|host| {
-                    let worker =
-                        host.assign_ticket(&ticket.id, role, profile.provider, instruction, focus)?;
-                    host.record_choice(&session, &worker, profile, &reason)?;
+                    let worker = host.assign_ticket(
+                        &ticket.id,
+                        role,
+                        pick.profile.provider,
+                        instruction,
+                        focus,
+                    )?;
+                    host.pin_pick(&worker, &pick)?;
                     Ok(worker)
                 })?;
                 self.assignment_result(&worker)
@@ -819,14 +827,12 @@ impl Host {
             }
             "verify_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
+                refuse_model_arguments(&args, &["verifiers", "profile", "reason"])?;
+                let small = small_work(&args)?;
                 let level = args["level"]
                     .as_str()
                     .with_context(|| self.settings().verification.name_a_level())?;
-                let choices: Vec<VerifierChoice> =
-                    serde_json::from_value(args.get("verifiers").cloned().context(
-                        "Missing verifiers: choose a profile and reason for each verifier of the level",
-                    )?)?;
-                let ticket = self.verify_ticket(&ticket.id, level, &choices)?;
+                let ticket = self.verify_ticket(&ticket.id, level, small)?;
                 let mut result = serde_json::to_value(&ticket)?;
                 if ticket.queued_since().is_some() {
                     let slots = self.verification_slots()?;
@@ -939,6 +945,25 @@ impl Host {
         let body = body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>();
         self.db.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at) VALUES (?1,?2,?3,?3,?4,'completed',?5) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![reply_id(run),session.project_id,session.id,body,now()])?;
         Ok(())
+    }
+}
+
+/// Refuses arguments that chose a model before the Who runs what table.
+fn refuse_model_arguments(args: &Value, removed: &[&str]) -> Result<()> {
+    for removed in removed {
+        ensure!(
+            args.get(removed).is_none(),
+            "`{removed}` was removed: Wiffletree picks the model from Models → Who runs what. Pass small: true for small work."
+        );
+    }
+    Ok(())
+}
+/// The optional `small` flag: whether the coordinator asked for small work.
+fn small_work(args: &Value) -> Result<bool> {
+    match args.get("small") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(small)) => Ok(*small),
+        Some(_) => bail!("small must be true or false"),
     }
 }
 

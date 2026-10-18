@@ -298,8 +298,9 @@ impl Actor {
             }
         }
         for (member, input, hold) in inputs {
-            // A held verifier reports blocked and never runs on a substitute; the rest of the
-            // round runs, so the round ends and its blocked outcome wakes the coordinator.
+            // A held verifier never runs on a substitute, and the rest of the round runs. One
+            // with no model reports blocked, so the round ends and wakes the coordinator; one
+            // waiting for a reset reports nothing and runs after it, keeping its cycle open.
             if let Some(reason) = hold {
                 if let Err(error) = self.hold_turn(&member, &input, &reason) {
                     eprintln!("Holding {}: {error:#}", member.id);

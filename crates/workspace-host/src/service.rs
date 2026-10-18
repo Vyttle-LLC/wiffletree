@@ -514,6 +514,13 @@ enum Event {
         reading: QuotaReading,
         reply: Reply,
     },
+    /// What a provider's CLI said about itself, read on its own thread; its sign-in decides
+    /// whether Wiffletree may choose it.
+    ProviderInspected {
+        provider: Provider,
+        report: ProviderReport,
+        reply: Reply,
+    },
     /// A root scan finished on its own thread; adding what it found is quick.
     Discovered {
         found: Vec<RepositoryCandidate>,
@@ -742,7 +749,7 @@ impl Service {
                     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
                     Ok((host, directory, socket, listener))
                 })();
-                let (host, directory, socket, listener) = match setup {
+                let (mut host, directory, socket, listener) = match setup {
                     Ok(v) => {
                         let _ = ready.send(Ok(()));
                         v
@@ -752,6 +759,15 @@ impl Service {
                         return;
                     }
                 };
+                // Which CLIs are signed in is known before any request is handled, so nothing
+                // is ever pinned to a provider that is not: each CLI's own status, read in
+                // parallel and without inference. The client is not held up meanwhile; its
+                // requests wait in the queue.
+                let detected = PROVIDERS.map(|p| std::thread::spawn(move || detection::detect(p)));
+                for (detecting, provider) in detected.into_iter().zip(PROVIDERS) {
+                    let status = detecting.join().unwrap_or_default();
+                    host.record_detection(provider, &status);
+                }
                 let connections = Arc::new(AtomicUsize::new(0));
                 let socket_sender = worker.clone();
                 let stop_listener = Arc::new(AtomicBool::new(false));
@@ -1141,10 +1157,15 @@ impl Actor {
                 });
             }
             Command::InspectProvider { provider } => {
-                let (provider, reply) = (*provider, reply.clone());
+                let (sender, provider, reply) = (self.sender.clone(), *provider, reply.clone());
                 std::thread::spawn(move || {
-                    let report = serde_json::to_value(detection::report(provider));
-                    let _ = reply.try_send(report.map_err(|e| e.to_string()));
+                    let report = detection::report(provider);
+                    let inspected = Event::ProviderInspected {
+                        provider,
+                        report,
+                        reply,
+                    };
+                    let _ = sender.send_blocking(inspected);
                 });
             }
             Command::MeasureContext {
@@ -1504,6 +1525,16 @@ impl Actor {
             Event::SkillMerged(run, answered) => {
                 self.host.finish_merge_run(run, answered);
                 true
+            }
+            Event::ProviderInspected {
+                provider,
+                report,
+                reply,
+            } => {
+                self.host.record_detection(provider, &report.status);
+                let report = serde_json::to_value(report).map_err(|e| e.to_string());
+                let _ = reply.try_send(report);
+                false
             }
             Event::QuotaRead { reading, reply } => {
                 let result = self
@@ -2085,7 +2116,13 @@ impl Actor {
                     now(),
                 )?;
             }
-            ProviderEvent::Quota(reading) => self.host.record_quota(reading)?,
+            ProviderEvent::Quota(reading) => {
+                self.host.record_quota(reading)?;
+                // A reading may end a wait for a reset whose time is unknown.
+                if self.host.any_waiting()? {
+                    self.wake(now());
+                }
+            }
             ProviderEvent::ModelUsage(usage) => {
                 self.host.record_model_usage(run, &usage, now())?;
             }
@@ -3182,7 +3219,14 @@ impl Actor {
                 "Provider process {group} from an earlier turn is still running. No turn starts until it exits or its inbox note is dismissed."
             )));
         }
-        self.host.hold_reason(session)
+        let reason = self.host.hold_reason(session)?;
+        // A wait for a known reset looks again then; an unknown one, at the next reading.
+        if reason.is_some()
+            && let Some(at) = self.host.wait_until(session)?
+        {
+            self.wake(at);
+        }
+        Ok(reason)
     }
     /// Settles every leftover-process note whose group has exited, whether or not its session
     /// has a turn due, and looks again while one still runs: the exit of a process the host
@@ -3198,9 +3242,12 @@ impl Actor {
         Ok(())
     }
     /// Keeps the input queued, blocks the session and tells its parent once per held input,
-    /// through the agent's own `report` path so the parent wakes.
+    /// through the agent's own `report` path so the parent wakes. A turn waiting for a reset
+    /// tells the parent with a message from Wiffletree instead, which is no verdict or report
+    /// of the agent's.
     fn hold_turn(&mut self, session: &Session, input: &[Message], reason: &str) -> Result<()> {
         let mut runtime = self.host.session_runtime(&session.id)?;
+        let waiting = runtime.waiting;
         let already = session.status == Status::Blocked
             && runtime.held
             && runtime.last_error.as_deref() == Some(reason);
@@ -3220,15 +3267,25 @@ impl Actor {
         }
         // Sent on every pass, so a report that failed earlier is retried. Keyed on the held
         // input's sequence: bounded, the same after a Retry, and a no-op once it exists.
-        if session.parent_id.is_some()
-            && let Some(first) = input.first()
-        {
-            self.host.agent_tool(
-                &session.id,
-                "report",
-                json!({"message_id": format!("turn-held:{}", first.sequence), "kind": "blocked", "body": reason}),
-            )?;
+        let (Some(parent), Some(first)) = (&session.parent_id, input.first()) else {
+            return Ok(());
+        };
+        if waiting {
+            let id = format!("wait:{}:{}", session.id, first.sequence);
+            if self.host.message(&id).is_err() {
+                let body = format!(
+                    "{} has not started: {reason} Its input is kept; nothing else waits for it.",
+                    session.name
+                );
+                self.host.send(&id, None, parent, &body)?;
+            }
+            return Ok(());
         }
+        self.host.agent_tool(
+            &session.id,
+            "report",
+            json!({"message_id": format!("turn-held:{}", first.sequence), "kind": "blocked", "body": reason}),
+        )?;
         Ok(())
     }
     /// Records why a turn could not start and settles any run it opened.
@@ -3441,6 +3498,7 @@ impl Actor {
         let detail = json!({"profile":profile,"provider_session_id":runtime.provider_session_id,"skill_version":1,"selection":runtime.selection,"model_selection_revision":self.host.model_selection()?.revision});
         runtime.last_error = None;
         runtime.held = false;
+        runtime.waiting = false;
         runtime.last_started_at = Some(started_at);
         runtime.directory = Some(cwd.to_string_lossy().into_owned());
         self.record_turn_start(&run, &session, &input, &detail, &runtime)?;
@@ -3695,6 +3753,46 @@ mod tests {
     }
 
     #[test]
+    fn other_work_runs_while_an_agent_waits_for_a_reset() {
+        run_with_provider(
+            "service::tests::other_work_while_waiting_with_the_fixture_provider",
+            &fixture_provider(),
+        );
+    }
+    #[test]
+    #[ignore = "run by other_work_runs_while_an_agent_waits_for_a_reset, with the fixture as its provider"]
+    fn other_work_while_waiting_with_the_fixture_provider() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        let (_home, mut actor, reviewer, coordinator, _) = waiting_codex_reviewer();
+        // The coordinator, on Claude, which is not spent, has a message from the human.
+        (actor.host)
+            .set_status(&coordinator.id, Status::Ready)
+            .unwrap();
+        actor
+            .host
+            .send("carry-on", None, &coordinator.id, "Carry on")
+            .unwrap();
+
+        actor.schedule().unwrap();
+
+        assert!(
+            actor.active.contains_key(&coordinator.id),
+            "other work runs"
+        );
+        assert!(!actor.active.contains_key(&reviewer.id));
+        let held = actor.host.session(&reviewer.id).unwrap();
+        assert_eq!(held.status, Status::Blocked);
+        let assignment = format!("assignment:{}", reviewer.id);
+        assert_eq!(
+            actor.host.message(&assignment).unwrap().receipt,
+            Receipt::Queued,
+            "the waiting agent's input is kept"
+        );
+    }
+    #[test]
     fn slow_worktree_preparation_preserves_input_and_defers_its_archive_until_git_finishes() {
         run_with_provider(
             "service::tests::slow_preparation_with_the_fixture_provider",
@@ -3714,20 +3812,14 @@ mod tests {
             .host
             .set_status(&implementer.id, Status::Ready)
             .unwrap();
-        let choice = actor
-            .host
-            .model_selection()
-            .unwrap()
-            .allowed(implementer.provider)[0]
-            .clone();
         actor
             .host
             .configure_session(
                 &implementer.id,
                 ModelProfile {
                     provider: implementer.provider,
-                    model: choice.model,
-                    effort: choice.effort,
+                    model: "custom".into(),
+                    effort: "high".into(),
                 },
             )
             .unwrap();
@@ -4979,7 +5071,7 @@ mod tests {
 
     #[test]
     fn a_held_turns_report_is_not_a_question_waiting() {
-        let (_home, mut actor, reviewer, _) = codex_reviewer_on_a_disabled_provider();
+        let (_home, mut actor, reviewer, _) = held_codex_reviewer();
         actor.schedule().unwrap();
         let held: i64 = actor
             .host
@@ -4997,7 +5089,7 @@ mod tests {
 
     #[test]
     fn a_report_admission_sends_is_admitted_in_the_same_pass() {
-        let (_home, mut actor, _reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
+        let (_home, mut actor, _reviewer, coordinator) = held_codex_reviewer();
         assert!(
             coordinator.parent_id.is_none(),
             "its own hold reports to no one"
@@ -5018,22 +5110,15 @@ mod tests {
             .host
             .set_status(&coordinator.id, Status::Ready)
             .unwrap();
-        // The coordinator is pinned to the disabled provider too, so reaching it holds its turn
-        // where it would otherwise start one.
+        // The coordinator waits for Codex's reset too, so reaching it holds its turn where it
+        // would otherwise start one.
         let mut runtime = actor.host.session_runtime(&coordinator.id).unwrap();
         runtime.profile = Some(ModelProfile {
             provider: Provider::Codex,
             model: "gpt-6.1-sol".into(),
             effort: "medium".into(),
         });
-        runtime.selection = Some(Selection {
-            chosen_by: Chooser::Coordinator {
-                session_id: coordinator.id.clone(),
-            },
-            reason: "Test".into(),
-            revision: 0,
-            at: now(),
-        });
+        runtime.waiting = true;
         actor.host.save_runtime(&runtime).unwrap();
 
         actor.schedule().unwrap();
@@ -5047,7 +5132,7 @@ mod tests {
 
     #[test]
     fn a_paused_coordinators_long_queue_does_not_hide_a_runnable_worker() {
-        let (_home, mut actor, reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
+        let (_home, mut actor, reviewer, coordinator) = held_codex_reviewer();
         for n in 0..101 {
             actor
                 .host
@@ -5055,8 +5140,8 @@ mod tests {
                 .unwrap();
         }
         actor.schedule().unwrap();
-        // A unit test cannot launch a provider, so the reviewer's provider is disabled: the
-        // scheduler reaching it holds its turn where it would otherwise start it.
+        // A unit test cannot launch a provider, so the reviewer has no model: the scheduler
+        // reaching it holds its turn where it would otherwise start it.
         assert!(actor.host.session_runtime(&reviewer.id).unwrap().held);
     }
 
@@ -5101,7 +5186,6 @@ mod tests {
                     role: Role::Tester,
                     focus: format!("Tester {i}"),
                     instruction: None,
-                    provider: None,
                 })
                 .collect(),
             2,
@@ -5117,23 +5201,7 @@ mod tests {
             json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"}),
         )
         .unwrap();
-        let profile = host
-            .model_selection()
-            .unwrap()
-            .prefill(Role::Tester)
-            .unwrap();
-        let choices: Vec<_> = host
-            .settings()
-            .verification
-            .verifiers
-            .into_iter()
-            .map(|v| VerifierChoice {
-                focus: v.focus,
-                profile: profile.clone(),
-                reason: "Routine check".into(),
-            })
-            .collect();
-        let ticket = host.verify_ticket(&ticket.id, "Full", &choices).unwrap();
+        let ticket = host.verify_ticket(&ticket.id, "Full", false).unwrap();
         host.set_live(&coordinator.project_id, true).unwrap();
         let verifiers = ticket.verification.as_ref().unwrap().rounds[0]
             .verifiers
@@ -5227,129 +5295,66 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_provider_holds_coordinator_choices_and_reports_once() {
-        let (_home, mut actor, first, tester, coordinator) = ticket_in_turn();
-        let host = &mut actor.host;
-        let ticket = host
-            .create_ticket(&coordinator.id, &first.repository_id, "Review", "Do")
-            .unwrap();
-        let reviewer = host
-            .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
-            .unwrap();
-        let sol = ModelProfile {
-            provider: Provider::Codex,
-            model: "gpt-6.1-sol".into(),
-            effort: "medium".into(),
-        };
-        host.pin(
-            &reviewer.id,
-            sol.clone(),
-            Chooser::Coordinator {
-                session_id: coordinator.id.clone(),
-            },
-            "Routine review",
-        )
-        .unwrap();
-        // Only the reviewer may be scheduled; nothing here may launch a real provider.
-        for id in [&tester.id, &coordinator.id] {
-            host.set_status(id, Status::Paused).unwrap();
-        }
-        let mut selection = host.model_selection().unwrap();
-        selection
-            .providers
-            .get_mut(&Provider::Codex)
-            .unwrap()
-            .enabled = false;
-        selection
-            .role_providers
-            .insert(Role::Tester, [Provider::Claude].into());
-        host.set_model_selection(&selection).unwrap();
-        host.set_live(&reviewer.project_id, true).unwrap();
-        let reports = |host: &Host| -> Vec<String> {
+    fn a_turn_waiting_for_a_reset_is_held_and_its_coordinator_told_once_by_wiffletree() {
+        let (_home, mut actor, reviewer, coordinator, sol) = waiting_codex_reviewer();
+        let told = |host: &Host| -> Vec<(Option<String>, String)> {
             host.db
-                .prepare("SELECT id FROM messages WHERE recipient=?1 AND sender=?2")
+                .prepare("SELECT sender,id FROM messages WHERE recipient=?1 AND (id LIKE 'wait:%' OR sender=?2)")
                 .unwrap()
-                .query_map(params![coordinator.id, reviewer.id], |r| r.get(0))
+                .query_map(params![coordinator.id, reviewer.id], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
                 .collect::<rusqlite::Result<_>>()
                 .unwrap()
         };
-        // A long input ID, such as a forwarded child report, must not break the report's ID.
-        host.db
-            .execute(
-                "UPDATE messages SET receipt='completed' WHERE id=?1",
-                [format!("assignment:{}", reviewer.id)],
-            )
-            .unwrap();
-        let assignment = format!("report:{}:assignment:{}", new_id(), new_id());
-        let input = host
-            .send(
-                &assignment,
-                Some(&coordinator.id),
-                &reviewer.id,
-                "Review it",
-            )
-            .unwrap();
-        let report_id = format!("report:{}:turn-held:{}", reviewer.id, input.sequence);
+        let assignment = format!("assignment:{}", reviewer.id);
+        let input = actor.host.message(&assignment).unwrap();
         for retry in [false, true] {
             if retry {
                 actor.host.reconcile_session(&reviewer.id, true).unwrap();
             }
             actor.schedule().unwrap();
             assert!(!actor.active.contains_key(&reviewer.id));
-            let held = actor.host.session(&reviewer.id).unwrap();
-            assert_eq!(held.status, Status::Blocked);
-            let error = actor.host.session_runtime(&reviewer.id).unwrap().last_error;
             assert_eq!(
-                error.as_deref(),
-                Some(
-                    "Codex is disabled on this machine. Enable it in Models, or choose another model for this agent."
-                )
+                actor.host.session(&reviewer.id).unwrap().status,
+                Status::Blocked
             );
+            let runtime = actor.host.session_runtime(&reviewer.id).unwrap();
+            let error = runtime.last_error.unwrap();
+            assert!(
+                error.starts_with("Waits for Codex: its weekly limit is at 99% (moves on at 95%). Starts after the reset, "),
+                "{error}"
+            );
+            assert_eq!(runtime.profile, Some(sol.clone()), "no model switch");
             assert_eq!(
                 actor.host.message(&assignment).unwrap().receipt,
                 Receipt::Queued,
                 "input kept"
             );
+            // One message from Wiffletree, not a report in the reviewer's name, after a retry too.
             assert_eq!(
-                reports(&actor.host),
-                [report_id.as_str()],
-                "one report to the parent, even after a retry"
-            );
-            assert_eq!(
-                actor
-                    .host
-                    .runtimes()
-                    .unwrap()
-                    .iter()
-                    .find(|r| r.session_id == reviewer.id)
-                    .unwrap()
-                    .profile,
-                Some(sol.clone()),
-                "no model switch"
+                told(&actor.host),
+                [(None, format!("wait:{}:{}", reviewer.id, input.sequence))]
             );
         }
-        let report = actor.host.message(&report_id).unwrap();
-        assert!(report.body.starts_with("[blocked] "));
-        assert!(report.body.ends_with("Codex is disabled on this machine. Enable it in Models, or choose another model for this agent."));
-        // Skip, through the same command the banner sends, drops the held input.
-        let skipped = actor.host.respond(Request {
-            version: PROTOCOL_VERSION,
-            id: new_id(),
-            command: Command::ReconcileSession {
-                session_id: reviewer.id.clone(),
-                retry: false,
-            },
-        });
-        assert_eq!(skipped.error, None);
-        assert_eq!(
-            actor.host.message(&assignment).unwrap().receipt,
-            Receipt::Cancelled
-        );
-        actor.schedule().unwrap();
-        assert_eq!(reports(&actor.host).len(), 1, "nothing left to hold");
-        // The human's own choice is never held.
-        actor.host.configure_session(&reviewer.id, sol).unwrap();
+        // A reading below the threshold ends the wait, and the turn may start on its model.
+        spend(&mut actor.host, Provider::Codex, 40.);
+        assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
+        // The human's own choice is never held, even on a spent provider.
+        spend(&mut actor.host, Provider::Codex, 99.);
+        let mut human = actor.host.session_runtime(&reviewer.id).unwrap();
+        human.waiting = true;
+        actor.host.save_runtime(&human).unwrap();
+        actor.host.set_status(&reviewer.id, Status::Ready).unwrap();
+        actor
+            .host
+            .configure_session(&reviewer.id, sol.clone())
+            .unwrap();
+        assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
+        // A wait ends with the turn that starts; a later spell of high use never holds it.
+        let mut runtime = actor.host.session_runtime(&reviewer.id).unwrap();
+        runtime.waiting = false;
+        actor.host.save_runtime(&runtime).unwrap();
+        spend(&mut actor.host, Provider::Codex, 99.);
         assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
     }
 
@@ -5363,9 +5368,7 @@ mod tests {
         let ticket = host
             .create_ticket(&coordinator.id, &first.repository_id, "Atomic", "Do")
             .unwrap();
-        let opus = json!({"provider":"claude","model":"opus","effort":"high"});
-        let assign = json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Do",
-            "profile":opus,"reason":"Large change"});
+        let assign = json!({"ticket_id":ticket.id,"role":"implementer","instruction":"Do"});
         // Fail the write that pins the model, after the session and its instruction were written.
         host.db
             .execute_batch(
@@ -5381,6 +5384,8 @@ mod tests {
         let count =
             |host: &Host, sql: &str| -> i64 { host.db.query_row(sql, [], |r| r.get(0)).unwrap() };
         let messages = count(host, "SELECT COUNT(*) FROM messages");
+        let selected = "SELECT COUNT(*) FROM activity WHERE kind='model_selected'";
+        let selections = count(host, selected);
         assert!(
             host.agent_tool(&coordinator.id, "assign_ticket", assign.clone())
                 .is_err()
@@ -5396,13 +5401,7 @@ mod tests {
             "no instruction"
         );
         assert_eq!(host.ticket(&ticket.id).unwrap().state, ticket.state);
-        assert_eq!(
-            count(
-                host,
-                "SELECT COUNT(*) FROM activity WHERE kind='model_selected'"
-            ),
-            0
-        );
+        assert_eq!(count(host, selected), selections);
         // With the fault gone, retrying creates the agent with its model.
         host.db
             .execute_batch("DROP TRIGGER fail_pin_insert; DROP TRIGGER fail_pin_update;")
@@ -5454,9 +5453,10 @@ mod tests {
         );
     }
 
-    /// A coordinator-chosen Codex reviewer with queued input, Codex disabled, and every other
-    /// session paused so nothing here can launch a real provider.
-    fn codex_reviewer_on_a_disabled_provider() -> (tempfile::TempDir, Actor, Session, Session) {
+    /// A Codex reviewer with queued input and no pinned model, so it is held, with Codex's
+    /// weekly limit spent, and every other session paused so nothing here can launch a real
+    /// provider.
+    fn held_codex_reviewer() -> (tempfile::TempDir, Actor, Session, Session) {
         let (home, mut actor, first, tester, coordinator) = ticket_in_turn();
         let host = &mut actor.host;
         let ticket = host
@@ -5465,40 +5465,52 @@ mod tests {
         let reviewer = host
             .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
             .unwrap();
-        let sol = ModelProfile {
-            provider: Provider::Codex,
-            model: "gpt-6.1-sol".into(),
-            effort: "medium".into(),
-        };
-        host.pin(
-            &reviewer.id,
-            sol,
-            Chooser::Coordinator {
-                session_id: coordinator.id.clone(),
-            },
-            "Routine review",
-        )
-        .unwrap();
         for id in [&tester.id, &coordinator.id] {
             host.set_status(id, Status::Paused).unwrap();
         }
-        set_codex(host, false);
+        spend(host, Provider::Codex, 99.);
         host.set_live(&reviewer.project_id, true).unwrap();
         (home, actor, reviewer, coordinator)
     }
-    fn set_codex(host: &mut Host, enabled: bool) {
-        let mut selection = host.model_selection().unwrap();
-        selection
-            .providers
-            .get_mut(&Provider::Codex)
-            .unwrap()
-            .enabled = enabled;
-        if !enabled {
-            selection
-                .role_providers
-                .insert(Role::Tester, [Provider::Claude].into());
-        }
-        host.set_model_selection(&selection).unwrap();
+    /// The same reviewer pinned to GPT 6.1 Sol while every choice of its row was spent, so it
+    /// waits for Codex's reset.
+    fn waiting_codex_reviewer() -> (tempfile::TempDir, Actor, Session, Session, ModelProfile) {
+        let (home, mut actor, reviewer, coordinator) = held_codex_reviewer();
+        let sol = ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "high".into(),
+        };
+        let pick = Pick {
+            profile: sol.clone(),
+            waits: true,
+            until: None,
+            reason: "Waits for Codex".into(),
+        };
+        actor.host.pin_pick(&reviewer, &pick).unwrap();
+        (home, actor, reviewer, coordinator, sol)
+    }
+    /// Records `provider`'s weekly window at `used` percent, resetting in a day.
+    fn spend(host: &mut Host, provider: Provider, used: f64) {
+        let at = now();
+        let window = QuotaWindow {
+            key: "codex:secondary".into(),
+            label: "Weekly".into(),
+            used_percent: Some(used),
+            observed_at: at,
+            duration_mins: Some(10080),
+            resets_at: Some(at + 86_400_000),
+            status: None,
+        };
+        host.record_quota(QuotaReading {
+            provider,
+            account: None,
+            observed_at: at,
+            source: "test".into(),
+            windows: vec![window],
+            error: None,
+        })
+        .unwrap();
     }
     fn turn_held_reports(host: &Host, from: &Session) -> i64 {
         host.db
@@ -5512,7 +5524,7 @@ mod tests {
 
     #[test]
     fn a_hold_report_that_failed_is_sent_on_a_later_pass() {
-        let (_home, mut actor, reviewer, _) = codex_reviewer_on_a_disabled_provider();
+        let (_home, mut actor, reviewer, _) = held_codex_reviewer();
         // The parent's queue refuses the report, say because it is full.
         actor
             .host
@@ -5542,12 +5554,12 @@ mod tests {
 
     #[test]
     fn skip_drops_held_input_even_after_the_provider_is_back() {
-        let (_home, mut actor, reviewer, _) = codex_reviewer_on_a_disabled_provider();
+        let (_home, mut actor, reviewer, _, _) = waiting_codex_reviewer();
         actor.schedule().unwrap();
         assert!(actor.host.session_runtime(&reviewer.id).unwrap().held);
-        // Stop the project, re-enable Codex, then Skip: the input must not run on resume.
+        // Stop the project, let Codex reset, then Skip: the input must not run on resume.
         actor.host.set_live(&reviewer.project_id, false).unwrap();
-        set_codex(&mut actor.host, true);
+        spend(&mut actor.host, Provider::Codex, 10.);
         assert_eq!(actor.host.hold_reason(&reviewer).unwrap(), None);
         let skipped = actor.host.respond(Request {
             version: PROTOCOL_VERSION,
@@ -8552,6 +8564,7 @@ mod tests {
             level: None,
             max_rounds: 1,
             queued_at: None,
+            small: false,
             keeper: false,
             outcome: VerificationOutcome::Blocked,
             rounds: vec![VerificationRound {
@@ -9076,15 +9089,12 @@ mod tests {
             state: CompactionState::Queued,
         });
         actor.host.save_runtime(&runtime).unwrap();
-        // The coordinator chose both verifiers' models; their provider is then disabled.
-        let provider = actor.host.session(&verifiers[0]).unwrap().provider;
-        let other = PROVIDERS.into_iter().find(|p| *p != provider).unwrap();
-        let mut selection = actor.host.model_selection().unwrap();
-        selection.providers.get_mut(&provider).unwrap().enabled = false;
-        for providers in selection.role_providers.values_mut() {
-            *providers = [other].into();
+        // Both verifiers lost their models, so neither may run on a substitute.
+        for verifier in &verifiers {
+            let mut runtime = actor.host.session_runtime(verifier).unwrap();
+            runtime.profile = None;
+            actor.host.save_runtime(&runtime).unwrap();
         }
-        actor.host.set_model_selection(&selection).unwrap();
 
         actor.admit_rounds().unwrap();
 
@@ -9105,7 +9115,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_provider_still_holds_and_reports_an_agent_with_a_queued_compaction() {
+    fn a_wait_for_a_reset_still_holds_and_tells_of_an_agent_with_a_queued_compaction() {
         let (_home, mut actor, first, tester, coordinator) = ticket_in_turn();
         let host = &mut actor.host;
         let ticket = host
@@ -9119,11 +9129,13 @@ mod tests {
             model: "opus".into(),
             effort: "medium".into(),
         };
-        let chooser = Chooser::Coordinator {
-            session_id: coordinator.id.clone(),
+        let pick = Pick {
+            profile: opus,
+            waits: true,
+            until: None,
+            reason: "Waits for Claude".into(),
         };
-        host.pin(&reviewer.id, opus, chooser, "Routine review")
-            .unwrap();
+        host.pin_pick(&reviewer, &pick).unwrap();
         let mut runtime = host.session_runtime(&reviewer.id).unwrap();
         runtime.provider_session_id = Some("claude-session".into());
         host.save_runtime(&runtime).unwrap();
@@ -9132,16 +9144,7 @@ mod tests {
         for id in [&tester.id, &coordinator.id] {
             host.set_status(id, Status::Paused).unwrap();
         }
-        let set_claude = |host: &mut Host, enabled: bool| {
-            let mut selection = host.model_selection().unwrap();
-            let claude = selection.providers.get_mut(&Provider::Claude).unwrap();
-            claude.enabled = enabled;
-            for providers in selection.role_providers.values_mut() {
-                *providers = [Provider::Codex].into();
-            }
-            host.set_model_selection(&selection).unwrap();
-        };
-        set_claude(host, false);
+        spend(host, Provider::Claude, 97.);
         host.set_live(&reviewer.project_id, true).unwrap();
 
         for _ in 0..2 {
@@ -9152,23 +9155,26 @@ mod tests {
         let held = actor.host.session(&reviewer.id).unwrap();
         assert_eq!(held.status, Status::Blocked);
         let runtime = actor.host.session_runtime(&reviewer.id).unwrap();
-        assert_eq!(
-            runtime.last_error.as_deref(),
-            Some(
-                "Claude is disabled on this machine. Enable it in Models, or choose another model for this agent."
-            )
+        let error = runtime.last_error.unwrap();
+        assert!(
+            error.starts_with("Waits for Claude: its weekly limit is at 97%"),
+            "{error}"
         );
         assert_eq!(
             runtime.compaction.map(|c| c.state),
             Some(CompactionState::Queued)
         );
-        assert_eq!(
-            turn_held_reports(&actor.host, &reviewer),
-            1,
-            "the parent is told once"
-        );
-        // Enabled again, the compaction is what runs first.
-        set_claude(&mut actor.host, true);
+        let told: i64 = (actor.host.db)
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND id LIKE 'wait:%'",
+                [&coordinator.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(told, 1, "the parent is told once");
+        assert_eq!(turn_held_reports(&actor.host, &reviewer), 0);
+        // Once Claude reads below the threshold, the compaction is what runs first.
+        spend(&mut actor.host, Provider::Claude, 20.);
         let due = actor.due_compactions().unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, reviewer.id);
@@ -9326,22 +9332,25 @@ mod tests {
         assert!(matches!(part, Some(KeeperPart::RebaseAt(_))));
     }
 
-    /// Saves the Claude model allowed at `index` as the PR keeper's, as the Models page does.
-    fn choose_keeper_model(host: &mut Host, index: usize) -> ModelProfile {
+    /// Saves the PR keeper's row as `first` then `then`, as the Models page does.
+    fn choose_keeper_line(host: &mut Host, first: ModelProfile, then: Option<ModelProfile>) {
         let mut selection = host.model_selection().unwrap();
-        let allowed = &selection.allowed(Provider::Claude)[index];
+        selection.set_keeper(Some(Line { first, then }));
+        host.set_model_selection(&selection).unwrap();
+    }
+    /// Saves Claude's `model` at medium as the PR keeper's only choice.
+    fn choose_keeper_model(host: &mut Host, model: &str) -> ModelProfile {
         let profile = ModelProfile {
             provider: Provider::Claude,
-            model: allowed.model.clone(),
-            effort: allowed.effort.clone(),
+            model: model.into(),
+            effort: "medium".into(),
         };
-        selection.keeper = Some(profile.clone());
-        host.set_model_selection(&selection).unwrap();
+        choose_keeper_line(host, profile.clone(), None);
         profile
     }
 
     #[test]
-    fn a_keeper_agent_is_pinned_to_the_model_saved_when_it_is_created() {
+    fn a_keeper_agent_is_pinned_to_its_row_before_each_run() {
         let (home, mut host, ticket, coordinator) = ticket_fixture();
         let workdir = home.path().join("keeper");
         let refused = host
@@ -9352,18 +9361,8 @@ mod tests {
             "Choose the PR keeper's model in Models first"
         );
         assert!(host.ticket_agents(&ticket.id).unwrap().is_empty());
-        // A save naming a model that is not allowed is refused whole.
-        let before = host.model_selection().unwrap();
-        let mut disallowed = before.clone();
-        disallowed.keeper = Some(ModelProfile {
-            provider: Provider::Claude,
-            model: "unlisted".into(),
-            effort: "low".into(),
-        });
-        assert!(host.set_model_selection(&disallowed).is_err());
-        assert_eq!(host.model_selection().unwrap(), before);
 
-        let first = choose_keeper_model(&mut host, 0);
+        let first = choose_keeper_model(&mut host, "sonnet");
         let sorting = host
             .keeper_agent(&ticket, KeeperSession::Sorting, &workdir)
             .unwrap();
@@ -9375,10 +9374,10 @@ mod tests {
         assert_eq!(runtime.workdir.as_deref(), workdir.to_str());
         assert_eq!(
             runtime.selection.unwrap().chosen_by,
-            workspace_core::Chooser::Human
+            workspace_core::Chooser::Wiffletree
         );
-        // A later choice pins the next agent and leaves this one on its own model.
-        let second = choose_keeper_model(&mut host, 1);
+        // A later choice on the same provider pins it again before its next run.
+        let second = choose_keeper_model(&mut host, "opus");
         assert_ne!(first, second);
         let again = host
             .keeper_agent(&ticket, KeeperSession::Sorting, &workdir)
@@ -9397,16 +9396,16 @@ mod tests {
             ..first.clone()
         };
         assert!(host.configure_session(&sorting.id, other).is_err());
-        assert_eq!(host.turn_profile(&sorting).unwrap(), first);
+        assert_eq!(host.turn_profile(&sorting).unwrap(), second);
         assert_eq!(host.turn_profile(&attempt).unwrap(), second);
     }
 
     #[test]
     fn no_coordinator_tool_assigns_messages_or_resumes_a_keeper_agent() {
         let (home, mut host, ticket, coordinator) = ticket_fixture();
-        let profile = choose_keeper_model(&mut host, 0);
+        choose_keeper_model(&mut host, "sonnet");
         let assign = json!({"ticket_id":ticket.id,"role":"keeper","focus":"sorting",
-            "instruction":"Sort","profile":profile,"reason":"Cheap"});
+            "instruction":"Sort"});
         let refused = |result: Result<Value>| result.unwrap_err().to_string();
         assert_eq!(
             refused(host.agent_tool(&coordinator.id, "assign_ticket", assign.clone())),
@@ -9444,7 +9443,7 @@ mod tests {
     #[test]
     fn a_keeper_agent_neither_holds_nor_waits_for_the_tickets_worktree() {
         let (home, mut host, ticket, _) = ticket_fixture();
-        choose_keeper_model(&mut host, 0);
+        choose_keeper_model(&mut host, "sonnet");
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Claude, "Do", None)
             .unwrap();
@@ -9464,27 +9463,57 @@ mod tests {
     }
 
     #[test]
-    fn a_keeper_agent_on_another_provider_is_replaced_when_the_keepers_model_moves() {
+    fn a_keeper_try_moves_on_when_claude_is_spent_and_sorting_never_does() {
         let (home, mut host, ticket, _) = ticket_fixture();
-        choose_keeper_model(&mut host, 0);
-        let first = host
-            .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
-            .unwrap();
-        let mut selection = host.model_selection().unwrap();
-        let allowed = selection.allowed(Provider::Codex)[0].clone();
+        let sonnet = choose_keeper_model(&mut host, "sonnet");
         let codex = ModelProfile {
             provider: Provider::Codex,
-            model: allowed.model,
-            effort: allowed.effort,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
         };
-        selection.keeper = Some(codex.clone());
-        host.set_model_selection(&selection).unwrap();
-        let moved = host
+        choose_keeper_line(&mut host, sonnet.clone(), Some(codex.clone()));
+        let first = host
+            .keeper_agent(&ticket, KeeperSession::Try, home.path())
+            .unwrap();
+        let sorting = host
             .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
+            .unwrap();
+        assert_eq!(host.turn_profile(&first).unwrap(), sonnet);
+        spend(&mut host, Provider::Claude, 96.);
+        // The next try starts on Codex in a fresh agent; the Claude one keeps its model.
+        let moved = host
+            .keeper_agent(&ticket, KeeperSession::Try, home.path())
             .unwrap();
         assert_ne!(moved.id, first.id);
         assert!(host.session(&first.id).unwrap().archived);
         assert_eq!(host.turn_profile(&moved).unwrap(), codex);
+        let reason = host
+            .session_runtime(&moved.id)
+            .unwrap()
+            .selection
+            .unwrap()
+            .reason;
+        assert!(
+            reason.starts_with("Started on Codex: Claude's weekly limit was at 96%"),
+            "{reason}"
+        );
+        // Sorting stays on the row's Claude choice, however spent Claude is.
+        let again = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
+            .unwrap();
+        assert_eq!(again.id, sorting.id);
+        assert_eq!(host.turn_profile(&again).unwrap(), sonnet);
+        // A row without a Claude choice has no sorting model at all.
+        choose_keeper_line(&mut host, codex, None);
+        let refused = host
+            .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .starts_with("Sorting comments needs a Claude model"),
+            "{refused}"
+        );
     }
 
     /// A ticket whose try's agent resolved the conflict in its checkout.

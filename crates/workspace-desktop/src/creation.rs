@@ -9,7 +9,7 @@ use gpui_component::{
     menu::{DropdownMenu, PopupMenuItem},
     select::{Select, SelectItem, SelectState},
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, rc::Rc};
 // GPUI exports an accessibility `Role` too; ours wins over both globs.
 use workspace_core::Role;
 use workspace_core::*;
@@ -59,6 +59,9 @@ impl SelectItem for Choice {
     }
 }
 
+/// The new-agent dialog names no focus, and its pre-fill reads the row of the agent it creates.
+const AGENT_FOCUS: Option<&str> = None;
+
 pub(crate) struct CreationForm {
     kind: Creation,
     project_id: Option<String>,
@@ -74,6 +77,11 @@ pub(crate) struct CreationForm {
     role: Role,
     model_selection: ModelSelection,
     catalog: Vec<ModelOption>,
+    /// What the pre-fill reads besides the table: the review settings, the latest quota
+    /// readings and which CLIs are signed in.
+    verification: VerificationSettings,
+    quotas: Rc<Vec<QuotaReading>>,
+    detection: Rc<Detection>,
     /// The human's pick; `None` follows the role's pre-fill.
     profile: Option<ModelProfile>,
     pub pending: bool,
@@ -199,6 +207,9 @@ impl CreationForm {
             role: Role::Implementer,
             model_selection: snapshot.model_selection.clone(),
             catalog: Vec::new(),
+            verification: VerificationSettings::default(),
+            quotas: Rc::default(),
+            detection: Rc::default(),
             profile: None,
             pending: false,
             error: String::new(),
@@ -212,16 +223,32 @@ impl CreationForm {
         }
     }
 
-    /// The installed CLIs' models, offered by the model picker beside the allowed ones.
-    pub(crate) fn with_catalog(mut self, catalog: &[ModelOption]) -> Self {
-        self.catalog = catalog.to_vec();
+    /// The installed CLIs' models, offered by the model picker beside the table's, and what
+    /// the pre-fill reads: the review settings, the quota readings and the CLIs' sign-in.
+    pub(crate) fn with_models(
+        mut self,
+        shared: &super::Shared,
+        verification: VerificationSettings,
+    ) -> Self {
+        self.catalog = shared.catalog.to_vec();
+        self.quotas = shared.quotas.clone();
+        self.detection = shared.detection.clone();
+        self.verification = verification;
         self
     }
 
+    /// The human's pick, else what the role's row in Who runs what would use now.
     fn chosen_profile(&self, role: Role) -> Option<ModelProfile> {
-        self.profile
-            .clone()
-            .or_else(|| self.model_selection.prefill(role))
+        self.profile.clone().or_else(|| {
+            super::models::prefill(
+                &self.model_selection,
+                &self.verification,
+                (role, AGENT_FOCUS),
+                &self.quotas,
+                &self.detection,
+                super::ui::now(),
+            )
+        })
     }
 
     pub(crate) fn command(&self, cx: &App) -> Result<Command, String> {
@@ -316,7 +343,7 @@ impl CreationForm {
                 } else {
                     detail
                 },
-                focus: None,
+                focus: AGENT_FOCUS.map(Into::into),
             }),
             Creation::Repository | Creation::Import | Creation::ProjectRepositories => {
                 unreachable!("answered above")
@@ -482,14 +509,19 @@ impl CreationForm {
             .child(text.into())
     }
 
-    /// The model picker: the role's providers first, then every other model. Never limited.
+    /// The model picker: the role's row first, then every other model. Never limited.
     fn model_field(&self, role: Role, cx: &mut Context<Self>) -> Div {
         let current = self.chosen_profile(role);
         let label = current.as_ref().map_or_else(
             || "Choose a model".to_owned(),
             |profile| super::models::profile_label(&self.catalog, profile),
         );
-        let groups = super::models::picker_groups(&self.model_selection, &self.catalog, role);
+        let groups = super::models::picker_groups(
+            &self.model_selection,
+            &self.verification,
+            &self.catalog,
+            (role, AGENT_FOCUS),
+        );
         let catalog = self.catalog.clone();
         let weak = cx.weak_entity();
         Self::field(

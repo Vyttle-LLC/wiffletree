@@ -644,38 +644,54 @@ fn rebase_in_checkout(job: &Job) -> Result<Rebased> {
 
 impl Host {
     /// The ticket's PR keeper agent for `kind`, created on first use as a child of the ticket's
-    /// coordinator working in `workdir`, and pinned to the keeper's model as saved then. Only
-    /// the host calls this; no agent tool reaches it.
+    /// coordinator working in `workdir`, and pinned before each run to what the PR keeper's row
+    /// resolves to: its Claude choice for a sorting run. Only the host calls this; no agent tool
+    /// reaches it.
     pub fn keeper_agent(
         &mut self,
         ticket: &Ticket,
         kind: KeeperSession,
         workdir: &Path,
     ) -> Result<Session> {
-        let profile = self
-            .model_selection()?
-            .keeper
-            .context("Choose the PR keeper's model in Models first")?;
+        let selection = self.model_selection()?;
+        ensure!(
+            selection.keeper().is_some(),
+            "Choose the PR keeper's model in Models first"
+        );
+        let pick = match kind {
+            KeeperSession::Sorting => Pick {
+                profile: (selection.sorting_model().cloned()).context(
+                    "Sorting comments needs a Claude model in the PR keeper's row in Models",
+                )?,
+                waits: false,
+                until: None,
+                reason: "The PR keeper's Claude choice: sorting runs with every tool turned off"
+                    .into(),
+            },
+            KeeperSession::Try => self.resolve_job(&workspace_core::Job::Keeper, false)?,
+        };
         let mut replaced = vec![];
         let agent = self.atomically(|host| {
-            // The keeper's model moved to another provider: the old agent keeps its model.
+            // The keeper's row resolved to another provider: the old agent keeps its model.
             let existing =
                 host.existing_assignment(&ticket.id, Role::Keeper, Some(kind.focus()))?;
-            if let Some(old) = existing.filter(|old| old.provider != profile.provider) {
+            if let Some(old) = existing.filter(|old| old.provider != pick.profile.provider) {
                 replaced = host.archive_in_change(&old.id, None)?;
             }
-            let (session, created) =
-                host.ticket_agent(ticket, Role::Keeper, profile.provider, Some(kind.focus()))?;
+            let (session, created) = host.ticket_agent(
+                ticket,
+                Role::Keeper,
+                pick.profile.provider,
+                Some(kind.focus()),
+            )?;
             if created {
                 let mut runtime = host.session_runtime(&session.id)?;
                 runtime.workdir = Some(workdir.to_string_lossy().into());
                 host.save_runtime(&runtime)?;
-                host.pin(
-                    &session.id,
-                    profile,
-                    Chooser::Human,
-                    "The PR keeper's model",
-                )?;
+            }
+            // Between its runs, so a model on the same provider never changes mid-turn.
+            if !host.in_turn.contains(&session.id) {
+                host.pin_pick(&session, &pick)?;
             }
             Ok(session)
         })?;
@@ -825,8 +841,8 @@ impl Host {
         }
         Ok(due)
     }
-    /// Makes a read of a kept PR's new comments due, while the comments trigger is on and its
-    /// sorting session is not in a turn, when the watcher's record of its newest comments changed
+    /// Makes a read of a kept PR's new comments due, while the comments trigger is on, its
+    /// sorting session is not in a turn and Claude is not spent, when the watcher's record of its newest comments changed
     /// since the last read. The first pass that sees the PR with the trigger on reads it only to
     /// record the comments already there, so they are never sorted.
     fn comments_due(
@@ -847,9 +863,13 @@ impl Host {
         let sorting = agents
             .iter()
             .any(|a| a.role == Role::Keeper && self.in_turn.contains(&a.id));
+        // Sorting runs only on Claude, so new comments wait while Claude is spent or not found
+        // signed in.
         if sorting
             || self.keeper.sorting.contains_key(&ticket.id)
             || !self.kept(ticket, repository, &coordinator)?
+            || self.detected.get(&Provider::Claude) != Some(&true)
+            || self.spent(Provider::Claude)?.is_some()
         {
             return Ok(());
         }
@@ -890,7 +910,8 @@ impl Host {
         self.settings().keeper.comments && self.keeper.sorting.get(ticket_id) == Some(&number)
     }
     /// Takes a read of new comments and returns the sorting run for those by people who can
-    /// push, with their text in its input alone. With none to sort, the read is recorded.
+    /// push, with their text in its input alone. With none to sort, the read is recorded; while
+    /// Claude is spent, it is dropped and read again later.
     pub(crate) fn keeper_read(
         &mut self,
         ticket_id: &str,
@@ -905,6 +926,12 @@ impl Host {
         })?;
         if sorted.sent.is_empty() {
             return self.keeper_sorted(sorted, None).map(|()| None);
+        }
+        // Claude became spent while the comments were read: nothing is recorded, so a pass
+        // after the reset reads them again.
+        if self.spent(Provider::Claude)?.is_some() {
+            self.keeper.sorting.remove(ticket_id);
+            return Ok(None);
         }
         let ticket = self.ticket(ticket_id)?;
         let workdir = Path::new(&self.settings().workspaces_dir)
@@ -1237,7 +1264,7 @@ impl Host {
             && settings.tries(problem)
             && repository.checks.is_some()
             && head.is_some_and(|head| !ticket.tried(problem, head))
-            && self.model_selection().is_ok_and(|s| s.keeper.is_some())
+            && self.model_selection().is_ok_and(|s| s.keeper().is_some())
             && self.keeper_review_ready(ticket).is_ok()
             && self.wake_sent(ticket, problem).is_ok_and(|sent| !sent)
     }
@@ -3517,18 +3544,30 @@ pub(crate) mod tests {
         let read = read_comments(job, gh).unwrap();
         (calls.into_inner(), read)
     }
+    /// The PR keeper's line in tests: one model on `provider`, with no then choice.
+    pub(crate) fn keeper_line(provider: Provider) -> Line {
+        let model = match provider {
+            Provider::Claude => "sonnet",
+            Provider::Codex => "gpt-6.1-sol",
+        };
+        let first = ModelProfile {
+            provider,
+            model: model.into(),
+            effort: "medium".into(),
+        };
+        Line { first, then: None }
+    }
+    /// Saves the PR keeper's row as one model on `provider`, or none.
+    pub(crate) fn set_keeper(host: &mut Host, provider: Option<Provider>) {
+        let mut selection = host.model_selection().unwrap();
+        selection.set_keeper(provider.map(keeper_line));
+        host.set_model_selection(&selection).unwrap();
+    }
     /// A kept ticket whose new comments are sorted: a Claude model is the PR keeper's, and the
     /// comments trigger is on.
     pub(crate) fn sorting() -> (Fixture, Remote) {
         let (mut f, r) = kept();
-        let mut selection = f.host.model_selection().unwrap();
-        let allowed = selection.allowed(Provider::Claude)[0].clone();
-        selection.keeper = Some(ModelProfile {
-            provider: Provider::Claude,
-            model: allowed.model,
-            effort: allowed.effort,
-        });
-        f.host.set_model_selection(&selection).unwrap();
+        set_keeper(&mut f.host, Some(Provider::Claude));
         let on = KeeperSettings {
             comments: true,
             ..f.host.settings().keeper
@@ -3580,6 +3619,61 @@ pub(crate) mod tests {
         sort.sorted.sent.iter().map(|s| s.id.as_str()).collect()
     }
 
+    /// Records Claude's weekly window at `used` percent, resetting in a day.
+    fn claude_weekly(host: &Host, used: f64) {
+        let at = now();
+        let window = QuotaWindow {
+            key: "seven_day".into(),
+            label: "Weekly".into(),
+            used_percent: Some(used),
+            observed_at: at,
+            duration_mins: Some(10080),
+            resets_at: Some(at + 86_400_000),
+            status: None,
+        };
+        host.record_quota(QuotaReading {
+            provider: Provider::Claude,
+            account: None,
+            observed_at: at,
+            source: "Claude stream".into(),
+            windows: vec![window],
+            error: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn new_comments_wait_while_claude_is_spent_and_are_read_once_it_is_not() {
+        let (mut f, _r) = sorting();
+        claude_weekly(&f.host, 97.);
+        assert!(comments_pass(&mut f, CommentCursors::default()).is_empty());
+        claude_weekly(&f.host, 20.);
+        assert_eq!(comments_pass(&mut f, CommentCursors::default()).len(), 1);
+    }
+
+    #[test]
+    fn a_read_that_returns_after_claude_became_spent_starts_no_sorting_and_is_read_again() {
+        let (mut f, _r) = sorting();
+        let job = read_due(&mut f);
+        let comment = node(1, 11, "MEMBER", "Fix the flag");
+        let (_, read) = read_from(&job, answer(vec![comment], vec![], vec![]));
+        claude_weekly(&f.host, 96.);
+        let started = f
+            .host
+            .keeper_read(&f.ticket.clone(), read.sorted.read, Ok(read));
+        assert!(started.unwrap().is_none());
+        assert!(
+            f.host
+                .ticket_agents(&f.ticket)
+                .unwrap()
+                .iter()
+                .all(|a| a.role != Role::Keeper)
+        );
+        // Nothing was recorded, so once Claude is no longer spent the comments are read again.
+        claude_weekly(&f.host, 20.);
+        assert_eq!(comments_pass(&mut f, inline(1)).len(), 1);
+    }
+
     #[test]
     fn the_comments_trigger_needs_a_claude_model_and_keeps_it() {
         let (mut f, _r) = kept();
@@ -3592,14 +3686,7 @@ pub(crate) mod tests {
             refused.contains("choose a Claude model in Models first"),
             "{refused}"
         );
-        let mut selection = f.host.model_selection().unwrap();
-        let codex = selection.allowed(Provider::Codex)[0].clone();
-        selection.keeper = Some(ModelProfile {
-            provider: Provider::Codex,
-            model: codex.model,
-            effort: codex.effort,
-        });
-        f.host.set_model_selection(&selection).unwrap();
+        set_keeper(&mut f.host, Some(Provider::Codex));
         let refused = f.host.set_keeper(on).unwrap_err().to_string();
         assert!(
             refused.starts_with("Sorting comments needs a Claude model"),
@@ -3609,17 +3696,12 @@ pub(crate) mod tests {
         // With the trigger on, a selection that drops or replaces the Claude model is refused.
         let (mut f, _r) = sorting();
         let mut selection = f.host.model_selection().unwrap();
-        selection.keeper = None;
+        selection.set_keeper(None);
         assert!(f.host.set_model_selection(&selection).is_err());
-        let codex = selection.allowed(Provider::Codex)[0].clone();
-        selection.keeper = Some(ModelProfile {
-            provider: Provider::Codex,
-            model: codex.model,
-            effort: codex.effort,
-        });
+        selection.set_keeper(Some(keeper_line(Provider::Codex)));
         assert!(f.host.set_model_selection(&selection).is_err());
-        let saved = f.host.model_selection().unwrap().keeper.unwrap();
-        assert_eq!(saved.provider, Provider::Claude);
+        let saved = f.host.model_selection().unwrap();
+        assert_eq!(saved.sorting_model().unwrap().provider, Provider::Claude);
     }
 
     #[test]
@@ -4026,9 +4108,7 @@ pub(crate) mod tests {
         let (mut f, _r) = sorting();
         let sort = sort_of(&mut f, &["Fix the flag"]);
         turn_comments_off(&mut f);
-        let mut selection = f.host.model_selection().unwrap();
-        let model = selection.keeper.take();
-        f.host.set_model_selection(&selection).unwrap();
+        set_keeper(&mut f.host, None);
         let pulled = KeeperSettings {
             comments: true,
             ..f.host.settings().keeper
@@ -4037,8 +4117,7 @@ pub(crate) mod tests {
             .set_keeper(&pulled)
             .unwrap();
         assert!(!f.host.settings().keeper.comments);
-        selection.keeper = model;
-        f.host.set_model_selection(&selection).unwrap();
+        set_keeper(&mut f.host, Some(Provider::Claude));
         assert!(f.host.settings().keeper.comments);
         let answer_needs_change = classes(&[("discussion_r1", "needs_change")]);
         f.host
@@ -4174,24 +4253,20 @@ pub(crate) mod tests {
     }
 
     /// A kept ticket whose PR changes line 5 of `src/tree.rs`, its first cycle a Full review
-    /// that passed with Correctness and Regressions on sessions the coordinator chose models
-    /// for, the re-check level Light running Correctness, the keeper's model chosen, the
+    /// that passed with Correctness and Regressions on sessions pinned to Correctness's row,
+    /// the re-check level Light running Correctness, the keeper's model chosen, the
     /// conflicts trigger on and `checks` as the repository's checks command.
     pub(crate) fn reviewing(checks: &str) -> (Fixture, Remote) {
         let (mut f, r) = kept_editing_tree();
-        let mut selection = f.host.model_selection().unwrap();
-        let provider = selection.providers_for(Role::Reviewer)[0];
-        let allowed = selection.allowed(provider)[0].clone();
-        let profile = ModelProfile {
-            provider,
-            model: allowed.model,
-            effort: allowed.effort,
+        let correctness = workspace_core::Job::Verifier {
+            focus: "Correctness".into(),
         };
+        let profile = f.host.resolve_job(&correctness, false).unwrap().profile;
+        let provider = profile.provider;
         let reviewer = |focus: &str| VerifierConfig {
             role: Role::Reviewer,
             focus: focus.into(),
             instruction: None,
-            provider: None,
         };
         let mut settings = VerificationSettings::one_level(
             vec![reviewer("Correctness"), reviewer("Regressions")],
@@ -4206,15 +4281,19 @@ pub(crate) mod tests {
         });
         f.host.set_verification(settings).unwrap();
         let mut ticket = f.ticket();
-        let coordinator = f.coordinator.clone();
         let verifiers = ["Correctness", "Regressions"]
             .map(|focus| {
                 let (agent, _) = f
                     .host
                     .ticket_agent(&ticket, Role::Reviewer, provider, Some(focus))
                     .unwrap();
-                f.host
-                    .record_choice(&coordinator, &agent, profile.clone(), "First review")
+                (f.host)
+                    .pin(
+                        &agent.id,
+                        profile.clone(),
+                        Chooser::Wiffletree,
+                        "First review",
+                    )
                     .unwrap();
                 // Retired when the cycle ended, as every verifier is.
                 f.host.set_archived(&agent.id, true).unwrap();
@@ -4238,8 +4317,7 @@ pub(crate) mod tests {
         verification.rounds[0].verifiers = verifiers;
         ticket.state = TicketState::Passed;
         f.host.save_ticket(&ticket).unwrap();
-        selection.keeper = Some(profile);
-        f.host.set_model_selection(&selection).unwrap();
+        set_keeper(&mut f.host, Some(provider));
         f.host
             .set_keeper(KeeperSettings {
                 rebase: true,
@@ -4507,15 +4585,9 @@ pub(crate) mod tests {
         let mut ticket = f.ticket();
         ticket.state = TicketState::ReadyForTesting;
         f.host.save_ticket(&ticket).unwrap();
-        let profile = f.host.model_selection().unwrap().keeper.unwrap();
-        let choice = VerifierChoice {
-            focus: "Correctness".into(),
-            profile,
-            reason: "Re-check".into(),
-        };
         let started = f
             .host
-            .verify_ticket(&f.ticket.clone(), "Light", &[choice])
+            .verify_ticket(&f.ticket.clone(), "Light", false)
             .unwrap();
         let cycle = started.verification.unwrap();
         assert_eq!(cycle.cycle, 3);
@@ -4545,13 +4617,8 @@ pub(crate) mod tests {
         ticket.state = TicketState::ReadyForTesting;
         f.host.save_ticket(&ticket).unwrap();
         let record = ticket.keeper_reviews().to_vec();
-        let choice = VerifierChoice {
-            focus: "Correctness".into(),
-            profile: f.host.model_selection().unwrap().keeper.unwrap(),
-            reason: "Re-check".into(),
-        };
         f.host
-            .verify_ticket(&f.ticket.clone(), "Light", &[choice])
+            .verify_ticket(&f.ticket.clone(), "Light", false)
             .unwrap();
         verdict(&mut f, "Correctness", "blocked", json!([]));
         let ticket = f.ticket();
@@ -4740,46 +4807,17 @@ pub(crate) mod tests {
             let ticket = f.ticket();
             format!("{:#}", f.host.keeper_review_ready(&ticket).unwrap_err())
         };
-        // No model was ever chosen: Light runs Style, which never ran on the ticket.
-        let style = refused(&|f| {
-            let mut settings = f.host.settings().verification;
-            settings.verifiers.push(VerifierConfig {
-                role: Role::Reviewer,
-                focus: "Style".into(),
-                instruction: None,
-                provider: None,
-            });
-            settings.levels[1].verifiers = vec!["Style".into()];
-            f.host.set_verification(settings).unwrap();
+        // A verifier that never ran on the ticket starts on its row, so it is no reason.
+        let (mut f, _r) = reviewing("true");
+        let mut settings = f.host.settings().verification;
+        settings.verifiers.push(VerifierConfig {
+            role: Role::Reviewer,
+            focus: "Style".into(),
+            instruction: None,
         });
-        assert!(
-            style.contains("Reviewer · Style has never run on this ticket"),
-            "{style}"
-        );
-        // The chosen model is no longer allowed.
-        let removed = refused(&|f| {
-            let mut selection = f.host.model_selection().unwrap();
-            let chosen = selection.keeper.clone().unwrap();
-            let access = selection.providers.get_mut(&chosen.provider).unwrap();
-            access
-                .models
-                .retain(|m| m.model != chosen.model || m.effort != chosen.effort);
-            selection.keeper = None;
-            f.host
-                .set_keeper(KeeperSettings {
-                    rebase: true,
-                    ..KeeperSettings::default()
-                })
-                .unwrap();
-            f.host.set_model_selection(&selection).unwrap();
-            f.host
-                .set_keeper(KeeperSettings {
-                    review_level: Some("Light".into()),
-                    ..f.host.settings().keeper
-                })
-                .unwrap();
-        });
-        assert!(removed.contains("Reviewer · Correctness"), "{removed}");
+        settings.levels[1].verifiers = vec!["Style".into()];
+        f.host.set_verification(settings).unwrap();
+        f.host.keeper_review_ready(&f.ticket()).unwrap();
         // The latest review did not pass.
         let blocked = refused(&|f| f.review(VerificationOutcome::Blocked));
         assert!(blocked.contains("last review ended blocked"), "{blocked}");
@@ -5055,8 +5093,11 @@ pub(crate) mod tests {
         assert_eq!(agent.parent_id.as_ref(), Some(&f.coordinator.id));
         let runtime = f.host.session_runtime(&agent.id).unwrap();
         assert_eq!(runtime.workdir.as_deref(), checkout.to_str());
-        let keeper = f.host.model_selection().unwrap().keeper;
-        assert_eq!(runtime.profile, keeper);
+        let keeper = f.host.model_selection().unwrap();
+        assert_eq!(
+            runtime.profile.as_ref(),
+            Some(&keeper.keeper().unwrap().main.first)
+        );
         let messages = f.host.messages(&agent.id, None, 100).unwrap();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].sender.is_none());
