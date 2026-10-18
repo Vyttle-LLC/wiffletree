@@ -10,20 +10,22 @@ use gpui_component::{
 use ui::{banner, empty_state, hint, icon, mono, pill, section};
 use wording::{age, counted, from_now};
 
-const WITHOUT_ASKING: &str = "In an allowed owner’s repositories, agents push a ticket’s branch and open and update its pull request once its review has passed, without asking you. Everywhere else, each push and each pull request waits for your approval. This list stays on this Mac and is never synced.";
+const WITHOUT_ASKING: &str =
+    "For repositories owned by these accounts. Everything else asks you first.";
 const NEVER: &str = "Wiffletree never approves, merges, closes or comments on a pull request.";
-const SETTINGS_REPOSITORY: &str = "These owners don’t cover your settings repository, and it doesn’t need them: choosing it in Settings is what lets Wiffletree push your settings there.";
 const HELD: &str = "A trigger held here can be turned off only on a Mac that runs it.";
 const UNTIL_GITHUB_ANSWERS: &str = "Owners are still listed, because they come from each repository’s remote on disk. Until GitHub has answered for a repository, it asks first, whatever is ticked. Wiffletree asks GitHub again the next time you come back.";
-const FORKS: &str = "FORKS · ALLOWED ONE AT A TIME, NEVER BY THEIR OWNER’S TICK";
-const NOT_ON_GITHUB: &str = "NOT ON GITHUB · NOTHING TO PUSH TO";
-const KEEP: &str = "Only in the repositories ticked above · all off until you tick them.";
-const REBASE: &str = "Plain Git, no model and no review. Once the base has been quiet, replaces the branch on GitHub with the rebased one (a force-push that refuses to overwrite anything Wiffletree has not seen).";
-const CONFLICTS: &str = "The PR keeper’s model tries once. Its result must change only the conflicted files, pass the repository’s checks and pass a review at the level below before anything is pushed. If not, the try is thrown away and the coordinator is told. A rebase that changes the patch is checked and reviewed the same way. Needs the rebase trigger above and a checks command in the repository.";
-const CHECKS: &str = "Only when the checks also fail on this machine. One try, the same gate and review, and only in files the pull request already changes. Needs the rebase trigger above and a checks command in the repository.";
+const KEEP: &str =
+    "Only in repositories whose owner is allowed below · all off until you allow one.";
+const WATCH: &str =
+    "Always on. Tells the coordinator when it merges, closes, fails checks or conflicts.";
+const REBASE_AFTER: &str = "After the base has been quiet for";
+const REBASE_PUSH: &str = "minutes. Pushes only when the change is the same as the reviewed one.";
+const SORT: &str = "Tells the coordinator which need a change or an answer.";
+/// The name of the one trigger for tries at conflicts and failed checks.
+const FIXES: &str = "Try once to fix a conflict or failed checks";
 const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
-const SORT: &str = "Reads each new comment and sorts it: needs a change, a question, or no action. Tells the coordinator about the first two. Never replies, resolves or reacts.";
-const NEVER_KEEPER: &str = "Wiffletree never merges, approves, closes or comments on a pull request. The model is chosen in Models → PR keeper.";
+const OWNER_PLACEHOLDER: &str = "An owner, or owner/name for one fork";
 
 /// A repository's checks command being edited on its row, with the limit chosen so far.
 pub(super) struct ChecksEdit {
@@ -52,6 +54,8 @@ pub(super) struct RepositoriesPage {
     shared: Shared,
     checks_command: Entity<InputState>,
     checks_edit: Option<ChecksEdit>,
+    /// The owner being added to those allowed to have PRs opened without asking.
+    owner_input: Entity<InputState>,
     /// The saved review levels, which the keeper's review level picks from.
     verifiers: Entity<verifiers::VerifierEditor>,
 }
@@ -72,6 +76,7 @@ impl RepositoriesPage {
                 InputState::new(window, cx).placeholder("The command that runs its checks")
             }),
             checks_edit: None,
+            owner_input: cx.new(|cx| InputState::new(window, cx).placeholder(OWNER_PLACEHOLDER)),
         }
     }
     /// Redraws while shown, as the repositories it lists change.
@@ -97,8 +102,8 @@ impl RepositoriesPage {
         let mut body = div().flex().flex_col().gap_3();
         if !snapshot.repositories.is_empty() {
             body = body
-                .child(self.owners_block(snapshot, p, cx))
-                .child(self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx));
+                .child(self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx))
+                .child(self.owners_block(snapshot, p, cx));
         }
         body = body.child(
             section(
@@ -229,25 +234,34 @@ impl RepositoriesPage {
             .child(self.repository_roots(snapshot, p, cx))
     }
 
-    /// The owners the human allows to have pull requests opened without asking: one tick box per
-    /// organization or user and per fork, and the repositories with nowhere to push.
+    /// The owners the human allows to have pull requests opened without asking: one chip per
+    /// organization or user, and per single fork, with a field to add another.
     fn owners_block(&self, snapshot: &Snapshot, p: Palette, cx: &mut Context<Self>) -> Div {
-        let entries = owner_entries(&snapshot.repositories);
-        let allowed = &snapshot.allowed_owners;
-        let mut block = div()
+        let mut chips = div().flex().flex_wrap().items_center().gap_2();
+        for entry in &snapshot.allowed_owners {
+            chips = chips.child(self.owner_chip(entry, p, cx));
+        }
+        let add = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Input::new(&self.owner_input).small().flex_1().min_w_0())
+            .child(
+                button("add-owner")
+                    .small()
+                    .icon(icon("plus"))
+                    .label("Add")
+                    .on_click(cx.listener(|v, _, w, c| v.add_owner(w, c))),
+            );
+        let mut card = div()
             .mb_4()
             .flex()
             .flex_col()
             .gap_2()
-            .child(
-                section(owners_heading(&entries, allowed), p)
-                    .child(pill("This Mac only", p.subtle)),
-            )
-            .child(hint(WITHOUT_ASKING, p))
-            .child(hint(SETTINGS_REPOSITORY, p))
-            .child(div().text_size(px(font::SMALL)).child(NEVER));
+            .child(section("OPENING PRS WITHOUT ASKING", p).child(pill("This Mac only", p.subtle)))
+            .child(hint(WITHOUT_ASKING, p));
         if let Some(error) = &snapshot.github_error {
-            block = block.child(
+            card = card.child(
                 banner(p.yellow).child(
                     div()
                         .flex()
@@ -258,46 +272,58 @@ impl RepositoriesPage {
                 ),
             );
         }
-        let mut rows = div().flex().flex_col();
-        for owner in &entries.owners {
-            rows = rows.child(self.owner_row(
-                Some(&owner.login),
-                &owner.login,
-                owner.kind(),
-                owner.summary(),
-                allowed,
-                p,
-                cx,
-            ));
-        }
-        if !entries.forks.is_empty() {
-            rows = rows.child(section(FORKS, p).mt_2());
-        }
-        for fork in &entries.forks {
-            let detail = format!("{} · {}", fork.summary(), fork.detail());
-            rows = rows.child(self.owner_row(
-                Some(&fork.entry),
-                &fork.entry,
-                None,
-                detail,
-                allowed,
-                p,
-                cx,
-            ));
-        }
-        if !entries.not_on_github.is_empty() {
-            rows = rows.child(section(NOT_ON_GITHUB, p).mt_2());
-        }
-        for local in &entries.not_on_github {
-            let detail = format!("{} · cannot be allowed", local.reason);
-            rows = rows.child(self.owner_row(None, &local.name, None, detail, allowed, p, cx));
-        }
-        block.child(rows)
+        card.child(chips).child(add)
     }
 
-    /// The PR keeper's triggers, for the whole workspace: the rebase trigger and its quiet
-    /// period, the conflicts trigger and its review level, the checks trigger, and comment
-    /// sorting, with a line for each trigger on from another machine that this one cannot run.
+    /// One allowed owner, with a button that stops allowing it.
+    fn owner_chip(&self, entry: &str, p: Palette, cx: &mut Context<Self>) -> Div {
+        let id = entry.to_owned();
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .rounded_md()
+            .border_1()
+            .border_color(p.edge)
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(entry.to_owned()),
+            )
+            .child(
+                button(SharedString::from(format!("remove-owner-{entry}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(icon("close"))
+                    .tooltip("Stop opening PRs without asking here")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        let command = Command::SetOwnerAllowed {
+                            entry: id.clone(),
+                            allowed: false,
+                        };
+                        v.request(command, w, c)
+                    })),
+            )
+    }
+
+    /// Allows the owner as typed; the host refuses a name GitHub could not have.
+    fn add_owner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entry = self.owner_input.read(cx).value().trim().to_owned();
+        if entry.is_empty() {
+            return;
+        }
+        let command = Command::SetOwnerAllowed {
+            entry,
+            allowed: true,
+        };
+        self.request(command, window, cx);
+    }
+
+    /// The PR keeper's triggers, for the whole workspace, in one card: the watch that is always
+    /// on, the rebase trigger and its quiet period, the one trigger for tries at conflicts and
+    /// failed checks and its review level, and comment sorting, with a line for each trigger on
+    /// from another machine that this one cannot run.
     fn keeper_block(
         &self,
         keeper: &KeeperSettings,
@@ -305,7 +331,6 @@ impl RepositoriesPage {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let picker = self.review_level_picker(keeper, cx);
         let save = |keeper: KeeperSettings| {
             cx.listener(move |v, _, w, c| {
                 v.request(
@@ -346,37 +371,21 @@ impl RepositoriesPage {
             v.request(Command::SetKeeper { keeper }, w, c)
         });
         let current = keeper.clone();
-        let conflicts = cx.listener(move |v, checked: &bool, w, c| {
-            let keeper = KeeperSettings {
-                conflicts: *checked,
-                ..current.clone()
-            };
+        let fixes = cx.listener(move |v, checked: &bool, w, c| {
+            let keeper = with_fixes(&current, *checked);
             v.request(Command::SetKeeper { keeper }, w, c)
         });
-        let current = keeper.clone();
-        let checks = cx.listener(move |v, checked: &bool, w, c| {
-            let keeper = KeeperSettings {
-                checks: *checked,
-                ..current.clone()
-            };
-            v.request(Command::SetKeeper { keeper }, w, c)
-        });
-        let level = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .text_size(px(font::SMALL))
-            .text_color(p.subtle)
-            .child("Reviewed with")
-            .child(picker)
-            .child("a re-check level from Models → Review");
-        let period = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .text_size(px(font::SMALL))
-            .text_color(p.subtle)
-            .child("Waits until the base has been quiet for")
+        let inline = || {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_1()
+                .text_size(px(font::SMALL))
+                .text_color(p.subtle)
+        };
+        let period = inline()
+            .child(REBASE_AFTER)
             .child(step("less", "−", minutes - 1).on_click(save(quiet(minutes - 1))))
             .child(
                 div()
@@ -385,13 +394,21 @@ impl RepositoriesPage {
                     .child(minutes.to_string()),
             )
             .child(step("more", "+", minutes + 1).on_click(save(quiet(minutes + 1))))
-            .child("minutes");
+            .child(REBASE_PUSH);
+        let level = inline()
+            .child("Then runs the")
+            .child(self.review_level_picker(keeper, cx))
+            .child("review before pushing.");
+        let mut fix_details = vec![level.into_any_element()];
+        if let Some(partly) = partly_on_hint(keeper) {
+            fix_details.push(hint(partly, p).text_color(p.yellow).into_any_element());
+        }
         div()
             .mb_4()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(section("KEEP PULL REQUESTS UP TO DATE", p))
+            .gap_3()
+            .child(section("WHEN A TICKET’S PR IS OPEN", p))
             .child(hint(KEEP, p))
             .children(
                 held.iter()
@@ -399,31 +416,23 @@ impl RepositoriesPage {
             )
             .when(!held.is_empty(), |d| d.child(hint(HELD, p)))
             .child(trigger(
+                Checkbox::new("keeper-watch").checked(true).disabled(true),
+                "Watch it",
+                vec![hint(WATCH, p).into_any_element()],
+            ))
+            .child(trigger(
                 Checkbox::new("keeper-rebase")
                     .checked(keeper.rebase)
                     .on_click(rebase),
-                "Rebase when the base branch moves",
-                vec![
-                    hint(REBASE, p).into_any_element(),
-                    period.into_any_element(),
-                ],
+                "Keep it rebased",
+                vec![period.into_any_element()],
             ))
             .child(trigger(
-                Checkbox::new("keeper-conflicts")
-                    .checked(keeper.conflicts)
-                    .on_click(conflicts),
-                "Try to resolve conflicts",
-                vec![
-                    hint(CONFLICTS, p).into_any_element(),
-                    level.into_any_element(),
-                ],
-            ))
-            .child(trigger(
-                Checkbox::new("keeper-checks")
-                    .checked(keeper.checks)
-                    .on_click(checks),
-                "Try to fix failed checks",
-                vec![hint(CHECKS, p).into_any_element()],
+                Checkbox::new("keeper-fixes")
+                    .checked(fixes_are_on(keeper))
+                    .on_click(fixes),
+                FIXES,
+                fix_details,
             ))
             .child(trigger(
                 Checkbox::new("keeper-comments")
@@ -432,7 +441,7 @@ impl RepositoriesPage {
                 "Sort new comments",
                 vec![hint(SORT, p).into_any_element()],
             ))
-            .child(div().text_size(px(font::SMALL)).child(NEVER_KEEPER))
+            .child(div().text_size(px(font::SMALL)).child(NEVER))
     }
 
     /// The repository's checks command and its limit, or its editor while the human edits it.
@@ -620,53 +629,6 @@ impl RepositoriesPage {
             })
     }
 
-    /// One row of the owners block. `entry` is what its tick box allows; a repository that is
-    /// not on GitHub has none.
-    #[allow(clippy::too_many_arguments)]
-    fn owner_row(
-        &self,
-        entry: Option<&str>,
-        name: &str,
-        kind: Option<&'static str>,
-        detail: String,
-        allowed: &[String],
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let tick = entry.map(|entry| {
-            let entry = entry.to_owned();
-            Checkbox::new(SharedString::from(format!("allow-owner-{entry}")))
-                .checked(is_entry_allowed(&entry, allowed))
-                .on_click(cx.listener(move |v, checked: &bool, w, c| {
-                    v.request(
-                        Command::SetOwnerAllowed {
-                            entry: entry.clone(),
-                            allowed: *checked,
-                        },
-                        w,
-                        c,
-                    )
-                }))
-        });
-        div()
-            .py_1p5()
-            .flex()
-            .items_center()
-            .gap_3()
-            .border_b_1()
-            .border_color(p.edge.opacity(edge::HAIRLINE))
-            // A row without a box keeps its text in line with the others.
-            .child(div().w(px(16.)).flex_none().children(tick))
-            .child(
-                div()
-                    .flex_none()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(name.to_owned()),
-            )
-            .children(kind.map(|kind| pill(kind, p.subtle)))
-            .child(div().flex_1().min_w_0().text_right().child(hint(detail, p)))
-    }
-
     /// Lists leftover worktrees in a sheet; removal happens there only after confirmation.
     fn open_leftovers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
@@ -728,21 +690,39 @@ impl RepositoriesPage {
     }
 }
 
-/// "OPEN PULL REQUESTS WITHOUT ASKING · 3 of 4 owners allowed", counting forks as owners to
-/// allow.
-fn owners_heading(entries: &OwnerEntries, allowed: &[String]) -> String {
-    let all = entries
-        .owners
-        .iter()
-        .map(|owner| &owner.login)
-        .chain(entries.forks.iter().map(|fork| &fork.entry));
-    let (mut total, mut ticked) = (0, 0);
-    for entry in all {
-        total += 1;
-        ticked += usize::from(is_entry_allowed(entry, allowed));
+/// Whether the one trigger for tries is shown on: both of the triggers it writes are on.
+fn fixes_are_on(keeper: &KeeperSettings) -> bool {
+    keeper.conflicts && keeper.checks
+}
+
+/// The keeper's settings with both triggers for tries set the same way.
+fn with_fixes(keeper: &KeeperSettings, on: bool) -> KeeperSettings {
+    KeeperSettings {
+        conflicts: on,
+        checks: on,
+        ..keeper.clone()
     }
-    let owners = counted(total, "owner");
-    format!("OPEN PULL REQUESTS WITHOUT ASKING · {ticked} of {owners} allowed")
+}
+
+/// What the one trigger says while saved settings, such as ones from another machine, have
+/// only one of the two on. It shows as off, and turning it on sets both.
+fn partly_on_hint(keeper: &KeeperSettings) -> Option<&'static str> {
+    match (keeper.conflicts, keeper.checks) {
+        (true, false) => Some("Partly on: only conflicts. Turning it on sets both."),
+        (false, true) => Some("Partly on: only failed checks. Turning it on sets both."),
+        _ => None,
+    }
+}
+
+/// Rewords a refusal from the host in the Repositories page's words.
+fn page_words(error: &str) -> String {
+    if error.contains("needs a PR keeper model: choose") {
+        return "Choose a PR keeper model in Models first.".into();
+    }
+    error
+        .replace("Try to resolve conflicts", FIXES)
+        .replace("Try to fix failed checks", FIXES)
+        .replace("Rebase when the base branch moves", "Keep it rebased")
 }
 
 /// The repository's checks command, if it has one, and the line that goes with it: its limit,
@@ -829,10 +809,13 @@ impl Requests for RepositoriesPage {
         cx: &mut Context<Self>,
     ) {
         match reply {
-            Err(error) => toast_error(error, window, cx),
+            Err(error) => toast_error(page_words(&error), window, cx),
             Ok(_) if matches!(command, Command::SetRepositoryChecks { .. }) => {
                 self.checks_edit = None
             }
+            Ok(_) if matches!(command, Command::SetOwnerAllowed { allowed: true, .. }) => self
+                .owner_input
+                .update(cx, |input, cx| input.set_value("", window, cx)),
             Ok(_) => {}
         }
     }
@@ -855,8 +838,8 @@ impl Render for RepositoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        FORKS, NEVER, NOT_ON_GITHUB, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary,
-        owners_heading, pr_check_status, repository_counts,
+        FIXES, NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on,
+        page_words, partly_on_hint, pr_check_status, repository_counts, with_fixes,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1021,55 +1004,6 @@ mod tests {
     }
 
     #[test]
-    fn the_owners_block_lists_owners_with_counts_and_a_fork_on_its_own() {
-        let mut repositories: Vec<_> = (0..29)
-            .map(|i| on_github(&format!("Sage-Social/r{i}"), false, false))
-            .collect();
-        repositories.push(on_github("Vyttle-LLC/wiffletree", false, true));
-        repositories.push(on_github("MHohlios/dotfiles", false, false));
-        repositories.push(on_github("MHohlios/gpui-component", true, true));
-        repositories.push(
-            serde_json::from_value(serde_json::json!({
-                "id": "s", "name": "scratch-prototypes", "path": "/s", "base": "main"
-            }))
-            .unwrap(),
-        );
-        let entries = owner_entries(&repositories);
-        let allowed = vec![
-            "sage-social".to_owned(),
-            "MHohlios/gpui-component".to_owned(),
-        ];
-        assert_eq!(
-            owners_heading(&entries, &allowed),
-            "OPEN PULL REQUESTS WITHOUT ASKING · 2 of 4 owners allowed"
-        );
-        assert_eq!(
-            owners_heading(&owner_entries(&repositories[..1]), &[]),
-            "OPEN PULL REQUESTS WITHOUT ASKING · 0 of 1 owner allowed"
-        );
-        let owners: Vec<_> = entries
-            .owners
-            .iter()
-            .map(|o| format!("{} · {} · {}", o.login, o.kind().unwrap(), o.summary()))
-            .collect();
-        assert_eq!(
-            owners,
-            [
-                "Sage-Social · Organization · 29 repositories · all private",
-                "Vyttle-LLC · Organization · 1 repository · public",
-                "MHohlios · User · 1 repository · private",
-            ]
-        );
-        // The fork has its own entry and is not counted under MHohlios.
-        let fork = &entries.forks[0];
-        assert_eq!(
-            format!("{} · {} · {}", fork.entry, fork.summary(), fork.detail()),
-            "MHohlios/gpui-component · Fork of longbridge/gpui-component · public · pull requests stay inside the fork"
-        );
-        assert_eq!(entries.not_on_github[0].reason, "No GitHub remote");
-    }
-
-    #[test]
     fn each_repository_row_says_which_rule_applies() {
         let allowed = vec!["Vyttle-LLC".to_owned()];
         let label = |repository: &Repository| rule_label(repository, &allowed);
@@ -1095,17 +1029,13 @@ mod tests {
     #[test]
     fn the_page_says_allowed_and_without_asking_and_never_approved_or_automatic() {
         let fork = on_github("MHohlios/gpui-component", true, true);
-        let entries = owner_entries(std::slice::from_ref(&fork));
         let mut copy = vec![
             WITHOUT_ASKING.to_owned(),
             NEVER.to_owned(),
             UNTIL_GITHUB_ANSWERS.to_owned(),
-            FORKS.to_owned(),
-            NOT_ON_GITHUB.to_owned(),
-            owners_heading(&entries, &[]),
             rule_label(&fork, &["MHohlios/gpui-component".to_owned()]),
             rule_label(&fork, &[]),
-            entries.forks[0].detail(),
+            owner_entries(std::slice::from_ref(&fork)).forks[0].detail(),
         ];
         copy.push(rule_label(
             &on_github("Vyttle-LLC/wiffletree", false, true),
@@ -1122,6 +1052,92 @@ mod tests {
             NEVER,
             "Wiffletree never approves, merges, closes or comments on a pull request."
         );
-        assert!(WITHOUT_ASKING.contains("stays on this Mac"));
+        assert_eq!(
+            WITHOUT_ASKING,
+            "For repositories owned by these accounts. Everything else asks you first."
+        );
+    }
+
+    fn keeper(conflicts: bool, checks: bool) -> KeeperSettings {
+        KeeperSettings {
+            rebase: true,
+            quiet_minutes: 5,
+            comments: true,
+            conflicts,
+            checks,
+            review_level: Some("Light".into()),
+        }
+    }
+
+    #[test]
+    fn the_one_trigger_for_tries_shows_on_only_when_both_are_on() {
+        assert!(fixes_are_on(&keeper(true, true)));
+        assert!(!fixes_are_on(&keeper(false, false)));
+        assert!(!fixes_are_on(&keeper(true, false)));
+        assert!(!fixes_are_on(&keeper(false, true)));
+        assert_eq!(partly_on_hint(&keeper(true, true)), None);
+        assert_eq!(partly_on_hint(&keeper(false, false)), None);
+        assert!(
+            partly_on_hint(&keeper(true, false))
+                .unwrap()
+                .contains("only conflicts")
+        );
+        assert!(
+            partly_on_hint(&keeper(false, true))
+                .unwrap()
+                .contains("only failed checks")
+        );
+    }
+
+    #[test]
+    fn turning_the_one_trigger_on_or_off_sets_both_and_changes_nothing_else() {
+        for from in [(false, false), (true, false), (false, true), (true, true)] {
+            let before = keeper(from.0, from.1);
+            assert_eq!(with_fixes(&before, true), keeper(true, true));
+            assert_eq!(with_fixes(&before, false), keeper(false, false));
+        }
+    }
+
+    #[test]
+    fn a_partly_on_pair_shows_off_and_turning_it_on_sets_both() {
+        let saved = keeper(true, false);
+        assert!(!fixes_are_on(&saved));
+        // The box shows off, so a click asks for on.
+        assert_eq!(with_fixes(&saved, true), keeper(true, true));
+    }
+
+    #[test]
+    fn a_settings_file_saved_before_the_regrouping_loads_and_displays() {
+        let saved: KeeperSettings = serde_json::from_str(
+            r#"{"rebase": true, "quiet_minutes": 3, "conflicts": true, "review_level": "Light"}"#,
+        )
+        .unwrap();
+        assert!(!fixes_are_on(&saved));
+        assert!(partly_on_hint(&saved).is_some());
+        assert_eq!(
+            serde_json::to_value(with_fixes(&saved, true)).unwrap(),
+            serde_json::json!({"rebase": true, "quiet_minutes": 3, "comments": false,
+                "conflicts": true, "checks": true, "review_level": "Light"})
+        );
+    }
+
+    #[test]
+    fn refusals_use_the_names_on_the_page() {
+        assert_eq!(
+            page_words(
+                "\"Try to resolve conflicts\" needs a PR keeper model: choose one in Models first"
+            ),
+            "Choose a PR keeper model in Models first."
+        );
+        assert_eq!(
+            page_words(
+                "Sorting comments needs a PR keeper model: choose a Claude model in Models first"
+            ),
+            "Choose a PR keeper model in Models first."
+        );
+        assert_eq!(
+            page_words("\"Try to fix failed checks\" needs \"Rebase when the base branch moves\""),
+            format!("\"{FIXES}\" needs \"Keep it rebased\"")
+        );
     }
 }
