@@ -7,14 +7,6 @@ use crate::*;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
-const REPORT_KINDS: [&str; 6] = [
-    "progress",
-    "blocked",
-    "ready_for_testing",
-    "passed",
-    "failed",
-    "completed",
-];
 const WORKTREE_CHANGED: &str = "worktree changed during verification";
 const UNCOMMITTED: &str = "The worktree has uncommitted or untracked files; ask the implementer to commit or discard them";
 /// How many verification cycles may hold a slot at once across the host, so concurrent
@@ -379,6 +371,26 @@ pub(crate) struct Triage {
 }
 
 impl Host {
+    pub(crate) fn checkout_head(&self, ticket: &Ticket) -> Result<String> {
+        match self
+            .completed_move
+            .as_ref()
+            .filter(|done| done.for_ticket(ticket))
+        {
+            Some(done) => done.head.clone().map_err(anyhow::Error::msg),
+            None => head(ticket),
+        }
+    }
+    fn checkout_clean(&self, ticket: &Ticket) -> Result<bool> {
+        match self
+            .completed_move
+            .as_ref()
+            .filter(|done| done.for_ticket(ticket))
+        {
+            Some(done) => done.clean.clone().map_err(anyhow::Error::msg),
+            None => is_clean(ticket),
+        }
+    }
     /// Starts a cycle at the review level named `level`: pins HEAD and sends every verifier of
     /// that level one message naming it. When every verification slot is taken, or another
     /// cycle already waits for one, the cycle queues instead: its verifiers are chosen now and
@@ -481,7 +493,7 @@ impl Host {
     /// `verify_ticket` and `keeper_review`.
     fn start_cycle(&mut self, mut ticket: Ticket, level: &str, by: Starter) -> Result<Ticket> {
         self.prepare_ticket_worktree(&ticket.id)?;
-        ensure!(is_clean(&ticket)?, "{UNCOMMITTED}");
+        ensure!(self.checkout_clean(&ticket)?, "{UNCOMMITTED}");
         let settings = self.settings().verification;
         let (level, level_verifiers) = settings.level(level)?;
         level_may_start(&ticket, &settings, level)?;
@@ -501,7 +513,7 @@ impl Host {
             ),
         };
         let keeper = review.is_some();
-        let commit = head(&ticket)?;
+        let commit = self.checkout_head(&ticket)?;
         // A cycle queues behind every slot holder and every cycle queued before it.
         let slots = self.verification_slots()?;
         let queued_at = (slots.taken >= VERIFICATION_SLOTS || !slots.queued.is_empty()).then(now);
@@ -631,7 +643,7 @@ impl Host {
             queued: vec![],
             stalled: vec![],
         };
-        for ticket in self.tickets()? {
+        for ticket in self.running_verifications()? {
             match self.standing(&ticket, &live)? {
                 Standing::Idle => {}
                 Standing::Holding => slots.taken += 1,
@@ -931,12 +943,14 @@ impl Host {
         message_id: &str,
         findings: &[ReportedFinding],
     ) -> Result<Value> {
-        ensure!(REPORT_KINDS.contains(&kind), "Unknown report kind");
+        let kind = ReportKind::named(kind).context("Unknown report kind")?;
         // Wiffletree judges what a PR keeper agent leaves behind, never what it reports.
         let kind = match session.role {
-            Role::Keeper => "progress",
+            Role::Keeper => ReportKind::Progress,
             _ => kind,
         };
+        let content = report_body(kind, &session.name, body);
+        let kind = kind.name();
         check_findings(findings)?;
         ensure!(
             kind != "passed" || matches!(session.role, Role::Tester | Role::Reviewer),
@@ -947,7 +961,6 @@ impl Host {
             .clone()
             .context("You have no parent to report to; answer the human in this chat instead")?;
         let report_id = format!("report:{}:{message_id}", session.id);
-        let content = format!("[{kind}] {}\n{body}", session.name);
         if let Ok(existing) = self.message(&report_id) {
             ensure!(
                 existing.body == content,

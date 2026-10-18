@@ -90,7 +90,7 @@ impl Settings {
 
 /// What would be shared, what stays on this Mac and what is never shared.
 fn what_is_shared(p: Palette) -> Div {
-    let list = |icon_name: &str, title: &'static str, items: &[&'static str]| {
+    let list = |icon_name: &'static str, title: &'static str, items: &[&'static str]| {
         div()
             .flex_1()
             .min_w_0()

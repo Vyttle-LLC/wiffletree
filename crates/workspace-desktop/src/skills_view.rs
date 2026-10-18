@@ -827,18 +827,89 @@ fn core_tab(part: usize) -> String {
     format!("{} {}", CORE_NAMES[part], version(CORE[part].1))
 }
 
-impl Workspace {
+/// Any rewrite is out of date, which the sidebar's Skills row marks.
+pub(super) fn a_rewrite_is_out_of_date(shared: &Shared) -> bool {
+    (shared.snapshot()).is_some_and(|snapshot| snapshot.skills.iter().any(out_of_date))
+}
+
+/// The Skills page: each skill's rules or rewrite, its history, merges and stock changes.
+pub(super) struct SkillsPage {
+    bridge: Bridge,
+    shared: Shared,
+    skill_view: SkillView,
+    /// The open skill's rules or rewrite as the human is editing them.
+    skill_text: Entity<TextareaState>,
+    stock_unfolded: bool,
+    /// What the open skill's page is asking to confirm.
+    confirming: Option<Confirm>,
+    /// The open history, newest first, and the entry whose text is shown.
+    skill_history: Vec<workspace_host::skills::Recorded>,
+    viewed_entry: Option<String>,
+    /// What changed from the open rewrite's base to this release's stock text.
+    stock_changes: Vec<workspace_host::skills::Line>,
+    /// The merge open in Review changes.
+    merge_review: Option<workspace_host::skills::MergeReview>,
+    /// Review changes was opened from a History entry, which Done returns to.
+    review_from_history: bool,
+    /// By skill, the wording chosen so far for each passage, until Apply.
+    skill_wordings: [Chosen; 4],
+    /// The saved review levels, which the core page lists.
+    verifiers: Entity<verifiers::VerifierEditor>,
+}
+impl EventEmitter<Intent> for SkillsPage {}
+impl SkillsPage {
+    pub(super) fn new(
+        bridge: Bridge,
+        verifiers: Entity<verifiers::VerifierEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let skill_text = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(6, 24).placeholder(
+                "One rule per line, e.g. Run the repository's checks before reporting ready.",
+            )
+        });
+        // Save and Discard follow the draft.
+        cx.subscribe(&skill_text, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        Self {
+            bridge,
+            shared: Shared::default(),
+            skill_view: SkillView::List,
+            skill_text,
+            stock_unfolded: false,
+            confirming: None,
+            skill_history: vec![],
+            viewed_entry: None,
+            stock_changes: vec![],
+            merge_review: None,
+            review_from_history: false,
+            skill_wordings: Default::default(),
+            verifiers,
+        }
+    }
+    /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot.
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
+        let (_, moved) = shared.moved_from(&self.shared);
+        if moved && let Some(snapshot) = shared.snapshot() {
+            self.follow_saved_rules(snapshot, window, cx);
+        }
+        self.shared = shared;
+        if moved {
+            cx.notify();
+        }
+    }
+
     fn skill_state(&self, skill: Skill) -> Option<&SkillState> {
-        (self.snapshot()?.skills.iter()).find(|state| state.skill == skill)
+        (self.shared.snapshot()?.skills.iter()).find(|state| state.skill == skill)
     }
 
     fn skill_draft(&self, cx: &App) -> String {
         self.skill_text.read(cx).value().to_string()
-    }
-
-    /// Any rewrite is out of date, which the sidebar's Skills row marks.
-    pub(super) fn a_rewrite_is_out_of_date(&self) -> bool {
-        (self.snapshot()).is_some_and(|snapshot| snapshot.skills.iter().any(out_of_date))
     }
 
     /// A skill opens with its saved rules or rewrite in the editor, its stock text folded, and
@@ -920,7 +991,7 @@ impl Workspace {
         }
         let restored_out_of_date = out_of_date(&state);
         let state_stock_version = state.stock_version.clone();
-        self.skill_saved(state);
+        self.skill_saved(state, cx);
         let done = match command {
             Command::RestoreSkill { entry, .. } if restored_out_of_date => format!(
                 "Restored the version of {}. It is out of date.",
@@ -938,7 +1009,7 @@ impl Workspace {
             }
             _ => format!("{} is back to stock", skill.name()),
         };
-        self.toast(done, window, cx);
+        toast(done, window, cx);
         if self.skill_view == SkillView::History(skill) {
             self.request(Command::SkillHistory { skill }, window, cx);
         }
@@ -978,7 +1049,7 @@ impl Workspace {
                 .find(|s| s.skill == skill)
                 .map(|s| saved_text(s).to_owned())
         };
-        let shown = self.snapshot().and_then(|s| saved(&s.skills));
+        let shown = self.shared.snapshot().and_then(|s| saved(&s.skills));
         if shown == Some(self.skill_draft(cx))
             && let Some(text) = saved(&snapshot.skills)
         {
@@ -988,18 +1059,12 @@ impl Workspace {
     }
 
     /// The host's answer to a save, shown until the next snapshot.
-    pub(super) fn skill_saved(&mut self, saved: SkillState) {
-        self.amend_snapshot(|snapshot| {
-            if let Some(state) =
-                (snapshot.skills.iter_mut()).find(|state| state.skill == saved.skill)
-            {
-                *state = saved;
-            }
-        });
+    fn skill_saved(&mut self, saved: SkillState, cx: &mut Context<Self>) {
+        cx.emit(Intent::Amend(Amendment::Skill(Box::new(saved))));
     }
 
     /// The view, under what it asks to confirm.
-    pub(super) fn skills_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn skills_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let page = match self.skill_view {
             SkillView::Core(part) => self.core_page(part, p, cx),
             SkillView::Skill(skill) => match self.skill_state(skill) {
@@ -1033,7 +1098,7 @@ impl Workspace {
     }
 
     fn skills_list(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let skills = self.snapshot().into_iter().flat_map(|s| &s.skills);
+        let skills = self.shared.snapshot().into_iter().flat_map(|s| &s.skills);
         div()
             .flex()
             .flex_col()
@@ -1436,7 +1501,7 @@ impl Workspace {
 
     /// "Claude · Haiku · Medium", as pickers show the model that merged.
     fn merge_model(&self, note: &MergeNote) -> Option<String> {
-        (note.model.as_ref()).map(|model| models::profile_label(&self.model_catalog, &model.model))
+        (note.model.as_ref()).map(|model| models::profile_label(&self.shared.catalog, &model.model))
     }
 
     /// An out-of-date rewrite's banner, with what it offers; or, for a base from a newer
@@ -1502,7 +1567,7 @@ impl Workspace {
                 let models = button("choose-model")
                     .ghost()
                     .label("Choose a model in Models")
-                    .on_click(cx.listener(|v, _, w, c| v.open_page(Page::Models, w, c)));
+                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Models))));
                 let choices = Choice::overlapping(passages);
                 let extra = ("page", vec![models]);
                 Some(self.wordings_view(skill, &state.stock_version, &choices, extra, p, cx))
@@ -1619,7 +1684,7 @@ impl Workspace {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let model = models::profile_label(&self.model_catalog, &question.model);
+        let model = models::profile_label(&self.shared.catalog, &question.model);
         let [title, text] = question_banner(question, &model);
         let choices = Choice::asked(question);
         let wordings = self.wordings_view(
@@ -1647,10 +1712,7 @@ impl Workspace {
         let open = button(SharedString::from(format!("open-{}", skill.folder())))
             .link()
             .label(format!("Open {}", skill.name()))
-            .on_click(cx.listener(move |v, _, w, c| {
-                v.open_page(Page::Skills, w, c);
-                v.open_skill(SkillView::Skill(skill), w, c);
-            }));
+            .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenSkill(skill))));
         let choices = Choice::asked(question);
         let wordings =
             self.wordings_view(skill, &question.to, &choices, ("inbox", vec![open]), p, cx);
@@ -2023,7 +2085,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
-            .child(Self::card_title(title, note, p))
+            .child(models_view::card_title(title, note, p))
             .children(unreadable)
             .children(newer)
             .child(Textarea::new(&self.skill_text).w_full())
@@ -2108,7 +2170,7 @@ impl Workspace {
                 )
             }
             Skill::Coordinating => {
-                let guide = self.saved_model_selection.guide.trim();
+                let guide = (self.shared.snapshot()).map_or("", |s| s.model_selection.guide.trim());
                 let guide = if guide.is_empty() {
                     "No guide yet."
                 } else {
@@ -2128,17 +2190,87 @@ impl Workspace {
                 .flex_col()
                 .gap_1()
                 .child(
-                    Self::card_title(title, from, p).child(
+                    models_view::card_title(title, from, p).child(
                         div()
                             .id("edit-in-models")
                             .text_size(px(12.))
                             .text_color(p.focus)
                             .cursor_pointer()
-                            .on_click(cx.listener(|v, _, w, c| v.open_page(Page::Models, w, c)))
+                            .on_click(
+                                cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Models))),
+                            )
                             .child("Edit in Models"),
                     ),
                 )
                 .child(Self::read_only_text(lines.join("\n"), p)),
+        )
+    }
+}
+
+impl Requests for SkillsPage {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = match reply {
+            Ok(value) => value,
+            Err(error) => return toast_error(error, window, cx),
+        };
+        match command {
+            Command::SaveSkillRules { .. }
+            | Command::SaveSkillRewrite { .. }
+            | Command::MarkSkillUpToDate { .. } => {
+                match serde_json::from_value(value) {
+                    Ok(saved) => self.skill_saved(saved, cx),
+                    Err(error) => eprintln!("Saved skill: {error}"),
+                }
+                toast(skills_view::saved_toast(&command), window, cx);
+            }
+            Command::ResetSkill { .. }
+            | Command::RestoreSkill { .. }
+            | Command::StartSkillRewrite { .. }
+            | Command::MergeSkillUpdate { .. }
+            | Command::UndoSkillMerge { .. } => match serde_json::from_value(value) {
+                Ok(state) => self.skill_replaced(state, &command, window, cx),
+                Err(error) => eprintln!("Reset, restored, rewrote or merged skill: {error}"),
+            },
+            Command::DismissSkillMerge { .. } => match serde_json::from_value(value) {
+                Ok(state) => self.skill_saved(state, cx),
+                Err(error) => eprintln!("Dismissed skill merge: {error}"),
+            },
+            Command::SkillMergeReview { skill, .. } => match serde_json::from_value(value) {
+                Ok(review) => self.review_arrived(skill, review),
+                Err(error) => eprintln!("Skill merge review: {error}"),
+            },
+            Command::SkillHistory { skill } => match serde_json::from_value(value) {
+                Ok(history) => self.history_arrived(skill, history),
+                Err(error) => eprintln!("Skill history: {error}"),
+            },
+            Command::SkillStockChanges { skill } => match serde_json::from_value(value) {
+                Ok(lines) => self.stock_changes_arrived(skill, lines),
+                Err(error) => eprintln!("Skill stock changes: {error}"),
+            },
+            _ => {}
+        }
+    }
+}
+impl Render for SkillsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_counts::count("Skills");
+        let p = palette(is_dark(cx));
+        ui::page(
+            "Skills",
+            "How your agents work",
+            self.skills_page(p, cx),
+            None,
+            p,
+            cx,
         )
     }
 }

@@ -11,3 +11,6 @@ CREATE INDEX IF NOT EXISTS provider_runs_session_started ON provider_runs(sessio
 -- Tickets whose worktree removal waits for an agent's turn to end. Only rows here are swept.
 CREATE TABLE IF NOT EXISTS pending_worktree_removals (ticket_id TEXT PRIMARY KEY REFERENCES tickets(id), marked_at INTEGER NOT NULL);
 PRAGMA user_version = 2;
+
+-- Scheduling reads only running verification cycles, independent of ticket history.
+CREATE INDEX IF NOT EXISTS tickets_verification_outcome ON tickets(json_extract(data,'$.verification.outcome'));

@@ -1,6 +1,7 @@
 //! Single-writer durable host, independent of graphics and provider inference.
 mod agent_processes;
 pub mod attachments;
+mod checkout;
 pub mod compaction;
 pub mod context;
 pub mod detection;
@@ -97,6 +98,10 @@ pub struct Host {
     /// Each session's latest checklist; `None` until first read from stored steps.
     plans: Option<std::collections::HashMap<String, PlanCounts>>,
     progress: progress::Progress,
+    checked_publish: Option<checkout::PublicationResult>,
+    checkout_reservations: checkout::Reservations,
+    completed_move: Option<checkout::KeeperResult>,
+    checkout_rollbacks: Vec<(String, KeeperReview, String)>,
     /// Sessions in a turn this host started; see `shown`.
     pub(crate) in_turn: std::collections::HashSet<String>,
     /// By ticket, the report that last set its state from a running turn; see `shown_ticket`.
@@ -255,6 +260,7 @@ impl Host {
         repositories::migrate_to_workspace(&db)?;
         attachments::migrate(&db)?;
         worktrees::migrate(&db)?;
+        checkout::migrate(&db)?;
         agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
         order::migrate(&db)?;
@@ -270,6 +276,10 @@ impl Host {
             github_error: None,
             plans: None,
             progress: Default::default(),
+            checked_publish: None,
+            checkout_reservations: Default::default(),
+            completed_move: None,
+            checkout_rollbacks: vec![],
             in_turn: Default::default(),
             mid_turn_reports: Default::default(),
             shared_written: Default::default(),
@@ -417,7 +427,10 @@ impl Host {
     /// The live workspace; `archive` has the rest.
     pub fn snapshot(&self) -> Result<Snapshot> {
         let skills = self.skill_states()?;
-        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} ORDER BY rowid", tickets_listed(true)), [])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) ORDER BY rowid", sessions_where(false)), [])?, archive_stamp: self.archive_stamp()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
+        // Archived sessions still in a turn keep their runtime and ticket until it ends.
+        let turning = serde_json::to_string(&self.in_turn)?;
+        let in_turn = "SELECT value FROM json_each(?1)";
+        Ok(Snapshot { projects: self.projects()?, repositories: self.repositories()?, sessions: self.live_sessions()?, attention: self.list_data("SELECT data FROM attention WHERE json_extract(data,'$.answer') IS NULL ORDER BY rowid", [])?, tickets: self.list_data::<Ticket, _>(&format!("SELECT data FROM tickets WHERE {} OR id IN (SELECT json_extract(data,'$.ticket_id') FROM runtimes WHERE session_id IN ({in_turn})) ORDER BY rowid", tickets_listed(true)), [&turning])?.into_iter().map(|t| self.shown_ticket(t)).collect(), runtimes: self.list_data(&format!("SELECT data FROM runtimes WHERE session_id NOT IN (SELECT id FROM sessions WHERE {}) OR session_id IN ({in_turn}) ORDER BY rowid", sessions_where(false)), [&turning])?, archive_stamp: self.archive_stamp()?, archived_sessions: self.db.query_row(&format!("SELECT count(*) FROM sessions WHERE {ARCHIVED_FLAG}=1"), [], |r| r.get(0))?, tickets_owned: (self.db.prepare("SELECT coordinator_id,count(*) FROM tickets GROUP BY coordinator_id")?).query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?, live_projects: self.live_projects()?, repository_roots: self.repository_roots()?, missing_repositories: self.missing_repositories()?, schedules: self.active_schedules(None)?, model_selection: self.model_selection()?, guide_saved: self.shared().guide().is_some(), undelivered: self.undelivered()?, branch_warnings: self.open_branch_warnings()?, pull_request_checks: self.pull_request_checks.values().cloned().collect(), questions_waiting: self.questions_waiting()?, allowed_owners: self.settings().allowed_owners, github_error: self.github_error.clone(), keeper_parts: self.keeper_parts(), keeper: self.settings().keeper, running_processes: self.running_process_counts()?, workspace_notes: self.workspace_notes(&skills)?, skills, still_needs: self.still_needs()?, settings_sync: self.sync_status()?, keeper_held: self.keeper_held() })
     }
     /// The snapshot's sessions: the live ones, then archived ones still in a turn, which show as
     /// working until it ends.
@@ -1209,25 +1222,8 @@ impl Host {
         Ok(self.db.prepare("SELECT * FROM activity WHERE project_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3")?.query_map(params![project, before.unwrap_or(i64::MAX), page_limit(limit)?], |r| Ok(Activity { sequence: r.get(0)?, project_id: r.get(1)?, session_id: r.get(2)?, kind: r.get(3)?, detail: r.get(4)?, created_at: r.get(5)? }))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn git_history(&self, repository: &str, skip: usize, limit: usize) -> Result<Value> {
-        page_limit(limit)?;
-        ensure!(skip <= 100_000, "History cursor too large");
-        let repo = self.repository(repository)?;
-        let output = runtime::git_output(
-            Path::new(&repo.path),
-            &[
-                "log",
-                "--date-order",
-                &format!("--max-count={limit}"),
-                &format!("--skip={skip}"),
-                "--format=%H%x1f%P%x1f%an%x1f%s",
-                "HEAD",
-                "--",
-            ],
-        )?;
-        let commits: Vec<_> = output.lines().filter_map(|line| { let parts: Vec<_> = line.splitn(4, '\u{1f}').collect(); (parts.len() == 4).then(|| json!({"sha":parts[0],"parents":parts[1].split_whitespace().collect::<Vec<_>>(),"author":parts[2],"subject":parts[3]})) }).collect();
-        Ok(
-            json!({"repository":repo,"commits":commits,"next_skip":skip+commits.len(),"observed_at":now(),"source":"local Git · read only"}),
-        )
+        checkout::History::prepare(self, repository, skip, limit)?
+            .run(&publish::Tools::default().git)
     }
     pub fn respond(&mut self, request: Request) -> Response {
         let result = if request.version != PROTOCOL_VERSION {

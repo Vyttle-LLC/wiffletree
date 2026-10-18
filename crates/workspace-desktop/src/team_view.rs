@@ -6,9 +6,11 @@ use ui::{
     card, empty_state, hint, humanize, icon, mono, pill, section, session_icon, ticket_state_color,
 };
 
-impl Workspace {
+impl Inspector {
     pub(super) fn team_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let (Some(session), Some(index)) = (self.selected_session(), self.index.as_ref()) else {
+        let (Some(session), Some(index)) =
+            (self.shared.selected_session(), self.shared.index.as_ref())
+        else {
             return div();
         };
         // Every ticket belongs to the project's coordinator; its agents show the same list.
@@ -40,7 +42,7 @@ impl Workspace {
             .rounded_md()
             .cursor_pointer()
             .hover(move |d| d.bg(p.overlay.opacity(0.7)))
-            .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
+            .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
             .child(
                 icon(session_icon(session.role))
                     .size(px(14.))
@@ -50,7 +52,7 @@ impl Workspace {
             .when(show_provider, |d| {
                 d.child(hint(session.provider.label(), p))
             })
-            .child(self.session_badge(session, p))
+            .child(ui::session_badge(&self.shared, session, p))
             .child(icon("chevron-right").size(px(12.)).text_color(p.subtle))
     }
 
@@ -62,7 +64,7 @@ impl Workspace {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let runtime = self.runtime(&agent.id);
+        let runtime = self.shared.runtime(&agent.id);
         let label = agent
             .role
             .agent_label(runtime.and_then(|r| r.focus.as_deref()));
@@ -86,7 +88,10 @@ impl Workspace {
                     .mt(px(-4.))
                     .flex()
                     .flex_col()
-                    .child(hint(models::profile_label(&self.model_catalog, profile), p))
+                    .child(hint(
+                        models::profile_label(&self.shared.catalog, profile),
+                        p,
+                    ))
                     .children(reason.map(|reason| hint(reason, p).italic().line_clamp(2))),
             );
         }
@@ -108,9 +113,12 @@ impl Workspace {
                     .primary()
                     .icon(icon("plus"))
                     .label("New ticket")
-                    .on_click(
-                        cx.listener(|v, _, w, c| v.open_creation(Creation::Ticket, None, w, c)),
-                    ),
+                    .on_click(cx.listener(|_, _, _, c| {
+                        c.emit(Intent::Create {
+                            kind: Creation::Ticket,
+                            ticket: None,
+                        })
+                    })),
             ),
         );
         if tickets.is_empty() {
@@ -124,7 +132,7 @@ impl Workspace {
         // Archived agents appear only while the sidebar is showing them.
         let agents_of = |ticket: &Ticket| {
             (index.agents(&ticket.id))
-                .filter(|s| self.listed(s))
+                .filter(|s| self.shared.listed(s))
                 .collect::<Vec<_>>()
         };
         for ticket in tickets {
@@ -209,8 +217,11 @@ impl Workspace {
                             .ghost()
                             .icon(icon("plus"))
                             .label("Assign agent")
-                            .on_click(cx.listener(move |v, _, w, c| {
-                                v.open_creation(Creation::Agent, Some(&ticket_id), w, c)
+                            .on_click(cx.listener(move |_, _, _, c| {
+                                c.emit(Intent::Create {
+                                    kind: Creation::Agent,
+                                    ticket: Some(ticket_id.clone()),
+                                })
                             })),
                     ),
                 );
@@ -220,9 +231,12 @@ impl Workspace {
         // Older stores can contain workers created before ticket ownership existed.
         let unassigned: Vec<_> = (index.children(&coordinator.id))
             .filter(|s| {
-                self.listed(s)
+                self.shared.listed(s)
                     && s.role != Role::TaskOrchestrator
-                    && self.runtime(&s.id).is_none_or(|r| r.ticket_id.is_none())
+                    && self
+                        .shared
+                        .runtime(&s.id)
+                        .is_none_or(|r| r.ticket_id.is_none())
             })
             .collect();
         if !unassigned.is_empty() {

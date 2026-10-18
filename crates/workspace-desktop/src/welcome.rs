@@ -93,23 +93,20 @@ fn step(number: usize, title: &'static str, next: bool, body: Option<Div>, p: Pa
 }
 
 impl Workspace {
-    pub(super) fn start_screen_kind(&self) -> StartScreen {
+    pub(super) fn start_screen_kind(&self, cx: &App) -> StartScreen {
+        let models = self.models.read(cx);
         start_screen(
-            self.index.is_some(),
-            &self.saved_model_selection,
-            &self.detection,
+            self.shared.index.is_some(),
+            &models.saved_model_selection,
+            &models.detection,
         )
     }
 
-    pub(super) fn offers_new_project(&self) -> bool {
-        offers_new_project(self.index.is_some(), &self.saved_model_selection)
-    }
-
     /// Each provider as detection found it: signed in with its plan, or its one-line fix.
-    fn detected_providers(&self, p: Palette) -> Div {
+    fn detected_providers(detection: &Detection, p: Palette) -> Div {
         let mut lines = div().flex().flex_col().gap(px(2.));
         for provider in PROVIDERS {
-            let Some(status) = self.detection.get(&provider) else {
+            let Some(status) = detection.get(&provider) else {
                 continue;
             };
             lines = lines.child(match models::welcome_fix_hint(provider, status) {
@@ -130,13 +127,15 @@ impl Workspace {
     /// The welcome's heading is drawn by the start screen; this is what follows it.
     pub(super) fn welcome_steps(&self, signed_in: bool, p: Palette, cx: &mut Context<Self>) -> Div {
         let project = "Start a project";
+        let models = self.models.read(cx);
+        let (detection, checking) = (models.detection.clone(), models.catalog_pending > 0);
         let content = div().w_full().flex().flex_col().items_start().gap_3();
         if signed_in {
             let models = div()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(self.detected_providers(p))
+                .child(Self::detected_providers(&detection, p))
                 .child(hint(
                     "Review which models your agents may use, then Save.",
                     p,
@@ -169,7 +168,6 @@ impl Workspace {
                         .on_click(cx.listener(|v, _, w, c| v.open_page(Page::Models, w, c))),
                 )
         } else {
-            let checking = self.catalog_pending > 0;
             content
                 .child(hint(
                     "Wiffletree runs your agents through the Claude Code and Codex CLIs, using your own sign-in. You need at least one.",
@@ -185,21 +183,25 @@ impl Workspace {
                             1,
                             "Sign in to a CLI",
                             true,
-                            Some(self.detected_providers(p)),
+                            Some(Self::detected_providers(&detection, p)),
                             p,
                         ))
                         .child(step(2, "Set up your models", false, None, p))
                         .child(step(3, project, false, None, p)),
                 )
                 .child(
-                    button("check-again")
-                        .primary()
-                        .icon(icon("refresh"))
-                        .label("Check again")
-                        .loading(checking)
-                        .disabled(checking)
+                    ui::icon_or_spinner(
+                        button("check-again").primary(),
+                        icon("refresh"),
+                        Some("Check again"),
+                        checking,
+                        gpui_component::Size::Small,
+                    )
+                    .disabled(checking)
                         .mt_1()
-                        .on_click(cx.listener(|v, _, w, c| v.refresh_models(w, c))),
+                        .on_click(cx.listener(|v, _, w, c| {
+                            v.models.update(c, |models, c| models.refresh_models(w, c))
+                        })),
                 )
         }
     }

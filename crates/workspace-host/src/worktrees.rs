@@ -20,19 +20,13 @@ impl Host {
     /// Ensures an open ticket's worktree exists before an agent runs in it. A finished ticket's
     /// removed worktree is reported rather than re-created.
     pub(crate) fn prepare_ticket_worktree(&self, ticket_id: &str) -> Result<()> {
-        let ticket = self.ticket(ticket_id)?;
-        if ticket.is_open() {
-            return self.restore_worktrees(&[ticket]);
+        if self.completed_move.as_ref().is_some_and(|done| {
+            self.ticket(ticket_id)
+                .is_ok_and(|ticket| done.for_ticket(&ticket))
+        }) {
+            return Ok(());
         }
-        ensure!(
-            Path::new(&ticket.worktree).exists(),
-            "Ticket \"{}\" ({}) is {}; its worktree was removed and branch {} keeps the work",
-            ticket.title,
-            ticket.id,
-            ticket.state,
-            ticket.branch
-        );
-        Ok(())
+        checkout::Worktree::prepare(self, ticket_id)?.run(&publish::Tools::default().git)
     }
     /// Re-creates any missing worktrees from their saved branches. Checks every branch first, so
     /// a missing one refuses the whole restore, naming its ticket.
@@ -616,8 +610,14 @@ struct RegisteredWorktree {
 /// The repository's worktrees from `git worktree list`, with canonical paths where they exist.
 /// Stale registrations whose folder is gone are left out.
 fn registered_worktrees(repository: &Path) -> Result<Vec<RegisteredWorktree>> {
+    registered_worktrees_with(repository, &publish::Tools::default().git)
+}
+fn registered_worktrees_with(
+    repository: &Path,
+    git: &publish::GitTool,
+) -> Result<Vec<RegisteredWorktree>> {
     Ok(
-        runtime::git_output(repository, &["worktree", "list", "--porcelain"])?
+        checkout::git_output(git, repository, &["worktree", "list", "--porcelain"])?
             .split("\n\n")
             .filter_map(|entry| {
                 let mut lines = entry.lines();
@@ -649,13 +649,13 @@ fn registered_worktrees(repository: &Path) -> Result<Vec<RegisteredWorktree>> {
 }
 
 /// Whether `path` is the top of a checkout registered as one of the repository's worktrees.
-fn is_worktree(repository: &Path, path: &Path) -> Result<bool> {
+fn is_worktree(repository: &Path, path: &Path, git: &publish::GitTool) -> Result<bool> {
     let path = fs::canonicalize(path)?;
-    let top = runtime::git_output(&path, &["rev-parse", "--show-toplevel"])
+    let top = checkout::git_output(git, &path, &["rev-parse", "--show-toplevel"])
         .ok()
         .and_then(|top| fs::canonicalize(top.trim()).ok());
     Ok(top.as_ref() == Some(&path)
-        && registered_worktrees(repository)?
+        && registered_worktrees_with(repository, git)?
             .iter()
             .any(|w| w.path == path))
 }
@@ -684,8 +684,23 @@ pub(crate) fn ensure_worktree(
     branch: &str,
     base: Option<&str>,
 ) -> Result<()> {
+    ensure_worktree_with(
+        repository,
+        path,
+        branch,
+        base,
+        &publish::Tools::default().git,
+    )
+}
+pub(crate) fn ensure_worktree_with(
+    repository: &Path,
+    path: &Path,
+    branch: &str,
+    base: Option<&str>,
+    git: &publish::GitTool,
+) -> Result<()> {
     if path.exists() {
-        if is_worktree(repository, path)? {
+        if is_worktree(repository, path, git)? {
             return Ok(());
         }
         ensure!(
@@ -696,7 +711,7 @@ pub(crate) fn ensure_worktree(
         );
         fs::remove_dir(path)?;
     }
-    runtime::git_output(repository, &["worktree", "prune"])?;
+    checkout::git_output(git, repository, &["worktree", "prune"])?;
     fs::create_dir_all(path.parent().context("Invalid worktree path")?)?;
     let path = path.to_str().context("Invalid worktree path")?;
     let mut args = vec!["worktree", "add"];
@@ -704,7 +719,7 @@ pub(crate) fn ensure_worktree(
         Some(base) => args.extend(["-b", branch, path, base]),
         None => args.extend([path, branch]),
     }
-    runtime::git_output(repository, &args)?;
+    checkout::git_output(git, repository, &args)?;
     Ok(())
 }
 

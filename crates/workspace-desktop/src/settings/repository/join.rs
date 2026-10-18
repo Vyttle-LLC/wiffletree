@@ -180,7 +180,7 @@ fn needs(shown: &SyncShown) -> Vec<(&'static str, StillNeed, Option<&'static str
 }
 
 /// What one card lacks, why, and a link to the main window's page that provides it.
-fn need(icon_name: &str, what: StillNeed, why: Option<&'static str>, p: Palette) -> Div {
+fn need(icon_name: &'static str, what: StillNeed, why: Option<&'static str>, p: Palette) -> Div {
     let (label, open): (_, Box<dyn Action>) = match what.page {
         WorkspacePage::Models => ("Open Models", Box::new(OpenModels)),
         WorkspacePage::Repositories => ("Open Repositories", Box::new(OpenRepositories)),

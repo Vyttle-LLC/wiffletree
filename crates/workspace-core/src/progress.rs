@@ -196,13 +196,28 @@ pub fn derive(
     tickets: &[Ticket],
     plans: &HashMap<String, PlanCounts>,
 ) -> Board {
+    let runtime_index: HashMap<&str, &SessionRuntime> = runtimes
+        .iter()
+        .map(|r| (r.session_id.as_str(), r))
+        .collect();
+    let mut ticket_agents: HashMap<&str, Vec<&Session>> = HashMap::new();
+    for session in sessions {
+        if let Some(ticket) = runtime_index
+            .get(session.id.as_str())
+            .and_then(|r| r.ticket_id.as_deref())
+        {
+            ticket_agents.entry(ticket).or_default().push(session);
+        }
+    }
     let records = Records {
-        sessions,
-        runtimes: runtimes
+        by_session: sessions
             .iter()
-            .map(|r| (r.session_id.as_str(), r))
+            .enumerate()
+            .map(|(i, s)| (s.id.as_str(), (i, s)))
             .collect(),
-        tickets,
+        ticket_agents,
+        runtimes: runtime_index,
+        tickets: tickets.iter().map(|t| (t.id.as_str(), t)).collect(),
         plans,
     };
     let tickets: Vec<_> = tickets
@@ -219,10 +234,23 @@ pub fn derive(
         .filter(|session| !session.archived || crew.contains(session.id.as_str()))
         .map(|session| records.agent(session))
         .collect();
+    let mut project_tickets: HashMap<&str, Vec<&TicketProgress>> = HashMap::new();
+    for ticket in &tickets {
+        if let Some(project) = records.project_of(&ticket.ticket_id) {
+            project_tickets.entry(project).or_default().push(ticket);
+        }
+    }
     let projects = sessions
         .iter()
         .filter(|session| session.role == Role::ProjectOrchestrator && !session.archived)
-        .map(|coordinator| records.project(coordinator, &tickets))
+        .map(|coordinator| {
+            records.project(
+                coordinator,
+                project_tickets
+                    .get(coordinator.project_id.as_str())
+                    .map_or(&[], Vec::as_slice),
+            )
+        })
         .collect();
     Board {
         agents,
@@ -232,9 +260,10 @@ pub fn derive(
 }
 
 struct Records<'a> {
-    sessions: &'a [Session],
+    by_session: HashMap<&'a str, (usize, &'a Session)>,
+    ticket_agents: HashMap<&'a str, Vec<&'a Session>>,
     runtimes: HashMap<&'a str, &'a SessionRuntime>,
-    tickets: &'a [Ticket],
+    tickets: HashMap<&'a str, &'a Ticket>,
     plans: &'a HashMap<String, PlanCounts>,
 }
 impl Records<'_> {
@@ -274,7 +303,7 @@ impl Records<'_> {
     /// The session's latest result in its ticket's latest cycle, when it verifies there.
     fn verifier_result(&self, session: &Session) -> Option<VerifierResult> {
         let ticket_id = self.ticket_id(session)?;
-        let ticket = self.tickets.iter().find(|t| t.id == ticket_id)?;
+        let ticket = self.tickets.get(ticket_id)?;
         let results = ticket.verification.as_ref()?.latest_results();
         let run = results.iter().find(|run| run.session_id == session.id)?;
         Some(run.result)
@@ -320,11 +349,12 @@ impl Records<'_> {
     /// The Implementing band: 0–60% by the implementer's checklist, or stripes while it works
     /// with nothing to count.
     fn implementing(&self, ticket: &Ticket) -> (BarState, u16) {
-        let implementer = self.sessions.iter().find(|session| {
-            session.role == Role::Implementer
-                && !session.archived
-                && self.ticket_id(session) == Some(&ticket.id)
-        });
+        let implementer = self
+            .ticket_agents
+            .get(ticket.id.as_str())
+            .into_iter()
+            .flatten()
+            .find(|session| session.role == Role::Implementer && !session.archived);
         let Some(agent) = implementer.map(|session| self.agent(session)) else {
             return (BarState::InProgress, 0);
         };
@@ -347,22 +377,28 @@ impl Records<'_> {
             .flat_map(|cycle| cycle.rounds.iter().flat_map(|round| &round.verifiers))
             .map(|run| run.session_id.as_str())
             .collect();
-        self.sessions
-            .iter()
-            .filter(|session| {
-                verifiers.contains(session.id.as_str())
-                    || (!session.archived && self.ticket_id(session) == Some(&ticket.id))
-            })
-            .map(|session| session.id.clone())
-            .collect()
+        let mut crew = std::collections::BTreeMap::new();
+        for session in self
+            .ticket_agents
+            .get(ticket.id.as_str())
+            .into_iter()
+            .flatten()
+            .filter(|session| !session.archived)
+        {
+            if let Some((order, _)) = self.by_session.get(session.id.as_str()) {
+                crew.insert(*order, session.id.clone());
+            }
+        }
+        for verifier in verifiers {
+            if let Some((order, session)) = self.by_session.get(verifier) {
+                crew.insert(*order, session.id.clone());
+            }
+        }
+        crew.into_values().collect()
     }
 
     /// `counted` are the tickets already derived, which leaves out closed ones.
-    fn project(&self, coordinator: &Session, counted: &[TicketProgress]) -> ProjectProgress {
-        let tickets: Vec<&TicketProgress> = counted
-            .iter()
-            .filter(|ticket| self.project_of(&ticket.ticket_id) == Some(&coordinator.project_id))
-            .collect();
+    fn project(&self, coordinator: &Session, tickets: &[&TicketProgress]) -> ProjectProgress {
         let open: Vec<_> = tickets
             .iter()
             .filter(|ticket| ticket.stage != Stage::Accepted)
@@ -378,9 +414,9 @@ impl Records<'_> {
         } else if open.is_empty() {
             (Phase::Done, BarState::Finished, Some(FULL_POSITION))
         } else if let Some(stage) = moving {
-            (stage.into(), BarState::InProgress, Some(mean(&tickets)))
+            (stage.into(), BarState::InProgress, Some(mean(tickets)))
         } else {
-            (Phase::Blocked, BarState::Blocked, Some(mean(&tickets)))
+            (Phase::Blocked, BarState::Blocked, Some(mean(tickets)))
         };
         ProjectProgress {
             project_id: coordinator.project_id.clone(),
@@ -395,11 +431,8 @@ impl Records<'_> {
 
     /// The project of the coordinator that owns the ticket.
     fn project_of(&self, ticket_id: &str) -> Option<&String> {
-        let ticket = self.tickets.iter().find(|t| t.id == ticket_id)?;
-        let owner = self
-            .sessions
-            .iter()
-            .find(|s| s.id == ticket.coordinator_id)?;
+        let ticket = self.tickets.get(ticket_id)?;
+        let (_, owner) = self.by_session.get(ticket.coordinator_id.as_str())?;
         Some(&owner.project_id)
     }
 }

@@ -1,4 +1,6 @@
 //! Event-driven host actor: all SQLite access stays on one thread; provider I/O never blocks it.
+mod scheduling;
+
 use crate::agent_processes::StopReason;
 use crate::compaction::CompactionRecord;
 use crate::keeper::KeeperSession;
@@ -59,7 +61,7 @@ fn turn_prompt(
             let status = status.as_ref().map_or(String::new(), |s| format!("\n{s}"));
             format!(
                 "Sender: {}\nMessage ID: {}{status}\n\n{}{}",
-                if m.id.starts_with(schedules::FIRE_PREFIX) {
+                if m.id.starts_with(TIMER_PREFIX) {
                     "your timer"
                 } else if let Some(label) = host_notice(&m.id) {
                     label
@@ -311,152 +313,183 @@ fn runtime_stopped(error: &str) -> String {
         "Runtime stopped:\n{fence}text\n{error}\n{fence}\nInspect the worktree before retrying uncertain work."
     )
 }
-/// Runs a repository's check on its own thread and always reports back, even if it panics, so
-/// the repository is never left marked as running.
+/// Every job reports once, including a panic. Operations keep their own typed recovery.
+fn spawn_job<I: Send + 'static, O: Send + 'static>(
+    sender: Sender<Event>,
+    input: I,
+    run: impl FnOnce(&I) -> O + Send + 'static,
+    failed: impl FnOnce(&I) -> O + Send + 'static,
+    completed: impl FnOnce(I, O) -> Event + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&input)))
+            .unwrap_or_else(|_| failed(&input));
+        let _ = sender.send_blocking(completed(input, outcome));
+    });
+}
 fn spawn_overlap_check(
     sender: Sender<Event>,
     repository: String,
     check: impl FnOnce() -> (Option<i64>, Vec<BranchWarnings>) + Send + 'static,
 ) {
-    std::thread::spawn(move || {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).ok();
-        let _ = sender.send_blocking(Event::Overlaps {
+    // The closure itself is consumed by the job; it is never retried after a panic.
+    spawn_job(
+        sender,
+        repository,
+        move |_| Some(check()),
+        |_| None,
+        |repository, outcome| Event::Overlaps {
             repository,
             fetched_at: outcome.as_ref().and_then(|(at, _)| *at),
             warnings: outcome.map(|(_, warnings)| warnings),
-        });
-    });
+        },
+    );
 }
-/// Runs a repository's PR pass on its own thread and always reports back, even if it panics.
 fn spawn_pull_request_check(
     sender: Sender<Event>,
     repository: String,
     fetch: impl FnOnce() -> pr_watch::Outcome + Send + 'static,
 ) {
-    std::thread::spawn(move || {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(fetch)).unwrap_or_else(|_| {
-                pr_watch::Outcome::Failed("The PR check stopped unexpectedly".into())
-            });
-        let _ = sender.send_blocking(Event::PullRequests {
+    spawn_job(
+        sender,
+        repository,
+        move |_| fetch(),
+        |_| pr_watch::Outcome::Failed("The PR check stopped unexpectedly".into()),
+        |repository, outcome| Event::PullRequests {
             repository,
             outcome,
-        });
-    });
+        },
+    );
 }
-/// Reads the repositories' GitHub facts on its own thread and always reports back, even if it
-/// panics, so the next read is never held off.
 fn spawn_github_read(
     sender: Sender<Event>,
     read: impl FnOnce() -> repositories::GitHubReading + Send + 'static,
 ) {
-    std::thread::spawn(move || {
-        let reading = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).ok();
-        let _ = sender.send_blocking(Event::GitHub(reading));
-    });
+    spawn_job(
+        sender,
+        (),
+        move |_| Some(read()),
+        |_| None,
+        |(), reading| Event::GitHub(reading),
+    );
 }
-/// Runs one publish step on its own thread and always reports back, even if it panics, so a
-/// request is never left running.
 fn spawn_publish_step(sender: Sender<Event>, job: publish::Job, tools: publish::Tools) {
-    std::thread::spawn(move || {
-        let step = std::panic::AssertUnwindSafe(|| publish::run(&job, &tools));
-        let outcome = std::panic::catch_unwind(step).unwrap_or_else(|_| publish::Outcome {
+    spawn_job(
+        sender,
+        job,
+        move |job| publish::run(job, &tools),
+        |job| publish::Outcome {
             ticket_id: job.ticket_id.clone(),
             request_id: job.request.id.clone(),
             github: None,
             result: publish::StepResult::Failed("The publish step stopped unexpectedly".into()),
-        });
-        let _ = sender.send_blocking(Event::Published(outcome));
-    });
+        },
+        |_, outcome| Event::Published(outcome),
+    );
 }
 fn spawn_sync_pass(sender: Sender<Event>, pass: sync::Pass, tools: publish::Tools) {
-    std::thread::spawn(move || {
-        let run = std::panic::AssertUnwindSafe(|| sync::pass(pass, &tools));
-        let passed = std::panic::catch_unwind(run)
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("The sync pass stopped unexpectedly")));
-        let _ = sender.send_blocking(Event::Synced(passed));
-    });
+    spawn_job(
+        sender,
+        (),
+        move |_| sync::pass(pass, &tools),
+        |_| Err(anyhow::anyhow!("The sync pass stopped unexpectedly")),
+        |(), passed| Event::Synced(passed),
+    );
 }
-/// Runs one skill merge's model on its own thread and always reports back, even if it panics,
-/// so the skill is never left marked as merging.
 fn spawn_skill_merge(sender: Sender<Event>, run: skills::MergeRun) {
-    std::thread::spawn(move || {
-        let merge = std::panic::AssertUnwindSafe(|| {
+    spawn_job(
+        sender,
+        run,
+        |run| {
             let claude = provider::executable(Provider::Claude)?;
             provider::merge_run(&claude, &run.profile, run.input(), provider::MERGE_LIMIT)
-        });
-        let answered = std::panic::catch_unwind(merge)
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("The merge run stopped unexpectedly.")));
-        let _ = sender.send_blocking(Event::SkillMerged(run, answered));
-    });
+        },
+        |_| Err(anyhow::anyhow!("The merge run stopped unexpectedly.")),
+        Event::SkillMerged,
+    );
 }
-/// Runs one PR keeper rebase on its own thread and always reports back, even if it panics, so
-/// the ticket is never left marked as rebasing.
 fn spawn_keeper_rebase(sender: Sender<Event>, job: keeper::Job) {
-    std::thread::spawn(move || {
-        let rebase = std::panic::AssertUnwindSafe(|| keeper::rebase(&job, overlaps::fetch_base));
-        let outcome = std::panic::catch_unwind(rebase).unwrap_or_else(|_| keeper::Outcome {
+    spawn_job(
+        sender,
+        job,
+        |job| keeper::rebase(job, overlaps::fetch_base),
+        |job| keeper::Outcome {
             ticket_id: job.ticket_id.clone(),
             head: job.head.clone(),
             base_commit: job.base_commit.clone(),
             result: keeper::Rebased::Failed("The rebase stopped unexpectedly".into()),
             stopped: None,
-        });
-        let _ = sender.send_blocking(Event::Kept(outcome));
-    });
+        },
+        |_, outcome| Event::Kept(outcome),
+    );
 }
-/// Runs one try's gate on its own thread and always reports back, even if it panics, so the
-/// try is never left at its gate.
 fn spawn_keeper_gate(sender: Sender<Event>, job: keeper::Gate) {
-    std::thread::spawn(move || {
-        let gate = std::panic::AssertUnwindSafe(|| keeper::gate(&job));
-        let gated = std::panic::catch_unwind(gate).unwrap_or_else(|_| keeper::Gated {
+    spawn_job(
+        sender,
+        job,
+        keeper::gate,
+        |job| keeper::Gated {
             ticket_id: job.ticket_id.clone(),
             result: Err("the gate stopped unexpectedly".into()),
-        });
-        let _ = sender.send_blocking(Event::Gated(gated));
-    });
+        },
+        |_, gated| Event::Gated(gated),
+    );
 }
-/// Runs one reproduction of a PR's failed checks on its own thread and always reports back,
-/// even if it panics, so the ticket is never left marked as reproducing.
 fn spawn_keeper_reproduce(sender: Sender<Event>, job: keeper::Reproduce) {
-    std::thread::spawn(move || {
-        let reproduce = std::panic::AssertUnwindSafe(|| keeper::reproduce(&job));
-        let reproduced =
-            std::panic::catch_unwind(reproduce).unwrap_or_else(|_| keeper::Reproduced {
-                ticket_id: job.ticket_id.clone(),
-                base: job.base.clone(),
-                head: job.head.clone(),
-                checkout: job.checkout.clone(),
-                result: Err("the checks stopped unexpectedly".into()),
-            });
-        let _ = sender.send_blocking(Event::Reproduced(reproduced));
-    });
+    spawn_job(
+        sender,
+        job,
+        keeper::reproduce,
+        |job| keeper::Reproduced {
+            ticket_id: job.ticket_id.clone(),
+            base: job.base.clone(),
+            head: job.head.clone(),
+            checkout: job.checkout.clone(),
+            result: Err("the checks stopped unexpectedly".into()),
+        },
+        |_, reproduced| Event::Reproduced(reproduced),
+    );
 }
-/// Runs one PR keeper fetch of GitHub's branch on its own thread and always reports back, even
-/// if it panics, so the ticket is never left marked as fetching.
 fn spawn_keeper_fetch(sender: Sender<Event>, job: keeper::Fetch, git: publish::GitTool) {
-    std::thread::spawn(move || {
-        let fetch = std::panic::AssertUnwindSafe(|| keeper::fetch(&job, &git));
-        let fetched = std::panic::catch_unwind(fetch).unwrap_or_else(|_| keeper::Fetched {
+    spawn_job(
+        sender,
+        job,
+        move |job| keeper::fetch(job, &git),
+        |job| keeper::Fetched {
             ticket_id: job.ticket_id.clone(),
             from: job.from.clone(),
             found: keeper::Found::Failed("The fetch stopped unexpectedly".into()),
-        });
-        let _ = sender.send_blocking(Event::Fetched(fetched));
-    });
+        },
+        |_, fetched| Event::Fetched(fetched),
+    );
 }
-/// Reads one kept PR's new comments on its own thread and always reports back, even if it
-/// panics, so the ticket is never left marked as sorting.
 fn spawn_comments_read(sender: Sender<Event>, job: keeper::Read) {
-    std::thread::spawn(move || {
-        let read = std::panic::AssertUnwindSafe(|| keeper::read_comments(&job, runtime::gh_output));
-        let read = std::panic::catch_unwind(read)
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("The read stopped unexpectedly")));
-        let _ = sender.send_blocking(Event::CommentsRead(job.ticket_id, job.read, read));
-    });
+    spawn_job(
+        sender,
+        job,
+        |job| keeper::read_comments(job, runtime::gh_output),
+        |_| Err(anyhow::anyhow!("The read stopped unexpectedly")),
+        |job, read| Event::CommentsRead(job.ticket_id, job.read, read),
+    );
+}
+enum PublishAction {
+    Request {
+        caller: String,
+        args: Value,
+        reply: Reply,
+    },
+    Continued(publish::Outcome),
+    Answer {
+        item: String,
+        approved: bool,
+    },
 }
 enum Event {
+    KeeperCheckoutDone(Box<checkout::KeeperCheckout>, Box<checkout::KeeperResult>),
+    PublicationChecked(Box<checkout::PublicationResult>, PublishAction),
+    WorktreePrepared(Box<checkout::Worktree>, Result<()>),
+    CreationInspected(Box<checkout::Creation>, Result<Vec<String>>, Reply),
+    CreationCompleted(Box<checkout::ReservedCreation>, Result<()>),
     Command(Command, Reply),
     /// A sync pass finished on its own thread.
     Synced(Result<sync::Passed>),
@@ -541,6 +574,7 @@ pub struct Service {
     changes: Receiver<()>,
     step_changes: Receiver<()>,
     progress_changes: Receiver<()>,
+    usage_changes: Receiver<()>,
 }
 struct Active {
     run: String,
@@ -612,6 +646,8 @@ struct Permission {
 }
 struct Actor {
     host: Host,
+    #[cfg(test)]
+    schedule_runs: usize,
     sender: Sender<Event>,
     changed: Sender<()>,
     /// Work steps change many times a second, so they have their own signal; a pending
@@ -621,12 +657,18 @@ struct Actor {
     /// Progress has its own signal too, sent only when a figure on the board changed, so a
     /// plan step never reloads the snapshot and other steps never fetch progress.
     progress_changed: Sender<()>,
+    usage_changed: Sender<()>,
     /// A plan step or a turn start may have moved a figure since the last signal.
     progress_dirty: bool,
     /// Each session's latest step revision, seeded from the store on first use.
     revisions: HashMap<String, u64>,
     active: HashMap<String, Active>,
     compacting: HashMap<String, Compacting>,
+    creation_replies: HashMap<String, Vec<Reply>>,
+    preparing_worktrees: HashSet<String>,
+    checkout_deferred: Vec<Event>,
+    checkout_jobs: usize,
+    prepared_worktrees: HashMap<String, (checkout::Worktree, Result<()>)>,
     permissions: HashMap<String, Permission>,
     socket: PathBuf,
     helper: PathBuf,
@@ -634,7 +676,7 @@ struct Actor {
     /// memory, so a host restart starts the count again.
     human_turns: HashMap<String, usize>,
     /// The earliest armed wake-up, for progress batches and timers alike.
-    wake_at: Option<i64>,
+    scheduling: scheduling::Admission,
     /// When this host started, and the sessions that have had a turn since.
     started_at: i64,
     resumed: HashSet<String>,
@@ -667,6 +709,7 @@ impl Service {
         let (changed, changes) = async_channel::bounded(1);
         let (steps_changed, step_changes) = async_channel::bounded(1);
         let (progress_changed, progress_changes) = async_channel::bounded(1);
+        let (usage_changed, usage_changes) = async_channel::bounded(1);
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let worker = sender.clone();
         let thread = std::thread::Builder::new()
@@ -675,6 +718,7 @@ impl Service {
                 let setup = (|| -> Result<_> {
                     let mut host = Host::open(home)?;
                     recover_unfinished_turns(&mut host)?;
+                    checkout::recover_moves(&mut host)?;
                     host.delete_removed_worktrees()?;
                     host.settle_pending_worktrees();
                     let directory = tempfile::Builder::new().prefix("aw-").tempdir_in("/tmp")?;
@@ -740,20 +784,28 @@ impl Service {
                 });
                 let mut actor = Actor {
                     host,
+                    #[cfg(test)]
+                    schedule_runs: 0,
                     sender: worker,
                     changed,
                     steps_changed,
                     steps_dirty: false,
                     progress_changed,
+                    usage_changed,
                     progress_dirty: false,
                     revisions: HashMap::new(),
                     active: HashMap::new(),
                     compacting: HashMap::new(),
+                    creation_replies: HashMap::new(),
+                    preparing_worktrees: HashSet::new(),
+                    checkout_deferred: vec![],
+                    checkout_jobs: 0,
+                    prepared_worktrees: HashMap::new(),
                     permissions: HashMap::new(),
                     socket: socket.clone(),
                     helper,
                     human_turns: HashMap::new(),
-                    wake_at: None,
+                    scheduling: scheduling::Admission::default(),
                     started_at: now(),
                     resumed: HashSet::new(),
                     stopping: false,
@@ -767,6 +819,12 @@ impl Service {
                     publish_tools: publish::Tools::default(),
                     sync_pace: sync::Pace::default(),
                 };
+                for creation in checkout::pending_creations(&actor.host).unwrap_or_else(|error| {
+                    eprintln!("Recover ticket checkouts: {error:#}");
+                    vec![]
+                }) {
+                    actor.run_creation(creation, None);
+                }
                 // Timers that came due while the host was stopped fire now.
                 if let Err(e) = actor.schedule() {
                     eprintln!("Workspace scheduler: {e:#}");
@@ -799,6 +857,7 @@ impl Service {
             changes,
             step_changes,
             progress_changes,
+            usage_changes,
         })
     }
     pub fn request(
@@ -829,14 +888,132 @@ impl Service {
     pub fn progress_changes(&self) -> Receiver<()> {
         self.progress_changes.clone()
     }
+    /// Telemetry changed; fetch Usage and ProviderQuota without reloading workspace state.
+    /// The store is updated even when a client does not subscribe to this optional signal.
+    pub fn usage_changes(&self) -> Receiver<()> {
+        self.usage_changes.clone()
+    }
 }
 impl Actor {
+    fn keeper_checkout(&mut self, ticket: &str, action: checkout::KeeperAction) {
+        match checkout::KeeperCheckout::prepare(&mut self.host, ticket, action) {
+            Ok(job) => {
+                self.checkout_jobs += 1;
+                let git = self.publish_tools.git.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    job,
+                    move |job| job.run(&git),
+                    |job| job.failed(),
+                    |job, done| Event::KeeperCheckoutDone(Box::new(job), Box::new(done)),
+                );
+            }
+            Err(error) => eprintln!("Workspace checkout {ticket}: {error:#}"),
+        }
+    }
+    fn inspect_publication(&mut self, ticket: &str, action: PublishAction) -> Result<()> {
+        if let PublishAction::Request { caller, args, .. } = &action {
+            self.host.publish_inputs(
+                caller,
+                ticket,
+                args["title"].as_str(),
+                args["body"].as_str(),
+            )?;
+        }
+        let plan = checkout::Publication::prepare(&self.host, ticket)?;
+        ensure!(
+            self.host.checkout_reservations.acquire(ticket),
+            "A checkout operation for this ticket is running"
+        );
+        self.checkout_jobs += 1;
+        spawn_job(
+            self.sender.clone(),
+            (plan, action),
+            |(plan, _)| plan.run(),
+            |(plan, _)| plan.failed(),
+            |(_, action), checked| Event::PublicationChecked(Box::new(checked), action),
+        );
+        Ok(())
+    }
+    fn create_ticket(
+        &mut self,
+        owner: &str,
+        repository: &str,
+        title: &str,
+        brief: &str,
+        reply: Reply,
+    ) -> Result<()> {
+        match checkout::Creation::prepare(&self.host, owner, repository, title, brief)? {
+            checkout::Prepared::Existing(ticket) => {
+                let _ = reply.try_send(Ok(serde_json::to_value(ticket)?));
+            }
+            checkout::Prepared::Create(plan) => {
+                self.checkout_jobs += 1;
+                let git = self.publish_tools.git.clone();
+                spawn_job(
+                    self.sender.clone(),
+                    (plan, reply),
+                    move |(plan, _)| plan.inspect(&git),
+                    |_| {
+                        Err(anyhow::anyhow!(
+                            "The checkout inspection stopped unexpectedly"
+                        ))
+                    },
+                    |(plan, reply), result| Event::CreationInspected(plan, result, reply),
+                );
+            }
+        }
+        Ok(())
+    }
+    fn run_creation(&mut self, creation: checkout::ReservedCreation, reply: Option<Reply>) {
+        let id = creation.ticket.id.clone();
+        if let Some(replies) = self.creation_replies.get_mut(&id) {
+            replies.extend(reply);
+            return;
+        }
+        self.creation_replies
+            .insert(id, reply.into_iter().collect());
+        self.checkout_jobs += 1;
+        let git = self.publish_tools.git.clone();
+        spawn_job(
+            self.sender.clone(),
+            creation,
+            move |creation| creation.run(&git),
+            |_| {
+                Err(anyhow::anyhow!(
+                    "The checkout preparation stopped unexpectedly"
+                ))
+            },
+            |creation, result| Event::CreationCompleted(Box::new(creation), result),
+        );
+    }
     /// Repository scans run Git once per new repository, so they leave the host thread free
     /// for agents and send back only what the store needs. The Files panel's Git reads leave
     /// it the same way, after the store has answered which files the agents touched. Sync now
     /// makes a sync pass due, which `refresh_settings_sync` starts.
     fn scan_in_background(&mut self, command: &Command, reply: &Reply) -> Result<bool> {
         match command {
+            Command::CreateTicket {
+                coordinator_id,
+                repository_id,
+                title,
+                brief,
+            } => {
+                self.create_ticket(coordinator_id, repository_id, title, brief, reply.clone())?;
+            }
+            Command::GitHistory {
+                repository_id,
+                skip,
+                limit,
+            } => {
+                let history = checkout::History::prepare(&self.host, repository_id, *skip, *limit)?;
+                let git = self.publish_tools.git.clone();
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let result = history.run(&git).map_err(|error| format!("{error:#}"));
+                    let _ = reply.try_send(result);
+                });
+            }
             Command::Files {
                 session_id,
                 whole_tree,
@@ -908,18 +1085,84 @@ impl Actor {
 
     /// Handles one event, then starts what it made due.
     fn process(&mut self, event: Event) {
+        if self.checkout_conflict(&event) {
+            self.checkout_deferred.push(event);
+            return;
+        }
+        self.scheduling.observe(&event);
         let mut dirty = self.handle(event);
-        dirty |= self.end_keeper_reviews();
-        if let Err(e) = self.schedule() {
-            eprintln!("Workspace scheduler: {e:#}");
+        if self.scheduling.take_due() {
+            dirty |= self.end_keeper_reviews();
+            if let Err(e) = self.schedule() {
+                eprintln!("Workspace scheduler: {e:#}");
+            }
         }
         self.refresh_overlaps(now());
         self.refresh_pull_requests(now(), dirty);
         let syncing = self.refresh_settings_sync(now());
         self.start_skill_merges();
         self.signal(dirty || syncing);
+        if !self.checkout_deferred.is_empty()
+            && self
+                .checkout_deferred
+                .iter()
+                .any(|event| !self.checkout_conflict(event))
+        {
+            self.resume_checkout_commands();
+        }
     }
 
+    fn checkout_conflict(&self, event: &Event) -> bool {
+        let reservations = &self.host.checkout_reservations;
+        if reservations.is_empty() {
+            return false;
+        }
+        match event {
+            Event::Command(command, _) => reservations.blocks_command(&self.host, command),
+            Event::Tool { name, args, .. }
+                if matches!(
+                    name.as_str(),
+                    "assign_ticket"
+                        | "verify_ticket"
+                        | "accept_ticket"
+                        | "close_ticket"
+                        | "publish_ticket"
+                        | "triage_findings"
+                ) =>
+            {
+                args["ticket_id"]
+                    .as_str()
+                    .is_some_and(|ticket| reservations.contains(ticket))
+            }
+            Event::Tool { name, args, .. } if name == "archive_agent" => args["session_id"]
+                .as_str()
+                .is_some_and(|id| reservations.blocks_session(&self.host, id)),
+            Event::Kept(outcome) => reservations.contains(&outcome.ticket_id),
+            Event::Gated(outcome) => reservations.contains(&outcome.ticket_id),
+            Event::Reproduced(outcome) => reservations.contains(&outcome.ticket_id),
+            Event::Fetched(outcome) => reservations.contains(&outcome.ticket_id),
+            Event::Published(outcome) => {
+                reservations.contains(&outcome.ticket_id)
+                    || outcome
+                        .github
+                        .as_ref()
+                        .is_some_and(|read| reservations.blocks_repository(&self.host, &read.id))
+            }
+            Event::Synced(_) | Event::GitHub(_) | Event::SettingsRepositoryPrepared { .. } => true,
+            Event::PullRequests { repository, .. } => self.host.tickets().is_ok_and(|tickets| {
+                tickets.iter().any(|ticket| {
+                    ticket.repository_id == *repository && reservations.contains(&ticket.id)
+                })
+            }),
+            _ => false,
+        }
+    }
+    fn resume_checkout_commands(&mut self) {
+        let deferred = std::mem::take(&mut self.checkout_deferred);
+        for event in deferred {
+            self.process(event);
+        }
+    }
     /// Starts the model runs of the merges the host found due.
     fn start_skill_merges(&mut self) {
         for run in self.host.take_merge_runs() {
@@ -1045,6 +1288,108 @@ impl Actor {
 
     fn handle(&mut self, event: Event) -> bool {
         match event {
+            Event::KeeperCheckoutDone(job, done) => {
+                self.checkout_jobs = self.checkout_jobs.saturating_sub(1);
+                let ticket = job.ticket.id.clone();
+                let git = self.publish_tools.git.clone();
+                match job.apply(&mut self.host, *done, &git) {
+                    Ok(step) => self.run_publish_step(step),
+                    Err(error) => eprintln!("Workspace checkout {ticket}: {error:#}"),
+                }
+                for (ticket, review, why) in std::mem::take(&mut self.host.checkout_rollbacks) {
+                    self.keeper_checkout(
+                        &ticket,
+                        checkout::KeeperAction::PutBack(Box::new(review), why),
+                    );
+                }
+                true
+            }
+            Event::PublicationChecked(checked, action) => {
+                self.checkout_jobs = self.checkout_jobs.saturating_sub(1);
+                let ticket_id = checked.ticket_id().to_owned();
+                match action {
+                    PublishAction::Request {
+                        caller,
+                        args,
+                        reply,
+                    } => {
+                        let result = checked.apply(&mut self.host, |host| {
+                            host.publish_ticket(
+                                &caller,
+                                args["ticket_id"].as_str().unwrap(),
+                                args["title"].as_str(),
+                                args["body"].as_str(),
+                            )
+                        });
+                        let result = result.map(|(status, step)| {
+                            self.run_publish_step(step);
+                            status
+                        });
+                        if result.is_err() {
+                            self.refresh_github();
+                        }
+                        let _ = reply.try_send(result.map_err(|error| format!("{error:#}")));
+                    }
+                    PublishAction::Continued(outcome) => {
+                        match checked.apply(&mut self.host, |host| host.record_published(outcome)) {
+                            Ok(step) => self.run_publish_step(step),
+                            Err(error) => eprintln!("Workspace publish: {error:#}"),
+                        }
+                    }
+                    PublishAction::Answer { item, approved } => {
+                        match checked
+                            .apply(&mut self.host, |host| host.answer_publish(&item, approved))
+                        {
+                            Ok(step) => self.run_publish_step(step),
+                            Err(error) => eprintln!("Workspace publish: {error:#}"),
+                        }
+                    }
+                }
+                self.host.checkout_reservations.release(&ticket_id);
+                true
+            }
+            Event::WorktreePrepared(plan, result) => {
+                self.checkout_jobs = self.checkout_jobs.saturating_sub(1);
+                self.preparing_worktrees.remove(plan.id());
+                self.host.checkout_reservations.release(plan.id());
+                if plan.current(&self.host) {
+                    self.prepared_worktrees
+                        .insert(plan.id().into(), (*plan, result));
+                }
+                false
+            }
+            Event::CreationInspected(plan, inspected, reply) => {
+                self.checkout_jobs = self.checkout_jobs.saturating_sub(1);
+                if let Ok(Some(ticket)) = plan.existing(&self.host) {
+                    let _ = reply
+                        .try_send(serde_json::to_value(ticket).map_err(|error| error.to_string()));
+                    return false;
+                }
+                match inspected.and_then(|branches| plan.reserve(&self.host, &branches)) {
+                    Ok(creation) => self.run_creation(creation, Some(reply)),
+                    Err(error) => {
+                        let _ = reply.try_send(Err(format!("{error:#}")));
+                    }
+                }
+                false
+            }
+            Event::CreationCompleted(creation, result) => {
+                self.checkout_jobs = self.checkout_jobs.saturating_sub(1);
+                let id = creation.ticket.id.clone();
+                let result = result
+                    .and_then(|()| creation.apply(&mut self.host))
+                    .and_then(|ticket| Ok(serde_json::to_value(ticket)?))
+                    .map_err(|error| format!("{error:#}"));
+                let changed = result.is_ok();
+                if let Some(replies) = self.creation_replies.remove(&id) {
+                    for reply in replies {
+                        let _ = reply.try_send(result.clone());
+                    }
+                } else if let Err(error) = &result {
+                    eprintln!("Recover ticket checkout {id}: {error}");
+                }
+                changed
+            }
             Event::SettingsRepositoryPrepared { prepared, reply } => {
                 let result = prepared
                     .and_then(|prepared| self.host.adopt_settings_repository(prepared))
@@ -1230,8 +1575,24 @@ impl Actor {
                         } else if attention.is_publish() {
                             // The request's own result is its caller's one message, so the
                             // answer is not sent on as other Inbox answers are.
-                            let step = self.host.answer_publish(id, answer == "approved")?;
-                            self.run_publish_step(step);
+                            let ticket = self.host.tickets()?.into_iter().find(|ticket| {
+                                ticket
+                                    .publishing
+                                    .as_ref()
+                                    .is_some_and(|request| request.waiting.as_deref() == Some(id))
+                            });
+                            if answer != "approved" {
+                                let step = self.host.answer_publish(id, false)?;
+                                self.run_publish_step(step);
+                            } else if let Some(ticket) = ticket {
+                                self.inspect_publication(
+                                    &ticket.id,
+                                    PublishAction::Answer {
+                                        item: id.clone(),
+                                        approved: answer == "approved",
+                                    },
+                                )?;
+                            }
                         } else {
                             self.host.send(
                                 &format!("answer:{id}"),
@@ -1264,7 +1625,36 @@ impl Actor {
                         "stop_agents" => return self.stop_agents(&id, &args).map(Some),
                         "resume_agent" => return self.resume_agent(&id, &args).map(Some),
                         "set_plan" => return self.set_plan(&id, &args).map(Some),
-                        "publish_ticket" => return self.publish_ticket(&id, &args).map(Some),
+                        "create_ticket" => {
+                            let string = |key: &str| {
+                                args[key].as_str().with_context(|| format!("Missing {key}"))
+                            };
+                            self.create_ticket(
+                                &id,
+                                string("repository_id")?,
+                                string("title")?,
+                                string("brief")?,
+                                reply.clone(),
+                            )?;
+                            return Ok(None);
+                        }
+                        "publish_ticket" => {
+                            only_arguments(
+                                "publish_ticket",
+                                &args,
+                                &["ticket_id", "title", "body"],
+                            )?;
+                            let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
+                            self.inspect_publication(
+                                ticket,
+                                PublishAction::Request {
+                                    caller: id,
+                                    args: args.clone(),
+                                    reply: reply.clone(),
+                                },
+                            )?;
+                            return Ok(None);
+                        }
                         _ => {}
                     }
                     if name == "request_permission" {
@@ -1388,11 +1778,9 @@ impl Actor {
                 true
             }
             Event::Fetched(fetched) => {
-                let in_turn = self.ticket_in_turn(&fetched.ticket_id);
-                let git = &self.publish_tools.git;
-                if let Err(e) = self.host.keeper_fetched(fetched, in_turn, git) {
-                    eprintln!("Workspace PR keeper: {e:#}");
-                }
+                let ticket = fetched.ticket_id.clone();
+                let in_turn = self.ticket_in_turn(&ticket);
+                self.keeper_checkout(&ticket, checkout::KeeperAction::Fetched(fetched, in_turn));
                 true
             }
             Event::CommentsRead(ticket, number, read) => {
@@ -1417,7 +1805,7 @@ impl Actor {
                     })
                 })
             }
-            Event::Published(outcome) => {
+            Event::Published(mut outcome) => {
                 // What the step sent shows on the ticket's row once the watcher reads it.
                 let sent = matches!(
                     outcome.result,
@@ -1428,15 +1816,29 @@ impl Actor {
                 {
                     self.pr_watch.check_now(&ticket.repository_id);
                 }
-                match self.host.record_published(outcome) {
-                    Ok(next) => self.run_publish_step(next),
-                    Err(e) => eprintln!("Workspace publish: {e:#}"),
+                if let Some(read) = outcome.github.take()
+                    && let Err(error) = self.host.save_github(read)
+                {
+                    eprintln!("Workspace publish GitHub facts: {error:#}");
+                }
+                if matches!(outcome.result, publish::StepResult::Pushed { .. }) {
+                    let ticket = outcome.ticket_id.clone();
+                    if let Err(error) =
+                        self.inspect_publication(&ticket, PublishAction::Continued(outcome))
+                    {
+                        eprintln!("Workspace publish: {error:#}");
+                    }
+                } else {
+                    match self.host.record_published(outcome) {
+                        Ok(next) => self.run_publish_step(next),
+                        Err(error) => eprintln!("Workspace publish: {error:#}"),
+                    }
                 }
                 true
             }
             Event::Wake(at) => {
-                if self.wake_at == Some(at) {
-                    self.wake_at = None;
+                if self.scheduling.wake_at == Some(at) {
+                    self.scheduling.wake_at = None;
                 }
                 false
             }
@@ -1447,9 +1849,18 @@ impl Actor {
     /// what clients show. An event of a run the host no longer has is dropped.
     fn run_event(&mut self, session: &str, run: &str, event: ProviderEvent) -> bool {
         if self.compacting.get(session).is_some_and(|c| c.run == run) {
+            let telemetry = matches!(
+                event,
+                ProviderEvent::Usage { .. }
+                    | ProviderEvent::Quota(_)
+                    | ProviderEvent::ModelUsage(_)
+            );
             let changes_state = matches!(event, ProviderEvent::Finished { .. });
             if let Err(e) = self.compaction_event(session, run, event) {
                 eprintln!("Workspace compaction event: {e:#}");
+            }
+            if telemetry {
+                let _ = self.usage_changed.try_send(());
             }
             return changes_state;
         }
@@ -1461,10 +1872,18 @@ impl Actor {
         if !watched {
             active.last_event_at = now();
         }
-        let changes_state =
-            !watched && !matches!(event, ProviderEvent::Step(_) | ProviderEvent::Reply(_));
+        let telemetry = matches!(
+            event,
+            ProviderEvent::Usage { .. } | ProviderEvent::Quota(_) | ProviderEvent::ModelUsage(_)
+        );
+        let changes_state = !watched
+            && !telemetry
+            && !matches!(event, ProviderEvent::Step(_) | ProviderEvent::Reply(_));
         if let Err(e) = self.provider_event(session, run, event) {
             eprintln!("Workspace provider event: {e:#}");
+        }
+        if telemetry {
+            let _ = self.usage_changed.try_send(());
         }
         changes_state
     }
@@ -1625,19 +2044,12 @@ impl Actor {
                     && !active.stopped_by_human
                     && (error.is_some() || (session.role.is_worker() && !active.reported))
                 {
-                    let body = if let Some(error) = &error {
-                        format!(
-                            "{} stopped with an error: {error}. Inspect its worktree, then resume it with resume_agent, choosing held: retry or skip.",
-                            session.name
-                        )
-                    } else {
-                        format!(
-                            "{} finished a turn. This is not ticket acceptance.\n{}",
-                            session.name, active.output
-                        )
+                    let body = match &error {
+                        Some(error) => turn_error_body(&session.name, error),
+                        None => turn_finished_body(&session.name, &active.output),
                     };
                     self.host.send(
-                        &format!("turn-result:{run}"),
+                        &turn_result_id(run),
                         Some(id),
                         parent,
                         &body.chars().take(MAX_TEXT_BYTES / 4).collect::<String>(),
@@ -1746,6 +2158,9 @@ impl Actor {
             }
             host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
         })?;
+        if matches!(spent, Some(Ok(_))) {
+            let _ = self.usage_changed.try_send(());
+        }
         // A stop let this compaction finish. If its agent is still stopped, paused or in a
         // stopped project, what the compaction's provider left running is stopped now.
         let live = self.host.live_projects()?.contains(&session.project_id);
@@ -1843,12 +2258,42 @@ impl Actor {
         }
         while !(self.active.is_empty() && self.compacting.is_empty()) && Instant::now() < deadline {
             match events.try_recv() {
-                Ok(event @ Event::Provider { .. }) => {
+                Ok(
+                    event @ (Event::Provider { .. }
+                    | Event::KeeperCheckoutDone(..)
+                    | Event::PublicationChecked(..)
+                    | Event::WorktreePrepared(..)
+                    | Event::CreationInspected(..)
+                    | Event::CreationCompleted(..)),
+                ) => {
                     self.handle(event);
                 }
                 // A stopping host answers nothing else.
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        // A checkout owns a reserved ticket until its result is applied. Do not release the
+        // store lock while a Git mutation from this host can still finish behind its back.
+        while self.checkout_jobs > 0 {
+            match events.recv_blocking() {
+                Ok(
+                    event @ (Event::KeeperCheckoutDone(..)
+                    | Event::PublicationChecked(..)
+                    | Event::WorktreePrepared(..)
+                    | Event::CreationInspected(..)
+                    | Event::CreationCompleted(..)),
+                ) => {
+                    self.handle(event);
+                }
+                Ok(Event::Command(_, reply) | Event::Tool { reply, .. }) => {
+                    let _ = reply.try_send(Err("Workspace stopped".into()));
+                }
+                Ok(event @ Event::Provider { .. }) => {
+                    self.handle(event);
+                }
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
     }
@@ -1891,29 +2336,6 @@ impl Actor {
         self.record_step(caller, &run, update)?;
         Ok(json!({"done":counts.done,"total":counts.total}))
     }
-    /// Publishes a ticket for its coordinator or implementer; see `publish`. The steps run off
-    /// this thread and their result reaches the caller as a message.
-    fn publish_ticket(&mut self, caller: &str, args: &Value) -> Result<Value> {
-        only_arguments("publish_ticket", args, &["ticket_id", "title", "body"])?;
-        let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
-        let published = self.host.publish_ticket(
-            caller,
-            ticket,
-            args["title"].as_str(),
-            args["body"].as_str(),
-        );
-        match published {
-            Ok((status, step)) => {
-                self.run_publish_step(step);
-                Ok(status)
-            }
-            Err(refusal) => {
-                // An `origin` GitHub was never asked about is read now, for the next call.
-                self.refresh_github();
-                Err(refusal)
-            }
-        }
-    }
     /// Starts the rebases and fetches a pass made due and moves the results that wait for their
     /// worktree.
     /// Returns whether a ticket's PR line changed.
@@ -1948,10 +2370,7 @@ impl Actor {
         if self.ticket_in_turn(ticket_id) {
             return;
         }
-        match self.host.keeper_move(ticket_id) {
-            Ok(step) => self.run_publish_step(step),
-            Err(e) => eprintln!("Workspace PR keeper: {ticket_id}: {e:#}"),
-        }
+        self.keeper_checkout(ticket_id, checkout::KeeperAction::Waiting);
     }
     /// Pushes each keeper review that passed, or puts the branch back after one was
     /// withdrawn, once no agent of its ticket is in a turn. Returns whether any ended.
@@ -1962,10 +2381,7 @@ impl Actor {
                 continue;
             }
             ended = true;
-            match self.host.keeper_review_done(&ticket) {
-                Ok(step) => self.run_publish_step(step),
-                Err(e) => eprintln!("Workspace PR keeper: {ticket}: {e:#}"),
-            }
+            self.keeper_checkout(&ticket, checkout::KeeperAction::ReviewDone);
         }
         ended
     }
@@ -1978,13 +2394,17 @@ impl Actor {
         }
     }
     fn ticket_in_turn(&self, ticket_id: &str) -> bool {
-        self.active.keys().any(|id| {
-            self.host
-                .session_runtime(id)
-                .is_ok_and(|r| r.ticket_id.as_deref() == Some(ticket_id))
-        })
+        self.host.checkout_reservations.contains(ticket_id)
+            || self.active.keys().any(|id| {
+                self.host
+                    .session_runtime(id)
+                    .is_ok_and(|r| r.ticket_id.as_deref() == Some(ticket_id))
+            })
     }
     fn run_publish_step(&mut self, step: Option<publish::Job>) {
+        if self.stopping {
+            return;
+        }
         if let Some(job) = step {
             spawn_publish_step(self.sender.clone(), job, self.publish_tools.clone());
         }
@@ -2380,9 +2800,9 @@ impl Actor {
                     &format!("{CHECK_IN}{run}:{minutes}"),
                     Some(id),
                     parent,
-                    &format!(
-                        "[check-in] {status}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{id}] and a reason."
-                    ),
+                    &check_in_body(&format!(
+                        "{status}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{id}] and a reason."
+                    )),
                 )?;
             }
             None => {
@@ -2473,12 +2893,12 @@ impl Actor {
             &format!("{CHECK_IN}{run}:turns"),
             Some(&session.id),
             parent,
-            &format!(
-                "[check-in] {}{} has run {turns} turns {since}. {reply}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{}] and a reason.",
+            &check_in_body(&format!(
+                "{}{} has run {turns} turns {since}. {reply}\nTo let it continue, do nothing. To stop it, call stop_agents with session_ids [{}] and a reason.",
                 session.name,
                 self.ticket_label(&session.id)?,
                 session.id
-            ),
+            )),
         )?;
         Ok(())
     }
@@ -2490,88 +2910,6 @@ impl Actor {
             }
         }
         Ok(())
-    }
-    fn schedule(&mut self) -> Result<()> {
-        self.check_in_long_turns(now());
-        self.settle_leftover_notes()?;
-        // Timers fire into the queue whether or not the project is live.
-        match self.host.fire_due_schedules(now()) {
-            Ok(pass) => {
-                if let Some(next) = pass.next {
-                    self.wake(next);
-                }
-                // Fires and next-fire times show in the client even when no turn starts.
-                if pass.changed {
-                    self.state_changed();
-                }
-            }
-            Err(e) => eprintln!("Workspace timers: {e:#}"),
-        }
-        // A queued compaction runs before any input is taken.
-        for session in self.due_compactions()? {
-            // One session's compaction must never stop the others from being scheduled.
-            if let Err(error) = self.start_compaction(session) {
-                eprintln!("Workspace compaction: {error:#}");
-            }
-        }
-        let in_rounds = self.admit_rounds()?;
-        // Quiet messages ride along with the next turn but never start one. Each recipient's
-        // oldest due message stands for it, so a long queue cannot hide other sessions.
-        let messages=self.host.db.prepare(&format!("SELECT m.*,MIN(m.sequence) AS first FROM messages m JOIN live_projects p ON p.project_id=m.project_id AND p.enabled=1 JOIN sessions s ON s.id=m.recipient WHERE m.receipt='queued' AND m.quiet=0 AND COALESCE(json_extract(s.data,'$.archived'),0)=0 AND {} AND NOT EXISTS (SELECT 1 FROM messages h WHERE h.recipient=m.recipient AND h.receipt='held') GROUP BY m.recipient ORDER BY s.role<>'project_orchestrator',first", is_turn_input("m")))?.query_map([],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        for message in messages {
-            if in_rounds.contains(&message.recipient) {
-                continue;
-            }
-            let session = self.host.session(&message.recipient)?;
-            if self.active.contains_key(&session.id)
-                || matches!(session.status, Status::Paused | Status::Disconnected)
-            {
-                continue;
-            }
-            let Some(input) = self.due_input(&session.id)? else {
-                continue;
-            };
-            let runtime = self.host.session_runtime(&session.id)?;
-            if let Some(ticket) = &runtime.ticket_id
-                && self.worktree_busy(ticket, &session)?
-            {
-                continue;
-            }
-            if let Some(reason) = self.hold_reason(&session)? {
-                // One session's hold must never stop the others from being scheduled.
-                if let Err(error) = self.hold_turn(&session, &input, &reason) {
-                    eprintln!("Holding {}: {error:#}", session.id);
-                }
-                continue;
-            }
-            // The input stays queued for the first turn after the compaction settles.
-            if runtime.compaction.is_some() {
-                continue;
-            }
-            if let Err(error) = self.start_turn(session.clone(), input) {
-                self.start_failed(&session, &message, &error)?;
-            }
-        }
-        Ok(())
-    }
-    /// Sessions whose queued compaction starts now: whenever a turn of theirs could, except
-    /// that it needs no input, no free worktree and no admitted round.
-    fn due_compactions(&mut self) -> Result<Vec<Session>> {
-        let live = self.host.live_projects()?;
-        let mut due = vec![];
-        for session in self.host.queued_compactions()? {
-            if !self.active.contains_key(&session.id)
-                && !self.compacting.contains_key(&session.id)
-                && !session.archived
-                && !matches!(session.status, Status::Paused | Status::Disconnected)
-                && live.contains(&session.project_id)
-                && self.host.held_input(&session.id)? == 0
-                && self.hold_reason(&session)?.is_none()
-            {
-                due.push(session);
-            }
-        }
-        Ok(due)
     }
     /// Runs a session's queued compaction with a turn's arguments: Claude's compact command on
     /// its session, or Codex's app-server on its thread. It is not a turn: it takes no input
@@ -2655,125 +2993,6 @@ impl Actor {
             instructions: role_instructions,
         };
         self.run_provider(turn, cancel);
-        Ok(())
-    }
-    /// A ticket's worktree has one writer at a time. Readers run together: reviewers, and the
-    /// testers verifying the ticket in its running cycle. PR keeper agents work elsewhere.
-    fn worktree_busy(&self, ticket_id: &str, session: &Session) -> Result<bool> {
-        if session.role == Role::Keeper {
-            return Ok(false);
-        }
-        let ticket = self.host.ticket(ticket_id)?;
-        let reader = |session: &Session| {
-            session.role == Role::Reviewer
-                || ticket.running_cycle().is_some_and(|cycle| {
-                    cycle
-                        .rounds
-                        .iter()
-                        .flat_map(|r| &r.verifiers)
-                        .any(|v| v.session_id == session.id)
-                })
-        };
-        for id in self.active.keys() {
-            if self
-                .host
-                .session_runtime(id)?
-                .ticket_id
-                .is_some_and(|t| t == ticket_id)
-            {
-                let active = self.host.session(id)?;
-                if active.role != Role::Keeper && !(reader(session) && reader(&active)) {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-    /// Starts the queued cycles that now have a slot, then each verification round that can
-    /// start. A round's verifiers start together or not at all, so they are never scheduled one
-    /// by one; returns them all.
-    fn admit_rounds(&mut self) -> Result<HashSet<String>> {
-        if self.host.start_queued_cycles()? {
-            self.state_changed();
-        }
-        let mut members_of_rounds = HashSet::new();
-        for (ticket, members) in self.waiting_rounds()? {
-            self.admit_round(&ticket, &members)?;
-            members_of_rounds.extend(members.into_iter().map(|s| s.id));
-        }
-        Ok(members_of_rounds)
-    }
-    /// Each running cycle's current round whose verifiers still have their round message queued.
-    fn waiting_rounds(&self) -> Result<Vec<(Ticket, Vec<Session>)>> {
-        let mut rounds = vec![];
-        for ticket in self.host.tickets()? {
-            let Some(round) = ticket.running_cycle().and_then(Verification::current_round) else {
-                continue;
-            };
-            let mut members = vec![];
-            for run in &round.verifiers {
-                if self
-                    .host
-                    .message(&run.message_id)
-                    .is_ok_and(|m| m.receipt == Receipt::Queued)
-                {
-                    members.push(self.host.session(&run.session_id)?);
-                }
-            }
-            if !members.is_empty() {
-                rounds.push((ticket, members));
-            }
-        }
-        Ok(rounds)
-    }
-    /// Starts every member of a round, or none of them.
-    fn admit_round(&mut self, ticket: &Ticket, members: &[Session]) -> Result<()> {
-        if !self.host.live_projects()?.contains(&members[0].project_id) {
-            return Ok(());
-        }
-        // Each member's hold is asked once: an answer that changed between two questions could
-        // send a member with a compaction on to `start_turn`.
-        let mut holds = vec![];
-        for member in members {
-            if member.archived
-                || matches!(member.status, Status::Paused | Status::Disconnected)
-                || self.host.held_input(&member.id)? > 0
-                || self.active.contains_key(&member.id)
-                || self.worktree_busy(&ticket.id, member)?
-            {
-                return Ok(());
-            }
-            let hold = self.hold_reason(member)?;
-            // A compaction comes before the member's turn, so the round waits whole. A member
-            // whose turn is held anyway is held below instead of waiting for a compaction that
-            // cannot start either.
-            let compaction = self.host.session_runtime(&member.id)?.compaction;
-            if hold.is_none() && compaction.is_some() {
-                return Ok(());
-            }
-            holds.push(hold);
-        }
-        let mut inputs = vec![];
-        for (member, hold) in members.iter().zip(holds) {
-            match self.due_input(&member.id)? {
-                Some(input) => inputs.push((member.clone(), input, hold)),
-                None => return Ok(()),
-            }
-        }
-        for (member, input, hold) in inputs {
-            // A held verifier reports blocked and never runs on a substitute; the rest of the
-            // round runs, so the round ends and its blocked outcome wakes the coordinator.
-            if let Some(reason) = hold {
-                if let Err(error) = self.hold_turn(&member, &input, &reason) {
-                    eprintln!("Holding {}: {error:#}", member.id);
-                }
-                continue;
-            }
-            let first = input[0].clone();
-            if let Err(error) = self.start_turn(member.clone(), input) {
-                self.start_failed(&member, &first, &error)?;
-            }
-        }
         Ok(())
     }
     /// Why this session's turn cannot start now, if anything holds it.
@@ -2864,32 +3083,6 @@ impl Actor {
     /// The recipient's next turn input: every queued message, in order, up to
     /// MAX_TURN_MESSAGES. It is `None` while only progress reports wait inside
     /// their batch window; one wake-up is then armed for when the window closes.
-    fn due_input(&mut self, recipient: &str) -> Result<Option<Vec<Message>>> {
-        let input = self.host.db.prepare(&format!("SELECT * FROM messages WHERE recipient=?1 AND receipt='queued' AND {} ORDER BY sequence LIMIT ?2", is_turn_input("messages")))?.query_map(params![recipient, MAX_TURN_MESSAGES],Host::message_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        // Urgency covers the whole queue, not just the bounded input.
-        let urgent: bool = self.host.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0 AND {} AND NOT ({IS_PROGRESS_REPORT}))", is_turn_input("messages")), [recipient], |r| r.get(0))?;
-        let due = input
-            .first()
-            .map_or(0, |m| m.created_at + PROGRESS_BATCH_MS);
-        if urgent || now() >= due {
-            return Ok(Some(input));
-        }
-        self.wake(due);
-        Ok(None)
-    }
-    /// Arms one wake-up for `at` unless an earlier one is already armed.
-    fn wake(&mut self, at: i64) {
-        if self.wake_at.is_some_and(|armed| armed <= at) {
-            return;
-        }
-        self.wake_at = Some(at);
-        let sender = self.sender.clone();
-        let wait = (at - now()).clamp(0, MAX_WAKE_SLEEP_MS) as u64;
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(wait));
-            let _ = sender.send_blocking(Event::Wake(at));
-        });
-    }
     /// Records the run and delivers its whole input together, so a failure leaves every
     /// message queued for the next attempt.
     fn record_turn_start(
@@ -3006,8 +3199,40 @@ impl Actor {
         }
         runtime.profile = Some(profile.clone());
         provider::executable(session.provider)?;
-        if let Some(ticket) = &runtime.ticket_id {
-            self.host.prepare_ticket_worktree(ticket)?;
+        let sorting = KeeperSession::is_sorting(&session, &runtime);
+        // A sorting run works in its own emptied folder, never the ticket's worktree, and its
+        // input is held in memory alone, so it cannot wait for a preparation.
+        if let Some(ticket) = runtime.ticket_id.as_ref().filter(|_| !sorting) {
+            if let Some((prepared, result)) = self
+                .prepared_worktrees
+                .remove(ticket)
+                .filter(|(plan, _)| plan.current(&self.host))
+            {
+                result?;
+                // Readers admitted together share the same preparation until this pass ends.
+                self.prepared_worktrees
+                    .insert(ticket.clone(), (prepared, Ok(())));
+            } else {
+                if !self.preparing_worktrees.contains(ticket) {
+                    let plan = checkout::Worktree::prepare(&self.host, ticket)?;
+                    self.preparing_worktrees.insert(ticket.clone());
+                    self.host.checkout_reservations.acquire(ticket);
+                    self.checkout_jobs += 1;
+                    let git = self.publish_tools.git.clone();
+                    spawn_job(
+                        self.sender.clone(),
+                        plan,
+                        move |plan| plan.run(&git),
+                        |_| {
+                            Err(anyhow::anyhow!(
+                                "The worktree preparation stopped unexpectedly"
+                            ))
+                        },
+                        |plan, result| Event::WorktreePrepared(Box::new(plan), result),
+                    );
+                }
+                return Ok(());
+            }
         }
         let cwd = if let Some(path) = &runtime.workdir {
             PathBuf::from(path)
@@ -3020,7 +3245,6 @@ impl Actor {
             fs::create_dir_all(&path)?;
             path
         };
-        let sorting = KeeperSession::is_sorting(&session, &runtime);
         if sorting {
             if cwd.exists() {
                 fs::remove_dir_all(&cwd)?;
@@ -3071,6 +3295,7 @@ impl Actor {
         active.sort = sorting;
         active.sorted = sorted;
         self.wake(active.next_check_in);
+        self.scheduling.started(&session, runtime.ticket_id.clone());
         self.active.insert(session.id.clone(), active);
         if let Err(e) = self.host.run_started(&session.id) {
             eprintln!("Workspace progress: {e:#}");
@@ -3112,6 +3337,196 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hot_path_measurements() {
+        let (_home, host, ticket, _) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        actor.publish_tools.git = Arc::new(|path, args| {
+            std::thread::sleep(Duration::from_millis(300));
+            runtime::git_answer(path, args)
+        });
+        let (reply, history_reply) = async_channel::bounded(1);
+        let started = Instant::now();
+        actor.handle(Event::Command(
+            Command::GitHistory {
+                repository_id: ticket.repository_id,
+                skip: 0,
+                limit: 10,
+            },
+            reply,
+        ));
+        let (reply, replies) = async_channel::bounded(1);
+        actor.handle(Event::Command(Command::Snapshot, reply));
+        replies.try_recv().unwrap().unwrap();
+        let latency = started.elapsed();
+        println!("slow Git actor turn latency: {latency:?}");
+        assert!(
+            latency < Duration::from_millis(200),
+            "unrelated read waited for Git: {latency:?}"
+        );
+        assert!(history_reply.try_recv().is_err());
+        history_reply.recv_blocking().unwrap().unwrap();
+        let (_home, mut actor, session, run) = actor_with_turn();
+        actor.overlaps_due_at = i64::MAX;
+        for n in 0..30 {
+            actor.process(Event::Provider {
+                session: session.clone(),
+                run: run.clone(),
+                event: ProviderEvent::Step(StepUpdate {
+                    id: "stream".into(),
+                    parent_id: None,
+                    kind: StepKind::Narration,
+                    state: StepState::Running,
+                    title: format!("stream {n}"),
+                    note: None,
+                    detail: None,
+                    paths: vec![],
+                    plan: None,
+                }),
+            });
+        }
+        println!(
+            "schedule runs per 30 streamed steps: {}",
+            actor.schedule_runs
+        );
+        assert_eq!(actor.schedule_runs, 0);
+    }
+
+    #[test]
+    fn telemetry_has_its_own_coalesced_signal_and_never_admits_work_or_refreshes_state() {
+        let (_home, mut actor, session, run, changes, steps) = actor_with_signals();
+        let (sender, telemetry) = async_channel::bounded(1);
+        actor.usage_changed = sender;
+        actor.overlaps_due_at = i64::MAX;
+        let events = [
+            ProviderEvent::Usage {
+                request_id: "request".into(),
+                model: Some("claude-opus-4-6".into()),
+                usage: json!({"input_tokens":3,"output_tokens":5}),
+                complete: true,
+            },
+            ProviderEvent::ModelUsage(json!({})),
+            ProviderEvent::Quota(QuotaReading {
+                provider: Provider::Claude,
+                account: None,
+                observed_at: now(),
+                source: "fixture".into(),
+                windows: vec![],
+                error: None,
+            }),
+        ];
+        for event in events {
+            actor.process(Event::Provider {
+                session: session.clone(),
+                run: run.clone(),
+                event,
+            });
+        }
+        assert_eq!(telemetry.len(), 1);
+        assert!(changes.is_empty());
+        assert!(steps.is_empty());
+        assert_eq!(actor.schedule_runs, 0);
+    }
+    /// Runs the ignored test `test` again in a process of its own whose Claude and Codex are
+    /// `provider`: a provider is found through the environment, which only a process of its
+    /// own may set. The fixture provider keeps its counts in a scratch folder.
+    fn run_with_provider(test: &str, provider: &Path) {
+        let scratch = tempfile::tempdir().unwrap();
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--ignored", "--test-threads=1"])
+            .env("WORKSPACE_CLAUDE_BIN", provider)
+            .env("WORKSPACE_CODEX_BIN", provider)
+            .env("WORKSPACE_TEST_USAGE_DIR", scratch.path())
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&ran.stdout);
+        assert!(
+            ran.status.success() && out.contains("1 passed"),
+            "{out}{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+    fn fixture_provider() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider.py")
+    }
+
+    #[test]
+    fn slow_worktree_preparation_preserves_input_and_defers_its_archive_until_git_finishes() {
+        run_with_provider(
+            "service::tests::slow_preparation_with_the_fixture_provider",
+            &fixture_provider(),
+        );
+    }
+    #[test]
+    #[ignore = "run by slow_worktree_preparation_preserves_input_and_defers_its_archive_until_git_finishes, with the fixture as its provider"]
+    fn slow_preparation_with_the_fixture_provider() {
+        assert!(
+            std::env::var_os("WORKSPACE_CLAUDE_BIN").is_some(),
+            "never a real provider"
+        );
+        let (_home, mut actor, ticket, implementer, _) = implementer_in_turn("assigned");
+        actor.active.clear();
+        actor
+            .host
+            .set_status(&implementer.id, Status::Ready)
+            .unwrap();
+        let choice = actor
+            .host
+            .model_selection()
+            .unwrap()
+            .allowed(implementer.provider)[0]
+            .clone();
+        actor
+            .host
+            .configure_session(
+                &implementer.id,
+                ModelProfile {
+                    provider: implementer.provider,
+                    model: choice.model,
+                    effort: choice.effort,
+                },
+            )
+            .unwrap();
+
+        actor.prepared_worktrees.clear();
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
+        let (started, wait_started) = std::sync::mpsc::sync_channel(1);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        let released = Arc::new(std::sync::Mutex::new(released));
+        let once = Arc::new(AtomicBool::new(false));
+        actor.publish_tools.git = Arc::new(move |path, args| {
+            if !once.swap(true, Ordering::Relaxed) {
+                started.send(()).unwrap();
+                released.lock().unwrap().recv().unwrap();
+            }
+            runtime::git_answer(path, args)
+        });
+        let input = actor.host.messages(&implementer.id, None, 10).unwrap();
+        let before = actor.host.queued_input(&implementer.id).unwrap();
+        actor.start_turn(implementer.clone(), input).unwrap();
+        wait_started.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!actor.active.contains_key(&implementer.id));
+        assert_eq!(actor.host.queued_input(&implementer.id).unwrap(), before);
+        let (reply, response) = async_channel::bounded(1);
+        actor.process(Event::Command(
+            Command::SetArchived {
+                session_id: implementer.id.clone(),
+                archived: true,
+            },
+            reply,
+        ));
+        assert!(response.is_empty());
+        let (reply, snapshot) = async_channel::bounded(1);
+        actor.handle(Event::Command(Command::Snapshot, reply));
+        assert!(snapshot.try_recv().unwrap().is_ok());
+        release.send(()).unwrap();
+        actor.process(events.recv_blocking().unwrap());
+        response.recv_blocking().unwrap().unwrap();
+        assert!(actor.host.session(&implementer.id).unwrap().archived);
+        assert!(!actor.host.checkout_reservations.contains(&ticket.id));
+    }
 
     /// An actor with one active turn and no provider process behind it.
     fn actor_with_turn() -> (tempfile::TempDir, Actor, String, String) {
@@ -3159,23 +3574,39 @@ mod tests {
         let (sender, _) = async_channel::bounded(1);
         let (changed, changes) = async_channel::bounded(1);
         let (steps_changed, step_changes) = async_channel::bounded(1);
+        let prepared_worktrees = host
+            .tickets()
+            .unwrap()
+            .into_iter()
+            .map(|ticket| {
+                let plan = checkout::Worktree::prepare(&host, &ticket.id).unwrap();
+                (ticket.id, (plan, Ok(())))
+            })
+            .collect();
         let actor = Actor {
             host,
+            schedule_runs: 0,
             sender,
             changed,
             steps_changed,
             steps_dirty: false,
             // A test that reads the progress signal installs its own sender.
             progress_changed: async_channel::bounded(1).0,
+            usage_changed: async_channel::bounded(1).0,
             progress_dirty: false,
             revisions: HashMap::new(),
             active: HashMap::new(),
             compacting: HashMap::new(),
+            creation_replies: HashMap::new(),
+            preparing_worktrees: HashSet::new(),
+            checkout_deferred: vec![],
+            checkout_jobs: 0,
+            prepared_worktrees,
             permissions: HashMap::new(),
             socket: PathBuf::new(),
             helper: PathBuf::new(),
             human_turns: HashMap::new(),
-            wake_at: None,
+            scheduling: scheduling::Admission::default(),
             started_at: now(),
             resumed: HashSet::new(),
             stopping: false,
@@ -3520,7 +3951,7 @@ mod tests {
         actor.refresh_pull_requests(1_000, true);
         actor.refresh_pull_requests(i64::MAX, true);
         assert!(actor.pr_watch.start_due(i64::MAX).is_empty());
-        assert_eq!(actor.wake_at, None);
+        assert_eq!(actor.scheduling.wake_at, None);
         let event = events.recv_blocking().unwrap();
         assert!(
             matches!(&event, Event::PullRequests { repository, .. } if *repository == ticket.repository_id)
@@ -3550,7 +3981,7 @@ mod tests {
         actor.refresh_pull_requests(2_000, true);
         assert!(!not_watched(&mut actor, 2_000));
         let relist_at = 1_000 + pr_watch::ACTIVE_MS;
-        assert_eq!(actor.wake_at, Some(relist_at));
+        assert_eq!(actor.scheduling.wake_at, Some(relist_at));
         actor.refresh_pull_requests(relist_at, false);
         assert!(not_watched(&mut actor, relist_at));
     }
@@ -3586,7 +4017,7 @@ mod tests {
         });
         actor.process(Event::Wake(0));
         let due = actor.pr_watch.next_due().unwrap();
-        assert_eq!(actor.wake_at, Some(due));
+        assert_eq!(actor.scheduling.wake_at, Some(due));
         // When the wake-up comes, it starts the pass with no other event.
         actor.pr_watch.start_due(due);
         actor.pr_watch.finish(
@@ -3594,7 +4025,7 @@ mod tests {
             now() - pr_watch::IDLE_MS,
             &pr_watch::Outcome::NotOnGitHub,
         );
-        actor.wake_at = None;
+        actor.scheduling.wake_at = None;
         actor.process(Event::Wake(due));
         assert!(actor.pr_watch.start_due(i64::MAX).is_empty());
     }
@@ -3670,13 +4101,33 @@ mod tests {
         args: Value,
     ) -> std::result::Result<Value, String> {
         let (reply, replies) = async_channel::bounded(1);
+        let (sender, events) = async_channel::bounded(8);
+        let original = std::mem::replace(&mut actor.sender, sender);
         actor.handle(Event::Tool {
             token: token.into(),
             name: name.into(),
             args,
             reply,
         });
+        if replies.is_empty() {
+            let event = events.recv_blocking().unwrap();
+            actor.sender = original;
+            actor.handle(event);
+        } else {
+            actor.sender = original;
+        }
         replies.try_recv().unwrap()
+    }
+    /// Complete one logical job, including its returned local checkout inspection.
+    fn complete_job(actor: &mut Actor, events: &Receiver<Event>) -> bool {
+        let event = events.recv_blocking().unwrap();
+        let followup = matches!(&event, Event::Published(outcome) if matches!(outcome.result, publish::StepResult::Pushed { .. }))
+            || matches!(&event, Event::Kept(_) | Event::Gated(_) | Event::Fetched(_));
+        let changed = actor.handle(event);
+        if followup {
+            actor.handle(events.recv_blocking().unwrap());
+        }
+        changed
     }
 
     #[test]
@@ -3715,7 +4166,7 @@ mod tests {
         assert!(actor.pr_watch.start_due(checked).is_empty());
         let waiting_before = actor.host.queued_input(&caller).unwrap();
         for _ in 0..2 {
-            assert!(actor.handle(events.recv_blocking().unwrap()));
+            assert!(complete_job(&mut actor, &events));
         }
         assert_eq!(remote.branch("wiffletree/fix-contrast"), Some(f.head()));
         let results = publish::tests::results(&actor.host);
@@ -3743,7 +4194,7 @@ mod tests {
             json!({"ticket_id": f.ticket, "title": "Fix", "body": "Why"}),
         )
         .unwrap();
-        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert!(complete_job(&mut actor, &events));
         assert!(actor.host.ticket(&f.ticket).unwrap().publishing.is_none());
         let results = publish::tests::results(&actor.host);
         assert_eq!(
@@ -3912,11 +4363,11 @@ mod tests {
         publish(&mut actor);
         let item = waiting(&actor);
         resolve(&mut actor, item, "approved");
-        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert!(complete_job(&mut actor, &events));
         assert_eq!(remote.branch("wiffletree/fix-contrast"), Some(f.head()));
         let item = waiting(&actor);
         resolve(&mut actor, item, "approved");
-        assert!(actor.handle(events.recv_blocking().unwrap()));
+        assert!(complete_job(&mut actor, &events));
         let results = messages_to(&actor, &caller, "publish:");
         assert_eq!(results.len(), 2);
         assert!(results[1].contains("opened PR #45"), "{}", results[1]);
@@ -4188,10 +4639,24 @@ mod tests {
                 .map(|s| (s.archived, s.status))
         };
         assert_eq!(shown(&actor), Some((true, Status::Working)));
+        let index = WorkspaceIndex::new(actor.host.snapshot().unwrap(), Default::default());
+        assert_eq!(
+            index.ticket_of(&implementer.id).map(|t| &t.id),
+            Some(&ticket.id),
+            "its title and inspector name the ticket without the archive"
+        );
 
         finish_turn(&mut actor, &implementer, "run");
 
         assert_eq!(shown(&actor), None, "it is left to the archive");
+        let snapshot = actor.host.snapshot().unwrap();
+        assert!(
+            snapshot
+                .runtimes
+                .iter()
+                .all(|r| r.session_id != implementer.id)
+        );
+        assert!(snapshot.tickets.iter().all(|t| t.id != ticket.id));
     }
 
     #[test]
@@ -4284,6 +4749,56 @@ mod tests {
         assert_eq!(held, 1);
         let snapshot = actor.host.snapshot().unwrap();
         assert_eq!(snapshot.questions_waiting(&reviewer.id), 0);
+    }
+
+    #[test]
+    fn a_report_admission_sends_is_admitted_in_the_same_pass() {
+        let (_home, mut actor, _reviewer, coordinator) = codex_reviewer_on_a_disabled_provider();
+        assert!(
+            coordinator.parent_id.is_none(),
+            "its own hold reports to no one"
+        );
+        let queued = |actor: &Actor| -> i64 {
+            actor
+                .host
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE recipient=?1 AND receipt='queued' AND quiet=0",
+                    [&coordinator.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(queued(&actor), 0);
+        actor
+            .host
+            .set_status(&coordinator.id, Status::Ready)
+            .unwrap();
+        // The coordinator is pinned to the disabled provider too, so reaching it holds its turn
+        // where it would otherwise start one.
+        let mut runtime = actor.host.session_runtime(&coordinator.id).unwrap();
+        runtime.profile = Some(ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
+        });
+        runtime.selection = Some(Selection {
+            chosen_by: Chooser::Coordinator {
+                session_id: coordinator.id.clone(),
+            },
+            reason: "Test".into(),
+            revision: 0,
+            at: now(),
+        });
+        actor.host.save_runtime(&runtime).unwrap();
+
+        actor.schedule().unwrap();
+
+        assert_eq!(queued(&actor), 1, "the reviewer's blocked report");
+        assert!(
+            actor.host.session_runtime(&coordinator.id).unwrap().held,
+            "the pass that sent the report also reached its coordinator"
+        );
     }
 
     #[test]
@@ -4982,7 +5497,7 @@ mod tests {
             report(&mut actor, &child, "progress", body);
             assert!(actor.due_input(&parent).unwrap().is_none());
         }
-        assert!(actor.wake_at.is_some());
+        assert!(actor.scheduling.wake_at.is_some());
         actor
             .host
             .db
@@ -5046,7 +5561,7 @@ mod tests {
         }
         let (mut actor, _, _) = idle_actor(host);
         actor.schedule().unwrap();
-        let armed = actor.wake_at.unwrap();
+        let armed = actor.scheduling.wake_at.unwrap();
         assert!(armed > now() + 50_000, "armed {} ms ahead", armed - now());
     }
 
@@ -5143,7 +5658,7 @@ mod tests {
             bodies(&input),
             ["started", "which schema?", "tests fail", "meanwhile"]
         );
-        assert!(actor.wake_at.is_none());
+        assert!(actor.scheduling.wake_at.is_none());
     }
 
     #[test]
@@ -5213,7 +5728,7 @@ mod tests {
             .send("report:x", None, &parent, "[progress] imitation")
             .unwrap();
         assert_eq!(actor.due_input(&parent).unwrap().unwrap().len(), 1);
-        assert!(actor.wake_at.is_none());
+        assert!(actor.scheduling.wake_at.is_none());
     }
 
     #[test]
@@ -5233,7 +5748,7 @@ mod tests {
             .unwrap();
         let second = actor.due_input(&parent).unwrap().unwrap();
         assert_eq!(bodies(&second), ["which schema?"]);
-        assert!(actor.wake_at.is_none());
+        assert!(actor.scheduling.wake_at.is_none());
     }
 
     /// A tester in a turn that started `started_at`, with one step under way.
@@ -5285,7 +5800,7 @@ mod tests {
 
         actor.check_in_long_turns(minutes(29));
         assert!(check_ins(&actor, &coordinator).is_empty());
-        assert_eq!(actor.wake_at, Some(minutes(30)));
+        assert_eq!(actor.scheduling.wake_at, Some(minutes(30)));
 
         actor.check_in_long_turns(minutes(30));
         let first = check_ins(&actor, &coordinator);
@@ -5658,7 +6173,7 @@ mod tests {
         actor.active.insert(session, active);
 
         actor.check_in_long_turns(now());
-        assert_eq!(actor.wake_at, None);
+        assert_eq!(actor.scheduling.wake_at, None);
     }
 
     #[test]
@@ -5780,8 +6295,18 @@ mod tests {
 
     /// Runs a client command through the actor, as the desktop sends it.
     fn command(actor: &mut Actor, command: Command) -> std::result::Result<Value, String> {
+        let approved_publish = matches!(&command, Command::ResolveAttention { id, answer } if answer == "approved" && actor.host.tickets().unwrap().iter().any(|ticket| ticket.publishing.as_ref().is_some_and(|request| request.waiting.as_deref() == Some(id))));
         let (reply, replies) = async_channel::bounded(1);
-        actor.handle(Event::Command(command, reply));
+        if approved_publish {
+            let (sender, events) = async_channel::bounded(8);
+            let original = std::mem::replace(&mut actor.sender, sender);
+            actor.handle(Event::Command(command, reply));
+            let event = events.recv_blocking().unwrap();
+            actor.sender = original;
+            actor.handle(event);
+        } else {
+            actor.handle(Event::Command(command, reply));
+        }
         replies.try_recv().unwrap()
     }
 
@@ -6598,7 +7123,7 @@ mod tests {
             let reason = actor.hold_reason(&session).unwrap().unwrap();
             assert!(reason.contains(&group), "{reason}");
             // The process's exit sends no event, so the hold arms its own wake-up.
-            assert!(actor.wake_at.is_some_and(|at| at > now()));
+            assert!(actor.scheduling.wake_at.is_some_and(|at| at > now()));
 
             drop(process);
             assert_eq!(actor.hold_reason(&session).unwrap(), None);
@@ -6664,7 +7189,7 @@ mod tests {
         let open = actor.host.open_attention(&session.project_id).unwrap();
         assert_eq!(open.len(), 1, "{open:?}");
         // The process's exit sends no event, so the open note arms its own wake-up.
-        assert!(actor.wake_at.is_some_and(|at| at > now()));
+        assert!(actor.scheduling.wake_at.is_some_and(|at| at > now()));
 
         drop(process);
         actor.schedule().unwrap();
@@ -7995,7 +8520,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(actor.wake_at, None);
+        assert_eq!(actor.scheduling.wake_at, None);
     }
 
     #[test]
@@ -8391,7 +8916,10 @@ mod tests {
             "told only once it is back"
         );
         actor.active.clear();
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
         assert!(actor.end_keeper_reviews());
+        actor.handle(events.recv_blocking().unwrap());
         assert_eq!(head(), before);
         assert_eq!(keeper::tests::notices(&actor.host).len(), 1);
         drop(r);
@@ -8433,7 +8961,10 @@ mod tests {
             .active
             .insert(implementer.clone(), active_turn("run", vec![]));
         actor.host.in_turn.insert(implementer.clone());
+        let (sender, events) = async_channel::bounded(8);
+        actor.sender = sender;
         actor.handle(Event::Fetched(keeper::fetch(&job, &r.tools.git)));
+        actor.handle(events.recv_blocking().unwrap());
         let worktree = Path::new(&ticket.worktree);
         assert_eq!(worktrees::head(worktree).unwrap(), old);
         assert!(
@@ -8451,6 +8982,7 @@ mod tests {
         actor.host.turn_ended(&implementer);
         let job = due(&mut actor).fetches.remove(0);
         actor.handle(Event::Fetched(keeper::fetch(&job, &r.tools.git)));
+        actor.handle(events.recv_blocking().unwrap());
         assert_eq!(worktrees::head(worktree).unwrap(), theirs);
     }
 
@@ -8697,6 +9229,7 @@ mod tests {
         let event = events.recv_blocking().unwrap();
         assert!(matches!(event, Event::Gated(_)));
         actor.handle(event);
+        actor.handle(events.recv_blocking().unwrap());
         let ticket = actor.host.ticket(&ticket).unwrap();
         assert!(
             ticket.running_cycle().is_some_and(|v| v.keeper),
@@ -8824,24 +9357,14 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
 
     #[test]
     fn no_sorted_comments_text_is_stored_or_sent_anywhere() {
-        // A provider is found through the environment, which only a process of its own may set:
-        // the test below runs again in one whose Claude is the stand-in.
+        // The test below runs again with the stand-in as its Claude.
         let scratch = tempfile::tempdir().unwrap();
         let claude = scratch.path().join("claude");
         fs::write(&claude, STAND_IN).unwrap();
         fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let test = "service::tests::sorting_through_the_real_launch_keeps_no_comment_text";
-        let ran = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--ignored", "--test-threads=1"])
-            .env("WORKSPACE_CLAUDE_BIN", &claude)
-            .env("WORKSPACE_CODEX_BIN", &claude)
-            .output()
-            .unwrap();
-        let out = String::from_utf8_lossy(&ran.stdout);
-        assert!(
-            ran.status.success() && out.contains("1 passed"),
-            "{out}{}",
-            String::from_utf8_lossy(&ran.stderr)
+        run_with_provider(
+            "service::tests::sorting_through_the_real_launch_keeps_no_comment_text",
+            &claude,
         );
     }
 
@@ -8863,6 +9386,8 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
             let (ticket, session) = (f.ticket.clone(), sort.session.id.clone());
             let publish::tests::Fixture { host, home, .. } = f;
             let (mut actor, _, _) = idle_actor(host);
+            // As a running actor has it: nothing prepared for the ticket.
+            actor.prepared_worktrees.clear();
             let (sender, events) = async_channel::unbounded();
             actor.sender = sender;
             actor.start_sort(sort);

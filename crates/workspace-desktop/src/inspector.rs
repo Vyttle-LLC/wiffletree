@@ -1,6 +1,5 @@
 //! The right-edge rail and the inspector panel it opens for the selected session.
 use super::*;
-use conversation::markdown;
 use gpui_component::{
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
@@ -96,102 +95,184 @@ impl Panel {
     }
 }
 
-impl Workspace {
-    pub(super) fn selected_role(&self) -> Role {
-        self.selected_session()
-            .map_or(Role::ProjectOrchestrator, |s| s.role)
+/// The inspector panel the rail opens beside the conversation, for the selected session.
+pub(super) struct Inspector {
+    pub(super) bridge: Bridge,
+    pub(super) shared: Shared,
+    pub(super) inbox: Entity<inbox::Inbox>,
+    pub(super) contexts: Entity<context_view::Contexts>,
+    /// The Inbox lists the Skills page's questions.
+    pub(super) skills: Entity<skills_view::SkillsPage>,
+    pub(super) panel_data: PanelData,
+    pub(super) memory_title: Entity<InputState>,
+    pub(super) memory_body: Entity<TextareaState>,
+    pub(super) memory_kind: LogKind,
+    pub(super) brain_path: Entity<InputState>,
+    /// What the Files panel shows; fetched only while that panel is open.
+    pub(super) files: files_view::Files,
+    /// What the Processes panel shows; read only while that panel is open.
+    pub(super) processes: processes_view::Processes,
+    pub(super) crew_clock: bool,
+    /// The Compact form of each session that has it open, and the field they share.
+    pub(super) compact_forms: BTreeMap<String, context_view::CompactForm>,
+    pub(super) compact_note: Entity<TextareaState>,
+}
+impl EventEmitter<Intent> for Inspector {}
+impl Inspector {
+    pub(super) fn new(
+        bridge: Bridge,
+        inbox: Entity<inbox::Inbox>,
+        contexts: Entity<context_view::Contexts>,
+        skills: Entity<skills_view::SkillsPage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&inbox, |_, _, cx| cx.notify()).detach();
+        cx.observe(&contexts, |_, _, cx| cx.notify()).detach();
+        cx.observe(&skills, |_, _, cx| cx.notify()).detach();
+        Self {
+            bridge,
+            shared: Shared::default(),
+            inbox,
+            contexts,
+            skills,
+            panel_data: PanelData::Loading,
+            memory_title: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Title, e.g. Palette stays compatible")
+            }),
+            memory_body: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(3, 8)
+                    .placeholder("What was decided or observed, and why it matters")
+            }),
+            memory_kind: LogKind::Decision,
+            brain_path: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Path to a Markdown brain folder")
+            }),
+            files: Default::default(),
+            processes: Default::default(),
+            crew_clock: false,
+            compact_forms: BTreeMap::new(),
+            compact_note: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 6)
+                    .placeholder("For example: the failing test names")
+            }),
+        }
     }
-
-    pub(super) fn inspector_rail(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let role = self.selected_role();
-        let attention = self.workspace_notes().len() + self.project_attention().len();
-        let mut rail = div()
-            .w(px(64.))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .py_2()
-            .bg(p.surface)
-            .border_l_1()
-            .border_color(p.edge.opacity(0.35));
-        if self.selected_session().is_none() {
-            return rail;
+    /// The open panel follows the selected session: it loads again for a new selection, a new
+    /// panel and each snapshot.
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.shared, shared);
+        let (selection, moved) = self.shared.moved_from(&old);
+        let panel = self.shared.panel != old.panel;
+        let page = self.shared.page != old.page;
+        let progress = !Rc::ptr_eq(&self.shared.progress, &old.progress);
+        if selection && let Some(id) = self.shared.selected.clone() {
+            self.swap_compact_note(old.selected.as_deref(), &id, window, cx);
         }
-        for panel in [
-            Panel::Overview,
-            Panel::Team,
-            Panel::Attention,
-            Panel::Git,
-            Panel::Files,
-            Panel::Processes,
-            Panel::Memory,
-            Panel::Events,
-        ]
-        .into_iter()
-        .filter(|panel| panel.available(role))
-        {
-            let selected = self.panel == Some(panel);
-            let badge = match panel {
-                Panel::Attention => (attention > 0).then_some((attention, p.accent, p.on_accent)),
-                Panel::Processes => self.processes_badge().map(|count| (count, p.red, p.base)),
-                _ => None,
-            };
-            let tooltip = format!("{} · {}", panel.title(), self.owner_name());
-            rail = rail.child(
-                div()
-                    .id(SharedString::from(format!("inspector-{panel:?}")))
-                    .relative()
-                    .w(px(54.))
-                    .h(px(50.))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(3.))
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(p.accent.opacity(0.10)))
-                    .text_color(if selected { p.accent } else { p.subtle })
-                    .hover(move |d| d.bg(p.overlay).text_color(p.text))
-                    .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
-                    .on_click(cx.listener(move |v, _, w, c| v.toggle_panel(panel, w, c)))
-                    .child(icon(panel.icon()).size(px(18.)))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
-                            .child(panel.title()),
+        if selection || panel {
+            self.panel_data = PanelData::Loading;
+        }
+        if selection || panel || moved {
+            self.load_panel(window, cx);
+        }
+        if page {
+            self.sync_process_readings(window, cx);
+        }
+        if selection || panel || progress {
+            self.sync_crew_clock(window, cx);
+        }
+        if selection || moved || panel || page || progress {
+            cx.notify();
+        }
+    }
+    fn accept_panel_data(
+        &mut self,
+        data: serde_json::Result<PanelData>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match data {
+            Ok(data) => self.panel_data = data,
+            Err(error) => toast_error(error.to_string(), window, cx),
+        }
+    }
+    fn load_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project_id) = self.shared.project_id() else {
+            return;
+        };
+        match self.shared.panel {
+            Some(Panel::Memory) => self.request(
+                Command::Logs {
+                    project_id,
+                    before: None,
+                    limit: 30,
+                },
+                window,
+                cx,
+            ),
+            Some(Panel::Events) => self.request(
+                Command::Activity {
+                    project_id,
+                    before: None,
+                    limit: 50,
+                },
+                window,
+                cx,
+            ),
+            Some(Panel::Git) => {
+                if let Some(repository_id) = self
+                    .shared
+                    .selected_session()
+                    .and_then(|s| s.repository_id.clone())
+                {
+                    self.request(
+                        Command::GitHistory {
+                            repository_id,
+                            skip: 0,
+                            limit: 30,
+                        },
+                        window,
+                        cx,
                     )
-                    .when_some(badge, |d, (count, fill, text)| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top(px(4.))
-                                .right(px(8.))
-                                .min_w(px(15.))
-                                .h(px(15.))
-                                .px(px(4.))
-                                .rounded_full()
-                                .bg(fill)
-                                .text_color(text)
-                                .text_size(px(9.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(count.to_string()),
-                        )
-                    }),
-            );
+                }
+            }
+            Some(Panel::Files) => self.fetch_files(window, cx),
+            Some(Panel::Processes) => self.sync_process_readings(window, cx),
+            _ => {}
         }
-        rail
+    }
+    pub(super) fn capture_memory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session_id) = self.shared.selected.clone() else {
+            return;
+        };
+        let title = self.memory_title.read(cx).value().trim().to_string();
+        let changed = self.memory_body.read(cx).value().trim().to_string();
+        if title.is_empty() || changed.is_empty() {
+            toast_error("Add a title and a description first.", window, cx);
+            return;
+        }
+        self.request(
+            Command::AppendLog {
+                input: LogInput {
+                    session_id,
+                    milestone: new_id(),
+                    kind: self.memory_kind.clone(),
+                    title,
+                    reference: "—".into(),
+                    changed,
+                    why: "Captured directly in native prototype".into(),
+                    state: "Source report; evidence not independently verified".into(),
+                },
+            },
+            window,
+            cx,
+        );
     }
 
     pub(super) fn panel_view(&self, panel: Panel, p: Palette, cx: &mut Context<Self>) -> Div {
-        let role = self.selected_role();
+        let role = self.shared.selected_role();
         let body = match panel {
             Panel::Overview => self.overview(p, cx),
             Panel::Team => self.team_panel(p, cx),
@@ -199,10 +280,14 @@ impl Workspace {
             Panel::Events => self.events_panel(p),
             Panel::Attention => self.attention_panel(p, cx),
             Panel::Git => self.git_panel(p),
-            Panel::Files => self.files_panel(p, cx),
+            Panel::Files => self.files_message(p),
             Panel::Processes => self.processes_panel(p, cx),
             Panel::Crew => self.crew_panel(p, cx),
         };
+        // The Files panel lists its tree a screenful at a time, so the tree scrolls itself.
+        let tree = (panel == Panel::Files)
+            .then(|| self.files_tree(p, cx))
+            .flatten();
         // The Files panel keeps its counts and what is live now in view while its tree scrolls.
         let (head, foot) = match panel {
             Panel::Files => (self.files_head(p, cx), self.files_live(p)),
@@ -211,8 +296,8 @@ impl Workspace {
         };
         // The crew is the project's, whichever of its agents is selected.
         let (scope, subtitle) = match panel {
-            Panel::Crew => ("Project", self.project_name()),
-            _ => (scope(role), self.owner_name()),
+            Panel::Crew => ("Project", self.shared.project_name()),
+            _ => (scope(role), self.shared.owner_name()),
         };
         div()
             .size_full()
@@ -256,23 +341,23 @@ impl Workspace {
                             .ghost()
                             .icon(icon("close"))
                             .tooltip("Close")
-                            .on_click(cx.listener(|v, _, _, c| {
-                                v.panel = None;
-                                c.notify();
-                            })),
+                            .on_click(cx.listener(|_, _, _, c| c.emit(Intent::ClosePanel))),
                     ),
             )
             .children(head)
-            .child(
-                div()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .p_5()
-                    .text_size(px(13.))
-                    .child(body.w_full()),
-            )
+            .map(|d| match tree {
+                Some(tree) => d.child(tree),
+                None => d.child(
+                    div()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p_5()
+                        .text_size(px(13.))
+                        .child(body.w_full()),
+                ),
+            })
             .children(foot)
     }
 
@@ -320,6 +405,7 @@ impl Workspace {
     fn schedule_row(&self, schedule: &Schedule, p: Palette) -> Div {
         let local = |at| local_time(at, "America/New_York").unwrap_or_default();
         let owner = self
+            .shared
             .session(&schedule.session_id)
             .map_or("Unknown session".into(), |s| s.name.clone());
         let mut cadence = schedule
@@ -361,12 +447,14 @@ impl Workspace {
     }
 
     fn overview(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let (Some(session), Some(index)) = (self.selected_session(), self.index.as_ref()) else {
+        let (Some(session), Some(index)) =
+            (self.shared.selected_session(), self.shared.index.as_ref())
+        else {
             return div();
         };
         let snapshot = index.snapshot();
-        let live = self.live_enabled();
-        let profile = self.selected_profile();
+        let live = self.shared.live_enabled();
+        let profile = self.shared.selected_profile();
         let mut body = div()
             .flex()
             .flex_col()
@@ -401,7 +489,7 @@ impl Workspace {
                             )
                             .child(hint(session.role.label(), p)),
                     )
-                    .child(self.session_badge(session, p)),
+                    .child(ui::session_badge(&self.shared, session, p)),
             )
             .child(
                 card(p)
@@ -416,7 +504,10 @@ impl Workspace {
                         ))
                     })
                     .when_some(
-                        session.parent_id.as_deref().and_then(|id| self.session(id)),
+                        session
+                            .parent_id
+                            .as_deref()
+                            .and_then(|id| self.shared.session(id)),
                         |d, parent| d.child(property("Reports to", parent.name.clone(), p)),
                     )
                     .child(property(
@@ -429,16 +520,14 @@ impl Workspace {
         if session.role == Role::ProjectOrchestrator {
             let in_project = |s: &&Session| s.project_id == session.project_id;
             // Open tickets are live; the snapshot counts the others.
-            let tickets = snapshot
-                .tickets_owned
-                .get(&session.id)
+            let tickets = (index.snapshot().tickets_owned.get(&session.id))
                 .copied()
                 .unwrap_or(0);
             let open = (index.tickets_owned_by(&session.id))
                 .filter(|t| t.is_open())
                 .count();
             let agents = (index.sessions())
-                .filter(|s| self.listed(s))
+                .filter(|s| self.shared.listed(s))
                 .filter(in_project)
                 .filter(|s| s.role.is_worker())
                 .count();
@@ -466,9 +555,9 @@ impl Workspace {
                             ] {
                                 let weak = weak.clone();
                                 menu = menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, window, cx| {
-                                        let _ = weak.update(cx, |view, cx| {
-                                            view.open_creation(kind, None, window, cx)
+                                    move |_, _, cx| {
+                                        let _ = weak.update(cx, |_, cx| {
+                                            cx.emit(Intent::Create { kind, ticket: None })
                                         });
                                     },
                                 ));
@@ -514,7 +603,7 @@ impl Workspace {
                 body = body.child(list);
             }
         } else {
-            if let Some(ticket) = self.ticket_of(&session.id) {
+            if let Some(ticket) = self.shared.ticket_of(&session.id) {
                 body = body.child(
                     div()
                         .flex()
@@ -533,7 +622,7 @@ impl Workspace {
                         ),
                 );
             }
-            if let Some(repository) = self.repository() {
+            if let Some(repository) = self.shared.repository() {
                 body = body.child(
                     div()
                         .flex()
@@ -594,8 +683,8 @@ impl Workspace {
     }
 
     fn attention_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let items = self.project_attention();
-        let notes = self.workspace_notes();
+        let items = self.shared.project_attention();
+        let notes = self.shared.workspace_notes();
         if items.is_empty() && notes.is_empty() {
             return empty_state(
                 "check",
@@ -604,7 +693,7 @@ impl Workspace {
                 p,
             );
         }
-        let answering = self.answering.clone().or_else(|| {
+        let answering = self.inbox.read(cx).answering.clone().or_else(|| {
             items
                 .iter()
                 .find(|item| !item.is_permission())
@@ -617,279 +706,28 @@ impl Workspace {
             .children(notes.iter().map(|note| self.note_card(note, p, cx)));
         for item in items {
             let open = answering.as_ref() == Some(&item.id);
-            body = body.child(self.attention_card(item, open, p, cx));
+            body = body.child(
+                self.inbox
+                    .update(cx, |inbox, cx| inbox.attention_card(item, open, p, cx)),
+            );
         }
         body
     }
 
-    /// One inbox item with everything needed to settle it. `answering` opens the answer box.
-    pub(super) fn attention_card(
-        &self,
-        item: &Attention,
-        answering: bool,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let asker = self
-            .session(&item.session_id)
-            .map_or("Agent".to_owned(), |s| s.name.clone());
-        let id = item.id.clone();
-        let entry = card(p).child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(hint(asker, p).text_ellipsis())
-                .child(if item.is_permission() {
-                    pill("Approval", p.yellow)
-                } else {
-                    pill("Question", p.focus)
-                }),
-        );
-        if let Some(publish) = self.publish_card(item) {
-            return publish_approval(entry, id, publish, p, cx);
-        }
-        if item.is_permission() {
-            let approve = id.clone();
-            return entry
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .line_height(relative(1.5))
-                        .child(item.prompt.clone()),
-                )
-                .child(hint(format!("{} · {}", item.host, item.operation_id), p))
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            button(SharedString::from(format!("deny-{id}")))
-                                .ghost()
-                                .label("Deny")
-                                .on_click(cx.listener(move |v, _, w, c| {
-                                    v.resolve_attention(&id, "denied", w, c)
-                                })),
-                        )
-                        .child(
-                            button(SharedString::from(format!("approve-{approve}")))
-                                .primary()
-                                .label("Approve once")
-                                .on_click(cx.listener(move |v, _, w, c| {
-                                    v.resolve_attention(&approve, "approved", w, c)
-                                })),
-                        ),
-                );
-        }
-        let mut choices = div().flex().flex_col().gap_1p5();
-        for (ix, option) in item.options.iter().enumerate() {
-            let (id, option) = (id.clone(), option.clone());
-            choices = choices.child(
-                div()
-                    .id(SharedString::from(format!("choice-{id}-{ix}")))
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(p.edge.opacity(0.5))
-                    .text_size(px(13.))
-                    .line_height(relative(1.4))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(p.overlay).border_color(p.accent))
-                    .child(option.clone())
-                    .on_click(
-                        cx.listener(move |v, _, w, c| v.resolve_attention(&id, &option, w, c)),
-                    ),
-            );
-        }
-        let dismiss = id.clone();
-        let actions = div().flex().justify_end().gap_2().child(
-            button(SharedString::from(format!("dismiss-{id}")))
-                .ghost()
-                .label("Dismiss")
-                .on_click(cx.listener(move |v, _, w, c| {
-                    v.request(
-                        Command::DismissAttention {
-                            id: dismiss.clone(),
-                        },
-                        w,
-                        c,
-                    )
-                })),
-        );
-        let entry = entry
-            .child(
-                div()
-                    .max_h(px(280.))
-                    .overflow_y_scrollbar()
-                    .id(SharedString::from(format!("question-{id}")))
-                    .child(markdown(
-                        &format!("attention-{id}"),
-                        &item.prompt,
-                        &self.link_bases(&item.session_id),
-                    )),
-            )
-            .when(!item.options.is_empty(), |d| d.child(choices));
-        if answering {
-            entry.child(Textarea::new(&self.answer).w_full()).child(
-                actions.child(
-                    button(SharedString::from(format!("answer-{id}")))
-                        .primary()
-                        .label("Send answer")
-                        .on_click(cx.listener(move |v, _, w, c| {
-                            let answer = v.answer.read(c).value().trim().to_string();
-                            if !answer.is_empty() {
-                                v.resolve_attention(&id, &answer, w, c);
-                            }
-                        })),
-                ),
-            )
-        } else {
-            entry.child(
-                actions.child(
-                    button(SharedString::from(format!("start-answer-{id}")))
-                        .label("Answer")
-                        .on_click(cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))),
-                ),
-            )
-        }
-    }
-
     fn note_card(&self, note: &WorkspaceNote, p: Palette, cx: &mut Context<Self>) -> Div {
         match note {
-            WorkspaceNote::Paused(setting) => self.paused_card(setting, p, cx),
-            WorkspaceNote::SkillQuestion(question) => self.question_card(question, p, cx),
+            WorkspaceNote::Paused(setting) => self
+                .inbox
+                .update(cx, |inbox, cx| inbox.paused_card(setting, p, cx)),
+            WorkspaceNote::SkillQuestion(question) => self
+                .skills
+                .update(cx, |skills, cx| skills.question_card(question, p, cx)),
         }
-    }
-
-    /// A paused setting's note: the setting, what happened, Compare and the choices that settle
-    /// it for every project at once.
-    fn paused_card(&self, note: &PausedSetting, p: Palette, cx: &mut Context<Self>) -> Div {
-        let view = cx.entity().downgrade();
-        let on: workspace_notes::OnNote = Rc::new(move |path, action, window, cx| {
-            let _ = view.update(cx, |view, cx| view.note_action(path, action, window, cx));
-        });
-        let said = (note.text.strip_prefix(&note.setting)).unwrap_or(&note.text);
-        let compared = &self.compared;
-        card(p)
-            .bg(p.surface)
-            .border_color(p.yellow.opacity(0.55))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(hint("Workspace · settings sync", p))
-                    .child(pill("Paused", p.yellow)),
-            )
-            .child(div().text_size(px(13.)).line_height(relative(1.5)).child(
-                StyledText::new(format!("{}{said}", note.setting)).with_highlights([(
-                    0..note.setting.len(),
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                )]),
-            ))
-            .children(workspace_notes::comparison(note, compared, p))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .flex_wrap()
-                    .gap_2()
-                    // Narrow, the choices wrap to the right under Compare.
-                    .child(div().flex_1().flex().child(workspace_notes::compare_link(
-                        note,
-                        "Compare",
-                        "Hide comparison",
-                        compared,
-                        &on,
-                    )))
-                    .children(workspace_notes::settle_buttons(note, &on)),
-            )
-            .children(
-                workspace_notes::kept_note(note, compared)
-                    .map(|kept| hint(kept, p).text_size(px(11.))),
-            )
-    }
-
-    fn note_action(
-        &mut self,
-        path: String,
-        action: workspace_notes::NoteAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let command = match action {
-            workspace_notes::NoteAction::Compare => {
-                workspace_notes::toggle_compare(&mut self.compared, path)
-            }
-            workspace_notes::NoteAction::Settle(settle) => {
-                Some(Command::SettlePausedFile { path, settle })
-            }
-        };
-        match command {
-            Some(command) => self.request(command, window, cx),
-            None => cx.notify(),
-        }
-    }
-
-    /// Opens the answer box for one question, empty and focused.
-    pub(super) fn start_answer(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.answering = Some(id.to_owned());
-        self.answer.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    /// The card for a publish step waiting on this item, drawn from the ticket's frozen request,
-    /// its review and ledger, and the repository's facts. `None` for any other item.
-    fn publish_card(&self, item: &Attention) -> Option<PublishCard> {
-        let index = self.index.as_ref()?;
-        let snapshot = index.snapshot();
-        let (ticket, request) = index.tickets().find_map(|ticket| {
-            let request = ticket.publishing.as_ref()?;
-            (request.waiting.as_deref() == Some(item.id.as_str())).then_some((ticket, request))
-        })?;
-        let repository = snapshot
-            .repositories
-            .iter()
-            .find(|r| r.id == ticket.repository_id)?;
-        Some(waiting_card(
-            ticket,
-            request,
-            repository,
-            &snapshot.allowed_owners,
-        ))
-    }
-
-    fn resolve_attention(
-        &mut self,
-        id: &str,
-        answer: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.request(
-            Command::ResolveAttention {
-                id: id.into(),
-                answer: answer.into(),
-            },
-            window,
-            cx,
-        );
     }
 
     fn git_panel(&self, p: Palette) -> Div {
         let mut body = div().flex().flex_col().gap_4();
-        if let Some(repository) = self.repository() {
+        if let Some(repository) = self.shared.repository() {
             body = body.child(Self::repository_row(repository, p));
         }
         let PanelData::Git(commits) = &self.panel_data else {
@@ -940,6 +778,195 @@ impl Workspace {
     }
 }
 
+impl Requests for Inspector {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = match reply {
+            Ok(value) => value,
+            Err(error) => {
+                // A refused compaction shows in its form.
+                if let Command::CompactContext { session_id, .. } = &command {
+                    return self.compact_refused(session_id, &error);
+                }
+                return toast_error(error, window, cx);
+            }
+        };
+        match command {
+            Command::Logs { project_id, .. } => {
+                if self.shared.panel == Some(Panel::Memory)
+                    && self.shared.project_id() == Some(project_id)
+                {
+                    let logs = serde_json::from_value(value).map(PanelData::Memory);
+                    self.accept_panel_data(logs, window, cx);
+                }
+            }
+            Command::Activity { project_id, .. } => {
+                if self.shared.panel == Some(Panel::Events)
+                    && self.shared.project_id() == Some(project_id)
+                {
+                    let events = serde_json::from_value(value).map(PanelData::Events);
+                    self.accept_panel_data(events, window, cx);
+                }
+            }
+            Command::GitHistory { repository_id, .. } => {
+                if self.shared.panel == Some(Panel::Git)
+                    && self
+                        .shared
+                        .selected_session()
+                        .and_then(|s| s.repository_id.clone())
+                        == Some(repository_id)
+                {
+                    let history = inspector::commits(value).map(PanelData::Git);
+                    self.accept_panel_data(history, window, cx);
+                }
+            }
+            Command::CompactContext { session_id, .. } => self.compact_accepted(&session_id),
+            Command::SetArchived { archived, .. } => {
+                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
+                cx.emit(Intent::Archived { archived, affected });
+            }
+            Command::AppendLog { .. } => {
+                self.memory_title
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.memory_body
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                toast("Saved to project memory", window, cx);
+                self.load_panel(window, cx);
+            }
+            Command::AttachBrain { .. } => {
+                self.brain_path
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                toast("Markdown brain attached", window, cx);
+            }
+            Command::ExportLogs { .. } => {
+                let exported = value["exported"].as_u64().unwrap_or_default();
+                toast(
+                    if exported == 0 {
+                        "Nothing new to export".to_owned()
+                    } else {
+                        format!("Exported {exported} memories to the brain")
+                    },
+                    window,
+                    cx,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+impl Render for Inspector {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_counts::count("Inspector");
+        let p = palette(is_dark(cx));
+        match self.shared.panel {
+            Some(panel) => self.panel_view(panel, p, cx),
+            None => div(),
+        }
+    }
+}
+
+impl Workspace {
+    pub(super) fn inspector_rail(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let role = self.shared.selected_role();
+        let attention = self.shared.workspace_notes().len() + self.shared.project_attention().len();
+        let mut rail = div()
+            .w(px(64.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .py_2()
+            .bg(p.surface)
+            .border_l_1()
+            .border_color(p.edge.opacity(0.35));
+        if self.shared.selected_session().is_none() {
+            return rail;
+        }
+        for panel in [
+            Panel::Overview,
+            Panel::Team,
+            Panel::Attention,
+            Panel::Git,
+            Panel::Files,
+            Panel::Processes,
+            Panel::Memory,
+            Panel::Events,
+        ]
+        .into_iter()
+        .filter(|panel| panel.available(role))
+        {
+            let selected = self.shared.panel == Some(panel);
+            let badge = match panel {
+                Panel::Attention => (attention > 0).then_some((attention, p.accent, p.on_accent)),
+                Panel::Processes => self
+                    .inspector
+                    .read(cx)
+                    .processes_badge()
+                    .map(|count| (count, p.red, p.base)),
+                _ => None,
+            };
+            let tooltip = format!("{} · {}", panel.title(), self.shared.owner_name());
+            rail = rail.child(
+                div()
+                    .id(SharedString::from(format!("inspector-{panel:?}")))
+                    .relative()
+                    .w(px(54.))
+                    .h(px(50.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(p.accent.opacity(0.10)))
+                    .text_color(if selected { p.accent } else { p.subtle })
+                    .hover(move |d| d.bg(p.overlay).text_color(p.text))
+                    .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
+                    .on_click(cx.listener(move |v, _, w, c| v.toggle_panel(panel, w, c)))
+                    .child(icon(panel.icon()).size(px(18.)))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
+                            .child(panel.title()),
+                    )
+                    .when_some(badge, |d, (count, fill, text)| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(4.))
+                                .right(px(8.))
+                                .min_w(px(15.))
+                                .h(px(15.))
+                                .px(px(4.))
+                                .rounded_full()
+                                .bg(fill)
+                                .text_color(text)
+                                .text_size(px(9.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(count.to_string()),
+                        )
+                    }),
+            );
+        }
+        rail
+    }
+}
+
 /// A commit in the Git panel's local history.
 #[derive(Deserialize)]
 pub(super) struct Commit {
@@ -954,81 +981,6 @@ pub(super) fn commits(reply: Value) -> serde_json::Result<Vec<Commit>> {
         commits: Vec<Commit>,
     }
     serde_json::from_value::<History>(reply).map(|history| history.commits)
-}
-
-/// A publish approval: what would leave the machine, then Deny and the step's own approve button.
-fn publish_approval(
-    entry: Div,
-    id: String,
-    card: PublishCard,
-    p: Palette,
-    cx: &mut Context<Workspace>,
-) -> Div {
-    let row = |label: &'static str, value: AnyElement| {
-        div()
-            .flex()
-            .gap_3()
-            .text_size(px(12.))
-            .line_height(relative(1.5))
-            .child(
-                div()
-                    .w(px(104.))
-                    .flex_none()
-                    .text_color(p.subtle)
-                    .child(label),
-            )
-            .child(div().flex_1().min_w_0().child(value))
-    };
-    let mut rows = div().flex().flex_col().gap_1();
-    for (label, value) in card.rows {
-        rows = rows.child(row(label, value.into_any_element()));
-    }
-    if !card.findings.is_empty() {
-        let mut findings = div().flex().flex_col().gap_1p5();
-        for (heading, summary) in card.findings {
-            findings = findings.child(div().child(mono(heading, p)).child(summary));
-        }
-        rows = rows.child(row("Open findings", findings.into_any_element()));
-    }
-    if let Some(sent) = card.would_send {
-        rows = rows.child(row("Would send", sent.into_any_element()));
-    }
-    if let Some(description) = card.description {
-        let block = div().p_2().rounded_md().bg(p.overlay).child(description);
-        rows = rows.child(row("Description", block.into_any_element()));
-    }
-    let approve = id.clone();
-    entry
-        .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .child(card.title),
-        )
-        .child(rows)
-        .child(hint(card.note, p))
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    button(SharedString::from(format!("deny-{id}")))
-                        .ghost()
-                        .label("Deny")
-                        .on_click(
-                            cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c)),
-                        ),
-                )
-                .child(
-                    button(SharedString::from(format!("approve-{approve}")))
-                        .primary()
-                        .label(card.approve)
-                        .on_click(cx.listener(move |v, _, w, c| {
-                            v.resolve_attention(&approve, "approved", w, c)
-                        })),
-                ),
-        )
 }
 
 #[cfg(test)]

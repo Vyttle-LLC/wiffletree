@@ -1,5 +1,6 @@
 //! Noninteractive provider turns with the user's YOLO execution policy.
 mod codex_compaction;
+mod constrained;
 mod output;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
@@ -244,7 +245,7 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         .at_low_priority()
         .own_descriptors_only();
     if matches!(turn.kind, TurnKind::Sort) {
-        with_no_tools(cmd, &turn.profile, keeper::SORTING, keeper::ANSWER_SCHEMA);
+        constrained::configure(cmd, &turn.profile, keeper::SORTING, keeper::ANSWER_SCHEMA);
         return;
     }
     // Credentials go to the MCP subprocess environment, never in the prompt.
@@ -307,25 +308,6 @@ fn configure(cmd: &mut ProcessCommand, turn: &Turn) {
         }
     }
 }
-/// Claude with every tool off but the one that returns its answer to `schema`, no MCP server,
-/// hooks, workspace access, earlier conversation or stored session, told only `prompt`.
-fn with_no_tools(cmd: &mut ProcessCommand, profile: &ModelProfile, prompt: &str, schema: &str) {
-    cmd.env_remove("WORKSPACE_SOCKET")
-        .env_remove("WORKSPACE_TOKEN")
-        .args([
-            "-p",
-            "--tools",
-            "",
-            "--strict-mcp-config",
-            "--no-session-persistence",
-        ])
-        // Hooks would receive the input, such as untrusted comments, on stdin.
-        .args(["--settings", r#"{"disableAllHooks":true}"#])
-        .args(["--output-format", "stream-json", "--verbose", "--no-chrome"])
-        .args(["--model", &profile.model, "--effort", &profile.effort])
-        .args(["--system-prompt", prompt])
-        .args(["--json-schema", schema]);
-}
 /// How long a skill merge's model run may take.
 pub const MERGE_LIMIT: Duration = Duration::from_secs(5 * 60);
 /// A skill merge's answer, as the run returned it, and the tokens the run used.
@@ -350,7 +332,7 @@ pub fn merge_run(
         .process_group(0)
         .at_low_priority()
         .own_descriptors_only();
-    with_no_tools(
+    constrained::configure(
         &mut cmd,
         profile,
         skills::model::MERGING,
@@ -358,75 +340,68 @@ pub fn merge_run(
     );
     let mut child = cmd.spawn().context("Claude could not be started")?;
     let mut stdin = child.stdin.take().context("No Claude stdin")?;
-    let read = |mut pipe: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut read = vec![];
-            let _ = pipe.read_to_end(&mut read);
-            read
-        })
-    };
-    let stdout = read(Box::new(child.stdout.take().context("No Claude stdout")?));
-    let stderr = read(Box::new(child.stderr.take().context("No Claude stderr")?));
+    let output = Output::spawn(child.stdout.take().context("No Claude stdout")?)?;
+    let _stop_reading = StopReading(output.clone());
+    let errors = constrained::Errors::spawn(child.stderr.take().context("No Claude stderr")?);
     let mut process = Process {
         child,
         status: None,
     };
     std::thread::spawn(move || stdin.write_all(&input));
     let deadline = Instant::now() + limit;
+    let mut run = constrained::Run::new("merge");
+    let mut answer = None;
+    loop {
+        if process.exited()? {
+            output.provider_exited();
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "The model took too long to answer, so the run was stopped."
+        );
+        match output.next(Duration::from_millis(20)) {
+            Next::Event(Ok(value)) => {
+                if answer.is_none()
+                    && let Some(result) = run.event(&value)?
+                {
+                    ensure!(
+                        result.answer.is_some(),
+                        "The merge run failed: {}.",
+                        value["subtype"]
+                    );
+                    answer = Some(MergeAnswer {
+                        answer: result.answer.unwrap(),
+                        tokens: result.tokens,
+                    });
+                }
+            }
+            Next::Event(Err(error))
+                if answer.is_none() && error == "Provider event exceeds bound" =>
+            {
+                bail!("{error}")
+            }
+            Next::Event(Err(_)) => {}
+            Next::Waiting => {}
+            Next::Finished => break,
+        }
+    }
     while !process.exited()? {
         ensure!(
             Instant::now() < deadline,
             "The model took too long to answer, so the run was stopped."
         );
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(20));
     }
-    // Stops what outlived Claude in its group, which closes the pipes.
     let status = process.stop()?;
-    let (stdout, stderr) = (stdout.join(), stderr.join());
-    let mut attested = false;
-    for line in stdout.unwrap_or_default().split(|&byte| byte == b'\n') {
-        let Ok(value) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        match value["type"].as_str() {
-            // Anything the run could act with ends it, and its answer with it.
-            Some("system") if value["subtype"] == "init" => {
-                ensure!(
-                    value["tools"] == json!(["StructuredOutput"])
-                        && value["mcp_servers"].as_array().is_some_and(Vec::is_empty),
-                    "The merge run started with tools {} and MCP servers {}.",
-                    value["tools"],
-                    value["mcp_servers"]
-                );
-                attested = true;
-            }
-            Some("result") if attested => {
-                ensure!(
-                    value["is_error"] != true && value["structured_output"].is_object(),
-                    "The merge run failed: {}.",
-                    value["subtype"]
-                );
-                let usage = &value["usage"];
-                let counts = [
-                    "input_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                    "output_tokens",
-                ];
-                let tokens = counts.iter().filter_map(|count| usage[count].as_u64());
-                return Ok(MergeAnswer {
-                    answer: value["structured_output"].clone(),
-                    tokens: tokens.sum(),
-                });
-            }
-            _ => {}
-        }
+    if let Some(answer) = answer {
+        return Ok(answer);
     }
-    let stderr = without_terminal_codes(&String::from_utf8_lossy(&stderr.unwrap_or_default()));
+    let stderr = errors.finish();
     let said = stderr.trim().chars().take(1500).collect::<String>();
     let ended = format!("Claude ended without an answer ({status}). {said}");
     bail!("{}", ended.trim_end())
 }
+
 /// How long a finished turn waits for the rest of the provider's stderr.
 const STDERR_DRAIN: Duration = Duration::from_millis(500);
 /// The provider and the helpers that stay in its process group, which this turn owns. What the
@@ -560,31 +535,15 @@ fn run_turn(
     // is read and its input closed, and at once when its time is up.
     let mut stop_at: Option<Instant> = None;
     let due = |at: Option<Instant>| at.is_some_and(|at| Instant::now() >= at);
-    let mut stderr = process.child.stderr.take().context("No provider stderr")?;
-    // The tail is kept as it arrives, so a process still holding stderr when the turn ends
-    // cannot withhold what was already written.
-    let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (errors_done, errors_closed) = std::sync::mpsc::sync_channel(1);
-    let tail = errors.clone();
-    std::thread::spawn(move || {
-        let mut chunk = [0; 4096];
-        while let Ok(read @ 1..) = stderr.read(&mut chunk) {
-            let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
-            tail.extend_from_slice(&chunk[..read]);
-            if tail.len() > 16384 {
-                let excess = tail.len() - 16384;
-                tail.drain(..excess);
-            }
-        }
-        let _ = errors_done.send(());
-    });
+    let errors =
+        constrained::Errors::spawn(process.child.stderr.take().context("No provider stderr")?);
     let stdout = process.child.stdout.take().context("No provider stdout")?;
     let output = Output::spawn(stdout)?;
     let _stop_reading = StopReading(output.clone());
     let compaction = matches!(turn.kind, TurnKind::Compaction(_));
     let sort = matches!(turn.kind, TurnKind::Sort);
     // A sorting run's answer counts only after its start reported nothing to act with.
-    let mut attested = false;
+    let mut constrained = constrained::Run::new("sorting");
     let mut terminal = false;
     let mut failure = None;
     let mut usage = Value::Null;
@@ -686,14 +645,7 @@ fn run_turn(
                 }
                 // Anything a sorting run could act with ends it, and its answer with it.
                 "system" if sort && value["subtype"] == "init" => {
-                    ensure!(
-                        value["tools"] == json!(["StructuredOutput"])
-                            && value["mcp_servers"].as_array().is_some_and(Vec::is_empty),
-                        "The sorting run started with tools {} and MCP servers {}",
-                        value["tools"],
-                        value["mcp_servers"]
-                    );
-                    attested = true;
+                    constrained.event(&value)?;
                 }
                 "system" if value["subtype"] == "init" => {
                     if let Some(id) = value["session_id"].as_str() {
@@ -749,18 +701,17 @@ fn run_turn(
                         // totals for the session's whole life, kept as it reported them.
                         usage = json!({"modelUsage":value["modelUsage"],"total_cost_usd":value["total_cost_usd"]});
                     } else if sort {
-                        usage = value["usage"].clone();
-                        emit(ProviderEvent::Usage {
-                            request_id: format!("turn:{}", turn.run_id),
-                            model: Some(turn.profile.model.clone()),
-                            usage: usage.clone(),
-                            complete: true,
-                        });
-                        if attested
-                            && value["is_error"] != true
-                            && value["structured_output"].is_object()
-                        {
-                            emit(ProviderEvent::Reply(value["structured_output"].to_string()));
+                        if let Some(result) = constrained.event(&value)? {
+                            usage = result.usage;
+                            emit(ProviderEvent::Usage {
+                                request_id: format!("turn:{}", turn.run_id),
+                                model: Some(turn.profile.model.clone()),
+                                usage: usage.clone(),
+                                complete: true,
+                            });
+                            if let Some(answer) = result.answer {
+                                emit(ProviderEvent::Reply(answer.to_string()));
+                            }
                         }
                     } else {
                         usage = value["usage"].clone();
@@ -804,10 +755,7 @@ fn run_turn(
     }
     // Stops the helpers in the provider's group that outlived it.
     let status = process.stop()?;
-    let _ = errors_closed.recv_timeout(STDERR_DRAIN);
-    let stderr = without_terminal_codes(&String::from_utf8_lossy(
-        &errors.lock().unwrap_or_else(|e| e.into_inner()),
-    ));
+    let stderr = errors.finish();
     if !ended && (!status.success() || !terminal) && failure.is_none() {
         failure = Some(format!(
             "Provider exited without a successful terminal result ({status}). {}",
@@ -982,6 +930,10 @@ mod tests {
             (
                 "print('Not signed in', file=sys.stderr); sys.exit(1)".into(),
                 "Claude ended without an answer (exit status: 1). Not signed in",
+            ),
+            (
+                "print('x' * (3 * 1024 * 1024), flush=True)".into(),
+                "Provider event exceeds bound",
             ),
         ];
         let profile = ModelProfile {

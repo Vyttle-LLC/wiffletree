@@ -13,17 +13,14 @@ fn clock_runs(panel: Option<Panel>, crew: &[&AgentProgress]) -> bool {
     panel == Some(Panel::Crew) && crew.iter().any(|agent| agent.working)
 }
 
-impl Workspace {
-    /// The selected project's board entry.
-    pub(super) fn project_progress(&self) -> Option<&ProjectProgress> {
-        self.progress.project(&self.selected_session()?.project_id)
-    }
-
+impl Inspector {
     pub(super) fn crew_panel(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let (Some(project), Some(index)) = (self.project_progress(), self.index.as_ref()) else {
+        let (Some(project), Some(index)) =
+            (self.shared.project_progress(), self.shared.index.as_ref())
+        else {
             return div();
         };
-        let tickets = self.progress.tickets_of(project);
+        let tickets = self.shared.progress.tickets_of(project);
         if tickets.is_empty() {
             return empty_state(
                 "team",
@@ -57,7 +54,7 @@ impl Workspace {
             for agent in progress
                 .agents
                 .iter()
-                .filter_map(|id| self.progress.agent(id))
+                .filter_map(|id| self.shared.progress.agent(id))
             {
                 ticket_card = ticket_card.children(self.crew_row(agent, p, cx));
             }
@@ -75,21 +72,21 @@ impl Workspace {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        let session = self.session(&agent.session_id)?;
-        let runtime = self.runtime(&session.id);
+        let session = self.shared.session(&agent.session_id)?;
+        let runtime = self.shared.runtime(&session.id);
         let label = session
             .role
             .agent_label(runtime.and_then(|r| r.focus.as_deref()));
         let model = runtime
             .and_then(|r| r.profile.as_ref())
-            .map(|profile| models::profile_label(&self.model_catalog, profile));
+            .map(|profile| models::profile_label(&self.shared.catalog, profile));
         let figure = [
             tree::agent_figure(agent),
             tree::elapsed_label(agent, ui::now()),
         ];
         let figure = figure.into_iter().flatten().collect::<Vec<_>>().join(" · ");
         let id = session.id.clone();
-        let selected = self.selected.as_ref() == Some(&id);
+        let selected = self.shared.selected.as_ref() == Some(&id);
         Some(
             div()
                 .id(SharedString::from(format!("crew-{id}")))
@@ -103,7 +100,7 @@ impl Workspace {
                 .when(session.archived, |d| d.opacity(0.7))
                 .when(selected, |d| d.bg(p.overlay))
                 .hover(move |d| d.bg(p.overlay.opacity(if selected { 1. } else { 0.7 })))
-                .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
+                .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
                 .child(
                     div()
                         .flex()
@@ -130,8 +127,11 @@ impl Workspace {
     }
 
     fn crew_working(&self) -> bool {
-        let crew = self.project_progress().map(|p| self.progress.crew(p));
-        clock_runs(self.panel, &crew.unwrap_or_default())
+        let crew = self
+            .shared
+            .project_progress()
+            .map(|p| self.shared.progress.crew(p));
+        clock_runs(self.shared.panel, &crew.unwrap_or_default())
     }
 
     /// Redraws the elapsed times every half minute, only while the panel is open and a

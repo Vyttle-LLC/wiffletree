@@ -87,13 +87,13 @@ fn busiest(windows: &[QuotaWindow], duration_mins: u64) -> Option<&QuotaWindow> 
                 .total_cmp(&b.used_percent.unwrap_or(-1.))
         })
 }
-fn quota_pill(
+fn quota_pill<V: EventEmitter<Intent>>(
     provider: Provider,
     short: &'static str,
     window: Option<&QuotaWindow>,
     reading: Option<&QuotaReading>,
     p: Palette,
-    cx: &mut Context<Workspace>,
+    cx: &mut Context<V>,
 ) -> Stateful<Div> {
     let used = window.and_then(|w| w.used_percent);
     let faded = window.is_none_or(stale);
@@ -118,7 +118,6 @@ fn quota_pill(
             .unwrap_or_else(|| format!("{provider:?} reported no {short} window")),
         _ => "Waiting for provider telemetry".into(),
     };
-    let weak = cx.weak_entity();
     div()
         .id(SharedString::from(format!("quota-{provider:?}-{short}")))
         .relative()
@@ -160,84 +159,38 @@ fn quota_pill(
                 .child(div().text_color(p.subtle).child(short)),
         )
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .on_click(move |_, window, cx| {
-            let _ = weak.update(cx, |v, cx| v.open_page(Page::Usage, window, cx));
-        })
+        .on_click(cx.listener(|_, _, _, cx| cx.emit(Intent::OpenPage(Page::Usage))))
 }
-impl Workspace {
-    pub(super) fn usage_project_id(&self) -> Option<String> {
-        if self.usage_project {
-            self.project_id()
-        } else {
-            None
-        }
-    }
-    pub(super) fn load_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request(
-            Command::Usage {
-                days: self.usage_days,
-                project_id: self.usage_project_id(),
-                provider: self.usage_provider,
-                timezone: "America/New_York".into(),
-            },
-            window,
-            cx,
+/// One row per provider of compact 5-hour and weekly pills, filled to the share used.
+pub(super) fn quota_strip<V: EventEmitter<Intent>>(
+    quotas: &[QuotaReading],
+    p: Palette,
+    cx: &mut Context<V>,
+) -> Div {
+    let mut strip = div().flex_none().px_4().pb_2().flex().flex_col().gap_1();
+    for provider in [Provider::Claude, Provider::Codex] {
+        let reading = quotas.iter().find(|r| r.provider == provider);
+        let mut row = div().flex().items_center().gap_1().child(
+            div()
+                .w(px(46.))
+                .flex_none()
+                .text_size(px(11.))
+                .text_color(p.subtle)
+                .child(format!("{provider:?}")),
         );
-    }
-    pub(super) fn refresh_quota(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request(Command::Quotas, window, cx);
-        if self.quota_pending {
-            return;
+        for (duration, short) in [(300, "5h"), (10080, "wk")] {
+            let window = reading.and_then(|r| busiest(&r.windows, duration));
+            row = row.child(quota_pill(provider, short, window, reading, p, cx));
         }
-        self.quota_pending = true;
-        let (send, receive) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let reading =
-                workspace_host::runtime::codex_quota().unwrap_or_else(|error| QuotaReading {
-                    provider: Provider::Codex,
-                    account: None,
-                    observed_at: now(),
-                    source: "Codex app-server".into(),
-                    windows: vec![],
-                    error: Some(error.to_string()),
-                });
-            let _ = send.send_blocking(reading);
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(reading) = receive.recv().await {
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| {
-                        view.request(Command::RecordQuota { reading }, window, cx)
-                    })
-                });
-            }
-        })
-        .detach();
+        strip = strip.child(row);
     }
-    /// One row per provider of compact 5-hour and weekly pills, filled to the share used.
-    pub(super) fn quota_strip(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let mut strip = div().flex_none().px_4().pb_2().flex().flex_col().gap_1();
-        for provider in [Provider::Claude, Provider::Codex] {
-            let reading = self.quotas.iter().find(|r| r.provider == provider);
-            let mut row = div().flex().items_center().gap_1().child(
-                div()
-                    .w(px(46.))
-                    .flex_none()
-                    .text_size(px(11.))
-                    .text_color(p.subtle)
-                    .child(format!("{provider:?}")),
-            );
-            for (duration, short) in [(300, "5h"), (10080, "wk")] {
-                let window = reading.and_then(|r| busiest(&r.windows, duration));
-                row = row.child(quota_pill(provider, short, window, reading, p, cx));
-            }
-            strip = strip.child(row);
-        }
-        strip
-    }
+    strip
+}
+
+impl Inspector {
     /// Events for the selected session: everything for a project, a team's own and its workers'.
     pub(super) fn events_panel(&self, p: Palette) -> Div {
-        let Some(selected) = self.selected_session() else {
+        let Some(selected) = self.shared.selected_session() else {
             return div();
         };
         let PanelData::Events(events) = &self.panel_data else {
@@ -260,7 +213,7 @@ impl Workspace {
             let source = event
                 .session_id
                 .as_deref()
-                .and_then(|id| self.session(id))
+                .and_then(|id| self.shared.session(id))
                 .map(|s| s.name.clone());
             body = body.child(
                 div()
@@ -301,6 +254,120 @@ impl Workspace {
         }
         body
     }
+}
+impl Workspace {
+    /// Reads the stored usage again whenever a provider reports some. A new reading redraws
+    /// the quota strip, and the Usage page reloads its report with it.
+    pub(super) fn watch_usage(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(changes) = self.bridge.usage_changes() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                let read = cx
+                    .update(|window, cx| this.update(cx, |view, cx| view.read_quotas(window, cx)));
+                if !matches!(read, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Asks for the stored quota readings, or, while a read is on its way, for one more after it.
+    pub(super) fn read_quotas(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quota_request.send() {
+            self.request(Command::Quotas, window, cx);
+        }
+    }
+    pub(super) fn refresh_quota(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.read_quotas(window, cx);
+        if self.shared.quota_pending {
+            return;
+        }
+        self.shared.quota_pending = true;
+        let (send, receive) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let reading =
+                workspace_host::runtime::codex_quota().unwrap_or_else(|error| QuotaReading {
+                    provider: Provider::Codex,
+                    account: None,
+                    observed_at: now(),
+                    source: "Codex app-server".into(),
+                    windows: vec![],
+                    error: Some(error.to_string()),
+                });
+            let _ = send.send_blocking(reading);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(reading) = receive.recv().await {
+                let _ = cx.update(|window, cx| {
+                    this.update(cx, |view, cx| {
+                        view.request(Command::RecordQuota { reading }, window, cx)
+                    })
+                });
+            }
+        })
+        .detach();
+    }
+}
+
+/// The Usage page: account limits, and the tokens recorded in this app by period, provider and
+/// project.
+pub(super) struct UsagePage {
+    bridge: Bridge,
+    shared: Shared,
+    report: Option<UsageReport>,
+    days: u16,
+    /// Only the selected session's project, rather than all of them.
+    scoped: bool,
+    provider: Option<Provider>,
+    /// The day the chart's detail shows; the period's last when none is picked.
+    day: Option<String>,
+}
+impl EventEmitter<Intent> for UsagePage {}
+impl UsagePage {
+    pub(super) fn new(bridge: Bridge) -> Self {
+        Self {
+            bridge,
+            shared: Shared::default(),
+            report: None,
+            days: 7,
+            scoped: false,
+            provider: None,
+            day: None,
+        }
+    }
+    /// Loads the report when the page opens and again with each new quota reading, which a
+    /// provider's usage report also brings.
+    pub(super) fn share(&mut self, shared: Shared, window: &mut Window, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.shared, shared);
+        if self.shared.page != Page::Usage {
+            return;
+        }
+        if old.page != Page::Usage || !Rc::ptr_eq(&old.quotas, &self.shared.quotas) {
+            self.load(window, cx);
+        }
+        cx.notify();
+    }
+    pub(super) fn scoped_project_id(&self) -> Option<String> {
+        if self.scoped {
+            self.shared.project_id()
+        } else {
+            None
+        }
+    }
+    pub(super) fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request(
+            Command::Usage {
+                days: self.days,
+                project_id: self.scoped_project_id(),
+                provider: self.provider,
+                timezone: "America/New_York".into(),
+            },
+            window,
+            cx,
+        );
+    }
     fn usage_filters(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut periods = div().flex().gap_1();
         for (days, label) in [(1, "Today"), (7, "7 days"), (30, "30 days")] {
@@ -308,13 +375,13 @@ impl Workspace {
                 segment(
                     SharedString::from(format!("usage-days-{days}")),
                     label,
-                    self.usage_days == days,
+                    self.days == days,
                 )
                 .on_click(cx.listener(move |v, _, w, c| {
-                    v.usage_days = days;
-                    v.usage_day = None;
-                    v.usage_report = None;
-                    v.load_usage(w, c);
+                    v.days = days;
+                    v.day = None;
+                    v.report = None;
+                    v.load(w, c);
                 })),
             );
         }
@@ -328,29 +395,29 @@ impl Workspace {
                 segment(
                     SharedString::from(format!("usage-provider-{label}")),
                     label,
-                    self.usage_provider == provider,
+                    self.provider == provider,
                 )
                 .on_click(cx.listener(move |v, _, w, c| {
-                    v.usage_provider = provider;
-                    v.usage_report = None;
-                    v.load_usage(w, c);
+                    v.provider = provider;
+                    v.report = None;
+                    v.load(w, c);
                 })),
             );
         }
-        let project = self.project_name();
+        let project = self.shared.project_name();
         let mut scopes = div().flex().gap_1();
         for (scoped, label) in [(false, "All projects".to_owned()), (true, project.clone())] {
             scopes = scopes.child(
                 segment(
                     SharedString::from(format!("usage-scope-{scoped}")),
                     label,
-                    self.usage_project == scoped,
+                    self.scoped == scoped,
                 )
                 .disabled(scoped && project.is_empty())
                 .on_click(cx.listener(move |v, _, w, c| {
-                    v.usage_project = scoped;
-                    v.usage_report = None;
-                    v.load_usage(w, c);
+                    v.scoped = scoped;
+                    v.report = None;
+                    v.load(w, c);
                 })),
             );
         }
@@ -371,7 +438,6 @@ impl Workspace {
             .child(filter("Period", periods))
             .child(filter("Provider", providers))
     }
-
     fn tile(label: &'static str, value: String, detail: String, p: Palette) -> Div {
         card(p)
             .flex_1()
@@ -386,9 +452,8 @@ impl Workspace {
             )
             .child(hint(detail, p))
     }
-
     fn day_detail(&self, report: &UsageReport, p: Palette) -> Div {
-        let date = self.usage_day.as_deref().unwrap_or(&report.end_date);
+        let date = self.day.as_deref().unwrap_or(&report.end_date);
         let mut detail = card(p).child(eyebrow(format!("DAY · {date}"), p));
         for day in report.daily.iter().filter(|day| day.date == date) {
             detail = detail
@@ -422,7 +487,6 @@ impl Workspace {
             p,
         ))
     }
-
     fn coordinator_usage(&self, report: &UsageReport, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut work = card(p).child(eyebrow("BY COORDINATOR", p));
         let largest = report
@@ -443,7 +507,7 @@ impl Workspace {
                     .flex_col()
                     .gap_1()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |v, _, w, c| v.select(id.clone(), w, c)))
+                    .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
                     .child(
                         div()
                             .flex()
@@ -477,7 +541,6 @@ impl Workspace {
         }
         work
     }
-
     fn quota_trend(report: &UsageReport, trend: &QuotaTrend, p: Palette) -> Div {
         let largest = trend
             .daily
@@ -543,9 +606,8 @@ impl Workspace {
                 p,
             ))
     }
-
     /// Account limits and recorded tokens for the whole workspace.
-    pub(super) fn usage_page(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn body(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut body = div()
             .flex()
             .flex_col()
@@ -559,7 +621,7 @@ impl Workspace {
                     .child(section("RECORDED IN THIS APP", p))
                     .child(self.usage_filters(p, cx)),
             );
-        let Some(report) = &self.usage_report else {
+        let Some(report) = &self.report else {
             return body.child(hint("Loading recorded usage…", p));
         };
         let totals = &report.totals;
@@ -711,7 +773,7 @@ impl Workspace {
                     )
                     .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
                     .on_click(cx.listener(move |v, _, _, c| {
-                        v.usage_day = Some(click_date.clone());
+                        v.day = Some(click_date.clone());
                         c.notify();
                     })),
             );
@@ -738,7 +800,7 @@ impl Workspace {
             ))
     }
     fn provider_limits(&self, provider: Provider, p: Palette) -> Div {
-        let reading = self.quotas.iter().find(|r| r.provider == provider);
+        let reading = self.shared.quotas.iter().find(|r| r.provider == provider);
         let mut body = card(p).flex_1().min_w(px(280.)).child(
             div()
                 .flex()
@@ -811,7 +873,6 @@ impl Workspace {
         }
         body
     }
-
     /// Both providers, always: limits belong to the account, not to the selected agent.
     fn limits(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         div()
@@ -820,14 +881,16 @@ impl Workspace {
             .gap_3()
             .child(
                 section("ACCOUNT LIMITS", p).child(
-                    button("quota-refresh")
-                        .ghost()
-                        .xsmall()
-                        .icon(ui::icon("refresh").size(px(13.)))
-                        .loading(self.quota_pending)
-                        .disabled(self.quota_pending)
+                    ui::icon_or_spinner(
+                        button("quota-refresh").ghost().xsmall(),
+                        ui::icon("refresh").size(px(13.)),
+                        None,
+                        self.shared.quota_pending,
+                        gpui_component::Size::XSmall,
+                    )
+                    .disabled(self.shared.quota_pending)
                         .tooltip("Refresh account limits")
-                        .on_click(cx.listener(|v, _, w, c| v.refresh_quota(w, c))),
+                        .on_click(cx.listener(|_, _, _, c| c.emit(Intent::RefreshQuotas))),
                 ),
             )
             .child(
@@ -841,5 +904,50 @@ impl Workspace {
                 "Shared across every app and machine on these accounts. Codex refreshes every 5 minutes; Claude reports during live responses.",
                 p,
             ))
+    }
+}
+impl Requests for UsagePage {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Command::Usage {
+            days,
+            project_id,
+            provider,
+            ..
+        } = command
+        else {
+            return;
+        };
+        // A reply to filters since changed is dropped.
+        if days != self.days || project_id != self.scoped_project_id() || provider != self.provider
+        {
+            return;
+        }
+        match reply.and_then(|value| serde_json::from_value(value).map_err(|e| e.to_string())) {
+            Ok(report) => self.report = Some(report),
+            Err(error) => toast_error(error, window, cx),
+        }
+    }
+}
+impl Render for UsagePage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_counts::count("Usage");
+        let p = palette(is_dark(cx));
+        ui::page(
+            "Usage",
+            "Account limits and tokens across every project",
+            self.body(p, cx),
+            None,
+            p,
+            cx,
+        )
     }
 }

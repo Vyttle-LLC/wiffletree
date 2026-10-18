@@ -5,12 +5,14 @@ mod automation;
 mod bridge;
 mod context_view;
 mod conversation;
+mod conversation_header;
 mod creation;
 mod crew_panel;
 mod data_dir;
 mod file_links;
 mod files_view;
 mod history_sheet;
+mod inbox;
 mod inspector;
 mod leftovers;
 mod login_env;
@@ -22,11 +24,14 @@ mod preferences;
 mod processes_view;
 mod progress;
 mod project_name;
+mod render_counts;
 mod repositories_view;
 mod settings;
+mod shared;
 mod sidebar;
 mod skills_view;
 mod team_view;
+mod transcript;
 mod tree;
 mod ui;
 mod update;
@@ -47,6 +52,9 @@ use gpui_component::{
 use palette::{Palette, palette};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
+use shared::{Amendment, Intent, Requests, Shared, toast, toast_error};
+// GPUI has an `Inspector` too; ours wins over its glob.
+use inspector::Inspector;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
@@ -146,299 +154,88 @@ fn button(id: impl Into<ElementId>) -> Button {
 
 struct Workspace {
     bridge: Bridge,
-    /// The latest snapshot joined with the archive; shared so that a frame's transcript rows
-    /// can hold it without a copy.
-    index: Option<Rc<WorkspaceIndex>>,
+    shared: Shared,
     /// The snapshot request sent and not yet answered, so that a burst of changes asks for one
     /// more, not one per change.
     snapshot_request: Coalesced,
+    quota_request: Coalesced,
     /// An archive request is on its way.
     archive_pending: bool,
     load_error: Option<String>,
-    selected: Option<String>,
-    messages: Rc<Vec<Message>>,
-    /// Where each loaded message sits in the transcript, recomputed whenever they change.
-    placements: Rc<Vec<conversation::Placement>>,
-    open_peers: Rc<conversation::OpenPeers>,
-    /// Where the loaded messages' file references resolve, recomputed with their placements.
-    transcript_links: Rc<conversation::LinkBases>,
-    list: ListState,
-    drafts: BTreeMap<String, String>,
-    /// Files dropped on each session's conversation, waiting to go with its draft.
-    attached: BTreeMap<String, Vec<Attachment>>,
-    /// Why files in the selected conversation's last drop were not attached.
-    refused_files: Vec<String>,
-    cached_pages: BTreeMap<String, Rc<Vec<Message>>>,
-    cache_order: VecDeque<String>,
-    input: Entity<TextareaState>,
-    sending: BTreeSet<String>,
-    page: Option<i64>,
-    memory_title: Entity<InputState>,
-    memory_body: Entity<TextareaState>,
-    memory_kind: LogKind,
-    brain_path: Entity<InputState>,
-    answer: Entity<TextareaState>,
-    answering: Option<String>,
-    /// Projects whose decision card is folded to one row. Kept in memory only.
-    minimized_decisions: BTreeSet<String>,
-    /// The Models page's draft and the host's saved copy.
-    model_selection: ModelSelection,
-    saved_model_selection: ModelSelection,
-    guide_input: Entity<TextareaState>,
-    skill_view: skills_view::SkillView,
-    /// The open skill's rules or rewrite as the human is editing them.
-    skill_text: Entity<TextareaState>,
-    stock_unfolded: bool,
-    /// What the open skill's page is asking to confirm.
-    confirming: Option<skills_view::Confirm>,
-    /// The open history, newest first, and the entry whose text is shown.
-    skill_history: Vec<workspace_host::skills::Recorded>,
-    viewed_entry: Option<String>,
-    /// What changed from the open rewrite's base to this release's stock text.
-    stock_changes: Vec<workspace_host::skills::Line>,
-    /// The merge open in Review changes.
-    merge_review: Option<workspace_host::skills::MergeReview>,
-    /// Review changes was opened from a History entry, which Done returns to.
-    review_from_history: bool,
-    /// By skill, the wording chosen so far for each passage, until Apply.
-    skill_wordings: [skills_view::Chosen; 4],
-    /// The workspace note open in Compare in the Inbox.
-    compared: workspace_notes::Compared,
-    verifiers: Entity<verifiers::VerifierEditor>,
-    /// What the last refresh found for each provider's CLI: installed, signed in and its plan.
-    detection: Detection,
-    /// The setup last suggested from `detection`, while the store has no saved one.
-    suggested: Option<Setup>,
-    /// The model each provider's Add row on the Providers card shows.
-    model_drafts: BTreeMap<Provider, String>,
-    model_catalog: Vec<workspace_host::runtime::ModelOption>,
-    /// The chat's model menu, rebuilt when the catalog or the snapshot changes.
-    chat_models: Rc<BTreeMap<(Provider, String), String>>,
-    catalog_pending: usize,
-    catalog_loaded: bool,
-    catalog_notice: String,
-    panel: Option<Panel>,
-    panel_data: PanelData,
-    view: Page,
+    models: Entity<models_view::ModelsPage>,
+    skills: Entity<skills_view::SkillsPage>,
+    conversation: Entity<conversation::Conversation>,
     creation: Option<Entity<CreationForm>>,
-    pending_project_selection: Option<String>,
-    creating_project: bool,
-    project_name: Entity<InputState>,
-    checks_command: Entity<InputState>,
-    checks_edit: Option<repositories_view::ChecksEdit>,
-    project_edit: Option<project_name::NameEdit>,
-    collapsed_projects: BTreeSet<String>,
-    /// Collapsed project groups, by their first word in lowercase.
-    collapsed_groups: BTreeSet<String>,
-    /// The project or group being dragged in the sidebar; gone once the drag ends.
-    project_drag: Option<WeakEntity<sidebar::ProjectDrag>>,
-    /// The press in progress ended a rename, so it does not also start a drag.
-    rename_press: bool,
-    /// How the latest press on a project row began.
-    row_press: tree::RowPress,
-    /// The tree is scrolling under a row dragged to its edge.
-    drag_scrolling: bool,
-    show_archived: bool,
-    tree_scroll: ScrollHandle,
-    quotas: Vec<QuotaReading>,
-    quota_pending: bool,
-    usage_report: Option<UsageReport>,
-    usage_days: u16,
-    usage_project: bool,
-    usage_provider: Option<Provider>,
-    usage_day: Option<String>,
-    context: BTreeMap<String, Result<workspace_host::context::ContextUsage, String>>,
-    context_pending: BTreeSet<String>,
-    /// What each session's context was last measured after.
-    context_seen: BTreeMap<String, context_view::Measured>,
-    /// The Compact form of each session that has it open, and the field they share.
-    compact_forms: BTreeMap<String, context_view::CompactForm>,
-    compact_note: Entity<TextareaState>,
+    repositories: Entity<repositories_view::RepositoriesPage>,
+    usage: Entity<usage_view::UsagePage>,
+    sidebar: Entity<sidebar::Sidebar>,
+    inspector: Entity<Inspector>,
+    inbox: Entity<inbox::Inbox>,
+    contexts: Entity<context_view::Contexts>,
     last_repository_refresh: Option<std::time::Instant>,
-    /// A downloaded release that installs on restart or quit.
-    update: Option<update::Staged>,
-    checking_update: bool,
-    /// Hides the update card; the footer keeps a smaller restart button.
-    update_card_dismissed: bool,
-    /// The selected session's latest run, shown as the activity card while it works.
-    activity: Option<activity::RunActivity>,
-    step_fetch: activity::StepFetch,
-    activity_clock: bool,
-    /// The open turn history, which follows step changes while it is shown.
-    history: Option<WeakEntity<history_sheet::HistorySheet>>,
-    /// Finished runs' durations and step counts, keyed by run.
-    run_summaries: Rc<BTreeMap<String, RunSummary>>,
-    /// What the Files panel shows; fetched only while that panel is open.
-    files: files_view::Files,
-    /// What the Processes panel shows; read only while that panel is open.
-    processes: processes_view::Processes,
-    /// How far along every agent, ticket and project is, as the host last derived it.
-    progress: progress::ProgressBoard,
     progress_fetch: activity::StepFetch,
-    crew_clock: bool,
 }
 impl Workspace {
     fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 9));
-        // The send button follows the draft, so redraw as it changes.
-        cx.subscribe(&input, |_, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        })
-        .detach();
-        let guide_input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(8, 24).placeholder(
-                "e.g. Claude: small, contained change → sonnet; large or cross-cutting → opus.",
-            )
-        });
-        cx.subscribe(&guide_input, |view: &mut Self, input, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                view.model_selection.guide = input.read(cx).value().to_string();
-                cx.notify();
-            }
-        })
-        .detach();
-        let skill_text = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(6, 24).placeholder(
-                "One rule per line, e.g. Run the repository's checks before reporting ready.",
-            )
-        });
-        // Save and Discard follow the draft.
-        cx.subscribe(&skill_text, |_, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        })
-        .detach();
         let verifiers = cx.new(|cx| verifiers::VerifierEditor::new(bridge.clone(), window, cx));
-        // The Save bar follows the verifiers while they are part of an unsaved setup.
-        cx.observe(&verifiers, |_, _, cx| cx.notify()).detach();
-        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
-        cx.subscribe_in(
-            &project_name,
-            window,
-            |view, _, event, window, cx| match event {
-                InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                    view.save_project_name(window, cx)
-                }
-                _ => {}
-            },
-        )
-        .detach();
-        let answer = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(2, 6)
-                .placeholder("Your answer…")
+        let models = cx
+            .new(|cx| models_view::ModelsPage::new(bridge.clone(), verifiers.clone(), window, cx));
+        Self::adopt(&models, window, cx);
+        // The start screen draws what the Models page detected.
+        cx.observe(&models, |_, _, cx| cx.notify()).detach();
+        let skills = cx
+            .new(|cx| skills_view::SkillsPage::new(bridge.clone(), verifiers.clone(), window, cx));
+        Self::adopt(&skills, window, cx);
+        let inbox = cx.new(|cx| inbox::Inbox::new(bridge.clone(), window, cx));
+        let contexts = cx.new(|_| context_view::Contexts::default());
+        let conversation = cx.new(|cx| {
+            conversation::Conversation::new(
+                bridge.clone(),
+                inbox.clone(),
+                contexts.clone(),
+                window,
+                cx,
+            )
         });
+        Self::adopt(&conversation, window, cx);
+        let inspector = cx.new(|cx| {
+            Inspector::new(
+                bridge.clone(),
+                inbox.clone(),
+                contexts.clone(),
+                skills.clone(),
+                window,
+                cx,
+            )
+        });
+        Self::adopt(&inspector, window, cx);
+        let repositories = cx.new(|cx| {
+            repositories_view::RepositoriesPage::new(bridge.clone(), verifiers.clone(), window, cx)
+        });
+        Self::adopt(&repositories, window, cx);
+        let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
+        Self::adopt(&sidebar, window, cx);
+        let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
+        Self::adopt(&usage, window, cx);
         let mut view = Self {
             bridge,
-            index: None,
+            shared: Shared::default(),
             snapshot_request: Coalesced::default(),
+            quota_request: Coalesced::default(),
             archive_pending: false,
             load_error: None,
-            selected: None,
-            messages: Rc::new(vec![]),
-            placements: Rc::new(vec![]),
-            open_peers: Rc::default(),
-            transcript_links: Rc::default(),
-            list: ListState::new(0, ListAlignment::Bottom, px(300.)),
-            drafts: BTreeMap::new(),
-            attached: BTreeMap::new(),
-            refused_files: vec![],
-            cached_pages: BTreeMap::new(),
-            cache_order: VecDeque::new(),
-            input,
-            sending: BTreeSet::new(),
-            page: None,
-            memory_title: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Title, e.g. Palette stays compatible")
-            }),
-            memory_body: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .auto_grow(3, 8)
-                    .placeholder("What was decided or observed, and why it matters")
-            }),
-            memory_kind: LogKind::Decision,
-            brain_path: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Path to a Markdown brain folder")
-            }),
-            answer,
-            answering: None,
-            minimized_decisions: BTreeSet::new(),
-            model_selection: ModelSelection::default(),
-            saved_model_selection: ModelSelection::default(),
-            guide_input,
-            skill_view: skills_view::SkillView::List,
-            skill_text,
-            stock_unfolded: false,
-            confirming: None,
-            skill_history: vec![],
-            viewed_entry: None,
-            stock_changes: vec![],
-            merge_review: None,
-            review_from_history: false,
-            skill_wordings: Default::default(),
-            compared: None,
-            verifiers,
-            detection: Detection::new(),
-            suggested: None,
-            model_drafts: BTreeMap::new(),
-            model_catalog: models::fallback(),
-            chat_models: Rc::default(),
-            catalog_pending: 0,
-            catalog_loaded: false,
-            catalog_notice: String::new(),
-            panel: None,
-            panel_data: PanelData::Loading,
-            view: Page::Conversation,
+            models,
+            skills,
+            conversation,
             creation: None,
-            pending_project_selection: None,
-            creating_project: false,
-            project_name,
-            project_edit: None,
-            checks_command: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("The command that runs its checks")
-            }),
-            checks_edit: None,
-            collapsed_projects: BTreeSet::new(),
-            collapsed_groups: BTreeSet::new(),
-            project_drag: None,
-            rename_press: false,
-            row_press: tree::RowPress::default(),
-            drag_scrolling: false,
-            show_archived: false,
-            tree_scroll: ScrollHandle::new(),
-            quotas: vec![],
-            quota_pending: false,
-            usage_report: None,
-            usage_days: 7,
-            usage_project: false,
-            usage_provider: None,
-            usage_day: None,
-            context: BTreeMap::new(),
-            context_pending: BTreeSet::new(),
-            context_seen: BTreeMap::new(),
-            compact_forms: BTreeMap::new(),
-            compact_note: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .auto_grow(2, 6)
-                    .placeholder("For example: the failing test names")
-            }),
+            repositories,
+            usage,
+            sidebar,
+            inspector,
+            inbox,
+            contexts,
             last_repository_refresh: None,
-            update: None,
-            checking_update: false,
-            update_card_dismissed: false,
-            activity: None,
-            step_fetch: Default::default(),
-            activity_clock: false,
-            history: None,
-            run_summaries: Rc::default(),
-            files: Default::default(),
-            processes: Default::default(),
-            progress: Default::default(),
             progress_fetch: Default::default(),
-            crew_clock: false,
         };
         if let Some(changes) = view.bridge.changes() {
             cx.spawn_in(window, async move |this, cx| {
@@ -459,6 +256,7 @@ impl Workspace {
         }
         view.watch_steps(window, cx);
         view.watch_progress(window, cx);
+        view.watch_usage(window, cx);
         view.refresh(window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
@@ -469,8 +267,8 @@ impl Workspace {
             }
         })
         .detach();
-        // Each minute's redraw also keeps the times shown in minutes current in an idle window,
-        // such as the PR keeper's countdown and age on PR lines.
+        // Each minute's redraw of the whole window also keeps the times shown in minutes
+        // current in an idle window, such as the PR keeper's countdown and age on PR lines.
         cx.spawn_in(window, async move |this, cx| {
             let mut minute = 0u8;
             loop {
@@ -484,9 +282,9 @@ impl Workspace {
                             if minute == 0 {
                                 view.refresh_quota(window, cx);
                             } else {
-                                view.request(Command::Quotas, window, cx);
+                                view.read_quotas(window, cx);
                             }
-                            cx.notify();
+                            window.refresh();
                         })
                     })
                     .is_err()
@@ -496,71 +294,141 @@ impl Workspace {
             }
         })
         .detach();
-        view.watch_for_updates(window, cx);
         view
     }
-    fn live_enabled(&self) -> bool {
-        self.index.as_ref().is_some_and(|index| {
-            self.project_id()
-                .is_some_and(|id| index.snapshot().live_projects.contains(&id))
+    /// Routes a view's intents to the shell.
+    fn adopt<V: EventEmitter<Intent>>(
+        view: &Entity<V>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(view, window, |shell, _, intent, window, cx| {
+            shell.handle(intent, window, cx)
         })
+        .detach();
     }
-    /// The latest snapshot of the live workspace; `index` also has the archive.
-    fn snapshot(&self) -> Option<&Snapshot> {
-        self.index.as_deref().map(WorkspaceIndex::snapshot)
+    fn handle(&mut self, intent: &Intent, window: &mut Window, cx: &mut Context<Self>) {
+        match intent {
+            Intent::Select(id) => self.select(id.clone(), window, cx),
+            Intent::OpenPage(page) => self.open_page(*page, window, cx),
+            Intent::ShowPanel(panel) => self.show_panel(*panel, window, cx),
+            Intent::TogglePanel(panel) => self.toggle_panel(*panel, window, cx),
+            Intent::ClosePanel => self.shared.panel = None,
+            Intent::ShowArchived(shown) => {
+                self.shared.show_archived = *shown;
+                self.sync_archive(window, cx);
+            }
+            // Only the archive may know who sent them.
+            Intent::MessagesShown => return self.sync_archive(window, cx),
+            Intent::RefreshQuotas => self.refresh_quota(window, cx),
+            Intent::Archived { archived, affected } => {
+                self.archived(*archived, affected, window, cx)
+            }
+            Intent::OpenSkill(skill) => {
+                self.open_page(Page::Skills, window, cx);
+                self.skills.update(cx, |skills, cx| {
+                    skills.open_skill(skills_view::SkillView::Skill(*skill), window, cx)
+                });
+            }
+            Intent::Catalog(catalog) => self.shared.catalog = catalog.clone(),
+            Intent::Amend(amendment) => self.amend(amendment),
+            Intent::Create { kind, ticket } => {
+                self.open_creation(*kind, ticket.as_deref(), window, cx)
+            }
+        }
+        self.share(window, cx);
+        cx.notify();
     }
-    fn selected_session(&self) -> Option<&Session> {
-        self.session(self.selected.as_deref()?)
-    }
-    fn session(&self, id: &str) -> Option<&Session> {
-        self.index.as_ref()?.session(id)
-    }
-    fn runtime(&self, session_id: &str) -> Option<&SessionRuntime> {
-        self.index.as_ref()?.runtime(session_id)
-    }
-    /// Where a session's relative file references resolve: its ticket worktree or directory,
-    /// then its project's home.
-    fn link_bases(&self, session_id: &str) -> Vec<PathBuf> {
-        let runtime = self.runtime(session_id);
-        let directory = runtime.and_then(|r| r.workdir.as_ref().or(r.directory.as_ref()));
-        let home = self.session(session_id).and_then(|session| {
-            let project = self.index.as_ref()?.project(&session.project_id)?;
-            project.home.as_ref()
+    /// Hands every view the shared state as it is now.
+    fn share(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shared = self.shared.clone();
+        self.usage
+            .update(cx, |usage, cx| usage.share(shared.clone(), window, cx));
+        self.repositories.update(cx, |repositories, cx| {
+            repositories.share(shared.clone(), cx)
         });
-        directory
-            .into_iter()
-            .chain(home)
-            .map(PathBuf::from)
-            .collect()
+        self.models
+            .update(cx, |models, cx| models.share(shared.clone(), window, cx));
+        self.skills
+            .update(cx, |skills, cx| skills.share(shared.clone(), window, cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.share(shared.clone(), window, cx));
+        self.inbox
+            .update(cx, |inbox, cx| inbox.share(shared.clone(), window, cx));
+        self.contexts.update(cx, |contexts, cx| {
+            contexts.share(shared.clone(), window, cx)
+        });
+        self.inspector.update(cx, |inspector, cx| {
+            inspector.share(shared.clone(), window, cx)
+        });
+        self.conversation.update(cx, |conversation, cx| {
+            conversation.share(shared, window, cx)
+        });
     }
-    fn project_id(&self) -> Option<String> {
-        self.selected_session().map(|s| s.project_id.clone())
-    }
-    fn project_attention(&self) -> Vec<&Attention> {
-        let project = self.project_id();
-        self.index
-            .iter()
-            .flat_map(|index| &index.snapshot().attention)
-            .filter(|a| Some(&a.project_id) == project.as_ref())
-            .collect()
-    }
-    /// The notes about the whole workspace, which every project's Inbox lists first.
-    fn workspace_notes(&self) -> &[WorkspaceNote] {
-        self.index
-            .as_ref()
-            .map_or(&[], |index| &index.snapshot().workspace_notes)
-    }
-    fn toast(&self, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-        window.push_notification(Notification::success(message), cx);
-    }
-    fn toast_error(&self, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-        struct RequestFailed;
-        window.push_notification(
-            Notification::error(message)
-                .title("That didn’t work")
-                .id::<RequestFailed>(),
+    /// Says what was archived or restored, and steps out of a selection that just went out of
+    /// sight to its owner, or to any session still listed.
+    fn archived(
+        &mut self,
+        archived: bool,
+        affected: &[Session],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = affected.first().map_or("Session", |s| s.name.as_str());
+        toast(
+            if archived {
+                format!("Archived {name}. Nothing was deleted.")
+            } else {
+                format!("Restored {name}")
+            },
+            window,
             cx,
         );
+        let hidden = archived
+            && !self.shared.show_archived
+            && affected
+                .iter()
+                .any(|s| Some(&s.id) == self.shared.selected.as_ref());
+        if hidden {
+            let owner = affected[0].parent_id.clone().or_else(|| {
+                (self.shared.index.iter())
+                    .flat_map(|index| index.sessions())
+                    .find(|s| !s.archived && affected.iter().all(|a| a.id != s.id))
+                    .map(|s| s.id.clone())
+            });
+            match owner {
+                Some(id) => self.select(id, window, cx),
+                None => self.shared.selected = None,
+            }
+        }
+    }
+    /// Starts a project, or opens Models where a first setup is saved.
+    fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.new_project(window, cx));
+    }
+    fn amend(&mut self, amendment: &Amendment) {
+        self.amend_snapshot(|snapshot| match amendment {
+            Amendment::Project(project) => {
+                if let Some(saved) = snapshot.projects.iter_mut().find(|p| p.id == project.id) {
+                    *saved = project.clone();
+                }
+                for session in &mut snapshot.sessions {
+                    if session.project_id == project.id && session.role == Role::ProjectOrchestrator
+                    {
+                        session.name = project.name.clone();
+                    }
+                }
+            }
+            Amendment::Projects(projects) => snapshot.projects = projects.clone(),
+            Amendment::Skill(saved) => {
+                if let Some(state) =
+                    (snapshot.skills.iter_mut()).find(|state| state.skill == saved.skill)
+                {
+                    *state = (**saved).clone();
+                }
+            }
+        });
     }
     /// Shows a failure where the user is looking: in its form when one owns it, otherwise as a toast.
     fn fail(
@@ -570,35 +438,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        workspace_notes::compare_failed(&mut self.compared, command);
-        if self.index.is_none() {
+        if self.shared.index.is_none() {
             self.load_error = Some(error);
         } else if !self.form_failed(command, &error, cx) {
-            self.toast_error(error, window, cx);
+            toast_error(error, window, cx);
         }
         cx.notify();
-    }
-    fn request(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = match self.bridge.request(command.clone()) {
-            Ok(r) => r,
-            Err(e) => return self.accept(command, Err(e), window, cx),
-        };
-        if let Command::Send { recipient, .. } = &command {
-            self.sending.insert(recipient.clone());
-        }
-        cx.spawn_in(window, async move |this, cx| {
-            let result = receiver
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("Host disconnected".into()));
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |view, cx| {
-                    view.accept(command, result, window, cx);
-                    cx.notify();
-                })
-            });
-        })
-        .detach();
     }
     /// Checks the root folders for new repositories, at most once a minute unless `now`.
     fn refresh_repositories(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -610,7 +455,30 @@ impl Workspace {
             self.request(Command::RefreshRepositories, window, cx);
         }
     }
-    fn accept(
+    /// Step changes go to the transcript, for its activity card, and to the Files panel.
+    fn watch_steps(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(changes) = self.bridge.step_changes() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            while changes.recv().await.is_ok() {
+                let fetched = cx.update(|window, cx| {
+                    this.update(cx, |view, cx| {
+                        let transcript = view.conversation.read(cx).transcript.clone();
+                        transcript.update(cx, |transcript, cx| transcript.fetch_steps(window, cx));
+                        view.inspector
+                            .update(cx, |inspector, cx| inspector.fetch_files(window, cx));
+                    })
+                });
+                if !matches!(fetched, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Handles a reply to one of the shell's own requests: snapshots, quotas and creations.
+    fn accept_reply(
         &mut self,
         command: Command,
         result: Result<Value, String>,
@@ -624,7 +492,7 @@ impl Workspace {
             }) {
                 Ok(refresh) if !refresh.added.is_empty() => {
                     let names: Vec<_> = refresh.added.iter().map(|r| r.name.as_str()).collect();
-                    self.toast(
+                    toast(
                         format!("Found new repositories: {}", names.join(", ")),
                         window,
                         cx,
@@ -639,14 +507,12 @@ impl Workspace {
         }
         match &command {
             Command::Snapshot if self.snapshot_request.answered() => self.refresh(window, cx),
+            Command::Quotas if self.quota_request.answered() => self.read_quotas(window, cx),
             Command::Archive => self.archive_pending = false,
             _ => {}
         }
         if matches!(&command, Command::RecordQuota { .. }) {
-            self.quota_pending = false;
-        }
-        if let Command::Send { recipient, .. } = &command {
-            self.sending.remove(recipient);
+            self.shared.quota_pending = false;
         }
         let value = match result {
             Ok(v) => v,
@@ -656,7 +522,7 @@ impl Workspace {
             match serde_json::from_value::<RepositoryImport>(value) {
                 Ok(result) => {
                     if !result.imported.is_empty() {
-                        self.toast(
+                        toast(
                             format!("Added {} repositories", result.imported.len()),
                             window,
                             cx,
@@ -694,110 +560,10 @@ impl Workspace {
                 Ok(archive) => self.accept_archive(archive, window, cx),
                 Err(e) => self.fail(&Command::Archive, e.to_string(), window, cx),
             },
-            Command::Messages {
-                session_id, before, ..
-            } => {
-                if self.selected.as_deref() == Some(&session_id) && self.page == before {
-                    match serde_json::from_value::<Vec<Message>>(value) {
-                        Ok(rows) => {
-                            self.replace_messages(rows);
-                            self.sync_archive(window, cx);
-                            self.load_run_summaries(window, cx);
-                            if before.is_none() {
-                                self.cached_pages
-                                    .insert(session_id.clone(), self.messages.clone());
-                                self.cache_order.retain(|id| id != &session_id);
-                                self.cache_order.push_back(session_id);
-                                while self.cache_order.len() > 4 {
-                                    if let Some(old) = self.cache_order.pop_front() {
-                                        self.cached_pages.remove(&old);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => self.toast_error(e.to_string(), window, cx),
-                    }
-                }
-            }
-            Command::Send {
-                recipient,
-                body,
-                attachments,
-                ..
-            } => {
-                if self
-                    .attached
-                    .get(&recipient)
-                    .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
-                {
-                    self.attached.remove(&recipient);
-                }
-                if self.selected.as_deref() == Some(&recipient)
-                    && self.input.read(cx).value().as_str() == body
-                {
-                    self.input
-                        .update(cx, |input, cx| input.set_value("", window, cx));
-                }
-                if self.drafts.get(&recipient) == Some(&body) {
-                    self.drafts.remove(&recipient);
-                }
-                if self.selected.as_deref() == Some(&recipient) {
-                    self.page = None;
-                    self.load_messages(window, cx);
-                }
-            }
-            Command::RunSummaries { .. } => match serde_json::from_value(value) {
-                Ok(summaries) => self.accept_run_summaries(summaries),
-                Err(error) => self.toast_error(error.to_string(), window, cx),
+            Command::Quotas | Command::RecordQuota { .. } => match serde_json::from_value(value) {
+                Ok(quotas) => self.shared.quotas = quotas,
+                Err(error) => toast_error(error.to_string(), window, cx),
             },
-            Command::Logs { project_id, .. } => {
-                if self.panel == Some(Panel::Memory) && self.project_id() == Some(project_id) {
-                    let logs = serde_json::from_value(value).map(PanelData::Memory);
-                    self.accept_panel_data(logs, window, cx);
-                }
-            }
-            Command::Quotas | Command::RecordQuota { .. } => {
-                match serde_json::from_value(value) {
-                    Ok(quotas) => self.quotas = quotas,
-                    Err(error) => self.toast_error(error.to_string(), window, cx),
-                }
-                if self.view == Page::Usage {
-                    self.load_usage(window, cx);
-                }
-            }
-            Command::Usage {
-                days,
-                project_id,
-                provider,
-                ..
-            } => {
-                if days == self.usage_days
-                    && project_id == self.usage_project_id()
-                    && provider == self.usage_provider
-                {
-                    match serde_json::from_value(value) {
-                        Ok(report) => self.usage_report = Some(report),
-                        Err(error) => self.toast_error(error.to_string(), window, cx),
-                    }
-                }
-            }
-            Command::Activity { project_id, .. } => {
-                if self.panel == Some(Panel::Events) && self.project_id() == Some(project_id) {
-                    let events = serde_json::from_value(value).map(PanelData::Events);
-                    self.accept_panel_data(events, window, cx);
-                }
-            }
-            Command::GitHistory { repository_id, .. } => {
-                if self.panel == Some(Panel::Git)
-                    && self
-                        .selected_session()
-                        .and_then(|s| s.repository_id.clone())
-                        == Some(repository_id)
-                {
-                    let history = inspector::commits(value).map(PanelData::Git);
-                    self.accept_panel_data(history, window, cx);
-                }
-            }
             Command::CreateSession { .. } | Command::AssignTicket { .. } => {
                 if let Ok(session) = serde_json::from_value::<Session>(value) {
                     let id = session.id.clone();
@@ -807,176 +573,7 @@ impl Workspace {
             }
             Command::CreateTicket { coordinator_id, .. } => {
                 self.select(coordinator_id, window, cx);
-                self.panel = Some(Panel::Team);
-            }
-            Command::CreateProject { .. } => {
-                if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    self.pending_project_selection = Some(project.id);
-                }
-            }
-            Command::RenameProject { project_id, .. } => {
-                if let Ok(project) = serde_json::from_value::<Project>(value) {
-                    self.amend_snapshot(|snapshot| {
-                        if let Some(saved) =
-                            snapshot.projects.iter_mut().find(|p| p.id == project_id)
-                        {
-                            *saved = project.clone();
-                        }
-                        for session in &mut snapshot.sessions {
-                            if session.project_id == project_id
-                                && session.role == Role::ProjectOrchestrator
-                            {
-                                session.name = project.name.clone();
-                            }
-                        }
-                    });
-                    if self
-                        .project_edit
-                        .as_ref()
-                        .is_some_and(|e| e.project_id == project_id)
-                    {
-                        self.project_edit = None;
-                    }
-                }
-            }
-            Command::MoveProjects { .. } => {
-                if let Ok(projects) = serde_json::from_value(value) {
-                    self.amend_snapshot(|snapshot| snapshot.projects = projects);
-                }
-            }
-            Command::SetArchived { archived, .. } => {
-                let affected: Vec<Session> = serde_json::from_value(value).unwrap_or_default();
-                let name = affected.first().map_or("Session", |s| s.name.as_str());
-                self.toast(
-                    if archived {
-                        format!("Archived {name}. Nothing was deleted.")
-                    } else {
-                        format!("Restored {name}")
-                    },
-                    window,
-                    cx,
-                );
-                let hidden = archived
-                    && !self.show_archived
-                    && affected
-                        .iter()
-                        .any(|s| Some(&s.id) == self.selected.as_ref());
-                if hidden {
-                    // Step out to the owner that is still listed, or to any remaining session.
-                    let owner = affected[0].parent_id.clone().or_else(|| {
-                        self.index
-                            .iter()
-                            .flat_map(|index| index.sessions())
-                            .find(|s| !s.archived && affected.iter().all(|a| a.id != s.id))
-                            .map(|s| s.id.clone())
-                    });
-                    match owner {
-                        Some(id) => self.select(id, window, cx),
-                        None => self.selected = None,
-                    }
-                }
-            }
-            Command::ResolveAttention { .. } => {
-                self.answering = None;
-                self.answer
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-            }
-            Command::DismissAttention { id } => {
-                if self.answering.as_ref() == Some(&id) {
-                    self.answering = None;
-                }
-            }
-            Command::CompactContext { session_id, .. } => {
-                self.compact_accepted(&session_id);
-            }
-            Command::SetModelSelection { selection, .. } => {
-                // The host answers with the saved selection at its new revision, so the store
-                // reads as saved before the next snapshot arrives.
-                let saved: ModelSelection = serde_json::from_value(value)
-                    .map_err(|e| e.to_string())
-                    .unwrap_or_else(|e| {
-                        eprintln!("Saved model selection: {e}");
-                        *selection.clone()
-                    });
-                self.model_selection =
-                    models::after_save(&self.model_selection, &selection, &saved);
-                self.saved_model_selection = saved;
-                self.suggested = None;
-                self.verifiers
-                    .update(cx, |editor, cx| editor.setup_saved(cx));
-                self.toast("Models saved", window, cx);
-            }
-            Command::AppendLog { .. } => {
-                self.memory_title
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.memory_body
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.toast("Saved to project memory", window, cx);
-                self.load_panel(window, cx);
-            }
-            Command::AttachBrain { .. } => {
-                self.brain_path
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.toast("Markdown brain attached", window, cx);
-            }
-            Command::ExportLogs { .. } => {
-                let exported = value["exported"].as_u64().unwrap_or_default();
-                self.toast(
-                    if exported == 0 {
-                        "Nothing new to export".to_owned()
-                    } else {
-                        format!("Exported {exported} memories to the brain")
-                    },
-                    window,
-                    cx,
-                );
-            }
-            Command::SaveSkillRules { .. }
-            | Command::SaveSkillRewrite { .. }
-            | Command::MarkSkillUpToDate { .. } => {
-                match serde_json::from_value(value) {
-                    Ok(saved) => self.skill_saved(saved),
-                    Err(error) => eprintln!("Saved skill: {error}"),
-                }
-                self.toast(skills_view::saved_toast(&command), window, cx);
-            }
-            Command::ResetSkill { .. }
-            | Command::RestoreSkill { .. }
-            | Command::StartSkillRewrite { .. }
-            | Command::MergeSkillUpdate { .. }
-            | Command::UndoSkillMerge { .. } => match serde_json::from_value(value) {
-                Ok(state) => self.skill_replaced(state, &command, window, cx),
-                Err(error) => eprintln!("Reset, restored, rewrote or merged skill: {error}"),
-            },
-            Command::DismissSkillMerge { .. } => match serde_json::from_value(value) {
-                Ok(state) => self.skill_saved(state),
-                Err(error) => eprintln!("Dismissed skill merge: {error}"),
-            },
-            Command::SkillMergeReview { skill, .. } => match serde_json::from_value(value) {
-                Ok(review) => self.review_arrived(skill, review),
-                Err(error) => eprintln!("Skill merge review: {error}"),
-            },
-            Command::SkillHistory { skill } => match serde_json::from_value(value) {
-                Ok(history) => self.history_arrived(skill, history),
-                Err(error) => eprintln!("Skill history: {error}"),
-            },
-            Command::SkillStockChanges { skill } => match serde_json::from_value(value) {
-                Ok(lines) => self.stock_changes_arrived(skill, lines),
-                Err(error) => eprintln!("Skill stock changes: {error}"),
-            },
-            Command::ComparePausedFile { path } => match serde_json::from_value(value) {
-                Ok(lines) => workspace_notes::compared_arrived(&mut self.compared, &path, lines),
-                Err(error) => eprintln!("Compare paused file: {error}"),
-            },
-            Command::SettlePausedFile { .. } => {
-                self.compared = None;
-            }
-            Command::SetRepositoryChecks { .. } => {
-                self.checks_edit = None;
-            }
-            // The change signal brings the snapshot; the transcript goes back to its newest page.
-            _ if !command.is_read() && self.page.take().is_some() => {
-                self.load_messages(window, cx);
+                self.shared.panel = Some(Panel::Team);
             }
             _ => {}
         }
@@ -989,13 +586,14 @@ impl Workspace {
     }
     /// Reads the archive again when what is shown needs it and the one held is out of date.
     fn sync_archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = self.index.as_ref().is_some_and(|index| {
+        let transcript = self.conversation.read(cx).transcript.read(cx);
+        let wanted = self.shared.index.as_ref().is_some_and(|index| {
             let shown = ArchiveDemand {
-                show_archived: self.show_archived,
-                panel: self.panel,
-                page: self.view,
-                selected: self.selected.as_deref(),
-                messages: &self.messages,
+                show_archived: self.shared.show_archived,
+                panel: self.shared.panel,
+                page: self.shared.page,
+                selected: self.shared.selected.as_deref(),
+                messages: transcript.messages(),
             };
             wants_archive(index, &shown)
         });
@@ -1005,639 +603,88 @@ impl Workspace {
         }
     }
     fn accept_archive(&mut self, archive: Archive, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = &self.index else {
+        let Some(index) = &self.shared.index else {
             return;
         };
         let snapshot = index.snapshot().clone();
-        self.index = Some(Rc::new(WorkspaceIndex::new(snapshot, Rc::new(archive))));
+        self.shared.index = Some(Rc::new(WorkspaceIndex::new(snapshot, Rc::new(archive))));
         // A selection the archive does not hold either is gone.
-        if self.selected_session().is_none() {
-            let first = self
-                .index
-                .as_ref()
+        if self.shared.selected_session().is_none() {
+            let first = (self.shared.index.as_ref())
                 .and_then(|index| index.sessions().find(|s| !s.archived).map(|s| s.id.clone()));
             match first {
                 Some(id) => self.select(id, window, cx),
-                None => self.selected = None,
+                None => self.shared.selected = None,
             }
         }
-        self.place_links();
+        self.share(window, cx);
         // A snapshot that arrived meanwhile may have moved the stamp again.
         self.sync_archive(window, cx);
     }
     /// Shows a change the host confirmed before the snapshot that has it arrives.
     fn amend_snapshot(&mut self, change: impl FnOnce(&mut Snapshot)) {
-        if let Some(index) = &self.index {
+        if let Some(index) = &self.shared.index {
             let mut snapshot = index.snapshot().clone();
             change(&mut snapshot);
             let archive = index.archive().clone();
-            self.index = Some(Rc::new(WorkspaceIndex::new(snapshot, archive)));
+            self.shared.index = Some(Rc::new(WorkspaceIndex::new(snapshot, archive)));
         }
     }
     fn accept_snapshot(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
-        let archive = self
-            .index
-            .as_ref()
-            .map_or_else(Rc::default, |index| index.archive().clone());
-        let index = WorkspaceIndex::new(snapshot, archive);
-        let new_root = self.pending_project_selection.as_ref().and_then(|project| {
-            index
-                .sessions()
-                .find(|s| &s.project_id == project && s.role == Role::ProjectOrchestrator)
-                .map(|s| s.id.clone())
-        });
+        let index = WorkspaceIndex::new(snapshot, self.shared.archive());
         // A selected session the held archive is out of date for may be in the next one, which
         // `accept_archive` checks.
         let gone = |id: &String| index.session(id).is_none() && !index.archive_is_stale();
-        if self.selected.as_ref().is_none_or(gone) {
-            self.selected = index.sessions().find(|s| !s.archived).map(|s| s.id.clone());
+        if self.shared.selected.as_ref().is_none_or(gone) {
+            self.shared.selected = index.sessions().find(|s| !s.archived).map(|s| s.id.clone());
         }
-        let snapshot = index.snapshot();
-        self.sync_model_selection(&snapshot.model_selection, window, cx);
-        self.follow_saved_rules(snapshot, window, cx);
-        if snapshot.model_selection.is_saved() {
-            self.verifiers
-                .update(cx, |editor, cx| editor.setup_saved(cx));
-        }
-        conversation::forget_settled(&mut self.minimized_decisions, &snapshot.attention);
-        settings::share_sync(snapshot, cx);
-        let synced = |s: &Snapshot| (s.settings_sync.clone(), s.workspace_notes.clone());
-        let previous = self.index.as_ref().map(|index| synced(index.snapshot()));
-        let resynced = previous != Some(synced(snapshot));
-        let recompare = resynced
-            .then(|| workspace_notes::recompare(&mut self.compared, snapshot.paused_settings()))
-            .flatten();
-        self.index = Some(Rc::new(index));
-        self.place_links();
-        self.list_chat_models();
-        if let Some(command) = recompare {
-            self.request(command, window, cx);
-        }
-        // A store with no saved setup checks the CLIs at once, so the welcome and the Models
-        // page share one result. A saved store waits for its Models page, as before.
-        if !self.saved_model_selection.is_saved() && !self.catalog_loaded {
-            self.refresh_models(window, cx);
-        }
-        self.offer_suggestion(window, cx);
+        settings::share_sync(index.snapshot(), cx);
+        self.shared.index = Some(Rc::new(index));
         self.load_error = None;
-        self.sync_composer(window, cx);
-        if let Some(root) = new_root {
-            let project_id = self.pending_project_selection.take().unwrap();
-            self.creating_project = false;
-            self.collapsed_projects.remove(&project_id);
-            // Naming it needs its row, which a collapsed group would hide.
-            if let Some(group) = self.session(&root).map(|s| tree::group_key(&s.name)) {
-                self.collapsed_groups.remove(&group);
-            }
-            self.select(root, window, cx);
-            self.tree_scroll.set_offset(point(px(0.), px(0.)));
-            self.begin_project_rename(project_id, window, cx);
-        } else {
-            self.sync_transcript_rows();
-            self.load_messages(window, cx);
-            self.load_panel(window, cx);
-        }
-        // A turn that just started has no steps yet; ask before the first one arrives.
-        if self.selected_working() && !self.activity.as_ref().is_some_and(|a| a.running) {
-            self.fetch_steps(window, cx);
-        }
-        self.sync_activity_clock(window, cx);
-        self.sync_context(window, cx);
+        self.share(window, cx);
         self.sync_archive(window, cx);
-    }
-    /// Transcript rows are the loaded messages plus a trailing activity row while the agent works.
-    fn transcript_rows(&self) -> usize {
-        self.messages.len() + usize::from(self.selected_working())
-    }
-    fn sync_transcript_rows(&mut self) {
-        let rows = self.transcript_rows();
-        let shown = self.list.item_count();
-        if shown < self.messages.len() {
-            self.list.reset(rows);
-        } else if shown != rows {
-            self.list
-                .splice(self.messages.len()..shown, rows - self.messages.len());
-        }
-    }
-    /// Splices only what a refresh changed, so a reader scrolled up keeps their place.
-    fn replace_messages(&mut self, rows: Vec<Message>) {
-        let shown = std::mem::replace(&mut self.messages, Rc::new(rows));
-        let placed = self.place_messages();
-        let Some((dropped, unchanged)) = conversation::transcript_overlap(&shown, &self.messages)
-        else {
-            self.list.reset(self.transcript_rows());
-            return;
-        };
-        if dropped > 0 {
-            self.list.splice(0..dropped, 0);
-        }
-        // An unchanged message whose run grew, or lost its head, draws a different row.
-        for row in 0..unchanged {
-            if placed.get(row + dropped) != self.placements.get(row) {
-                self.list.remeasure_items(row..row + 1);
-            }
-        }
-        let (shown_rows, rows) = (self.list.item_count(), self.transcript_rows());
-        if unchanged < self.messages.len() || shown_rows != rows {
-            self.list.splice(unchanged..shown_rows, rows - unchanged);
-        }
-    }
-    /// Places the loaded messages in the transcript; returns where they were placed before.
-    fn place_messages(&mut self) -> Rc<Vec<conversation::Placement>> {
-        self.place_links();
-        let placements =
-            conversation::placements(&self.messages, self.selected.as_deref().unwrap_or_default());
-        std::mem::replace(&mut self.placements, Rc::new(placements))
-    }
-    /// Works out where the loaded messages' file references resolve, once per page or snapshot.
-    fn place_links(&mut self) {
-        let senders: BTreeSet<&String> = self
-            .messages
-            .iter()
-            .filter_map(|m| m.sender.as_ref())
-            .collect();
-        self.transcript_links = Rc::new(conversation::LinkBases {
-            senders: senders
-                .into_iter()
-                .map(|id| (id.clone(), self.link_bases(id)))
-                .collect(),
-            current: (self.selected.as_deref())
-                .map(|id| self.link_bases(id))
-                .unwrap_or_default(),
-        });
-    }
-    fn sync_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let placeholder = match self.selected_session().map(|s| s.role) {
-            Some(Role::ProjectOrchestrator) => "Describe the goal, or reply to your coordinator…",
-            Some(Role::TaskOrchestrator) => "This retired repository coordinator is read-only",
-            Some(_) => "Give this agent a direct instruction…",
-            None => "Create a project to start…",
-        };
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(placeholder, window, cx)
-        });
-    }
-    fn load_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.selected.clone() {
-            self.request(
-                Command::Messages {
-                    session_id,
-                    before: self.page,
-                    limit: MAX_PAGE,
-                },
-                window,
-                cx,
-            );
-        }
     }
     fn select(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(old) = &self.selected {
-            self.drafts
-                .insert(old.clone(), self.input.read(cx).value().to_string());
+        self.shared.selected = Some(id);
+        self.shared.selections += 1;
+        self.shared.page = Page::Conversation;
+        if let Some(role) = self.shared.selected_session().map(|s| s.role) {
+            self.shared.panel = self.shared.panel.map(|panel| panel.kept_for(role));
         }
-        let draft = self.drafts.get(&id).cloned().unwrap_or_default();
-        self.swap_compact_note(self.selected.clone().as_deref(), &id, window, cx);
-        self.refused_files.clear();
-        self.input
-            .update(cx, |input, cx| input.set_value(draft, window, cx));
-        self.messages = self
-            .cached_pages
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| Rc::new(vec![]));
-        self.selected = Some(id);
-        self.place_messages();
-        self.view = Page::Conversation;
-        self.page = None;
-        self.list.reset(self.transcript_rows());
-        self.panel_data = PanelData::Loading;
-        if let Some(role) = self.selected_session().map(|s| s.role) {
-            self.panel = self.panel.map(|panel| panel.kept_for(role));
-        }
-        self.sync_composer(window, cx);
-        self.sync_context(window, cx);
-        self.load_messages(window, cx);
-        self.load_panel(window, cx);
-        self.activity = None;
-        self.fetch_steps(window, cx);
-        self.sync_activity_clock(window, cx);
-        self.sync_crew_clock(window, cx);
+        self.share(window, cx);
         self.sync_archive(window, cx);
         cx.notify();
-    }
-    /// Adds dropped files to the selected session's draft. Each refused file is named with
-    /// its reason; the rest are still attached.
-    fn attach_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let Some(session) = self.selected.clone() else {
-            return;
-        };
-        self.refused_files =
-            attachment_chips::add_dropped(self.attached.entry(session).or_default(), paths);
-        cx.notify();
-    }
-    fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(files) = self
-            .selected
-            .as_ref()
-            .and_then(|s| self.attached.get_mut(s))
-        {
-            files.retain(|a| a.path != path);
-        }
-        cx.notify();
-    }
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let body = self.input.read(cx).value().to_string();
-        let Some(recipient) = self.selected.clone() else {
-            return;
-        };
-        let attachments = self
-            .attached
-            .get(&recipient)
-            .map(|files| files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
-            .unwrap_or_default();
-        if (body.trim().is_empty() && attachments.is_empty()) || self.sending.contains(&recipient) {
-            return;
-        }
-        self.drafts.insert(recipient.clone(), body.clone());
-        self.refused_files.clear();
-        self.request(
-            Command::Send {
-                id: new_id(),
-                sender: None,
-                recipient,
-                body,
-                attachments,
-            },
-            window,
-            cx,
-        );
-    }
-    fn set_live(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(project_id) = self.project_id() {
-            self.request(
-                Command::SetLive {
-                    project_id,
-                    enabled,
-                },
-                window,
-                cx,
-            );
-        }
-    }
-    fn set_archived(
-        &mut self,
-        session_id: String,
-        archived: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.request(
-            Command::SetArchived {
-                session_id,
-                archived,
-            },
-            window,
-            cx,
-        );
-    }
-    fn reconcile(&mut self, retry: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.selected.clone() {
-            self.request(Command::ReconcileSession { session_id, retry }, window, cx);
-        }
-    }
-    fn toggle_pause(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session() {
-            let status = if session.status == Status::Paused {
-                Status::Ready
-            } else {
-                Status::Paused
-            };
-            self.request(
-                Command::SetStatus {
-                    session_id: session.id.clone(),
-                    status,
-                },
-                window,
-                cx,
-            );
-        }
-    }
-    fn selected_profile(&self) -> Option<ModelProfile> {
-        let session = self.selected_session()?;
-        self.runtime(&session.id)
-            .and_then(|runtime| runtime.profile.clone())
-            .or_else(|| {
-                // Only an unpinned main coordinator runs on its provider's first allowed model;
-                // any other unpinned agent is held until it is given one.
-                if session.parent_id.is_some() {
-                    return None;
-                }
-                let model = self
-                    .snapshot()?
-                    .model_selection
-                    .allowed(session.provider)
-                    .first()?
-                    .clone();
-                Some(ModelProfile {
-                    provider: session.provider,
-                    model: model.model,
-                    effort: model.effort,
-                })
-            })
     }
     fn toggle_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panel == Some(panel) {
-            self.panel = None;
-            cx.notify();
-        } else {
-            self.show_panel(panel, window, cx);
-        }
+        let open = self.shared.panel != Some(panel);
+        self.shared.panel = open.then_some(panel);
+        self.share(window, cx);
+        self.sync_archive(window, cx);
+        cx.notify();
     }
     fn show_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel = Some(panel);
-        self.panel_data = PanelData::Loading;
-        self.load_panel(window, cx);
+        self.shared.panel = Some(panel);
+        self.share(window, cx);
         self.sync_archive(window, cx);
-        self.sync_crew_clock(window, cx);
         cx.notify();
     }
     /// Opens a workspace page in place of the conversation.
     fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
-        self.view = page;
-        self.sync_archive(window, cx);
+        self.shared.page = page;
         match page {
-            Page::Usage => {
-                self.request(Command::Quotas, window, cx);
-                self.load_usage(window, cx);
-            }
-            Page::Models if !self.catalog_loaded => self.refresh_models(window, cx),
+            Page::Usage => self.read_quotas(window, cx),
             Page::Repositories => self.refresh_repositories(true, window, cx),
-            Page::Skills => self.open_skill(skills_view::SkillView::List, window, cx),
+            Page::Skills => self.skills.update(cx, |skills, cx| {
+                skills.open_skill(skills_view::SkillView::List, window, cx)
+            }),
             _ => {}
         }
+        self.share(window, cx);
+        self.sync_archive(window, cx);
         cx.notify();
-    }
-    fn accept_panel_data(
-        &mut self,
-        data: serde_json::Result<PanelData>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match data {
-            Ok(data) => self.panel_data = data,
-            Err(error) => self.toast_error(error.to_string(), window, cx),
-        }
-    }
-    fn load_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project_id) = self.project_id() else {
-            return;
-        };
-        match self.panel {
-            Some(Panel::Memory) => self.request(
-                Command::Logs {
-                    project_id,
-                    before: None,
-                    limit: 30,
-                },
-                window,
-                cx,
-            ),
-            Some(Panel::Events) => self.request(
-                Command::Activity {
-                    project_id,
-                    before: None,
-                    limit: 50,
-                },
-                window,
-                cx,
-            ),
-            Some(Panel::Git) => {
-                if let Some(repository_id) = self
-                    .selected_session()
-                    .and_then(|s| s.repository_id.clone())
-                {
-                    self.request(
-                        Command::GitHistory {
-                            repository_id,
-                            skip: 0,
-                            limit: 30,
-                        },
-                        window,
-                        cx,
-                    )
-                }
-            }
-            Some(Panel::Files) => self.fetch_files(window, cx),
-            Some(Panel::Processes) => self.sync_process_readings(window, cx),
-            _ => {}
-        }
-    }
-    fn refresh_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.catalog_pending > 0 {
-            return;
-        }
-        self.catalog_pending = 2;
-        self.catalog_loaded = true;
-        self.catalog_notice.clear();
-        let (sender, receiver) = async_channel::bounded(2);
-        for provider in PROVIDERS {
-            let sender = sender.clone();
-            std::thread::spawn(move || {
-                let status = workspace_host::detection::detect(provider);
-                let result = workspace_host::runtime::models(provider).map_err(|e| e.to_string());
-                let _ = sender.send_blocking((provider, status, result));
-            });
-        }
-        drop(sender);
-        cx.spawn_in(window, async move |this, cx| {
-            while let Ok((provider, status, result)) = receiver.recv().await {
-                let updated = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| {
-                        view.catalog_pending -= 1;
-                        view.detection.insert(provider, status);
-                        match result {
-                            Ok(models) if !models.is_empty() => {
-                                view.model_catalog
-                                    .retain(|model| model.provider != provider);
-                                view.model_catalog.extend(models);
-                                view.list_chat_models();
-                            }
-                            _ => {
-                                if !view.catalog_notice.is_empty() {
-                                    view.catalog_notice.push(' ');
-                                }
-                                view.catalog_notice.push_str(&format!(
-                                    "{provider:?} list unavailable; showing built-in and saved models."
-                                ));
-                            }
-                        }
-                        view.offer_suggestion(window, cx);
-                        cx.notify();
-                    })
-                });
-                if updated.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-    fn save_model_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A first save also sends the verifiers shown; afterwards they save on their own.
-        let verification = self
-            .suggested
-            .as_ref()
-            .and_then(|_| self.verifiers.read(cx).verification().cloned());
-        self.request(
-            Command::SetModelSelection {
-                selection: Box::new(self.model_selection.clone()),
-                verification,
-            },
-            window,
-            cx,
-        );
-    }
-    /// Checks for a newer release now and hourly, and installs a staged one when the app quits.
-    fn watch_for_updates(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if update::VERSION.is_none() || update::installed_bundle().is_none() {
-            return;
-        }
-        cx.on_app_quit(|view, _| {
-            if let Some(staged) = view.update.take() {
-                let _ = staged.install_after_exit(false);
-            }
-            async {}
-        })
-        .detach();
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let checked = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| view.check_for_updates(false, window, cx))
-                });
-                if checked.is_err() {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(60 * 60))
-                    .await;
-            }
-        })
-        .detach();
-    }
-    /// Downloads and stages a newer release. A `manual` check also reports when there is none.
-    fn check_for_updates(&mut self, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.update.is_some() {
-            if manual {
-                self.update_card_dismissed = false;
-                cx.notify();
-            }
-            return;
-        }
-        let (Some(current), Some(installed)) = (update::VERSION, update::installed_bundle()) else {
-            if manual {
-                window.push_notification(
-                    Notification::info(
-                        "This build can't update itself. Install a release to get updates.",
-                    ),
-                    cx,
-                );
-            }
-            return;
-        };
-        if self.checking_update {
-            return;
-        }
-        self.checking_update = true;
-        cx.notify();
-        let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let _ = sender.send_blocking(update::check(current, &installed));
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(result) = receiver.recv().await else {
-                return;
-            };
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |view, cx| {
-                    view.checking_update = false;
-                    match result {
-                        Ok(Some(staged)) => {
-                            view.update = Some(staged);
-                            view.update_card_dismissed = false;
-                        }
-                        Ok(None) if manual => view.toast(
-                            format!("Wiffletree {current} is the latest version"),
-                            window,
-                            cx,
-                        ),
-                        Ok(None) => {}
-                        Err(error) if manual => window.push_notification(
-                            Notification::error(format!("{error:#}"))
-                                .title("Couldn’t check for updates"),
-                            cx,
-                        ),
-                        Err(error) => eprintln!("Update check failed: {error:#}"),
-                    }
-                    cx.notify();
-                })
-            });
-        })
-        .detach();
-    }
-    /// Restarts into the staged release, confirming first if agents would be interrupted.
-    fn restart_to_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let working = self
-            .index
-            .iter()
-            .flat_map(|index| index.sessions())
-            .any(|s| s.status == Status::Working);
-        if !working {
-            return self.install_update(window, cx);
-        }
-        let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let weak = weak.clone();
-            dialog
-                .title("Restart to update?")
-                .confirm()
-                .ok_text("Restart")
-                .child("Agents are working. Restarting interrupts their turns; you can retry the held input afterwards.")
-                .on_ok(move |_, window, cx| {
-                    let _ = weak.update(cx, |view, cx| view.install_update(window, cx));
-                    true
-                })
-        });
-    }
-    fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(staged) = self.update.take() else {
-            return;
-        };
-        match staged.install_after_exit(true) {
-            Ok(()) => cx.quit(),
-            Err(error) => {
-                self.update = Some(staged);
-                self.toast_error(format!("{error:#}"), window, cx);
-            }
-        }
     }
     /// Returns true when an open form displays the failure itself.
     fn form_failed(&mut self, command: &Command, error: &str, cx: &mut Context<Self>) -> bool {
-        if matches!(command, Command::CreateProject { .. }) {
-            self.creating_project = false;
-        }
-        if let Command::CompactContext { session_id, .. } = command {
-            self.compact_refused(session_id, error);
-            return true;
-        }
-        if let Command::RenameProject { project_id, .. } = command
-            && let Some(edit) = &mut self.project_edit
-            && edit.project_id == *project_id
-        {
-            edit.saving = false;
-            edit.error = error.into();
-            return true;
-        }
         if matches!(
             command,
             Command::CreateSession { .. }
@@ -1665,10 +712,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = &self.index else {
+        let Some(index) = &self.shared.index else {
             return;
         };
-        let project = self.project_id();
+        let project = self.shared.project_id();
         let has_repository = project
             .as_ref()
             .is_some_and(|id| !index.snapshot().project_repositories(id).is_empty());
@@ -1683,8 +730,8 @@ impl Workspace {
             kind
         };
         // The workspace Repositories page adds to the workspace, not to the selected project.
-        let context = (self.view != Page::Repositories)
-            .then(|| self.selected_session())
+        let context = (self.shared.page != Page::Repositories)
+            .then(|| self.shared.selected_session())
             .flatten();
         let form = cx.new(|cx| {
             CreationForm::new(
@@ -1696,7 +743,7 @@ impl Workspace {
                 window,
                 cx,
             )
-            .with_catalog(&self.model_catalog)
+            .with_catalog(&self.shared.catalog)
         });
         self.creation = Some(form.clone());
         let focused_form = form.clone();
@@ -1752,35 +799,24 @@ impl Workspace {
             }),
         }
     }
-    fn capture_memory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.selected.clone() else {
-            return;
-        };
-        let title = self.memory_title.read(cx).value().trim().to_string();
-        let changed = self.memory_body.read(cx).value().trim().to_string();
-        if title.is_empty() || changed.is_empty() {
-            self.toast_error("Add a title and a description first.", window, cx);
-            return;
-        }
-        self.request(
-            Command::AppendLog {
-                input: LogInput {
-                    session_id,
-                    milestone: new_id(),
-                    kind: self.memory_kind.clone(),
-                    title,
-                    reference: "—".into(),
-                    changed,
-                    why: "Captured directly in native prototype".into(),
-                    state: "Source report; evidence not independently verified".into(),
-                },
-            },
-            window,
-            cx,
-        );
-    }
     fn colors(&self, cx: &App) -> Palette {
         palette(is_dark(cx))
+    }
+}
+
+impl Requests for Workspace {
+    fn bridge(&self) -> &Bridge {
+        &self.bridge
+    }
+    fn accept(
+        &mut self,
+        command: Command,
+        reply: Result<Value, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.accept_reply(command, reply, window, cx);
+        self.share(window, cx);
     }
 }
 
@@ -2029,7 +1065,9 @@ fn main() -> anyhow::Result<()> {
                             cx.defer(move |cx| {
                                 let _ = handle.update(cx, |_, window, cx| {
                                     workspace.update(cx, |view, cx| {
-                                        view.check_for_updates(true, window, cx)
+                                        view.sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.check_for_updates(true, window, cx)
+                                        })
                                     })
                                 });
                             });
@@ -2040,8 +1078,9 @@ fn main() -> anyhow::Result<()> {
                             cx.defer(move |cx| {
                                 let _ = handle.update(cx, |_, window, cx| {
                                     window.activate_window();
-                                    workspace
-                                        .update(cx, |view, cx| view.open_page(page, window, cx))
+                                    workspace.update(cx, |view, cx| {
+                                        view.handle(&Intent::OpenPage(page), window, cx)
+                                    })
                                 });
                             });
                         };
