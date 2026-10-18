@@ -1,4 +1,4 @@
-//! One test per scenario of the work-progress spec's agent, ticket and project requirements.
+//! The work-progress spec's agent, ticket and project scenarios.
 use serde_json::json;
 use std::collections::HashMap;
 use workspace_core::*;
@@ -306,35 +306,24 @@ fn a_failed_verifier_starting_the_next_round_is_indeterminate() {
 // Ticket progress
 
 #[test]
-fn implementing_follows_the_implementers_checklist() {
-    let world = World::new()
-        .ticket("assigned")
-        .implementer(Status::Working)
-        .plan("implementer", 3, 6);
-    assert_eq!(
-        world.ticket_progress(),
-        (Stage::Implementing, InProgress, 30)
-    );
-}
-
-#[test]
-fn a_ticket_whose_implementer_works_without_a_plan_is_indeterminate() {
-    let world = World::new().ticket("assigned").implementer(Status::Working);
-    assert_eq!(
-        world.ticket_progress(),
-        (Stage::Implementing, Indeterminate, 0)
-    );
-}
-
-#[test]
-fn ready_for_verification_is_sixty_percent() {
-    let world = World::new()
-        .ticket("ready_for_testing")
-        .implementer(Status::Done);
-    assert_eq!(
-        world.ticket_progress(),
-        (Stage::Implementing, InProgress, 60)
-    );
+fn ticket_progress_follows_state_status_and_plan() {
+    for (state, status, plan, bar, position) in [
+        ("assigned", Status::Working, Some((3, 6)), InProgress, 30),
+        ("assigned", Status::Working, None, Indeterminate, 0),
+        ("ready_for_testing", Status::Done, None, InProgress, 60),
+        ("completed", Status::Done, None, InProgress, 60),
+        ("blocked", Status::Blocked, Some((3, 7)), Blocked, 26),
+    ] {
+        let mut world = World::new().ticket(state).implementer(status);
+        if let Some((done, total)) = plan {
+            world = world.plan("implementer", done, total);
+        }
+        assert_eq!(
+            world.ticket_progress(),
+            (Stage::Implementing, bar, position),
+            "{state}, {status:?}, plan {plan:?}"
+        );
+    }
 }
 
 #[test]
@@ -411,30 +400,12 @@ fn a_passed_ticket_reassigned_for_a_fix_follows_the_fix_run() {
 }
 
 #[test]
-fn finished_without_verification_is_sixty_percent() {
-    let world = World::new().ticket("completed").implementer(Status::Done);
-    assert_eq!(
-        world.ticket_progress(),
-        (Stage::Implementing, InProgress, 60)
-    );
-}
-
-#[test]
 fn an_accepted_ticket_is_finished_and_lists_no_agents() {
     let world = World::new()
         .verified("accepted", cycle(Outcome::Passed, &[&[("a", Passed)]]))
         .implementer(Status::Done);
     assert_eq!(world.ticket_progress(), (Stage::Accepted, Finished, 100));
     assert!(world.board().tickets[0].agents.is_empty());
-}
-
-#[test]
-fn blocked_while_implementing_keeps_its_position() {
-    let world = World::new()
-        .ticket("blocked")
-        .implementer(Status::Blocked)
-        .plan("implementer", 3, 7);
-    assert_eq!(world.ticket_progress(), (Stage::Implementing, Blocked, 26));
 }
 
 #[test]

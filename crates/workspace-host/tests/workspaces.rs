@@ -7,20 +7,7 @@ use workspace_host::Host;
 fn repository(path: &Path) {
     std::fs::create_dir_all(path).unwrap();
     git(path, &["init", "-q", "-b", "main"]);
-    git(
-        path,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Fixture",
-        ],
-    );
+    git(path, &["commit", "-q", "--allow-empty", "-m", "Fixture"]);
 }
 
 /// The project coordinator and the repository its tickets are created in.

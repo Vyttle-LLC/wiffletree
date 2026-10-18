@@ -509,18 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn fixtures_load() {
-        for name in [
-            "claude-recorded.jsonl",
-            "claude-synthetic.jsonl",
-            "codex-recorded.jsonl",
-            "codex-synthetic.jsonl",
-        ] {
-            assert!(!lines(name).is_empty(), "{name}");
-        }
-    }
-
-    #[test]
     fn recorded_claude_turn_becomes_one_step_per_tool_call() {
         let mut claude = ClaudeSteps::new(Path::new(CWD));
         let (_, steps) = replay("claude-recorded.jsonl", |v| claude.event(v));
