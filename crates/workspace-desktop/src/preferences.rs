@@ -124,28 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_before_appearance_keeps_its_choices() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join("desktop-preferences.json"),
+    fn missing_or_unknown_appearance_preserves_other_choices() {
+        for saved in [
             r#"{ "minimize_activity": true }"#,
-        )
-        .unwrap();
-        let preferences = Preferences::load(home.path());
-        assert!(preferences.minimize_activity);
-        assert_eq!(preferences.appearance, Appearance::System);
-    }
-
-    #[test]
-    fn an_unknown_appearance_reads_as_system_and_keeps_the_rest() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join("desktop-preferences.json"),
             r#"{ "minimize_activity": true, "appearance": "sepia" }"#,
-        )
-        .unwrap();
-        let preferences = Preferences::load(home.path());
-        assert!(preferences.minimize_activity);
-        assert_eq!(preferences.appearance, Appearance::System);
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("desktop-preferences.json"), saved).unwrap();
+            let preferences = Preferences::load(home.path());
+            assert!(preferences.minimize_activity, "{saved}");
+            assert_eq!(preferences.appearance, Appearance::System, "{saved}");
+        }
     }
 }
