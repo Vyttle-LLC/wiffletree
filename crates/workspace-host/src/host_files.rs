@@ -147,19 +147,19 @@ fn never_served(inside_data: &Path) -> bool {
     })
 }
 
-/// Whether `root` reaches `data` through real folders: neither it nor any folder between it and
-/// `data` is a symlink. Symlinks above the data folder, such as `/var`, do not count.
+/// Whether no folder between `root` and the data folder, `root` included, is a symlink inside
+/// the data folder, such as an attachment store linked elsewhere. Symlinks outside it do not
+/// count: those above it, such as `/var`, and a workspace folder chosen as an alias of a folder in
+/// it, whose project homes `never_served` still guards.
 fn plainly_inside(root: &Path, data: &Path) -> bool {
+    let mut symlink = false;
     for folder in root.ancestors() {
-        let symlink = fs::symlink_metadata(folder).map_or(true, |m| m.file_type().is_symlink());
-        if symlink {
-            return false;
-        }
         if resolve(folder).is_ok_and(|resolved| resolved == data) {
-            return true;
+            return !symlink;
         }
+        symlink |= fs::symlink_metadata(folder).map_or(true, |m| m.file_type().is_symlink());
     }
-    false
+    true
 }
 
 fn resolve(path: &Path) -> Result<PathBuf> {

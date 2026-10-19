@@ -221,3 +221,23 @@ fn a_project_home_in_a_workspace_folder_inside_the_data_folder_is_served() {
     fs::write(home.join("plan.md"), "the plan").unwrap();
     assert_eq!(read(&mut host, &home.join("plan.md")).unwrap(), b"the plan");
 }
+
+#[test]
+fn a_project_home_reached_through_a_workspace_folder_alias_is_served() {
+    let data = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(data.path()).unwrap();
+    let workspaces = data.path().join("workspaces");
+    fs::create_dir_all(&workspaces).unwrap();
+    let alias = outside.path().join("workspace-alias");
+    std::os::unix::fs::symlink(&workspaces, &alias).unwrap();
+    host.set_workspaces_dir(alias.to_str().unwrap()).unwrap();
+    let project = host.create_project("y").unwrap();
+    let home = host.project_directory(&project.id).unwrap();
+    assert_eq!(home, alias.join("projects/y"));
+    fs::create_dir_all(home.join("src")).unwrap();
+    fs::write(home.join("plan.md"), "the plan").unwrap();
+    assert_eq!(read(&mut host, &home.join("plan.md")).unwrap(), b"the plan");
+    let listing = host.execute(Command::ListFolder { path: home }).unwrap();
+    assert_eq!(listing["folders"][0]["name"], "src");
+}
