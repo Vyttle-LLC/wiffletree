@@ -80,7 +80,7 @@ A paired device SHALL have the access level Control or View only. The host SHALL
 - **THEN** the host refuses with "Only Studio Mac itself can change remote access" and changes nothing
 
 ### Requirement: Path reads from remote devices are bounded
-For a remote device, the host SHALL resolve every host path a command names, symlinks and `..` included, and SHALL serve `ReadFile`, `ResolvePaths` and `ListFolder` only within the roots `standalone-host` allows, with `ListFolder` also under the host's home folder for a Control device. It SHALL refuse `InspectAttachments` from every remote device and `DiscoverRepositories` from a View only device, and SHALL answer `ComparePausedFile` only for a file it recorded as paused. The `standalone-host` deny list of credential locations SHALL apply to every remote read and listing.
+For a remote device, the host SHALL resolve every host path a command names, symlinks and `..` included, and SHALL serve `ReadFile`, `ResolvePaths` and `ListFolder` only within the roots `standalone-host` allows, with `ListFolder` also under the host's home folder for a Control device. It SHALL refuse `InspectAttachments` from every remote device and `DiscoverRepositories` from a View only device, and SHALL answer `ComparePausedFile` only for a file it recorded as paused. The `standalone-host` deny list of credential locations, Git's credential stores `~/.git-credentials`, `~/.config/git/credentials` and `$XDG_CONFIG_HOME/git/credentials` among them, SHALL apply to every remote read and listing.
 
 #### Scenario: View only lists the home folder
 - **WHEN** a View only device asks to list the host's home folder
