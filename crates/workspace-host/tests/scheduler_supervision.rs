@@ -19,6 +19,17 @@ fn status(snapshot: &Snapshot, session: &str) -> Status {
         .status
 }
 
+/// Asserts the long-running implementer is still in its turn, naming why it is not.
+fn assert_working(snapshot: &Snapshot, session: &str) {
+    let runtime = snapshot.runtimes.iter().find(|r| r.session_id == session);
+    assert_eq!(
+        status(snapshot, session),
+        Status::Working,
+        "last error: {:?}",
+        runtime.and_then(|r| r.last_error.as_deref())
+    );
+}
+
 fn runs(db: &rusqlite::Connection, session: &str) -> i64 {
     db.query_row(
         "SELECT COUNT(*) FROM provider_runs WHERE session_id=?1 AND finished_at IS NOT NULL",
@@ -113,7 +124,7 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
             .cloned();
         ticket.is_some() && runs(&db, &other.id) == 1
     });
-    assert_eq!(status(&snapshot(&service), &writer.id), Status::Working);
+    assert_working(&snapshot(&service), &writer.id);
     let round = ticket.unwrap().verification.unwrap().rounds.remove(0);
 
     // Another ticket's worker still starts while the round waits.
@@ -130,7 +141,7 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
     until(&service, "the other worker's second turn", |_| {
         runs(&db, &other.id) == 2
     });
-    assert_eq!(status(&snapshot(&service), &writer.id), Status::Working);
+    assert_working(&snapshot(&service), &writer.id);
     for verifier in &round.verifiers {
         assert_eq!(runs(&db, &verifier.session_id), 0, "the round still waits");
     }
