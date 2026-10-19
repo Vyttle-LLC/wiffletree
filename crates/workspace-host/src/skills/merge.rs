@@ -129,8 +129,8 @@ mod tests {
         text.replacen(old, new, 1)
     }
 
-    fn v2(text: &str) -> String {
-        edit(text, "# Coordinating — v1", "# Coordinating — v2")
+    fn newer(text: &str) -> String {
+        edit(text, "# Coordinating — v2", "# Coordinating — v3")
     }
 
     const FIRST: &str = "Start by clarifying and planning the goal;";
@@ -151,7 +151,7 @@ mod tests {
             assert_eq!(format!("{title}{}", paragraphs.concat()), text);
         }
         let (title, paragraphs) = split(coordinating());
-        assert_eq!(title, "# Coordinating — v1\n");
+        assert_eq!(title, "# Coordinating — v2\n");
         assert!(paragraphs[0].starts_with(FIRST) && paragraphs[0].ends_with(".\n\n"));
         assert!(paragraphs[4].starts_with(FIFTH));
         // Lines with no blank line between them are one paragraph.
@@ -163,15 +163,15 @@ mod tests {
     #[test]
     fn changes_that_dont_overlap_merge_as_plain_text() {
         let yours = edit(coordinating(), FIRST, "Start by restating the goal;");
-        let stock = v2(&edit(coordinating(), FIFTH, "Ask the human when a waiver"));
+        let stock = newer(&edit(coordinating(), FIFTH, "Ask the human when a waiver"));
         let merged = merge(coordinating(), &stock, &yours);
         let (text, changes) = merged.plain().unwrap();
-        let expected = v2(&edit(&yours, FIFTH, "Ask the human when a waiver"));
+        let expected = newer(&edit(&yours, FIFTH, "Ask the human when a waiver"));
         assert_eq!(text, expected);
         assert!(merged.passages().is_empty());
         let sources: Vec<_> = changes.iter().map(|change| change.source).collect();
         assert_eq!(sources, [Source::Update, Source::Update]);
-        assert_eq!(changes[0].after, "# Coordinating — v2\n");
+        assert_eq!(changes[0].after, "# Coordinating — v3\n");
         assert!(changes[1].before.starts_with(FIFTH));
     }
 
@@ -197,13 +197,13 @@ mod tests {
     #[test]
     fn a_new_version_line_and_an_edited_first_paragraph_do_not_overlap() {
         let yours = edit(coordinating(), FIRST, "Start by restating the goal;");
-        let merged = merge(coordinating(), &v2(coordinating()), &yours);
-        assert_eq!(merged.plain().unwrap().0, v2(&yours));
+        let merged = merge(coordinating(), &newer(coordinating()), &yours);
+        assert_eq!(merged.plain().unwrap().0, newer(&yours));
     }
 
     #[test]
     fn a_change_the_human_already_copied_is_taken_once() {
-        let stock = v2(&edit(coordinating(), FIFTH, "Ask the human when a waiver"));
+        let stock = newer(&edit(coordinating(), FIFTH, "Ask the human when a waiver"));
         let yours = edit(coordinating(), FIFTH, "Ask the human when a waiver");
         let (text, changes) = merge(coordinating(), &stock, &yours).plain().unwrap();
         assert_eq!(text, stock);
@@ -269,8 +269,8 @@ mod tests {
 
     #[test]
     fn both_sides_changing_the_title_keeps_the_human_s() {
-        let yours = edit(coordinating(), "# Coordinating — v1", "# How I coordinate");
-        let (text, changes) = merge(coordinating(), &v2(coordinating()), &yours)
+        let yours = edit(coordinating(), "# Coordinating — v2", "# How I coordinate");
+        let (text, changes) = merge(coordinating(), &newer(coordinating()), &yours)
             .plain()
             .unwrap();
         assert_eq!((text, changes), (yours, vec![]));

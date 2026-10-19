@@ -2791,11 +2791,11 @@ pub(crate) mod tests {
         let (name, _) = second.skills().history(Skill::Coordinating).remove(0);
         let history = "skills/coordinating/history";
         let entry = github.show(&format!("{history}/{name}.json")).unwrap();
-        let entry = entry.replace("\"v1\"", "\"v2\"");
+        let entry = entry.replace("\"v2\"", "\"v3\"");
         github.commit(&format!("{history}/2099-01-01T00-00-00.000Z.json"), entry);
         second.sync_now(&github.tools()).unwrap();
         let states = second.skill_states().unwrap();
-        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v2"));
+        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v3"));
     }
 
     #[test]
@@ -3384,7 +3384,7 @@ pub(crate) mod tests {
     ) -> (tempfile::TempDir, tempfile::TempDir, String) {
         let (first_home, first) = host();
         let stock = skills::stock(Skill::Coordinating);
-        let base = (stock.replacen("— v1", "— v0", 1)).replacen(
+        let base = (stock.replacen("— v2", "— v0", 1)).replacen(
             "Ask the human instead when a waiver",
             "Ask the human when",
             1,
@@ -3450,7 +3450,7 @@ pub(crate) mod tests {
         assert_eq!(
             github.log("%s")[0],
             format!(
-                "Coordinating: merged v1 into your rewrite · {}",
+                "Coordinating: merged v2 into your rewrite · {}",
                 machine_name()
             )
         );
@@ -3521,7 +3521,7 @@ pub(crate) mod tests {
         first.execute(keep).unwrap();
         first.sync_now(&tools).unwrap();
         second.sync_now(&tools).unwrap();
-        let merged = text.replacen("— v0", "— v1", 1);
+        let merged = text.replacen("— v0", "— v2", 1);
         for host in [&first, &second] {
             assert_eq!(coordinating(host).text, merged);
             assert_eq!(coordinating(host).base, skills::stock(skill));
@@ -3727,8 +3727,8 @@ pub(crate) mod tests {
         host.sync_now(&tools).unwrap();
         host.sync_now(&tools).unwrap();
 
-        // A Mac on v0 saves over the merge; this Mac on v1 merges v0 → v1 into it and pushes that.
-        let older = (stock.replacen("— v1", "— v0", 1)).replacen(
+        // A Mac on v0 saves over the merge; this Mac on v2 merges v0 → v2 into it and pushes that.
+        let older = (stock.replacen("— v2", "— v0", 1)).replacen(
             "Ask the human instead when a waiver",
             "Ask the human when",
             1,
@@ -3748,10 +3748,10 @@ pub(crate) mod tests {
             briefly
         );
 
-        // A Mac on v2 merges v2 in; this Mac sends that rewrite as written and merges nothing.
-        let newer = stock.replacen("— v1", "— v2", 1);
-        let text = "Coordinating, merged with v2.";
-        push_merge(&github, "v1", &newer, text, "A newer Mac");
+        // A Mac on v3 merges v3 in; this Mac sends that rewrite as written and merges nothing.
+        let newer = stock.replacen("— v2", "— v3", 1);
+        let text = "Coordinating, merged with v3.";
+        push_merge(&github, "v2", &newer, text, "A newer Mac");
         let count = merges(&host).len();
         host.sync_now(&tools).unwrap();
         let pushes = github.pushes();

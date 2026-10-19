@@ -700,6 +700,51 @@ fn acceptance_refuses_commits_after_the_verified_one() {
     assert!(f.worktree().exists());
 }
 
+/// A ticket whose one full review, all the cap allows, passed, with two commits after it.
+fn passed_then_two_commits() -> (Fixture, [String; 2]) {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 2);
+    let mut settings = f.host.settings().verification;
+    settings.max_cycles = 1;
+    f.host.set_verification(settings).unwrap();
+    f.verify().unwrap();
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let first = f.commit("late.txt", "after");
+    let second = f.commit("later.txt", "after that");
+    (f, [first, second])
+}
+
+#[test]
+fn at_the_cap_a_waiver_naming_every_unreviewed_commit_accepts_them() {
+    let (mut f, [first, second]) = passed_then_two_commits();
+
+    let refused = f
+        .accept(Some(&format!("Read {}; it holds up", &first[..7])))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains(&second[..7]), "{refused}");
+    assert!(!refused.contains(&first[..7]), "{refused}");
+    assert!(f.worktree().exists());
+
+    let waiver = format!("Read {} and {}; both hold up", &first[..7], &second[..9]);
+    f.accept(Some(&waiver)).unwrap();
+    let accepted = f.current();
+    assert_eq!(accepted.state, TicketState::Accepted);
+    assert_eq!(accepted.waiver.as_deref(), Some(waiver.as_str()));
+    assert_eq!(accepted.waived_commits, [first, second]);
+}
+
+#[test]
+fn below_the_cap_a_waiver_does_not_cover_unreviewed_commits() {
+    // One of two full reviews used: the waiver may cover F1, but not a commit after the review.
+    let mut f = blocked_at_the_cap();
+    let late = f.commit("late.txt", "after");
+    let waiver = format!("F1 is acceptable; read {}", &late[..7]);
+    let refused = f.accept(Some(&waiver)).unwrap_err().to_string();
+    assert!(refused.ends_with("; verify again"), "{refused}");
+    assert_eq!(f.current().state, TicketState::Blocked);
+    assert!(f.worktree().exists());
+}
+
 /// Records `provider`'s weekly window at `used` percent, resetting in a day.
 fn spend(host: &Host, provider: Provider, used: f64) {
     let at = std::time::SystemTime::now()
@@ -1734,6 +1779,8 @@ fn the_cycle_cap_refuses_a_third_cycle_until_the_human_raises_it() {
     for expected in ["2 full reviews", "waiver", "close", "ask the human"] {
         assert!(refused.contains(expected), "{expected}: {refused}");
     }
+    // The cap is the coordinator's call, never a limit to ask the human to raise.
+    assert!(!refused.contains("raise"), "{refused}");
     assert_eq!(
         f.host.sessions().unwrap().len(),
         sessions,
@@ -1898,7 +1945,12 @@ fn the_last_cycle_blocked_offers_no_further_verification() {
     assert!(
         body.contains("waived")
             && body.contains("close the ticket")
-            && body.contains("ask the human")
+            && body.contains("ask the human, only for a product, security or data-loss decision")
+    );
+    // A publish waiver covers only unreviewed commits, never the findings alone.
+    assert!(
+        body.contains("give publish_ticket waived only for such commits"),
+        "{body}"
     );
     assert!(!body.contains("verify_ticket"), "{body}");
 }

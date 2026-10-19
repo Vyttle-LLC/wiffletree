@@ -980,7 +980,14 @@ impl Actor {
                 args["body"].as_str(),
             )?;
         }
-        let plan = checkout::Publication::prepare(&self.host, ticket)?;
+        // A new request brings its own waiver; a waiting or running one keeps the one it froze.
+        let waived = match &action {
+            PublishAction::Request { args, .. } => args["waived"].as_str().map(Into::into),
+            _ => (self.host.ticket(ticket)?.publishing)
+                .and_then(|request| request.waived)
+                .map(|waived| waived.reason),
+        };
+        let plan = checkout::Publication::prepare(&self.host, ticket, waived.as_deref())?;
         ensure!(
             self.host.checkout_reservations.acquire(ticket),
             "A checkout operation for this ticket is running"
@@ -1434,6 +1441,7 @@ impl Actor {
                                 args["ticket_id"].as_str().unwrap(),
                                 args["title"].as_str(),
                                 args["body"].as_str(),
+                                args["waived"].as_str(),
                             )
                         });
                         let result = result.map(|(status, step)| {
@@ -1780,7 +1788,7 @@ impl Actor {
                             only_arguments(
                                 "publish_ticket",
                                 &args,
-                                &["ticket_id", "title", "body"],
+                                &["ticket_id", "title", "body", "waived"],
                             )?;
                             let ticket = args["ticket_id"].as_str().context("Missing ticket_id")?;
                             self.inspect_publication(
@@ -4479,7 +4487,7 @@ mod tests {
         );
         assert_eq!(
             aimed.unwrap_err(),
-            "publish_ticket takes ticket_id, title, body, not branch"
+            "publish_ticket takes ticket_id, title, body, waived, not branch"
         );
         let status = call_tool(
             &mut actor,

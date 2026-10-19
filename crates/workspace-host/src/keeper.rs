@@ -766,7 +766,7 @@ impl Host {
         };
         ticket.publishing.is_none()
             && verification::head(ticket).is_ok_and(|head| head == pr.head)
-            && self.check_verified_head(ticket, verified).is_ok()
+            && self.check_verified_head(ticket, verified, None).is_ok()
     }
     /// Remembers each base commit a pass reported, and since when.
     pub(crate) fn note_bases(&mut self, repository_id: &str, pass: &pr_watch::Pass, at: i64) {
@@ -2364,7 +2364,10 @@ pub(crate) mod tests {
         f.host.set_live(&project, true).unwrap();
         watch_open_pr(&mut f, NUMBER);
         let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
-        let (_, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        let (_, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, None, None)
+            .unwrap();
         drive(&mut f, &r, step);
         assert_eq!(r.branch(BRANCH), Some(f.head()));
         let on = KeeperSettings {
@@ -3218,7 +3221,7 @@ pub(crate) mod tests {
         let caller = f.coordinator.id.clone();
         refused(
             f.host
-                .publish_ticket(&caller, &f.ticket.clone(), None, None),
+                .publish_ticket(&caller, &f.ticket.clone(), None, None, None),
         );
         assert_eq!(r.branch(BRANCH), Some(theirs));
         // The adopted head is the PR's head: nothing more is fetched, and nothing is told again.
@@ -3245,7 +3248,7 @@ pub(crate) mod tests {
         let caller = f.coordinator.id.clone();
         refused(
             f.host
-                .publish_ticket(&caller, &f.ticket.clone(), None, None),
+                .publish_ticket(&caller, &f.ticket.clone(), None, None, None),
         );
         refused(f.host.accept_ticket(&f.ticket.clone(), None));
         assert_eq!(f.ticket().verification, cycle);
@@ -3268,7 +3271,7 @@ pub(crate) mod tests {
         let caller = f.coordinator.id.clone();
         let (_, step) = f
             .host
-            .publish_ticket(&caller, &f.ticket.clone(), None, None)
+            .publish_ticket(&caller, &f.ticket.clone(), None, None, None)
             .unwrap();
         drive(&mut f, &r, step);
         assert_eq!(r.branch(BRANCH), Some(theirs.clone()));
@@ -4786,7 +4789,10 @@ pub(crate) mod tests {
                 "{body}"
             );
             let (caller, id) = (f.coordinator.id.clone(), f.ticket.clone());
-            let refused = f.host.publish_ticket(&caller, &id, None, None).unwrap_err();
+            let refused = f
+                .host
+                .publish_ticket(&caller, &id, None, None, None)
+                .unwrap_err();
             assert!(
                 format!("{refused:#}").contains("commits no review has checked"),
                 "{refused:#}"

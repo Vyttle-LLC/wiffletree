@@ -360,7 +360,8 @@ impl Host {
     }
     /// Accepts a ticket on its latest verification cycle: one that passed, or, with a waiver
     /// reason, one blocked only by findings it checked. No cycle may be running or finding
-    /// untriaged, and HEAD must be the verified commit or patch-equivalent to it. The ticket's
+    /// untriaged, and HEAD must be the verified commit or patch-equivalent to it, or, at the
+    /// full-review cap, past it only by commits the waiver names. The ticket's
     /// state is not the gate, so a report after the cycle does not undo it. Like closing, it
     /// archives the agents and removes the worktree, keeping the branch.
     pub fn accept_ticket(&mut self, ticket_id: &str, waived: Option<&str>) -> Result<Ticket> {
@@ -379,8 +380,10 @@ impl Host {
             "Start verification with verify_ticket; acceptance needs the commit it verified",
         )?;
         let waived = waived.map(one_line_reason).transpose()?;
+        let unreviewed_waiver = self.unreviewed_waiver(&ticket, waived);
         match (verification.outcome, waived) {
             (VerificationOutcome::Passed, None) => {}
+            (VerificationOutcome::Passed, Some(_)) if unreviewed_waiver.is_some() => {}
             (VerificationOutcome::Passed, Some(_)) => bail!(
                 "Verification cycle {} passed; there is nothing to waive",
                 verification.cycle
@@ -410,14 +413,39 @@ impl Host {
             untriaged.join(", ")
         );
         let verified = verification.verified_commit().context("No round")?;
-        self.check_verified_head(&ticket, verified)?;
+        let waived_commits = self.check_verified_head(&ticket, verified, unreviewed_waiver)?;
+        ensure!(
+            verification.outcome == VerificationOutcome::Blocked
+                || waived.is_none()
+                || !waived_commits.is_empty(),
+            "Verification cycle {} passed at the commit checked out; there is nothing to waive",
+            verification.cycle
+        );
         ticket.waiver = waived.map(Into::into);
+        ticket.waived_commits = waived_commits;
         self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
     }
     /// HEAD is the verified commit, or has the same patch id against the ticket's base, as
-    /// after a squash or a clean rebase, and the keeper adopted no commit no review has checked.
-    pub(crate) fn check_verified_head(&self, ticket: &Ticket, verified: &str) -> Result<()> {
-        verified_head(ticket, verified, || self.ticket_base(ticket))
+    /// after a squash or a clean rebase, or, with a waiver `unreviewed_waiver` allows at the
+    /// full-review cap, is past it only by commits the waiver names, which are returned. Either
+    /// way the keeper adopted no commit no review has checked.
+    pub(crate) fn check_verified_head(
+        &self,
+        ticket: &Ticket,
+        verified: &str,
+        waived: Option<&str>,
+    ) -> Result<Vec<String>> {
+        verified_head(ticket, verified, || self.ticket_base(ticket), waived)
+    }
+    /// The waiver, when it may cover commits no review checked: once the ticket has started
+    /// every full review the cycle cap allows. Below the cap they need a review.
+    pub(crate) fn unreviewed_waiver<'a>(
+        &self,
+        ticket: &Ticket,
+        waived: Option<&'a str>,
+    ) -> Option<&'a str> {
+        let cap = self.settings().verification.max_cycles as usize;
+        waived.filter(|_| verification::full_reviews(ticket) >= cap)
     }
     fn finish_ticket(
         &mut self,
@@ -447,7 +475,14 @@ impl Host {
                         .filter(|e| e.status == EntryStatus::Open)
                         .map(|e| e.id.as_str())
                         .collect();
-                    format!("{}; waived: {waiver}; open: {}", ticket.id, open.join(", "))
+                    let mut body =
+                        format!("{}; waived: {waiver}; open: {}", ticket.id, open.join(", "));
+                    if !ticket.waived_commits.is_empty() {
+                        let commits: Vec<&str> =
+                            ticket.waived_commits.iter().map(|c| short_sha(c)).collect();
+                        body.push_str(&format!("; unreviewed: {}", commits.join(", ")));
+                    }
+                    body
                 }
                 None => ticket.id.clone(),
             };
@@ -974,12 +1009,15 @@ fn small_work(args: &Value) -> Result<bool> {
 }
 
 /// `Host::check_verified_head` for a caller that has the ticket's base without the store,
-/// as a publish step has on its own thread.
+/// as a publish step has on its own thread. With `waived`, which `Host::unreviewed_waiver`
+/// allows only at the full-review cap, HEAD may be past the verified commit when the waiver
+/// names every commit since; those commits are returned.
 pub(crate) fn verified_head(
     ticket: &Ticket,
     verified: &str,
     base: impl FnOnce() -> Result<stacks::Base>,
-) -> Result<()> {
+    waived: Option<&str>,
+) -> Result<Vec<String>> {
     // Whatever their patch id: `git patch-id` ignores whitespace, which can change behaviour.
     if let Some(unreviewed) = ticket.unreviewed() {
         bail!(
@@ -989,17 +1027,50 @@ pub(crate) fn verified_head(
     }
     let head = verification::head(ticket)?;
     if head == verified {
-        return Ok(());
+        return Ok(vec![]);
     }
     let worktree = Path::new(&ticket.worktree);
     let same_patch = || base()?.same_patch(worktree, verified, &head);
-    match same_patch() {
-        Ok(true) => Ok(()),
-        Ok(false) => bail!(
-            "The worktree's changes differ from the verified commit: verified {verified}, current {head}; verify again"
+    let differs = match same_patch() {
+        Ok(true) => return Ok(vec![]),
+        Ok(false) => format!(
+            "The worktree's changes differ from the verified commit: verified {verified}, current {head}"
         ),
-        Err(error) => bail!(
-            "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#}); verify again"
+        Err(error) => format!(
+            "The worktree moved past the verified commit: verified {verified}, current {head}, and their patches could not be compared ({error:#})"
         ),
-    }
+    };
+    let unreviewed = match waived {
+        Some(_) => unreviewed_commits(worktree, verified, &head)?,
+        None => vec![],
+    };
+    let (Some(waiver), false) = (waived, unreviewed.is_empty()) else {
+        bail!("{differs}; verify again");
+    };
+    let named: Vec<String> = (waiver.split(|c: char| !c.is_ascii_hexdigit()))
+        .filter(|word| word.len() >= 7)
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let missing: Vec<&str> = (unreviewed.iter())
+        .filter(|commit| !named.iter().any(|name| commit.starts_with(name.as_str())))
+        .map(|commit| short_sha(commit))
+        .collect();
+    ensure!(
+        missing.is_empty(),
+        "The waiver does not name every commit no review checked. Read {}, then name each by its short SHA of at least 7 characters",
+        missing.join(", ")
+    );
+    Ok(unreviewed)
+}
+
+/// The commits on HEAD past the verified one, oldest first.
+fn unreviewed_commits(worktree: &Path, verified: &str, head: &str) -> Result<Vec<String>> {
+    let range = format!("{verified}..{head}");
+    let listed = runtime::git_answer(worktree, &["rev-list", "--reverse", &range])?;
+    ensure!(
+        listed.status.success(),
+        "The commits past the verified one could not be listed: {}",
+        listed.output.trim()
+    );
+    Ok(listed.output.lines().map(Into::into).collect())
 }

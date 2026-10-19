@@ -91,6 +91,8 @@ pub(crate) struct Checked {
     /// The latest verification cycle and how it ended.
     cycle: u32,
     outcome: VerificationOutcome,
+    /// The waiver and the commits past the verified one it names, when there are any.
+    waived: Option<CommitWaiver>,
 }
 
 /// Whether `commit` contains `older`. A commit this repository does not have is not contained.
@@ -380,8 +382,9 @@ pub(crate) fn check_with_size(
     ticket: &Ticket,
     repository: Repository,
     base: &stacks::Base,
+    waived: Option<&str>,
 ) -> Result<Checked> {
-    let mut checked = check(ticket, repository, base)?;
+    let mut checked = check(ticket, repository, base, waived)?;
     checked.size = Some(commit_size(
         Path::new(&ticket.worktree),
         &checked.measured,
@@ -391,11 +394,17 @@ pub(crate) fn check_with_size(
     Ok(checked)
 }
 impl Host {
-    fn check_publish(&self, ticket: &Ticket, repository: Repository) -> Result<Checked> {
+    fn check_publish(
+        &self,
+        ticket: &Ticket,
+        repository: Repository,
+        waived: Option<&str>,
+    ) -> Result<Checked> {
         let base = self.ticket_base(ticket)?;
+        let waived = self.unreviewed_waiver(ticket, waived);
         match &self.checked_publish {
-            Some(checked) => checked.get(ticket, &repository, &base),
-            None => check(ticket, repository, &base),
+            Some(checked) => checked.get(ticket, &repository, &base, waived),
+            None => check(ticket, repository, &base, waived),
         }
     }
     fn recheck_publish(
@@ -404,7 +413,8 @@ impl Host {
         repository: Repository,
         request: &PublishRequest,
     ) -> Result<Repository> {
-        recheck_checked(self.check_publish(ticket, repository)?, request)
+        let waived = request.waived.as_ref().map(|w| w.reason.as_str());
+        recheck_checked(self.check_publish(ticket, repository, waived)?, request)
     }
     pub(crate) fn publish_inputs(
         &self,
@@ -459,21 +469,28 @@ impl Host {
         ticket_id: &str,
         title: Option<&str>,
         body: Option<&str>,
+        waived: Option<&str>,
     ) -> Result<(Value, Option<Job>)> {
         let mut ticket = self.publish_inputs(caller, ticket_id, title, body)?;
-        let checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?)?;
+        let waived = waived.map(one_line_reason).transpose()?;
+        let checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?, waived)?;
+        ensure!(
+            waived.is_none() || checked.waived.is_some(),
+            "No commit past the reviewed one needs a waiver; publish without waived"
+        );
         if let Some(waiting) = ticket.publishing.clone() {
             // The same call again changes nothing; a different one replaces the request.
             if waiting.commit == checked.commit
                 && (waiting.cycle, waiting.outcome) == (checked.cycle, checked.outcome)
                 && waiting.title.as_deref() == title
                 && waiting.body.as_deref() == body
+                && waiting.waived == checked.waived
             {
                 return Ok((self.publish_status(&ticket, &checked.repository), None));
             }
             self.withdraw_request(
                 &mut ticket,
-                "publish_ticket was called again with another commit, review, title or description",
+                "publish_ticket was called again with another commit, review, title, description or waiver",
             )?;
         }
         let repository = checked.repository.clone();
@@ -493,7 +510,7 @@ impl Host {
             ticket.publishing.is_none(),
             "A publish request for this ticket is running or waiting"
         );
-        let checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?)?;
+        let checked = self.check_publish(&ticket, self.ticket_repository(&ticket)?, None)?;
         let caller = ticket.coordinator_id.clone();
         self.start_request(&mut ticket, checked, &caller, None, None, true)
     }
@@ -535,6 +552,7 @@ impl Host {
             waiting: None,
             blocked_review_approved: false,
             approvals: 0,
+            waived: checked.waived,
             keeper,
         });
         self.save_ticket(ticket)?;
@@ -605,6 +623,9 @@ impl Host {
         let allowed = self.settings().allowed_owners;
         let reason = match publish_ask(ticket, request, repository, &allowed) {
             Some(PublishAsk::BlockedReview) => "the review ended blocked".to_owned(),
+            Some(PublishAsk::UnreviewedCommits) => {
+                "you waived commits no review checked".to_owned()
+            }
             Some(PublishAsk::EndedPullRequest) => {
                 ended_pull_request_notice(ticket).unwrap_or_default()
             }
@@ -624,6 +645,7 @@ pub(crate) fn check(
     ticket: &Ticket,
     repository: Repository,
     base: &stacks::Base,
+    waived: Option<&str>,
 ) -> Result<Checked> {
     ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);
     if let Some(cycle) = ticket.running_cycle() {
@@ -637,7 +659,7 @@ pub(crate) fn check(
         .and_then(|v| v.verified_commit().map(|commit| (v, commit)))
         .context("This ticket has not been reviewed. Verify it before publishing it.");
     let (review, verified) = verified?;
-    live::verified_head(ticket, verified, || Ok(base.clone()))?;
+    let waived_commits = live::verified_head(ticket, verified, || Ok(base.clone()), waived)?;
     let worktree = Path::new(&ticket.worktree);
     let on = runtime::git_answer(worktree, &["symbolic-ref", "--short", "HEAD"])?;
     ensure!(
@@ -688,6 +710,12 @@ pub(crate) fn check(
         commit: verification::head(ticket)?,
         cycle: review.cycle,
         outcome: review.outcome,
+        waived: waived
+            .filter(|_| !waived_commits.is_empty())
+            .map(|reason| CommitWaiver {
+                reason: reason.into(),
+                commits: waived_commits,
+            }),
         repository,
     })
 }
@@ -701,7 +729,8 @@ fn recheck(
     base: &stacks::Base,
     request: &PublishRequest,
 ) -> Result<Repository> {
-    recheck_checked(check(ticket, repository, base)?, request)
+    let waived = request.waived.as_ref().map(|w| w.reason.as_str());
+    recheck_checked(check(ticket, repository, base, waived)?, request)
 }
 fn recheck_checked(now: Checked, request: &PublishRequest) -> Result<Repository> {
     // The request was decided on one review. A later one decides anew: whether it passed, and
@@ -715,6 +744,10 @@ fn recheck_checked(now: Checked, request: &PublishRequest) -> Result<Repository>
             VerificationOutcome::Passed => "passed",
             _ => "ended blocked",
         }
+    );
+    ensure!(
+        request.waived == now.waived,
+        "The commits no review checked changed since the waiver named them"
     );
     // GitHub reports a repository in its own letter case, whatever case `origin` uses.
     ensure!(
@@ -896,11 +929,13 @@ impl Host {
                 return Ok(None);
             }
         };
-        // After a blocked review in an allowed owner's repository, the one item covers the
-        // commit's steps.
+        // After a blocked review or a waiver of unreviewed commits in an allowed owner's
+        // repository, the one item covers the commit's steps.
         let allowed = self.settings().allowed_owners;
-        request.blocked_review_approved |= publish_ask(&ticket, &request, &repository, &allowed)
-            == Some(PublishAsk::BlockedReview);
+        request.blocked_review_approved |= matches!(
+            publish_ask(&ticket, &request, &repository, &allowed),
+            Some(PublishAsk::BlockedReview | PublishAsk::UnreviewedCommits)
+        );
         request.waiting = None;
         request.approvals += 1;
         ticket.publishing = Some(request.clone());
@@ -1145,8 +1180,13 @@ pub(crate) mod tests {
             self.host.set_owner_allowed(entry, true).unwrap();
         }
         pub fn publish(&mut self, caller: &str) -> Result<(Value, Option<Job>)> {
-            self.host
-                .publish_ticket(caller, &self.ticket.clone(), Some("Fix it"), Some("Why"))
+            self.host.publish_ticket(
+                caller,
+                &self.ticket.clone(),
+                Some("Fix it"),
+                Some("Why"),
+                None,
+            )
         }
         pub fn open_items(&self) -> Vec<Attention> {
             self.host
@@ -1448,12 +1488,12 @@ pub(crate) mod tests {
         f.allow("allowed-org");
         let (ticket, caller) = (f.ticket.clone(), f.coordinator.id.clone());
         for (title, body) in [(None, None), (None, Some("Why")), (Some("Fix"), None)] {
-            let result = f.host.publish_ticket(&caller, &ticket, title, body);
+            let result = f.host.publish_ticket(&caller, &ticket, title, body, None);
             refused(&mut f, result, "give its title and body");
         }
         let result = f
             .host
-            .publish_ticket(&caller, &ticket, Some("Two\nlines"), Some("Why"));
+            .publish_ticket(&caller, &ticket, Some("Two\nlines"), Some("Why"), None);
         refused(&mut f, result, "one-line title");
     }
 
@@ -1705,6 +1745,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_waiver_of_unreviewed_commits_at_the_cap_always_asks_and_names_them() {
+        let mut f = fixture();
+        f.allow("allowed-org");
+        let mut settings = f.host.settings().verification;
+        settings.max_cycles = 1;
+        f.host.set_verification(settings).unwrap();
+        let late = f.commit("late.txt", "after");
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let publish = |f: &mut Fixture, waived: &str| {
+            f.host
+                .publish_ticket(&caller, &ticket, Some("Fix it"), Some("Why"), Some(waived))
+        };
+        let refused = publish(&mut f, "Read nothing").unwrap_err().to_string();
+        assert!(refused.contains(short_sha(&late)), "{refused}");
+
+        let waiver = format!("Read {}; it holds up", short_sha(&late));
+        let (status, job) = publish(&mut f, &waiver).unwrap();
+        assert!(job.is_none());
+        assert_eq!(status["reason"], "you waived commits no review checked");
+        let items = f.open_items();
+        assert_eq!(items.len(), 1);
+        for shown in [
+            format!("Unreviewed commits: {}", short_sha(&late)),
+            format!("Waiver: {waiver}"),
+        ] {
+            assert!(items[0].prompt.contains(&shown), "{}", items[0].prompt);
+        }
+        let request = f.ticket().publishing.unwrap();
+        assert_eq!(request.waived.unwrap().commits, [late]);
+    }
+
+    #[test]
     fn an_allowed_owners_fork_an_unanswered_repository_and_a_blocked_review_all_ask() {
         let mut fork = fixture();
         fork.allow("allowed-org");
@@ -1749,7 +1821,7 @@ pub(crate) mod tests {
         let (caller, ticket) = (f.implementer.id.clone(), f.ticket.clone());
         let (_, step) = f
             .host
-            .publish_ticket(&caller, &ticket, Some(title), Some(body))
+            .publish_ticket(&caller, &ticket, Some(title), Some(body), None)
             .unwrap();
         drive(&mut f, &remote, step);
         assert_eq!(remote.branch(BRANCH), Some(head.clone()));
@@ -1828,7 +1900,10 @@ pub(crate) mod tests {
     /// Publishes again to the open PR, and returns the result message.
     fn update(f: &mut Fixture, remote: &Remote) -> String {
         let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
-        let (_, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        let (_, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, None, None)
+            .unwrap();
         drive(f, remote, step);
         results(&f.host).pop().unwrap().1
     }
@@ -1840,11 +1915,14 @@ pub(crate) mod tests {
         // An open pull request's title and description are not edited.
         let edit = f
             .host
-            .publish_ticket(&caller, &ticket, Some("New title"), Some("Why"));
+            .publish_ticket(&caller, &ticket, Some("New title"), Some("Why"), None);
         assert!(edit.unwrap_err().to_string().contains("PR #45 is open"));
         let head = f.commit("c.txt", "three\n");
         f.review(VerificationOutcome::Passed);
-        let (status, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        let (status, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, None, None)
+            .unwrap();
         assert_eq!(status["steps"], json!(["push"]));
         drive(&mut f, &remote, step);
         assert_eq!(remote.branch(BRANCH), Some(head.clone()));
@@ -2778,7 +2856,10 @@ pub(crate) mod tests {
         let fix = f.commit("c.txt", "three\n");
         f.review(VerificationOutcome::Passed);
         let ticket = f.ticket.clone();
-        let (status, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        let (status, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, None, None)
+            .unwrap();
         assert!(step.is_none() && status["step"] == "push");
         let item = waiting_item(&f);
         assert!(
@@ -2889,7 +2970,7 @@ pub(crate) mod tests {
         let ticket = f.ticket.clone();
         let (status, _) = f
             .host
-            .publish_ticket(&caller, &ticket, Some("Fix it"), Some("Corrected"))
+            .publish_ticket(&caller, &ticket, Some("Fix it"), Some("Corrected"), None)
             .unwrap();
         assert_eq!(status["status"], "waiting_for_human");
         answer(&mut f, &remote, "approved");
@@ -3147,7 +3228,13 @@ pub(crate) mod tests {
         // A different description replaces it too.
         let ticket = f.ticket.clone();
         f.host
-            .publish_ticket(&coordinator, &ticket, Some("Fix it"), Some("Other words"))
+            .publish_ticket(
+                &coordinator,
+                &ticket,
+                Some("Fix it"),
+                Some("Other words"),
+                None,
+            )
             .unwrap();
         assert_ne!(waiting_item(&f).id, replaced.id);
         assert!(remote.git_calls().is_empty());
@@ -3194,7 +3281,10 @@ pub(crate) mod tests {
         let next = f.commit("c.txt", "three\n");
         block_review(&mut f);
         let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
-        let (status, step) = f.host.publish_ticket(&caller, &ticket, None, None).unwrap();
+        let (status, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, None, None)
+            .unwrap();
         assert!(step.is_none() && status["reason"] == "the review ended blocked");
         let item = waiting_item(&f);
         assert!(
@@ -3601,7 +3691,7 @@ pub(crate) mod tests {
         let (caller, ticket) = (f.implementer.id.clone(), f.ticket.clone());
         let error = f
             .host
-            .publish_ticket(&caller, &ticket, None, None)
+            .publish_ticket(&caller, &ticket, None, None, None)
             .unwrap_err();
         assert!(format!("{error:#}").contains("A publish step for this ticket is running"));
         drive(&mut f, &remote, step);

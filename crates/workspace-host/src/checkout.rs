@@ -146,7 +146,7 @@ impl KeeperPoll {
                         .filter(|v| v.outcome == VerificationOutcome::Passed)
                         .and_then(Verification::verified_commit)
                         .is_some_and(|verified| {
-                            live::verified_head(ticket, verified, || Ok(ticket_base.clone()))
+                            live::verified_head(ticket, verified, || Ok(ticket_base.clone()), None)
                                 .is_ok()
                         })
                 {
@@ -361,6 +361,7 @@ impl Creation {
             previous_cycles: vec![],
             ledger: vec![],
             waiver: None,
+            waived_commits: vec![],
             pull_request: None,
             publishing: None,
             pushed: None,
@@ -531,19 +532,24 @@ pub(crate) struct Publication {
     ticket: Ticket,
     repository: Repository,
     base: stacks::Base,
+    /// The waiver of unreviewed commits the check allows, at the full-review cap.
+    waived: Option<String>,
 }
 pub(crate) struct PublicationResult {
     ticket: Ticket,
     repository: Repository,
     base: stacks::Base,
+    waived: Option<String>,
     checked: std::result::Result<publish::Checked, String>,
 }
 impl Publication {
-    pub(crate) fn prepare(host: &Host, ticket: &str) -> Result<Self> {
+    pub(crate) fn prepare(host: &Host, ticket: &str, waived: Option<&str>) -> Result<Self> {
         let ticket = host.ticket(ticket)?;
         let repository = host.ticket_repository(&ticket)?;
         let base = host.ticket_base(&ticket)?;
+        let waived = waived.map(one_line_reason).transpose()?;
         Ok(Self {
+            waived: host.unreviewed_waiver(&ticket, waived).map(Into::into),
             ticket,
             repository,
             base,
@@ -554,8 +560,14 @@ impl Publication {
             ticket: self.ticket.clone(),
             repository: self.repository.clone(),
             base: self.base.clone(),
-            checked: publish::check_with_size(&self.ticket, self.repository.clone(), &self.base)
-                .map_err(|error| format!("{error:#}")),
+            waived: self.waived.clone(),
+            checked: publish::check_with_size(
+                &self.ticket,
+                self.repository.clone(),
+                &self.base,
+                self.waived.as_deref(),
+            )
+            .map_err(|error| format!("{error:#}")),
         }
     }
     pub(crate) fn failed(&self) -> PublicationResult {
@@ -563,6 +575,7 @@ impl Publication {
             ticket: self.ticket.clone(),
             repository: self.repository.clone(),
             base: self.base.clone(),
+            waived: self.waived.clone(),
             checked: Err("The publish inspection stopped unexpectedly".into()),
         }
     }
@@ -576,6 +589,7 @@ impl PublicationResult {
         ticket: &Ticket,
         repository: &Repository,
         base: &stacks::Base,
+        waived: Option<&str>,
     ) -> Result<publish::Checked> {
         // Publishing advances these fields when a push reports back. They are not inputs
         // to the verification/branch check, which is shared by both publish steps.
@@ -586,7 +600,8 @@ impl PublicationResult {
         ensure!(
             inputs(ticket) == inputs(&self.ticket)
                 && repository == &self.repository
-                && base == &self.base,
+                && base == &self.base
+                && waived == self.waived.as_deref(),
             "The ticket or repository changed during its publish inspection; call publish_ticket again for what is current"
         );
         self.checked.clone().map_err(anyhow::Error::msg)
@@ -894,7 +909,8 @@ impl KeeperCheckout {
             .is_some_and(|(verified, pr)| {
                 self.ticket.publishing.is_none()
                     && verification::head(&self.ticket).is_ok_and(|head| head == pr.head)
-                    && live::verified_head(&self.ticket, verified, || Ok(self.base.clone())).is_ok()
+                    && live::verified_head(&self.ticket, verified, || Ok(self.base.clone()), None)
+                        .is_ok()
             });
         let allowed = self
             .allowed
@@ -958,6 +974,7 @@ impl KeeperCheckout {
             ticket: self.ticket.clone(),
             repository: self.repository.clone(),
             base: self.base.clone(),
+            waived: None,
         }
         .run();
         KeeperResult {
@@ -992,6 +1009,7 @@ impl KeeperCheckout {
                 ticket: self.ticket.clone(),
                 repository: self.repository.clone(),
                 base: self.base.clone(),
+                waived: None,
             }
             .failed(),
         }
@@ -1032,6 +1050,7 @@ impl KeeperCheckout {
                 ticket: self.ticket.clone(),
                 repository: self.repository.clone(),
                 base: self.base.clone(),
+                waived: None,
             }
             .failed(),
             ..result
@@ -1402,7 +1421,7 @@ mod tests {
     #[test]
     fn publication_revalidates_the_review_and_repository_before_its_result_can_apply() {
         let f = publish::tests::fixture();
-        let job = Publication::prepare(&f.host, &f.ticket).unwrap();
+        let job = Publication::prepare(&f.host, &f.ticket, None).unwrap();
         let observed = job.run();
         let mut ticket = f.ticket();
         ticket.state = TicketState::Closed;
@@ -1412,7 +1431,8 @@ mod tests {
                 .get(
                     &ticket,
                     &f.host.ticket_repository(&ticket).unwrap(),
-                    &f.host.ticket_base(&ticket).unwrap()
+                    &f.host.ticket_base(&ticket).unwrap(),
+                    None
                 )
                 .is_err()
         );

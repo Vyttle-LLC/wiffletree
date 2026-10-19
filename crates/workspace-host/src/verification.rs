@@ -95,7 +95,7 @@ fn cycle_verifiers(ticket: &Ticket) -> Vec<String> {
 
 /// How many full reviews the ticket has started, its latest cycle included. Re-checks are not
 /// counted against the cycle cap.
-fn full_reviews(ticket: &Ticket) -> usize {
+pub(crate) fn full_reviews(ticket: &Ticket) -> usize {
     ticket
         .previous_cycles
         .iter()
@@ -154,7 +154,7 @@ fn level_may_start(
     }
     ensure!(
         level.kind == LevelKind::Recheck || full_reviews(ticket) < settings.max_cycles as usize,
-        "Ticket \"{}\" has used its {} full reviews; accept it with a waiver, close it or ask the human. Only the human can raise the limit, in Models → Reviews.",
+        "Ticket \"{}\" has used its {} full reviews. More review rarely pays for itself from here: read any commits no review checked yourself, then accept_ticket or publish_ticket with waived naming each one by its short SHA, file what remains as follow-ups, or close the ticket. Ask the human only when the waiver would settle a product, security or data-loss decision. Do not ask the human for more full reviews.",
         ticket.title,
         settings.max_cycles
     );
@@ -1223,17 +1223,27 @@ impl Host {
                 .filter(|v| v.result == VerifierResult::Blocked)
                 .collect();
             let mut actions = vec![];
-            if full_reviews(&ticket) < max_cycles as usize {
+            let review_left = full_reviews(&ticket) < max_cycles as usize;
+            if review_left {
                 actions.push(
                     "send the implementer fixes and call verify_ticket again with a full-review level, not a re-check",
                 );
             }
             if !blocked {
-                actions.push(
-                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings",
-                );
+                actions.push(if review_left {
+                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings"
+                } else {
+                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings and, by short SHA, any commit no review checked; give publish_ticket waived only for such commits"
+                });
             }
-            actions.extend(["close the ticket", "or ask the human"]);
+            actions.push("close the ticket");
+            // At the cap more review is no longer an option, so the human is asked only for a
+            // decision that is theirs.
+            actions.push(if review_left {
+                "or ask the human"
+            } else {
+                "or ask the human, only for a product, security or data-loss decision"
+            });
             let mut parts = vec![format!(
                 "Wiffletree verification of ticket \"{}\" ({}) is blocked after {rounds}: {why}.{skipped}",
                 ticket.title, ticket.id

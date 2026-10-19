@@ -696,7 +696,7 @@ impl Render for VerifierEditor {
             .child(setting(
                 "Full reviews per ticket",
                 cycles,
-                "Reviews at a level marked Full review, with fresh reviewers. After the last one, the coordinator accepts, accepts with a waiver, closes the ticket or asks you. Re-checks are not counted.",
+                "Reviews at a level marked Full review, with fresh reviewers. After the last one the coordinator weighs whether more review is worth it and accepts, accepts with a waiver or closes the ticket itself. Re-checks are not counted.",
                 p,
             ))
             .child(hint(

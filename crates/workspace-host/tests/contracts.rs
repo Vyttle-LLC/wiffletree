@@ -135,7 +135,7 @@ fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
     let properties = publish["inputSchema"]["properties"].as_object().unwrap();
     let mut arguments: Vec<&str> = properties.keys().map(String::as_str).collect();
     arguments.sort_unstable();
-    assert_eq!(arguments, ["body", "ticket_id", "title"]);
+    assert_eq!(arguments, ["body", "ticket_id", "title", "waived"]);
     assert_eq!(
         publish["inputSchema"]["required"],
         serde_json::json!(["ticket_id"])
@@ -249,7 +249,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v2"));
+    assert!(coordinator.contains("Project coordinator core — v3"));
     for role in Role::ALL {
         let core = core(role);
         assert!(core.contains("Wiffletree communication contract — v9"));
@@ -307,7 +307,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v1"));
+    assert!(coordinator.contains("Coordinating — v2"));
     for phrase in [
         "After two or three rounds, remaining non-blocking findings become follow-up tickets",
         "Never start a fresh cycle to chase them",
