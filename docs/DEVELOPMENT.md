@@ -343,6 +343,14 @@ Only a signed build runs its host as a launchd job, so its tests cannot cover th
 
 Step 7 needs no signature and passes on an unsigned build.
 
+Last checked on October 19, 2026, on macOS 27.0.1 (26A434), signed with *Apple Development: Michael Hohlios (PF6B6HV656)* and the hardened runtime, not with a Developer ID and not notarized. Every step behaved as expected:
+
+- Steps 3–5 started the host with no SecurityAgent process running. The item was in the login keychain, and the copy re-signed under `host/9.9.9/` read it silently.
+- Step 6 brought up the dialog "security wants to use your confidential information stored in "com.vyttle.wiffletree.client-credential" in your keychain", asking for the login keychain password. The reader was killed without anything being clicked, and it printed nothing.
+- Step 7 exited 1 with `Name "/nonexistent/Wiffletree.app" in the access list: 100002` and left no item.
+
+Repeat the check with the Developer ID before the first launchd release.
+
 ## Current limits
 
 - Acceptance preserves the tested branch. **Merging is manual**: Wiffletree pushes a ticket's branch and opens its pull request through `publish_ticket` (see [repository owners and publishing](#repository-owners-and-publishing)), and never approves, merges, closes or comments on one. No dependency rebase or combined integration testing is implemented, and conflict fixing is limited to the PR keeper's one checked try. The PR watcher reads PR status and tells the coordinator when a PR merges, but accepting the ticket stays the coordinator's call.
