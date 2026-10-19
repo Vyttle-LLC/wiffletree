@@ -23,6 +23,59 @@ fn samples(
         json!({"measure":name,"samples":count,"p50_ms":ms(times[count/2]),"p95_ms":ms(times[count*95/100]),"max_ms":ms(times[count-1])}),
     )
 }
+/// What the desktop waits for from its own host process: a request written to `host.sock`,
+/// the host's actor and JSON, and the reply decoded. The host is the `workspace-host` built
+/// beside this example, started as a child the way the app starts one, with no provider found.
+fn over_the_socket(directory: &std::path::Path, session: &str) -> Result<Vec<serde_json::Value>> {
+    let examples = std::env::current_exe()?;
+    let binary = examples
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .join("workspace-host");
+    anyhow::ensure!(
+        binary.is_file(),
+        "Build {} first: cargo build --release -p workspace-host --bin workspace-host",
+        binary.display()
+    );
+    let launch = ChildLaunch::new(&binary, directory)
+        .env("SHELL", "/usr/bin/false")
+        .env("PATH", "/usr/bin:/bin")
+        .env("WORKSPACE_CLAUDE_BIN", "/nonexistent/claude")
+        .env("WORKSPACE_CODEX_BIN", "/nonexistent/codex");
+    let client = Client {
+        name: "benchmark".into(),
+        kind: "script".into(),
+    };
+    let client = HostClient::connect(Box::new(launch), client, Box::new(|_| {}))?;
+    let answer = |command: Command| -> Result<serde_json::Value> {
+        let reply = client.request(command).map_err(anyhow::Error::msg)?;
+        reply.recv_blocking()?.map_err(anyhow::Error::msg)
+    };
+    let results = vec![
+        samples(
+            "transcript page (100 rows) over host.sock, decoded",
+            1000,
+            |_| {
+                let page = answer(Command::Messages {
+                    session_id: session.into(),
+                    before: None,
+                    limit: 100,
+                })?;
+                std::hint::black_box(serde_json::from_value::<Vec<Message>>(page)?);
+                Ok(())
+            },
+        )?,
+        samples("workspace snapshot over host.sock, decoded", 200, |_| {
+            let snapshot = answer(Command::Snapshot)?;
+            std::hint::black_box(serde_json::from_value::<Snapshot>(snapshot)?);
+            Ok(())
+        })?,
+    ];
+    client.stop();
+    Ok(results)
+}
+
 /// A finished store's shape: 140 tickets, ten still open, each with an implementer and four
 /// verifiers, so 700 ticket agents, all archived but the open tickets' implementers. Every
 /// agent has a runtime, and each open implementer has a question waiting for its coordinator.
@@ -351,10 +404,11 @@ fn main() -> Result<()> {
         std::hint::black_box(host.snapshot()?);
         Ok(())
     })?;
+    let socket = over_the_socket(directory, &session.id)?;
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"build":if cfg!(debug_assertions){"debug"}else{"release"},"durability":"SQLite WAL / synchronous=FULL","fixture":{"projects":5,"repositories":"10 metadata fixtures; no Git history benchmark","sessions":750,"tickets":140,"snapshot_bytes":snapshot_bytes,"archive_bytes":archive_bytes,"messages":100000,"activity":100000,"source_logs":100000,"step_runs":101,"steps":MAX_RUN_STEPS+MAX_PAGE*20},"seed_ms":seed_ms,"results":results,"recovery":reopen,"excluded":"native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak"})
+            &json!({"build":if cfg!(debug_assertions){"debug"}else{"release"},"durability":"SQLite WAL / synchronous=FULL","fixture":{"projects":5,"repositories":"10 metadata fixtures; no Git history benchmark","sessions":750,"tickets":140,"snapshot_bytes":snapshot_bytes,"archive_bytes":archive_bytes,"messages":100000,"activity":100000,"source_logs":100000,"step_runs":101,"steps":MAX_RUN_STEPS+MAX_PAGE*20},"seed_ms":seed_ms,"results":results,"recovery":reopen,"socket":socket,"excluded":"native UI, GPU, provider runtimes/inference, in-memory step streaming, filesystem import and long soak"})
         )?
     );
     Ok(())
