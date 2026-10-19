@@ -226,7 +226,7 @@ mod tests {
         let child = reviewed_child(&mut f);
         let coordinator = f.coordinator.id.clone();
         let publish = |f: &mut Fixture| {
-            (f.host).publish_ticket(&coordinator, &child.id, Some("Child"), Some("Why"))
+            (f.host).publish_ticket(&coordinator, &child.id, Some("Child"), Some("Why"), None)
         };
         let error = publish(&mut f).expect_err("published before its parent");
         assert!(format!("{error:#}").contains("Publish that ticket first"));
@@ -284,11 +284,11 @@ mod tests {
         let parent = f.commit("a.txt", "one, fixed\n");
         let worktree = Path::new(&child.worktree);
         git(worktree, &["rebase", "-q", &parent]);
-        f.host.check_verified_head(&child, &head).unwrap();
+        f.host.check_verified_head(&child, &head, None).unwrap();
         // Undoing the parent's fix matches the reviewed tree against main, but not the child's
         // own reviewed changes, so it needs a new review.
         fs::write(worktree.join("a.txt"), "one\n").unwrap();
         git(worktree, &["commit", "-q", "-am", "revert the fix"]);
-        assert!(f.host.check_verified_head(&child, &head).is_err());
+        assert!(f.host.check_verified_head(&child, &head, None).is_err());
     }
 }

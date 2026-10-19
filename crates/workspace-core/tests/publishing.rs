@@ -77,6 +77,7 @@ fn a_ticket_stored_before_publishing_decodes_and_a_request_round_trips() {
         step: PublishStep::OpenPullRequest,
         waiting: Some("attention".into()),
         blocked_review_approved: false,
+        waived: None,
         approvals: 1,
         keeper: false,
     };

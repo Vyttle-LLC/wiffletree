@@ -10,7 +10,9 @@
 - **The Coordinating stock skill (v2)** narrows "a security decision" to an open finding that leaves a real, unresolved risk, not a ticket whose security wording or code merely changed and which the coordinator has read and judged sound. The new version merges into rewrites.
 - **The Reviews card's** "Full reviews per ticket" caption says the coordinator weighs more review and decides itself.
 
-The cap stays a hard limit; counting and enforcement do not change.
+- **A waiver of unreviewed commits at the cap.** Once a ticket has used every full review, `accept_ticket` and `publish_ticket` take a `waived` reason that may cover the commits past the verified one, when it names each by its short SHA of at least 7 characters. A missing commit is refused by its SHA. The covered commits are recorded with the waiver. Below the cap, nothing changes. A publish that relies on such a waiver always waits for the human, whose Inbox item lists the commits and the reason. Commits the PR keeper took from GitHub still need a review.
+
+The cap stays a hard limit; counting it does not change.
 
 ## Capabilities
 
@@ -20,10 +22,14 @@ The cap stays a hard limit; counting and enforcement do not change.
 ### Modified Capabilities
 - `ticket-verification`: the cycle cap's refusal and the blocked-cycle actions at the cap.
 - `native-workspace`: the "Full reviews per ticket" caption.
+- `ticket-workspaces`: accepting with a waiver of unreviewed commits at the cap.
+- `ticket-publishing`: `publish_ticket`'s `waived`, and the approval it always needs.
 
 ## Impact
 
 - `crates/workspace-host/src/verification.rs`: the cap refusal and the blocked cycle's actions.
+- `crates/workspace-host/src/live.rs` (`verified_head`, `accept_ticket`), `publish.rs`, `checkout.rs`, `service.rs`, `mcp.rs`.
+- `crates/workspace-core`: `Ticket.waived_commits`, `PublishRequest.waived`, `PublishAsk::UnreviewedCommits` and the approval card.
 - `crates/workspace-host/skills/core/coordinator.md`, `crates/workspace-host/skills/stock/coordinating.md`, and the tests that pin their versions.
 - `crates/workspace-desktop/src/verifiers.rs`: the caption.
 - Docs: `docs/PRD.md`.

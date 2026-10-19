@@ -1538,9 +1538,13 @@ pub struct Ticket {
     /// Every finding verifiers recorded, across all cycles, with the coordinator's decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ledger: Vec<LedgerEntry>,
-    /// Why the coordinator accepted the ticket after a blocked cycle.
+    /// Why the coordinator accepted the ticket after a blocked cycle, or with commits no review
+    /// checked once it had used every full review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiver: Option<String>,
+    /// The commits no review checked that the waiver named, past the verified commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waived_commits: Vec<String>,
     /// The ticket branch's GitHub PR, as the PR watcher last read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<PullRequest>,
@@ -1782,17 +1786,27 @@ pub struct PublishRequest {
     /// The Inbox item the step waits on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
-    /// The human approved this commit's steps on one item after a blocked review in an allowed
-    /// owner's repository.
+    /// The human approved this commit's steps on one item after a blocked review, or a waiver of
+    /// unreviewed commits, in an allowed owner's repository.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked_review_approved: bool,
     /// How many of this request's Inbox items the human approved.
     #[serde(default)]
     pub approvals: u8,
+    /// The coordinator's waiver for commits past the verified one, once the ticket had used
+    /// every full review. Such a request always waits for the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waived: Option<CommitWaiver>,
     /// Started by the host for the PR keeper: it never asks, and its result goes to the
     /// keeper's record rather than to an agent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keeper: bool,
+}
+/// A waiver for commits no review checked: its one-line reason and the commits it names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitWaiver {
+    pub reason: String,
+    pub commits: Vec<String>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

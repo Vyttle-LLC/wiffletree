@@ -135,7 +135,7 @@ fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
     let properties = publish["inputSchema"]["properties"].as_object().unwrap();
     let mut arguments: Vec<&str> = properties.keys().map(String::as_str).collect();
     arguments.sort_unstable();
-    assert_eq!(arguments, ["body", "ticket_id", "title"]);
+    assert_eq!(arguments, ["body", "ticket_id", "title", "waived"]);
     assert_eq!(
         publish["inputSchema"]["required"],
         serde_json::json!(["ticket_id"])

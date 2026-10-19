@@ -700,6 +700,49 @@ fn acceptance_refuses_commits_after_the_verified_one() {
     assert!(f.worktree().exists());
 }
 
+/// A ticket whose one full review passed, under a cap of `max_cycles` full reviews, with two
+/// commits after it.
+fn passed_then_two_commits(max_cycles: u32) -> (Fixture, [String; 2]) {
+    let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 2);
+    let mut settings = f.host.settings().verification;
+    settings.max_cycles = max_cycles;
+    f.host.set_verification(settings).unwrap();
+    f.verify().unwrap();
+    f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
+    let first = f.commit("late.txt", "after");
+    let second = f.commit("later.txt", "after that");
+    (f, [first, second])
+}
+
+#[test]
+fn at_the_cap_a_waiver_naming_every_unreviewed_commit_accepts_them() {
+    let (mut f, [first, second]) = passed_then_two_commits(1);
+
+    let refused = f
+        .accept(Some(&format!("Read {}; it holds up", &first[..7])))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains(&second[..7]), "{refused}");
+    assert!(!refused.contains(&first[..7]), "{refused}");
+    assert!(f.worktree().exists());
+
+    let waiver = format!("Read {} and {}; both hold up", &first[..7], &second[..9]);
+    f.accept(Some(&waiver)).unwrap();
+    let accepted = f.current();
+    assert_eq!(accepted.state, TicketState::Accepted);
+    assert_eq!(accepted.waiver.as_deref(), Some(waiver.as_str()));
+    assert_eq!(accepted.waived_commits, [first, second]);
+}
+
+#[test]
+fn below_the_cap_a_waiver_does_not_cover_unreviewed_commits() {
+    let (mut f, [first, second]) = passed_then_two_commits(2);
+    let waiver = format!("Read {} and {}", &first[..7], &second[..7]);
+    assert!(f.accept(Some(&waiver)).is_err());
+    assert_eq!(f.current().state, TicketState::Passed);
+    assert!(f.worktree().exists());
+}
+
 /// Records `provider`'s weekly window at `used` percent, resetting in a day.
 fn spend(host: &Host, provider: Provider, used: f64) {
     let at = std::time::SystemTime::now()
