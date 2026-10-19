@@ -4480,6 +4480,54 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_keeper_review_that_passes_with_a_skipped_verifier_tells_the_coordinator() {
+        let (mut f, r) = reviewing("true");
+        let mut settings = f.host.settings().verification;
+        settings.levels[1].verifiers.push("Regressions".into());
+        f.host.set_verification(settings).unwrap();
+        let correctness = workspace_core::Job::Verifier {
+            focus: "Correctness".into(),
+        };
+        let runs_on = f.host.resolve_job(&correctness, false, false).unwrap();
+        let other = match runs_on.profile.provider {
+            Provider::Claude => Provider::Codex,
+            Provider::Codex => Provider::Claude,
+        };
+        let mut selection = f.host.model_selection().unwrap();
+        let regressions = workspace_core::Job::Verifier {
+            focus: "Regressions".into(),
+        };
+        selection.row_mut(&regressions).unwrap().main = Line {
+            first: ModelProfile {
+                provider: other,
+                ..runs_on.profile
+            },
+            then: Then::Skip,
+        };
+        f.host.set_model_selection(&selection).unwrap();
+        let signed_out = ProviderStatus {
+            installed: true,
+            signed_in: false,
+            plan: None,
+        };
+        f.host.record_detection(other, &signed_out);
+        under_review(&mut f, &r);
+        assert_eq!(f.ticket().verification.unwrap().skipped.len(), 1);
+
+        verdict(&mut f, "Correctness", "passed", json!([]));
+
+        let outcome = format!("verification:{}:2:outcome", f.ticket);
+        assert_eq!(cycle_messages(&f), vec![outcome.clone()]);
+        let body = f.host.message(&outcome).unwrap().body;
+        let skipped = format!(
+            "- Reviewer · Regressions: skipped, {} is not signed in on this Mac; its row says skip",
+            other.label()
+        );
+        assert!(body.contains(&skipped), "{body}");
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+    }
+
+    #[test]
     fn a_failed_keeper_review_is_withdrawn_keeping_the_coordinators_decisions_and_the_branch_goes_back()
      {
         let (mut f, r) = reviewing("true");

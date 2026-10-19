@@ -1287,12 +1287,13 @@ impl Host {
         }
         ticket.end_unreviewed();
         self.save_ticket(&ticket)?;
-        // A keeper review that passed wakes the coordinator only to triage, and is pushed.
+        // A keeper review that passed wakes the coordinator only to triage or to hear of a
+        // skipped verifier, and is pushed.
         let untriaged = ticket
             .ledger
             .iter()
             .any(|e| e.status == EntryStatus::Untriaged && e.cycle == cycle);
-        if !keeper || untriaged {
+        if !keeper || untriaged || !skipped.is_empty() {
             self.send(&id, None, &coordinator, &summary)?;
         }
         if keeper {
