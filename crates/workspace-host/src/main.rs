@@ -140,7 +140,6 @@ fn serve(args: &[String]) -> Result<()> {
     let data = std::fs::canonicalize(&data)?;
     workspace_host::socket::socket_path(&data)?;
     let binary = std::env::current_exe()?;
-    workspace_core::host_copy::remove_unused(&data, &binary);
     let credential = if child {
         workspace_host::socket::read_credential(&mut io::stdin().lock())?
     } else {
@@ -149,6 +148,8 @@ fn serve(args: &[String]) -> Result<()> {
         workspace_host::keychain::credential(&data, &trusted)?
     };
     let service = workspace_host::service::Service::start(data.clone(), binary.clone())?;
+    // Only now that this host owns the store is no other copy in use.
+    workspace_core::host_copy::remove_unused(&data, &binary);
     let options = workspace_host::socket::Options {
         credential,
         // SAFETY: getuid cannot fail.

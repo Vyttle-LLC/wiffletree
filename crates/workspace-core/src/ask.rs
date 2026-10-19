@@ -31,6 +31,10 @@ impl<R: DeserializeOwned> Ask<R> {
 pub fn snapshot() -> Ask<Snapshot> {
     Ask::new(Command::Snapshot)
 }
+/// Answered with nothing once the host has stopped its turns.
+pub fn stop_agents_and_quit() -> Ask<()> {
+    Ask::new(Command::StopAgentsAndQuit)
+}
 pub fn archive() -> Ask<Archive> {
     Ask::new(Command::Archive)
 }

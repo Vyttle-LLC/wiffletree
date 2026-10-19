@@ -1110,75 +1110,75 @@ fn main() -> anyhow::Result<()> {
     let preferences = Preferences::load(&home);
     let bridge = Bridge::start(&home, default_folder, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx| {
-            gpui_component::init(cx);
-            cx.set_global(preferences);
-            cx.set_global(attachment_chips::HostImages::new(bridge.clone()));
-            apply_theme(cx);
-            // Under the System appearance, macOS can switch modes while the app runs. The component
-            // theme only changes when told, so every window re-applies it or keeps stale colours.
-            cx.observe_new(|_: &mut Root, window, _| {
-                if let Some(window) = window {
-                    window
-                        .observe_window_appearance(|_, cx| apply_theme(cx))
-                        .detach();
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    application.on_reopen(background::reopened);
+    application.run(move |cx| {
+        gpui_component::init(cx);
+        cx.set_global(preferences);
+        cx.set_global(attachment_chips::HostImages::new(bridge.clone()));
+        apply_theme(cx);
+        // Under the System appearance, macOS can switch modes while the app runs. The component
+        // theme only changes when told, so every window re-applies it or keeps stale colours.
+        cx.observe_new(|_: &mut Root, window, _| {
+            if let Some(window) = window {
+                window
+                    .observe_window_appearance(|_, cx| apply_theme(cx))
+                    .detach();
+            }
+        })
+        .detach();
+        cx.bind_keys([
+            KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
+            KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
+            KeyBinding::new("cmd-n", NewProject, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
+        cx.on_action(|_: &About, _| show_about());
+        // Settings needs no main window, so it opens even after that one is closed.
+        // Deferred so ⌘, pressed inside Settings can still focus that window.
+        let settings_bridge = bridge.clone();
+        cx.on_action(move |_: &OpenSettings, cx| {
+            let bridge = settings_bridge.clone();
+            cx.defer(move |cx| settings::Settings::open(bridge, cx));
+        });
+        cx.set_menus(vec![
+            Menu::new("Wiffletree").items([
+                MenuItem::action("About Wiffletree", About),
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Quit Wiffletree", Quit),
+            ]),
+            Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
+        ]);
+        register_window_actions(cx);
+        let reopen = bridge.clone();
+        background::install(
+            bridge.clone(),
+            move |cx| {
+                open_main_window(reopen.clone(), cx);
+            },
+            cx,
+        );
+        let window = open_main_window(bridge, cx);
+        if let Some(steps) = steps {
+            // The untyped handle leaves the root view free for the events a step dispatches.
+            let window: AnyWindowHandle = window.into();
+            let _ = automation::NativeWindow::stay_on_stage();
+            cx.spawn(async move |cx| {
+                while let Ok((step, reply)) = steps.recv().await {
+                    let outcome = window
+                        .update(cx, |_, window, cx| step.perform(window, cx))
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = reply.send(outcome).await;
                 }
             })
             .detach();
-            cx.bind_keys([
-                KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
-                KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
-                KeyBinding::new("cmd-n", NewProject, None),
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("cmd-q", Quit, None),
-            ]);
-            cx.on_action(|_: &About, _| show_about());
-            // Settings needs no main window, so it opens even after that one is closed.
-            // Deferred so ⌘, pressed inside Settings can still focus that window.
-            let settings_bridge = bridge.clone();
-            cx.on_action(move |_: &OpenSettings, cx| {
-                let bridge = settings_bridge.clone();
-                cx.defer(move |cx| settings::Settings::open(bridge, cx));
-            });
-            cx.set_menus(vec![
-                Menu::new("Wiffletree").items([
-                    MenuItem::action("About Wiffletree", About),
-                    MenuItem::action("Settings…", OpenSettings),
-                    MenuItem::action("Check for Updates…", CheckForUpdates),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit Wiffletree", Quit),
-                ]),
-                Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
-            ]);
-            register_window_actions(cx);
-            let reopen = bridge.clone();
-            background::install(
-                bridge.clone(),
-                move |cx| {
-                    open_main_window(reopen.clone(), cx);
-                },
-                cx,
-            );
-            let window = open_main_window(bridge, cx);
-            if let Some(steps) = steps {
-                // The untyped handle leaves the root view free for the events a step dispatches.
-                let window: AnyWindowHandle = window.into();
-                let _ = automation::NativeWindow::stay_on_stage();
-                cx.spawn(async move |cx| {
-                    while let Ok((step, reply)) = steps.recv().await {
-                        let outcome = window
-                            .update(cx, |_, window, cx| step.perform(window, cx))
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = reply.send(outcome).await;
-                    }
-                })
-                .detach();
-            } else {
-                cx.activate(true);
-            }
-        });
+        } else {
+            cx.activate(true);
+        }
+    });
     Ok(())
 }
 

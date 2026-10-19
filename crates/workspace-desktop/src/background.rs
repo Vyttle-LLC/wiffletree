@@ -6,8 +6,13 @@
 //! simply quits.
 use crate::{bridge::Bridge, menu_bar, update};
 use gpui::*;
-use std::rc::Rc;
-use workspace_core::{Command, Snapshot, Status, ask};
+use std::{rc::Rc, time::Duration};
+use workspace_core::{Snapshot, Status, ask};
+
+/// How long quitting waits to hear how many agents work before it just quits.
+const COUNT_WAIT: Duration = Duration::from_secs(2);
+/// How long Stop agents and quit waits for the host, which answers once its turns have stopped.
+const STOP_WAIT: Duration = Duration::from_secs(60);
 
 /// What quitting does.
 #[derive(Debug, PartialEq, Eq)]
@@ -83,6 +88,30 @@ pub(crate) fn exiting(
     }
 }
 
+/// What ⌘Q does beside `bridge`'s host, asking the host how many agents work. A host that is out
+/// of reach, refuses the app or does not answer within `COUNT_WAIT` cannot say, so the app just
+/// quits, which leaves a launchd host and its turns running. Blocks; run it off the main thread.
+pub(crate) fn plan_quit(bridge: &Bridge) -> Quit {
+    if !bridge.outlives_app() {
+        return Quit::Exit { stop_agents: false };
+    }
+    match bridge.ask_within(ask::snapshot(), COUNT_WAIT) {
+        Ok(snapshot) => Quit::requested(true, working(&snapshot)),
+        Err(_) => Quit::Exit { stop_agents: false },
+    }
+}
+
+/// Runs `blocking` on a thread of its own and hands its result back.
+fn off_main_thread<T: Send + 'static>(
+    blocking: impl FnOnce() -> T + Send + 'static,
+) -> async_channel::Receiver<T> {
+    let (sender, receiver) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = sender.send_blocking(blocking());
+    });
+    receiver
+}
+
 /// The app's way of quitting, and the menu bar icon while it runs in the background.
 struct Lifecycle {
     bridge: Bridge,
@@ -143,25 +172,24 @@ pub(crate) fn install(bridge: Bridge, open_window: impl Fn(&mut App) + 'static, 
     }
 }
 
-/// ⌘Q: quits as `Quit::requested` says, once the host has said how many agents work.
+/// ⌘Q: quits as `plan_quit` says.
 fn quit(cx: &mut App) {
     let bridge = cx.global::<Lifecycle>().bridge.clone();
-    if !bridge.outlives_app() {
-        return exit(false, cx);
-    }
-    let snapshot = bridge.ask(ask::snapshot());
+    let plan = off_main_thread(move || plan_quit(&bridge));
     cx.spawn(async move |cx| {
-        // An unreachable host cannot say whether agents work, so the app just quits.
-        let plan = match snapshot {
-            Ok(snapshot) => match snapshot.await {
-                Ok(snapshot) => Quit::requested(true, working(&snapshot)),
-                Err(_) => Quit::Exit { stop_agents: false },
-            },
-            Err(_) => Quit::Exit { stop_agents: false },
-        };
-        cx.update(|cx| act(plan, cx));
+        if let Ok(plan) = plan.recv().await {
+            cx.update(|cx| act(plan, cx));
+        }
     })
     .detach();
+}
+
+/// Opening the app while it runs, from the Finder or the Dock, brings it back as Open
+/// Wiffletree does.
+pub(crate) fn reopened(cx: &mut App) {
+    if cx.has_global::<Lifecycle>() {
+        come_forward(cx);
+    }
 }
 
 fn act(plan: Quit, cx: &mut App) {
@@ -221,21 +249,17 @@ fn come_forward(cx: &mut App) {
     cx.activate(true);
 }
 
-/// Ends the app; with `stop_agents`, once the host has stopped them and answered.
+/// Ends the app; with `stop_agents`, once the host has stopped them and answered, or at once
+/// when it is out of reach or refuses the app, since then it cannot stop them.
 fn exit(stop_agents: bool, cx: &mut App) {
     if !stop_agents {
         return cx.quit();
     }
-    let stopped = cx
-        .global::<Lifecycle>()
-        .bridge
-        .send(Command::StopAgentsAndQuit);
+    let bridge = cx.global::<Lifecycle>().bridge.clone();
+    let stopped =
+        off_main_thread(move || bridge.ask_within(ask::stop_agents_and_quit(), STOP_WAIT));
     cx.spawn(async move |cx| {
-        let result = match stopped {
-            Ok(stopped) => stopped.await.map(|_| ()),
-            Err(error) => Err(error),
-        };
-        if let Err(error) = result {
+        if let Ok(Err(error)) = stopped.recv().await {
             eprintln!("Stop agents and quit: {error}");
         }
         cx.update(|cx| cx.quit());
@@ -266,7 +290,9 @@ fn count_working(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     // Not a glob: gpui's `test` attribute would shadow the standard one.
-    use super::{Bridge, PendingUpdate, Quit, QuitPrompt, exiting, menu_bar, update, working};
+    use super::{
+        Bridge, PendingUpdate, Quit, QuitPrompt, exiting, menu_bar, plan_quit, update, working,
+    };
     use crate::bridge::tests::serve;
     use std::{
         os::unix::fs::PermissionsExt as _,
@@ -299,6 +325,61 @@ mod tests {
     #[test]
     fn with_nothing_working_quitting_asks_nothing_and_stops_nothing() {
         assert_eq!(Quit::requested(true, 0), Quit::Background);
+    }
+
+    /// A launchd host at `socket`, as far as the bridge can tell.
+    struct Launchd(std::path::PathBuf);
+    impl Launch for Launchd {
+        fn endpoint(&mut self, _: &std::sync::atomic::AtomicBool) -> std::io::Result<Endpoint> {
+            Ok(Endpoint {
+                socket: self.0.clone(),
+                credential: None,
+            })
+        }
+        fn outlives_app(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn quitting_beside_a_reachable_launchd_host_with_nothing_working_goes_to_the_background() {
+        let served = serve(|_| {});
+        let bridge = Bridge::connect(Box::new(Launchd(served.data.path().join(SOCKET_FILE))));
+        assert_eq!(plan_quit(&bridge), Quit::Background);
+        bridge.shutdown();
+    }
+
+    #[test]
+    fn beside_a_host_that_refuses_the_app_quitting_and_stopping_agents_end_at_once() {
+        use std::io::{BufRead, Write};
+        let folder = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let socket = folder.path().join(SOCKET_FILE);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut line = String::new();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let _ = reader.read_line(&mut line);
+                let refusal = serde_json::json!({"refused": {
+                    "host_protocols": [PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 1],
+                    "client_protocols": [PROTOCOL_VERSION, PROTOCOL_VERSION],
+                    "host_version": "9.0.0", "working": 0}});
+                let _ = writeln!(&stream, "{refusal}");
+            }
+        });
+        let bridge = Bridge::connect(Box::new(Launchd(socket)));
+        assert!(bridge.refusal().is_some());
+
+        let asked = Instant::now();
+        assert_eq!(plan_quit(&bridge), Quit::Exit { stop_agents: false });
+        let stop = bridge.ask_within(ask::stop_agents_and_quit(), Duration::from_secs(60));
+        assert!(stop.is_err(), "nothing can stop the agents");
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            asked.elapsed()
+        );
+        bridge.shutdown();
     }
 
     /// The host binary `cargo` built beside this test.

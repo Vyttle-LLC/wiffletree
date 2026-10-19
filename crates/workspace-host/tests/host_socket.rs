@@ -417,6 +417,41 @@ fn a_host_run_from_a_versioned_copy_keeps_its_path_and_removes_unused_copies() {
 }
 
 #[test]
+fn a_second_host_from_another_copy_is_refused_and_leaves_the_running_hosts_copy() {
+    let data = tempfile::tempdir().unwrap();
+    let running = host_copy::path(data.path(), "1.0.0");
+    std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &running).unwrap();
+    let data_path = data.path().to_owned();
+    let fixture = Fixture::from(&running, None, data, |_| {});
+    // An update arrives while the host runs: the app copies the new version beside it.
+    let second = host_copy::path(&data_path, "2.0.0");
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &second).unwrap();
+
+    let mut command = process::Command::new(&second);
+    command
+        .args(["serve", "--data-dir"])
+        .arg(fixture.data.path())
+        .arg("--child")
+        .envs(isolated(fixture.shell.path()))
+        .stderr(std::process::Stdio::piped());
+    let mut refused = ChildHost::start_command(command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = refused.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the second host kept running");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    assert!(!status.success(), "the store is the running host's");
+    assert!(running.exists(), "the running host's copy is kept");
+    assert!(snapshot(&mut fixture.welcomed(None)).projects.is_empty());
+}
+
+#[test]
 fn inbox_answers_need_the_apps_credential_and_other_commands_do_not() {
     let fixture = Fixture::new(|host| {
         let project = host.create_project("Questions").unwrap();

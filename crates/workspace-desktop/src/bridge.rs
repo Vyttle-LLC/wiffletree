@@ -186,8 +186,17 @@ impl Bridge {
     /// Sends `ask` and waits briefly for its answer, for a reply the app needs before it can go
     /// on. Fails at once while the host is out of reach.
     pub(crate) fn ask_now<R: DeserializeOwned>(&self, ask: Ask<R>) -> Result<R, String> {
+        self.ask_within(ask, BLOCKING_REPLY)
+    }
+    /// Sends `ask` and waits at most `timeout` for its answer. Fails at once while the host is
+    /// out of reach or refuses the app; run it off the main thread.
+    pub(crate) fn ask_within<R: DeserializeOwned>(
+        &self,
+        ask: Ask<R>,
+        timeout: Duration,
+    ) -> Result<R, String> {
         let client = self.client.as_ref().map_err(Clone::clone)?;
-        let reply = client.request_blocking(ask.command().clone(), BLOCKING_REPLY)?;
+        let reply = client.request_blocking(ask.command().clone(), timeout)?;
         ask.decode(reply)
     }
     /// Disconnects. A child host stops, which stops its running turns; a launchd host keeps
