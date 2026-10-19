@@ -302,6 +302,19 @@ Only builds with `WIFFLETREE_VERSION` embedded, meaning CI releases, update them
 
 **Restart to update** then replaces the bundle in place after the app exits and reopens it. An ordinary quit installs the update without reopening. Restarting interrupts active turns like any quit; the sessions it cut off come back Interrupted, and the rest of each running project carries on. If the app's folder isn't writable, for example when it's run from a translocated download, the updater stays off.
 
+`crates/workspace-host/examples/keychain_probe.rs` checks how the Keychain guards the client credential (`openspec/changes/standalone-host/design.md`, section 2). It creates, reads and deletes a generic-password item without printing the secret. Sign the built example, copy it, and read the item from each copy and from `security find-generic-password -w`:
+
+```sh
+cargo build --release -p workspace-host --example keychain_probe
+cp target/release/examples/keychain_probe /tmp/kc/host
+codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.host --sign "<identity>" /tmp/kc/host
+/tmp/kc/host create com.vyttle.wiffletree.spike [--trust <other binary>]
+/tmp/kc/host read com.vyttle.wiffletree.spike
+/tmp/kc/host delete com.vyttle.wiffletree.spike
+```
+
+`--data-protection` and `--access-group <team ID>.<group>` use the data-protection keychain instead, which needs the `keychain-access-groups` entitlement and a provisioning profile. Use only a test service name, never a real Wiffletree item.
+
 ## Current limits
 
 - Acceptance preserves the tested branch. **Merging is manual**: Wiffletree pushes a ticket's branch and opens its pull request through `publish_ticket` (see [repository owners and publishing](#repository-owners-and-publishing)), and never approves, merges, closes or comments on one. No dependency rebase or combined integration testing is implemented, and conflict fixing is limited to the PR keeper's one checked try. The PR watcher reads PR status and tells the coordinator when a PR merges, but accepting the ticket stays the coordinator's call.

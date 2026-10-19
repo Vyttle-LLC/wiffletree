@@ -8707,6 +8707,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "core-foundation 0.10.1",
  "libc",
  "rusqlite",
  "serde",
