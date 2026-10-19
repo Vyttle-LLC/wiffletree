@@ -73,7 +73,12 @@ impl Workspace {
         let Some(wait) = self.progress_fetch.begin(Duration::ZERO) else {
             return;
         };
-        let after = self.shared.progress.revision;
+        // After a resync the host may have restarted with revisions from zero, so the board is
+        // read whole, which replaces it.
+        let after = match self.bridge.take_progress_resync() {
+            true => 0,
+            false => self.shared.progress.revision,
+        };
         let page = paced_reply(
             self.bridge.clone(),
             ask::progress(after),

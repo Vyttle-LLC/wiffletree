@@ -4,7 +4,14 @@
 use async_channel::{Receiver, Sender};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use workspace_core::{ask::Ask, *};
 
 /// How long the app waits for a reply it needs before it can go on, such as which file a link
@@ -27,6 +34,8 @@ struct Wakes {
     steps: (Sender<()>, Receiver<()>),
     progress: (Sender<()>, Receiver<()>),
     usage: (Sender<()>, Receiver<()>),
+    /// Set by `resync`: the host may have restarted, and its progress revisions with it.
+    progress_resynced: Arc<AtomicBool>,
 }
 impl Wakes {
     fn new() -> Self {
@@ -36,6 +45,7 @@ impl Wakes {
             steps: wake(),
             progress: wake(),
             usage: wake(),
+            progress_resynced: Arc::default(),
         }
     }
     fn wake(&self, kind: &EventKind) {
@@ -44,7 +54,10 @@ impl Wakes {
             EventKind::Steps { .. } => vec![&self.steps],
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
-            EventKind::Resync => vec![&self.state, &self.steps, &self.progress, &self.usage],
+            EventKind::Resync => {
+                self.progress_resynced.store(true, Ordering::Relaxed);
+                vec![&self.state, &self.steps, &self.progress, &self.usage]
+            }
         };
         for (sender, _) in woken {
             let _ = sender.try_send(());
@@ -166,6 +179,10 @@ impl Bridge {
     pub(crate) fn progress_changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.progress)
     }
+    /// Whether the progress board must be read whole, once: true once after each `resync`.
+    pub(crate) fn take_progress_resync(&self) -> bool {
+        self.wakes.progress_resynced.swap(false, Ordering::Relaxed)
+    }
     /// Wakes when usage was recorded; fetch usage and quotas.
     pub(crate) fn usage_changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.usage)
@@ -226,6 +243,16 @@ pub(crate) mod tests {
             _listener: listener,
             service,
         }
+    }
+
+    #[test]
+    fn after_a_resync_the_progress_board_is_read_whole_once() {
+        let bridge = Bridge::unavailable(String::new());
+        bridge.wakes.wake(&EventKind::Progress);
+        assert!(!bridge.take_progress_resync());
+        bridge.wakes.wake(&EventKind::Resync);
+        assert!(bridge.take_progress_resync());
+        assert!(!bridge.take_progress_resync());
     }
 
     #[test]
