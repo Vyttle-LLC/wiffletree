@@ -664,11 +664,12 @@ impl Host {
                     "Sorting comments needs a Claude model in the PR keeper's row in Models",
                 )?,
                 waits: false,
+                skip: None,
                 until: None,
                 reason: "The PR keeper's Claude choice: sorting runs with every tool turned off"
                     .into(),
             },
-            KeeperSession::Try => self.resolve_job(&workspace_core::Job::Keeper, false)?,
+            KeeperSession::Try => self.resolve_job(&workspace_core::Job::Keeper, false, false)?,
         };
         let mut replaced = vec![];
         let agent = self.atomically(|host| {
@@ -3555,7 +3556,10 @@ pub(crate) mod tests {
             model: model.into(),
             effort: "medium".into(),
         };
-        Line { first, then: None }
+        Line {
+            first,
+            then: Then::Wait,
+        }
     }
     /// Saves the PR keeper's row as one model on `provider`, or none.
     pub(crate) fn set_keeper(host: &mut Host, provider: Option<Provider>) {
@@ -4261,7 +4265,11 @@ pub(crate) mod tests {
         let correctness = workspace_core::Job::Verifier {
             focus: "Correctness".into(),
         };
-        let profile = f.host.resolve_job(&correctness, false).unwrap().profile;
+        let profile = f
+            .host
+            .resolve_job(&correctness, false, false)
+            .unwrap()
+            .profile;
         let provider = profile.provider;
         let reviewer = |focus: &str| VerifierConfig {
             role: Role::Reviewer,
@@ -4469,6 +4477,54 @@ pub(crate) mod tests {
         assert_eq!(cycle_messages(&f), vec![outcome.clone()]);
         let body = f.host.message(&outcome).unwrap().body;
         assert!(body.contains("Triage the untriaged findings"), "{body}");
+    }
+
+    #[test]
+    fn a_keeper_review_that_passes_with_a_skipped_verifier_tells_the_coordinator() {
+        let (mut f, r) = reviewing("true");
+        let mut settings = f.host.settings().verification;
+        settings.levels[1].verifiers.push("Regressions".into());
+        f.host.set_verification(settings).unwrap();
+        let correctness = workspace_core::Job::Verifier {
+            focus: "Correctness".into(),
+        };
+        let runs_on = f.host.resolve_job(&correctness, false, false).unwrap();
+        let other = match runs_on.profile.provider {
+            Provider::Claude => Provider::Codex,
+            Provider::Codex => Provider::Claude,
+        };
+        let mut selection = f.host.model_selection().unwrap();
+        let regressions = workspace_core::Job::Verifier {
+            focus: "Regressions".into(),
+        };
+        selection.row_mut(&regressions).unwrap().main = Line {
+            first: ModelProfile {
+                provider: other,
+                ..runs_on.profile
+            },
+            then: Then::Skip,
+        };
+        f.host.set_model_selection(&selection).unwrap();
+        let signed_out = ProviderStatus {
+            installed: true,
+            signed_in: false,
+            plan: None,
+        };
+        f.host.record_detection(other, &signed_out);
+        under_review(&mut f, &r);
+        assert_eq!(f.ticket().verification.unwrap().skipped.len(), 1);
+
+        verdict(&mut f, "Correctness", "passed", json!([]));
+
+        let outcome = format!("verification:{}:2:outcome", f.ticket);
+        assert_eq!(cycle_messages(&f), vec![outcome.clone()]);
+        let body = f.host.message(&outcome).unwrap().body;
+        let skipped = format!(
+            "- Reviewer · Regressions: skipped, {} is not signed in on this Mac; its row says skip",
+            other.label()
+        );
+        assert!(body.contains(&skipped), "{body}");
+        assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
     }
 
     #[test]
@@ -4840,6 +4896,28 @@ pub(crate) mod tests {
             };
             assert!(open.contains(why), "{focus}: {open}");
         }
+        // Every verifier of the level would skip.
+        let skipped = refused(&|f| {
+            let mut selection = f.host.model_selection().unwrap();
+            let correctness = workspace_core::Job::Verifier {
+                focus: "Correctness".into(),
+            };
+            let row = selection.row_mut(&correctness).unwrap();
+            row.main = Line {
+                first: ModelProfile {
+                    provider: Provider::Claude,
+                    model: "opus".into(),
+                    effort: "high".into(),
+                },
+                then: Then::Skip,
+            };
+            f.host.set_model_selection(&selection).unwrap();
+            claude_weekly(&f.host, 97.);
+        });
+        assert!(
+            skipped.contains("Every verifier of Light would be skipped"),
+            "{skipped}"
+        );
         // Re-checks are not counted against the cycle cap.
         let (mut f, _r) = reviewing("true");
         let mut settings = f.host.settings().verification;

@@ -518,7 +518,7 @@ impl Host {
         };
         let selection = self.model_selection()?;
         ensure!(selection.is_saved(), policies::NO_SETUP);
-        let pick = self.resolve_job(&Job::Coordinator, false)?;
+        let pick = self.resolve_job(&Job::Coordinator, false, false)?;
         let session = Session {
             id: new_id(),
             project_id: project.id.clone(),

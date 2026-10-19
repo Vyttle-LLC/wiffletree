@@ -100,7 +100,7 @@ fn sorting_needs_a_claude_model() {
                 model: "m".into(),
                 effort: "low".into(),
             },
-            then: None,
+            then: Then::Wait,
         },
         small: None,
     };

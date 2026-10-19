@@ -414,6 +414,7 @@ fn cycle(
         queued_at: None,
         small: false,
         keeper: false,
+        skipped: vec![],
         outcome,
         rounds: vec![],
     }
@@ -552,6 +553,7 @@ fn latest_results_keep_each_verifiers_last_round() {
         queued_at: None,
         small: false,
         keeper: false,
+        skipped: vec![],
         outcome: VerificationOutcome::Running,
         rounds: vec![
             VerificationRound {

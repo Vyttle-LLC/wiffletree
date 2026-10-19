@@ -2,7 +2,7 @@
 //! who runs each job, the reviews and the notes coordinators read.
 use super::*;
 use gpui_component::{
-    Disableable, Sizable,
+    ActiveTheme, Disableable, Sizable,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
@@ -491,7 +491,7 @@ impl ModelsPage {
                     .gap_2()
                     .child("Move to the next choice once any limit (5-hour, weekly or another) passes")
                     .child(picker)
-                    .child(". When every choice is past it, wait for the earliest reset."),
+                    .child(". When every choice is past it, wait for the earliest reset, or skip the review where its row says skip."),
             )
             .child(hint(
                 "Applies when an agent starts. An agent that is already running keeps its model. Fresh reviewers start each review, so they pick up a switch on the next review. Shared with your other Macs.",
@@ -499,19 +499,23 @@ impl ModelsPage {
             ))
     }
 
-    /// A dropdown for one cell of `job`'s row, which holds `current`; `first` is the provider
-    /// of the cell's line's first choice, which a then choice may not use.
+    /// A dropdown for one cell of `job`'s row, which holds `current`, or for a then choice skip
+    /// when `skips`; `first` is the provider of the cell's line's first choice, which a then
+    /// choice may not use. Only a verifier's then choice offers skip.
     fn cell_menu(
         &self,
         job: &Job,
         which: Cell,
         current: Option<ModelProfile>,
+        skips: bool,
         first: Option<Provider>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let catalog = self.catalog.clone();
+        let may_skip = which.then && matches!(job, Job::Verifier { .. });
         let label = match (&current, which) {
             (Some(profile), _) => models::cell_label(&catalog, profile),
+            (None, Cell { then: true, .. }) if skips => "skip".to_owned(),
             (None, Cell { then: true, .. }) => "wait".to_owned(),
             (None, Cell { small: true, .. }) => "same".to_owned(),
             (None, _) => "No model".to_owned(),
@@ -557,7 +561,34 @@ impl ModelsPage {
                         });
                     }
                 };
-                if let Some(none) = none {
+                if may_skip {
+                    let resets = first.map_or("its subscription", Provider::label);
+                    let skip = {
+                        let (weak, job) = (weak.clone(), job.clone());
+                        move |_: &ClickEvent, _: &mut Window, c: &mut App| {
+                            let _ = weak.update(c, |v, c| {
+                                if let Some(row) = v.model_selection.row_mut(&job) {
+                                    models::set_then(row, which.small, Then::Skip);
+                                }
+                                c.notify();
+                            });
+                        }
+                    };
+                    menu = menu
+                        .item(
+                            titled(
+                                "Wait for the reset",
+                                format!("The review runs once {resets} resets"),
+                            )
+                            .checked(current.is_none() && !skips)
+                            .on_click(set(None)),
+                        )
+                        .item(
+                            titled("Skip this review", "The others run without it".into())
+                                .checked(skips)
+                                .on_click(skip),
+                        );
+                } else if let Some(none) = none {
                     menu = menu.item(
                         PopupMenuItem::new(none)
                             .checked(current.is_none())
@@ -588,6 +619,12 @@ impl ModelsPage {
             ui::now(),
         );
         let reason = match &pick {
+            Ok(pick) if pick.skip.is_some() => {
+                let again = (pick.until.map(models::reset_time)).map_or(String::new(), |at| {
+                    format!(" Runs again after the reset, {at}.")
+                });
+                format!("Skipped: {}.{again}", pick.reason)
+            }
             Ok(pick) => pick.reason.clone(),
             Err(why) => why.clone(),
         };
@@ -596,6 +633,8 @@ impl ModelsPage {
             Now::Moved(provider) => pill(provider.label(), p.blue),
             Now::Waits(Some(at)) => pill(format!("Waits · {at}"), p.yellow),
             Now::Waits(None) => pill("Waits", p.yellow),
+            Now::Skips(Some(at)) => pill(format!("Skips · {at}"), p.subtle),
+            Now::Skips(None) => pill("Skips", p.subtle),
             Now::Cannot => pill("Cannot start", p.red),
             Now::Checking => pill("Checking…", p.subtle),
         };
@@ -615,8 +654,9 @@ impl ModelsPage {
             Some(&row.main)
         };
         let current = models::cell(row, which).cloned();
+        let skips = which.then && line.is_some_and(|line| line.then == Then::Skip);
         let first = line.map(|line| line.first.provider);
-        self.cell_menu(&row.job, which, current, first, cx)
+        self.cell_menu(&row.job, which, current, skips, first, cx)
     }
     fn job_row(
         &self,
@@ -782,7 +822,7 @@ impl ModelsPage {
             .child(
                 div()
                     .flex_1()
-                    .child(self.cell_menu(&Job::Keeper, first, None, None, cx)),
+                    .child(self.cell_menu(&Job::Keeper, first, None, false, None, cx)),
             )
             .child(hint("No PR keeper model: its model triggers stay off.", p).flex_1())
     }
@@ -1028,4 +1068,16 @@ impl Render for ModelsPage {
             cx,
         )
     }
+}
+
+/// A menu item with a title and a line under it.
+fn titled(title: &'static str, detail: String) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, cx| {
+        let p = palette(cx.theme().is_dark());
+        div()
+            .flex()
+            .flex_col()
+            .child(title)
+            .child(hint(detail.clone(), p))
+    })
 }

@@ -638,13 +638,19 @@ impl Host {
             now: now(),
         };
         let line = |line: &Line| json!({"first": line.first, "then": line.then});
-        let right_now =
-            |row: &JobRow, small: bool| match resolve(row, small, &limits, &policies::reset_time) {
-                Ok(pick) => {
-                    json!({"profile": pick.profile, "waits": pick.waits, "reason": pick.reason})
-                }
-                Err(error) => json!({"cannot_start": format!("{error:#}")}),
-            };
+        let right_now = |row: &JobRow, small: bool| match resolve(
+            row,
+            small,
+            true,
+            &limits,
+            &policies::reset_time,
+        ) {
+            Ok(pick) if pick.skip.is_some() => json!({"skips": true, "reason": pick.reason}),
+            Ok(pick) => {
+                json!({"profile": pick.profile, "waits": pick.waits, "reason": pick.reason})
+            }
+            Err(error) => json!({"cannot_start": format!("{error:#}")}),
+        };
         let jobs: Vec<Value> = (selection.jobs.iter())
             .map(|row| {
                 let mut entry = json!({"job": row.job, "name": row.job.name(),
@@ -794,7 +800,7 @@ impl Host {
                     return self.assignment_result(&existing);
                 }
                 let job = self.assignment_job(role, focus, args["like"].as_str())?;
-                let pick = self.resolve_job(&job, small)?;
+                let pick = self.resolve_job(&job, small, false)?;
                 let instruction = string("instruction")?;
                 // The agent, its instruction and the ticket update exist only with the agent's
                 // model and reason, or not at all.

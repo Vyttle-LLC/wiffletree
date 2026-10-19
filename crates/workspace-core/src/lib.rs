@@ -2111,6 +2111,18 @@ pub struct Verification {
     /// Started by the host for the PR keeper.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keeper: bool,
+    /// Verifiers the cycle left out as it was created: their row says skip and their first
+    /// choice was spent or not signed in. They start no session and never block the cycle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedVerifier>,
+}
+/// A verifier a cycle went ahead without, and why, such as "Claude's weekly limit was at 96%;
+/// its row says skip".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedVerifier {
+    pub role: Role,
+    pub focus: String,
+    pub reason: String,
 }
 /// A level's name and kind as they were when a cycle started at it; later edits to the level do
 /// not change them.
@@ -2186,14 +2198,23 @@ impl Verification {
             .collect();
         focuses.join(", ")
     }
+    /// The skipped verifiers as a line ends, such as " · Claude skipped", or nothing.
+    fn skipped_suffix(&self) -> String {
+        let focuses: Vec<&str> = self.skipped.iter().map(|s| s.focus.as_str()).collect();
+        match focuses.is_empty() {
+            true => String::new(),
+            false => format!(" · {} skipped", focuses.join(", ")),
+        }
+    }
     /// A passed cycle with the commit it verified, such as "Cycle 1 · Full passed at 9e03c1b ·
-    /// Tests, Correctness, Regressions".
+    /// Tests, Correctness, Regressions", and any verifiers it skipped.
     pub fn passed_line(&self) -> String {
         format!(
-            "{} passed at {} · {}",
+            "{} passed at {} · {}{}",
             self.cycle_label("Cycle"),
             short_sha(self.verified_commit().unwrap_or_default()),
-            self.focuses()
+            self.focuses(),
+            self.skipped_suffix()
         )
     }
     /// How the review ended for `commit`, such as "Cycle 2 · Light re-check passed at this
@@ -2213,7 +2234,11 @@ impl Verification {
                         short_sha(verified)
                     )
                 };
-                format!("{cycle} passed {at} · {}", self.focuses())
+                format!(
+                    "{cycle} passed {at} · {}{}",
+                    self.focuses(),
+                    self.skipped_suffix()
+                )
             }
             _ => {
                 let results: Vec<String> = results

@@ -934,6 +934,7 @@ mod tests {
             queued_at: None,
             small: false,
             keeper: false,
+            skipped: vec![],
             outcome,
             rounds: (1..=rounds)
                 .map(|round| VerificationRound {

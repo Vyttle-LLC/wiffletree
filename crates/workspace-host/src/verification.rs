@@ -444,20 +444,40 @@ impl Host {
             !ticket.ledger.iter().any(|e| e.status == EntryStatus::Open),
             "the ticket has an open finding"
         );
-        self.verifier_picks(&verifiers, false)?;
+        self.verifier_picks(ticket, level, &verifiers, false)?;
         Ok(name)
     }
     /// What each verifier's row resolves to now, for small work when `small`. One that cannot
-    /// start on this machine starts none of them.
-    fn verifier_picks(&self, verifiers: &[&VerifierConfig], small: bool) -> Result<Vec<Pick>> {
-        (verifiers.iter())
+    /// start on this machine starts none of them. A verifier with an open finding never skips,
+    /// so a fix is checked by the verifier that asked for it, and some verifier must run.
+    fn verifier_picks(
+        &self,
+        ticket: &Ticket,
+        level: &ReviewLevel,
+        verifiers: &[&VerifierConfig],
+        small: bool,
+    ) -> Result<Vec<Pick>> {
+        let picks: Vec<Pick> = (verifiers.iter())
             .map(|verifier| {
                 let job = Job::Verifier {
                     focus: verifier.focus.clone(),
                 };
-                self.resolve_job(&job, small)
+                let open = (ticket.ledger.iter())
+                    .any(|e| e.status == EntryStatus::Open && e.focus == verifier.focus);
+                self.resolve_job(&job, small, !open)
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        if picks.iter().all(|pick| pick.skip.is_some()) {
+            let reasons: Vec<String> = (verifiers.iter().zip(&picks))
+                .map(|(verifier, pick)| format!("{}: {}", verifier.focus, pick.reason))
+                .collect();
+            bail!(
+                "Every verifier of {} would be skipped ({}), so the review cannot start. Wait for a reset, or change their rows in Models → Who runs what.",
+                level.name,
+                reasons.join("; ")
+            );
+        }
+        Ok(picks)
     }
     /// Starts a cycle at the level named `level` on a ticket with no running cycle; see
     /// `verify_ticket` and `keeper_review`.
@@ -479,7 +499,7 @@ impl Host {
                 }),
             ),
         };
-        let chosen = self.verifier_picks(&level_verifiers, small)?;
+        let chosen = self.verifier_picks(&ticket, level, &level_verifiers, small)?;
         let keeper = review.is_some();
         let commit = self.checkout_head(&ticket)?;
         // A cycle queues behind every slot holder and every cycle queued before it.
@@ -487,8 +507,16 @@ impl Host {
         let queued_at = (slots.taken >= VERIFICATION_SLOTS || !slots.queued.is_empty()).then(now);
         let mut replaced = vec![];
         let started = self.atomically(|host| {
-            let mut verifiers = vec![];
+            let (mut verifiers, mut skipped) = (vec![], vec![]);
             for (config, pick) in level_verifiers.into_iter().zip(chosen) {
+                if let Some(reason) = pick.skip {
+                    skipped.push(SkippedVerifier {
+                        role: config.role,
+                        focus: config.focus.clone(),
+                        reason,
+                    });
+                    continue;
+                }
                 let existing =
                     host.existing_assignment(&ticket.id, config.role, Some(&config.focus))?;
                 // A verifier keeps its model: one pinned to another profile is retired, and a
@@ -555,6 +583,7 @@ impl Host {
                 queued_at,
                 small,
                 keeper,
+                skipped,
             });
             let milestone = if queued_at.is_some() {
                 ticket.state = TicketState::Verifying;
@@ -680,7 +709,8 @@ impl Host {
             let job = Job::Verifier {
                 focus: run.focus.clone(),
             };
-            let pick = self.resolve_job(&job, small)?;
+            // Skips were decided when the cycle was created; a verifier left in it waits.
+            let pick = self.resolve_job(&job, small, false)?;
             let mut agent = self.session(&run.session_id)?;
             if agent.provider != pick.profile.provider {
                 replaced.extend(self.archive_in_change(&agent.id, Some("verifier_replaced"))?);
@@ -1170,6 +1200,15 @@ impl Host {
         // The cycle ends here, so its message already lists orphaned entries as untriaged.
         untriage_orphans(verification, &mut ticket.ledger);
         let ledger = ledger_summary(&ticket.ledger);
+        let skipped = (verification.skipped.iter())
+            .map(|s| {
+                format!(
+                    "\n- {}: skipped, {}",
+                    s.role.agent_label(Some(&s.focus)),
+                    s.reason
+                )
+            })
+            .collect::<String>();
         let (outcome, summary) = if blocked || !failed.is_empty() {
             let why = if blocked {
                 "a verifier could not verify".to_owned()
@@ -1196,7 +1235,7 @@ impl Host {
             }
             actions.extend(["close the ticket", "or ask the human"]);
             let mut parts = vec![format!(
-                "Wiffletree verification of ticket \"{}\" ({}) is blocked after {rounds}: {why}.",
+                "Wiffletree verification of ticket \"{}\" ({}) is blocked after {rounds}: {why}.{skipped}",
                 ticket.title, ticket.id
             )];
             parts.extend(ledger);
@@ -1228,7 +1267,7 @@ impl Host {
                 "Accept the ticket."
             };
             let mut parts = vec![format!(
-                "Wiffletree verification of ticket \"{}\" ({}) passed in {rounds}; verified commit {}.\n{passes}",
+                "Wiffletree verification of ticket \"{}\" ({}) passed in {rounds}; verified commit {}.\n{passes}{skipped}",
                 ticket.title, ticket.id, round.commit
             )];
             parts.extend(ledger);
@@ -1248,12 +1287,13 @@ impl Host {
         }
         ticket.end_unreviewed();
         self.save_ticket(&ticket)?;
-        // A keeper review that passed wakes the coordinator only to triage, and is pushed.
+        // A keeper review that passed wakes the coordinator only to triage or to hear of a
+        // skipped verifier, and is pushed.
         let untriaged = ticket
             .ledger
             .iter()
             .any(|e| e.status == EntryStatus::Untriaged && e.cycle == cycle);
-        if !keeper || untriaged {
+        if !keeper || untriaged || !skipped.is_empty() {
             self.send(&id, None, &coordinator, &summary)?;
         }
         if keeper {

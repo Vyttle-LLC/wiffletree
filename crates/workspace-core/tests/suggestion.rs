@@ -13,10 +13,7 @@ fn detected(claude: ProviderStatus, codex: ProviderStatus) -> Detection {
 /// Each row as "job: first → then | small first → small then", with "wait" for no then.
 fn rows(setup: &Setup) -> Vec<String> {
     let line = |line: &Line| {
-        let then = line
-            .then
-            .as_ref()
-            .map_or("wait".into(), ToString::to_string);
+        let then = (line.then.model()).map_or("wait".into(), ToString::to_string);
         format!("{} → {then}", line.first)
     };
     (setup.selection.jobs.iter())
@@ -97,7 +94,7 @@ fn one_signed_in_provider_runs_every_row_alone() {
             for row in &setup.selection.jobs {
                 for line in std::iter::once(&row.main).chain(&row.small) {
                     assert_eq!(line.first.provider, provider, "{:?}", row.job);
-                    assert_eq!(line.then, None, "{:?}", row.job);
+                    assert_eq!(line.then, Then::Wait, "{:?}", row.job);
                 }
             }
             let focuses: Vec<_> = (setup.verification.verifiers.iter())
