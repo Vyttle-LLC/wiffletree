@@ -8,7 +8,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
     sync::{
@@ -23,6 +23,12 @@ const FIRST_RETRY: Duration = Duration::from_millis(500);
 const LAST_RETRY: Duration = Duration::from_secs(30);
 /// How long the host may take to answer `Hello` and `Subscribe`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// After this long without a line from the host the client asks it something; if that goes
+/// unanswered as long again, the host has stopped answering and the client connects again.
+#[cfg(not(test))]
+const QUIET: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const QUIET: Duration = Duration::from_millis(300);
 const LOST: &str = "The connection to the host closed before it answered";
 const DISCONNECTED: &str = "Not connected to the host";
 
@@ -228,17 +234,49 @@ impl Shared {
         }
         !self.stopped.load(Ordering::Relaxed)
     }
+    /// Reads until the connection drops or the host stops answering: quiet for `QUIET`, then
+    /// for `QUIET` again after a probe.
     fn read(&self, reader: &mut BufReader<UnixStream>) {
-        let mut line = String::new();
-        while matches!(reader.read_line(&mut line), Ok(count) if count > 0) {
-            if let Err(error) = self.dispatch(&line) {
-                eprintln!("Host line: {error}");
+        if reader.get_ref().set_read_timeout(Some(QUIET)).is_err() {
+            return;
+        }
+        let mut line = vec![];
+        let mut probed_at = None;
+        loop {
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => return,
+                Ok(_) => {
+                    if let Err(error) = self.dispatch(&line) {
+                        eprintln!("Host line: {error}");
+                    }
+                    line.clear();
+                    probed_at = None;
+                }
+                // A timed-out read keeps what it read so far in `line`.
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    match probed_at {
+                        Some(read) if read == line.len() => {
+                            eprintln!("The host stopped answering; connecting again");
+                            return;
+                        }
+                        _ => {
+                            probed_at = Some(line.len());
+                            self.probe();
+                        }
+                    }
+                }
+                Err(_) => return,
             }
-            line.clear();
         }
     }
-    fn dispatch(&self, line: &str) -> serde_json::Result<()> {
-        let value: Value = serde_json::from_str(line)?;
+    /// Asks the host's actor something cheap, so a host that is only quiet answers.
+    fn probe(&self) {
+        let _ = self.submit_as(Command::Settings, Box::new(|_| {}), false);
+    }
+    fn dispatch(&self, line: &[u8]) -> serde_json::Result<()> {
+        let value: Value = serde_json::from_slice(line)?;
         if value.get("event").is_some() {
             let EventLine { event } = serde_json::from_value(value)?;
             self.state().cursor = Some(event.cursor);
@@ -279,6 +317,10 @@ impl Shared {
     }
 
     fn submit(&self, command: Command, reply: Reply) -> Result<(), String> {
+        let repeatable = command.is_read() || matches!(command, Command::Send { .. });
+        self.submit_as(command, reply, repeatable)
+    }
+    fn submit_as(&self, command: Command, reply: Reply, repeatable: bool) -> Result<(), String> {
         if self.stopped.load(Ordering::Relaxed) {
             return Err(DISCONNECTED.into());
         }
@@ -289,15 +331,32 @@ impl Shared {
             {
                 return Err(format!("This host does not offer {capability}"));
             }
+            // The host closes the connection on a longer line, so it would never be answered.
+            let request = Request {
+                version: state.protocol,
+                id: new_id(),
+                command,
+            };
+            if serde_json::to_vec(&request)
+                .map_err(|e| e.to_string())?
+                .len()
+                >= MAX_LINE_BYTES
+            {
+                return Err(format!(
+                    "This is too large to send: the host takes at most {} KiB at once",
+                    MAX_LINE_BYTES / 1024
+                ));
+            }
             state.asked += 1;
+            let Request { id, command, .. } = request;
             let pending = Pending {
-                repeatable: command.is_read() || matches!(command, Command::Send { .. }),
+                repeatable,
                 command,
                 reply,
                 written: false,
                 order: state.asked,
             };
-            state.pending.insert(new_id(), pending);
+            state.pending.insert(id, pending);
         }
         self.flush(&mut self.writer());
         Ok(())
@@ -370,6 +429,146 @@ fn read_line<T: DeserializeOwned>(reader: &mut BufReader<UnixStream>) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        os::unix::net::UnixListener, path::PathBuf, sync::atomic::AtomicUsize, time::Instant,
+    };
+
+    /// A host that completes the handshake on each connection, then reads every request and
+    /// answers none, as a hung host does.
+    struct Silent {
+        socket: PathBuf,
+        _folder: tempfile::TempDir,
+        /// Every request line read, on any connection.
+        requests: Arc<Mutex<Vec<Value>>>,
+    }
+    impl Silent {
+        fn start() -> Self {
+            let folder = tempfile::tempdir().unwrap();
+            let socket = folder.path().join(SOCKET_FILE);
+            let listener = UnixListener::bind(&socket).unwrap();
+            let requests = Arc::new(Mutex::new(vec![]));
+            let read = requests.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let (mut stream, read) = (stream.unwrap(), read.clone());
+                    std::thread::spawn(move || {
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let _: HelloLine = read_line(&mut reader).unwrap();
+                        let welcome = HelloAnswer::Welcome(Welcome {
+                            protocol: PROTOCOL_VERSION,
+                            host_id: "h".into(),
+                            host_version: "t".into(),
+                            epoch: "e".into(),
+                            capabilities: vec![capability::EVENTS.into()],
+                            binary: PathBuf::new(),
+                        });
+                        write_line(&mut stream, &welcome).unwrap();
+                        let subscribe: Request = read_line(&mut reader).unwrap();
+                        let cursor = Cursor {
+                            epoch: "e".into(),
+                            seq: 0,
+                        };
+                        let subscribed = serde_json::to_value(Subscribed { cursor }).unwrap();
+                        let answer = Response {
+                            version: PROTOCOL_VERSION,
+                            id: subscribe.id,
+                            result: Some(subscribed),
+                            error: None,
+                        };
+                        write_line(&mut stream, &answer).unwrap();
+                        while let Ok(request) = read_line::<Value>(&mut reader) {
+                            read.lock().unwrap().push(request);
+                        }
+                    });
+                }
+            });
+            Self {
+                socket,
+                _folder: folder,
+                requests,
+            }
+        }
+        /// A client of it, and how many times the client has asked for the host.
+        fn client(&self) -> (HostClient, Arc<AtomicUsize>) {
+            struct Counted(Endpoint, Arc<AtomicUsize>);
+            impl Launch for Counted {
+                fn endpoint(&mut self) -> io::Result<Endpoint> {
+                    self.1.fetch_add(1, Ordering::Relaxed);
+                    Ok(self.0.clone())
+                }
+            }
+            let endpoint = Endpoint {
+                socket: self.socket.clone(),
+                credential: None,
+            };
+            let calls = Arc::new(AtomicUsize::new(0));
+            let client = Client {
+                name: "test".into(),
+                kind: "script".into(),
+            };
+            let launch = Box::new(Counted(endpoint, calls.clone()));
+            let client = HostClient::connect(launch, client, Box::new(|_| {})).unwrap();
+            (client, calls)
+        }
+        fn commands(&self) -> Vec<String> {
+            let requests = self.requests.lock().unwrap();
+            (requests.iter())
+                .map(|r| r["command"]["type"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_host_that_stops_answering_is_probed_then_connected_to_again() {
+        let host = Silent::start();
+        let (client, calls) = host.client();
+        let snapshot = client.request(Command::Snapshot).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while calls.load(Ordering::Relaxed) < 2 {
+            assert!(Instant::now() < deadline, "never connected again");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // A probe went unanswered first, and the snapshot is asked again on the new connection.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.commands().iter().filter(|c| *c == "snapshot").count() < 2 {
+            assert!(Instant::now() < deadline, "{:?}", host.commands());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(host.commands().contains(&"settings".to_string()));
+        assert!(snapshot.try_recv().is_err());
+        client.stop();
+    }
+
+    #[test]
+    fn a_request_over_the_hosts_line_bound_fails_at_once_and_is_never_sent() {
+        let host = Silent::start();
+        let (client, _) = host.client();
+        let send = Command::Send {
+            id: new_id(),
+            sender: None,
+            recipient: "coordinator".into(),
+            body: "x".repeat(300 * 1024),
+            attachments: vec![],
+        };
+        let error = client.request(send).unwrap_err();
+        assert!(error.contains("too large to send"), "{error}");
+        let small = Command::Send {
+            id: new_id(),
+            sender: None,
+            recipient: "coordinator".into(),
+            body: "Hello".into(),
+            attachments: vec![],
+        };
+        let _reply = client.request(small).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.commands().is_empty() {
+            assert!(Instant::now() < deadline, "nothing written");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(host.commands()[0], "send");
+        assert_eq!(host.requests.lock().unwrap()[0]["command"]["body"], "Hello");
+        client.stop();
+    }
 
     #[test]
     fn a_refusal_names_the_side_to_update() {
