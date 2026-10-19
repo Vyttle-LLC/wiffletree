@@ -315,6 +315,12 @@ codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.host
 
 `--data-protection` and `--access-group <team ID>.<group>` use the data-protection keychain instead, which needs the `keychain-access-groups` entitlement and a provisioning profile. Use only a test service name, never a real Wiffletree item.
 
+Only a signed build runs its host as a launchd job, so its tests cannot cover that the host does not start at login. Before a release, check it by hand on a test account:
+
+1. Open the signed app with its default data folder, so it loads the job from `<data folder>/host/com.vyttle.wiffletree.host.plist`.
+2. Quit the app and log out, then log back in without opening Wiffletree.
+3. `launchctl print gui/$(id -u)/com.vyttle.wiffletree.host` finds no job, and `pgrep -fl workspace-host` lists nothing.
+
 ## Current limits
 
 - Acceptance preserves the tested branch. **Merging is manual**: Wiffletree pushes a ticket's branch and opens its pull request through `publish_ticket` (see [repository owners and publishing](#repository-owners-and-publishing)), and never approves, merges, closes or comments on one. No dependency rebase or combined integration testing is implemented, and conflict fixing is limited to the PR keeper's one checked try. The PR watcher reads PR status and tells the coordinator when a PR merges, but accepting the ticket stays the coordinator's call.

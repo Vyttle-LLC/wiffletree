@@ -19,21 +19,24 @@ const NOT_IN_PATHS: &[char] = &['`', '*', '?', '|', ';', '$', '"', '<', '>', '\\
 /// Linked bodies kept before the cache starts over; enough for every message on screen.
 const CACHE_LIMIT: usize = 1024;
 
-/// Markdown whose file references are already links, so drawing it reads nothing from disk.
+/// Markdown whose file references are already links, so drawing it asks the host nothing.
 #[derive(Clone)]
 pub(super) struct Linked {
     id: SharedString,
     text: SharedString,
     bases: Arc<[PathBuf]>,
+    bridge: Bridge,
 }
 impl Linked {
     /// Links `body`'s file references against `bases` in order. That parses the Markdown and
-    /// looks for files, so it runs when the text arrives, never while drawing.
-    pub(super) fn new(id: &str, body: &str, bases: Arc<[PathBuf]>) -> Self {
+    /// asks the host which references are files, so it runs when the text arrives, never while
+    /// drawing.
+    pub(super) fn new(id: &str, body: &str, bases: Arc<[PathBuf]>, bridge: &Bridge) -> Self {
         Self {
             id: SharedString::from(format!("message-markdown-{id}")),
-            text: linkify(body, &bases),
+            text: linkify(body, &bases, bridge),
             bases,
+            bridge: bridge.clone(),
         }
     }
     #[cfg(test)]
@@ -41,10 +44,12 @@ impl Linked {
         &self.text
     }
     pub(super) fn view(&self) -> TextView {
-        let bases = self.bases.clone();
+        let (bases, bridge) = (self.bases.clone(), self.bridge.clone());
         TextView::markdown(self.id.clone(), self.text.clone())
             .selectable(true)
-            .on_link_click(move |url, event, window, cx| open_link(url, event, &bases, window, cx))
+            .on_link_click(move |url, event, window, cx| {
+                open_link(url, event, &bases, &bridge, window, cx)
+            })
             .code_block_actions(|block, _, _| {
                 let code = block.code();
                 button("copy-code")
@@ -60,9 +65,10 @@ impl Linked {
     }
 }
 
-/// `body` with its file references turned into links, resolved against `bases` in order.
-/// Each body is resolved once and cached, since a page is prepared again on each refresh.
-fn linkify(body: &str, bases: &[PathBuf]) -> SharedString {
+/// `body` with its file references turned into links, resolved by the host against `bases` in
+/// order. Each body is resolved once and cached, since a page is prepared again on each refresh;
+/// while the host is out of reach it stays unlinked and uncached.
+fn linkify(body: &str, bases: &[PathBuf], bridge: &Bridge) -> SharedString {
     if !body.contains('`') {
         return SharedString::from(body.to_owned());
     }
@@ -82,10 +88,18 @@ fn linkify(body: &str, bases: &[PathBuf]) -> SharedString {
     {
         return hit.text.clone();
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let text = SharedString::from(link_code(body, |reference| {
-        resolve(reference, bases, home.as_deref())
-    }));
+    let candidates = candidates(body);
+    let references = candidates.iter().map(|(.., r)| r.clone()).collect();
+    let text = match bridge.ask_now(ask::resolve_paths(references, bases.to_vec())) {
+        Ok(resolved) => {
+            let files: HashMap<&str, PathBuf> = (candidates.iter())
+                .zip(resolved)
+                .filter_map(|((.., reference), file)| Some((reference.as_str(), file?.path)))
+                .collect();
+            SharedString::from(link_code(body, &candidates, |r| files.get(r).cloned()))
+        }
+        Err(_) => return SharedString::from(body.to_owned()),
+    };
     let mut cache = cache.lock().unwrap();
     if cache.len() >= CACHE_LIMIT {
         cache.clear();
@@ -101,25 +115,37 @@ fn linkify(body: &str, bases: &[PathBuf]) -> SharedString {
     text
 }
 
-/// Wraps each inline code span that `resolve` finds a file for in a link to that file.
-fn link_code(body: &str, resolve: impl Fn(&str) -> Option<PathBuf>) -> String {
+/// The source range of each inline code span in `body` that may name a file, with the
+/// reference it names.
+fn candidates(body: &str) -> Vec<(usize, usize, String)> {
     let mut options = markdown::ParseOptions::gfm();
     // As the text view parses, so code inside math is not mistaken for a code span.
     options.constructs.math_text = true;
     options.constructs.math_flow = true;
     let Ok(root) = markdown::to_mdast(body, &options) else {
-        return body.to_owned();
+        return vec![];
     };
     let mut spans = vec![];
     code_spans(&root, &mut spans);
+    spans
+        .into_iter()
+        // `!` before the new link would make it an image.
+        .filter(|(start, ..)| !body[..*start].ends_with('!'))
+        .filter_map(|(start, end, code)| Some((start, end, reference(&code)?.to_owned())))
+        .collect()
+}
+
+/// Wraps each of the `candidates` that `resolve` finds a file for in a link to that file.
+fn link_code(
+    body: &str,
+    candidates: &[(usize, usize, String)],
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> String {
     let mut linked = String::with_capacity(body.len());
     let mut copied = 0;
-    for (start, end, code) in spans {
-        // `!` before the new link would make it an image.
-        if body[..start].ends_with('!') {
-            continue;
-        }
-        let Some(path) = reference(&code).and_then(&resolve) else {
+    for (start, end, reference) in candidates {
+        let (start, end) = (*start, *end);
+        let Some(path) = resolve(reference) else {
             continue;
         };
         linked.push_str(&body[copied..start]);
@@ -203,24 +229,6 @@ fn without_location(code: &str) -> &str {
     path
 }
 
-/// The existing file `reference` names: an absolute path, or `~` for `home`, as it is; a
-/// relative one under the first of `bases` that holds it.
-fn resolve(reference: &str, bases: &[PathBuf], home: Option<&Path>) -> Option<PathBuf> {
-    let path = match reference.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            home?.join(rest.trim_start_matches('/'))
-        }
-        _ => PathBuf::from(reference),
-    };
-    if path.is_absolute() {
-        return path.is_file().then_some(path);
-    }
-    bases
-        .iter()
-        .map(|base| base.join(&path))
-        .find(|candidate| candidate.is_file())
-}
-
 /// The local path a link points at, without a `#fragment` or `?query` and percent-decoded; `None`
 /// for a web or other URL.
 fn local_target(url: &str) -> Option<String> {
@@ -294,38 +302,24 @@ fn link_action(url: &str, event: &ClickEvent) -> LinkAction {
     }
 }
 
-/// Whether opening `path` would run it instead of showing it: an executable, or a script
-/// Terminal runs.
-fn runs_when_opened(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    const LAUNCHERS: [&str; 3] = ["command", "tool", "terminal"];
-    let executable = path
-        .metadata()
-        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0);
-    let launcher = path.extension().is_some_and(|extension| {
-        LAUNCHERS
-            .iter()
-            .any(|launcher| extension.eq_ignore_ascii_case(launcher))
-    });
-    executable || launcher
-}
-
 /// Opens a file in its default app, or reveals it in Finder when opening would run it.
-fn open_file(path: &Path, cx: &App) {
-    if runs_when_opened(path) {
-        cx.reveal_path(path);
+fn open_file(file: &ResolvedPath, cx: &App) {
+    if file.runs_when_opened {
+        cx.reveal_path(&file.path);
     } else {
-        cx.open_with_system(path);
+        cx.open_with_system(&file.path);
     }
 }
 
 /// Opens a clicked link: a local file in its default app, anything else in the browser. A
 /// right-click on a file offers Open, Reveal in Finder and Copy path instead. A file that is
-/// gone by now, such as one in a removed worktree, says so.
+/// gone by now, such as one in a removed worktree, says so. The host says where the file is and
+/// whether opening it would run it; this app, on the host's Mac, opens it.
 pub(super) fn open_link(
     url: &str,
     event: &ClickEvent,
     bases: &[PathBuf],
+    bridge: &Bridge,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -336,22 +330,22 @@ pub(super) fn open_link(
         LinkAction::Menu(target, position) => (target, Some(position)),
     };
     let reference = without_location(&target);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match (resolve(reference, bases, home.as_deref()), menu_at) {
-        (Some(path), Some(position)) => show_menu(path, position, window, cx),
-        (Some(path), None) => open_file(&path, cx),
-        (None, _) => {
-            struct FileMissing;
-            let name = Path::new(reference)
-                .file_name()
-                .map_or(reference.into(), |name| name.to_string_lossy());
-            window.push_notification(
-                Notification::warning(format!("Can't open {name}: the file no longer exists."))
-                    .id::<FileMissing>(),
-                cx,
-            );
-        }
-    }
+    let asked = ask::resolve_paths(vec![reference.into()], bases.to_vec());
+    let resolved = bridge.ask_now(asked).map(|mut found| found.pop().flatten());
+    let missing = match (resolved, menu_at) {
+        (Ok(Some(file)), Some(position)) => return show_menu(file, position, window, cx),
+        (Ok(Some(file)), None) => return open_file(&file, cx),
+        (Ok(None), _) => "the file no longer exists".to_string(),
+        (Err(error), _) => error,
+    };
+    struct FileMissing;
+    let name = Path::new(reference)
+        .file_name()
+        .map_or(reference.into(), |name| name.to_string_lossy());
+    window.push_notification(
+        Notification::warning(format!("Can't open {name}: {missing}.")).id::<FileMissing>(),
+        cx,
+    );
 }
 
 /// The menu of the right-clicked file link. The text view only reports the click, so the
@@ -364,9 +358,10 @@ struct LinkMenu {
 }
 impl Global for LinkMenu {}
 
-fn show_menu(path: PathBuf, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+fn show_menu(file: ResolvedPath, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
     let menu = PopupMenu::build(window, cx, |menu, _, _| {
-        let (open, reveal, copy) = (path.clone(), path.clone(), path);
+        let (reveal, copy) = (file.path.clone(), file.path.clone());
+        let open = file;
         menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| open_file(&open, cx)))
             .item(
                 PopupMenuItem::new("Reveal in Finder")
@@ -407,14 +402,14 @@ pub(super) fn link_menu(cx: &App) -> Option<impl IntoElement> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LinkAction, link_action, link_code, local_target, reference, resolve, runs_when_opened,
-    };
+    use super::{Bridge, LinkAction, Linked, candidates, link_action, local_target, reference};
+    use crate::bridge::tests::serve;
     use gpui::{
         ClickEvent, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseUpEvent,
         TouchClickEvent, point, px,
     };
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    use workspace_core::{ResolvedPath, ask};
 
     fn mouse(button: MouseButton) -> ClickEvent {
         ClickEvent::Mouse(MouseClickEvent {
@@ -453,8 +448,15 @@ mod tests {
         assert_eq!(reference("~"), None);
     }
 
+    /// What the host resolves `reference` to against `bases`.
+    fn resolved(bridge: &Bridge, reference: &str, bases: &[PathBuf]) -> Option<ResolvedPath> {
+        let asked = ask::resolve_paths(vec![reference.into()], bases.to_vec());
+        bridge.ask_now(asked).unwrap().pop().flatten()
+    }
+
     #[test]
-    fn relative_paths_resolve_in_the_worktree_before_the_project_home() {
+    fn the_host_resolves_relative_paths_in_the_worktree_before_the_project_home() {
+        let served = serve(|_| {});
         let worktree = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(worktree.path().join("src")).unwrap();
@@ -462,53 +464,52 @@ mod tests {
         fs::write(home.path().join("plan.md"), "").unwrap();
         fs::write(worktree.path().join("plan.md"), "").unwrap();
         fs::write(home.path().join("only-home.md"), "").unwrap();
-        fs::write(worktree.path().join("LICENSE"), "").unwrap();
         let bases = [worktree.path().to_owned(), home.path().to_owned()];
+        let path = |reference| resolved(&served.bridge, reference, &bases).map(|r| r.path);
 
+        assert_eq!(path("src/lib.rs"), Some(worktree.path().join("src/lib.rs")));
+        assert_eq!(path("plan.md"), Some(worktree.path().join("plan.md")));
+        assert_eq!(path("only-home.md"), Some(home.path().join("only-home.md")));
+        assert_eq!(path("missing.md"), None);
+        assert_eq!(path("src"), None, "a directory is not a file");
+        let absolute = home.path().join("plan.md");
+        assert_eq!(path(absolute.to_str().unwrap()), Some(absolute));
+
+        // Linking asks once for the whole body.
+        let body = "See `src/lib.rs:12`, `plan.md` and `missing.md`, then run `cargo test`.";
+        let linked = Linked::new("m", body, bases.to_vec().into(), &served.bridge);
+        let lib = worktree.path().join("src/lib.rs");
+        let plan = worktree.path().join("plan.md");
         assert_eq!(
-            resolve("src/lib.rs", &bases, None),
-            Some(worktree.path().join("src/lib.rs"))
-        );
-        assert_eq!(
-            resolve("plan.md", &bases, None),
-            Some(worktree.path().join("plan.md"))
-        );
-        assert_eq!(
-            resolve("only-home.md", &bases, None),
-            Some(home.path().join("only-home.md"))
-        );
-        assert_eq!(
-            resolve("LICENSE", &bases, None),
-            Some(worktree.path().join("LICENSE"))
-        );
-        assert_eq!(resolve("missing.md", &bases, None), None);
-        assert_eq!(
-            resolve("src", &bases, None),
-            None,
-            "a directory is not a file"
+            linked.text(),
+            format!(
+                "See [`src/lib.rs:12`](<{}>), [`plan.md`](<{}>) and `missing.md`, then run `cargo test`.",
+                lib.display(),
+                plan.display()
+            )
         );
     }
 
     #[test]
-    fn absolute_and_home_paths_resolve_as_they_are() {
-        let home = tempfile::tempdir().unwrap();
-        fs::write(home.path().join("notes.md"), "").unwrap();
-        let absolute = home.path().join("notes.md");
-
-        assert_eq!(
-            resolve(absolute.to_str().unwrap(), &[], None),
-            Some(absolute.clone())
+    fn with_the_host_out_of_reach_a_body_stays_unlinked() {
+        let served = serve(|_| {});
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.md"), "").unwrap();
+        served.bridge.shutdown();
+        let linked = Linked::new(
+            "m",
+            "`notes.md`",
+            vec![dir.path().into()].into(),
+            &served.bridge,
         );
-        assert_eq!(
-            resolve("~/notes.md", &[], Some(home.path())),
-            Some(absolute)
-        );
-        assert_eq!(resolve("~/gone.md", &[], Some(home.path())), None);
-        assert_eq!(resolve("~/notes.md", &[], None), None);
+        assert_eq!(linked.text(), "`notes.md`");
     }
 
     #[test]
     fn only_code_naming_a_file_becomes_a_link() {
+        let link_code = |body: &str, found: fn(&str) -> Option<PathBuf>| {
+            super::link_code(body, &candidates(body), found)
+        };
         let found = |reference: &str| {
             (reference == "src/a b.rs" || reference == "x.rs")
                 .then(|| PathBuf::from("/w").join(reference))
@@ -553,38 +554,43 @@ mod tests {
 
     #[test]
     fn literal_percent_and_hash_signs_survive_the_link_and_the_click() {
+        let served = serve(|_| {});
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a%20b #1.md");
         fs::write(&file, "").unwrap();
         fs::write(dir.path().join("a b.md"), "").unwrap();
         let bases = [dir.path().to_owned()];
 
-        let linked = link_code("`a%20b #1.md`", |r| resolve(r, &bases, None));
-        let url = linked
-            .split_once("(<")
+        let linked = Linked::new("m", "`a%20b #1.md`", bases.to_vec().into(), &served.bridge);
+        let url = (linked.text().split_once("(<"))
             .and_then(|(_, rest)| rest.split_once(">)"))
             .unwrap()
             .0;
         let target = local_target(url).unwrap();
-        assert_eq!(resolve(&target, &bases, None), Some(file));
+        let clicked = resolved(&served.bridge, &target, &bases).unwrap();
+        assert_eq!(clicked.path, file);
     }
 
     #[test]
-    fn executables_and_terminal_scripts_run_when_opened() {
+    fn the_host_says_executables_and_terminal_scripts_run_when_opened() {
+        let served = serve(|_| {});
         let dir = tempfile::tempdir().unwrap();
-        let file = |name: &str, mode: u32| {
+        let runs = |name: &str, mode: u32| {
             let path = dir.path().join(name);
             fs::write(&path, "").unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
-            path
+            let bases = [dir.path().to_owned()];
+            resolved(&served.bridge, name, &bases)
+                .unwrap()
+                .runs_when_opened
         };
-        assert!(runs_when_opened(&file("build.sh", 0o755)));
-        assert!(runs_when_opened(&file("owner-only", 0o700)));
-        assert!(runs_when_opened(&file("Start.command", 0o644)));
-        assert!(runs_when_opened(&file("fix.TOOL", 0o644)));
-        assert!(runs_when_opened(&file("shell.terminal", 0o644)));
-        assert!(!runs_when_opened(&file("notes.md", 0o644)));
-        assert!(!runs_when_opened(&file("build.sh.txt", 0o644)));
+        assert!(runs("build.sh", 0o755));
+        assert!(runs("owner-only", 0o700));
+        assert!(runs("Start.command", 0o644));
+        assert!(runs("fix.TOOL", 0o644));
+        assert!(runs("shell.terminal", 0o644));
+        assert!(!runs("notes.md", 0o644));
+        assert!(!runs("build.sh.txt", 0o644));
     }
 
     #[test]

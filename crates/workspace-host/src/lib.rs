@@ -1492,6 +1492,7 @@ impl Host {
             } => serde_json::to_value(self.run_summaries(&session_id, &run_ids)?)?,
             Command::Progress { after } => serde_json::to_value(self.progress(after)?)?,
             Command::Settings => serde_json::to_value(self.settings())?,
+            Command::CoreInstructions => serde_json::to_value(provider::core_texts())?,
             Command::SetWorkspacesDir { path } => {
                 serde_json::to_value(self.set_workspaces_dir(&path)?)?
             }

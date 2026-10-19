@@ -94,12 +94,12 @@ impl HistorySheet {
                         *id == step.id && *revision == step.revision
                     })
                     .count();
-                // Narration is linked here, as it arrives, so drawing it reads nothing from disk.
+                // Narration is linked here, as it arrives, so drawing it asks the host nothing.
                 for step in &self.run.steps[unchanged..] {
                     if step.kind == StepKind::Narration {
                         let id = format!("{}-{}", step.run_id, step.id);
                         let text = step.detail.as_deref().unwrap_or(&step.title);
-                        let linked = Linked::new(&id, text, self.link_bases.clone());
+                        let linked = Linked::new(&id, text, self.link_bases.clone(), &self.bridge);
                         self.narration.insert(step.id.clone(), linked);
                     }
                 }

@@ -21,16 +21,16 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 
 ## 3. Desktop on the socket (ticket B)
 
-- [ ] 3.1 `bridge.rs`: a socket client with `Hello`, request correlation by id, and the event subscription feeding the existing reload paths in `main.rs`, `progress.rs` and the usage view. Keep `Bridge`'s `request`, `send` and `ask` signatures so views do not change.
-- [ ] 3.2 Launching (pass `serve --app <the app bundle>` so the Keychain item's access list names the app): write the plist under `<data folder>/host/` and bootstrap it into `gui/<uid>` for the default data folder (never into `~/Library/LaunchAgents`); start a child host for `--data-dir`. Test with `--data-dir`: no plist is written and the child stops with the app. Login check, by hand on a test account before release: start the host, log out and back in without opening the app, and confirm `launchctl print gui/<uid>/<label>` finds no job and no `workspace-host` runs.
-- [ ] 3.3 Reconnect with growing delay, resume from the cursor or snapshot, and resend an unanswered `Send` with its id. Test: kill the child host mid-send and restart it; the message is stored once.
-- [ ] 3.4 Move the desktop's host-file reads behind commands as in design.md 6: `file_links.rs`, `attachment_chips.rs`, `skills_view.rs` (the snapshot's `core_instructions` carries names and versions only; the Skills page also needs each part's text); remove `login_env.rs` from the app. Test: link resolution and thumbnails through a real host in a temporary folder.
-- [ ] 3.5 `Cargo.toml`: `workspace-host` only under `[dev-dependencies]`; `cargo build --release -p workspace-desktop` passes.
+- [x] 3.1 `bridge.rs`: a socket client with `Hello`, request correlation by id, and the event subscription feeding the existing reload paths in `main.rs`, `progress.rs` and the usage view. Keep `Bridge`'s `request`, `send` and `ask` signatures so views do not change.
+- [x] 3.2 Launching (pass `serve --app <the app bundle>` so the Keychain item's access list names the app): write the plist under `<data folder>/host/` and bootstrap it into `gui/<uid>` for the default data folder (never into `~/Library/LaunchAgents`); start a child host for `--data-dir`. Test with `--data-dir`: no plist is written and the child stops with the app. Login check, by hand on a test account before release: start the host, log out and back in without opening the app, and confirm `launchctl print gui/<uid>/<label>` finds no job and no `workspace-host` runs.
+- [x] 3.3 Reconnect with growing delay, resume from the cursor or snapshot, and resend an unanswered `Send` with its id. Test: kill the child host mid-send and restart it; the message is stored once.
+- [x] 3.4 Move the desktop's host-file reads behind commands as in design.md 6: `file_links.rs`, `attachment_chips.rs`, `skills_view.rs` (the snapshot's `core_instructions` carries names and versions only; the Skills page also needs each part's text); remove `login_env.rs` from the app. Test: link resolution and thumbnails through a real host in a temporary folder.
+- [x] 3.5 `Cargo.toml`: `workspace-host` only under `[dev-dependencies]`; `cargo build --release -p workspace-desktop` passes.
 
 ## 4. Desktop checks (ticket B)
 
-- [ ] 4.1 `scripts/drive_desktop.py` runs unchanged against a desktop started with `--data-dir`.
-- [ ] 4.2 Measure a `Snapshot` and a `Messages` page over the socket against the in-process figures in `docs/performance/host-baseline.md` and record both.
+- [x] 4.1 `scripts/drive_desktop.py` runs unchanged against a desktop started with `--data-dir`.
+- [x] 4.2 Measure a `Snapshot` and a `Messages` page over the socket against the in-process figures in `docs/performance/host-baseline.md` and record both.
 
 ## 5. Quitting and the menu bar (ticket C)
 

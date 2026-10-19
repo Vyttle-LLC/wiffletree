@@ -214,8 +214,9 @@ impl Senders {
     }
 }
 
-/// The rows for a page of messages, aligned with them.
-fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
+/// The rows for a page of messages, aligned with them; `bridge` asks the host which file
+/// references are files.
+fn prepare(messages: &[Message], senders: &Senders, bridge: &Bridge) -> Vec<Row> {
     let placements = placements(messages, &senders.session_id);
     let named = |message: &Message| {
         let sender = message.sender.as_ref()?;
@@ -273,7 +274,7 @@ fn prepare(messages: &[Message], senders: &Senders) -> Vec<Row> {
                 pill,
                 receipt: message.receipt.label().into(),
                 first_line: first_line(line.text, 160).into(),
-                body: shown.then(|| Linked::new(&message.id, text, senders.bases(message))),
+                body: shown.then(|| Linked::new(&message.id, text, senders.bases(message), bridge)),
                 run: None,
                 run_id: format!("peer-run-{}", message.id).into(),
                 line_id: format!("peer-line-{}", message.id).into(),
@@ -863,9 +864,9 @@ impl Transcript {
             page,
         };
         let senders = Arc::new(Senders::of(&self.shared, &ask.session_id, &messages));
-        let prepared_with = senders.clone();
+        let (prepared_with, bridge) = (senders.clone(), self.bridge.clone());
         let rows = cx.background_spawn(async move {
-            let rows = prepare(&messages, &prepared_with);
+            let rows = prepare(&messages, &prepared_with, &bridge);
             (messages, rows)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -1699,7 +1700,8 @@ mod tests {
         );
     }
 
-    /// A page prepared for session `me`, with the senders' names and `bases` for every link.
+    /// A page prepared for session `me`, with the senders' names and `bases` for every link,
+    /// which a host in a temporary folder resolves.
     fn prepared(messages: &[Message], bases: &std::path::Path) -> Vec<super::Row> {
         let bases: Arc<[std::path::PathBuf]> = vec![bases.to_owned()].into();
         let names = [
@@ -1714,7 +1716,11 @@ mod tests {
             bases: HashMap::new(),
             current: bases,
         };
-        prepare(messages, &senders)
+        prepare(
+            messages,
+            &senders,
+            &crate::bridge::tests::serve(|_| {}).bridge,
+        )
     }
 
     #[test]

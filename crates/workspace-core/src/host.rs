@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The host's client socket, in its data folder.
+pub const SOCKET_FILE: &str = "host.sock";
 /// The protocol this build speaks on the host socket.
 pub const PROTOCOL_VERSION: u32 = 2;
 /// Scripts on the host's standard input speak version 1, with no handshake.

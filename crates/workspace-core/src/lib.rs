@@ -1,5 +1,6 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 pub mod ask;
+mod client;
 mod context;
 pub mod data_dir;
 mod files;
@@ -18,6 +19,7 @@ mod steps;
 mod suggestion;
 mod usage;
 use anyhow::{Context, Result, bail, ensure};
+pub use client::*;
 pub use context::*;
 pub use files::*;
 pub use host::*;
@@ -3003,6 +3005,9 @@ pub enum Command {
     ListFolder {
         path: PathBuf,
     },
+    /// Read-only: the fixed core instructions the running host gives agents, each with its
+    /// text; answered with `Vec<CoreText>`.
+    CoreInstructions,
     /// Stops every running turn as a quit does, then ends the host. Only the human's client
     /// sends it.
     StopAgentsAndQuit,
@@ -3045,7 +3050,8 @@ impl Command {
             | Self::Subscribe { .. }
             | Self::ResolvePaths { .. }
             | Self::ReadFile { .. }
-            | Self::ListFolder { .. } => true,
+            | Self::ListFolder { .. }
+            | Self::CoreInstructions => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
             | Self::RemoveRepositoryRoot { .. }
@@ -3103,13 +3109,14 @@ impl Command {
         }
     }
     /// Commands only the human should give: on the host socket they need the app's client
-    /// credential. They answer the Inbox, which also approves a publish, or grant publish or push
-    /// authority without it: owners whose PRs open without asking, the PR keeper's rebases and
-    /// pushes, and a settings repository the host pushes to.
+    /// credential. They send a message as the human, answer the Inbox, which also approves a
+    /// publish, or grant publish or push authority without it: owners whose PRs open without
+    /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
-            Self::ResolveAttention { .. }
+            Self::Send { sender: None, .. }
+                | Self::ResolveAttention { .. }
                 | Self::DismissAttention { .. }
                 | Self::SetOwnerAllowed { .. }
                 | Self::SetKeeper { .. }

@@ -139,6 +139,15 @@ pub fn core_instructions() -> Vec<workspace_core::skills::CoreInstructions> {
         .map(|(audience, text)| workspace_core::skills::CoreInstructions::new(audience, text))
         .collect()
 }
+/// The core's parts with their texts, for the Skills page.
+pub fn core_texts() -> Vec<workspace_core::skills::CoreText> {
+    CORE.iter()
+        .map(|(audience, text)| workspace_core::skills::CoreText {
+            about: workspace_core::skills::CoreInstructions::new(audience, text),
+            text: (*text).into(),
+        })
+        .collect()
+}
 /// The part of a role's instructions the app depends on, which no skill text changes.
 fn core(role: Role) -> &'static str {
     let part = match role {

@@ -1,6 +1,8 @@
 //! The host as its own process: `serve --child` on `host.sock`, started as the app starts it.
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 use std::{
+    ffi::OsString,
     io::{BufRead, BufReader, Write},
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
@@ -9,6 +11,48 @@ use std::{
 };
 use workspace_core::*;
 use workspace_host::Host;
+
+/// The environment of a host whose login shell, written to `shell`, reports the test's own
+/// environment, and in which neither provider is found, whatever this machine has signed in, so
+/// detection at start is quick.
+fn isolated(shell: &Path) -> Vec<(&'static str, OsString)> {
+    let login = shell.join("shell");
+    // It records which signals it starts with blocked, as every program the host starts would.
+    let record = "/usr/bin/python3 -c 'import signal; print(sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, [])))'";
+    let script = format!("#!/bin/sh\n{record} > \"$(dirname \"$0\")/blocked\"\neval \"$4\"\n");
+    std::fs::write(&login, script).unwrap();
+    std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o755)).unwrap();
+    vec![
+        ("SHELL", login.into()),
+        ("PATH", "/usr/bin:/bin".into()),
+        ("WORKSPACE_CLAUDE_BIN", "/nonexistent/claude".into()),
+        ("WORKSPACE_CODEX_BIN", "/nonexistent/codex".into()),
+    ]
+}
+
+/// The files under `folder` holding `secret`, after checking there are some files at all.
+fn files_holding(folder: &Path, secret: &str) -> Vec<PathBuf> {
+    fn files(folder: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(folder).unwrap().flatten() {
+            let path = entry.path();
+            match entry.file_type().unwrap() {
+                kind if kind.is_dir() => files(&path, found),
+                kind if kind.is_file() => found.push(path),
+                _ => {}
+            }
+        }
+    }
+    let mut found = vec![];
+    files(folder, &mut found);
+    assert!(!found.is_empty());
+    found.retain(|file| {
+        let bytes = std::fs::read(file).unwrap_or_default();
+        bytes
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes())
+    });
+    found
+}
 
 /// A child host on a scratch store whose login shell reports the test's own environment.
 struct Fixture {
@@ -26,23 +70,12 @@ impl Fixture {
         prepare(&mut host);
         drop(host);
         let shell = tempfile::tempdir().unwrap();
-        let login = shell.path().join("shell");
-        // It records which signals it starts with blocked, as every program the host starts would.
-        let record = "/usr/bin/python3 -c 'import signal; print(sorted(int(s) for s in signal.pthread_sigmask(signal.SIG_BLOCK, [])))'";
-        let script = format!("#!/bin/sh\n{record} > \"$(dirname \"$0\")/blocked\"\neval \"$4\"\n");
-        std::fs::write(&login, script).unwrap();
-        std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut command = process::Command::new(env!("CARGO_BIN_EXE_workspace-host"));
         command
             .args(["serve", "--data-dir"])
             .arg(data.path())
             .arg("--child")
-            .env("SHELL", &login)
-            // Neither provider is found, whatever this machine has signed in, and detection at
-            // start is quick.
-            .env("PATH", "/usr/bin:/bin")
-            .env("WORKSPACE_CLAUDE_BIN", "/nonexistent/claude")
-            .env("WORKSPACE_CODEX_BIN", "/nonexistent/codex")
+            .envs(isolated(shell.path()))
             .stderr(std::process::Stdio::null());
         let host = ChildHost::start_command(command).unwrap();
         let socket = data.path().join("host.sock");
@@ -112,7 +145,7 @@ impl Connection {
         self.send(serde_json::to_value(HelloLine { hello }).unwrap());
         self.line()
     }
-    /// Sends a request and returns its response, keeping events that arrive first.
+    /// Sends a request and returns its response, skipping events that arrive first.
     fn request(&mut self, version: u32, command: Command) -> Response {
         let id = new_id();
         let request = Request {
@@ -288,26 +321,10 @@ fn the_child_hosts_credential_is_in_no_environment_and_no_file() {
     );
     assert!(!shown.contains(&credential));
     // Nothing in the data folder holds it.
-    fn files(folder: &Path, found: &mut Vec<PathBuf>) {
-        for entry in std::fs::read_dir(folder).unwrap().flatten() {
-            let path = entry.path();
-            match entry.file_type().unwrap() {
-                kind if kind.is_dir() => files(&path, found),
-                kind if kind.is_file() => found.push(path),
-                _ => {}
-            }
-        }
-    }
-    let mut found = vec![];
-    files(fixture.data.path(), &mut found);
-    assert!(!found.is_empty());
-    for file in found {
-        let bytes = std::fs::read(&file).unwrap();
-        let holds = bytes
-            .windows(credential.len())
-            .any(|window| window == credential.as_bytes());
-        assert!(!holds, "{} holds the credential", file.display());
-    }
+    assert_eq!(
+        files_holding(fixture.data.path(), &credential),
+        [] as [PathBuf; 0]
+    );
     let mode = std::fs::metadata(fixture.data.path().join("host.sock"))
         .unwrap()
         .permissions()
@@ -437,4 +454,193 @@ fn allowing_an_owner_needs_the_apps_credential() {
     let mut app = fixture.welcomed(Some(fixture.credential()));
     assert_eq!(allow(&mut app).error, None);
     assert_eq!(snapshot(&mut app).allowed_owners, ["Vyttle-LLC"]);
+}
+
+#[test]
+fn a_message_from_the_human_needs_the_apps_credential() {
+    let coordinator = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        let project = host.create_project("Messages").unwrap();
+        let session = (host.sessions().unwrap().into_iter())
+            .find(|s| s.project_id == project.id)
+            .unwrap();
+        coordinator.set(session.id).unwrap();
+    });
+    let coordinator = coordinator.into_inner().unwrap();
+    let send = |client: &mut Connection, id: &str| {
+        client.request(
+            PROTOCOL_VERSION,
+            Command::Send {
+                id: id.into(),
+                sender: None,
+                recipient: coordinator.clone(),
+                body: "Ship it".into(),
+                attachments: vec![],
+            },
+        )
+    };
+    let stored = |client: &mut Connection| -> Vec<String> {
+        let messages = client.result(Command::Messages {
+            session_id: coordinator.clone(),
+            before: None,
+            limit: 50,
+        });
+        let messages: Vec<Message> = serde_json::from_value(messages).unwrap();
+        messages.into_iter().map(|m| m.id).collect()
+    };
+    let mut agent = fixture.welcomed(None);
+    let refused = send(&mut agent, "from-an-agent");
+    assert!(refused.error.unwrap().contains("client credential"));
+    assert!(!stored(&mut agent).contains(&"from-an-agent".to_string()));
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    assert_eq!(send(&mut app, "from-the-human").error, None);
+    assert!(stored(&mut app).contains(&"from-the-human".to_string()));
+}
+
+/// The app's client of a child host on `data`, started as the app starts one; it records the
+/// events it reads.
+fn app_client(data: &Path, shell: &Path) -> (HostClient, Arc<Mutex<Vec<EventKind>>>) {
+    let mut launch = ChildLaunch::new(Path::new(env!("CARGO_BIN_EXE_workspace-host")), data);
+    for (key, value) in isolated(shell) {
+        launch = launch.env(key, value);
+    }
+    let events = Arc::new(Mutex::new(vec![]));
+    let seen = events.clone();
+    let client = HostClient::connect(
+        Box::new(launch),
+        Client {
+            name: "Wiffletree".into(),
+            kind: "desktop".into(),
+        },
+        Box::new(move |kind| seen.lock().unwrap().push(kind.clone())),
+    )
+    .unwrap();
+    (client, events)
+}
+
+fn child_pid(client: &HostClient) -> i32 {
+    client.with_launcher(|launch| launch.child().unwrap().id()) as i32
+}
+
+/// The reply to a request, waiting at most a minute.
+fn reply(receiver: async_channel::Receiver<Result<Value, String>>) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match receiver.try_recv() {
+            Ok(reply) => return reply.unwrap(),
+            Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Err(error) => panic!("no reply: {error}"),
+        }
+    }
+}
+
+fn answer<R: serde::de::DeserializeOwned>(client: &HostClient, ask: ask::Ask<R>) -> R {
+    let value = reply(client.request(ask.command().clone()).unwrap());
+    ask.decode(value).unwrap()
+}
+
+/// A scratch folder short enough for a socket path under `Library/Application Support`.
+fn short_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new().tempdir_in("/tmp").unwrap()
+}
+
+#[test]
+fn an_unsigned_app_on_its_default_data_folder_starts_a_child_host_and_no_launchd_job() {
+    let home = short_tempdir();
+    let data = workspace_core::data_dir::default_directory(home.path());
+    let app = std::env::current_exe().unwrap();
+    assert_eq!(
+        HostLaunch::choose(developer_id_signed(&app), true),
+        HostLaunch::Child
+    );
+    let shell = tempfile::tempdir().unwrap();
+    let (client, _) = app_client(&data, shell.path());
+    assert!(answer(&client, ask::snapshot()).projects.is_empty());
+    // The host was started with the credential on its standard input, and holds the store.
+    let credential = client.with_launcher(|launch| launch.child().unwrap().credential().to_owned());
+    assert!(data.join("host.sock").exists());
+    // No plist was written and launchd has no job for this data folder.
+    assert!(!data.join("host").exists());
+    let job = process::Command::new("/bin/launchctl")
+        .args([
+            "print",
+            &format!("gui/{}/{}", unsafe { libc::getuid() }, LaunchdJob::label()),
+        ])
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&job.stdout);
+    let folder = data.file_name().unwrap().to_string_lossy();
+    assert!(
+        !job.status.success() || !listed.contains(&*home.path().to_string_lossy()),
+        "launchd runs a host for {folder}: {listed}"
+    );
+    // No file holds the credential.
+    assert_eq!(files_holding(home.path(), &credential), [] as [PathBuf; 0]);
+    client.stop();
+}
+
+#[test]
+fn with_a_data_dir_no_plist_is_written_and_the_child_host_stops_with_the_app() {
+    // Even a signed app starts a child host for a data folder it was given.
+    assert_eq!(HostLaunch::choose(true, false), HostLaunch::Child);
+    let data = tempfile::tempdir().unwrap();
+    let shell = tempfile::tempdir().unwrap();
+    let (client, _) = app_client(data.path(), shell.path());
+    assert!(answer(&client, ask::snapshot()).projects.is_empty());
+    let pid = child_pid(&client);
+    client.stop();
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the host still runs");
+    assert!(!data.path().join("host").exists());
+    assert!(!data.path().join("host.sock").exists());
+}
+
+#[test]
+fn a_message_sent_as_the_child_host_is_killed_is_stored_once() {
+    let data = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(data.path()).unwrap();
+    let project = host.create_project("Drops").unwrap();
+    let coordinator = (host.sessions().unwrap().into_iter())
+        .find(|s| s.project_id == project.id)
+        .unwrap()
+        .id;
+    drop(host);
+    let shell = tempfile::tempdir().unwrap();
+    let (client, events) = app_client(data.path(), shell.path());
+    let send = |id: &str| {
+        let send = Command::Send {
+            id: id.into(),
+            sender: None,
+            recipient: coordinator.clone(),
+            body: "Across the drop".into(),
+            attachments: vec![],
+        };
+        client.request(send).unwrap()
+    };
+    // A stopped host reads nothing, so the request is written and never answered before the
+    // kill.
+    let pid = child_pid(&client);
+    // SAFETY: signals the child host this test started.
+    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    let first = send("first-across-the-drop");
+    std::thread::sleep(Duration::from_millis(200));
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let message: Message = serde_json::from_value(reply(first)).unwrap();
+    assert_eq!(message.id, "first-across-the-drop");
+    // Killed as the request is written, the host may have stored it or not.
+    let pid = child_pid(&client);
+    let second = send("second-across-the-drop");
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    reply(second);
+
+    let messages = answer(&client, ask::messages(coordinator.clone(), None, 50));
+    for id in ["first-across-the-drop", "second-across-the-drop"] {
+        let copies = messages.iter().filter(|m| m.id == id).count();
+        assert_eq!(copies, 1, "{id}");
+    }
+    // The restarted host is a new epoch, so the subscription resumed with resync.
+    assert!(events.lock().unwrap().contains(&EventKind::Resync));
+    client.stop();
 }

@@ -56,10 +56,23 @@ Phase 4b replaces the remaining archive hash with a maintained revision. Its
 [same-fixture before/after measurements](host-revisions.md) reduce snapshot host
 build p50 from 8.175 ms to 2.712 ms, including per-session message revisions.
 
+## Over host.sock — October 19, 2026
+
+The desktop now reaches its host only through `host.sock` (`openspec/changes/standalone-host`, task 4.2). The benchmark gained two measures: a child `workspace-host serve` started on the same fixture, as the app starts one, and asked through `workspace_core::HostClient`. Each sample covers the request written to the socket, the host's actor and JSON, the reply line and the decode the desktop does. The run was on the Apple M4 above (macOS 27.0.1, Rust 1.97.0, release build) at `f965b945`. Other agents' release builds were running alongside, so the p95 and maximum columns are noisier than the October 17 run.
+
+| Operation | Samples | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| Transcript page, 100 rows, in process (no JSON) | 1,000 | 0.061 ms | 0.181 ms | 0.373 ms |
+| Transcript page, 100 rows, over `host.sock`, decoded | 1,000 | 0.965 ms | 1.497 ms | 88.869 ms |
+| Snapshot with JSON round trip, in process | 200 | 6.330 ms | 12.433 ms | 20.493 ms |
+| Snapshot over `host.sock`, decoded | 200 | 6.645 ms | 20.822 ms | 52.267 ms |
+
+The 197,772-byte snapshot costs about 0.3 ms more at p50 over the socket than its in-process JSON round trip. A transcript page adds about 0.9 ms: the host's actor, the JSON of 100 messages each way and the socket, which the in-process figure skips and this run does not tell apart. Both stay well under a frame at p50 and p95. The maxima are single outliers on a loaded machine; a quiet rerun should replace them before they are compared with a target.
+
 Reproduce with:
 
 ```sh
-cargo build --locked --release -p workspace-host --example benchmark
+cargo build --locked --release -p workspace-host --bin workspace-host --example benchmark
 /usr/bin/time -l target/release/examples/benchmark [folder to keep the fixture in]
 WIFFLETREE_BENCH_DIR=<kept folder or a store copy> cargo test --locked --release -p workspace-desktop tree_rows_benchmark -- --ignored --nocapture
 ```

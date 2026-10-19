@@ -33,6 +33,13 @@ impl CoreInstructions {
         }
     }
 }
+/// A core part with its text, as `Command::CoreInstructions` answers it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreText {
+    #[serde(flatten)]
+    pub about: CoreInstructions,
+    pub text: String,
+}
 /// What the human has written for a skill: rules in Additions mode, or a rewrite.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edits {
