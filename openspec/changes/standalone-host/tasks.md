@@ -2,7 +2,7 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 
 ## 0. Spike (before ticket A)
 
-- [ ] 0.1 On a signed, notarized build, check the client credential's Keychain item: whether another program (a shell script, an agent's `security find-generic-password`) gets a silent refusal or an allow/deny dialog; which keychain (login or data protection) and which access list or access group the item needs; and what entitlement or signature the host's versioned copy needs to read it. Record the result in design.md, and settle the Risk about the Keychain guarantee.
+- [x] 0.1 On a signed, notarized build, check the client credential's Keychain item: whether another program (a shell script, an agent's `security find-generic-password`) gets a silent refusal or an allow/deny dialog; which keychain (login or data protection) and which access list or access group the item needs; and what entitlement or signature the host's versioned copy needs to read it. Record the result in design.md, and settle the Risk about the Keychain guarantee.
 
 ## 1. Core and protocol (ticket A)
 
