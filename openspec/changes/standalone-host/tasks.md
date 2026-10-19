@@ -36,7 +36,7 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 
 - [ ] 5.1 The quit prompt with its wording, Keep them running as the default, no prompt with nothing working, and no prompt for a child host. Tests: the prompt's default choice is Keep them running; with nothing working, quitting asks nothing and sends no stop; a desktop started with `--data-dir` asks nothing and its child host has exited afterwards.
 - [ ] 5.2 Stop agents and quit: `StopAgentsAndQuit` runs the shutdown and exits 0; the app exits after the reply. Test through `Service`: running turns are recorded with `QUIT_DURING_TURN` and their groups stopped with reason `quit`.
-- [ ] 5.3 The menu bar icon and its menu, leaving the Dock while windows are closed, and staying in the background so the icon also appears for a turn that starts later from a timer or a paired device. Test: with no window open and no agent working, a turn started by a fake timer brings the icon back with one agent working, and it hides again when the turn ends.
+- [ ] 5.3 The menu bar icon and its menu (count, Open Wiffletree, Stop agents and quit, Quit Wiffletree), leaving the Dock while windows are closed, and staying in the background with the icon always shown. Tests: with no window open and no agent working the icon is quiet; a turn started by a fake timer shows a count of one, and the icon goes quiet again when the turn ends; Quit Wiffletree with nothing working exits the app, leaves the host running, and runs the staged update's install; closing into the background does not run it.
 
 ## 6. Updates and staying awake (ticket C)
 

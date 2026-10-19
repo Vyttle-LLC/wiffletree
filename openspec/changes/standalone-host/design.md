@@ -69,7 +69,7 @@ The audit of the desktop, by file:
 | `data_dir.rs` | moves the pre-rename `Agent Workspace` folder | the host does it before opening the store; the app only names the folder |
 | `leftovers.rs`, `verifiers.rs`, `tree.rs`, `inspector.rs` | only commands; their tests open `Host` | unchanged |
 | `preferences.rs` | `desktop-preferences.json` in the data folder | stays the app's own file; the host never reads it |
-| `update.rs` | uses `workspace_host::runtime::OwnDescriptors` | the trait moves to `workspace-core` |
+| `update.rs` | uses `workspace_host::runtime::OwnDescriptors`; installs a staged update on an ordinary quit | the trait moves to `workspace-core`; the install runs when the app process exits, which is now Quit Wiffletree from the menu bar icon or Stop agents and quit (7) |
 
 `ReadFile` reads only files under these roots: the attachment store, `<data folder>/projects/<project-id>/attachments/`, where `attachments::directory` keeps every project's attachments whatever its home; a project home; a ticket worktree; an attached repository; and the workspace folder. It reads at most `MAX_ATTACHMENT_BYTES` (50 MB). The host resolves the requested path first, following symlinks and `..`, and checks the resolved path against the resolved roots, so a symlink in a worktree that points at `~/.config/gh/hosts.yml` is refused. It never reads the store (`workspace.sqlite3` and its `-wal`, `-shm` and earlier copies such as `.pre-flatten`), `backups/`, host settings, `host/`, `logs/` or anything else in the data folder outside the attachment store and project homes, so no client can hold a copy of the database. Over every root, a fixed deny list of credential locations applies, checked after the path is resolved: `~/.ssh`, `~/.config/gh`, `~/.gnupg`, `~/.aws`, `~/.netrc`, `~/.git-credentials`, the Claude and Codex auth files (`~/.claude/.credentials.json`, `~/.claude.json` and `$CODEX_HOME/auth.json`, by default `~/.codex/auth.json`) and `~/Library/Keychains`. A root that contains one of them, such as a workspace folder set to `~`, still never serves it.
 
@@ -80,10 +80,12 @@ With these, `workspace-desktop` needs `workspace-host` only as a dev-dependency.
 ### 7. Quitting and the menu bar
 The quit prompt applies when the app quits with a launchd host and at least one agent is working: "Quit Wiffletree?", "N agents are working on this Mac. They can keep going after the window closes, and you can check in from your other devices.", **Stop agents and quit** and **Keep them running**, the default.
 
-- **Keep them running** closes the windows, removes the Dock icon, and leaves the app running in the background, connected to the host. It shows the menu bar icon whenever any agent is working, including turns that start later, for example from a timer or a paired device, and hides it while none is. The icon's menu shows how many are working, **Open Wiffletree** and **Stop agents and quit**. The app leaves the background only when the human opens it again or stops the agents.
+- **Keep them running** closes the windows, removes the Dock icon, and leaves the app running in the background, connected to the host. While the app is in the background its menu bar icon is always shown: quiet while no agent works, and with the count while any does, including turns that start later from a timer or a paired device. The icon's menu shows how many are working, **Open Wiffletree**, **Stop agents and quit** and **Quit Wiffletree**. Quit Wiffletree quits the app and leaves the host and its turns running.
 - **Stop agents and quit** sends `StopAgentsAndQuit`. The host runs the existing shutdown, exits successfully so launchd does not restart it, and the app exits once the host's reply arrives.
 
-Quitting while no agent is working asks nothing: the app closes its windows and leaves the Dock exactly as Keep them running does, so the host keeps running and the icon still appears if a timer or a paired device starts a turn later.
+Quitting while no agent is working asks nothing: the app closes its windows and leaves the Dock exactly as Keep them running does, so the host keeps running and the quiet icon stays in the menu bar. To end the app itself, the human chooses Quit Wiffletree from the icon.
+
+A staged update (`update.rs`) installs when the app process exits: on Quit Wiffletree and on Stop agents and quit. Closing the windows into the background does not install it.
 
 The menu bar icon lives in the app, not the host, so the host keeps building without any GUI dependency.
 
@@ -96,6 +98,7 @@ If the socket closes or the host does not answer, the desktop keeps the last sna
 ### 10. Settled with the human on October 19, 2026
 - The host does not start at login (1).
 - Quitting with no agent working asks nothing and leaves the host running (7).
+- While the app is in the background, its menu bar icon is always shown, quiet when idle and with a count while agents work; its menu's Quit Wiffletree quits the app and leaves the host running, and a staged update installs on that quit and on Stop agents and quit (7).
 - New turns are not held while an update's restart waits (4); Restart now covers a host that stays busy.
 
 ## Risks
