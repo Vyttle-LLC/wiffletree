@@ -7,14 +7,20 @@ Termic 1.17.2 pairs machines on a LAN the same way (Bonjour `_termic._tcp`, a SP
 ## Decisions
 
 ### 1. Where a connection comes from decides what it may do
-A connection on the host's Unix socket is **the host itself**: the human at that Mac. It may do everything, including pairing and changing who has access. A connection over the network is a **paired device**, with that device's access level. Nothing a remote device sends can make it the host itself.
+A connection on the host's Unix socket is **the host itself**: the human at that Mac. It may do everything, including pairing and changing who has access; the commands only the human should give also need the app's client credential there, as `standalone-host` design 2 defines, because agents can reach that socket too. A connection over the network is a **paired device**, with that device's access level. Nothing a remote device sends can make it the host itself.
 
 | Commands | The host itself | Control | View only |
 | --- | --- | --- | --- |
-| Reads (`is_read`), `Hello`, `Subscribe` | yes | yes | yes |
+| Reads (`is_read`), `Hello`, `Subscribe` | yes | yes | yes, except the rows below |
+| Reads that take a host path: `ReadFile`, `ResolvePaths`, `ListFolder` | yes | within the `standalone-host` roots; `ListFolder` also under the home folder | within the roots only |
+| `DiscoverRepositories`, which scans the folders it is given | yes | yes | refused |
+| `InspectAttachments`, which reads host paths the client names | yes | refused; remote devices upload instead (8) | refused |
+| `ComparePausedFile` | yes | yes | yes: it only accepts a file the host itself recorded as paused in its shared folder |
 | Every other workspace command, settings included, and `UploadAttachment` | yes | yes | refused |
 | Remote access, pairing, devices and access levels | yes | refused | refused |
 | `StopAgentsAndQuit`, `RestartHost` | yes | refused | refused |
+
+Every path is resolved, symlinks and `..` included, before it is checked against the roots.
 
 The level is read from the store for each command, so a change at the host applies to the next command. Changing a device's level or removing it also closes its open connections at once, so it reconnects under the new level or not at all. A refused command answers `"View only: <host> refuses changes from this device"` or `"Only <host> itself can change remote access"`, and runs nothing.
 
@@ -24,17 +30,22 @@ Every host and every client device has one long-term P-256 key pair, created the
 The host stores each paired device in the store: its id, public key, name, level, when it paired and when it last connected. A client stores each paired host in its own client settings: the host's id, public key, name, and the addresses it was last reached at. Neither stores the other's private key, and neither key ever leaves its Keychain.
 
 ### 3. The listener
-While "Let other devices use this Mac's Wiffletree" is on, the host listens on one TCP port on every interface, TLS 1.3 only, with rustls. Its certificate is self-signed and carries the host's key. Two WebSocket paths: `/pair` while pairing mode is open, and `/v1` for paired devices. Turning the setting off closes the listener, every remote connection and the advertisement; paired devices stay paired. The setting is kept in this Mac's host settings and is never synced through a settings repository.
+While "Let other devices use this Mac's Wiffletree" is on, the host listens on TCP port 47821 on every interface (a typed address may name another port), TLS 1.3 only, with rustls. Its certificate is self-signed and carries the host's key. Two WebSocket paths: `/pair` while pairing mode is open, and `/v1` for paired devices. Turning the setting off closes the listener, every remote connection and the advertisement; paired devices stay paired. The setting is kept in this Mac's host settings and is never synced through a settings repository.
 
 ### 4. Pairing
-At the host, Settings › Remote access › Pair a device opens pairing mode with a random 4-digit code for 2 minutes. On the other device, Connect a computer › Pair asks for the code.
+Pairing methods are pluggable. The first message on `/pair` names the method, and the host refuses a method it does not offer. Every method ends the same way: both sides hold each other's long-term public key, the host stores the device with level **Control**, and pairing mode closes. Two methods are defined:
+
+- **`code`**, for Macs, built in this change: a 4-digit code run through SPAKE2, described below.
+- **`qr`**, for the iPhone, specified in the protocol now and built with the iPhone client, including the QR screen on the host's Remote access page. Apple provides no SPAKE2, so this method needs only CryptoKit. The host shows a QR code holding its public key, its addresses and port, and a one-time secret of at least 128 random bits that works once, for 2 minutes. The iPhone opens TLS pinned to the key from the QR code, so no machine in the middle can answer, sends its public key and name, and proves it holds the secret with an HMAC-SHA256 under the secret over the transcript (both public keys and both names). The host answers with its own HMAC over the same transcript. A wrong HMAC counts as a wrong try, as for `code`.
+
+**The `code` method.** At the host, Settings › Remote access › Pair a device opens pairing mode with a random 4-digit code for 2 minutes. On the other device, Connect a computer › Pair asks for the code.
 
 1. The device opens TLS to the host without checking its certificate yet, and connects to `/pair`. It notes the certificate's public key.
 2. Both sides run SPAKE2 (the Ed25519 group, as the RustCrypto `spake2` crate implements it) with the code as the password and fixed identities `wiffletree-device` and `wiffletree-host`.
 3. Each side sends a confirmation, an HMAC over the transcript under the derived key. The transcript holds the host's public key as each side sees it (from the TLS certificate on the device, its own key on the host), the device's public key, its name and the host's name. A wrong code, or a machine in the middle presenting another certificate, makes a confirmation fail.
 4. On success the host stores the device with level **Control** and closes pairing mode, so the code is used once. The device stores the host. Each side shows the other's name.
 
-Each failed confirmation counts as a wrong try. After the limit, pairing mode closes and the code no longer works; the human starts pairing again at the host. One pairing exchange runs at a time; a second device trying meanwhile is told to wait.
+Each failed confirmation counts as a wrong try. After 3 wrong tries, pairing mode closes and the code no longer works; the human starts pairing again at the host. One pairing exchange runs at a time; a second device trying meanwhile is told to wait.
 
 ### 5. Every later connection
 The device opens TLS 1.3 to the host and accepts the certificate only if its public key is the one stored at pairing. The host then sends a random challenge; the device answers with its id and an ECDSA signature over the challenge, the host's id and its own id. The host checks it against the stored device key and closes the connection with `unpaired` if the device is unknown or removed. Only then does the `Hello` handshake of `standalone-host` run.
@@ -55,7 +66,7 @@ Switching hosts never stops anything; each host keeps running on its own, and Th
 
 ### 8. Files between devices
 - **Attachments.** A file dropped on a remote host's conversation is uploaded with `UploadAttachment { upload_id, offset, bytes }` in 128 KiB pieces, base64 in JSON, which keeps each request under the 256 KiB line bound. `Send` names uploaded ids in place of paths. The host keeps an upload until a send uses it or for one hour; an upload cut off by a dropped connection resumes from the host's last stored offset. The 50 MB attachment limit applies.
-- **Opening a host's file.** Clicking a path on a remote host asks the host with `ResolvePaths`, reads the file with `ReadFile`, and opens a read-only copy from the client's cache folder for that host. Reveal in Finder is offered only for This Mac. Copy path copies the host's path.
+- **Opening a host's file.** Clicking a path on a remote host asks the host with `ResolvePaths`, reads the file with `ReadFile`, and opens a read-only copy from the client's cache folder for that host; the file is not shown inside Wiffletree. Reveal in Finder is offered only for This Mac. Copy path copies the host's path.
 - **Choosing a folder on the host.** Adding a repository, choosing the workspace folder or a brain folder on a remote host opens an in-app folder browser over `ListFolder`, starting at the host's home folder, in place of the system panel.
 
 ### 9. Labels
@@ -67,7 +78,7 @@ A setting belongs to the Mac whose agents it runs. With the switcher on a remote
 The Settings window has two parts: "This Mac · the app" (appearance and theme, computers you've paired with, window layout) and, while the switcher is on a remote host, "<host> · the host you're driving" (models, repositories and checks, workspace folder, PR owners allowed, check-ins, reviews, skills, settings repository), ending with "Remote access (pairing and who can control it) changes only at <host> itself." On This Mac, the second part is This Mac's host settings and includes Remote access. The per-Mac and shared split of `settings-repository` is unchanged.
 
 ### 11. Disconnected
-When a host stops answering, its view stays as last received and a banner says "Reconnecting to Studio Mac…" and "Showing what it sent 40 seconds ago. Its agents keep working.", with **Try now**. The age counts up. The composer still works: "You can write; it sends when Studio Mac is back." A message sent meanwhile gets its id when it is written and is sent with that id once the host answers, so a send already received is stored once. Other actions are disabled until the host is back. A host offline when the app starts shows "Offline · last seen 2 hours ago" in the switcher.
+When a host stops answering, its view stays as last received and a banner says "Reconnecting to Studio Mac…" and "Showing what it sent 40 seconds ago. Its agents keep working.", with **Try now**. The age counts up. The composer still works: "You can write; it sends when Studio Mac is back." A message sent meanwhile gets its id when it is written and is sent with that id once the host answers, so a send already received is stored once. Messages waiting to be sent are kept only while the app runs: like drafts today, they are lost if the app quits before the host is back. Other actions are disabled until the host is back. A host offline when the app starts shows "Offline · last seen 2 hours ago" in the switcher.
 
 Reconnecting tries after 1 s, doubling to at most 30 s, with up to 20% jitter. A change of network on the client, and Try now, try at once and restart the delay. On reconnecting, the client resumes its subscription from its cursor or takes a snapshot, as `standalone-host` defines.
 
@@ -78,20 +89,24 @@ Each reply gains `host_ms`, the time from the host reading the request to writin
 No command or event carries a provider, GitHub or Git credential, a token, or the host's environment. Provider sign-in states and account labels are shown as the host reports them, as today. Publishing, the PR keeper and their checks run on the host, as today. A test scans every reply and event of a scripted session for planted secret values.
 
 ### 14. The protocol for other clients
-`docs/remote-protocol.md` documents everything a client needs: TLS and pinning, the pairing exchange with test vectors, the challenge, the WebSocket framing (one JSON message per text frame), `Hello`, every command and event as in `docs/host-protocol.md`, the access table above, uploads and errors. Binary data is base64. Nothing in it requires Rust. The iPhone client and push notifications are not part of this change; its first job will be answering the Inbox, which the protocol already serves.
+`docs/remote-protocol.md` documents everything a client needs: TLS and pinning, the pairing methods (`code` and `qr`) with test vectors for each, the challenge, the WebSocket framing (one JSON message per text frame), `Hello`, every command and event as in `docs/host-protocol.md`, the access table above, uploads and errors. Binary data is base64. Nothing in it requires Rust. The iPhone client and push notifications are not part of this change; its first job will be answering the Inbox, which the protocol already serves.
+
+### 15. Settled with the human on October 19, 2026
+- The default port is 47821 (3).
+- Pairing mode closes after 3 wrong tries (4).
+- A remote device may not stop or restart the host process (1). Control devices can still stop agents' turns, as today.
+- Pairing is pluggable: Macs use the 4-digit code with SPAKE2; the iPhone scans a QR code and needs only CryptoKit (4).
+- Messages written while disconnected do not survive a restart of the app (11).
+- Opening a host's file gives a read-only copy on this Mac (8).
+- Network delay is shown in the switcher row's tooltip and in the log (12).
 
 ## Risks
 
 - **Local Network privacy.** macOS asks before an app uses the local network. The host binary runs from a copy outside the app bundle under launchd, and how macOS attributes its advertising and listening must be checked first (task 1.1). If macOS does not prompt for it, the app advertises on the host's behalf while the setting is on.
-- **Four digits.** The code is safe only because SPAKE2 allows one guess per try and pairing closes after a few wrong ones; the code must never be checked any other way.
+- **Four digits.** The code is safe only because SPAKE2 allows one guess per try and pairing closes after 3 wrong ones; the code must never be checked any other way.
+- **Agents on a driving Mac.** The client's own host socket and its paired hosts are reachable by that Mac's agents, which run as the same user. Device private keys stay in a Keychain item limited to the signed app, so an agent cannot sign the challenge as the device; this is defence in depth, not a sandbox.
 - **A lost device.** Anyone holding a paired Mac with Control can run commands on the host, since agents run with permission prompts off. Remove at the host is the remedy, and it applies at once.
 
 ## Open questions
 
-1. **The TCP port.** A typed name without a port needs a fixed default. Proposed: 47821.
-2. **How many wrong tries close pairing mode.** Proposed: 3.
-3. **Stopping or restarting the host from a remote device.** Proposed, and specified for now: refused, like pairing; only the host itself stops or restarts its host process. Stopping agents' turns remains available to Control devices, as today.
-4. **SPAKE2 on an iPhone.** Apple provides no SPAKE2 and no Ed25519-group arithmetic, so a SwiftUI client needs a third-party Swift implementation or a small pairing library compiled from Rust. Should the pairing exchange instead use a PAKE with a vetted Swift implementation, or is a small Rust pairing library acceptable for the iPhone, given the rule of no shared Rust code?
-5. **Messages written while disconnected.** Proposed: kept while the app runs and lost if it quits before the host is back, as drafts are today. Should they survive a restart of the app?
-6. **Opening a host's file** as a read-only copy on this Mac (proposed), or showing it inside Wiffletree.
-7. **Where network delay is shown.** Proposed: the switcher row's tooltip and the log; the mockup does not draw it.
+None.

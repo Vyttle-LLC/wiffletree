@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: The host runs as its own process
-For the default data folder, the host SHALL run as a per-user launchd process separate from the desktop app, labelled `com.vyttle.wiffletree.host` (`com.vyttle.wiffletree.beta.host` for a beta), and SHALL keep running when the app's windows close or the app exits. launchd SHALL restart it after an unsuccessful exit and SHALL NOT restart it after a clean one. A desktop started with `--data-dir` SHALL instead start the host as its own child process, SHALL NOT write a launchd plist, and SHALL stop that host when it exits. The host SHALL keep exclusive ownership of its store.
+For the default data folder, the host SHALL run as a per-user launchd process separate from the desktop app, SHALL NOT start at login, labelled `com.vyttle.wiffletree.host` (`com.vyttle.wiffletree.beta.host` for a beta), and SHALL keep running when the app's windows close or the app exits. launchd SHALL restart it after an unsuccessful exit and SHALL NOT restart it after a clean one. A desktop started with `--data-dir` SHALL instead start the host as its own child process, SHALL NOT write a launchd plist, and SHALL stop that host when it exits. The host SHALL keep exclusive ownership of its store.
 
 #### Scenario: First launch
 - **WHEN** the app opens on a Mac where no host runs for the default data folder
@@ -17,7 +17,11 @@ For the default data folder, the host SHALL run as a per-user launchd process se
 
 #### Scenario: A scratch store
 - **WHEN** the desktop is started with `--data-dir` pointing at a temporary folder
-- **THEN** no file is written under `~/Library/LaunchAgents`, and the host stops when the desktop exits
+- **THEN** no file is written under `~/Library/LaunchAgents`, the host runs from the app's own binary with no versioned copy, and the host stops when the desktop exits
+
+#### Scenario: Not at login
+- **WHEN** the Mac restarts and the human logs in without opening Wiffletree
+- **THEN** no host runs until the app is opened
 
 #### Scenario: Two hosts, one store
 - **WHEN** a second host is started for a data folder whose host is running
@@ -33,6 +37,21 @@ The host SHALL accept client connections on `<data folder>/host.sock`, created w
 #### Scenario: The desktop does not link the host
 - **WHEN** `workspace-desktop` is built for release
 - **THEN** it does not depend on the `workspace-host` crate
+
+### Requirement: Human-only commands need the app's credential
+On its own socket, the host SHALL run the commands only the human should give, namely opening or cancelling pairing mode, turning remote access on or off, changing or removing a device's access, and answering the Inbox (`ResolveAttention`, `DismissAttention`, which also approves a publish), only for a connection whose `Hello` carried the app's client credential. The host SHALL create that credential at its first start and keep it in a login Keychain item that only the signed Wiffletree app and the host can read. A child host SHALL receive it on its standard input, never in its environment. Every other command SHALL work without it. The agents' tool socket SHALL keep requiring each turn's own token.
+
+#### Scenario: An agent opens the host socket
+- **WHEN** an agent's shell connects to `host.sock`, sends `Hello` without the credential and answers an Inbox question
+- **THEN** the host refuses the answer and the question stays open
+
+#### Scenario: The app answers
+- **WHEN** the app, which sent the credential in `Hello`, answers the same question
+- **THEN** the host records the answer
+
+#### Scenario: Other commands
+- **WHEN** a connection without the credential asks for the snapshot
+- **THEN** the host answers it
 
 ### Requirement: Connections begin with a handshake
 Every client connection SHALL begin with `Hello`, naming the protocol versions and capabilities the client supports. The host SHALL answer with the protocol version it chose, its host id, its version, its epoch and its capabilities, and SHALL refuse any request sent before `Hello`. A host SHALL accept its own protocol version and the one before it. With no common version, the host SHALL refuse with both version ranges, its version and how many agents are working, and the app SHALL say which side needs updating. `Hello`, that refusal and `RestartHost` SHALL keep the same shape in every protocol version, and after a refusal the host SHALL accept `RestartHost`, and no other command, from a connection on its own socket. A client SHALL NOT send a command that needs a capability the host did not list.
@@ -92,7 +111,7 @@ The host SHALL offer one subscription per connection that sends the events `stat
 - **THEN** the subscriber receives at most one event of each kind for it
 
 ### Requirement: The desktop reads host files only through the host
-The desktop SHALL learn whether a linked path exists and whether opening it would run it, read attachment thumbnails, list folders for a chooser and read the core instructions' versions only through host commands. The host SHALL read files for a client only under a project home, a ticket worktree, an attached repository or the workspace folder, and at most 50 MB of one file. It SHALL NOT read for a client the store, its journal files or earlier copies, its backups, or any other file in the data folder outside a project home. A folder listing SHALL name only folders and whether each is a Git repository. The host SHALL adopt the user's login-shell environment at its own start.
+The desktop SHALL learn whether a linked path exists and whether opening it would run it, read attachment thumbnails, list folders for a chooser and read the core instructions' versions only through host commands. The host SHALL read files for a client only under the attachment store (`<data folder>/projects/<project-id>/attachments/`), a project home, a ticket worktree, an attached repository or the workspace folder, and at most 50 MB of one file. It SHALL resolve symlinks and `..` before checking, and SHALL refuse a path whose resolved form is not under a resolved allowed root. It SHALL NOT read for a client the store, its journal files or earlier copies, its backups, or any other file in the data folder outside the attachment store and project homes. A folder listing SHALL name only folders and whether each is a Git repository, SHALL be resolved and checked the same way, and SHALL be limited to the same roots, except that the host itself and a Control device may list folders under the host's home folder. The host SHALL adopt the user's login-shell environment at its own start.
 
 #### Scenario: A link to a worktree file
 - **WHEN** an agent's reply names `src/lib.rs` and the ticket worktree holds that file
@@ -101,6 +120,18 @@ The desktop SHALL learn whether a linked path exists and whether opening it woul
 #### Scenario: A file outside what the host serves
 - **WHEN** a client asks the host to read `/etc/hosts`
 - **THEN** the host refuses and reads nothing
+
+#### Scenario: An attachment of a project whose home is elsewhere
+- **WHEN** a project's home is `~/wiffletree/projects/tide-alerts` and the desktop asks for the thumbnail of an image stored with one of its messages under `<data folder>/projects/<project-id>/attachments/`
+- **THEN** the host returns the image
+
+#### Scenario: A symlink out of a worktree
+- **WHEN** a ticket worktree holds `creds`, a symlink to `~/.config/gh/hosts.yml`, and a client asks the host to read `creds` in that worktree
+- **THEN** the host refuses and reads nothing
+
+#### Scenario: Too large
+- **WHEN** a client asks the host to read a 60 MB file in a worktree
+- **THEN** the host refuses it as over 50 MB
 
 #### Scenario: The database
 - **WHEN** a client asks the host to read `workspace.sqlite3`, its `-wal` file or a file under `backups/` in the data folder

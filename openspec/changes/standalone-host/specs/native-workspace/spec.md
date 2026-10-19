@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Quitting asks while agents work
-When the app quits with a launchd host while at least one agent is working, it SHALL ask "Quit Wiffletree?", saying "N agents are working on this Mac. They can keep going after the window closes, and you can check in from your other devices.", with the buttons **Stop agents and quit** and **Keep them running**, the default. Keep them running SHALL leave the host and its turns running. Stop agents and quit SHALL ask the host to stop its agents and exit, and SHALL quit the app once the host has answered. A desktop that started its host as a child SHALL NOT ask.
+When the app quits with a launchd host while at least one agent is working, it SHALL ask "Quit Wiffletree?", saying "N agents are working on this Mac. They can keep going after the window closes, and you can check in from your other devices.", with the buttons **Stop agents and quit** and **Keep them running**, the default. Keep them running SHALL leave the host and its turns running. Stop agents and quit SHALL ask the host to stop its agents and exit, and SHALL quit the app once the host has answered. Quitting while no agent is working SHALL NOT ask, and SHALL close the windows and leave the Dock as Keep them running does, leaving the host running. A desktop that started its host as a child SHALL NOT ask, and quitting it SHALL stop that host.
 
 #### Scenario: Three agents working
 - **WHEN** the human presses ⌘Q while three agents are working
 - **THEN** the prompt says "3 agents are working on this Mac." and Return chooses Keep them running
+
+#### Scenario: Nothing working
+- **WHEN** the human presses ⌘Q while no agent is working
+- **THEN** no prompt appears, the windows close, and the host keeps running
 
 #### Scenario: Stop agents and quit
 - **WHEN** the human chooses Stop agents and quit

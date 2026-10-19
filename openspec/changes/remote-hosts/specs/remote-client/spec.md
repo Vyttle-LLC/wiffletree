@@ -53,11 +53,15 @@ While a remote host is selected, the Workspace section's Repositories, Models, S
 - **THEN** only this device's appearance changes, and Work Studio's own windows are unchanged
 
 ### Requirement: A dropped connection freezes the view without losing work
-When a selected remote host stops answering, the client SHALL keep showing the last state it received, under "Reconnecting to <host>…" and "Showing what it sent <age> ago. Its agents keep working.", with the age counting up and **Try now**. The composer SHALL keep working, saying "You can write; it sends when <host> is back.", and drafts SHALL be kept. A message sent while disconnected SHALL get its id when it is written and SHALL be sent with that id when the host answers again. A message whose reply was lost SHALL be sent again with its id. The host's existing deduplication SHALL store each such message once. Other actions SHALL be disabled until the host answers.
+When a selected remote host stops answering, the client SHALL keep showing the last state it received, under "Reconnecting to <host>…" and "Showing what it sent <age> ago. Its agents keep working.", with the age counting up and **Try now**. The composer SHALL keep working, saying "You can write; it sends when <host> is back.", and drafts SHALL be kept. A message sent while disconnected SHALL get its id when it is written and SHALL be sent with that id when the host answers again, and SHALL be kept only while the app runs. A message whose reply was lost SHALL be sent again with its id. The host's existing deduplication SHALL store each such message once. Other actions SHALL be disabled until the host answers.
 
 #### Scenario: Writing during a drop
 - **WHEN** the connection drops and the human writes and sends a reply to the coordinator
 - **THEN** the reply waits in the composer area and is delivered once when the host is back
+
+#### Scenario: The app quits during a drop
+- **WHEN** a message waits to be sent and the human quits the app before the host is back
+- **THEN** the message is not sent after the app opens again
 
 #### Scenario: A send whose answer was lost
 - **WHEN** the connection drops after a message reached the host and before its reply arrived

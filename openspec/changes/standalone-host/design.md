@@ -13,16 +13,18 @@ See proposal.md for why. At origin/main f67ce3f:
 ## Decisions
 
 ### 1. One host process per data folder
-For the default data folder (`~/Library/Application Support/Wiffletree`, or the beta's) the host runs under launchd as the LaunchAgent `com.vyttle.wiffletree.host` (`com.vyttle.wiffletree.beta.host` for a beta), so the release and the beta keep separate hosts as they keep separate stores. The app writes `~/Library/LaunchAgents/<label>.plist` and loads it with `launchctl bootstrap gui/<uid>` the first time it finds no host, and starts it with `launchctl kickstart` after that. The plist runs `workspace-host serve --data-dir <folder>` with `KeepAlive` set to restart only after an unsuccessful exit, and sends standard error to `<data folder>/logs/host.log`.
+For the default data folder (`~/Library/Application Support/Wiffletree`, or the beta's) the host runs under launchd as the LaunchAgent `com.vyttle.wiffletree.host` (`com.vyttle.wiffletree.beta.host` for a beta), so the release and the beta keep separate hosts as they keep separate stores. The app writes `~/Library/LaunchAgents/<label>.plist` and loads it with `launchctl bootstrap gui/<uid>` the first time it finds no host, and starts it with `launchctl kickstart` after that. The plist runs `workspace-host serve --data-dir <folder>` from the versioned copy (4), with `KeepAlive` set to restart only after an unsuccessful exit and without `RunAtLoad`, so the host does not start at login: after the Mac restarts, nothing runs until the app is opened. It sends standard error to `<data folder>/logs/host.log`.
 
-When the desktop is started with `--data-dir`, as in tests, `drive_desktop.py` and scratch stores, it starts `workspace-host serve` as its own child and stops it when it exits. No plist is written. The quit prompt and the menu bar icon do not apply to such a host.
+When the desktop is started with `--data-dir`, as in tests, `drive_desktop.py` and scratch stores, it starts `workspace-host serve` as its own child, straight from the bundle's `Contents/MacOS/workspace-host` (or `target/<profile>/` in development), and stops it when it exits. No plist is written and no versioned copy is made: a child host never outlives the app that started it, so an update cannot replace it mid-turn. The quit prompt and the menu bar icon do not apply to such a host.
 
 The store lock stays as it is and remains the single guarantee that one host owns a store.
 
 *Why not `SMAppService`:* it requires the program to stay inside the app bundle, which an update replaces under the running host (see 4).
 
 ### 2. The socket
-`serve` listens on `<data folder>/host.sock`, created with mode 0600 inside the data folder, which the host keeps at 0700. Each accepted connection is checked with `getpeereid`; a different user is closed at once. A socket path longer than the platform's limit (104 bytes on macOS) stops the host at start with that reason, rather than falling back to another folder. The agents' tool socket in `/tmp/aw-*` is unchanged; it is a different protocol with its own per-turn tokens.
+`serve` listens on `<data folder>/host.sock`, created with mode 0600 inside the data folder, which the host keeps at 0700. Each accepted connection is checked with `getpeereid`; a different user is closed at once. A socket path longer than the platform's limit (104 bytes on macOS) stops the host at start with that reason, rather than falling back to another folder. The agents' tool socket in `/tmp/aw-*` is unchanged: it is a different protocol, and each call still needs the calling turn's own token, as today.
+
+Agents run as the same user with permission prompts off, so an agent can connect to `host.sock` as well as the app can. The socket's permissions keep out other users, not agents. As defence in depth, the commands only the human should give also require the app's **client credential**: opening or cancelling pairing mode, turning remote access on or off, changing or removing a device's access (all from `remote-hosts`), and answering the Inbox (`ResolveAttention`, `DismissAttention`), which is also how a publish is approved. The host creates the credential, a random 256-bit secret, at its first start and keeps it in a login Keychain item whose access list holds only the signed Wiffletree app and the host's own copy; Keychain refuses other programs, an agent's shell among them, without asking. The app reads it and sends it in `Hello`; a connection without it may use every other command. A child host gets it from the app on its standard input at start, never in its environment, which agents inherit. This raises the bar for an agent that tries to answer its own questions or pair a device of its own; it is not a sandbox. As the README warns, agents can still run any command as the user.
 
 Messages are the existing JSON lines, at most 256 KiB per request line. A connection carries any number of requests, answered in any order and matched by `id`, plus the events of a subscription (5).
 
@@ -69,7 +71,9 @@ The audit of the desktop, by file:
 | `preferences.rs` | `desktop-preferences.json` in the data folder | stays the app's own file; the host never reads it |
 | `update.rs` | uses `workspace_host::runtime::OwnDescriptors` | the trait moves to `workspace-core` |
 
-`ReadFile` reads only files under a project home (which holds the message attachments), a ticket worktree, an attached repository or the workspace folder, and at most `MAX_ATTACHMENT_BYTES` (50 MB). `ListFolder` lists only folders, names and whether each is a Git repository, and reads nothing inside them. It never reads the store (`workspace.sqlite3` and its `-wal`, `-shm` and earlier copies), `backups/`, host settings, `host/`, `logs/` or anything else in the data folder outside a project home, so no client can hold a copy of the database. Both run off the host thread, as Git reads do.
+`ReadFile` reads only files under these roots: the attachment store, `<data folder>/projects/<project-id>/attachments/`, where `attachments::directory` keeps every project's attachments whatever its home; a project home; a ticket worktree; an attached repository; and the workspace folder. It reads at most `MAX_ATTACHMENT_BYTES` (50 MB). The host resolves the requested path first, following symlinks and `..`, and checks the resolved path against the resolved roots, so a symlink in a worktree that points at `~/.config/gh/hosts.yml` is refused. It never reads the store (`workspace.sqlite3` and its `-wal`, `-shm` and earlier copies such as `.pre-flatten`), `backups/`, host settings, `host/`, `logs/` or anything else in the data folder outside the attachment store and project homes, so no client can hold a copy of the database.
+
+`ListFolder` lists only folders, with their names and whether each is a Git repository, and reads nothing inside them. It applies the same resolution, and lists only folders under the same roots, except that the host itself and a `remote-hosts` Control device may list folders under the host's home folder, since choosing a new repository needs that. Both run off the host thread, as Git reads do.
 
 With these, `workspace-desktop` needs `workspace-host` only as a dev-dependency.
 
@@ -79,6 +83,8 @@ The quit prompt applies when the app quits with a launchd host and at least one 
 - **Keep them running** closes the windows, removes the Dock icon, and leaves the app running in the background, connected to the host. It shows the menu bar icon whenever any agent is working, including turns that start later, for example from a timer or a paired device, and hides it while none is. The icon's menu shows how many are working, **Open Wiffletree** and **Stop agents and quit**. The app leaves the background only when the human opens it again or stops the agents.
 - **Stop agents and quit** sends `StopAgentsAndQuit`. The host runs the existing shutdown, exits successfully so launchd does not restart it, and the app exits once the host's reply arrives.
 
+Quitting while no agent is working asks nothing: the app closes its windows and leaves the Dock exactly as Keep them running does, so the host keeps running and the icon still appears if a timer or a paired device starts a turn later.
+
 The menu bar icon lives in the app, not the host, so the host keeps building without any GUI dependency.
 
 ### 8. Keeping the Mac awake
@@ -87,14 +93,18 @@ While at least one turn or compaction runs, the host holds one IOKit power asser
 ### 9. Losing the host
 If the socket closes or the host does not answer, the desktop keeps the last snapshot on screen, tries again after 0.5 s, doubling up to 30 s (and at once if launchd has just restarted the host), and on success sends `Hello` and `Subscribe` with its last cursor. A send whose reply never came is retried with the same message id, which the host's existing dedup accepts once.
 
+### 10. Settled with the human on October 19, 2026
+- The host does not start at login (1).
+- Quitting with no agent working asks nothing and leaves the host running (7).
+- New turns are not held while an update's restart waits (4); Restart now covers a host that stays busy.
+
 ## Risks
 
 - A LaunchAgent shows a "Background item added" notification and appears in System Settings › Login Items, where the human can turn it off. The app then says the host could not start and how to allow it.
 - Copying the host binary out of the bundle keeps its code signature, but Gatekeeper's treatment of the copy must be checked on a notarized build before release.
+- Agents are same-user peers of `host.sock`. The client credential (2) guards the human-only commands; everything else an agent could do through the socket it can already do as the user.
 - Every reply now crosses a socket. The local transport target in the PRD (low overhead, bounded buffering) is to be measured with the existing host benchmark, not assumed.
 
 ## Open questions
 
-1. **Does the host start at login?** Proposed: no. The host starts when the app opens and runs until it is stopped, so after a restart of the Mac nothing runs until the app is opened. Starting at login matters most once other devices drive this Mac.
-2. **Quitting with no agent working.** The approved prompt covers quitting while agents work. When none is working, should the app quit without asking and leave the host running (timers and other devices keep working), or stop the host too? Proposed: quit without asking and leave the host running.
-3. **Holding new turns while an update waits.** Proposed: no; the host restarts at the first idle moment. A busy host may then wait a long time, which **Restart now** covers.
+None.
