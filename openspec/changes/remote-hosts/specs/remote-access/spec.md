@@ -61,7 +61,7 @@ After pairing, a device SHALL accept a connection to a host only if the host's T
 - **THEN** the host closes the connection with `unpaired` before the handshake
 
 ### Requirement: Access levels are enforced per command
-A paired device SHALL have the access level Control or View only. The host SHALL check the level of the connection's device for every command. View only SHALL allow only reads, the handshake and the event subscription, and SHALL refuse every other command, running nothing. Control SHALL allow every workspace command, including saving the host's settings and uploading attachments. Commands that change remote access, pairing, devices or access levels, and commands that stop or restart the host process, SHALL be refused from every remote device. A connection on the host's own socket SHALL be the host itself and SHALL be allowed everything.
+A paired device SHALL have the access level Control or View only. The host SHALL check the level of the connection's device for every command. View only SHALL allow only reads, the handshake and the event subscription, and SHALL refuse every other command, running nothing. Control SHALL allow every workspace command, including saving the host's settings and uploading attachments, except as the path rules below say. Commands that change remote access, pairing, devices or access levels, and commands that stop or restart the host process, SHALL be refused from every remote device. A connection on the host's own socket SHALL be the host itself and SHALL be allowed everything.
 
 #### Scenario: View only sends a message
 - **WHEN** a View only device sends a message to a coordinator
@@ -80,7 +80,7 @@ A paired device SHALL have the access level Control or View only. The host SHALL
 - **THEN** the host refuses with "Only Studio Mac itself can change remote access" and changes nothing
 
 ### Requirement: Path reads from remote devices are bounded
-For a remote device, the host SHALL resolve every host path a command names, symlinks and `..` included, and SHALL serve `ReadFile`, `ResolvePaths` and `ListFolder` only within the roots `standalone-host` allows, with `ListFolder` also under the host's home folder for a Control device. It SHALL refuse `InspectAttachments` from every remote device and `DiscoverRepositories` from a View only device, and SHALL answer `ComparePausedFile` only for a file it recorded as paused.
+For a remote device, the host SHALL resolve every host path a command names, symlinks and `..` included, and SHALL serve `ReadFile`, `ResolvePaths` and `ListFolder` only within the roots `standalone-host` allows, with `ListFolder` also under the host's home folder for a Control device. It SHALL refuse `InspectAttachments` from every remote device and `DiscoverRepositories` from a View only device, and SHALL answer `ComparePausedFile` only for a file it recorded as paused. The `standalone-host` deny list of credential locations SHALL apply to every remote read and listing.
 
 #### Scenario: View only lists the home folder
 - **WHEN** a View only device asks to list the host's home folder
@@ -89,6 +89,10 @@ For a remote device, the host SHALL resolve every host path a command names, sym
 #### Scenario: Control chooses a repository
 - **WHEN** a Control device lists `~/dev` on the host to add a repository
 - **THEN** the host lists its folders and which are Git repositories
+
+#### Scenario: A credential under the workspace folder
+- **WHEN** the host's workspace folder is `~` and a View only device asks to read `~/.config/gh/hosts.yml`
+- **THEN** the host refuses and reads nothing
 
 #### Scenario: Reading host paths through attachments
 - **WHEN** a Control device sends `InspectAttachments` naming `~/.ssh/id_ed25519`

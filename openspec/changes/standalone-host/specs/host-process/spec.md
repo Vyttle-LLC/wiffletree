@@ -39,7 +39,7 @@ The host SHALL accept client connections on `<data folder>/host.sock`, created w
 - **THEN** it does not depend on the `workspace-host` crate
 
 ### Requirement: Human-only commands need the app's credential
-On its own socket, the host SHALL run the commands only the human should give, namely opening or cancelling pairing mode, turning remote access on or off, changing or removing a device's access, and answering the Inbox (`ResolveAttention`, `DismissAttention`, which also approves a publish), only for a connection whose `Hello` carried the app's client credential. The host SHALL create that credential at its first start and keep it in a login Keychain item that only the signed Wiffletree app and the host can read. A child host SHALL receive it on its standard input, never in its environment. Every other command SHALL work without it. The agents' tool socket SHALL keep requiring each turn's own token.
+On its own socket, the host SHALL run the commands only the human should give, namely opening or cancelling pairing mode, turning remote access on or off, changing or removing a device's access, and answering the Inbox (`ResolveAttention`, `DismissAttention`, which also approves a publish), only for a connection whose `Hello` carried the app's client credential. For a signed build's launchd host, the host SHALL create that credential at its first start and keep it in a login Keychain item that only the signed Wiffletree app and the host can read. For a child host, and for any host of an unsigned development build, the app SHALL create a fresh credential each launch and pass it on the host's standard input, never in its environment. Every other command SHALL work without it. The agents' tool socket SHALL keep requiring each turn's own token.
 
 #### Scenario: An agent opens the host socket
 - **WHEN** an agent's shell connects to `host.sock`, sends `Hello` without the credential and answers an Inbox question
@@ -111,7 +111,7 @@ The host SHALL offer one subscription per connection that sends the events `stat
 - **THEN** the subscriber receives at most one event of each kind for it
 
 ### Requirement: The desktop reads host files only through the host
-The desktop SHALL learn whether a linked path exists and whether opening it would run it, read attachment thumbnails, list folders for a chooser and read the core instructions' versions only through host commands. The host SHALL read files for a client only under the attachment store (`<data folder>/projects/<project-id>/attachments/`), a project home, a ticket worktree, an attached repository or the workspace folder, and at most 50 MB of one file. It SHALL resolve symlinks and `..` before checking, and SHALL refuse a path whose resolved form is not under a resolved allowed root. It SHALL NOT read for a client the store, its journal files or earlier copies, its backups, or any other file in the data folder outside the attachment store and project homes. A folder listing SHALL name only folders and whether each is a Git repository, SHALL be resolved and checked the same way, and SHALL be limited to the same roots, except that the host itself and a Control device may list folders under the host's home folder. The host SHALL adopt the user's login-shell environment at its own start.
+The desktop SHALL learn whether a linked path exists and whether opening it would run it, read attachment thumbnails, list folders for a chooser and read the core instructions' versions only through host commands. The host SHALL read files for a client only under the attachment store (`<data folder>/projects/<project-id>/attachments/`), a project home, a ticket worktree, an attached repository or the workspace folder, and at most 50 MB of one file. It SHALL resolve symlinks and `..` before checking, and SHALL refuse a path whose resolved form is not under a resolved allowed root. Over every root, it SHALL refuse a resolved path inside a fixed deny list of credential locations: `~/.ssh`, `~/.config/gh`, `~/.gnupg`, `~/.aws`, `~/.netrc`, `~/.git-credentials`, the Claude and Codex auth files (`~/.claude/.credentials.json`, `~/.claude.json` and `$CODEX_HOME/auth.json`, by default `~/.codex/auth.json`) and `~/Library/Keychains`. Folder listings SHALL apply the same deny list. It SHALL NOT read for a client the store, its journal files or earlier copies, its backups, or any other file in the data folder outside the attachment store and project homes. A folder listing SHALL name only folders and whether each is a Git repository, SHALL be resolved and checked the same way, and SHALL be limited to the same roots, except that the host itself and a Control device may list folders under the host's home folder. The host SHALL adopt the user's login-shell environment at its own start.
 
 #### Scenario: A link to a worktree file
 - **WHEN** an agent's reply names `src/lib.rs` and the ticket worktree holds that file
@@ -127,6 +127,10 @@ The desktop SHALL learn whether a linked path exists and whether opening it woul
 
 #### Scenario: A symlink out of a worktree
 - **WHEN** a ticket worktree holds `creds`, a symlink to `~/.config/gh/hosts.yml`, and a client asks the host to read `creds` in that worktree
+- **THEN** the host refuses and reads nothing
+
+#### Scenario: A credential under a root
+- **WHEN** the workspace folder is set to `~` and a client asks the host to read `~/.config/gh/hosts.yml`
 - **THEN** the host refuses and reads nothing
 
 #### Scenario: Too large

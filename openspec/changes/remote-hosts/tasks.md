@@ -17,7 +17,7 @@ Starts once `standalone-host` is archived. Three implementation tickets: the hos
 
 - [ ] 3.1 The access table of design.md 1, checked per command from the store; closing a device's connections when its level changes or it is removed. Tests: every command in `Command` is covered by one table row (a test fails when a new command is not classified); View only refuses a send and stores nothing; a remote device cannot open pairing or change levels, or stop or restart the host; View only cannot list the home folder or run `DiscoverRepositories`; no remote device can run `InspectAttachments`; a symlink out of a worktree is refused.
 - [ ] 3.2 Staged uploads in 128 KiB pieces, the 50 MB limit, expiry after an hour, and `Send` naming uploads. Tests: an upload is stored with its message; an unused one is deleted after an hour (fake clock); an upload that would pass 50 MB is refused at the piece that crosses it; a cut-off upload resumes from the stored offset.
-- [ ] 3.3 The credentials test: a scripted remote session against a host with planted secrets finds none of them in replies or events.
+- [ ] 3.3 The credentials test: a scripted remote session against a host with planted secrets finds none of them in replies or events. Also: with the workspace folder set to `~`, a View only device's `ReadFile` of `~/.config/gh/hosts.yml` and a Control device's `ListFolder` of `~/.ssh` are refused.
 - [ ] 3.4 Settings › Remote access at the host: the switch, "This Mac is called …" with its addresses, Pair a device with the code and timer, Paired devices with level and Remove, and the explanation text, as in the mockup's study 2.
 
 ## 4. Client: connecting and switching (ticket B)
