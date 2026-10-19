@@ -700,12 +700,11 @@ fn acceptance_refuses_commits_after_the_verified_one() {
     assert!(f.worktree().exists());
 }
 
-/// A ticket whose one full review passed, under a cap of `max_cycles` full reviews, with two
-/// commits after it.
-fn passed_then_two_commits(max_cycles: u32) -> (Fixture, [String; 2]) {
+/// A ticket whose one full review, all the cap allows, passed, with two commits after it.
+fn passed_then_two_commits() -> (Fixture, [String; 2]) {
     let mut f = Fixture::ready(vec![verifier(Role::Tester, "Codex", None)], 2);
     let mut settings = f.host.settings().verification;
-    settings.max_cycles = max_cycles;
+    settings.max_cycles = 1;
     f.host.set_verification(settings).unwrap();
     f.verify().unwrap();
     f.report(&f.verifier("Codex"), "pass", "passed").unwrap();
@@ -716,7 +715,7 @@ fn passed_then_two_commits(max_cycles: u32) -> (Fixture, [String; 2]) {
 
 #[test]
 fn at_the_cap_a_waiver_naming_every_unreviewed_commit_accepts_them() {
-    let (mut f, [first, second]) = passed_then_two_commits(1);
+    let (mut f, [first, second]) = passed_then_two_commits();
 
     let refused = f
         .accept(Some(&format!("Read {}; it holds up", &first[..7])))
@@ -736,14 +735,13 @@ fn at_the_cap_a_waiver_naming_every_unreviewed_commit_accepts_them() {
 
 #[test]
 fn below_the_cap_a_waiver_does_not_cover_unreviewed_commits() {
-    let (mut f, [first, second]) = passed_then_two_commits(2);
-    let waiver = format!("Read {} and {}", &first[..7], &second[..7]);
+    // One of two full reviews used: the waiver may cover F1, but not a commit after the review.
+    let mut f = blocked_at_the_cap();
+    let late = f.commit("late.txt", "after");
+    let waiver = format!("F1 is acceptable; read {}", &late[..7]);
     let refused = f.accept(Some(&waiver)).unwrap_err().to_string();
-    assert_eq!(
-        refused,
-        "Verification cycle 1 passed; there is nothing to waive"
-    );
-    assert_eq!(f.current().state, TicketState::Passed);
+    assert!(refused.ends_with("; verify again"), "{refused}");
+    assert_eq!(f.current().state, TicketState::Blocked);
     assert!(f.worktree().exists());
 }
 
