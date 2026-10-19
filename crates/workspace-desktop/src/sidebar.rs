@@ -429,7 +429,7 @@ impl Sidebar {
                                 112.,
                                 21.,
                             ))
-                            .when(super::data_dir::is_beta(), |d| {
+                            .when(workspace_core::data_dir::is_beta(), |d| {
                                 d.child(pill("BETA", p.accent))
                             }),
                     )

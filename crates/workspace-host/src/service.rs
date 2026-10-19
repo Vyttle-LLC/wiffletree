@@ -3,6 +3,7 @@ mod scheduling;
 
 use crate::agent_processes::StopReason;
 use crate::compaction::CompactionRecord;
+use crate::events::{self, EventLog, Pings, Subscription};
 use crate::keeper::KeeperSession;
 use crate::provider::{ProviderEvent, Turn, TurnKind};
 use crate::stream::StepUpdate;
@@ -592,10 +593,11 @@ impl Drop for Handle {
 #[derive(Clone)]
 pub struct Service {
     handle: Arc<Handle>,
-    changes: Receiver<()>,
-    step_changes: Receiver<()>,
-    progress_changes: Receiver<()>,
-    usage_changes: Receiver<()>,
+    events: EventLog,
+    pings: Pings,
+    host_id: String,
+    /// How many agents are in a turn, as of the actor's last event.
+    working: Arc<AtomicUsize>,
 }
 struct Active {
     run: String,
@@ -670,17 +672,16 @@ struct Actor {
     #[cfg(test)]
     schedule_runs: usize,
     sender: Sender<Event>,
-    changed: Sender<()>,
-    /// Work steps change many times a second, so they have their own signal; a pending
-    /// step signal must never hold back a state change.
-    steps_changed: Sender<()>,
-    steps_dirty: bool,
-    /// Progress has its own signal too, sent only when a figure on the board changed, so a
-    /// plan step never reloads the snapshot and other steps never fetch progress.
-    progress_changed: Sender<()>,
-    usage_changed: Sender<()>,
+    /// Clients' events. Work steps change many times a second, so they have their own kind; a
+    /// pending step event never holds back a state change. Progress has its own kind too,
+    /// emitted only when a figure on the board changed, so a plan step never reloads the
+    /// snapshot and other steps never fetch progress.
+    events: EventLog,
+    /// What changed since the last event was emitted.
+    changes: events::Changes,
     /// A plan step or a turn start may have moved a figure since the last signal.
     progress_dirty: bool,
+    working: Arc<AtomicUsize>,
     /// Each session's latest step revision, seeded from the store on first use.
     revisions: HashMap<String, u64>,
     active: HashMap<String, Active>,
@@ -728,10 +729,10 @@ impl Service {
             "workspace-host helper is missing; rebuild the app bundle"
         );
         let (sender, receiver) = async_channel::bounded(256);
-        let (changed, changes) = async_channel::bounded(1);
-        let (steps_changed, step_changes) = async_channel::bounded(1);
-        let (progress_changed, progress_changes) = async_channel::bounded(1);
-        let (usage_changed, usage_changes) = async_channel::bounded(1);
+        let events = EventLog::default();
+        let pings = events.pings();
+        let working = Arc::new(AtomicUsize::new(0));
+        let (actor_events, actor_working) = (events.clone(), working.clone());
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
         let worker = sender.clone();
         let thread = std::thread::Builder::new()
@@ -747,12 +748,13 @@ impl Service {
                     let socket = directory.path().join("ipc");
                     let listener = UnixListener::bind(&socket)?;
                     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-                    Ok((host, directory, socket, listener))
+                    let host_id = host.host_id()?;
+                    Ok((host, directory, socket, listener, host_id))
                 })();
                 let (mut host, directory, socket, listener) = match setup {
-                    Ok(v) => {
-                        let _ = ready.send(Ok(()));
-                        v
+                    Ok((host, directory, socket, listener, host_id)) => {
+                        let _ = ready.send(Ok(host_id));
+                        (host, directory, socket, listener)
                     }
                     Err(e) => {
                         let _ = ready.send(Err(format!("{e:#}")));
@@ -818,12 +820,10 @@ impl Service {
                     #[cfg(test)]
                     schedule_runs: 0,
                     sender: worker,
-                    changed,
-                    steps_changed,
-                    steps_dirty: false,
-                    progress_changed,
-                    usage_changed,
+                    events: actor_events,
+                    changes: events::Changes::default(),
                     progress_dirty: false,
+                    working: actor_working,
                     revisions: HashMap::new(),
                     active: HashMap::new(),
                     compacting: HashMap::new(),
@@ -866,6 +866,7 @@ impl Service {
                 actor.refresh_github();
                 actor.refresh_settings_sync(now());
                 actor.start_skill_merges();
+                actor.signal(false);
                 while let Ok(event) = receiver.recv_blocking() {
                     if matches!(event, Event::Shutdown) {
                         break;
@@ -880,16 +881,16 @@ impl Service {
                 let _ = std::os::unix::net::UnixStream::connect(&socket);
                 drop(directory);
             })?;
-        readiness.recv()?.map_err(anyhow::Error::msg)?;
+        let host_id = readiness.recv()?.map_err(anyhow::Error::msg)?;
         Ok(Self {
             handle: Arc::new(Handle {
                 sender,
                 worker: std::sync::Mutex::new(Some(thread)),
             }),
-            changes,
-            step_changes,
-            progress_changes,
-            usage_changes,
+            events,
+            pings,
+            host_id,
+            working,
         })
     }
     pub fn request(
@@ -909,21 +910,39 @@ impl Service {
     pub fn shutdown(&self) {
         self.handle.shutdown();
     }
+    /// Subscribes to the host's events; see `EventLog::subscribe`.
+    pub fn subscribe(&self, after: Option<&Cursor>) -> Subscription {
+        self.events.subscribe(after)
+    }
+    /// New each time the host starts.
+    pub fn epoch(&self) -> String {
+        self.events.epoch()
+    }
+    /// Stays the same for the data folder across restarts.
+    pub fn host_id(&self) -> &str {
+        &self.host_id
+    }
+    /// How many agents are in a turn.
+    pub fn working(&self) -> usize {
+        self.working.load(Ordering::Relaxed)
+    }
+    /// The in-process wakes for each event kind, which a `state` or a `resync` event sends:
+    /// reload the snapshot.
     pub fn changes(&self) -> Receiver<()> {
-        self.changes.clone()
+        self.pings.state.clone()
     }
     /// Signals that some session's work steps changed; fetch them with `Command::Steps`.
     pub fn step_changes(&self) -> Receiver<()> {
-        self.step_changes.clone()
+        self.pings.steps.clone()
     }
     /// Signals that a figure on the progress board changed; fetch it with `Command::Progress`.
     pub fn progress_changes(&self) -> Receiver<()> {
-        self.progress_changes.clone()
+        self.pings.progress.clone()
     }
     /// Telemetry changed; fetch Usage and ProviderQuota without reloading workspace state.
     /// The store is updated even when a client does not subscribe to this optional signal.
     pub fn usage_changes(&self) -> Receiver<()> {
-        self.usage_changes.clone()
+        self.pings.usage.clone()
     }
 }
 impl Actor {
@@ -1161,6 +1180,32 @@ impl Actor {
                 std::thread::spawn(move || {
                     let reading = runtime::codex_reading();
                     let _ = sender.send_blocking(Event::QuotaRead { reading, reply });
+                });
+            }
+            Command::ResolvePaths { references, bases } => {
+                let (references, bases, reply) = (references.clone(), bases.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let home = std::env::var_os("HOME").map(PathBuf::from);
+                    let resolved = host_files::resolve_paths(&references, &bases, home.as_deref());
+                    let _ =
+                        reply.try_send(serde_json::to_value(resolved).map_err(|e| e.to_string()));
+                });
+            }
+            Command::ReadFile { path, max_bytes } => {
+                let (roots, path, max_bytes) = (self.host.file_roots()?, path.clone(), *max_bytes);
+                let reply = reply.clone();
+                std::thread::spawn(move || {
+                    let read = host_files::read_file(&roots, &path, max_bytes)
+                        .and_then(|contents| Ok(serde_json::to_value(contents)?));
+                    let _ = reply.try_send(read.map_err(|e| format!("{e:#}")));
+                });
+            }
+            Command::ListFolder { path } => {
+                let (roots, path, reply) = (self.host.file_roots()?, path.clone(), reply.clone());
+                std::thread::spawn(move || {
+                    let listed = host_files::list_folder(&roots, &path, true)
+                        .and_then(|listing| Ok(serde_json::to_value(listing)?));
+                    let _ = reply.try_send(listed.map_err(|e| format!("{e:#}")));
                 });
             }
             Command::InspectProvider { provider } => {
@@ -2062,7 +2107,7 @@ impl Actor {
                 eprintln!("Workspace compaction event: {e:#}");
             }
             if telemetry {
-                let _ = self.usage_changed.try_send(());
+                self.changes.usage = true;
             }
             return changes_state;
         }
@@ -2085,7 +2130,7 @@ impl Actor {
             eprintln!("Workspace provider event: {e:#}");
         }
         if telemetry {
-            let _ = self.usage_changed.try_send(());
+            self.changes.usage = true;
         }
         changes_state
     }
@@ -2367,7 +2412,7 @@ impl Actor {
             host.compaction_ended(&session, &compacting.run, result, reason, compacting.tokens)
         })?;
         if matches!(spent, Some(Ok(_))) {
-            let _ = self.usage_changed.try_send(());
+            self.changes.usage = true;
         }
         // A stop let this compaction finish. If its agent is still stopped, paused or in a
         // stopped project, what the compaction's provider left running is stopped now.
@@ -2505,26 +2550,22 @@ impl Actor {
             }
         }
     }
-    /// Wakes clients; each bounded signal coalesces any number of changes until it is read.
+    /// Wakes clients with at most one event of each kind for what changed since the last.
     fn signal(&mut self, state_changed: bool) {
-        if state_changed {
-            let _ = self.changed.try_send(());
-        }
-        if std::mem::take(&mut self.steps_dirty) {
-            let _ = self.steps_changed.try_send(());
-        }
-        if std::mem::take(&mut self.progress_dirty) || state_changed {
+        let mut changes = std::mem::take(&mut self.changes);
+        changes.state |= state_changed;
+        if std::mem::take(&mut self.progress_dirty) || changes.state {
             match self.host.refresh_progress() {
-                Ok(true) => drop(self.progress_changed.try_send(())),
-                Ok(false) => {}
+                Ok(changed) => changes.progress = changed,
                 Err(e) => eprintln!("Workspace progress: {e:#}"),
             }
         }
+        self.working.store(self.active.len(), Ordering::Relaxed);
+        self.events.emit(changes);
     }
     /// Tells clients about a state change made outside an event's own handling.
     fn state_changed(&mut self) {
-        let _ = self.changed.try_send(());
-        self.progress_dirty = true;
+        self.changes.state = true;
     }
     /// Records the caller's checklist as its run's plan step, as a provider's plan would be.
     /// It writes that step and nothing else: no message, no status, no state signal.
@@ -2707,7 +2748,7 @@ impl Actor {
             self.host.plan_recorded(session_id, plan.as_ref())?;
             self.progress_dirty = true;
         }
-        self.steps_dirty = true;
+        self.changes.steps.insert(session_id.into());
         Ok(())
     }
     /// A finished turn leaves nothing running: unfinished steps succeed with the turn, or are
@@ -2727,7 +2768,7 @@ impl Actor {
             }
             self.host.save_step(session_id, &active.steps[index])?;
         }
-        self.steps_dirty = true;
+        self.changes.steps.insert(session_id.into());
         Ok(())
     }
     /// A running turn's steps come from memory, which is ahead of the store; others from the store.
@@ -3705,8 +3746,7 @@ mod tests {
     #[test]
     fn telemetry_has_its_own_coalesced_signal_and_never_admits_work_or_refreshes_state() {
         let (_home, mut actor, session, run, changes, steps) = actor_with_signals();
-        let (sender, telemetry) = async_channel::bounded(1);
-        actor.usage_changed = sender;
+        let telemetry = actor.events.pings().usage;
         actor.overlaps_due_at = i64::MAX;
         let events = [
             ProviderEvent::Usage {
@@ -3915,8 +3955,8 @@ mod tests {
 
     fn idle_actor(host: Host) -> (Actor, Receiver<()>, Receiver<()>) {
         let (sender, _) = async_channel::bounded(1);
-        let (changed, changes) = async_channel::bounded(1);
-        let (steps_changed, step_changes) = async_channel::bounded(1);
+        let events = EventLog::default();
+        let pings = events.pings();
         let prepared_worktrees = host
             .tickets()
             .unwrap()
@@ -3930,13 +3970,10 @@ mod tests {
             host,
             schedule_runs: 0,
             sender,
-            changed,
-            steps_changed,
-            steps_dirty: false,
-            // A test that reads the progress signal installs its own sender.
-            progress_changed: async_channel::bounded(1).0,
-            usage_changed: async_channel::bounded(1).0,
+            events,
+            changes: events::Changes::default(),
             progress_dirty: false,
+            working: Arc::default(),
             revisions: HashMap::new(),
             active: HashMap::new(),
             compacting: HashMap::new(),
@@ -3964,7 +4001,7 @@ mod tests {
             publish_tools: publish::Tools::default(),
             sync_pace: sync::Pace::default(),
         };
-        (actor, changes, step_changes)
+        (actor, pings.state, pings.steps)
     }
 
     /// A ticket whose tester is in its turn, run `run`, under its project coordinator.
@@ -8248,8 +8285,7 @@ mod tests {
                 .unwrap();
             host.set_status(&implementer.id, Status::Working).unwrap();
             let (mut actor, changes, _) = idle_actor(host);
-            let (progress_changed, progress) = async_channel::bounded(1);
-            actor.progress_changed = progress_changed;
+            let progress = actor.events.pings().progress;
             actor
                 .active
                 .insert(implementer.id.clone(), active_turn("run", vec![]));
@@ -8320,6 +8356,21 @@ mod tests {
                 .map(|(done, text)| json!({"text":text,"done":done}))
                 .collect::<Vec<_>>()
         )
+    }
+
+    #[test]
+    fn one_provider_event_emits_at_most_one_event_of_each_kind() {
+        let mut crew = Crew::new();
+        let subscription = crew.actor.events.subscribe(None);
+        let plan = crew.provider_plan("plan", 2, 5);
+        crew.handle(plan);
+        let kinds: Vec<_> = std::iter::from_fn(|| subscription.events.try_recv().ok())
+            .map(|event| event.kind)
+            .collect();
+        let steps = EventKind::Steps {
+            sessions: vec![crew.implementer.id.clone()],
+        };
+        assert_eq!(kinds, [steps, EventKind::Progress]);
     }
 
     #[test]

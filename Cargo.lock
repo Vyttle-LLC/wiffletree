@@ -8669,8 +8669,10 @@ name = "workspace-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 
@@ -8710,6 +8712,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "libc",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.11.0",

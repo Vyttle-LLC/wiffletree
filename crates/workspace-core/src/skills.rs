@@ -8,6 +8,31 @@ pub fn version(text: &str) -> &str {
     let first = text.lines().next().unwrap_or_default();
     first.rsplit_once(" — ").map_or("", |(_, version)| version)
 }
+/// One part of the fixed core instructions agents get, which no skill text changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoreInstructions {
+    /// As its first line names it, such as "Implementer core".
+    pub name: String,
+    /// Who gets it, such as "implementers".
+    pub audience: String,
+    pub version: String,
+}
+impl CoreInstructions {
+    /// From a bundled text whose first line is "# <name> — <version>".
+    pub fn new(audience: &str, text: &str) -> Self {
+        let first = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("# ");
+        let name = first.rsplit_once(" — ").map_or(first, |(name, _)| name);
+        Self {
+            name: name.into(),
+            audience: audience.into(),
+            version: version(text).into(),
+        }
+    }
+}
 /// What the human has written for a skill: rules in Additions mode, or a rewrite.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edits {
