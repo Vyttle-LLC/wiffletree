@@ -206,3 +206,18 @@ fn listings_name_folders_under_the_roots() {
         .is_err()
     );
 }
+
+#[test]
+fn a_project_home_in_a_workspace_folder_inside_the_data_folder_is_served() {
+    let data = tempfile::tempdir().unwrap();
+    let mut host = Host::open_set_up(data.path()).unwrap();
+    let workspaces = data.path().join("workspaces");
+    host.set_workspaces_dir(workspaces.to_str().unwrap())
+        .unwrap();
+    let project = host.create_project("x").unwrap();
+    let home = host.project_directory(&project.id).unwrap();
+    assert_eq!(home, workspaces.join("projects/x"));
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("plan.md"), "the plan").unwrap();
+    assert_eq!(read(&mut host, &home.join("plan.md")).unwrap(), b"the plan");
+}

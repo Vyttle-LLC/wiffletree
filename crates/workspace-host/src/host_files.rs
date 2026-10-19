@@ -68,7 +68,9 @@ pub struct Roots {
 }
 impl Roots {
     /// Roots that do not exist are left out. Inside the data folder only `served_in_data`, the
-    /// attachment stores and project homes there, is served, whatever `roots` holds.
+    /// attachment stores and project homes there, is served, whatever `roots` holds, and only
+    /// those reached through real folders: one that is a symlink, or under one inside the data
+    /// folder, serves nothing.
     pub fn new(
         roots: impl IntoIterator<Item = PathBuf>,
         served_in_data: impl IntoIterator<Item = PathBuf>,
@@ -80,13 +82,19 @@ impl Roots {
         let existing = |paths: Vec<PathBuf>| -> Vec<PathBuf> {
             paths.iter().filter_map(|p| resolve(p).ok()).collect()
         };
-        let served_in_data = existing(served_in_data.into_iter().collect());
-        let inside_data = served_in_data
-            .iter()
-            .filter(|root| root.starts_with(&data) && **root != data)
-            .cloned()
-            .collect();
-        let roots = existing(roots.into_iter().chain(served_in_data).collect());
+        let (mut inside_data, mut outside_data) = (vec![], vec![]);
+        for root in served_in_data {
+            let Ok(resolved) = resolve(&root) else {
+                continue;
+            };
+            if !resolved.starts_with(&data) {
+                outside_data.push(resolved);
+            } else if resolved != data && plainly_inside(&root, &data) {
+                inside_data.push(resolved);
+            }
+        }
+        let mut roots = existing(roots.into_iter().collect());
+        roots.extend(outside_data);
         Ok(Self {
             roots,
             data,
@@ -106,12 +114,9 @@ impl Roots {
             path.display()
         );
         let under = |roots: &[PathBuf]| roots.iter().any(|root| resolved.starts_with(root));
-        if resolved.starts_with(&self.data) {
-            // Attachment stores and the project homes kept in the data folder are all under
-            // `projects/`, so a root that resolves anywhere else, such as a symlink to
-            // `backups/`, never serves the store or its copies.
+        if let Ok(inside) = resolved.strip_prefix(&self.data) {
             ensure!(
-                resolved.starts_with(self.data.join("projects")) && under(&self.inside_data),
+                !never_served(inside) && under(&self.inside_data),
                 "The host serves only attachments and project folders from its data folder"
             );
         } else {
@@ -123,6 +128,38 @@ impl Roots {
         }
         Ok(resolved)
     }
+}
+
+/// The data folder's own files, never served whatever root holds them: the store and its
+/// copies, its backups, the host's binaries and logs, and its settings.
+fn never_served(inside_data: &Path) -> bool {
+    const NAMES: [&str; 6] = [
+        "backups",
+        "host",
+        "logs",
+        "shared",
+        "settings.json",
+        "host.lock",
+    ];
+    inside_data.components().next().is_some_and(|first| {
+        let name = first.as_os_str().to_string_lossy();
+        name.starts_with(crate::STORE_FILE) || NAMES.contains(&name.as_ref())
+    })
+}
+
+/// Whether `root` reaches `data` through real folders: neither it nor any folder between it and
+/// `data` is a symlink. Symlinks above the data folder, such as `/var`, do not count.
+fn plainly_inside(root: &Path, data: &Path) -> bool {
+    for folder in root.ancestors() {
+        let symlink = fs::symlink_metadata(folder).map_or(true, |m| m.file_type().is_symlink());
+        if symlink {
+            return false;
+        }
+        if resolve(folder).is_ok_and(|resolved| resolved == data) {
+            return true;
+        }
+    }
+    false
 }
 
 fn resolve(path: &Path) -> Result<PathBuf> {
