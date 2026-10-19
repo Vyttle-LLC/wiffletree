@@ -116,16 +116,70 @@ fn first_reviewer(verification: &VerificationSettings) -> Option<Job> {
     })
 }
 
-/// A first choice and what to use once its subscription is spent; no `then` means wait.
+/// A first choice and what to do once its subscription is spent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
     pub first: ModelProfile,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub then: Option<ModelProfile>,
+    #[serde(default, skip_serializing_if = "Then::is_wait")]
+    pub then: Then,
 }
 impl Line {
     pub fn choices(&self) -> impl Iterator<Item = &ModelProfile> {
-        std::iter::once(&self.first).chain(&self.then)
+        std::iter::once(&self.first).chain(self.then.model())
+    }
+}
+/// What a line does once its first choice is spent. Saved as the model, as `"skip"`, or left
+/// out for wait.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SavedThen", into = "SavedThen")]
+pub enum Then {
+    /// Waits for the earliest reset.
+    #[default]
+    Wait,
+    /// Moves on to a model on the other subscription.
+    Model(ModelProfile),
+    /// Leaves the review out; only verifier rows may skip.
+    Skip,
+}
+impl Then {
+    pub fn is_wait(&self) -> bool {
+        *self == Self::Wait
+    }
+    pub fn model(&self) -> Option<&ModelProfile> {
+        match self {
+            Self::Model(profile) => Some(profile),
+            Self::Wait | Self::Skip => None,
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SavedThen {
+    Wait(()),
+    Model(ModelProfile),
+    Word(ThenWord),
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ThenWord {
+    Skip,
+}
+impl From<SavedThen> for Then {
+    fn from(saved: SavedThen) -> Self {
+        match saved {
+            SavedThen::Wait(()) => Self::Wait,
+            SavedThen::Model(profile) => Self::Model(profile),
+            SavedThen::Word(ThenWord::Skip) => Self::Skip,
+        }
+    }
+}
+impl From<Then> for SavedThen {
+    fn from(then: Then) -> Self {
+        match then {
+            Then::Wait => Self::Wait(()),
+            Then::Model(profile) => Self::Model(profile),
+            Then::Skip => Self::Word(ThenWord::Skip),
+        }
     }
 }
 /// One job's choices, with an optional lighter line for small work.
@@ -288,14 +342,21 @@ impl ModelSelection {
                         "Invalid effort"
                     );
                 }
-                if let Some(then) = &line.then {
-                    ensure!(
+                match &line.then {
+                    Then::Model(then) => ensure!(
                         then.provider != line.first.provider,
                         "{}: both choices use the {} subscription, so they would be spent together. Choose a {} model or wait.",
                         row.job.name(),
                         then.provider.label(),
                         other(then.provider).label()
-                    );
+                    ),
+                    Then::Skip => ensure!(
+                        matches!(row.job, Job::Verifier { .. }),
+                        "{}: only reviews can be skipped. Choose a {} model or wait.",
+                        row.job.name(),
+                        other(line.first.provider).label()
+                    ),
+                    Then::Wait => {}
                 }
             }
         }
@@ -311,12 +372,13 @@ impl ModelSelection {
         );
         Ok(())
     }
-    /// What `job` would start on now, or why it cannot start here. `when` writes a reset time,
-    /// such as "Mon 09:00".
+    /// What `job` would start on now, or why it cannot start here; see [`resolve`]. `when`
+    /// writes a reset time, such as "Mon 09:00".
     pub fn resolve(
         &self,
         job: &Job,
         small: bool,
+        may_skip: bool,
         limits: &Limits,
         when: &dyn Fn(i64) -> String,
     ) -> Result<Pick> {
@@ -326,7 +388,7 @@ impl ModelSelection {
                 job.name()
             );
         };
-        resolve(row, small, limits, when)
+        resolve(row, small, may_skip, limits, when)
     }
 }
 fn other(provider: Provider) -> Provider {
@@ -414,11 +476,12 @@ impl Spent {
 }
 
 /// What a job starts on and why. A pick that `waits` is pinned and held until its provider is
-/// no longer spent.
+/// no longer spent; one that `skips` starts nothing, and its review goes ahead without it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pick {
     pub profile: ModelProfile,
     pub waits: bool,
+    pub skips: bool,
     /// When the wait should end, if known.
     pub until: Option<i64>,
     pub reason: String,
@@ -426,10 +489,12 @@ pub struct Pick {
 
 /// First unless it is spent, then `then` unless that is spent; choices this machine cannot run
 /// are left out. When every remaining choice is spent, the one that resets first is pinned and
-/// waits.
+/// waits. A line whose then is skip skips once its first choice is spent or not signed in, when
+/// `may_skip`; otherwise it waits.
 pub fn resolve(
     row: &JobRow,
     small: bool,
+    may_skip: bool,
     limits: &Limits,
     when: &dyn Fn(i64) -> String,
 ) -> Result<Pick> {
@@ -437,6 +502,25 @@ pub fn resolve(
         (Some(line), true) => (line, true),
         _ => (&row.main, false),
     };
+    if may_skip && line.then == Then::Skip {
+        let provider = line.first.provider;
+        let skipped = match limits.usable(provider) {
+            false => Some((
+                format!("{} is not signed in on this Mac", provider.label()),
+                None,
+            )),
+            true => (limits.spent(provider)).map(|spent| (spent.said("was", false), spent.until)),
+        };
+        if let Some((why, until)) = skipped {
+            return Ok(Pick {
+                profile: line.first.clone(),
+                waits: false,
+                skips: true,
+                until,
+                reason: format!("{why}; its row says skip"),
+            });
+        }
+    }
     let for_small = if small { " for small work" } else { "" };
     let choices: Vec<&ModelProfile> = line
         .choices()
@@ -475,6 +559,7 @@ pub fn resolve(
         return Ok(Pick {
             profile,
             waits: false,
+            skips: false,
             until: None,
             reason,
         });
@@ -495,6 +580,7 @@ pub fn resolve(
     Ok(Pick {
         profile: choices[index].clone(),
         waits: true,
+        skips: false,
         until: spent[index].until,
         reason: format!(
             "Waits for {}{for_small}: {} {moves_on}{others}. {starts}",

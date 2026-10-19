@@ -144,6 +144,7 @@ fn cycle(outcome: VerificationOutcome, rounds: &[&[(&str, VerifierResult)]]) -> 
         queued_at: None,
         small: false,
         keeper: false,
+        skipped: vec![],
         outcome,
         rounds: rounds.collect(),
     }

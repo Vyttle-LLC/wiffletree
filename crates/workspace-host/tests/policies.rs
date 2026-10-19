@@ -23,7 +23,7 @@ fn codex(model: &str, effort: &str) -> ModelProfile {
 fn rows(selection: &ModelSelection) -> Vec<String> {
     (selection.jobs.iter())
         .map(|row| {
-            let then = (row.main.then.as_ref()).map_or("wait".into(), ToString::to_string);
+            let then = (row.main.then.model()).map_or("wait".into(), ToString::to_string);
             format!("{}: {} → {then}", row.job.name(), row.main.first)
         })
         .collect()
@@ -263,7 +263,10 @@ fn legacy_codex_store_takes_the_opus_migration_then_the_catalogs_models() {
     // Sonnet was never allowed here, but the signed-in CLI lists it.
     assert_eq!(first(Job::Tester), claude("sonnet", "high"));
     let tester = selection.row(&Job::Tester).unwrap();
-    assert_eq!(tester.main.then, Some(codex("gpt-6.1-sol", "medium")));
+    assert_eq!(
+        tester.main.then,
+        Then::Model(codex("gpt-6.1-sol", "medium"))
+    );
 }
 
 #[test]
@@ -279,7 +282,7 @@ fn a_store_with_one_provider_runs_every_row_on_it() {
     selection.validate().unwrap();
     for row in &selection.jobs {
         assert_eq!(row.main.first.provider, Provider::Claude, "{:?}", row.job);
-        assert_eq!(row.main.then, None, "{:?}", row.job);
+        assert_eq!(row.main.then, Then::Wait, "{:?}", row.job);
     }
     // With no CLI signed in at the upgrade, the providers that were enabled are used.
     let home = tempfile::tempdir().unwrap();
@@ -288,7 +291,7 @@ fn a_store_with_one_provider_runs_every_row_on_it() {
     selection.validate().unwrap();
     for row in &selection.jobs {
         assert_eq!(row.main.first.provider, Provider::Claude, "{:?}", row.job);
-        assert_eq!(row.main.then, None, "{:?}", row.job);
+        assert_eq!(row.main.then, Then::Wait, "{:?}", row.job);
     }
     assert_eq!(
         selection.row(&Job::Coordinator).unwrap().main.first,
@@ -391,9 +394,9 @@ fn a_verifier_saved_with_a_provider_becomes_that_providers_waiting_lens() {
         selection.row(&job).unwrap().main.clone()
     };
     assert_eq!(row("Codex").first, codex("gpt-6.1-sol", "high"));
-    assert_eq!(row("Codex").then, None, "it waits for Codex");
+    assert_eq!(row("Codex").then, Then::Wait, "it waits for Codex");
     assert_eq!(row("Style").first, codex("gpt-6.1-sol", "medium"));
-    assert_eq!(row("Style").then, Some(claude("sonnet", "medium")));
+    assert_eq!(row("Style").then, Then::Model(claude("sonnet", "medium")));
     assert_eq!(row("Tests").first, claude("sonnet", "high"));
     // The saved list itself is kept; only the size and provider are no longer read.
     assert_eq!(host.settings().verification.verifiers.len(), 3);
@@ -429,7 +432,7 @@ fn a_saved_keeper_model_becomes_the_keeper_rows_first_choice() {
         .main
         .clone();
     assert_eq!(keeper.first, claude("sonnet", "low"));
-    assert_eq!(keeper.then, Some(codex("gpt-6.1-sol", "medium")));
+    assert_eq!(keeper.then, Then::Model(codex("gpt-6.1-sol", "medium")));
     let notes = host.model_selection().unwrap().notes;
     assert!(
         notes
@@ -461,7 +464,10 @@ fn signed_in_clis_and_their_catalogs_seed_the_table_and_every_old_setting_is_not
     selection.validate().unwrap();
     let coordinator = selection.row(&Job::Coordinator).unwrap();
     assert_eq!(coordinator.main.first, claude("opus", "high"));
-    assert_eq!(coordinator.main.then, Some(codex("gpt-6.1-sol", "high")));
+    assert_eq!(
+        coordinator.main.then,
+        Then::Model(codex("gpt-6.1-sol", "high"))
+    );
     assert_eq!(selection.guide, "Mine.\n");
     // A retired PR keeper model moves to the closest one the CLI lists, and the note keeps it.
     let keeper = selection.keeper().unwrap();
@@ -709,7 +715,10 @@ fn a_combined_save_refused_for_the_keeper_changes_nothing() {
     let mut host = Host::open_set_up(home.path()).unwrap();
     let mut selection = host.model_selection().unwrap();
     let first = claude("sonnet", "medium");
-    selection.set_keeper(Some(Line { first, then: None }));
+    selection.set_keeper(Some(Line {
+        first,
+        then: Then::Wait,
+    }));
     host.set_model_selection(&selection).unwrap();
     host.set_keeper(KeeperSettings {
         comments: true,

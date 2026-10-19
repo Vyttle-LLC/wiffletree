@@ -2,7 +2,8 @@
 //! rows of the "Who runs what" table it and the upgrade start from.
 use crate::{
     DEFAULT_SWITCH_AT, Job, JobRow, LevelKind, Line, ModelOption, ModelProfile, ModelSelection,
-    PROVIDERS, Provider, ReviewLevel, Role, VerificationSettings, VerifierConfig, usual_efforts,
+    PROVIDERS, Provider, ReviewLevel, Role, Then, VerificationSettings, VerifierConfig,
+    usual_efforts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -157,7 +158,10 @@ pub fn seed_row(
                 closest(provider, model, effort, available)
             });
         let first = choices.next()?;
-        let then = choices.next().filter(|_| !waits);
+        let then = choices
+            .next()
+            .filter(|_| !waits)
+            .map_or(Then::Wait, Then::Model);
         Some(Line { first, then })
     };
     let (main, small) = seed.lines();

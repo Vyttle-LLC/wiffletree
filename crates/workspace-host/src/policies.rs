@@ -144,8 +144,9 @@ impl Host {
         };
         Ok(limits.spent(provider))
     }
-    /// What `job` starts on now, from its row, for small work when `small`.
-    pub(crate) fn resolve_job(&self, job: &Job, small: bool) -> Result<Pick> {
+    /// What `job` starts on now, from its row, for small work when `small`. Only a verifier
+    /// starting a review passes `may_skip`; otherwise a then of skip waits.
+    pub(crate) fn resolve_job(&self, job: &Job, small: bool, may_skip: bool) -> Result<Pick> {
         let selection = self.model_selection()?;
         let (quotas, unusable, switch_at) = self.limits()?;
         let limits = Limits {
@@ -154,7 +155,7 @@ impl Host {
             switch_at,
             now: now(),
         };
-        selection.resolve(job, small, &limits, &reset_time)
+        selection.resolve(job, small, may_skip, &limits, &reset_time)
     }
     /// Pins a session's model and records how it was chosen.
     pub(crate) fn pin(
@@ -198,7 +199,7 @@ impl Host {
     /// What the human's picker starts on for an agent of `role`: what its row would use now.
     pub(crate) fn prefill(&self, role: Role, focus: Option<&str>) -> Option<ModelProfile> {
         let job = Job::for_role(role, focus, &self.settings().verification)?;
-        Some(self.resolve_job(&job, false).ok()?.profile)
+        Some(self.resolve_job(&job, false, false).ok()?.profile)
     }
     /// Pins a session the human created: "From Who runs what" when it matches the picker's
     /// pre-fill.
@@ -417,7 +418,7 @@ impl Host {
             let keeper = jobs.iter_mut().find(|row| row.job == Job::Keeper);
             if let (Some(model), Some(row)) = (&old.keeper, keeper) {
                 let then = (row.main.choices()).find(|p| p.provider != model.provider);
-                row.main.then = then.cloned();
+                row.main.then = then.cloned().map_or(Then::Wait, Then::Model);
                 // As every seeded model: the closest one its CLI lists; the note keeps the old.
                 row.main.first = closest(model.provider, &model.model, &model.effort, &available);
             }

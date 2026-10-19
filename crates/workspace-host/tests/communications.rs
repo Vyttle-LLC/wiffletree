@@ -481,7 +481,7 @@ fn the_coordinator_receives_the_model_configuration_and_workers_do_not() {
     selection.guide = "Raise effort for migrations.".into();
     selection.switch_at = 90;
     selection.row_mut(&Job::Tester).unwrap().main.first = codex("gpt-6.1-sol", "high");
-    selection.row_mut(&Job::Tester).unwrap().main.then = Some(claude("sonnet", "high"));
+    selection.row_mut(&Job::Tester).unwrap().main.then = Then::Model(claude("sonnet", "high"));
     let saved = host.set_model_selection(&selection).unwrap();
     let model = host.agent_context(&coordinator.id).unwrap()["model_selection"].clone();
     assert_eq!(model["revision"], saved.revision);

@@ -183,6 +183,17 @@ impl Inspector {
                 for line in rounds {
                     list = list.child(hint(line, p));
                 }
+                for skipped in ticket.verification.iter().flat_map(|v| &v.skipped) {
+                    list = list.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(hint(skipped.role.agent_label(Some(&skipped.focus)), p))
+                            .child(pill("Skipped", p.subtle))
+                            .child(hint(skipped.reason.clone(), p).min_w_0()),
+                    );
+                }
                 entry = entry.child(list);
             }
             let ledger = wording::ledger_rows(ticket);

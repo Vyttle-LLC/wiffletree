@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 use workspace_core::{
     Chooser, Detection, Job, JobRow, Limits, Line, ModelOption, ModelProfile, ModelSelection,
-    PROVIDERS, Pick, Provider, ProviderStatus, QuotaReading, Role, Selection, Setup,
+    PROVIDERS, Pick, Provider, ProviderStatus, QuotaReading, Role, Selection, Setup, Then,
     VerificationSettings, WorkspaceIndex, resolve, suggest, usual_efforts,
 };
 
@@ -128,8 +128,8 @@ pub(crate) struct Cell {
     pub small: bool,
     pub then: bool,
 }
-/// What a cell holds: a first choice, a then choice (none means wait), or for a small-work
-/// first choice, none meaning the row has no small-work line.
+/// What a cell holds: a first choice, a then choice's model (none means wait or skip), or for
+/// a small-work first choice, none meaning the row has no small-work line.
 pub(crate) fn cell(row: &JobRow, cell: Cell) -> Option<&ModelProfile> {
     let line = if cell.small {
         row.small.as_ref()?
@@ -137,7 +137,7 @@ pub(crate) fn cell(row: &JobRow, cell: Cell) -> Option<&ModelProfile> {
         &row.main
     };
     if cell.then {
-        line.then.as_ref()
+        line.then.model()
     } else {
         Some(&line.first)
     }
@@ -153,7 +153,10 @@ pub(crate) fn set_cell(
 ) {
     let keeper_first = *job == Job::Keeper && !cell.small && !cell.then;
     if keeper_first && (profile.is_none() || selection.keeper().is_none()) {
-        selection.set_keeper(profile.map(|first| Line { first, then: None }));
+        selection.set_keeper(profile.map(|first| Line {
+            first,
+            then: Then::Wait,
+        }));
         return;
     }
     let Some(row) = selection.row_mut(job) else {
@@ -164,28 +167,35 @@ pub(crate) fn set_cell(
         (true, false, None) => row.small = None,
         (true, false, Some(first)) => match &mut row.small {
             Some(line) => set_first(line, first),
-            None => row.small = Some(Line { first, then: None }),
+            None => {
+                row.small = Some(Line {
+                    first,
+                    then: Then::Wait,
+                })
+            }
         },
         (false, false, Some(first)) => set_first(&mut row.main, first),
-        (small, true, then) => {
-            let line = if small {
-                row.small.as_mut()
-            } else {
-                Some(&mut row.main)
-            };
-            if let Some(line) = line {
-                line.then = then;
-            }
-        }
+        (small, true, then) => set_then(row, small, then.map_or(Then::Wait, Then::Model)),
+    }
+}
+/// Sets the then choice of a row's main or small-work line, when the row has that line.
+pub(crate) fn set_then(row: &mut JobRow, small: bool, then: Then) {
+    let line = if small {
+        row.small.as_mut()
+    } else {
+        Some(&mut row.main)
+    };
+    if let Some(line) = line {
+        line.then = then;
     }
 }
 fn set_first(line: &mut Line, first: ModelProfile) {
     if line
         .then
-        .as_ref()
+        .model()
         .is_some_and(|then| then.provider == first.provider)
     {
-        line.then = None;
+        line.then = Then::Wait;
     }
     line.first = first;
 }
@@ -219,7 +229,7 @@ pub(crate) fn right_now(
         switch_at: selection.switch_at,
         now,
     };
-    resolve(row, small, &limits, &reset_time).map_err(|e| e.to_string())
+    resolve(row, small, true, &limits, &reset_time).map_err(|e| e.to_string())
 }
 /// A reset time as reasons write it, "Mon 09:00", in this Mac's time zone.
 pub(crate) fn reset_time(at: i64) -> String {
@@ -238,6 +248,8 @@ pub(crate) enum Now {
     Moved(Provider),
     /// Every choice is spent: waits until this time, if known.
     Waits(Option<String>),
+    /// Its first choice is spent and its row says skip: skips reviews until this time, if known.
+    Skips(Option<String>),
     Cannot,
     /// A provider's sign-in is still being checked, so the pick is not known.
     Checking,
@@ -257,6 +269,7 @@ pub(crate) fn now_of(
     };
     match pick {
         Ok(pick) if pick.waits => Now::Waits(pick.until.map(reset_time)),
+        Ok(pick) if pick.skips => Now::Skips(pick.until.map(reset_time)),
         Ok(pick) if pick.profile == line.first => Now::First(pick.profile.provider),
         Ok(pick) => Now::Moved(pick.profile.provider),
         Err(_) => Now::Cannot,
@@ -629,7 +642,7 @@ mod tests {
             Some(profile(Provider::Codex, "gpt-6.1-sol", "medium")),
         );
         let row = selection.row(&Job::Coordinator).unwrap();
-        assert_eq!(row.main.then, None);
+        assert_eq!(row.main.then, Then::Wait);
         selection.validate().unwrap();
         // Then may be set to wait, and a small-work line added and removed.
         set_cell(&mut selection, &Job::Implementer, cell(false, true), None);
@@ -643,7 +656,10 @@ mod tests {
         assert_eq!(cell_of(tester, true), Some(&opus));
         set_cell(&mut selection, &Job::Tester, cell(true, false), None);
         assert!(selection.row(&Job::Tester).unwrap().small.is_none());
-        assert_eq!(selection.row(&Job::Implementer).unwrap().main.then, None);
+        assert_eq!(
+            selection.row(&Job::Implementer).unwrap().main.then,
+            Then::Wait
+        );
         // The PR keeper's first choice of None removes the row; choosing one adds it back.
         set_cell(&mut selection, &Job::Keeper, cell(false, false), None);
         assert!(selection.keeper().is_none());
@@ -683,9 +699,27 @@ mod tests {
             focus: "Correctness".into(),
         };
         assert!(matches!(
-            pick(correctness, &spent, &both),
+            pick(correctness.clone(), &spent, &both),
             Now::Waits(Some(_))
         ));
+        // A verifier whose row says skip skips until the reset instead of waiting.
+        let mut skipping = row(correctness);
+        set_then(&mut skipping, false, Then::Skip);
+        let skips = right_now(&selection, &skipping, false, &spent, &both, now);
+        assert!(matches!(
+            now_of(&skipping, false, &skips, &both),
+            Now::Skips(Some(_))
+        ));
+        assert_eq!(
+            cell(
+                &skipping,
+                Cell {
+                    small: false,
+                    then: true
+                }
+            ),
+            None
+        );
         // A signed-out provider is never picked.
         let codex_only = detected(&[Provider::Codex]);
         assert_eq!(

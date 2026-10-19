@@ -41,7 +41,10 @@ fn testers_on_both_providers(host: &mut Host) {
         let job = Job::Verifier {
             focus: focus.into(),
         };
-        selection.row_mut(&job).unwrap().main = Line { first, then: None };
+        selection.row_mut(&job).unwrap().main = Line {
+            first,
+            then: Then::Wait,
+        };
     }
     host.set_model_selection(&selection).unwrap();
 }

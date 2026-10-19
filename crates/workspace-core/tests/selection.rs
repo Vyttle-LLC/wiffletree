@@ -62,11 +62,11 @@ fn implementer() -> JobRow {
         job: Job::Implementer,
         main: Line {
             first: opus(),
-            then: Some(sol()),
+            then: Then::Model(sol()),
         },
         small: Some(Line {
             first: sonnet(),
-            then: Some(profile(Provider::Codex, "gpt-6.1-sol", "medium")),
+            then: Then::Model(profile(Provider::Codex, "gpt-6.1-sol", "medium")),
         }),
     }
 }
@@ -164,19 +164,20 @@ fn the_first_choice_runs_unless_spent_then_the_next() {
     let none = BTreeSet::new();
     let row = implementer();
     for quotas in [vec![], claude_weekly(80.)] {
-        let pick = resolve(&row, false, &limits(&quotas, &none), &when).unwrap();
+        let pick = resolve(&row, false, false, &limits(&quotas, &none), &when).unwrap();
         assert_eq!(
             pick,
             Pick {
                 profile: opus(),
                 waits: false,
+                skips: false,
                 until: None,
                 reason: "First choice".into()
             }
         );
     }
     let quotas = claude_weekly(96.);
-    let pick = resolve(&row, false, &limits(&quotas, &none), &when).unwrap();
+    let pick = resolve(&row, false, false, &limits(&quotas, &none), &when).unwrap();
     assert_eq!(pick.profile, sol());
     assert!(!pick.waits);
     assert_eq!(
@@ -188,13 +189,13 @@ fn the_first_choice_runs_unless_spent_then_the_next() {
 #[test]
 fn small_work_uses_its_own_line_when_the_row_has_one() {
     let none = BTreeSet::new();
-    let pick = resolve(&implementer(), true, &limits(&[], &none), &when).unwrap();
+    let pick = resolve(&implementer(), true, false, &limits(&[], &none), &when).unwrap();
     assert_eq!(
         (pick.profile, pick.reason.as_str()),
         (sonnet(), "First choice for small work")
     );
     let quotas = claude_weekly(99.);
-    let pick = resolve(&implementer(), true, &limits(&quotas, &none), &when).unwrap();
+    let pick = resolve(&implementer(), true, false, &limits(&quotas, &none), &when).unwrap();
     assert_eq!(
         pick.profile,
         profile(Provider::Codex, "gpt-6.1-sol", "medium")
@@ -205,7 +206,7 @@ fn small_work_uses_its_own_line_when_the_row_has_one() {
         small: None,
         ..implementer()
     };
-    let pick = resolve(&tester, true, &limits(&[], &none), &when).unwrap();
+    let pick = resolve(&tester, true, false, &limits(&[], &none), &when).unwrap();
     assert_eq!(
         (pick.profile, pick.reason.as_str()),
         (opus(), "First choice")
@@ -221,17 +222,18 @@ fn a_job_without_another_choice_waits_for_the_reset() {
         },
         main: Line {
             first: opus(),
-            then: None,
+            then: Then::Wait,
         },
         small: None,
     };
     let quotas = claude_weekly(96.);
-    let pick = resolve(&reviewer, false, &limits(&quotas, &none), &when).unwrap();
+    let pick = resolve(&reviewer, false, false, &limits(&quotas, &none), &when).unwrap();
     assert_eq!(
         pick,
         Pick {
             profile: opus(),
             waits: true,
+            skips: false,
             until: Some(MONDAY),
             reason: "Waits for Claude: its weekly limit is at 96% (moves on at 95%), and no other choice can run. Starts after the reset, Mon 09:00.".into()
         }
@@ -244,7 +246,7 @@ fn every_choice_spent_pins_the_earliest_reset() {
     let codex_until = |at| reading(Provider::Codex, vec![window("Weekly", Some(97.), at)]);
     // Claude resets Monday, Codex Thursday: Claude.
     let quotas = [claude_weekly(96.).remove(0), codex_until(Some(THURSDAY))];
-    let pick = resolve(&implementer(), false, &limits(&quotas, &none), &when).unwrap();
+    let pick = resolve(&implementer(), false, false, &limits(&quotas, &none), &when).unwrap();
     assert_eq!(
         (pick.profile, pick.waits, pick.until),
         (opus(), true, Some(MONDAY))
@@ -258,18 +260,25 @@ fn every_choice_spent_pins_the_earliest_reset() {
     let mut later = claude_weekly(96.).remove(0);
     later.windows[1].resets_at = Some(THURSDAY);
     let quotas = [later, codex_until(Some(MONDAY))];
-    let pick = resolve(&implementer(), false, &limits(&quotas, &none), &when).unwrap();
+    let pick = resolve(&implementer(), false, false, &limits(&quotas, &none), &when).unwrap();
     assert_eq!((pick.profile, pick.until), (sol(), Some(MONDAY)));
     // An unknown reset comes after any known one.
     let quotas = [claude_weekly(96.).remove(0), codex_until(None)];
-    let pick = resolve(&implementer(), false, &limits(&quotas, &none), &when).unwrap();
+    let pick = resolve(&implementer(), false, false, &limits(&quotas, &none), &when).unwrap();
     assert_eq!(pick.profile, opus());
 }
 
 #[test]
 fn a_signed_out_provider_is_never_chosen() {
     let claude_out = BTreeSet::from([Provider::Claude]);
-    let pick = resolve(&implementer(), false, &limits(&[], &claude_out), &when).unwrap();
+    let pick = resolve(
+        &implementer(),
+        false,
+        false,
+        &limits(&[], &claude_out),
+        &when,
+    )
+    .unwrap();
     assert_eq!(pick.profile, sol());
     assert_eq!(
         pick.reason,
@@ -280,10 +289,18 @@ fn a_signed_out_provider_is_never_chosen() {
         Provider::Codex,
         vec![window("Weekly", Some(99.), Some(MONDAY))],
     )];
-    let pick = resolve(&implementer(), false, &limits(&quotas, &claude_out), &when).unwrap();
+    let pick = resolve(
+        &implementer(),
+        false,
+        false,
+        &limits(&quotas, &claude_out),
+        &when,
+    )
+    .unwrap();
     assert_eq!((pick.profile, pick.waits), (sol(), true));
     let both_out = BTreeSet::from(PROVIDERS);
-    let refused = resolve(&implementer(), false, &limits(&[], &both_out), &when).unwrap_err();
+    let refused =
+        resolve(&implementer(), false, false, &limits(&[], &both_out), &when).unwrap_err();
     assert_eq!(
         refused.to_string(),
         "Implementer cannot start on this Mac: Claude and Codex are not signed in. Sign in, or change its row in Models → Who runs what."
@@ -291,7 +308,7 @@ fn a_signed_out_provider_is_never_chosen() {
 }
 
 fn table() -> ModelSelection {
-    let row = |job, first: ModelProfile, then: Option<ModelProfile>| JobRow {
+    let row = |job, first: ModelProfile, then: Then| JobRow {
         job,
         main: Line { first, then },
         small: None,
@@ -299,15 +316,15 @@ fn table() -> ModelSelection {
     ModelSelection {
         revision: 1,
         jobs: vec![
-            row(Job::Coordinator, opus(), Some(sol())),
+            row(Job::Coordinator, opus(), Then::Model(sol())),
             implementer(),
-            row(Job::Tester, sonnet(), None),
+            row(Job::Tester, sonnet(), Then::Wait),
             row(
                 Job::Verifier {
                     focus: "Correctness".into(),
                 },
                 opus(),
-                None,
+                Then::Wait,
             ),
         ],
         ..ModelSelection::default()
@@ -330,7 +347,7 @@ fn the_table_needs_each_fixed_job_once_and_a_then_on_another_subscription() {
     };
     assert!(twice.validate().is_err());
     let mut same = table();
-    same.jobs[1].main.then = Some(sonnet());
+    same.jobs[1].main.then = Then::Model(sonnet());
     assert_eq!(
         same.validate().unwrap_err().to_string(),
         "Implementer: both choices use the Claude subscription, so they would be spent together. Choose a Codex model or wait."
@@ -345,6 +362,106 @@ fn the_table_needs_each_fixed_job_once_and_a_then_on_another_subscription() {
     };
     keepers.jobs.extend([keeper.clone(), keeper]);
     assert!(keepers.validate().is_err());
+}
+
+fn skipping_reviewer() -> JobRow {
+    JobRow {
+        job: Job::Verifier {
+            focus: "Correctness".into(),
+        },
+        main: Line {
+            first: opus(),
+            then: Then::Skip,
+        },
+        small: None,
+    }
+}
+
+#[test]
+fn a_skip_row_skips_only_once_its_first_choice_cannot_run() {
+    let none = BTreeSet::new();
+    let row = skipping_reviewer();
+    let pick = resolve(
+        &row,
+        false,
+        true,
+        &limits(&claude_weekly(80.), &none),
+        &when,
+    )
+    .unwrap();
+    assert_eq!((pick.profile, pick.skips), (opus(), false));
+    let pick = resolve(
+        &row,
+        false,
+        true,
+        &limits(&claude_weekly(96.), &none),
+        &when,
+    )
+    .unwrap();
+    assert!(pick.skips && !pick.waits);
+    assert_eq!(pick.until, Some(MONDAY));
+    assert_eq!(
+        pick.reason,
+        "Claude's weekly limit was at 96%; its row says skip"
+    );
+    let claude_out = BTreeSet::from([Provider::Claude]);
+    let pick = resolve(&row, false, true, &limits(&[], &claude_out), &when).unwrap();
+    assert!(pick.skips);
+    assert_eq!(
+        pick.reason,
+        "Claude is not signed in on this Mac; its row says skip"
+    );
+    // Where it may not skip, such as with an open finding, it waits as a wait row does.
+    let pick = resolve(
+        &row,
+        false,
+        false,
+        &limits(&claude_weekly(96.), &none),
+        &when,
+    )
+    .unwrap();
+    assert_eq!((pick.waits, pick.skips), (true, false));
+}
+
+#[test]
+fn only_verifier_rows_may_skip() {
+    let mut selection = table();
+    selection.jobs[3] = skipping_reviewer();
+    selection.jobs[3].small = Some(selection.jobs[3].main.clone());
+    selection.validate().unwrap();
+    for index in 0..3 {
+        let mut refused = table();
+        refused.jobs[index].main.then = Then::Skip;
+        let name = refused.jobs[index].job.name();
+        assert_eq!(
+            refused.validate().unwrap_err().to_string(),
+            format!("{name}: only reviews can be skipped. Choose a Codex model or wait.")
+        );
+    }
+}
+
+#[test]
+fn a_saved_line_reads_wait_model_or_skip() {
+    let first = serde_json::to_value(opus()).unwrap();
+    let read = |line: serde_json::Value| serde_json::from_value::<Line>(line).unwrap().then;
+    assert_eq!(read(serde_json::json!({"first": first})), Then::Wait);
+    assert_eq!(
+        read(serde_json::json!({"first": first, "then": sol()})),
+        Then::Model(sol())
+    );
+    assert_eq!(
+        read(serde_json::json!({"first": first, "then": "skip"})),
+        Then::Skip
+    );
+    for then in [Then::Wait, Then::Model(sol()), Then::Skip] {
+        let line = Line {
+            first: opus(),
+            then,
+        };
+        let saved = serde_json::to_value(&line).unwrap();
+        assert_eq!(saved.get("then").is_none(), line.then == Then::Wait);
+        assert_eq!(serde_json::from_value::<Line>(saved).unwrap(), line);
+    }
 }
 
 #[test]
@@ -421,15 +538,15 @@ fn a_role_and_focus_name_their_job() {
 fn sorting_uses_only_the_keepers_claude_choice() {
     let mut selection = table();
     assert_eq!(selection.sorting_model(), None);
-    let keeper = |first: ModelProfile, then: Option<ModelProfile>| JobRow {
+    let keeper = |first: ModelProfile, then: Then| JobRow {
         job: Job::Keeper,
         main: Line { first, then },
         small: None,
     };
-    selection.jobs.push(keeper(sol(), Some(sonnet())));
+    selection.jobs.push(keeper(sol(), Then::Model(sonnet())));
     assert_eq!(selection.sorting_model(), Some(&sonnet()));
     check_sorting_model(selection.keeper()).unwrap();
-    *selection.row_mut(&Job::Keeper).unwrap() = keeper(sol(), None);
+    *selection.row_mut(&Job::Keeper).unwrap() = keeper(sol(), Then::Wait);
     assert_eq!(selection.sorting_model(), None);
     assert!(
         check_sorting_model(selection.keeper())

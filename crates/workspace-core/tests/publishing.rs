@@ -193,6 +193,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
         queued_at: None,
         small: false,
         keeper: false,
+        skipped: vec![],
         outcome: VerificationOutcome::Passed,
         rounds: vec![round(
             1,
@@ -219,6 +220,7 @@ fn a_review_says_how_it_ended_and_which_verifiers_did_not_check() {
         queued_at: None,
         small: false,
         keeper: false,
+        skipped: vec![],
         outcome: VerificationOutcome::Blocked,
         rounds: vec![
             round(1, "aaaaaaa1", vec![run("Tests", VerifierResult::Failed)]),

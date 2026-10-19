@@ -37,11 +37,14 @@ fn lens(provider: Provider) -> ModelProfile {
 }
 /// Saves `focus`'s row as `first` alone, which waits rather than moving on.
 fn set_row(host: &mut Host, focus: &str, first: ModelProfile) {
+    set_line(host, focus, first, Then::Wait);
+}
+fn set_line(host: &mut Host, focus: &str, first: ModelProfile, then: Then) {
     let mut selection = host.model_selection().unwrap();
     let job = Job::Verifier {
         focus: focus.into(),
     };
-    selection.row_mut(&job).unwrap().main = Line { first, then: None };
+    selection.row_mut(&job).unwrap().main = Line { first, then };
     host.set_model_selection(&selection).unwrap();
 }
 
@@ -734,7 +737,7 @@ fn each_verifier_starts_on_its_row_and_a_lens_waits_for_its_own_provider() {
     // Style's row was copied from the Tester row when the fixture saved the lenses' rows.
     let selection = f.host.model_selection().unwrap();
     let tester = selection.row(&Job::Tester).unwrap().main.clone();
-    let codex_then = tester.then.clone().unwrap();
+    let codex_then = tester.then.model().unwrap().clone();
     for (focus, expected, waiting) in [
         ("Claude", lens(Provider::Claude), true),
         ("Codex", lens(Provider::Codex), false),
@@ -755,6 +758,96 @@ fn each_verifier_starts_on_its_row_and_a_lens_waits_for_its_own_provider() {
             assert_eq!(f.host.hold_reason(&session).unwrap(), None, "{focus}");
         }
     }
+}
+
+#[test]
+fn a_skipped_verifier_starts_nothing_and_the_others_pass_the_cycle() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    set_line(&mut f.host, "Claude", lens(Provider::Claude), Then::Skip);
+    spend(&f.host, Provider::Claude, 96.);
+    f.coordinator_reads();
+    let agents = f.host.sessions().unwrap().len();
+
+    let cycle = f.verify().unwrap().verification.unwrap();
+
+    let focuses: Vec<&str> = (cycle.rounds[0].verifiers.iter())
+        .map(|v| v.focus.as_str())
+        .collect();
+    assert_eq!(focuses, ["Codex", "Style"]);
+    assert_eq!(f.host.sessions().unwrap().len(), agents + 2);
+    let reason = "Claude's weekly limit was at 96%; its row says skip";
+    assert_eq!(
+        cycle.skipped,
+        [SkippedVerifier {
+            role: Role::Tester,
+            focus: "Claude".into(),
+            reason: reason.into(),
+        }]
+    );
+    for focus in ["Codex", "Style"] {
+        let session = f.verifier(focus);
+        f.report(&session, "pass", "passed").unwrap();
+    }
+    assert_eq!(f.current().state, TicketState::Passed);
+    let waking = f.waking(&f.coordinator.id);
+    assert_eq!(waking.len(), 1, "{waking:?}");
+    let skipped = format!("- Tester · Claude: skipped, {reason}");
+    assert!(waking[0].body.contains(&skipped), "{}", waking[0].body);
+    f.host
+        .agent_tool(
+            &f.coordinator.id,
+            "accept_ticket",
+            json!({"ticket_id":f.ticket.id}),
+        )
+        .unwrap();
+    assert_eq!(f.current().state, TicketState::Accepted);
+}
+
+#[test]
+fn a_review_whose_every_verifier_would_skip_does_not_start() {
+    let mut f = Fixture::ready(three_verifiers(), 2);
+    for (focus, provider) in [
+        ("Claude", Provider::Claude),
+        ("Codex", Provider::Codex),
+        ("Style", Provider::Codex),
+    ] {
+        set_line(&mut f.host, focus, lens(provider), Then::Skip);
+    }
+    spend(&f.host, Provider::Claude, 96.);
+    spend(&f.host, Provider::Codex, 99.);
+    let agents = f.host.sessions().unwrap();
+
+    let refused = f.verify().unwrap_err().to_string();
+
+    assert!(
+        refused.starts_with("Every verifier of Full would be skipped (Claude: Claude's weekly limit was at 96%; its row says skip;"),
+        "{refused}"
+    );
+    assert_eq!(f.host.sessions().unwrap(), agents);
+    assert_eq!(f.current().state, TicketState::ReadyForTesting);
+}
+
+#[test]
+fn a_verifier_with_an_open_finding_waits_instead_of_skipping() {
+    let mut f = Fixture::ready(three_verifiers(), 1);
+    f.verify().unwrap();
+    for focus in ["Claude", "Style"] {
+        let session = f.verifier(focus);
+        f.report(&session, "pass", "passed").unwrap();
+    }
+    let codex = f.verifier("Codex");
+    f.fail(&codex, "fail-1").unwrap();
+    assert_eq!(f.current().state, TicketState::Blocked);
+    set_line(&mut f.host, "Codex", lens(Provider::Codex), Then::Skip);
+    spend(&f.host, Provider::Codex, 99.);
+    f.report(&f.implementer.id.clone(), "again", "ready_for_testing")
+        .unwrap();
+
+    let cycle = f.verify().unwrap().verification.unwrap();
+
+    assert!(cycle.skipped.is_empty());
+    let codex = f.verifier("Codex");
+    assert!(f.host.session_runtime(&codex).unwrap().waiting);
 }
 
 #[test]
@@ -2277,7 +2370,7 @@ fn verify_ticket_refuses_the_old_choices_and_asks_the_whole_level_for_small_work
             model: "gpt-6.1-sol".into(),
             effort: "low".into(),
         },
-        then: None,
+        then: Then::Wait,
     };
     let mut selection = f.host.model_selection().unwrap();
     let tests = Job::Verifier {

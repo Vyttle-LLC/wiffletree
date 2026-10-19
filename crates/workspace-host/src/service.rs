@@ -5484,6 +5484,7 @@ mod tests {
         let pick = Pick {
             profile: sol.clone(),
             waits: true,
+            skips: false,
             until: None,
             reason: "Waits for Codex".into(),
         };
@@ -8566,6 +8567,7 @@ mod tests {
             queued_at: None,
             small: false,
             keeper: false,
+            skipped: vec![],
             outcome: VerificationOutcome::Blocked,
             rounds: vec![VerificationRound {
                 round: 1,
@@ -9132,6 +9134,7 @@ mod tests {
         let pick = Pick {
             profile: opus,
             waits: true,
+            skips: false,
             until: None,
             reason: "Waits for Claude".into(),
         };
@@ -9333,7 +9336,7 @@ mod tests {
     }
 
     /// Saves the PR keeper's row as `first` then `then`, as the Models page does.
-    fn choose_keeper_line(host: &mut Host, first: ModelProfile, then: Option<ModelProfile>) {
+    fn choose_keeper_line(host: &mut Host, first: ModelProfile, then: Then) {
         let mut selection = host.model_selection().unwrap();
         selection.set_keeper(Some(Line { first, then }));
         host.set_model_selection(&selection).unwrap();
@@ -9345,7 +9348,7 @@ mod tests {
             model: model.into(),
             effort: "medium".into(),
         };
-        choose_keeper_line(host, profile.clone(), None);
+        choose_keeper_line(host, profile.clone(), Then::Wait);
         profile
     }
 
@@ -9471,7 +9474,7 @@ mod tests {
             model: "gpt-6.1-sol".into(),
             effort: "medium".into(),
         };
-        choose_keeper_line(&mut host, sonnet.clone(), Some(codex.clone()));
+        choose_keeper_line(&mut host, sonnet.clone(), Then::Model(codex.clone()));
         let first = host
             .keeper_agent(&ticket, KeeperSession::Try, home.path())
             .unwrap();
@@ -9504,7 +9507,7 @@ mod tests {
         assert_eq!(again.id, sorting.id);
         assert_eq!(host.turn_profile(&again).unwrap(), sonnet);
         // A row without a Claude choice has no sorting model at all.
-        choose_keeper_line(&mut host, codex, None);
+        choose_keeper_line(&mut host, codex, Then::Wait);
         let refused = host
             .keeper_agent(&ticket, KeeperSession::Sorting, home.path())
             .unwrap_err();

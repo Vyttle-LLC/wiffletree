@@ -1096,6 +1096,7 @@ pub(crate) mod tests {
                 queued_at: None,
                 small: false,
                 keeper: false,
+                skipped: vec![],
                 outcome,
                 rounds: vec![VerificationRound {
                     round: 1,
