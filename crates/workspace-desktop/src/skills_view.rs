@@ -2405,7 +2405,7 @@ mod tests {
             tabs,
             [
                 "Contract v9",
-                "Coordinator v2",
+                "Coordinator v3",
                 "Implementer v1",
                 "Verifier v1",
                 "PR keeper v1"
@@ -2500,7 +2500,7 @@ mod tests {
         assert!(out_of_date(&saved));
         assert_eq!(
             out_of_date_title(&saved, base_version),
-            "Written against an unknown version of Coordinating. This release has v1."
+            "Written against an unknown version of Coordinating. This release has v2."
         );
         assert_eq!(based_on(base_version), "an unknown stock version");
         assert_eq!(based_on("v1"), "stock v1");
@@ -2548,7 +2548,7 @@ mod tests {
         assert!(snapshot.skills.iter().any(out_of_date));
         assert_eq!(
             out_of_date_title(coordinating, "v0"),
-            "Written against Coordinating v0. This release has v1."
+            "Written against Coordinating v0. This release has v2."
         );
         let lines: Vec<Line> =
             serde_json::from_value(host.execute(Command::SkillStockChanges { skill }).unwrap())
@@ -2563,7 +2563,7 @@ mod tests {
         );
 
         let banner = rewrite_banner(coordinating).unwrap();
-        let title = "Written against Coordinating v0. This release has v1.";
+        let title = "Written against Coordinating v0. This release has v2.";
         assert_eq!(
             banner,
             ([title.into(), OUT_OF_DATE.into()], Offers::MergeIn)
@@ -2574,21 +2574,21 @@ mod tests {
             yours: "Ask me when.\n\n".into(),
         };
         let failed =
-            "The model's text for passage 1 was longer than v1's version and yours together.";
+            "The model's text for passage 1 was longer than v2's version and yours together.";
         let standings = [
             (
                 MergeStanding::WaitingForSync,
                 [
                     title,
-                    "Waiting for this launch's first sync, so your Macs merge v1 only once. If another Mac already merged it, this Mac takes that.",
+                    "Waiting for this launch's first sync, so your Macs merge v2 only once. If another Mac already merged it, this Mac takes that.",
                 ],
                 Offers::Nothing,
             ),
             (
                 MergeStanding::Merging { passages: 1 },
                 [
-                    "Merging v1 into your rewrite",
-                    "The PR keeper's model is merging the 1 passage you and v1 both changed. Your rewrite runs as you wrote it until the merge applies.",
+                    "Merging v2 into your rewrite",
+                    "The PR keeper's model is merging the 1 passage you and v2 both changed. Your rewrite runs as you wrote it until the merge applies.",
                 ],
                 Offers::Nothing,
             ),
@@ -2597,7 +2597,7 @@ mod tests {
                     reason: failed.into(),
                 },
                 [
-                    "The merge of v1 couldn't finish",
+                    "The merge of v2 couldn't finish",
                     &format!(
                         "{failed} Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start."
                     ),
@@ -2609,7 +2609,7 @@ mod tests {
                     reason: "Claude could not be started".into(),
                 },
                 [
-                    "The merge of v1 couldn't finish",
+                    "The merge of v2 couldn't finish",
                     "Claude could not be started. Nothing was changed, and your rewrite runs as you wrote it. Wiffletree tries again at the next start.",
                 ],
                 Offers::TryAgain,
@@ -2620,7 +2620,7 @@ mod tests {
                     codex: false,
                 },
                 [
-                    "v1 and your rewrite both change 1 passage",
+                    "v2 and your rewrite both change 1 passage",
                     "Merging it needs a Claude model for the PR keeper, and none is chosen. Your rewrite runs as you wrote it. Choose a model, or choose a wording for the passage.",
                 ],
                 Offers::Wordings,
@@ -2631,7 +2631,7 @@ mod tests {
                     codex: true,
                 },
                 [
-                    "v1 and your rewrite both change 2 passages",
+                    "v2 and your rewrite both change 2 passages",
                     "Merging them needs a Claude model for the PR keeper, and its row has only Codex models. Your rewrite runs as you wrote it. Choose a model, or choose a wording for each passage.",
                 ],
                 Offers::Wordings,
@@ -2743,12 +2743,12 @@ mod tests {
         assert_eq!(entry_detail(&entry), "Based on stock v0 · 6 characters");
     }
 
-    /// Coordinating rewritten against a stand-in v0 and merged into v1 at start.
+    /// Coordinating rewritten against a stand-in v0 and merged into v2 at start.
     fn merged_at_start(home: &tempfile::TempDir) -> Host {
         let host = Host::open(home.path()).unwrap();
         let skill = Skill::Coordinating;
         host.skills().start_rewrite(skill).unwrap();
-        let base = stock(skill).replacen("— v1", "— v0", 1);
+        let base = stock(skill).replacen("— v2", "— v0", 1);
         let text = base.replacen("Start by clarifying", "Start by restating", 1);
         host.skills().save_rewrite(skill, &text).unwrap();
         std::fs::write(
@@ -2884,8 +2884,8 @@ mod tests {
         assert_eq!(
             merge_note_text(coordinating, &note, None),
             [
-                "Merged Coordinating v1 into your rewrite",
-                "1 change from v1 came in as plain text. Coordinators get the merged text from their next turn.",
+                "Merged Coordinating v2 into your rewrite",
+                "1 change from v2 came in as plain text. Coordinators get the merged text from their next turn.",
             ]
         );
 
@@ -2898,11 +2898,11 @@ mod tests {
         assert_eq!(
             asked,
             [
-                "Undo the merge of v1?".into(),
+                "Undo the merge of v2?".into(),
                 format!(
                     "Your rewrite goes back to exactly what it was before {before}, based on v0. Coordinators get it from their next turn, on every Mac."
                 ),
-                "v1 won't be merged in again on its own. The merge stays in the history.".into(),
+                "v2 won't be merged in again on its own. The merge stays in the history.".into(),
             ]
         );
         let undone = state(&mut host, command);
@@ -2911,15 +2911,15 @@ mod tests {
         assert_eq!(
             banner,
             [
-                "You undid the merge of v1",
-                "Your rewrite is exactly as it was before the merge, and v1 won't be merged into it again on its own.",
+                "You undid the merge of v2",
+                "Your rewrite is exactly as it was before the merge, and v2 won't be merged into it again on its own.",
             ]
         );
         assert_eq!(offers, Offers::MergeIn);
         let history = listing(&mut host, skill);
         assert_eq!(
             titles(&history)[..2],
-            ["Undid the merge of v1", "Merged v0 → v1"]
+            ["Undid the merge of v2", "Merged v0 → v2"]
         );
         // After a later change, the merge's entry still offers Undo, which says so.
         let later = Confirm::Undo { note, later: true };
@@ -2929,7 +2929,7 @@ mod tests {
         ));
         assert_eq!(
             kept,
-            "v1 won't be merged in again on its own. The merge and your changes since stay in the history."
+            "v2 won't be merged in again on its own. The merge and your changes since stay in the history."
         );
     }
 
@@ -2942,18 +2942,18 @@ mod tests {
         assert_eq!(
             titles(&history),
             [
-                "Merged v0 → v1",
+                "Merged v0 → v2",
                 "Saved your rewrite",
                 "Saved your rewrite",
                 "Started a rewrite"
             ]
         );
         assert_eq!(merged_since(&history, 0), None);
-        assert_eq!(merged_since(&history, 1).as_deref(), Some("v1"));
+        assert_eq!(merged_since(&history, 1).as_deref(), Some("v2"));
         let entry = history[1].name.clone();
         let restore = Confirm::Restore {
             entry: entry.clone(),
-            merged: "v1".into(),
+            merged: "v2".into(),
         };
         let coordinating = host.snapshot().unwrap().skills.remove(0);
         let (asked, command) = question(&coordinating, &restore, false);
@@ -2961,7 +2961,7 @@ mod tests {
             asked,
             [
                 format!("Restore the version of {}?", entry_time(&entry)),
-                "It is from before the merge of v1, so no automatic merge brings v1 in until a newer version arrives. You can still merge it in from Coordinating's page.".into(),
+                "It is from before the merge of v2, so no automatic merge brings v2 in until a newer version arrives. You can still merge it in from Coordinating's page.".into(),
                 "The merge and every later change stay in the history.".into(),
             ]
         );
@@ -2979,16 +2979,16 @@ mod tests {
         let mut host = Host::open(home.path()).unwrap();
         let skill = Skill::Coordinating;
         state(&mut host, Command::StartSkillRewrite { skill });
-        let base = stock(skill).replacen("— v1", "— v2", 1);
+        let base = stock(skill).replacen("— v2", "— v3", 1);
         std::fs::write(home.path().join("shared/skills/coordinating/base.md"), base).unwrap();
         let mut coordinating = host.snapshot().unwrap().skills.remove(0);
         assert_eq!(state_label(&coordinating), "Rewritten");
-        let here = "This Mac has v1 and sends the rewrite as written. It isn't out of date here, and nothing is merged here.";
+        let here = "This Mac has v2 and sends the rewrite as written. It isn't out of date here, and nothing is merged here.";
         assert_eq!(
             rewrite_banner(&coordinating),
             Some((
                 [
-                    "Based on Coordinating v2, from a Mac with a newer Wiffletree".into(),
+                    "Based on Coordinating v3, from a Mac with a newer Wiffletree".into(),
                     here.into()
                 ],
                 Offers::Nothing
@@ -3001,9 +3001,9 @@ mod tests {
             rewrite_banner(&coordinating),
             Some((
                 [
-                    "Based on Coordinating v2, from Mike's MacBook Air".into(),
+                    "Based on Coordinating v3, from Mike's MacBook Air".into(),
                     format!(
-                        "That Mac runs a newer Wiffletree and merged v2 into your rewrite. {here}"
+                        "That Mac runs a newer Wiffletree and merged v3 into your rewrite. {here}"
                     )
                 ],
                 Offers::Nothing
@@ -3055,7 +3055,7 @@ mod tests {
         let mut coordinating = host.snapshot().unwrap().skills.remove(0);
         assert!(
             list_who(&coordinating)
-                .starts_with("Project coordinator · v1 merged into your rewrite today at ")
+                .starts_with("Project coordinator · v2 merged into your rewrite today at ")
         );
         let note = coordinating.merge_note.as_mut().unwrap();
         note.entry = "2020-10-14T12-00-00.000Z".into();

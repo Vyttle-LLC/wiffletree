@@ -1734,6 +1734,8 @@ fn the_cycle_cap_refuses_a_third_cycle_until_the_human_raises_it() {
     for expected in ["2 full reviews", "waiver", "close", "ask the human"] {
         assert!(refused.contains(expected), "{expected}: {refused}");
     }
+    // The cap is the coordinator's call, never a limit to ask the human to raise.
+    assert!(!refused.contains("raise"), "{refused}");
     assert_eq!(
         f.host.sessions().unwrap().len(),
         sessions,
@@ -1898,7 +1900,7 @@ fn the_last_cycle_blocked_offers_no_further_verification() {
     assert!(
         body.contains("waived")
             && body.contains("close the ticket")
-            && body.contains("ask the human")
+            && body.contains("ask the human, only for a product, security or data-loss decision")
     );
     assert!(!body.contains("verify_ticket"), "{body}");
 }

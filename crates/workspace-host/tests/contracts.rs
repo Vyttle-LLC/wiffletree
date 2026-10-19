@@ -249,7 +249,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v2"));
+    assert!(coordinator.contains("Project coordinator core — v3"));
     for role in Role::ALL {
         let core = core(role);
         assert!(core.contains("Wiffletree communication contract — v9"));
@@ -307,7 +307,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v1"));
+    assert!(coordinator.contains("Coordinating — v2"));
     for phrase in [
         "After two or three rounds, remaining non-blocking findings become follow-up tickets",
         "Never start a fresh cycle to chase them",
