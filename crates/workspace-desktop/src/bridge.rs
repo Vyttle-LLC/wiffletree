@@ -230,14 +230,19 @@ pub(crate) mod tests {
 
     #[test]
     fn requests_and_events_cross_the_socket() {
-        let served = serve(|_| {});
+        // Renaming changes state without starting a coordinator, so no provider is needed.
+        let project = std::cell::OnceCell::new();
+        let served = serve(|host| {
+            project
+                .set(host.create_project("Socket").unwrap().id)
+                .unwrap();
+        });
+        let project = project.into_inner().unwrap();
         let changes = served.bridge.changes().unwrap();
-        let project = served
-            .bridge
-            .ask_now(ask::create_project("Socket".into()))
-            .unwrap();
+        let rename = ask::rename_project(project.clone(), "Renamed".into());
+        served.bridge.ask_now(rename).unwrap();
         let snapshot = served.bridge.ask_now(ask::snapshot()).unwrap();
-        assert!(snapshot.projects.iter().any(|p| p.id == project.id));
+        assert!((snapshot.projects.iter()).any(|p| p.id == project && p.name == "Renamed"));
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while changes.try_recv().is_err() {
             assert!(std::time::Instant::now() < deadline, "no state event");
