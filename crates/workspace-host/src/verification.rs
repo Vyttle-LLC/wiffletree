@@ -467,7 +467,7 @@ impl Host {
                 self.resolve_job(&job, small, !open)
             })
             .collect::<Result<_>>()?;
-        if picks.iter().all(|pick| pick.skips) {
+        if picks.iter().all(|pick| pick.skip.is_some()) {
             let reasons: Vec<String> = (verifiers.iter().zip(&picks))
                 .map(|(verifier, pick)| format!("{}: {}", verifier.focus, pick.reason))
                 .collect();
@@ -509,11 +509,11 @@ impl Host {
         let started = self.atomically(|host| {
             let (mut verifiers, mut skipped) = (vec![], vec![]);
             for (config, pick) in level_verifiers.into_iter().zip(chosen) {
-                if pick.skips {
+                if let Some(reason) = pick.skip {
                     skipped.push(SkippedVerifier {
                         role: config.role,
                         focus: config.focus.clone(),
-                        reason: pick.reason,
+                        reason,
                     });
                     continue;
                 }

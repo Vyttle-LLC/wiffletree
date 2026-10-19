@@ -170,7 +170,7 @@ fn the_first_choice_runs_unless_spent_then_the_next() {
             Pick {
                 profile: opus(),
                 waits: false,
-                skips: false,
+                skip: None,
                 until: None,
                 reason: "First choice".into()
             }
@@ -233,7 +233,7 @@ fn a_job_without_another_choice_waits_for_the_reset() {
         Pick {
             profile: opus(),
             waits: true,
-            skips: false,
+            skip: None,
             until: Some(MONDAY),
             reason: "Waits for Claude: its weekly limit is at 96% (moves on at 95%), and no other choice can run. Starts after the reset, Mon 09:00.".into()
         }
@@ -389,7 +389,7 @@ fn a_skip_row_skips_only_once_its_first_choice_cannot_run() {
         &when,
     )
     .unwrap();
-    assert_eq!((pick.profile, pick.skips), (opus(), false));
+    assert_eq!((pick.profile, pick.skip), (opus(), None));
     let pick = resolve(
         &row,
         false,
@@ -398,18 +398,22 @@ fn a_skip_row_skips_only_once_its_first_choice_cannot_run() {
         &when,
     )
     .unwrap();
-    assert!(pick.skips && !pick.waits);
+    assert!(!pick.waits);
     assert_eq!(pick.until, Some(MONDAY));
+    // Right now says it in the present; the review's record, afterwards.
     assert_eq!(
         pick.reason,
-        "Claude's weekly limit was at 96%; its row says skip"
+        "Claude's weekly limit is at 96% (moves on at 95%)"
+    );
+    assert_eq!(
+        pick.skip.as_deref(),
+        Some("Claude's weekly limit was at 96%; its row says skip")
     );
     let claude_out = BTreeSet::from([Provider::Claude]);
     let pick = resolve(&row, false, true, &limits(&[], &claude_out), &when).unwrap();
-    assert!(pick.skips);
     assert_eq!(
-        pick.reason,
-        "Claude is not signed in on this Mac; its row says skip"
+        pick.skip.as_deref(),
+        Some("Claude is not signed in on this Mac; its row says skip")
     );
     // Where it may not skip, such as with an open finding, it waits as a wait row does.
     let pick = resolve(
@@ -420,7 +424,7 @@ fn a_skip_row_skips_only_once_its_first_choice_cannot_run() {
         &when,
     )
     .unwrap();
-    assert_eq!((pick.waits, pick.skips), (true, false));
+    assert_eq!((pick.waits, pick.skip), (true, None));
 }
 
 #[test]

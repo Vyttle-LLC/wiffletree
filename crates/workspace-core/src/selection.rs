@@ -476,12 +476,14 @@ impl Spent {
 }
 
 /// What a job starts on and why. A pick that `waits` is pinned and held until its provider is
-/// no longer spent; one that `skips` starts nothing, and its review goes ahead without it.
+/// no longer spent; one with a `skip` starts nothing, and its review goes ahead without it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pick {
     pub profile: ModelProfile,
     pub waits: bool,
-    pub skips: bool,
+    /// Why the review skips this verifier, as its record says it afterwards, such as "Claude's
+    /// weekly limit was at 96%; its row says skip".
+    pub skip: Option<String>,
     /// When the wait should end, if known.
     pub until: Option<i64>,
     pub reason: String,
@@ -505,19 +507,26 @@ pub fn resolve(
     if may_skip && line.then == Then::Skip {
         let provider = line.first.provider;
         let skipped = match limits.usable(provider) {
-            false => Some((
-                format!("{} is not signed in on this Mac", provider.label()),
-                None,
-            )),
-            true => (limits.spent(provider)).map(|spent| (spent.said("was", false), spent.until)),
+            false => {
+                let why = format!("{} is not signed in on this Mac", provider.label());
+                Some((why.clone(), why, None))
+            }
+            true => (limits.spent(provider)).map(|spent| {
+                let now = format!(
+                    "{} (moves on at {}%)",
+                    spent.said("is", false),
+                    limits.switch_at
+                );
+                (now, spent.said("was", false), spent.until)
+            }),
         };
-        if let Some((why, until)) = skipped {
+        if let Some((now, then, until)) = skipped {
             return Ok(Pick {
                 profile: line.first.clone(),
                 waits: false,
-                skips: true,
+                skip: Some(format!("{then}; its row says skip")),
                 until,
-                reason: format!("{why}; its row says skip"),
+                reason: now,
             });
         }
     }
@@ -559,7 +568,7 @@ pub fn resolve(
         return Ok(Pick {
             profile,
             waits: false,
-            skips: false,
+            skip: None,
             until: None,
             reason,
         });
@@ -580,7 +589,7 @@ pub fn resolve(
     Ok(Pick {
         profile: choices[index].clone(),
         waits: true,
-        skips: false,
+        skip: None,
         until: spent[index].until,
         reason: format!(
             "Waits for {}{for_small}: {} {moves_on}{others}. {starts}",

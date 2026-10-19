@@ -664,7 +664,7 @@ impl Host {
                     "Sorting comments needs a Claude model in the PR keeper's row in Models",
                 )?,
                 waits: false,
-                skips: false,
+                skip: None,
                 until: None,
                 reason: "The PR keeper's Claude choice: sorting runs with every tool turned off"
                     .into(),

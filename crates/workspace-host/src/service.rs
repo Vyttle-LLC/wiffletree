@@ -5484,7 +5484,7 @@ mod tests {
         let pick = Pick {
             profile: sol.clone(),
             waits: true,
-            skips: false,
+            skip: None,
             until: None,
             reason: "Waits for Codex".into(),
         };
@@ -9134,7 +9134,7 @@ mod tests {
         let pick = Pick {
             profile: opus,
             waits: true,
-            skips: false,
+            skip: None,
             until: None,
             reason: "Waits for Claude".into(),
         };

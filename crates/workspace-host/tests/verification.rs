@@ -820,7 +820,7 @@ fn a_review_whose_every_verifier_would_skip_does_not_start() {
     let refused = f.verify().unwrap_err().to_string();
 
     assert!(
-        refused.starts_with("Every verifier of Full would be skipped (Claude: Claude's weekly limit was at 96%; its row says skip;"),
+        refused.starts_with("Every verifier of Full would be skipped (Claude: Claude's weekly limit is at 96% (moves on at 95%);"),
         "{refused}"
     );
     assert_eq!(f.host.sessions().unwrap(), agents);

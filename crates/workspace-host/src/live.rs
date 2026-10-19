@@ -645,7 +645,7 @@ impl Host {
             &limits,
             &policies::reset_time,
         ) {
-            Ok(pick) if pick.skips => json!({"skips": true, "reason": pick.reason}),
+            Ok(pick) if pick.skip.is_some() => json!({"skips": true, "reason": pick.reason}),
             Ok(pick) => {
                 json!({"profile": pick.profile, "waits": pick.waits, "reason": pick.reason})
             }

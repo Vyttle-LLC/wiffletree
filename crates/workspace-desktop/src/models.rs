@@ -269,7 +269,7 @@ pub(crate) fn now_of(
     };
     match pick {
         Ok(pick) if pick.waits => Now::Waits(pick.until.map(reset_time)),
-        Ok(pick) if pick.skips => Now::Skips(pick.until.map(reset_time)),
+        Ok(pick) if pick.skip.is_some() => Now::Skips(pick.until.map(reset_time)),
         Ok(pick) if pick.profile == line.first => Now::First(pick.profile.provider),
         Ok(pick) => Now::Moved(pick.profile.provider),
         Err(_) => Now::Cannot,

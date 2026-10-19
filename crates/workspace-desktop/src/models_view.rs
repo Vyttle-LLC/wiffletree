@@ -619,7 +619,7 @@ impl ModelsPage {
             ui::now(),
         );
         let reason = match &pick {
-            Ok(pick) if pick.skips => {
+            Ok(pick) if pick.skip.is_some() => {
                 let again = (pick.until.map(models::reset_time)).map_or(String::new(), |at| {
                     format!(" Runs again after the reset, {at}.")
                 });
