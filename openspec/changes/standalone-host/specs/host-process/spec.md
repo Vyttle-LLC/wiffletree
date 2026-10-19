@@ -5,7 +5,7 @@ For the default data folder, the host SHALL run as a per-user launchd process se
 
 #### Scenario: First launch
 - **WHEN** the app opens on a Mac where no host runs for the default data folder
-- **THEN** the app installs the LaunchAgent, the host starts under launchd, and the app connects to it
+- **THEN** the app loads the host's launchd job from the data folder, the host starts under launchd, and the app connects to it
 
 #### Scenario: The app's windows close
 - **WHEN** the human quits and chooses to keep agents running
@@ -17,11 +17,11 @@ For the default data folder, the host SHALL run as a per-user launchd process se
 
 #### Scenario: A scratch store
 - **WHEN** the desktop is started with `--data-dir` pointing at a temporary folder
-- **THEN** no file is written under `~/Library/LaunchAgents`, the host runs from the app's own binary with no versioned copy, and the host stops when the desktop exits
+- **THEN** no plist is written and no launchd job is loaded, the host runs from the app's own binary with no versioned copy, and the host stops when the desktop exits
 
 #### Scenario: Not at login
-- **WHEN** the Mac restarts and the human logs in without opening Wiffletree
-- **THEN** no host runs until the app is opened
+- **WHEN** the host has run under launchd, and then the Mac restarts and the human logs in without opening Wiffletree
+- **THEN** no host runs and launchd has no job with the host's label until the app is opened
 
 #### Scenario: Two hosts, one store
 - **WHEN** a second host is started for a data folder whose host is running

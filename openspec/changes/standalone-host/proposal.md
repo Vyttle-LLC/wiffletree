@@ -29,5 +29,5 @@ This change is the first step of remote control (see `remote-hosts`). It makes t
 - `workspace-core`: `PROTOCOL_VERSION` 2; `Hello`, `Event`, `Cursor`; commands `Subscribe`, `ResolvePaths`, `ReadFile`, `ListFolder`, `StopAgentsAndQuit`, `RestartHost`; the skills' core versions in the skills reply; `OwnDescriptors`, which `update.rs` uses, moves here from `workspace-host::runtime`.
 - `workspace-host`: a `serve` mode in `main.rs` with the socket listener; the event log in `service.rs` in place of the four signals; the login environment and `data_dir` migration at startup; a power assertion while turns run; the versioned binary copy.
 - `workspace-desktop`: `bridge.rs` becomes a socket client; `main.rs` (launch, quit prompt, menu bar icon, event loop); `file_links.rs`, `attachment_chips.rs`, `skills_view.rs` and `login_env.rs` change as audited; `Cargo.toml` keeps `workspace-host` only as a dev-dependency.
-- Packaging: `scripts/package_macos.sh` is unchanged except for the LaunchAgent label; the plist is written by the app at first launch.
+- Packaging: `scripts/package_macos.sh` is unchanged except for the LaunchAgent label; the plist is written into the data folder by the app whenever it starts the host, never into `~/Library/LaunchAgents`.
 - Docs: `docs/DEVELOPMENT.md` (running and stopping the host, its log, `--data-dir`).
