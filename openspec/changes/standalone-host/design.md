@@ -27,7 +27,7 @@ The store lock stays as it is and remains the single guarantee that one host own
 Messages are the existing JSON lines, at most 256 KiB per request line. A connection carries any number of requests, answered in any order and matched by `id`, plus the events of a subscription (5).
 
 ### 3. The handshake
-The first line on a connection is `Hello { protocols: [min, max], app_version, client: { name, kind }, capabilities }`. The host answers with the protocol it chose, its `host_id`, its `host_version`, its `epoch` (a new random id each time it starts), its capabilities, and the `binary` it runs from. A host accepts its own protocol version and the one before it, so an app one release ahead or behind still works. With no common version the host refuses with both ranges, and the app says which side needs updating.
+The first line on a connection is `Hello { protocols: [min, max], app_version, client: { name, kind }, capabilities }`. The host answers with the protocol it chose, its `host_id`, its `host_version`, its `epoch` (a new random id each time it starts), its capabilities, and the `binary` it runs from. A host accepts its own protocol version and the one before it, so an app one release ahead or behind still works. With no common version the host refuses with both ranges, its `host_version` and how many agents are working, and the app says which side needs updating. The shape of `Hello`, of that refusal and of `RestartHost` is frozen across protocol versions: after a refusal, a connection on the host's own socket may still send `RestartHost` and nothing else, so an updated app can always restart an older host.
 
 Capabilities are short strings, one per optional feature (`events`, `files`, `folders`, `restart-when-idle`). A client never sends a command for a capability the host did not list. A request before `Hello` is refused. `PROTOCOL_VERSION` becomes 2; the stdin mode keeps answering version 1 without a handshake, so existing scripts keep working.
 
@@ -36,7 +36,7 @@ The host runs from a copy of its binary: on first install and after each update,
 
 After an update the new app connects to the old host. If the handshake finds a common protocol, everything works and the sidebar's update line reads "The host restarts into <version> once no agent is working", with **Restart now**. The app asks the host `RestartHost { when: Idle }`; the host then exits cleanly at the first moment no turn and no compaction runs, and the app starts the new copy. **Restart now** sends `RestartHost { when: Now }`, which runs the same shutdown as a quit, recording interrupted turns with `QUIT_DURING_TURN` exactly as today. New turns are not held back while a restart waits.
 
-If there is no common protocol, the app shows only that the host must restart, how many agents are working, **Restart now**, and **Wait until they finish**, which sends `RestartHost { when: Idle }` and shows the projects again once the new host answers.
+If there is no common protocol, the app shows only that the host must restart, how many agents are working (from the refusal), **Restart now**, and **Wait until they finish**, which sends `RestartHost { when: Idle }` on the refused connection, as 3 allows, and shows the projects again once the new host answers.
 
 ### 5. One event stream with a resume cursor
 `Command::Subscribe { after: Option<Cursor> }` turns the connection into a subscriber. Events are sent as lines `{"event": {...}}` beside replies:
@@ -69,14 +69,14 @@ The audit of the desktop, by file:
 | `preferences.rs` | `desktop-preferences.json` in the data folder | stays the app's own file; the host never reads it |
 | `update.rs` | uses `workspace_host::runtime::OwnDescriptors` | the trait moves to `workspace-core` |
 
-`ReadFile` reads only files under the data folder, a project home, a ticket worktree, an attached repository or the workspace folder, and at most `MAX_ATTACHMENT_BYTES` (50 MB). `ListFolder` lists only folders, names and whether each is a Git repository, and reads nothing inside them. Both run off the host thread, as Git reads do.
+`ReadFile` reads only files under a project home (which holds the message attachments), a ticket worktree, an attached repository or the workspace folder, and at most `MAX_ATTACHMENT_BYTES` (50 MB). `ListFolder` lists only folders, names and whether each is a Git repository, and reads nothing inside them. It never reads the store (`workspace.sqlite3` and its `-wal`, `-shm` and earlier copies), `backups/`, host settings, `host/`, `logs/` or anything else in the data folder outside a project home, so no client can hold a copy of the database. Both run off the host thread, as Git reads do.
 
 With these, `workspace-desktop` needs `workspace-host` only as a dev-dependency.
 
 ### 7. Quitting and the menu bar
 The quit prompt applies when the app quits with a launchd host and at least one agent is working: "Quit Wiffletree?", "N agents are working on this Mac. They can keep going after the window closes, and you can check in from your other devices.", **Stop agents and quit** and **Keep them running**, the default.
 
-- **Keep them running** closes the windows, removes the Dock icon, and leaves the app running as a menu bar icon while any agent is working. The icon's menu shows how many are working, **Open Wiffletree** and **Stop agents and quit**. When no agent has been working for a short while, the app exits and the icon goes. The host keeps running either way.
+- **Keep them running** closes the windows, removes the Dock icon, and leaves the app running in the background, connected to the host. It shows the menu bar icon whenever any agent is working, including turns that start later, for example from a timer or a paired device, and hides it while none is. The icon's menu shows how many are working, **Open Wiffletree** and **Stop agents and quit**. The app leaves the background only when the human opens it again or stops the agents.
 - **Stop agents and quit** sends `StopAgentsAndQuit`. The host runs the existing shutdown, exits successfully so launchd does not restart it, and the app exits once the host's reply arrives.
 
 The menu bar icon lives in the app, not the host, so the host keeps building without any GUI dependency.
@@ -98,4 +98,3 @@ If the socket closes or the host does not answer, the desktop keeps the last sna
 1. **Does the host start at login?** Proposed: no. The host starts when the app opens and runs until it is stopped, so after a restart of the Mac nothing runs until the app is opened. Starting at login matters most once other devices drive this Mac.
 2. **Quitting with no agent working.** The approved prompt covers quitting while agents work. When none is working, should the app quit without asking and leave the host running (timers and other devices keep working), or stop the host too? Proposed: quit without asking and leave the host running.
 3. **Holding new turns while an update waits.** Proposed: no; the host restarts at the first idle moment. A busy host may then wait a long time, which **Restart now** covers.
-4. **The menu bar icon's grace period** before the app exits once no agent is working. Proposed: one minute.

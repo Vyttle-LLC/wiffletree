@@ -7,9 +7,9 @@ For the default data folder, the host SHALL run as a per-user launchd process se
 - **WHEN** the app opens on a Mac where no host runs for the default data folder
 - **THEN** the app installs the LaunchAgent, the host starts under launchd, and the app connects to it
 
-#### Scenario: The app exits
-- **WHEN** the app exits while the human chose to keep agents running
-- **THEN** the host process is still running and its turns continue
+#### Scenario: The app's windows close
+- **WHEN** the human quits and chooses to keep agents running
+- **THEN** the host process is still running and its turns continue, whether or not the app is running
 
 #### Scenario: The host crashes
 - **WHEN** the host process exits unexpectedly
@@ -35,7 +35,7 @@ The host SHALL accept client connections on `<data folder>/host.sock`, created w
 - **THEN** it does not depend on the `workspace-host` crate
 
 ### Requirement: Connections begin with a handshake
-Every client connection SHALL begin with `Hello`, naming the protocol versions and capabilities the client supports. The host SHALL answer with the protocol version it chose, its host id, its version, its epoch and its capabilities, and SHALL refuse any request sent before `Hello`. A host SHALL accept its own protocol version and the one before it. With no common version, the host SHALL refuse with both version ranges, and the app SHALL say which side needs updating. A client SHALL NOT send a command that needs a capability the host did not list.
+Every client connection SHALL begin with `Hello`, naming the protocol versions and capabilities the client supports. The host SHALL answer with the protocol version it chose, its host id, its version, its epoch and its capabilities, and SHALL refuse any request sent before `Hello`. A host SHALL accept its own protocol version and the one before it. With no common version, the host SHALL refuse with both version ranges, its version and how many agents are working, and the app SHALL say which side needs updating. `Hello`, that refusal and `RestartHost` SHALL keep the same shape in every protocol version, and after a refusal the host SHALL accept `RestartHost`, and no other command, from a connection on its own socket. A client SHALL NOT send a command that needs a capability the host did not list.
 
 #### Scenario: Same version
 - **WHEN** an app of the host's version connects
@@ -48,6 +48,10 @@ Every client connection SHALL begin with `Hello`, naming the protocol versions a
 #### Scenario: No common version
 - **WHEN** an app and a host share no protocol version
 - **THEN** the host refuses the connection with both ranges, and the app names which side to update
+
+#### Scenario: Restarting a host no version matches
+- **WHEN** an updated app shares no protocol version with the running host while two agents work, and the human chooses Wait until they finish
+- **THEN** the app shows that two agents are working, sends `RestartHost` with `Idle` on the refused connection, and the host restarts into the new version after both turns end
 
 #### Scenario: Request without a handshake
 - **WHEN** a client sends `Snapshot` as its first line
@@ -88,7 +92,7 @@ The host SHALL offer one subscription per connection that sends the events `stat
 - **THEN** the subscriber receives at most one event of each kind for it
 
 ### Requirement: The desktop reads host files only through the host
-The desktop SHALL learn whether a linked path exists and whether opening it would run it, read attachment thumbnails, list folders for a chooser and read the core instructions' versions only through host commands. The host SHALL read files for a client only under its data folder, a project home, a ticket worktree, an attached repository or the workspace folder, and at most 50 MB of one file. A folder listing SHALL name only folders and whether each is a Git repository. The host SHALL adopt the user's login-shell environment at its own start.
+The desktop SHALL learn whether a linked path exists and whether opening it would run it, read attachment thumbnails, list folders for a chooser and read the core instructions' versions only through host commands. The host SHALL read files for a client only under a project home, a ticket worktree, an attached repository or the workspace folder, and at most 50 MB of one file. It SHALL NOT read for a client the store, its journal files or earlier copies, its backups, or any other file in the data folder outside a project home. A folder listing SHALL name only folders and whether each is a Git repository. The host SHALL adopt the user's login-shell environment at its own start.
 
 #### Scenario: A link to a worktree file
 - **WHEN** an agent's reply names `src/lib.rs` and the ticket worktree holds that file
@@ -96,6 +100,10 @@ The desktop SHALL learn whether a linked path exists and whether opening it woul
 
 #### Scenario: A file outside what the host serves
 - **WHEN** a client asks the host to read `/etc/hosts`
+- **THEN** the host refuses and reads nothing
+
+#### Scenario: The database
+- **WHEN** a client asks the host to read `workspace.sqlite3`, its `-wal` file or a file under `backups/` in the data folder
 - **THEN** the host refuses and reads nothing
 
 #### Scenario: Core versions

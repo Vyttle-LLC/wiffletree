@@ -11,7 +11,7 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 - [ ] 2.2 The handshake and version rule (own version and the one before). Test: same version, one behind, none in common.
 - [ ] 2.3 `service.rs`: replace the four signals with the event log (1,024 events, epoch, per-subscriber queue of 256, `resync`). Test: resume replays exactly the missed events; an earlier epoch gets `resync`; a subscriber that never reads does not block the actor or other subscribers; one provider event yields at most one event per kind.
 - [ ] 2.4 The host adopts the login-shell environment (moved from `login_env.rs`) and runs the `Agent Workspace` folder migration (moved from `data_dir.rs`) before opening the store. Move their tests with them.
-- [ ] 2.5 `ResolvePaths`, `ReadFile` and `ListFolder` off the host thread, with the allowed roots and the 50 MB bound. Test: a worktree file resolves; an executable is marked as running when opened; `/etc/hosts` is refused; a listing names folders and repositories only.
+- [ ] 2.5 `ResolvePaths`, `ReadFile` and `ListFolder` off the host thread, with the allowed roots and the 50 MB bound. Test: a worktree file resolves; an executable is marked as running when opened; `/etc/hosts`, `workspace.sqlite3`, its `-wal` file and `backups/` are refused; a listing names folders and repositories only.
 - [ ] 2.6 The skills reply carries the core instructions' names and versions.
 
 ## 3. Desktop on the socket (ticket B)
@@ -31,12 +31,12 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 
 - [ ] 5.1 The quit prompt with its wording, Keep them running as the default, and no prompt for a child host.
 - [ ] 5.2 Stop agents and quit: `StopAgentsAndQuit` runs the shutdown and exits 0; the app exits after the reply. Test through `Service`: running turns are recorded with `QUIT_DURING_TURN` and their groups stopped with reason `quit`.
-- [ ] 5.3 The menu bar icon, its menu, leaving the Dock while windows are closed, and exiting when no agent works.
+- [ ] 5.3 The menu bar icon and its menu, leaving the Dock while windows are closed, and staying in the background so the icon also appears for a turn that starts later from a timer or a paired device.
 
 ## 6. Updates and staying awake (ticket C)
 
 - [ ] 6.1 The versioned host copy under `<data folder>/host/<version>/`, the plist pointing at it, helpers started from it, and removal of unused copies. Test: replacing the bundle's binary while a child host runs leaves the running host's helper path unchanged.
-- [ ] 6.2 `RestartHost { when: Idle | Now }` and the sidebar's update line with Restart now; the no-common-version screen. Test: an idle restart waits for a running fake turn to end, then exits cleanly.
+- [ ] 6.2 `RestartHost { when: Idle | Now }` and the sidebar's update line with Restart now; the no-common-version screen. Test: an idle restart waits for a running fake turn to end, then exits cleanly; with no common protocol, the refusal carries the working count and `RestartHost` on the refused connection is accepted while any other command is not.
 - [ ] 6.3 The power assertion while any turn or compaction runs. Test the assertion count around a fake turn on macOS.
 
 ## 7. Docs
