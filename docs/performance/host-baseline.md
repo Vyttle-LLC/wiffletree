@@ -67,7 +67,7 @@ The desktop now reaches its host only through `host.sock` (`openspec/changes/sta
 | Snapshot with JSON round trip, in process | 200 | 6.330 ms | 12.433 ms | 20.493 ms |
 | Snapshot over `host.sock`, decoded | 200 | 6.645 ms | 20.822 ms | 52.267 ms |
 
-The 197,772-byte snapshot costs about 0.3 ms more at p50 over the socket than its in-process JSON round trip. A transcript page adds about 0.9 ms: the host's actor, the JSON of 100 messages each way and the socket, which the in-process figure skips and this run does not tell apart. Both stay well under a frame at p50 and p95. The maxima are single outliers on a loaded machine; a quiet rerun should replace them before they are compared with a target.
+The 197,772-byte snapshot costs about 0.3 ms more at p50 over the socket than its in-process JSON round trip. A transcript page adds about 0.9 ms: the host's actor, the JSON of 100 messages each way and the socket, which the in-process figure skips and this run does not tell apart. At p50 both stay well under a 60 Hz frame (16.7 ms). At p95 the transcript page does too, but the snapshot over the socket took 20.8 ms, against 12.4 ms in process, on this loaded machine. The maxima are single outliers on a loaded machine; a quiet rerun should replace them before they are compared with a target.
 
 Reproduce with:
 

@@ -1632,7 +1632,9 @@ impl Host {
             Command::ListFolder { path } => {
                 serde_json::to_value(host_files::list_folder(&self.file_roots()?, &path, true)?)?
             }
-            Command::Subscribe { .. } => bail!("Subscribe is answered only on the host socket"),
+            Command::Subscribe { .. } | Command::Ping => {
+                bail!("Subscribe and Ping are answered only on the host socket")
+            }
             Command::StopAgentsAndQuit | Command::RestartHost { .. } => {
                 bail!("Only the running host's service stops or restarts it")
             }

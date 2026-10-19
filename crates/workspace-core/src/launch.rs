@@ -6,6 +6,7 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -122,7 +123,9 @@ pub struct Endpoint {
 /// Finds the app's host, starting it when none answers. A client asks again before each
 /// connection, so a host that stopped is started again.
 pub trait Launch: Send {
-    fn endpoint(&mut self) -> io::Result<Endpoint>;
+    /// Waiting for a host that is starting ends early once `stopped` is set, so a client that
+    /// stops is not held up and can stop the host just started.
+    fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint>;
     /// Stops the host if it is the app's own child; a launchd host keeps running.
     fn stop(&mut self) {}
     /// The running child host, when the host is the app's own.
@@ -168,7 +171,7 @@ impl ChildLaunch {
     }
 }
 impl Launch for ChildLaunch {
-    fn endpoint(&mut self) -> io::Result<Endpoint> {
+    fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint> {
         let running = match &mut self.host {
             Some(host) => host.try_wait()?.is_none(),
             None => false,
@@ -186,7 +189,7 @@ impl Launch for ChildLaunch {
         }
         let host = self.host.as_mut().expect("started above");
         let socket = self.data.join(SOCKET_FILE);
-        wait_for_socket(&socket, || Ok(host.try_wait()?.is_none()))?;
+        wait_for_socket(&socket, stopped, || Ok(host.try_wait()?.is_none()))?;
         Ok(Endpoint {
             socket,
             credential: Some(host.credential().into()),
@@ -212,7 +215,7 @@ pub struct LaunchdJob {
     app: PathBuf,
 }
 impl LaunchdJob {
-    pub fn new(binary: &Path, data: &Path, app: &Path) -> Self {
+    fn new(binary: &Path, data: &Path, app: &Path) -> Self {
         Self {
             binary: binary.into(),
             data: data.into(),
@@ -227,19 +230,19 @@ impl LaunchdJob {
             "com.vyttle.wiffletree.host"
         }
     }
-    pub fn plist_path(&self) -> PathBuf {
+    fn plist_path(&self) -> PathBuf {
         self.data
             .join("host")
             .join(format!("{}.plist", Self::label()))
     }
     /// The copy of the host the job runs.
-    pub fn program(&self) -> PathBuf {
+    fn program(&self) -> PathBuf {
         host_copy::path(&self.data, build_version())
     }
     /// The job: `serve` for the data folder from this version's copy, trusting the app,
     /// restarted only after an unsuccessful exit (which also starts it when loaded), logging to
     /// `logs/host.log`.
-    pub fn plist(&self) -> String {
+    fn plist(&self) -> String {
         let program = self.program();
         let arguments = [
             program.as_path(),
@@ -318,12 +321,12 @@ impl LaunchdJob {
     }
 }
 impl Launch for LaunchdJob {
-    fn endpoint(&mut self) -> io::Result<Endpoint> {
+    fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint> {
         let socket = self.data.join(SOCKET_FILE);
         if UnixStream::connect(&socket).is_err() && !Self::running() {
             self.load()?;
         }
-        wait_for_socket(&socket, || Ok(true))?;
+        wait_for_socket(&socket, stopped, || Ok(true))?;
         Ok(Endpoint {
             socket,
             credential: Some(keychain_credential(&self.data)?),
@@ -349,10 +352,18 @@ fn keychain_credential(_data: &Path) -> io::Result<String> {
     Err(io::Error::other("A launchd host needs the macOS Keychain"))
 }
 
-/// Waits until `socket` accepts a connection, while `alive` says the host is still starting.
-fn wait_for_socket(socket: &Path, mut alive: impl FnMut() -> io::Result<bool>) -> io::Result<()> {
+/// Waits until `socket` accepts a connection, while `alive` says the host is still starting and
+/// the client has not `stopped`.
+fn wait_for_socket(
+    socket: &Path,
+    stopped: &AtomicBool,
+    mut alive: impl FnMut() -> io::Result<bool>,
+) -> io::Result<()> {
     let deadline = Instant::now() + START_TIMEOUT;
     while UnixStream::connect(socket).is_err() {
+        if stopped.load(Ordering::Relaxed) {
+            return Err(io::Error::other("The client stopped"));
+        }
         if !alive()? {
             return Err(io::Error::other(
                 "The host stopped as it started; its reason is in the app's log",

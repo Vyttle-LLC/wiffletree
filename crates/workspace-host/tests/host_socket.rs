@@ -257,6 +257,13 @@ fn the_handshake_chooses_the_newest_common_protocol() {
     assert!(wrong.error.unwrap().contains("Use protocol 1"));
     let right = client_behind.request(PROTOCOL_VERSION - 1, Command::Snapshot);
     assert_eq!((right.error, right.version), (None, PROTOCOL_VERSION - 1));
+    // The connection itself answers a ping.
+    assert_eq!(
+        client_behind
+            .request(PROTOCOL_VERSION - 1, Command::Ping)
+            .error,
+        None
+    );
     let snapshot = client.request(PROTOCOL_VERSION, Command::Snapshot);
     assert_eq!(snapshot.error, None);
 }
@@ -696,6 +703,25 @@ fn answer<R: serde::de::DeserializeOwned>(client: &HostClient, ask: ask::Ask<R>)
 }
 
 /// A scratch folder short enough for a socket path under `Library/Application Support`.
+/// The labels of the Wiffletree host jobs launchd has loaded for this user, such as
+/// `LaunchdJob::label()`; the running apps' own `application.…` entries are not jobs.
+fn wiffletree_jobs() -> Vec<String> {
+    let list = process::Command::new("/bin/launchctl")
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let prefix = LaunchdJob::label()
+        .trim_end_matches(".host")
+        .trim_end_matches(".beta");
+    String::from_utf8_lossy(&list.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').nth(2))
+        .filter(|label| label.starts_with(prefix))
+        .map(String::from)
+        .collect()
+}
+
 fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new().tempdir_in("/tmp").unwrap()
 }
@@ -710,29 +736,95 @@ fn an_unsigned_app_on_its_default_data_folder_starts_a_child_host_and_no_launchd
         HostLaunch::Child
     );
     let shell = tempfile::tempdir().unwrap();
+    let jobs_before = wiffletree_jobs();
     let (client, _) = app_client(&data, shell.path());
     assert!(answer(&client, ask::snapshot()).projects.is_empty());
     // The host was started with the credential on its standard input, and holds the store.
     let credential = client.with_launcher(|launch| launch.child().unwrap().credential().to_owned());
     assert!(data.join("host.sock").exists());
-    // No plist was written and launchd has no job for this data folder.
+    // No plist was written, launchd gained no Wiffletree job while the app ran, and none it
+    // has serves this data folder.
     assert!(!data.join("host").exists());
-    let job = process::Command::new("/bin/launchctl")
-        .args([
-            "print",
-            &format!("gui/{}/{}", unsafe { libc::getuid() }, LaunchdJob::label()),
-        ])
-        .output()
-        .unwrap();
-    let listed = String::from_utf8_lossy(&job.stdout);
-    let folder = data.file_name().unwrap().to_string_lossy();
-    assert!(
-        !job.status.success() || !listed.contains(&*home.path().to_string_lossy()),
-        "launchd runs a host for {folder}: {listed}"
-    );
+    let jobs = wiffletree_jobs();
+    assert!(jobs.iter().all(|job| jobs_before.contains(job)), "{jobs:?}");
+    for label in jobs {
+        let job = process::Command::new("/bin/launchctl")
+            .args([
+                "print",
+                &format!("gui/{}/{label}", unsafe { libc::getuid() }),
+            ])
+            .output()
+            .unwrap();
+        let listed = String::from_utf8_lossy(&job.stdout);
+        assert!(
+            !listed.contains(&*home.path().to_string_lossy()),
+            "launchd's {label} serves this data folder: {listed}"
+        );
+    }
     // No file holds the credential.
     assert_eq!(files_holding(home.path(), &credential), [] as [PathBuf; 0]);
     client.stop();
+}
+
+#[test]
+fn stopping_the_client_while_it_starts_a_host_again_stops_that_host_at_once() {
+    let data = short_tempdir();
+    let scratch = tempfile::tempdir().unwrap();
+    // The real host the first time; after that a host that never listens, as one still
+    // starting looks, and that exits when its standard input closes.
+    let started = scratch.path().join("started");
+    let wrapper = scratch.path().join("host");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e \"$0.ran\" ]; then touch \"$0.ran\"; exec '{}' \"$@\"; fi\necho $$ > '{}'\nexec cat >/dev/null\n",
+        env!("CARGO_BIN_EXE_workspace-host"),
+        started.display()
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut launch = ChildLaunch::new(&wrapper, data.path());
+    for (key, value) in isolated(scratch.path()) {
+        launch = launch.env(key, value);
+    }
+    let client = HostClient::connect(
+        Box::new(launch),
+        Client {
+            name: "Wiffletree".into(),
+            kind: "desktop".into(),
+        },
+        Box::new(|_| {}),
+    )
+    .unwrap();
+    // SAFETY: the child is this test's own host.
+    unsafe { libc::kill(child_pid(&client), libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the client never started a host again"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let restarted: i32 = std::fs::read_to_string(&started)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let stopping = Instant::now();
+    client.stop();
+
+    // Not the minute a host may take to start, and the host it was starting is gone.
+    assert!(
+        stopping.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        stopping.elapsed()
+    );
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_eq!(
+        unsafe { libc::kill(restarted, 0) },
+        -1,
+        "the new host still runs"
+    );
 }
 
 #[test]

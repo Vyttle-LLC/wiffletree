@@ -260,7 +260,7 @@ pub(crate) mod tests {
     }
     struct Running(Endpoint);
     impl Launch for Running {
-        fn endpoint(&mut self) -> std::io::Result<Endpoint> {
+        fn endpoint(&mut self, _: &std::sync::atomic::AtomicBool) -> std::io::Result<Endpoint> {
             Ok(self.0.clone())
         }
     }

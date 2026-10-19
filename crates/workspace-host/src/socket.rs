@@ -296,8 +296,10 @@ impl Connection {
                 "Only the Wiffletree app can give this command: its client credential is missing".into(),
             ));
         }
-        if let Command::Subscribe { after } = &command {
-            return self.subscribe(version, id, after.as_ref());
+        match &command {
+            Command::Subscribe { after } => return self.subscribe(version, id, after.as_ref()),
+            Command::Ping => return self.reply(version, id, Ok(serde_json::Value::Null)),
+            _ => {}
         }
         if self.in_flight.fetch_add(1, Ordering::Relaxed) >= MAX_IN_FLIGHT {
             self.in_flight.fetch_sub(1, Ordering::Relaxed);

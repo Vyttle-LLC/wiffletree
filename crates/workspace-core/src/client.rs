@@ -146,7 +146,7 @@ impl HostClient {
             .recv_timeout(timeout)
             .map_err(|_| "The host did not answer in time".to_string())?
     }
-    pub fn connected(&self) -> bool {
+    fn connected(&self) -> bool {
         self.0.writer().is_some()
     }
     /// Why the host refuses this client, while it does.
@@ -192,9 +192,13 @@ impl Shared {
         self.launcher.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Connects, says `Hello`, subscribes from the last cursor and writes what waits.
+    /// Connects, says `Hello`, subscribes from the last cursor and writes what waits. A client
+    /// stopped meanwhile gives up instead, so it never keeps a host it started.
     fn open(&self) -> io::Result<BufReader<UnixStream>> {
-        let endpoint = self.launcher().endpoint()?;
+        let endpoint = self.launcher().endpoint(&self.stopped)?;
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err(io::Error::other(DISCONNECTED));
+        }
         let mut stream = UnixStream::connect(&endpoint.socket)?;
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -231,6 +235,11 @@ impl Shared {
         };
         reader.get_ref().set_read_timeout(None)?;
         let mut writer = self.writer();
+        // `stop` sets the flag before it takes the writer, so it either finds this connection
+        // or this sees the flag.
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err(io::Error::other(DISCONNECTED));
+        }
         let (was_refused, restart_when_idle) = {
             let mut state = self.state();
             state.protocol = welcome.protocol;
@@ -262,7 +271,7 @@ impl Shared {
     /// Sends `command`, a `RestartHost`, on a connection of its own to a host that refuses the
     /// client, and waits for the answer.
     fn restart_refused(&self, command: Command) -> io::Result<()> {
-        let endpoint = self.launcher().endpoint()?;
+        let endpoint = self.launcher().endpoint(&self.stopped)?;
         let mut stream = UnixStream::connect(&endpoint.socket)?;
         stream.set_read_timeout(Some(RESTART_TIMEOUT))?;
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -355,9 +364,11 @@ impl Shared {
             }
         }
     }
-    /// Asks the host's actor something cheap, so a host that is only quiet answers.
+    /// Pings the host's connection, which answers without waiting for the host's actor, so a
+    /// host that is quiet or busy answers. A host older than `Ping` answers it with an error,
+    /// which is an answer all the same.
     fn probe(&self) {
-        let _ = self.submit_as(Command::Settings, Box::new(|_| {}), false);
+        let _ = self.submit_as(Command::Ping, Box::new(|_| {}), false);
     }
     fn dispatch(&self, line: &[u8]) -> serde_json::Result<()> {
         let value: Value = serde_json::from_slice(line)?;
@@ -576,7 +587,7 @@ mod tests {
         fn client(&self) -> (HostClient, Arc<AtomicUsize>) {
             struct Counted(Endpoint, Arc<AtomicUsize>);
             impl Launch for Counted {
-                fn endpoint(&mut self) -> io::Result<Endpoint> {
+                fn endpoint(&mut self, _: &AtomicBool) -> io::Result<Endpoint> {
                     self.1.fetch_add(1, Ordering::Relaxed);
                     Ok(self.0.clone())
                 }
@@ -618,7 +629,7 @@ mod tests {
             assert!(Instant::now() < deadline, "{:?}", host.commands());
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(host.commands().contains(&"settings".to_string()));
+        assert!(host.commands().contains(&"ping".to_string()));
         assert!(snapshot.try_recv().is_err());
         client.stop();
     }
@@ -702,7 +713,7 @@ mod tests {
             let deadline = std::time::Instant::now() + wait;
             while std::time::Instant::now() < deadline {
                 match self.requests.try_recv() {
-                    Ok(Command::Subscribe { .. } | Command::Settings) => {}
+                    Ok(Command::Subscribe { .. } | Command::Ping) => {}
                     Ok(command) => return Some(command),
                     Err(_) => std::thread::sleep(Duration::from_millis(10)),
                 }
@@ -715,7 +726,7 @@ mod tests {
         outlives_app: bool,
     }
     impl Launch for Found {
-        fn endpoint(&mut self) -> io::Result<Endpoint> {
+        fn endpoint(&mut self, _: &AtomicBool) -> io::Result<Endpoint> {
             Ok(Endpoint {
                 socket: self.socket.clone(),
                 credential: None,

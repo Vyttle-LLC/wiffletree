@@ -2988,6 +2988,9 @@ pub enum Command {
         #[serde(default)]
         after: Option<Cursor>,
     },
+    /// Socket only: answered with nothing by the connection itself, not the host's actor, so a
+    /// client can tell a quiet host from one that is gone while the actor is busy.
+    Ping,
     /// Which `references` name a file, each as it is or, when relative, under the first of
     /// `bases` that holds it; a `~/` reference is under the host's home folder. Answered with
     /// one `Option<ResolvedPath>` per reference, in order. Reads no file's contents.
@@ -3049,6 +3052,7 @@ impl Command {
             | Self::LeftoverWorktrees
             | Self::Processes { .. }
             | Self::Subscribe { .. }
+            | Self::Ping
             | Self::ResolvePaths { .. }
             | Self::ReadFile { .. }
             | Self::ListFolder { .. }
