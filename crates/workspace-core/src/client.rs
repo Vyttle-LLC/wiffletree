@@ -3,6 +3,9 @@
 //! connection drops, it connects again after a growing delay, resumes its subscription from its
 //! last cursor, and sends again each request that never got its reply and is safe to repeat: a
 //! read, or a `Send`, which the host stores once by its message id.
+//!
+//! A host that shares no protocol with the client refuses it. The client keeps trying, since an
+//! older host restarts into the new version once asked, and says why it is not connected.
 use crate::*;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -29,11 +32,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUIET: Duration = Duration::from_secs(20);
 #[cfg(test)]
 const QUIET: Duration = Duration::from_millis(300);
+/// A restart now waits for the host's shutdown, which waits for its turns to stop.
+const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 const LOST: &str = "The connection to the host closed before it answered";
 const DISCONNECTED: &str = "Not connected to the host";
 
 type Reply = Box<dyn FnOnce(Result<Value, String>) + Send>;
-/// Called on the client's reading thread with each event the host sends.
+/// Called on the client's reading thread with each event the host sends, and with `Resync` when
+/// a host refuses the client or one that had refused it answers.
 pub type OnEvent = Box<dyn Fn(&EventKind) + Send + Sync>;
 
 struct Pending {
@@ -55,6 +61,10 @@ struct State {
     capabilities: Vec<String>,
     /// The last event read, to resume from.
     cursor: Option<Cursor>,
+    /// The version of the host last connected to.
+    host_version: Option<String>,
+    /// Why the host last refused the client, until one welcomes it.
+    refusal: Option<Refusal>,
 }
 
 struct Shared {
@@ -73,17 +83,16 @@ struct Shared {
 pub struct HostClient(Arc<Shared>);
 impl HostClient {
     /// Connects to the host `launcher` finds or starts, and keeps connected until `stop`. Fails
-    /// when the first connection does.
+    /// when the first connection does, unless the host refused it.
     pub fn connect(
         launcher: Box<dyn Launch>,
         client: Client,
         on_event: OnEvent,
     ) -> io::Result<Self> {
-        let app_version = option_env!("WIFFLETREE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
         let shared = Arc::new(Shared {
             hello: Hello {
                 protocols: [PROTOCOL_VERSION, PROTOCOL_VERSION],
-                app_version: app_version.into(),
+                app_version: build_version().into(),
                 client,
                 capabilities: vec![],
                 credential: None,
@@ -94,7 +103,11 @@ impl HostClient {
             state: Mutex::default(),
             stopped: AtomicBool::new(false),
         });
-        let reader = shared.open()?;
+        let reader = match shared.open() {
+            Ok(reader) => Some(reader),
+            Err(_) if shared.state().refusal.is_some() => None,
+            Err(error) => return Err(error),
+        };
         let worker = shared.clone();
         std::thread::Builder::new()
             .name("host-client".into())
@@ -136,6 +149,24 @@ impl HostClient {
     pub fn connected(&self) -> bool {
         self.0.writer().is_some()
     }
+    /// Why the host refuses this client, while it does.
+    pub fn refusal(&self) -> Option<Refusal> {
+        self.0.state().refusal.clone()
+    }
+    /// The version of the host last connected to.
+    pub fn host_version(&self) -> Option<String> {
+        self.0.state().host_version.clone()
+    }
+    /// Asks the host to restart, waiting for its answer, which `Now` gives once its turns have
+    /// stopped. A host that refused the client is asked on a connection of its own, as the
+    /// handshake allows after a refusal.
+    pub fn restart_host(&self, when: RestartWhen) -> Result<(), String> {
+        let command = Command::RestartHost { when };
+        if self.refusal().is_none() {
+            return self.request_blocking(command, RESTART_TIMEOUT).map(|_| ());
+        }
+        self.0.restart_refused(command).map_err(|e| e.to_string())
+    }
     /// Closes the connection for good, and stops the host if it is the client's own child.
     pub fn stop(&self) {
         self.0.stopped.store(true, Ordering::Relaxed);
@@ -174,7 +205,12 @@ impl Shared {
         write_line(&mut stream, &HelloLine { hello })?;
         let welcome = match read_line::<HelloAnswer>(&mut reader)? {
             HelloAnswer::Welcome(welcome) => welcome,
-            HelloAnswer::Refused(refusal) => return Err(io::Error::other(refused(&refusal))),
+            HelloAnswer::Refused(refusal) => {
+                let message = refused(&refusal);
+                self.state().refusal = Some(refusal);
+                (self.on_event)(&EventKind::Resync);
+                return Err(io::Error::other(message));
+            }
         };
         let after = self.state().cursor.clone();
         let subscribe = Request {
@@ -195,29 +231,77 @@ impl Shared {
         };
         reader.get_ref().set_read_timeout(None)?;
         let mut writer = self.writer();
-        {
+        let (was_refused, restart_when_idle) = {
             let mut state = self.state();
             state.protocol = welcome.protocol;
-            state.capabilities = welcome.capabilities;
             state.cursor.get_or_insert(subscribed.cursor);
-        }
+            let restart_when_idle = welcome.host_version != self.hello.app_version
+                && (welcome.capabilities.iter()).any(|c| c == capability::RESTART_WHEN_IDLE);
+            state.capabilities = welcome.capabilities;
+            state.host_version = Some(welcome.host_version);
+            (state.refusal.take().is_some(), restart_when_idle)
+        };
         *writer = Some(stream);
         self.flush(&mut writer);
+        drop(writer);
+        if was_refused {
+            (self.on_event)(&EventKind::Resync);
+        }
+        // An update left an older host running: it restarts into this version once no agent
+        // works. A child host is the app's own binary, so only a launchd host can differ.
+        if restart_when_idle && self.launcher().outlives_app() {
+            let restart = Command::RestartHost {
+                when: RestartWhen::Idle,
+            };
+            if let Err(error) = self.submit(restart, Box::new(|_| {})) {
+                eprintln!("Ask the older host to restart: {error}");
+            }
+        }
         Ok(reader)
     }
+    /// Sends `command`, a `RestartHost`, on a connection of its own to a host that refuses the
+    /// client, and waits for the answer.
+    fn restart_refused(&self, command: Command) -> io::Result<()> {
+        let endpoint = self.launcher().endpoint()?;
+        let mut stream = UnixStream::connect(&endpoint.socket)?;
+        stream.set_read_timeout(Some(RESTART_TIMEOUT))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let hello = Hello {
+            credential: endpoint.credential,
+            ..self.hello.clone()
+        };
+        write_line(&mut stream, &HelloLine { hello })?;
+        let version = match read_line::<HelloAnswer>(&mut reader)? {
+            HelloAnswer::Welcome(welcome) => welcome.protocol,
+            HelloAnswer::Refused(_) => PROTOCOL_VERSION,
+        };
+        let request = Request {
+            version,
+            id: new_id(),
+            command,
+        };
+        write_line(&mut stream, &request)?;
+        match read_line::<Response>(&mut reader)?.error {
+            Some(error) => Err(io::Error::other(error)),
+            None => Ok(()),
+        }
+    }
 
-    /// Reads until the connection drops, then connects again until stopped.
-    fn run(&self, mut reader: BufReader<UnixStream>) {
+    /// Reads until the connection drops, then connects again until stopped. With no reader, the
+    /// host refused the first connection.
+    fn run(&self, mut reader: Option<BufReader<UnixStream>>) {
         loop {
-            self.read(&mut reader);
-            self.disconnected();
+            if let Some(reader) = reader.as_mut() {
+                self.read(reader);
+                self.disconnected();
+            }
             let mut delay = FIRST_RETRY;
             reader = loop {
                 if !self.wait(delay) {
                     return;
                 }
                 match self.open() {
-                    Ok(reader) => break reader,
+                    Ok(reader) => break Some(reader),
                     Err(error) => eprintln!("Connect to the host: {error}"),
                 }
                 delay = (delay * 2).min(LAST_RETRY);
@@ -568,6 +652,155 @@ mod tests {
         assert_eq!(host.commands()[0], "send");
         assert_eq!(host.requests.lock().unwrap()[0]["command"]["body"], "Hello");
         client.stop();
+    }
+
+    /// A host on a socket in a temporary folder that answers every `Hello` with `answer`, every
+    /// `Subscribe` with a cursor and every other request with nothing, and records the requests.
+    struct FakeHost {
+        folder: tempfile::TempDir,
+        requests: async_channel::Receiver<Command>,
+    }
+    impl FakeHost {
+        fn start(answer: HelloAnswer) -> Self {
+            let folder = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+            let listener = UnixListener::bind(folder.path().join(SOCKET_FILE)).unwrap();
+            let (record, requests) = async_channel::unbounded();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let (Ok(mut stream), answer, record) = (stream, answer.clone(), record.clone())
+                    else {
+                        continue;
+                    };
+                    std::thread::spawn(move || {
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let _: HelloLine = read_line(&mut reader).unwrap();
+                        write_line(&mut stream, &answer).unwrap();
+                        while let Ok(request) = read_line::<Request>(&mut reader) {
+                            let result = match request.command {
+                                Command::Subscribe { .. } => serde_json::json!({
+                                    "cursor": {"epoch": "e", "seq": 0}
+                                }),
+                                _ => Value::Null,
+                            };
+                            let _ = record.send_blocking(request.command);
+                            let response = Response {
+                                version: request.version,
+                                id: request.id,
+                                result: Some(result),
+                                error: None,
+                            };
+                            write_line(&mut stream, &response).unwrap();
+                        }
+                    });
+                }
+            });
+            Self { folder, requests }
+        }
+        /// The next request other than `Subscribe` and the client's probes, waiting up to
+        /// `wait` for it.
+        fn next_request(&self, wait: Duration) -> Option<Command> {
+            let deadline = std::time::Instant::now() + wait;
+            while std::time::Instant::now() < deadline {
+                match self.requests.try_recv() {
+                    Ok(Command::Subscribe { .. } | Command::Settings) => {}
+                    Ok(command) => return Some(command),
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            None
+        }
+    }
+    struct Found {
+        socket: std::path::PathBuf,
+        outlives_app: bool,
+    }
+    impl Launch for Found {
+        fn endpoint(&mut self) -> io::Result<Endpoint> {
+            Ok(Endpoint {
+                socket: self.socket.clone(),
+                credential: None,
+            })
+        }
+        fn outlives_app(&self) -> bool {
+            self.outlives_app
+        }
+    }
+    fn connect(host: &FakeHost, outlives_app: bool, on_event: OnEvent) -> HostClient {
+        let launcher = Found {
+            socket: host.folder.path().join(SOCKET_FILE),
+            outlives_app,
+        };
+        let client = Client {
+            name: "test".into(),
+            kind: "script".into(),
+        };
+        HostClient::connect(Box::new(launcher), client, on_event).unwrap()
+    }
+    fn welcome(host_version: &str) -> HelloAnswer {
+        HelloAnswer::Welcome(Welcome {
+            protocol: PROTOCOL_VERSION,
+            host_id: "h".into(),
+            host_version: host_version.into(),
+            epoch: "e".into(),
+            capabilities: vec![
+                capability::EVENTS.into(),
+                capability::RESTART_WHEN_IDLE.into(),
+            ],
+            binary: "/host".into(),
+        })
+    }
+
+    #[test]
+    fn a_refusing_host_is_reported_and_restarted_on_a_connection_of_its_own() {
+        let host = FakeHost::start(HelloAnswer::Refused(Refusal {
+            host_protocols: [PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2],
+            client_protocols: [PROTOCOL_VERSION, PROTOCOL_VERSION],
+            host_version: "9.0.0".into(),
+            working: 2,
+        }));
+        let (woken, wakes) = async_channel::unbounded();
+        let on_event: OnEvent = Box::new(move |kind| {
+            let _ = woken.send_blocking(kind.clone());
+        });
+
+        let client = connect(&host, true, on_event);
+
+        assert_eq!(client.refusal().map(|r| r.working), Some(2));
+        assert_eq!(wakes.try_recv().ok(), Some(EventKind::Resync));
+        client.restart_host(RestartWhen::Idle).unwrap();
+        assert!(matches!(
+            host.next_request(Duration::from_secs(5)),
+            Some(Command::RestartHost {
+                when: RestartWhen::Idle
+            })
+        ));
+        client.stop();
+    }
+
+    #[test]
+    fn an_older_launchd_host_is_asked_to_restart_once_idle() {
+        let older = FakeHost::start(welcome("0.0.1-older"));
+        let client = connect(&older, true, Box::new(|_| {}));
+        assert_eq!(client.host_version().as_deref(), Some("0.0.1-older"));
+        assert!(matches!(
+            older.next_request(Duration::from_secs(5)),
+            Some(Command::RestartHost {
+                when: RestartWhen::Idle
+            })
+        ));
+        client.stop();
+
+        // The same version, or a child host, is left alone. The client asks as it connects, so
+        // a moment is enough to see that it did not.
+        for (version, outlives_app) in [(build_version(), true), ("0.0.1-older", false)] {
+            let host = FakeHost::start(welcome(version));
+            let client = connect(&host, outlives_app, Box::new(|_| {}));
+            assert!(
+                host.next_request(Duration::from_millis(500)).is_none(),
+                "{version} {outlives_app}"
+            );
+            client.stop();
+        }
     }
 
     #[test]

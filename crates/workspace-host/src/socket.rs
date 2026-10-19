@@ -421,7 +421,7 @@ fn same_secret(given: &str, expected: &str) -> bool {
 }
 
 pub fn host_version() -> &'static str {
-    option_env!("WIFFLETREE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    build_version()
 }
 
 /// Reads the child host's credential, the first line of its standard input, one byte at a time

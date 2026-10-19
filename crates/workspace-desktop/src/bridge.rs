@@ -27,10 +27,12 @@ fn answer<R: DeserializeOwned>(client: &HostClient, ask: Ask<R>) -> anyhow::Resu
     ask.decode(value).map_err(anyhow::Error::msg)
 }
 
-/// One wake per event kind, each holding at most one wake until it is read.
+/// One wake per event kind, each holding at most one wake until it is read, and the menu bar
+/// icon's own wake for state changes, since it runs beside the window's.
 #[derive(Clone)]
 struct Wakes {
     state: (Sender<()>, Receiver<()>),
+    menu_bar: (Sender<()>, Receiver<()>),
     steps: (Sender<()>, Receiver<()>),
     progress: (Sender<()>, Receiver<()>),
     usage: (Sender<()>, Receiver<()>),
@@ -42,6 +44,7 @@ impl Wakes {
         let wake = || async_channel::bounded(1);
         Self {
             state: wake(),
+            menu_bar: wake(),
             steps: wake(),
             progress: wake(),
             usage: wake(),
@@ -50,13 +53,19 @@ impl Wakes {
     }
     fn wake(&self, kind: &EventKind) {
         let woken = match kind {
-            EventKind::State => vec![&self.state],
+            EventKind::State => vec![&self.state, &self.menu_bar],
             EventKind::Steps { .. } => vec![&self.steps],
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
             EventKind::Resync => {
                 self.progress_resynced.store(true, Ordering::Relaxed);
-                vec![&self.state, &self.steps, &self.progress, &self.usage]
+                vec![
+                    &self.state,
+                    &self.menu_bar,
+                    &self.steps,
+                    &self.progress,
+                    &self.usage,
+                ]
             }
         };
         for (sender, _) in woken {
@@ -69,6 +78,8 @@ impl Wakes {
 pub(crate) struct Bridge {
     client: Result<HostClient, String>,
     wakes: Wakes,
+    /// The host is a launchd job, which keeps running after the app exits.
+    outlives_app: bool,
 }
 impl Bridge {
     /// Connects to the host of `home`, the default data folder when `default_folder`, starting
@@ -98,6 +109,7 @@ impl Bridge {
         bridge
     }
     pub(crate) fn connect(launcher: Box<dyn Launch>) -> Self {
+        let outlives_app = launcher.outlives_app();
         let wakes = Wakes::new();
         let woken = wakes.clone();
         let client = Client {
@@ -108,13 +120,34 @@ impl Bridge {
         Self {
             client: client.map_err(|e| format!("The host did not start: {e}")),
             wakes,
+            outlives_app,
         }
     }
     fn unavailable(error: String) -> Self {
         Self {
             client: Err(error),
             wakes: Wakes::new(),
+            outlives_app: false,
         }
+    }
+    /// Whether the host keeps running, with its agents, after the app exits.
+    pub(crate) fn outlives_app(&self) -> bool {
+        self.outlives_app
+    }
+    /// Why the host refuses the app, while it does: it shares no protocol with it.
+    pub(crate) fn refusal(&self) -> Option<Refusal> {
+        self.client.as_ref().ok()?.refusal()
+    }
+    /// The version of the host, once it has answered.
+    pub(crate) fn host_version(&self) -> Option<String> {
+        self.client.as_ref().ok()?.host_version()
+    }
+    /// Asks the host to restart and waits for its answer; run it off the main thread.
+    pub(crate) fn restart_host(&self, when: RestartWhen) -> Result<(), String> {
+        self.client
+            .as_ref()
+            .map_err(Clone::clone)?
+            .restart_host(when)
     }
     fn start_demo(client: &HostClient, path: String) -> anyhow::Result<()> {
         let snapshot = answer(client, ask::snapshot())?;
@@ -164,12 +197,22 @@ impl Bridge {
             client.stop();
         }
     }
+    /// Runs `with` on the app's child host, while it has one.
+    #[cfg(test)]
+    pub(crate) fn with_child<R>(&self, with: impl FnOnce(&mut ChildHost) -> R) -> Option<R> {
+        let client = self.client.as_ref().ok()?;
+        client.with_launcher(|launcher| launcher.child().map(with))
+    }
     fn wake(&self, wake: &(Sender<()>, Receiver<()>)) -> Option<Receiver<()>> {
         self.client.is_ok().then(|| wake.1.clone())
     }
     /// Wakes when the snapshot should be read again.
     pub(crate) fn changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.state)
+    }
+    /// Wakes the menu bar icon when the snapshot, and so how many agents work, may have changed.
+    pub(crate) fn menu_bar_changes(&self) -> Option<Receiver<()>> {
+        self.wake(&self.wakes.menu_bar)
     }
     /// Wakes when some session's work steps changed; fetch them with `Command::Steps`.
     pub(crate) fn step_changes(&self) -> Option<Receiver<()>> {
@@ -199,8 +242,15 @@ pub(crate) mod tests {
     pub(crate) struct Served {
         pub(crate) data: tempfile::TempDir,
         pub(crate) bridge: Bridge,
+        endpoint: Endpoint,
         _listener: socket::Listener,
         service: Service,
+    }
+    impl Served {
+        /// A second bridge to the same host, as the app has after it opens again.
+        pub(crate) fn reconnect(&self) -> Bridge {
+            Bridge::connect(Box::new(Running(self.endpoint.clone())))
+        }
     }
     impl Drop for Served {
         fn drop(&mut self) {
@@ -238,7 +288,8 @@ pub(crate) mod tests {
             credential: Some(credential),
         };
         Served {
-            bridge: Bridge::connect(Box::new(Running(endpoint))),
+            bridge: Bridge::connect(Box::new(Running(endpoint.clone()))),
+            endpoint,
             data,
             _listener: listener,
             service,

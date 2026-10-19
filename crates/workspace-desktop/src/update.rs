@@ -115,6 +115,17 @@ pub(crate) fn check(current: &str, installed: &Path) -> Result<Option<Staged>> {
 }
 
 impl Staged {
+    /// A staged release with nothing on disk, which tests never install.
+    #[cfg(test)]
+    pub(crate) fn fake(version: &str) -> Self {
+        Self {
+            version: version.into(),
+            summary: None,
+            page: String::new(),
+            app: PathBuf::new(),
+            installed: PathBuf::new(),
+        }
+    }
     /// Swaps the bundle once this process exits, then optionally reopens it.
     pub(crate) fn install_after_exit(&self, relaunch: bool) -> Result<()> {
         command("/bin/sh")

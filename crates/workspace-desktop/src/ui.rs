@@ -729,10 +729,115 @@ impl Workspace {
     }
 }
 
+/// What the app says when its host shares no protocol with it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Mismatch {
+    pub(crate) title: &'static str,
+    pub(crate) body: String,
+    /// Restarting the host would bring it to this app's version; otherwise the app is the older.
+    pub(crate) restarts: bool,
+}
+impl Mismatch {
+    pub(crate) fn of(refusal: &Refusal) -> Self {
+        let host = &refusal.host_version;
+        if refusal.client_protocols[1] < refusal.host_protocols[0] {
+            return Self {
+                title: "Update Wiffletree",
+                body: format!(
+                    "The host runs Wiffletree {host}, which this older version of the app can't talk to."
+                ),
+                restarts: false,
+            };
+        }
+        let working = match refusal.working {
+            0 => "No agent is working, so nothing is interrupted.".to_string(),
+            1 => "1 agent is working. Restarting now stops its turn; waiting lets it finish first."
+                .to_string(),
+            n => format!(
+                "{n} agents are working. Restarting now stops their turns; waiting lets them finish first."
+            ),
+        };
+        Self {
+            title: "The host must restart",
+            body: format!(
+                "It still runs Wiffletree {host}, which this version, {}, can't talk to. {working}",
+                build_version()
+            ),
+            restarts: true,
+        }
+    }
+}
+
+impl Workspace {
+    /// In place of everything else while the host refuses the app.
+    fn host_mismatch_screen(&self, refusal: &Refusal, p: Palette, cx: &mut Context<Self>) -> Div {
+        let mismatch = Mismatch::of(refusal);
+        let restart = |id: &'static str, label: &'static str, when: RestartWhen| {
+            button(id)
+                .label(label)
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    if when == RestartWhen::Idle {
+                        view.waiting_for_host = true;
+                        cx.notify();
+                    }
+                    crate::sidebar::restart_host(view.bridge.clone(), when, window, cx);
+                }))
+        };
+        let actions = if !mismatch.restarts {
+            None
+        } else if self.waiting_for_host {
+            Some(div().child(hint("The host restarts once no agent is working.", p)))
+        } else {
+            Some(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(restart("restart-host-now", "Restart now", RestartWhen::Now))
+                    .child(
+                        restart("wait-for-host", "Wait until they finish", RestartWhen::Idle)
+                            .primary(),
+                    ),
+            )
+        };
+        div()
+            .size_full()
+            .bg(p.base)
+            .text_color(p.text)
+            .font_family(".SystemUIFont")
+            .text_size(px(font::TEXT))
+            .flex()
+            .flex_col()
+            .child(TitleBar::new())
+            .child(
+                div().flex_1().flex().items_center().justify_center().child(
+                    div()
+                        .max_w(px(440.))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_size(px(font::HERO))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(mismatch.title),
+                        )
+                        .child(hint(mismatch.body, p))
+                        .children(actions),
+                ),
+            )
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::render_counts::count("Workspace");
         let p = self.colors(cx);
+        if let Some(refusal) = self.bridge.refusal() {
+            return self
+                .host_mismatch_screen(&refusal, p, cx)
+                .into_any_element();
+        }
         let main = match self.shared.page {
             Page::Usage => self.usage.clone().cached(full()).into_any_element(),
             Page::Models => self.models.clone().cached(full()).into_any_element(),
@@ -805,13 +910,42 @@ impl Render for Workspace {
                     .when(session_tools, |d| d.child(self.inspector_rail(p, cx))),
             )
             .children(file_links::link_menu(cx))
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::badge_state;
-    use workspace_core::Status;
+    use super::{Mismatch, badge_state};
+    use workspace_core::*;
+
+    #[test]
+    fn a_host_no_protocol_matches_must_restart_and_says_how_many_agents_work() {
+        let refusal = |host: [u32; 2], working| Refusal {
+            host_protocols: host,
+            client_protocols: [PROTOCOL_VERSION, PROTOCOL_VERSION],
+            host_version: "0.1.0".into(),
+            working,
+        };
+        let older = Mismatch::of(&refusal([0, PROTOCOL_VERSION - 2], 2));
+        assert_eq!(older.title, "The host must restart");
+        assert!(older.restarts);
+        assert!(older.body.starts_with("It still runs Wiffletree 0.1.0"));
+        assert!(
+            older.body.contains("2 agents are working."),
+            "{}",
+            older.body
+        );
+        assert!(
+            Mismatch::of(&refusal([0, 0], 0))
+                .body
+                .contains("No agent is working")
+        );
+        // Restarting a newer host would not help: the app is the one to update.
+        let newer = Mismatch::of(&refusal([PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2], 1));
+        assert_eq!(newer.title, "Update Wiffletree");
+        assert!(!newer.restarts);
+    }
 
     #[test]
     fn a_running_compaction_reads_as_compacting_over_the_agents_own_status() {

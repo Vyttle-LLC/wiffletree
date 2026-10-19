@@ -1,5 +1,6 @@
 //! Project tree, account quota and client appearance.
 use super::*;
+use crate::background::PendingUpdate;
 use gpui_component::{
     Disableable, Selectable,
     button::ButtonVariants,
@@ -173,9 +174,9 @@ pub(super) struct Sidebar {
     /// The tree is scrolling under a row dragged to its edge.
     drag_scrolling: bool,
     tree_scroll: ScrollHandle,
-    /// A downloaded release that installs on restart or quit.
-    update: Option<update::Staged>,
     checking_update: bool,
+    /// The host's version as last drawn, to redraw the restart line when it changes.
+    host_version: Option<String>,
     /// Hides the update card; the footer keeps a smaller restart button.
     update_card_dismissed: bool,
 }
@@ -208,8 +209,8 @@ impl Sidebar {
             row_press: tree::RowPress::default(),
             drag_scrolling: false,
             tree_scroll: ScrollHandle::new(),
-            update: None,
             checking_update: false,
+            host_version: None,
             update_card_dismissed: false,
         };
         sidebar.watch_for_updates(window, cx);
@@ -223,8 +224,12 @@ impl Sidebar {
         if moved {
             self.name_new_project(window, cx);
         }
+        let host_version = self.bridge.host_version();
+        let host_moved = host_version != self.host_version;
+        self.host_version = host_version;
         let new = &self.shared;
         if moved
+            || host_moved
             || selection
             || new.page != old.page
             || new.show_archived != old.show_archived
@@ -252,18 +257,12 @@ impl Sidebar {
         self.tree_scroll.set_offset(point(px(0.), px(0.)));
         self.begin_project_rename(project_id, window, cx);
     }
-    /// Checks for a newer release now and hourly, and installs a staged one when the app quits.
+    /// Checks for a newer release now and hourly while the window is open. The app installs a
+    /// staged one when it exits.
     fn watch_for_updates(&self, window: &mut Window, cx: &mut Context<Self>) {
         if update::VERSION.is_none() || update::installed_bundle().is_none() {
             return;
         }
-        cx.on_app_quit(|view, _| {
-            if let Some(staged) = view.update.take() {
-                let _ = staged.install_after_exit(false);
-            }
-            async {}
-        })
-        .detach();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let checked = cx.update(|window, cx| {
@@ -286,7 +285,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.update.is_some() {
+        if staged(cx).is_some() {
             if manual {
                 self.update_card_dismissed = false;
                 cx.notify();
@@ -322,7 +321,7 @@ impl Sidebar {
                     view.checking_update = false;
                     match result {
                         Ok(Some(staged)) => {
-                            view.update = Some(staged);
+                            cx.global_mut::<PendingUpdate>().0 = Some(staged);
                             view.update_card_dismissed = false;
                         }
                         Ok(None) if manual => toast(
@@ -344,14 +343,16 @@ impl Sidebar {
         })
         .detach();
     }
-    /// Restarts into the staged release, confirming first if agents would be interrupted.
+    /// Restarts into the staged release, confirming first if agents would be interrupted. A
+    /// launchd host keeps them working through the app's restart.
     fn restart_to_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let working = self
-            .shared
-            .index
-            .iter()
-            .flat_map(|index| index.sessions())
-            .any(|s| s.status == Status::Working);
+        let working = !self.bridge.outlives_app()
+            && self
+                .shared
+                .index
+                .iter()
+                .flat_map(|index| index.sessions())
+                .any(|s| s.status == Status::Working);
         if !working {
             return self.install_update(window, cx);
         }
@@ -370,16 +371,68 @@ impl Sidebar {
         });
     }
     fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(staged) = self.update.take() else {
+        let Some(staged) = cx.global_mut::<PendingUpdate>().0.take() else {
             return;
         };
         match staged.install_after_exit(true) {
             Ok(()) => cx.quit(),
             Err(error) => {
-                self.update = Some(staged);
+                cx.global_mut::<PendingUpdate>().0 = Some(staged);
                 toast_error(format!("{error:#}"), window, cx);
             }
         }
+    }
+    /// After an update, an older launchd host runs on until no agent works, then restarts into
+    /// this version; the client asked it to as it connected.
+    fn host_restart_line(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let older = self.host_version.as_deref()?;
+        if !self.bridge.outlives_app() || older == build_version() {
+            return None;
+        }
+        Some(
+            div()
+                .flex_none()
+                .px_4()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_t_1()
+                .border_color(p.edge.opacity(edge::LIGHT))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(font::CAPTION))
+                        .text_color(p.subtle)
+                        .child(format!(
+                            "The host restarts into {} once no agent is working",
+                            build_version()
+                        )),
+                )
+                .child(
+                    button("restart-host-now")
+                        .xsmall()
+                        .label("Restart now")
+                        .on_click(cx.listener(|v, _, w, c| v.restart_host_now(w, c))),
+                ),
+        )
+    }
+    /// Restarts the host into this version now, which stops running turns as a quit does.
+    fn restart_host_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let bridge = bridge.clone();
+            dialog
+                .title("Restart the host now?")
+                .confirm()
+                .ok_text("Restart now")
+                .child("Running turns stop, as when Wiffletree quits; you can retry their held input afterwards.")
+                .on_ok(move |_, window, cx| {
+                    restart_host(bridge.clone(), RestartWhen::Now, window, cx);
+                    true
+                })
+        });
     }
 
     fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -535,6 +588,7 @@ impl Sidebar {
             )
             .child(self.workspace_nav(p, cx))
             .child(quotas::quota_strip(&self.shared.quotas, p, cx))
+            .children(self.host_restart_line(p, cx))
             .child(
                 self.sidebar_footer(p, cx)
                     .relative()
@@ -598,7 +652,7 @@ impl Sidebar {
             .border_t_1()
             .border_color(p.edge.opacity(edge::LIGHT))
             .child(
-                match self.update.as_ref().filter(|_| self.update_card_dismissed) {
+                match staged(cx).cloned().filter(|_| self.update_card_dismissed) {
                     Some(staged) => button("restart-to-update")
                         .primary()
                         .xsmall()
@@ -684,9 +738,8 @@ impl Sidebar {
     /// What the downloaded release brings, with its changelog and the restart that installs it.
     /// It floats above the footer rather than taking room from the sidebar above it.
     fn update_card(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
-        let staged = self
-            .update
-            .as_ref()
+        let staged = staged(cx)
+            .cloned()
             .filter(|_| !self.update_card_dismissed)?;
         let page = staged.page.clone();
         Some(
@@ -1763,6 +1816,28 @@ fn needs_you(attention: &[Attention], notes: &[WorkspaceNote], project_id: &str)
         .filter(|a| a.project_id == project_id)
         .count()
         + notes.len()
+}
+
+/// The release the app has downloaded, waiting for it to exit.
+fn staged(cx: &App) -> Option<&update::Staged> {
+    cx.global::<PendingUpdate>().0.as_ref()
+}
+
+/// Asks the host to restart off the main thread, and says so if it could not.
+pub(crate) fn restart_host(bridge: Bridge, when: RestartWhen, window: &mut Window, cx: &mut App) {
+    let (sender, receiver) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = sender.send_blocking(bridge.restart_host(when));
+    });
+    window
+        .spawn(cx, async move |cx| {
+            if let Ok(Err(error)) = receiver.recv().await {
+                let _ = cx.update(|window, cx| {
+                    toast_error(format!("The host did not restart: {error}"), window, cx)
+                });
+            }
+        })
+        .detach();
 }
 
 #[cfg(test)]
