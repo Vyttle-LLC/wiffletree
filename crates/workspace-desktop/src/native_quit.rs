@@ -18,8 +18,11 @@ use std::sync::{
 /// `NSTerminateCancel` and `NSTerminateNow`.
 const CANCEL: usize = 0;
 const NOW: usize = 1;
-/// `keyAEQuitReason`, the attribute a logout, restart or shutdown puts on its quit event.
+/// `keyAEQuitReason`, the parameter a logout, restart or shutdown puts on its quit event.
 const QUIT_REASON: u32 = u32::from_be_bytes(*b"why?");
+/// The reasons that end the session: `kAELogOut`, `kAEReallyLogOut`, `kAEShowRestartDialog`,
+/// `kAERestart`, `kAEShowShutdownDialog` and `kAEShutDown`.
+const SESSION_ENDS: [&[u8; 4]; 6] = [b"logo", b"rlgo", b"rrst", b"rest", b"rsdn", b"shut"];
 
 /// The app has decided to end itself; set by `allow`.
 static ALLOWED: AtomicBool = AtomicBool::new(false);
@@ -65,8 +68,15 @@ extern "C" fn should_terminate(_: &Object, _: Sel, _: *mut Object) -> usize {
     }
 }
 
+/// Whether a quit event's `keyAEQuitReason` says a logout, restart or shutdown.
+fn ends_session(reason: u32) -> bool {
+    SESSION_ENDS
+        .iter()
+        .any(|code| u32::from_be_bytes(**code) == reason)
+}
+
 /// Whether the quit being handled comes from a logout, restart or shutdown, which must not be
-/// held up.
+/// held up. AppKit gives the reason as a parameter of the quit event; an attribute is read too.
 fn ending_session() -> bool {
     // SAFETY: called on the main thread from the delegate; every object is only read.
     unsafe {
@@ -75,7 +85,27 @@ fn ending_session() -> bool {
         if event.is_null() {
             return false;
         }
-        let reason: *mut Object = msg_send![event, attributeDescriptorForKeyword: QUIT_REASON];
-        !reason.is_null()
+        let parameter: *mut Object = msg_send![event, paramDescriptorForKeyword: QUIT_REASON];
+        let attribute: *mut Object = msg_send![event, attributeDescriptorForKeyword: QUIT_REASON];
+        [parameter, attribute].into_iter().any(|reason| {
+            !reason.is_null() && {
+                let code: u32 = msg_send![reason, enumCodeValue];
+                ends_session(code)
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ends_session;
+
+    #[test]
+    fn a_logout_restart_or_shutdown_ends_the_session_and_nothing_else_does() {
+        for code in [b"logo", b"rlgo", b"rrst", b"rest", b"rsdn", b"shut"] {
+            assert!(ends_session(u32::from_be_bytes(*code)), "{code:?}");
+        }
+        assert!(!ends_session(0));
+        assert!(!ends_session(u32::from_be_bytes(*b"quit")));
     }
 }
