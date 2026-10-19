@@ -1945,6 +1945,11 @@ fn the_last_cycle_blocked_offers_no_further_verification() {
             && body.contains("close the ticket")
             && body.contains("ask the human, only for a product, security or data-loss decision")
     );
+    // A publish waiver covers only unreviewed commits, never the findings alone.
+    assert!(
+        body.contains("give publish_ticket waived only for such commits"),
+        "{body}"
+    );
     assert!(!body.contains("verify_ticket"), "{body}");
 }
 

@@ -1233,7 +1233,7 @@ impl Host {
                 actions.push(if review_left {
                     "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings"
                 } else {
-                    "once no finding is untriaged, accept_ticket or publish_ticket with waived naming the open findings and, by short SHA, each commit no review checked"
+                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings and, by short SHA, any commit no review checked; give publish_ticket waived only for such commits"
                 });
             }
             actions.push("close the ticket");
