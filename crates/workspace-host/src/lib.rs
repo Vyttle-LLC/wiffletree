@@ -18,6 +18,7 @@ mod memory;
 mod order;
 mod overlaps;
 mod policies;
+pub mod power;
 mod pr_watch;
 mod processes;
 mod progress;
@@ -1633,7 +1634,7 @@ impl Host {
             }
             Command::Subscribe { .. } => bail!("Subscribe is answered only on the host socket"),
             Command::StopAgentsAndQuit | Command::RestartHost { .. } => {
-                bail!("This host cannot stop or restart itself yet")
+                bail!("Only the running host's service stops or restarts it")
             }
         })
     }

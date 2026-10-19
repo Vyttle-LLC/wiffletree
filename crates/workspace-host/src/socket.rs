@@ -21,7 +21,15 @@ use workspace_core::*;
 const MAX_CONNECTIONS: usize = 64;
 /// Requests one connection may have waiting for a reply.
 const MAX_IN_FLIGHT: usize = 64;
-const CAPABILITIES: [&str; 3] = [capability::EVENTS, capability::FILES, capability::FOLDERS];
+const CAPABILITIES: [&str; 4] = [
+    capability::EVENTS,
+    capability::FILES,
+    capability::FOLDERS,
+    capability::RESTART_WHEN_IDLE,
+];
+/// How long a stopping listener waits for the replies still being written, such as the answer
+/// to the `StopAgentsAndQuit` that stopped the host.
+const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Options {
     /// The app's client credential, which the human-only commands need.
@@ -49,16 +57,22 @@ pub fn socket_path(data: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Accepts connections until dropped, then removes the socket.
+/// Accepts connections until dropped, then removes the socket. Dropping it waits a moment for
+/// replies still being written, which a stopped host answers at once.
 pub struct Listener {
     path: PathBuf,
     stopping: Arc<AtomicBool>,
+    replying: Arc<AtomicUsize>,
 }
 impl Drop for Listener {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Relaxed);
         let _ = UnixStream::connect(&self.path);
         let _ = fs::remove_file(&self.path);
+        let deadline = std::time::Instant::now() + REPLY_WAIT;
+        while self.replying.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }
 
@@ -72,6 +86,8 @@ pub fn listen(service: Service, data: &Path, options: Options) -> Result<Listene
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     let stopping = Arc::new(AtomicBool::new(false));
     let stop = stopping.clone();
+    let replying = Arc::new(AtomicUsize::new(0));
+    let all_replies = replying.clone();
     let options = Arc::new(options);
     std::thread::spawn(move || {
         let connections = Arc::new(AtomicUsize::new(0));
@@ -88,9 +104,10 @@ pub fn listen(service: Service, data: &Path, options: Options) -> Result<Listene
                 continue;
             }
             let (service, options, count) = (service.clone(), options.clone(), connections.clone());
+            let replying = all_replies.clone();
             std::thread::spawn(move || {
                 if let Err(error) =
-                    Connection::new(service, options, stream).and_then(Connection::run)
+                    Connection::new(service, options, replying, stream).and_then(Connection::run)
                 {
                     eprintln!("Host connection: {error:#}");
                 }
@@ -98,7 +115,11 @@ pub fn listen(service: Service, data: &Path, options: Options) -> Result<Listene
             });
         }
     });
-    Ok(Listener { path, stopping })
+    Ok(Listener {
+        path,
+        stopping,
+        replying,
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -148,18 +169,26 @@ struct Connection {
     reader: BufReader<UnixStream>,
     writer: Arc<Mutex<UnixStream>>,
     in_flight: Arc<AtomicUsize>,
+    /// The listener's count of replies being waited for or written, over every connection.
+    replying: Arc<AtomicUsize>,
     stage: Stage,
     /// The subscription's queue, closed when the connection ends.
     events: Option<async_channel::Receiver<Event>>,
 }
 impl Connection {
-    fn new(service: Service, options: Arc<Options>, stream: UnixStream) -> Result<Self> {
+    fn new(
+        service: Service,
+        options: Arc<Options>,
+        replying: Arc<AtomicUsize>,
+        stream: UnixStream,
+    ) -> Result<Self> {
         Ok(Self {
             service,
             options,
             reader: BufReader::new(stream.try_clone()?),
             writer: Arc::new(Mutex::new(stream)),
             in_flight: Arc::default(),
+            replying,
             stage: Stage::AwaitingHello,
             events: None,
         })
@@ -286,12 +315,15 @@ impl Connection {
             }
         };
         let (writer, in_flight) = (self.writer.clone(), self.in_flight.clone());
+        let replying = self.replying.clone();
+        replying.fetch_add(1, Ordering::Relaxed);
         std::thread::spawn(move || {
             let result = receive
                 .recv_blocking()
                 .unwrap_or_else(|_| Err("Workspace stopped".into()));
             let _ = write_line(&writer, &response(version, id, result));
             in_flight.fetch_sub(1, Ordering::Relaxed);
+            replying.fetch_sub(1, Ordering::Relaxed);
         });
         Ok(())
     }

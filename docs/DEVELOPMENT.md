@@ -321,6 +321,28 @@ Only a signed build runs its host as a launchd job, so its tests cannot cover th
 2. Quit the app and log out, then log back in without opening Wiffletree.
 3. `launchctl print gui/$(id -u)/com.vyttle.wiffletree.host` finds no job, and `pgrep -fl workspace-host` lists nothing.
 
+### Checking the client credential on a signed build
+
+`crates/workspace-host/src/keychain.rs` keeps a launchd host's client credential in the login keychain. Check it by hand on a signed build before a release that changes it. Each step names what to expect. The host never shows a Keychain dialog itself: where it cannot read the item silently, it stops with an error instead.
+
+1. Build a signed bundle: `CODESIGN_IDENTITY="<identity>" scripts/package_macos.sh`, then set `APP="$PWD/target/Wiffletree.app"`, `HOST="$APP/Contents/MacOS/workspace-host"` and `SERVICE=com.vyttle.wiffletree.client-credential`.
+2. Make a scratch data folder: `DATA=$(mktemp -d /tmp/wt-kc.XXXX)` and `ACCOUNT=$(cd "$DATA" && pwd -P)`, since the item's account is the resolved folder.
+3. **Create.** Run `"$HOST" serve --data-dir "$DATA" --app "$APP"`. Expect no dialog, and `$DATA/host.sock` to appear. Stop it with Control-C. `security find-generic-password -s "$SERVICE" -a "$ACCOUNT"` lists the item's attributes, without its secret.
+4. **Read.** Run the same `serve` again. Expect it to start with no dialog: it found the item, because a host that could not read it would fail to add a second one.
+5. **A versioned copy.** Copy the host as the app will and re-sign it with the same identifier and identity:
+   ```sh
+   mkdir -p "$DATA/host/9.9.9" && cp "$HOST" "$DATA/host/9.9.9/workspace-host"
+   ID=$(codesign -dv "$HOST" 2>&1 | sed -n 's/^Identifier=//p')
+   codesign --force --options runtime --timestamp --identifier "$ID" --sign "<identity>" "$DATA/host/9.9.9/workspace-host"
+   "$DATA/host/9.9.9/workspace-host" serve --data-dir "$DATA" --app "$APP"
+   ```
+   Expect it to start with no dialog, then stop it.
+6. **Another program.** Run `security find-generic-password -s "$SERVICE" -a "$ACCOUNT" -w`. Expect a dialog asking for the login keychain password. Click **Deny**; nothing is printed.
+7. **Fail closed.** With a fresh folder, `DATA2=$(mktemp -d /tmp/wt-kc.XXXX)`, run `"$HOST" serve --data-dir "$DATA2" --app /nonexistent/Wiffletree.app`. Expect it to exit with status 1 and `Limit the client credential to Wiffletree`, and `security find-generic-password -s "$SERVICE" -a "$(cd "$DATA2" && pwd -P)"` to find no item.
+8. Clean up: delete the item in Keychain Access (search for `$SERVICE`), or with `security delete-generic-password -s "$SERVICE" -a "$ACCOUNT"`, then `rm -rf "$DATA" "$DATA2"`.
+
+Step 7 needs no signature and passes on an unsigned build.
+
 ## Current limits
 
 - Acceptance preserves the tested branch. **Merging is manual**: Wiffletree pushes a ticket's branch and opens its pull request through `publish_ticket` (see [repository owners and publishing](#repository-owners-and-publishing)), and never approves, merges, closes or comments on one. No dependency rebase or combined integration testing is implemented, and conflict fixing is limited to the PR keeper's one checked try. The PR watcher reads PR status and tells the coordinator when a PR merges, but accepting the ticket stays the coordinator's call.

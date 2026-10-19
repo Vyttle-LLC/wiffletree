@@ -42,7 +42,7 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 
 - [ ] 6.1 The versioned host copy under `<data folder>/host/<version>/`, the plist pointing at it, helpers started from it, and removal of unused copies. Child hosts are not copied and run from the bundle (or `target/`). Test, on the launchd path without launchd: `serve` started from a versioned copy in a temporary data folder keeps its own path as the helper path after the source binary it was copied from is replaced, and an unused copy is removed at the next start.
 - [ ] 6.2 `RestartHost { when: Idle | Now }` and the sidebar's update line with Restart now; the no-common-version screen. Test: an idle restart waits for a running fake turn to end, then exits cleanly; with no common protocol, the refusal carries the working count and `RestartHost` on the refused connection is accepted while any other command is not.
-- [ ] 6.3 The power assertion while any turn or compaction runs. Test the assertion count around a fake turn on macOS.
+- [x] 6.3 The power assertion while any turn or compaction runs. Test the assertion count around a fake turn on macOS.
 
 ## 7. Docs
 

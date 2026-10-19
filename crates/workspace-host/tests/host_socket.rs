@@ -62,7 +62,21 @@ struct Fixture {
 }
 impl Fixture {
     fn new(prepare: impl FnOnce(&mut Host)) -> Self {
-        let data = tempfile::tempdir().unwrap();
+        Self::from(
+            Path::new(env!("CARGO_BIN_EXE_workspace-host")),
+            None,
+            tempfile::tempdir().unwrap(),
+            prepare,
+        )
+    }
+    /// A child host of the store in `data`, run from `binary`, which finds `provider` as both
+    /// providers' CLI or else neither.
+    fn from(
+        binary: &Path,
+        provider: Option<&Path>,
+        data: tempfile::TempDir,
+        prepare: impl FnOnce(&mut Host),
+    ) -> Self {
         let mut host = Host::open_set_up(data.path()).unwrap();
         let workspaces = data.path().join("workspaces");
         host.set_workspaces_dir(workspaces.to_str().unwrap())
@@ -70,13 +84,18 @@ impl Fixture {
         prepare(&mut host);
         drop(host);
         let shell = tempfile::tempdir().unwrap();
-        let mut command = process::Command::new(env!("CARGO_BIN_EXE_workspace-host"));
+        let mut command = process::Command::new(binary);
         command
             .args(["serve", "--data-dir"])
             .arg(data.path())
             .arg("--child")
             .envs(isolated(shell.path()))
             .stderr(std::process::Stdio::null());
+        if let Some(provider) = provider {
+            command
+                .env("WORKSPACE_CLAUDE_BIN", provider)
+                .env("WORKSPACE_CODEX_BIN", provider);
+        }
         let host = ChildHost::start_command(command).unwrap();
         let socket = data.path().join("host.sock");
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -101,6 +120,18 @@ impl Fixture {
         Connection {
             reader: BufReader::new(stream.try_clone().unwrap()),
             stream,
+        }
+    }
+    /// Waits for the host to exit on its own.
+    fn exited(&mut self) -> process::ExitStatus {
+        let host = self.host.as_mut().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = host.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "the host did not exit");
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
     fn welcomed(&self, credential: Option<String>) -> Connection {
@@ -199,7 +230,10 @@ fn the_handshake_chooses_the_newest_common_protocol() {
     let same = fixture.connect().hello(PROTOCOLS, None);
     let welcome: Welcome = serde_json::from_value(same["welcome"].clone()).unwrap();
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
-    assert_eq!(welcome.capabilities, ["events", "files", "folders"]);
+    assert_eq!(
+        welcome.capabilities,
+        ["events", "files", "folders", "restart-when-idle"]
+    );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));
     assert!(welcome.binary.ends_with("workspace-host"));
     // The host id stays with the store; the epoch is this start's.
@@ -229,7 +263,7 @@ fn the_handshake_chooses_the_newest_common_protocol() {
 
 #[test]
 fn with_no_common_protocol_the_host_refuses_and_takes_only_restart_host() {
-    let fixture = Fixture::new(|_| {});
+    let mut fixture = Fixture::new(|_| {});
     let mut client = fixture.connect();
     let far = [PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2];
     let answer = client.hello(far, None);
@@ -245,14 +279,134 @@ fn with_no_common_protocol_the_host_refuses_and_takes_only_restart_host() {
     );
     let snapshot = client.request(far[1], Command::Snapshot);
     assert!(snapshot.error.unwrap().contains("only RestartHost"));
-    // `RestartHost` reaches the host, which cannot restart itself until ticket C.
+    // With nothing working, an idle restart ends the host at once, and cleanly, so launchd
+    // leaves it stopped for the app to start the new version.
     let restart = client.request(
         far[1],
         Command::RestartHost {
             when: RestartWhen::Idle,
         },
     );
-    assert!(!restart.error.unwrap().contains("only RestartHost"));
+    assert_eq!(restart.error, None);
+    assert!(fixture.exited().success());
+}
+
+/// A provider whose turns run until they are stopped. Its `auth status` check passes.
+const LINGERING_PROVIDER: &str = r#"#!/bin/sh
+case "$1" in -p|exec) ;; *) exit 0;; esac
+cat >/dev/null
+echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"agent_workspace","status":"connected"}]}'
+exec sleep 60
+"#;
+
+#[test]
+fn with_no_common_protocol_the_refusal_counts_working_agents_and_restart_now_stops_them() {
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = scratch.path().join("provider");
+    std::fs::write(&provider, LINGERING_PROVIDER).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut main = None;
+    let mut fixture = Fixture::from(
+        Path::new(env!("CARGO_BIN_EXE_workspace-host")),
+        Some(&provider),
+        tempfile::tempdir().unwrap(),
+        |host| {
+            let project = host.create_project("Working").unwrap();
+            host.set_live(&project.id, true).unwrap();
+            let sessions = host.sessions().unwrap().into_iter();
+            main = sessions.rev().find(|s| s.project_id == project.id);
+        },
+    );
+    let main = main.unwrap();
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    app.result(Command::Send {
+        id: "linger".into(),
+        sender: None,
+        recipient: main.id.clone(),
+        body: "Keep working".into(),
+        attachments: vec![],
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while snapshot(&mut app)
+        .sessions
+        .iter()
+        .find(|s| s.id == main.id)
+        .unwrap()
+        .status
+        != Status::Working
+    {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut updated = fixture.connect();
+    let far = [PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2];
+    let refusal: Refusal =
+        serde_json::from_value(updated.hello(far, None)["refused"].clone()).unwrap();
+    assert_eq!(refusal.working, 1);
+    let restart = updated.request(
+        far[1],
+        Command::RestartHost {
+            when: RestartWhen::Now,
+        },
+    );
+    assert_eq!(restart.error, None);
+    assert!(fixture.exited().success());
+    let db = rusqlite::Connection::open(fixture.data.path().join("workspace.sqlite3")).unwrap();
+    let error: String = db
+        .query_row(
+            "SELECT json_extract(detail,'$.result.error') FROM provider_runs WHERE session_id=?1",
+            [&main.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        error.starts_with("Wiffletree quit during a turn"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stop_agents_and_quit_is_answered_and_the_host_exits_successfully() {
+    let mut fixture = Fixture::new(|_| {});
+    let mut client = fixture.welcomed(None);
+    let quit = client.request(PROTOCOL_VERSION, Command::StopAgentsAndQuit);
+    assert_eq!(quit.error, None);
+    assert!(fixture.exited().success());
+    assert!(!fixture.data.path().join("host.sock").exists());
+}
+
+#[test]
+fn a_host_run_from_a_versioned_copy_keeps_its_path_and_removes_unused_copies() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("workspace-host");
+    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &source).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let copy = |version: &str| {
+        let copy = host_copy::path(data.path(), version);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(&source, &copy).unwrap();
+        copy
+    };
+    let unused = copy("0.9.0");
+    let current = copy("1.0.0");
+    // An update replaces the bundle's binary the copy was made from.
+    std::fs::write(&source, "replaced").unwrap();
+
+    let fixture = Fixture::from(&current, None, data, |_| {});
+
+    let answer = fixture.connect().hello(PROTOCOLS, None);
+    let welcome: Welcome = serde_json::from_value(answer["welcome"].clone()).unwrap();
+    // The binary `Welcome` names is the one the host starts its agents' helpers from.
+    assert_eq!(
+        welcome.binary.canonicalize().unwrap(),
+        current.canonicalize().unwrap()
+    );
+    assert!(
+        !unused.parent().unwrap().exists(),
+        "the unused copy is removed"
+    );
+    assert!(current.exists());
 }
 
 #[test]
