@@ -14,6 +14,8 @@ Wiffletree's own notices have a static study, [quiet-notices.html](mockups/curre
 
 Project order and groups have their own static study, [project-groups.html](mockups/current/project-groups.html), with no script. It shows today's newest-first list, the same nine projects grouped by the first word of their names, and dragging: a project inside its group, a whole group among the other rows, and the flat list with the Group button off. Its “How it behaves” list is what the native app implements; `openspec/specs/native-workspace` and `openspec/specs/workspace-host` specify it. The interactive study's sidebar still shows the earlier fixed list.
 
+Remote control has its own static study, [remote-hosts/ui/mockups.html](../openspec/changes/remote-hosts/ui/mockups.html), with no script: the sidebar's host switcher, Settings › Remote access on the host with a pairing code, Connect a computer, a remote project connected and reconnecting, the quit prompt, a later iPhone view, and whose settings a Mac driving another shows. The human approved it on October 19, 2026. `openspec/changes/standalone-host` and `openspec/changes/remote-hosts` specify what the native app implements.
+
 **Wiffletree** is the product name, selected October 5, 2026; **Tidal** remains the selected brand color palette as of October 2, 2026. The current study uses Wiffletree branding and paired Tidal light and dark modes. Celadon remains its sample project; it is no longer the product's theme family. See [Brand colors](brand.md) for the palette, semantic roles, and usage rules. The [brand kit](brand/README.md) pairs the selected red Interlock open-joint symbol with the original two-tone wordmark; [preview both appearances](brand/png/preview.png).
 
 ## Prototype boundaries
@@ -26,6 +28,7 @@ Project order and groups have their own static study, [project-groups.html](mock
 - The file-picker flow was not verified end to end in the sandboxed in-app browser. Selection of sample context files, sent references, task/agent creation, and approval routing were exercised.
 - The responsive layout was checked at desktop and 320 px widths. The application is intended for a desktop-first native implementation.
 - The project order and groups study is static: its project names, figures, states and drag positions are drawn by hand, and nothing in it moves.
+- The remote control study is static: its hosts, devices, codes, states and figures are drawn by hand, and nothing in it connects, pairs or reaches the network.
 - These are HTML studies, not the GPUI implementation or evidence of native performance.
 
 ## Earlier studies
