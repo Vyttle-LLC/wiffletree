@@ -426,7 +426,9 @@ impl Host {
         self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
     }
     /// HEAD is the verified commit, or has the same patch id against the ticket's base, as
-    /// after a squash or a clean rebase, and the keeper adopted no commit no review has checked.
+    /// after a squash or a clean rebase, or, with a waiver `unreviewed_waiver` allows at the
+    /// full-review cap, is past it only by commits the waiver names, which are returned. Either
+    /// way the keeper adopted no commit no review has checked.
     pub(crate) fn check_verified_head(
         &self,
         ticket: &Ticket,

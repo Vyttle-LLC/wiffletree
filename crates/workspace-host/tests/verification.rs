@@ -738,7 +738,11 @@ fn at_the_cap_a_waiver_naming_every_unreviewed_commit_accepts_them() {
 fn below_the_cap_a_waiver_does_not_cover_unreviewed_commits() {
     let (mut f, [first, second]) = passed_then_two_commits(2);
     let waiver = format!("Read {} and {}", &first[..7], &second[..7]);
-    assert!(f.accept(Some(&waiver)).is_err());
+    let refused = f.accept(Some(&waiver)).unwrap_err().to_string();
+    assert_eq!(
+        refused,
+        "Verification cycle 1 passed; there is nothing to waive"
+    );
     assert_eq!(f.current().state, TicketState::Passed);
     assert!(f.worktree().exists());
 }
