@@ -58,7 +58,7 @@ build p50 from 8.175 ms to 2.712 ms, including per-session message revisions.
 
 ## Over host.sock — October 19, 2026
 
-The desktop now reaches its host only through `host.sock` (`openspec/changes/standalone-host`, task 4.2). The benchmark gained two measures: a child `workspace-host serve` started on the same fixture, as the app starts one, and asked through `workspace_core::HostClient`. Each sample covers the request written to the socket, the host's actor and JSON, the reply line and the decode the desktop does. The run was on the Apple M4 above (macOS 27.0.1, Rust 1.97.0, release build) at `f965b945`. Other agents' release builds were running alongside, so the p95 and maximum columns are noisier than the October 17 run.
+The desktop now reaches its host only through `host.sock` (`openspec/changes/archive/2026-10-19-standalone-host`, task 4.2). The benchmark gained two measures: a child `workspace-host serve` started on the same fixture, as the app starts one, and asked through `workspace_core::HostClient`. Each sample covers the request written to the socket, the host's actor and JSON, the reply line and the decode the desktop does. The run was on the Apple M4 above (macOS 27.0.1, Rust 1.97.0, release build) at `f965b945`. Other agents' release builds were running alongside, so the p95 and maximum columns are noisier than the October 17 run.
 
 | Operation | Samples | p50 | p95 | Maximum |
 | --- | ---: | ---: | ---: | ---: |

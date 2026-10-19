@@ -46,6 +46,6 @@ Three implementation tickets, in order: the host serves a socket (1–2), the de
 
 ## 7. Docs
 
-- [ ] 7.1 `docs/DEVELOPMENT.md`: the host as a LaunchAgent that does not start at login, its log, how to stop or remove it, `--data-dir` hosts, the client credential, and that it is not a sandbox.
-- [ ] 7.2 `docs/PRD.md` stays in step with what shipped.
-- [ ] 7.3 When archiving this change, repoint the links to `openspec/changes/standalone-host/` in `docs/PRD.md` and `design/README.md` to its archived path under `openspec/changes/archive/`.
+- [x] 7.1 `docs/DEVELOPMENT.md`: the host as a LaunchAgent that does not start at login, its log, how to stop or remove it, `--data-dir` hosts, the client credential, and that it is not a sandbox.
+- [x] 7.2 `docs/PRD.md` stays in step with what shipped.
+- [x] 7.3 When archiving this change, repoint the links to `openspec/changes/standalone-host/` in `docs/PRD.md` and `design/README.md` to its archived path under `openspec/changes/archive/`.
