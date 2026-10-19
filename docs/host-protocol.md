@@ -21,7 +21,7 @@ The standard-input mode is for scripts such as `scripts/test_communications.py`:
 
 ## Framing
 
-Every message is one line of JSON ended by `\n`. A line from the client, `Hello` or a request, is at most 256 KiB; the host refuses a longer one. Lines from the host have no such bound: a `read_file` response carries up to 50 MB as base64, about 67 MiB, so a client accepts host lines of at least 70 MiB. A connection carries:
+Every message is one line of JSON ended by `\n`. A line from the client, `Hello` or a request, is at most 256 KiB; a longer one closes the connection. Lines from the host have no such bound: a `read_file` response carries up to 50 MB as base64, about 67 MiB, so a client accepts host lines of at least 70 MiB. A connection carries:
 
 - from the client: one `Hello`, then requests;
 - from the host: one answer to `Hello`, then responses and, after `Subscribe`, events.
@@ -78,7 +78,7 @@ This host lists `events`, `files` and `folders`. `stop_agents_and_quit` and `res
 
 ### Human-only commands
 
-Some commands are only the human's to give: answering the Inbox (`resolve_attention`, `dismiss_attention`, which also approves a publish); granting publish or push authority without the Inbox (`set_owner_allowed`, `set_keeper`, `set_up_settings_repository`, `join_settings_repository`); and in `remote-hosts` pairing and device access. On the socket they run only for a connection whose `Hello` carried the app's client credential; without it they are refused and change nothing. Every other command works without it. This raises the bar for an agent, which runs as the same user and can open the socket; it is not a sandbox.
+Some commands are only the human's to give: a `send` with no `sender`, which is a message from the human; answering the Inbox (`resolve_attention`, `dismiss_attention`, which also approves a publish); granting publish or push authority without the Inbox (`set_owner_allowed`, `set_keeper`, `set_up_settings_repository`, `join_settings_repository`); and in `remote-hosts` pairing and device access. On the socket they run only for a connection whose `Hello` carried the app's client credential; without it they are refused and change nothing. Every other command works without it. This raises the bar for an agent, which runs as the same user and can open the socket; it is not a sandbox.
 
 ## Events
 
@@ -162,7 +162,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `create_session` | `project_id: String`, `parent_id: String`, `repository_id: Option<String>`, `name: String`, `role: Role`, `profile: ModelProfile` | change |  |
 | `set_status` | `session_id: String`, `status: Status` | change |  |
 | `set_archived` | `session_id: String`, `archived: bool` | change | Archives or restores a session together with the sessions it owns. |
-| `send` | `id: String`, `sender: Option<String>`, `recipient: String`, `body: String`, `attachments?: Vec<PathBuf>` | change |  |
+| `send` | `id: String`, `sender: Option<String>`, `recipient: String`, `body: String`, `attachments?: Vec<PathBuf>` | change, human only | Human only with no `sender`, which is a message from the human; an agent's message names its sender. Sent again with the same `id`, it is stored once. |
 | `messages` | `session_id: String`, `before: Option<i64>`, `limit: usize` | read |  |
 | `steps` | `session_id: String`, `run_id: Option<String>`, `after: u64` | read | One run's steps changed after `after`: `run_id` names the run, or `None` for the session's latest. Answered with a `StepPage`. |
 | `files` | `session_id: String`, `whole_tree?: bool` | read | The files a ticket agent touched, or every agent's on a coordinator's open tickets; answered with `Vec<TicketFiles>`. `whole_tree` also lists each worktree's files. |
@@ -214,5 +214,6 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `resolve_paths` | `references: Vec<String>`, `bases: Vec<PathBuf>` | read | Which `references` name a file, each as it is or, when relative, under the first of `bases` that holds it; a `~/` reference is under the host's home folder. Answered with one `Option<ResolvedPath>` per reference, in order. Reads no file's contents. |
 | `read_file` | `path: PathBuf`, `max_bytes: u64` | read | Reads a file under the roots `docs/host-protocol.md` lists, refusing one larger than `max_bytes` or `MAX_ATTACHMENT_BYTES`; answered with `FileContents`. |
 | `list_folder` | `path: PathBuf` | read | Names the folders in `path` and which are Git repositories; answered with `FolderListing`. |
+| `core_instructions` | — | read | The fixed core instructions the host gives agents, each with its text; answered with `Vec<CoreText>`, each part's `name`, `audience`, `version` and `text`. The snapshot's `core_instructions` carries the same parts without their text. |
 | `stop_agents_and_quit` | — | change | Stops every running turn as a quit does, then ends the host. Only the human's client sends it. |
 | `restart_host` | `when: RestartWhen` | change | Restarts the host into the newest installed version; the only command a connection may send after a refused `Hello`. |

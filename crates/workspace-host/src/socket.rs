@@ -18,7 +18,6 @@ use std::{
 };
 use workspace_core::*;
 
-pub const SOCKET_FILE: &str = "host.sock";
 const MAX_CONNECTIONS: usize = 64;
 /// Requests one connection may have waiting for a reply.
 const MAX_IN_FLIGHT: usize = 64;

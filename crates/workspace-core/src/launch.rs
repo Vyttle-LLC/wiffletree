@@ -1,11 +1,19 @@
-//! How the app starts its host, and the client credential it hands a child host.
-use crate::OwnDescriptors as _;
+//! How the app starts or finds its host, and the client credential it connects with.
+use crate::{OwnDescriptors as _, SOCKET_FILE};
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{self, Read, Write},
-    path::Path,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
+    time::{Duration, Instant},
 };
+
+/// The Keychain item holding a launchd host's client credential; its account is the data folder,
+/// so each store has its own.
+pub const CREDENTIAL_SERVICE: &str = "com.vyttle.wiffletree.client-credential";
+/// How long a host that is starting may take to listen.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A fresh client credential: 256 random bits, hex-encoded.
 pub fn new_credential() -> io::Result<String> {
@@ -59,16 +67,6 @@ pub struct ChildHost {
     credential: String,
 }
 impl ChildHost {
-    /// Starts `<binary> serve --data-dir <data> --child`.
-    pub fn start(binary: &Path, data: &Path) -> io::Result<Self> {
-        let mut command = Command::new(binary);
-        command
-            .arg("serve")
-            .arg("--data-dir")
-            .arg(data)
-            .arg("--child");
-        Self::start_command(command)
-    }
     /// Starts `command`, a `serve --child`, passing a fresh credential as the first line of its
     /// standard input and keeping the pipe open: closing it stops the host.
     pub fn start_command(mut command: Command) -> io::Result<Self> {
@@ -114,6 +112,252 @@ impl Drop for ChildHost {
     }
 }
 
+/// What a client needs to reach a host: its socket and, for the app, the client credential.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    pub socket: PathBuf,
+    pub credential: Option<String>,
+}
+
+/// Finds the app's host, starting it when none answers. A client asks again before each
+/// connection, so a host that stopped is started again.
+pub trait Launch: Send {
+    fn endpoint(&mut self) -> io::Result<Endpoint>;
+    /// Stops the host if it is the app's own child; a launchd host keeps running.
+    fn stop(&mut self) {}
+    /// The running child host, when the host is the app's own.
+    fn child(&mut self) -> Option<&mut ChildHost> {
+        None
+    }
+}
+
+/// The launcher `choice` names, for the host binary `binary`, the store `data` and the app
+/// bundle `app`, which a launchd host's credential trusts.
+pub fn launcher(choice: HostLaunch, binary: &Path, data: &Path, app: &Path) -> Box<dyn Launch> {
+    match choice {
+        HostLaunch::Child => Box::new(ChildLaunch::new(binary, data)),
+        HostLaunch::Launchd => Box::new(LaunchdJob::new(binary, data, app)),
+    }
+}
+
+/// A child host, started again with a fresh credential whenever it has exited.
+pub struct ChildLaunch {
+    binary: PathBuf,
+    data: PathBuf,
+    environment: Vec<(String, std::ffi::OsString)>,
+    host: Option<ChildHost>,
+}
+impl ChildLaunch {
+    pub fn new(binary: &Path, data: &Path) -> Self {
+        Self {
+            binary: binary.into(),
+            data: data.into(),
+            environment: vec![],
+            host: None,
+        }
+    }
+    /// Sets an environment variable for each host it starts, as tests do to keep providers out.
+    pub fn env(mut self, key: &str, value: impl Into<std::ffi::OsString>) -> Self {
+        self.environment.push((key.into(), value.into()));
+        self
+    }
+}
+impl Launch for ChildLaunch {
+    fn endpoint(&mut self) -> io::Result<Endpoint> {
+        let running = match &mut self.host {
+            Some(host) => host.try_wait()?.is_none(),
+            None => false,
+        };
+        if !running {
+            self.host = None;
+            let mut command = Command::new(&self.binary);
+            command
+                .arg("serve")
+                .arg("--data-dir")
+                .arg(&self.data)
+                .arg("--child")
+                .envs(self.environment.iter().map(|(k, v)| (k, v)));
+            self.host = Some(ChildHost::start_command(command)?);
+        }
+        let host = self.host.as_mut().expect("started above");
+        let socket = self.data.join(SOCKET_FILE);
+        wait_for_socket(&socket, || Ok(host.try_wait()?.is_none()))?;
+        Ok(Endpoint {
+            socket,
+            credential: Some(host.credential().into()),
+        })
+    }
+    fn stop(&mut self) {
+        if let Some(host) = self.host.take() {
+            let _ = host.stop();
+        }
+    }
+    fn child(&mut self) -> Option<&mut ChildHost> {
+        self.host.as_mut()
+    }
+}
+
+/// A signed app's host on its default data folder: a launchd job loaded from a plist in
+/// `<data folder>/host/`, never from `~/Library/LaunchAgents`, so it does not start at login.
+pub struct LaunchdJob {
+    binary: PathBuf,
+    data: PathBuf,
+    app: PathBuf,
+}
+impl LaunchdJob {
+    pub fn new(binary: &Path, data: &Path, app: &Path) -> Self {
+        Self {
+            binary: binary.into(),
+            data: data.into(),
+            app: app.into(),
+        }
+    }
+    /// A beta keeps its own host, as it keeps its own store.
+    pub fn label() -> &'static str {
+        if crate::data_dir::is_beta() {
+            "com.vyttle.wiffletree.beta.host"
+        } else {
+            "com.vyttle.wiffletree.host"
+        }
+    }
+    pub fn plist_path(&self) -> PathBuf {
+        self.data
+            .join("host")
+            .join(format!("{}.plist", Self::label()))
+    }
+    /// The job: `serve` for the data folder, trusting the app, restarted only after an
+    /// unsuccessful exit (which also starts it when loaded), logging to `logs/host.log`.
+    pub fn plist(&self) -> String {
+        let arguments = [
+            self.binary.as_path(),
+            Path::new("serve"),
+            Path::new("--data-dir"),
+            self.data.as_path(),
+            Path::new("--app"),
+            self.app.as_path(),
+        ];
+        let arguments: String = arguments
+            .iter()
+            .map(|argument| format!("\t\t<string>{}</string>\n", xml(argument)))
+            .collect();
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{label}</string>
+	<key>ProgramArguments</key>
+	<array>
+{arguments}	</array>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>{log}</string>
+</dict>
+</plist>
+"#,
+            label = Self::label(),
+            log = xml(&self.data.join("logs/host.log")),
+        )
+    }
+    fn target() -> String {
+        // SAFETY: getuid cannot fail.
+        format!("gui/{}", unsafe { libc::getuid() })
+    }
+    fn service() -> String {
+        format!("{}/{}", Self::target(), Self::label())
+    }
+    fn running() -> bool {
+        Command::new("/bin/launchctl")
+            .args(["print", &Self::service()])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("state = running")
+            })
+    }
+    /// Writes the plist and bootstraps it, after unloading a job whose host has exited.
+    fn load(&self) -> io::Result<()> {
+        let plist = self.plist_path();
+        fs::create_dir_all(plist.parent().expect("in host/"))?;
+        fs::create_dir_all(self.data.join("logs"))?;
+        fs::write(&plist, self.plist())?;
+        let _ = Command::new("/bin/launchctl")
+            .args(["bootout", &Self::service()])
+            .output();
+        let output = Command::new("/bin/launchctl")
+            .args(["bootstrap", &Self::target()])
+            .arg(&plist)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "launchctl could not load the host: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+}
+impl Launch for LaunchdJob {
+    fn endpoint(&mut self) -> io::Result<Endpoint> {
+        let socket = self.data.join(SOCKET_FILE);
+        if UnixStream::connect(&socket).is_err() && !Self::running() {
+            self.load()?;
+        }
+        wait_for_socket(&socket, || Ok(true))?;
+        Ok(Endpoint {
+            socket,
+            credential: Some(keychain_credential(&self.data)?),
+        })
+    }
+}
+
+/// The launchd host's credential, from the Keychain item the host created at its first start.
+#[cfg(target_os = "macos")]
+fn keychain_credential(data: &Path) -> io::Result<String> {
+    use security_framework::os::macos::passwords::find_generic_password;
+    // The host names the item by its data folder as it resolved it.
+    let account = fs::canonicalize(data)?;
+    let (password, _) = find_generic_password(None, CREDENTIAL_SERVICE, &account.to_string_lossy())
+        .map_err(io::Error::other)?;
+    String::from_utf8(password.to_owned()).map_err(io::Error::other)
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_credential(_data: &Path) -> io::Result<String> {
+    Err(io::Error::other("A launchd host needs the macOS Keychain"))
+}
+
+/// Waits until `socket` accepts a connection, while `alive` says the host is still starting.
+fn wait_for_socket(socket: &Path, mut alive: impl FnMut() -> io::Result<bool>) -> io::Result<()> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    while UnixStream::connect(socket).is_err() {
+        if !alive()? {
+            return Err(io::Error::other(
+                "The host stopped as it started; its reason is in the app's log",
+            ));
+        }
+        if Instant::now() > deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "The host did not start listening within a minute",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+fn xml(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +378,41 @@ mod tests {
             HostLaunch::choose(developer_id_signed(&binary), true),
             HostLaunch::Child
         );
+    }
+
+    #[test]
+    fn the_launchd_plist_serves_the_data_folder_for_the_app_and_restarts_only_after_a_failure() {
+        let job = LaunchdJob::new(
+            Path::new("/Applications/Wiffletree.app/Contents/MacOS/workspace-host"),
+            Path::new("/Users/me/Library/Application Support/R&D"),
+            Path::new("/Applications/Wiffletree.app"),
+        );
+        assert_eq!(
+            job.plist_path(),
+            Path::new(
+                "/Users/me/Library/Application Support/R&D/host/com.vyttle.wiffletree.host.plist"
+            )
+        );
+        let plist = job.plist();
+        let arguments = "<string>/Applications/Wiffletree.app/Contents/MacOS/workspace-host</string>\n\t\t<string>serve</string>\n\t\t<string>--data-dir</string>\n\t\t<string>/Users/me/Library/Application Support/R&amp;D</string>\n\t\t<string>--app</string>\n\t\t<string>/Applications/Wiffletree.app</string>";
+        assert!(plist.contains(arguments), "{plist}");
+        assert!(plist.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
+        assert!(plist.contains("R&amp;D/logs/host.log</string>"));
+        assert!(
+            !plist.contains("RunAtLoad"),
+            "KeepAlive starts it when loaded"
+        );
+        // `plutil` accepts what launchd will read.
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("job.plist");
+        fs::write(&file, &plist).unwrap();
+        let lint = Command::new("/usr/bin/plutil")
+            .arg("-lint")
+            .arg(&file)
+            .output();
+        if let Ok(lint) = lint {
+            assert!(lint.status.success(), "{lint:?}");
+        }
     }
 
     #[test]

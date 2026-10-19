@@ -8,10 +8,9 @@ use gpui_component::{Disableable, Selectable, button::ButtonVariants};
 use ui::{card, confirm_card, eyebrow, hint, icon, over_dimmed, pill, stacked_banner};
 use wording::{counted, date_and_time, time_of_day, when};
 use workspace_core::skills::{
-    Change, Entry, History, Line, MergeReview, Recorded, Reviewed, Rewritten, merge::Source,
-    merge_note, version,
+    Change, CoreInstructions, CoreText, Entry, History, Line, MergeReview, Recorded, Reviewed,
+    Rewritten, merge::Source, merge_note, version,
 };
-use workspace_host::provider::CORE;
 
 /// What the Skills page shows: the list, the fixed core at one of its parts, one skill, its
 /// history or a review of its merge.
@@ -48,13 +47,6 @@ pub(super) enum Confirm {
     },
 }
 
-const CORE_NAMES: [&str; 5] = [
-    "Contract",
-    "Coordinator",
-    "Implementer",
-    "Verifier",
-    "PR keeper",
-];
 const CORE_PURPOSE: &str = "How every agent talks to Wiffletree: its tools, its reports and findings, and the rules the app enforces whatever a skill says.";
 const NO_PR_SKILL: &str = "Opening a pull request isn't a skill. Agents write pull requests by your repository's rules and your own, so put yours in Implementing's rules.";
 const CORE_HINT: &str = "Wiffletree depends on these instructions: the names of its tools, how reports and findings are written, and how messages and pull requests work. They can't be edited, so no change to a skill can break them. Each agent gets the contract and its role's part, then its skill.";
@@ -796,8 +788,16 @@ fn merged_since(history: &[Recorded], index: usize) -> Option<String> {
 }
 
 /// A part's tab, as "Contract v9".
-fn core_tab(part: usize) -> String {
-    format!("{} {}", CORE_NAMES[part], version(CORE[part].1))
+fn core_tab(part: &CoreInstructions) -> String {
+    let label = match part.audience.as_str() {
+        "every agent" => "Contract",
+        "coordinators" => "Coordinator",
+        "implementers" => "Implementer",
+        "testers and reviewers" => "Verifier",
+        "the PR keeper" => "PR keeper",
+        _ => &part.name,
+    };
+    format!("{label} {}", part.version)
 }
 
 /// Any rewrite is out of date, which the sidebar's Skills row marks.
@@ -828,6 +828,8 @@ pub(super) struct SkillsPage {
     skill_wordings: [Chosen; 4],
     /// The saved review levels, which the core page lists.
     verifiers: Entity<verifiers::VerifierEditor>,
+    /// The running host's core instructions with their texts, read when the core page opens.
+    core: Vec<CoreText>,
 }
 impl EventEmitter<Intent> for SkillsPage {}
 impl SkillsPage {
@@ -863,6 +865,7 @@ impl SkillsPage {
             review_from_history: false,
             skill_wordings: Default::default(),
             verifiers,
+            core: vec![],
         }
     }
     /// An editor without unsaved edits follows the saved rules or rewrite in each snapshot.
@@ -912,6 +915,9 @@ impl SkillsPage {
             self.skill_history = History::default();
             self.viewed_entry = None;
             self.read_history(skill, window, cx);
+        }
+        if matches!(view, SkillView::Core(_)) {
+            self.read_core(window, cx);
         }
         self.skill_view = view;
         cx.notify();
@@ -983,6 +989,18 @@ impl SkillsPage {
         if self.skill_view == SkillView::History(skill) {
             self.read_history(skill, window, cx);
         }
+    }
+
+    fn read_core(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask(
+            ask::core_instructions(),
+            window,
+            cx,
+            |view, core, window, cx| match core {
+                Ok(core) => view.core = core,
+                Err(error) => toast_error(error, window, cx),
+            },
+        );
     }
 
     fn read_history(&mut self, skill: Skill, window: &mut Window, cx: &mut Context<Self>) {
@@ -1220,14 +1238,19 @@ impl SkillsPage {
 
     fn core_page(&self, part: usize, p: Palette, cx: &mut Context<Self>) -> Div {
         let crumb = self.skills_crumb("Fixed core", p, cx);
-        let tabs = (0..CORE.len()).map(|tab| {
+        let parts = self
+            .shared
+            .snapshot()
+            .map_or(&[][..], |s| &s.core_instructions);
+        let tabs = parts.iter().enumerate().map(|(tab, about)| {
             button(SharedString::from(format!("core-part-{tab}")))
                 .ghost()
                 .selected(tab == part)
-                .label(core_tab(tab))
-                .tooltip(format!("Sent to {}", CORE[tab].0))
+                .label(core_tab(about))
+                .tooltip(format!("Sent to {}", about.audience))
                 .on_click(cx.listener(move |v, _, w, c| v.open_skill(SkillView::Core(tab), w, c)))
         });
+        let text = self.core.get(part).map_or("Loading…", |core| &core.text);
         div()
             .flex()
             .flex_col()
@@ -1240,7 +1263,7 @@ impl SkillsPage {
             ))
             .child(hint(CORE_HINT, p))
             .child(div().flex().flex_wrap().gap_1().children(tabs))
-            .child(Self::read_only_text(CORE[part].1, p))
+            .child(Self::read_only_text(text.to_owned(), p))
             .child(hint(
                 "Bundled with Wiffletree · changes only with a new release",
                 p,
@@ -2235,8 +2258,8 @@ impl Render for SkillsPage {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::{
-        CORE, Choice, Chosen, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab,
-        entry_detail, entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
+        Choice, Chosen, Confirm, OUT_OF_DATE, Offers, Shown, based_on, core_tab, entry_detail,
+        entry_time, entry_title, grouped, is_change, is_live, list_who, merge_counts,
         merge_note_text, merged_since, out_of_date, out_of_date_title, question, question_banner,
         question_note, redraws, reset_question, rewrite_banner, rewrite_question, saved_text,
         shown_changes, state_label, time_or_date, written_at,
@@ -2400,7 +2423,8 @@ mod tests {
 
     #[test]
     fn the_fixed_core_has_a_tab_for_each_part_with_its_version() {
-        let tabs: Vec<_> = (0..CORE.len()).map(core_tab).collect();
+        let parts = workspace_host::provider::core_instructions();
+        let tabs: Vec<_> = parts.iter().map(core_tab).collect();
         assert_eq!(
             tabs,
             [

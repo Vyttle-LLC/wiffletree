@@ -3,7 +3,7 @@
 use crate::{skills::Line, *};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, path::PathBuf};
 
 /// A command whose reply decodes as `R`.
 pub struct Ask<R> {
@@ -200,4 +200,16 @@ pub fn attach_repository(
         path,
         base,
     })
+}
+pub fn resolve_paths(
+    references: Vec<String>,
+    bases: Vec<PathBuf>,
+) -> Ask<Vec<Option<ResolvedPath>>> {
+    Ask::new(Command::ResolvePaths { references, bases })
+}
+pub fn read_file(path: PathBuf, max_bytes: u64) -> Ask<FileContents> {
+    Ask::new(Command::ReadFile { path, max_bytes })
+}
+pub fn core_instructions() -> Ask<Vec<crate::skills::CoreText>> {
+    Ask::new(Command::CoreInstructions)
 }

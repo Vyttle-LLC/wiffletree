@@ -8,9 +8,8 @@
 use anyhow::Result;
 use std::path::Path;
 
-/// The item's service; its account is the data folder, so each store has its own credential.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const SERVICE: &str = "com.vyttle.wiffletree.client-credential";
+#[cfg(target_os = "macos")]
+use workspace_core::CREDENTIAL_SERVICE as SERVICE;
 
 /// The data folder's credential, created at the first start with `trusted` as its access list.
 #[cfg(target_os = "macos")]

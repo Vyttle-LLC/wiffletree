@@ -1,9 +1,77 @@
 //! Attached files: dropped into a draft, and shown as chips pending in the composer or
 //! sent with a message.
 use super::*;
+use base64::Engine as _;
+use std::{collections::HashMap, sync::Arc};
 use ui::icon;
 
 const THUMBNAIL: f32 = 56.;
+
+/// Sent messages' images, each read once from the host's attachment store. The app never reads
+/// the host's files itself.
+pub(super) struct HostImages {
+    bridge: Bridge,
+    /// `None` while a read is on its way.
+    read: HashMap<PathBuf, Option<Result<Arc<Image>, SharedString>>>,
+}
+impl Global for HostImages {}
+impl HostImages {
+    pub(super) fn new(bridge: Bridge) -> Self {
+        Self {
+            bridge,
+            read: HashMap::new(),
+        }
+    }
+}
+
+/// A sent attachment's image, which the host reads; loading until its bytes arrive.
+fn host_image(path: PathBuf, format: workspace_core::ImageFormat) -> ImageSource {
+    ImageSource::from(move |window: &mut Window, cx: &mut App| {
+        match cx.try_global::<HostImages>()?.read.get(&path) {
+            Some(Some(Ok(image))) => image.clone().use_render_image(window, cx).map(Ok),
+            Some(Some(Err(error))) => Some(Err(ImageCacheError::Asset(error.clone()))),
+            Some(None) => None,
+            None => {
+                read_image(path.clone(), format, cx);
+                None
+            }
+        }
+    })
+}
+
+/// Asks the host for an attachment's bytes and redraws once they arrive. While the host is out
+/// of reach the request waits for it.
+fn read_image(path: PathBuf, format: workspace_core::ImageFormat, cx: &mut App) {
+    let images = cx.global_mut::<HostImages>();
+    images.read.insert(path.clone(), None);
+    let reply = (images.bridge).ask(ask::read_file(path.clone(), MAX_ATTACHMENT_BYTES));
+    cx.spawn(async move |cx| {
+        let contents = match reply {
+            Ok(reply) => reply.await,
+            Err(error) => Err(error),
+        };
+        let image = contents.and_then(|contents| image(&contents, format).map(Arc::new));
+        cx.update(|cx| {
+            let image = image.map_err(SharedString::from);
+            cx.global_mut::<HostImages>().read.insert(path, Some(image));
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+/// The image in `ReadFile`'s reply.
+fn image(contents: &FileContents, format: workspace_core::ImageFormat) -> Result<Image, String> {
+    let bytes = (base64::engine::general_purpose::STANDARD.decode(&contents.data))
+        .map_err(|e| e.to_string())?;
+    let format = match format {
+        workspace_core::ImageFormat::Png => gpui::ImageFormat::Png,
+        workspace_core::ImageFormat::Jpeg => gpui::ImageFormat::Jpeg,
+        workspace_core::ImageFormat::Gif => gpui::ImageFormat::Gif,
+        workspace_core::ImageFormat::Webp => gpui::ImageFormat::Webp,
+    };
+    Ok(Image::from_bytes(format, bytes))
+}
 
 /// Adds dropped files, as the host `inspected` them, to a draft's attachments and returns why
 /// any were refused. A file whose name is already attached, ignoring case, is refused (the same
@@ -42,8 +110,21 @@ pub(super) fn file_size(bytes: u64) -> String {
     }
 }
 
+/// Where a chip's thumbnail comes from: a draft's files are this app's own; a sent message's
+/// are in the host's attachment store.
+#[derive(Clone, Copy)]
+pub(super) enum Stored {
+    Draft,
+    Sent,
+}
+
 /// A thumbnail for an image, otherwise the file's name and size.
-pub(super) fn chip(id: impl Into<ElementId>, attachment: &Attachment, p: Palette) -> Stateful<Div> {
+pub(super) fn chip(
+    id: impl Into<ElementId>,
+    attachment: &Attachment,
+    stored: Stored,
+    p: Palette,
+) -> Stateful<Div> {
     let frame = div()
         .id(id)
         .relative()
@@ -53,10 +134,14 @@ pub(super) fn chip(id: impl Into<ElementId>, attachment: &Attachment, p: Palette
         .border_color(p.edge.opacity(edge::FIRM))
         .bg(p.overlay)
         .overflow_hidden();
-    if attachment.image.is_some() {
+    if let Some(format) = attachment.image {
         let unreadable = icon("file-text").text_color(p.subtle);
+        let source = match stored {
+            Stored::Draft => ImageSource::from(attachment.path.clone()),
+            Stored::Sent => host_image(attachment.path.clone(), format),
+        };
         frame.size(px(THUMBNAIL)).child(
-            img(attachment.path.clone())
+            img(source)
                 .size_full()
                 .object_fit(ObjectFit::Cover)
                 .with_fallback(move || {
@@ -109,6 +194,7 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
             chip(
                 SharedString::from(format!("sent-{}-{index}", message.id)),
                 a,
+                Stored::Sent,
                 p,
             )
             .cursor_pointer()
@@ -121,7 +207,7 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
 mod tests {
     use super::file_size;
     use std::{fs, path::PathBuf};
-    use workspace_core::Attachment;
+    use workspace_core::{Attachment, MAX_ATTACHMENT_BYTES, ask};
     use workspace_host::attachments::inspect_all;
 
     fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
@@ -169,6 +255,39 @@ mod tests {
         );
         let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
         assert_eq!(names, ["notes.txt", "shot.png", "plan.md"]);
+    }
+
+    #[test]
+    fn a_sent_image_is_read_through_the_host() {
+        let png = b"\x89PNG\r\n\x1a\nnot really".to_vec();
+        let message = std::cell::OnceCell::new();
+        let dropped = tempfile::tempdir().unwrap();
+        let shot = dropped.path().join("shot.png");
+        fs::write(&shot, &png).unwrap();
+        let served = crate::bridge::tests::serve(|host| {
+            let project = host.create_project("Pictures").unwrap();
+            let coordinator = (host.sessions().unwrap().into_iter())
+                .find(|s| s.project_id == project.id)
+                .unwrap();
+            let sent = host
+                .send_with_files("m1", None, &coordinator.id, "Look", &[shot])
+                .unwrap();
+            message.set(sent).unwrap();
+        });
+        let attachment = &message.get().unwrap().attachments[0];
+        let data = fs::canonicalize(served.data.path()).unwrap();
+        assert!(
+            attachment.path.starts_with(data.join("projects")),
+            "{attachment:?}"
+        );
+        let format = attachment.image.unwrap();
+        let read = ask::read_file(attachment.path.clone(), MAX_ATTACHMENT_BYTES);
+        let contents = served.bridge.ask_now(read).unwrap();
+        let image = super::image(&contents, format).unwrap();
+        assert_eq!(image.bytes(), png);
+        // Only what the host serves: not a file outside its roots.
+        let outside = ask::read_file("/etc/hosts".into(), MAX_ATTACHMENT_BYTES);
+        assert!(served.bridge.ask_now(outside).is_err());
     }
 
     #[test]

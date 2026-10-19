@@ -9,8 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 workspace-core.workspace = true
-workspace-host.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
@@ -27,5 +27,7 @@ objc = "0.2"
 sha2 = "0.11"
 
 [dev-dependencies]
+# Tests serve a real host in a temporary folder; the app reaches its host only over host.sock.
+workspace-host.workspace = true
 tempfile = "3.23"
 rusqlite = { version = "0.40", features = ["bundled"] }

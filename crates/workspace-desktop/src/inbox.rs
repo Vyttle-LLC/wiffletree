@@ -42,10 +42,15 @@ impl Inbox {
             return;
         };
         if moved {
-            // Linked here, as the items arrive, so drawing them reads nothing from disk.
+            // Linked here, as the items arrive, so drawing them asks the host nothing.
             let link = |item: &Attention| {
                 let bases = self.shared.link_bases(&item.session_id).into();
-                let linked = Linked::new(&format!("attention-{}", item.id), &item.prompt, bases);
+                let linked = Linked::new(
+                    &format!("attention-{}", item.id),
+                    &item.prompt,
+                    bases,
+                    &self.bridge,
+                );
                 (item.id.clone(), linked)
             };
             self.prompts = snapshot.attention.iter().map(link).collect();

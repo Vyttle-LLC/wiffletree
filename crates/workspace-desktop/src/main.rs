@@ -993,8 +993,6 @@ fn show_about() {
 }
 
 fn main() -> anyhow::Result<()> {
-    // SAFETY: nothing else has started yet, so no other thread can read the environment.
-    unsafe { workspace_host::login_env::adopt() };
     let mut args = std::env::args().skip(1);
     let mut home = None;
     let mut repository = None;
@@ -1024,19 +1022,21 @@ fn main() -> anyhow::Result<()> {
             ),
         }
     }
+    let default_folder = home.is_none();
     let home = home.unwrap_or_else(|| {
         workspace_core::data_dir::default_directory(&PathBuf::from(
             std::env::var_os("HOME").expect("macOS home directory"),
         ))
     });
     let preferences = Preferences::load(&home);
-    let bridge = Bridge::start(home, repository);
+    let bridge = Bridge::start(&home, default_folder, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_component::init(cx);
             cx.set_global(preferences);
+            cx.set_global(attachment_chips::HostImages::new(bridge.clone()));
             apply_theme(cx);
             // Under the System appearance, macOS can switch modes while the app runs. The component
             // theme only changes when told, so every window re-applies it or keeps stale colours.
@@ -1056,8 +1056,8 @@ fn main() -> anyhow::Result<()> {
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
-            // Quitting exits the process without dropping the host, so running turns are
-            // stopped here, before their provider processes could outlive the app.
+            // Quitting exits the process without dropping the bridge, so a child host is
+            // stopped here, with its running turns, before it could outlive the app.
             let host = bridge.clone();
             cx.on_app_quit(move |_| {
                 host.shutdown();
