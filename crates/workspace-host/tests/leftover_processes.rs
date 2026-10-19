@@ -2,10 +2,12 @@
 //! processes: what an agent starts keeps running between its turns and is stopped when the
 //! agent is archived or stopped, at a quit and at the next start; startup stops a provider
 //! process an earlier host left running, and a session starts no turn beside one it could not
-//! confirm. Kept in its own test binary because it sets the provider environment for the
-//! process.
+//! confirm. Also how the host ends, by Stop agents and quit or an idle restart, and its power
+//! assertion while turns run. Kept in its own test binary because it sets the provider
+//! environment for the process.
 mod common;
 use common::{request, snapshot, until_snapshot as until};
+use serde_json::Value;
 use std::{
     os::unix::{
         fs::PermissionsExt,
@@ -1495,4 +1497,125 @@ fn the_panel_never_lists_or_stops_a_group_it_cannot_confirm() {
     assert_eq!(unrelated.0.try_wait().unwrap(), None, "never signalled");
     assert!(!listing[0].groups[0].confirmed);
     assert!(notices(home.path(), &main).is_empty());
+}
+
+#[test]
+fn stop_agents_and_quit_stops_running_turns_as_a_quit_and_ends_the_host() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = install_provider(scratch.path());
+    let (_, working) = project(home.path(), scratch.path(), "Working");
+    let service = start(home.path());
+    send(&service, "tool", &working, "TOOL_THEN_LINGER");
+    let tool = until_tool_recorded(home.path(), &working, &provider, 1);
+    let group = groups(&provider)[0];
+
+    // The reply comes once the shutdown has stopped the turn.
+    assert_eq!(request(&service, Command::StopAgentsAndQuit), Value::Null);
+
+    assert!(!group_runs(group) && !group_runs(tool));
+    let (outcome, error) = run_result(home.path(), &working.id);
+    assert_eq!(outcome.as_deref(), Some("failed"));
+    assert!(
+        error.unwrap().starts_with("Wiffletree quit during a turn"),
+        "the turn is recorded as interrupted by the quit"
+    );
+    let record = recorded(home.path(), &working);
+    assert_eq!(record.len(), 1, "{record:?}");
+    assert_tool_stopped(&record[0], tool, "quit");
+    common::until("the host to end", || service.ended().is_closed());
+}
+
+/// The power assertions this process holds under the host's name, as `pmset` lists them.
+fn awake_assertions() -> usize {
+    let output = std::process::Command::new("/usr/bin/pmset")
+        .args(["-g", "assertions"])
+        .output()
+        .unwrap();
+    let me = format!("pid {}(", std::process::id());
+    let name = format!("named: \"{}\"", workspace_host::power::ASSERTION_NAME);
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(&me) && line.contains(&name))
+        .count()
+}
+
+/// Ends a lingering turn by stopping the `sleep` its provider waits on, the last id it saved.
+fn end_lingering_turn(provider: &Provider) {
+    let sleep = *ids(&provider.pids).last().unwrap();
+    unsafe { libc::kill(sleep, libc::SIGKILL) };
+}
+
+#[test]
+fn an_idle_restart_waits_for_the_running_turn_and_the_mac_stays_awake_meanwhile() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = install_provider(scratch.path());
+    let (_, main) = project(home.path(), scratch.path(), "Restart");
+    let service = start(home.path());
+    assert_eq!(awake_assertions(), 0, "an idle host holds no assertion");
+    send(&service, "linger", &main, "LINGER");
+    until(&service, "the turn to start", |s| {
+        status(s, &main.id) == Status::Working && !ids(&provider.pids).is_empty()
+    });
+    assert_eq!(awake_assertions(), 1, "one assertion while a turn runs");
+
+    let restart = Command::RestartHost {
+        when: RestartWhen::Idle,
+    };
+    assert_eq!(request(&service, restart), Value::Null);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!service.ended().is_closed(), "the host waits for the turn");
+    assert_eq!(status(&snapshot(&service), &main.id), Status::Working);
+
+    end_lingering_turn(&provider);
+    common::until("the host to end", || service.ended().is_closed());
+    assert_eq!(awake_assertions(), 0, "released once nothing runs");
+    let (outcome, error) = run_result(home.path(), &main.id);
+    assert!(outcome.is_some(), "the turn ended on its own");
+    assert!(
+        !error.is_some_and(|e| e.starts_with("Wiffletree quit during a turn")),
+        "the restart interrupted nothing"
+    );
+}
+
+#[test]
+fn the_power_assertion_is_released_when_the_last_turn_ends() {
+    let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = install_provider(scratch.path());
+    let (_, first) = project(home.path(), scratch.path(), "First");
+    let (_, second) = project(home.path(), scratch.path(), "Second");
+    let service = start(home.path());
+    send(&service, "first", &first, "LINGER");
+    send(&service, "second", &second, "LINGER");
+    until(&service, "both turns to start", |s| {
+        status(s, &first.id) == Status::Working
+            && status(s, &second.id) == Status::Working
+            && ids(&provider.pids).len() == 2
+    });
+    assert_eq!(
+        awake_assertions(),
+        1,
+        "one assertion however many turns run"
+    );
+
+    end_lingering_turn(&provider);
+    until(&service, "one turn to end", |s| {
+        [&first, &second]
+            .iter()
+            .filter(|session| status(s, &session.id) == Status::Working)
+            .count()
+            == 1
+    });
+    assert_eq!(awake_assertions(), 1, "held while a turn still runs");
+
+    unsafe { libc::kill(ids(&provider.pids)[0], libc::SIGKILL) };
+    until(&service, "both turns to end", |s| {
+        status(s, &first.id) != Status::Working && status(s, &second.id) != Status::Working
+    });
+    assert_eq!(awake_assertions(), 0);
 }

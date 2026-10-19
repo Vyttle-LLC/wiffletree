@@ -17,6 +17,12 @@ pub const MAX_LINE_BYTES: usize = 256 * 1024;
 /// The most `ReadFile` returns of one file, as for an attachment.
 pub const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
+/// This build's version, as `Hello` and `Welcome` report it and the versioned host copies are
+/// named: the release's, or the crate's in a local build.
+pub fn build_version() -> &'static str {
+    option_env!("WIFFLETREE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// One short string per optional feature a side supports.
 pub mod capability {
     /// `Subscribe` and its events.

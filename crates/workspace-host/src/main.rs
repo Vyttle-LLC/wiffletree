@@ -115,7 +115,9 @@ fn main() -> Result<()> {
 /// `serve --data-dir <dir> [--child | --app <bundle>]`: the host for clients on its socket. A
 /// child host reads its credential from the first line of standard input and stops when that
 /// closes; otherwise the credential is the data folder's Keychain item, readable by the host and
-/// the app at `--app`. Either stops on SIGTERM, SIGINT or SIGHUP.
+/// the app at `--app`. Either stops on SIGTERM, SIGINT or SIGHUP, and exits successfully once a
+/// client's `StopAgentsAndQuit` or `RestartHost` has stopped it. Run from a versioned copy, it
+/// removes the copies no host uses.
 fn serve(args: &[String]) -> Result<()> {
     let mut stops = catch_stop_signals()?;
     // SAFETY: no other thread has started yet.
@@ -146,6 +148,8 @@ fn serve(args: &[String]) -> Result<()> {
         workspace_host::keychain::credential(&data, &trusted)?
     };
     let service = workspace_host::service::Service::start(data.clone(), binary.clone())?;
+    // Only now that this host owns the store is no other copy in use.
+    workspace_core::host_copy::remove_unused(&data, &binary);
     let options = workspace_host::socket::Options {
         credential,
         // SAFETY: getuid cannot fail.
@@ -161,13 +165,22 @@ fn serve(args: &[String]) -> Result<()> {
             let _ = stop.send(());
         });
     }
+    let ended = service.ended();
+    {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let _ = ended.recv_blocking();
+            let _ = stop.send(());
+        });
+    }
     std::thread::spawn(move || {
         let _ = stops.read(&mut [0]);
         let _ = stop.send(());
     });
     let _ = stopped.recv();
-    drop(listener);
+    // The host stops first, so the listener's wait sees every reply answered.
     service.shutdown();
+    drop(listener);
     Ok(())
 }
 

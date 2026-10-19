@@ -18,6 +18,7 @@ The standard-input mode is for scripts such as `scripts/test_communications.py`:
 - A child host, `serve --data-dir <dir> --child`, reads the app's client credential from the first line of its standard input and stops when that input closes. The app keeps the pipe open for as long as it runs, so the credential is never in the host's environment, which agents inherit, or in a file. `workspace_core::ChildHost` starts one this way.
 - Without `--child`, the credential is the data folder's login Keychain item, created at the first start with an access list of the host's own binary and the app given with `--app <Wiffletree.app>` (`crates/workspace-host/src/keychain.rs`).
 - SIGTERM, SIGINT and SIGHUP run the host's shutdown, which stops running turns as a quit does, then remove the socket.
+- A launchd host runs from a versioned copy of its binary, `<data folder>/host/<version>/workspace-host`, which an update of the app does not replace, and starts its agents' helpers from that same copy. Started from a copy, it removes the other version folders under `host/`. A child host runs from the app bundle (or `target/`) and has no copy.
 
 ## Framing
 
@@ -74,7 +75,13 @@ A client never sends a command for a capability the host did not list.
 | `folders` | `list_folder` |
 | `restart-when-idle` | `restart_host` with `when: "idle"` |
 
-This host lists `events`, `files` and `folders`. `stop_agents_and_quit` and `restart_host` exist in the protocol, and this host refuses them until the quit and update work lands.
+This host lists `events`, `files`, `folders` and `restart-when-idle`.
+
+### Ending the host
+
+- `stop_agents_and_quit` and `restart_host` with `when: "now"` run the host's shutdown, which stops every running turn as a quit does and records each as interrupted by the quit with its input held. The reply comes once the shutdown has stopped them; the host then exits successfully, so launchd does not start it again.
+- `restart_host` with `when: "idle"` is answered at once. The host exits successfully at the first moment no turn and no compaction runs, which may be at once. New turns start as usual while it waits.
+- In both cases the app then starts the host it wants, such as an update's new version.
 
 ### Human-only commands
 
@@ -211,9 +218,10 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `processes` | `session_id: String` | read | What the agent has left running, or for a coordinator every agent of its project; answered with `Vec<AgentProcesses>`. Groups that have exited are forgotten. |
 | `stop_processes` | `session_id: String`, `groups?: Vec<String>` | change | Stops these groups of the Processes panel of `session_id`, or with none named every group it lists, as the human's stop; answered as `Processes`. The agents keep working. |
 | `subscribe` | `after?: Option<Cursor>` | read | Socket only: turns the connection into a subscriber of the host's events, after the events following `after` when it is still in the host's log, or after `resync` otherwise; answered with `Subscribed`. With no cursor only later events come. |
+| `ping` | — | read | Socket only: answered with nothing by the connection itself, without waiting for the host's actor. A client that has heard nothing for a while sends it to tell a quiet or busy host from one that is gone. |
 | `resolve_paths` | `references: Vec<String>`, `bases: Vec<PathBuf>` | read | Which `references` name a file, each as it is or, when relative, under the first of `bases` that holds it; a `~/` reference is under the host's home folder. Answered with one `Option<ResolvedPath>` per reference, in order. Reads no file's contents. |
 | `read_file` | `path: PathBuf`, `max_bytes: u64` | read | Reads a file under the roots `docs/host-protocol.md` lists, refusing one larger than `max_bytes` or `MAX_ATTACHMENT_BYTES`; answered with `FileContents`. |
 | `list_folder` | `path: PathBuf` | read | Names the folders in `path` and which are Git repositories; answered with `FolderListing`. |
 | `core_instructions` | — | read | The fixed core instructions the host gives agents, each with its text; answered with `Vec<CoreText>`, each part's `name`, `audience`, `version` and `text`. The snapshot's `core_instructions` carries the same parts without their text. |
-| `stop_agents_and_quit` | — | change | Stops every running turn as a quit does, then ends the host. Only the human's client sends it. |
-| `restart_host` | `when: RestartWhen` | change | Restarts the host into the newest installed version; the only command a connection may send after a refused `Hello`. |
+| `stop_agents_and_quit` | — | change | Stops every running turn as a quit does, then ends the host; answered with nothing once the turns are stopped. Only the human's client sends it. |
+| `restart_host` | `when: RestartWhen` | change | Ends the host so the app can start the newest installed version: `now` as `stop_agents_and_quit` does, `idle` once no turn and no compaction runs, answered at once. The only command a connection may send after a refused `Hello`. |

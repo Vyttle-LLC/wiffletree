@@ -27,11 +27,15 @@ The host SHALL retain pending attention bound to the originating operation and a
 - **THEN** the stale answer is rejected and the original resolution is preserved
 
 ### Requirement: Portable local command boundary
-The host SHALL expose versioned bounded commands over JSON-lines and build without GPUI. Database ownership SHALL be exclusive per store.
+The host SHALL expose versioned bounded commands over JSON-lines and build without GPUI. It SHALL serve them on standard input for scripts and on its private Unix socket for clients, where each connection begins with a handshake. Database ownership SHALL be exclusive per store.
 
 #### Scenario: Competing host
 - **WHEN** another process attempts to open an already owned store
 - **THEN** it fails visibly instead of becoming a competing writer
+
+#### Scenario: A script on standard input
+- **WHEN** a script writes a version-1 `Snapshot` request to `workspace-host --data-dir <dir>` without a handshake
+- **THEN** the host answers it as before
 
 ### Requirement: The coordinator receives the model configuration
 `workspace_context` SHALL give the project coordinator `model_selection`, read fresh on each call: the revision; the switch threshold; each row of the Who runs what table with its job, its main and small lines, and what each line would use right now, as a profile, whether it would wait and the reason; the configured verifiers; the review levels, each with its name, its kind, the focuses of its verifiers and its note on when to use it; the round and cycle caps; and the guide as `notes`. Workers SHALL NOT receive it.
@@ -191,10 +195,10 @@ The host SHALL count, for each session, the `blocked` reports it sent to its par
 - **THEN** the turn that takes the answer leaves one question waiting
 
 ### Requirement: A quit stops running turns
-The host SHALL offer a shutdown that cancels every running turn, looks afresh at what each running turn has started, stops every process group recorded for any agent under the confirmation rule, and returns only once each of those turns' provider process groups has been stopped, as at any turn's end, or a bounded wait has passed. The desktop app SHALL call it before it exits from a quit, and the headless host SHALL call it when its input closes. A run SHALL be recorded as finished only after its process group has been stopped; a turn still running when the wait ends SHALL stay unfinished, and a group still running then SHALL stay recorded as running, so the next start handles both. Each group the shutdown stops SHALL be recorded with the reason `quit`.
+The host SHALL offer a shutdown that cancels every running turn, looks afresh at what each running turn has started, stops every process group recorded for any agent under the confirmation rule, and returns only once each of those turns' provider process groups has been stopped, as at any turn's end, or a bounded wait has passed. The host SHALL run it when the human chooses Stop agents and quit, when the human chooses to restart the host now, when launchd stops it, when a desktop that started it as a child exits, and, for the host on standard input, when its input closes. Closing the desktop app while the human chose to keep agents running SHALL NOT run it. A run SHALL be recorded as finished only after its process group has been stopped; a turn still running when the wait ends SHALL stay unfinished, and a group still running then SHALL stay recorded as running, so the next start handles both. Each group the shutdown stops SHALL be recorded with the reason `quit`.
 
 #### Scenario: Quit during a turn
-- **WHEN** the host is shut down while a provider is mid-turn
+- **WHEN** the human chooses Stop agents and quit while a provider is mid-turn
 - **THEN** the provider's process group no longer runs when the shutdown returns
 - **AND** the run is finished with the quit as its error and its input is held for a retry
 
@@ -206,6 +210,10 @@ The host SHALL offer a shutdown that cancels every running turn, looks afresh at
 - **WHEN** the host is shut down while an agent between turns has a process it started still running
 - **THEN** that process no longer runs when the shutdown returns
 - **AND** its group is recorded as stopped with the reason `quit`
+
+#### Scenario: Keep them running
+- **WHEN** the human quits the app and chooses Keep them running while a provider is mid-turn
+- **THEN** the turn continues and its process group still runs after the app has exited
 
 ### Requirement: No turn starts beside a leftover process
 While the provider process group of one of a session's finished runs is still recorded as running and still runs, the host SHALL start no turn for that session. It SHALL hold the turn as other held turns are, with the reason naming the process id, and SHALL check again without waiting for another event. When the group no longer runs, the host SHALL settle its note itself and start the turn. The host SHALL settle a leftover-process note once it sees its group gone whether or not the session has a turn due, and SHALL look again without waiting for another event while a note is open, so no note keeps saying a process runs after it exited. When the human dismisses the note, the hold SHALL end and the group SHALL no longer be recorded as running. A run an earlier version finished without its process having been seen to end, marked interrupted or finished by a quit, SHALL be carried into the record when the store is opened, so it holds its session the same way; once its group no longer runs it SHALL be dropped and never looked at again, since process ids are reused. Only a provider's own process group SHALL hold a session: a process group the agent started with its tools SHALL never hold the agent's turns, whether or not the host could confirm it.

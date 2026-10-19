@@ -53,7 +53,7 @@ codex login
 
 The first time you open Wiffletree, a welcome screen lists the CLIs it found signed in and offers a model setup suggested from them. Review it on the Models page and press **Save**; no agent starts until a setup is saved. Then press **⌘N**, add a repository, and tell the coordinator what you want built. [Your first project](docs/DEVELOPMENT.md#first-project) walks through it step by step.
 
-**Updates are automatic.** The app checks hourly, downloads new versions in the background and shows a card in the sidebar with what changed. Click **Restart to update**, or just quit. To check right away, click the version number at the bottom of the sidebar.
+**Updates are automatic.** The app checks hourly, downloads new versions in the background and shows a card in the sidebar with what changed. Click **Restart to update**, or quit Wiffletree from its menu bar icon. To check right away, click the version number at the bottom of the sidebar.
 
 > [!WARNING]
 > Agents run with their provider's permission prompts bypassed so they can work unattended. Add only repositories you are comfortable letting them change. Wiffletree itself pushes a ticket's branch and opens its pull request only through its own checked operation: without asking in repositories whose GitHub owner you allow, and after your approval everywhere else. It never approves, merges, closes or comments on a pull request. If you turn on the PR keeper, Wiffletree also rebases a ticket's open pull request when its base moves and replaces the branch on GitHub, which changes every commit id on the pull request. Agents can still run any command on your Mac, including a push with your credentials, which Wiffletree does not prevent. That includes the PR keeper's model, which gets one try at a conflict or at failed checks when "Try once to fix a conflict or failed checks" is ticked: Wiffletree checks only what the try leaves behind, which files changed and whether your checks command passes, and has that reviewed before pushing it. Your checks command runs as you wrote it.
@@ -108,7 +108,7 @@ Wiffletree has opinions about how agent work should be organized.
 
 ## Status
 
-Wiffletree is early software, and it changes quickly. Live Claude and Codex runs, exact session resume and mixed-provider handoffs work today. Everything runs on your Mac, and closing the app stops active turns until you resume. See [current limits](docs/DEVELOPMENT.md#current-limits) and the [product requirements](docs/PRD.md) for what comes next, including a headless host you can drive from another machine.
+Wiffletree is early software, and it changes quickly. Live Claude and Codex runs, exact session resume and mixed-provider handoffs work today. Everything runs on your Mac. Agents keep working after you quit the app, and a menu bar icon shows how many are; they stop when the Mac restarts or you log out, until you open Wiffletree again. See [current limits](docs/DEVELOPMENT.md#current-limits) and the [product requirements](docs/PRD.md) for what comes next, including a headless host you can drive from another machine.
 
 ## Build from source
 

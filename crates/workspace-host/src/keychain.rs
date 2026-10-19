@@ -3,8 +3,8 @@
 //! them by their signing requirement, and asks any other program, an agent's shell among them,
 //! for the login password in a dialog.
 //!
-//! Design §2 of `openspec/changes/standalone-host` settles which keychain, access list and
-//! signature this needs; everything that depends on it is in this module.
+//! Design §2 of `openspec/changes/archive/2026-10-19-standalone-host` settles which keychain,
+//! access list and signature this needs; everything that depends on it is in this module.
 use anyhow::Result;
 use std::path::Path;
 

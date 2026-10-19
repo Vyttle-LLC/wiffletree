@@ -62,7 +62,21 @@ struct Fixture {
 }
 impl Fixture {
     fn new(prepare: impl FnOnce(&mut Host)) -> Self {
-        let data = tempfile::tempdir().unwrap();
+        Self::from(
+            Path::new(env!("CARGO_BIN_EXE_workspace-host")),
+            None,
+            tempfile::tempdir().unwrap(),
+            prepare,
+        )
+    }
+    /// A child host of the store in `data`, run from `binary`, which finds `provider` as both
+    /// providers' CLI or else neither.
+    fn from(
+        binary: &Path,
+        provider: Option<&Path>,
+        data: tempfile::TempDir,
+        prepare: impl FnOnce(&mut Host),
+    ) -> Self {
         let mut host = Host::open_set_up(data.path()).unwrap();
         let workspaces = data.path().join("workspaces");
         host.set_workspaces_dir(workspaces.to_str().unwrap())
@@ -70,13 +84,18 @@ impl Fixture {
         prepare(&mut host);
         drop(host);
         let shell = tempfile::tempdir().unwrap();
-        let mut command = process::Command::new(env!("CARGO_BIN_EXE_workspace-host"));
+        let mut command = process::Command::new(binary);
         command
             .args(["serve", "--data-dir"])
             .arg(data.path())
             .arg("--child")
             .envs(isolated(shell.path()))
             .stderr(std::process::Stdio::null());
+        if let Some(provider) = provider {
+            command
+                .env("WORKSPACE_CLAUDE_BIN", provider)
+                .env("WORKSPACE_CODEX_BIN", provider);
+        }
         let host = ChildHost::start_command(command).unwrap();
         let socket = data.path().join("host.sock");
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -101,6 +120,18 @@ impl Fixture {
         Connection {
             reader: BufReader::new(stream.try_clone().unwrap()),
             stream,
+        }
+    }
+    /// Waits for the host to exit on its own.
+    fn exited(&mut self) -> process::ExitStatus {
+        let host = self.host.as_mut().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = host.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "the host did not exit");
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
     fn welcomed(&self, credential: Option<String>) -> Connection {
@@ -199,7 +230,10 @@ fn the_handshake_chooses_the_newest_common_protocol() {
     let same = fixture.connect().hello(PROTOCOLS, None);
     let welcome: Welcome = serde_json::from_value(same["welcome"].clone()).unwrap();
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
-    assert_eq!(welcome.capabilities, ["events", "files", "folders"]);
+    assert_eq!(
+        welcome.capabilities,
+        ["events", "files", "folders", "restart-when-idle"]
+    );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));
     assert!(welcome.binary.ends_with("workspace-host"));
     // The host id stays with the store; the epoch is this start's.
@@ -223,13 +257,20 @@ fn the_handshake_chooses_the_newest_common_protocol() {
     assert!(wrong.error.unwrap().contains("Use protocol 1"));
     let right = client_behind.request(PROTOCOL_VERSION - 1, Command::Snapshot);
     assert_eq!((right.error, right.version), (None, PROTOCOL_VERSION - 1));
+    // The connection itself answers a ping.
+    assert_eq!(
+        client_behind
+            .request(PROTOCOL_VERSION - 1, Command::Ping)
+            .error,
+        None
+    );
     let snapshot = client.request(PROTOCOL_VERSION, Command::Snapshot);
     assert_eq!(snapshot.error, None);
 }
 
 #[test]
 fn with_no_common_protocol_the_host_refuses_and_takes_only_restart_host() {
-    let fixture = Fixture::new(|_| {});
+    let mut fixture = Fixture::new(|_| {});
     let mut client = fixture.connect();
     let far = [PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2];
     let answer = client.hello(far, None);
@@ -245,14 +286,169 @@ fn with_no_common_protocol_the_host_refuses_and_takes_only_restart_host() {
     );
     let snapshot = client.request(far[1], Command::Snapshot);
     assert!(snapshot.error.unwrap().contains("only RestartHost"));
-    // `RestartHost` reaches the host, which cannot restart itself until ticket C.
+    // With nothing working, an idle restart ends the host at once, and cleanly, so launchd
+    // leaves it stopped for the app to start the new version.
     let restart = client.request(
         far[1],
         Command::RestartHost {
             when: RestartWhen::Idle,
         },
     );
-    assert!(!restart.error.unwrap().contains("only RestartHost"));
+    assert_eq!(restart.error, None);
+    assert!(fixture.exited().success());
+}
+
+/// A provider whose turns run until they are stopped. Its `auth status` check passes.
+const LINGERING_PROVIDER: &str = r#"#!/bin/sh
+case "$1" in -p|exec) ;; *) exit 0;; esac
+cat >/dev/null
+echo '{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"agent_workspace","status":"connected"}]}'
+exec sleep 60
+"#;
+
+#[test]
+fn with_no_common_protocol_the_refusal_counts_working_agents_and_restart_now_stops_them() {
+    let scratch = tempfile::tempdir().unwrap();
+    let provider = scratch.path().join("provider");
+    std::fs::write(&provider, LINGERING_PROVIDER).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut main = None;
+    let mut fixture = Fixture::from(
+        Path::new(env!("CARGO_BIN_EXE_workspace-host")),
+        Some(&provider),
+        tempfile::tempdir().unwrap(),
+        |host| {
+            let project = host.create_project("Working").unwrap();
+            host.set_live(&project.id, true).unwrap();
+            let sessions = host.sessions().unwrap().into_iter();
+            main = sessions.rev().find(|s| s.project_id == project.id);
+        },
+    );
+    let main = main.unwrap();
+    let mut app = fixture.welcomed(Some(fixture.credential()));
+    app.result(Command::Send {
+        id: "linger".into(),
+        sender: None,
+        recipient: main.id.clone(),
+        body: "Keep working".into(),
+        attachments: vec![],
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while snapshot(&mut app)
+        .sessions
+        .iter()
+        .find(|s| s.id == main.id)
+        .unwrap()
+        .status
+        != Status::Working
+    {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut updated = fixture.connect();
+    let far = [PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 2];
+    let refusal: Refusal =
+        serde_json::from_value(updated.hello(far, None)["refused"].clone()).unwrap();
+    assert_eq!(refusal.working, 1);
+    let restart = updated.request(
+        far[1],
+        Command::RestartHost {
+            when: RestartWhen::Now,
+        },
+    );
+    assert_eq!(restart.error, None);
+    assert!(fixture.exited().success());
+    let db = rusqlite::Connection::open(fixture.data.path().join("workspace.sqlite3")).unwrap();
+    let error: String = db
+        .query_row(
+            "SELECT json_extract(detail,'$.result.error') FROM provider_runs WHERE session_id=?1",
+            [&main.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        error.starts_with("Wiffletree quit during a turn"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stop_agents_and_quit_is_answered_and_the_host_exits_successfully() {
+    let mut fixture = Fixture::new(|_| {});
+    let mut client = fixture.welcomed(None);
+    let quit = client.request(PROTOCOL_VERSION, Command::StopAgentsAndQuit);
+    assert_eq!(quit.error, None);
+    assert!(fixture.exited().success());
+    assert!(!fixture.data.path().join("host.sock").exists());
+}
+
+#[test]
+fn a_host_run_from_a_versioned_copy_keeps_its_path_and_removes_unused_copies() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("workspace-host");
+    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &source).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let copy = |version: &str| {
+        let copy = host_copy::path(data.path(), version);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(&source, &copy).unwrap();
+        copy
+    };
+    let unused = copy("0.9.0");
+    let current = copy("1.0.0");
+    // An update replaces the bundle's binary the copy was made from.
+    std::fs::write(&source, "replaced").unwrap();
+
+    let fixture = Fixture::from(&current, None, data, |_| {});
+
+    let answer = fixture.connect().hello(PROTOCOLS, None);
+    let welcome: Welcome = serde_json::from_value(answer["welcome"].clone()).unwrap();
+    // The binary `Welcome` names is the one the host starts its agents' helpers from.
+    assert_eq!(
+        welcome.binary.canonicalize().unwrap(),
+        current.canonicalize().unwrap()
+    );
+    assert!(
+        !unused.parent().unwrap().exists(),
+        "the unused copy is removed"
+    );
+    assert!(current.exists());
+}
+
+#[test]
+fn a_second_host_from_another_copy_is_refused_and_leaves_the_running_hosts_copy() {
+    let data = tempfile::tempdir().unwrap();
+    let running = host_copy::path(data.path(), "1.0.0");
+    std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &running).unwrap();
+    let data_path = data.path().to_owned();
+    let fixture = Fixture::from(&running, None, data, |_| {});
+    // An update arrives while the host runs: the app copies the new version beside it.
+    let second = host_copy::path(&data_path, "2.0.0");
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_workspace-host"), &second).unwrap();
+
+    let mut command = process::Command::new(&second);
+    command
+        .args(["serve", "--data-dir"])
+        .arg(fixture.data.path())
+        .arg("--child")
+        .envs(isolated(fixture.shell.path()))
+        .stderr(std::process::Stdio::piped());
+    let mut refused = ChildHost::start_command(command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = refused.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the second host kept running");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    assert!(!status.success(), "the store is the running host's");
+    assert!(running.exists(), "the running host's copy is kept");
+    assert!(snapshot(&mut fixture.welcomed(None)).projects.is_empty());
 }
 
 #[test]
@@ -542,6 +738,25 @@ fn answer<R: serde::de::DeserializeOwned>(client: &HostClient, ask: ask::Ask<R>)
 }
 
 /// A scratch folder short enough for a socket path under `Library/Application Support`.
+/// The labels of the Wiffletree host jobs launchd has loaded for this user, such as
+/// `LaunchdJob::label()`; the running apps' own `application.…` entries are not jobs.
+fn wiffletree_jobs() -> Vec<String> {
+    let list = process::Command::new("/bin/launchctl")
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let prefix = LaunchdJob::label()
+        .trim_end_matches(".host")
+        .trim_end_matches(".beta");
+    String::from_utf8_lossy(&list.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').nth(2))
+        .filter(|label| label.starts_with(prefix))
+        .map(String::from)
+        .collect()
+}
+
 fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new().tempdir_in("/tmp").unwrap()
 }
@@ -556,29 +771,95 @@ fn an_unsigned_app_on_its_default_data_folder_starts_a_child_host_and_no_launchd
         HostLaunch::Child
     );
     let shell = tempfile::tempdir().unwrap();
+    let jobs_before = wiffletree_jobs();
     let (client, _) = app_client(&data, shell.path());
     assert!(answer(&client, ask::snapshot()).projects.is_empty());
     // The host was started with the credential on its standard input, and holds the store.
     let credential = client.with_launcher(|launch| launch.child().unwrap().credential().to_owned());
     assert!(data.join("host.sock").exists());
-    // No plist was written and launchd has no job for this data folder.
+    // No plist was written, launchd gained no Wiffletree job while the app ran, and none it
+    // has serves this data folder.
     assert!(!data.join("host").exists());
-    let job = process::Command::new("/bin/launchctl")
-        .args([
-            "print",
-            &format!("gui/{}/{}", unsafe { libc::getuid() }, LaunchdJob::label()),
-        ])
-        .output()
-        .unwrap();
-    let listed = String::from_utf8_lossy(&job.stdout);
-    let folder = data.file_name().unwrap().to_string_lossy();
-    assert!(
-        !job.status.success() || !listed.contains(&*home.path().to_string_lossy()),
-        "launchd runs a host for {folder}: {listed}"
-    );
+    let jobs = wiffletree_jobs();
+    assert!(jobs.iter().all(|job| jobs_before.contains(job)), "{jobs:?}");
+    for label in jobs {
+        let job = process::Command::new("/bin/launchctl")
+            .args([
+                "print",
+                &format!("gui/{}/{label}", unsafe { libc::getuid() }),
+            ])
+            .output()
+            .unwrap();
+        let listed = String::from_utf8_lossy(&job.stdout);
+        assert!(
+            !listed.contains(&*home.path().to_string_lossy()),
+            "launchd's {label} serves this data folder: {listed}"
+        );
+    }
     // No file holds the credential.
     assert_eq!(files_holding(home.path(), &credential), [] as [PathBuf; 0]);
     client.stop();
+}
+
+#[test]
+fn stopping_the_client_while_it_starts_a_host_again_stops_that_host_at_once() {
+    let data = short_tempdir();
+    let scratch = tempfile::tempdir().unwrap();
+    // The real host the first time; after that a host that never listens, as one still
+    // starting looks, and that exits when its standard input closes.
+    let started = scratch.path().join("started");
+    let wrapper = scratch.path().join("host");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e \"$0.ran\" ]; then touch \"$0.ran\"; exec '{}' \"$@\"; fi\necho $$ > '{}'\nexec cat >/dev/null\n",
+        env!("CARGO_BIN_EXE_workspace-host"),
+        started.display()
+    );
+    std::fs::write(&wrapper, script).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut launch = ChildLaunch::new(&wrapper, data.path());
+    for (key, value) in isolated(scratch.path()) {
+        launch = launch.env(key, value);
+    }
+    let client = HostClient::connect(
+        Box::new(launch),
+        Client {
+            name: "Wiffletree".into(),
+            kind: "desktop".into(),
+        },
+        Box::new(|_| {}),
+    )
+    .unwrap();
+    // SAFETY: the child is this test's own host.
+    unsafe { libc::kill(child_pid(&client), libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the client never started a host again"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let restarted: i32 = std::fs::read_to_string(&started)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let stopping = Instant::now();
+    client.stop();
+
+    // Not the minute a host may take to start, and the host it was starting is gone.
+    assert!(
+        stopping.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        stopping.elapsed()
+    );
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert_eq!(
+        unsafe { libc::kill(restarted, 0) },
+        -1,
+        "the new host still runs"
+    );
 }
 
 #[test]

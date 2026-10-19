@@ -2,6 +2,7 @@ mod activity;
 mod assets;
 mod attachment_chips;
 mod automation;
+mod background;
 mod bridge;
 mod context_view;
 mod conversation;
@@ -16,8 +17,10 @@ mod inbox;
 mod inspector;
 mod leftovers;
 mod memory_view;
+mod menu_bar;
 mod models;
 mod models_view;
+mod native_quit;
 mod palette;
 mod preferences;
 mod processes_view;
@@ -171,6 +174,10 @@ struct Workspace {
     /// An archive request is on its way.
     archive_pending: bool,
     load_error: Option<String>,
+    /// The host refused the app as it last connected.
+    refused: bool,
+    /// The human chose to let a refusing host's agents finish before it restarts.
+    waiting_for_host: bool,
     models: Entity<models_view::ModelsPage>,
     skills: Entity<skills_view::SkillsPage>,
     conversation: Entity<conversation::Conversation>,
@@ -233,6 +240,8 @@ impl Workspace {
             quota_request: Coalesced::default(),
             archive_pending: false,
             load_error: None,
+            refused: false,
+            waiting_for_host: false,
             models,
             skills,
             conversation,
@@ -252,6 +261,12 @@ impl Workspace {
                     if cx
                         .update(|window, cx| {
                             this.update(cx, |view, cx| {
+                                // A refusing host answers nothing, so its screen is drawn now.
+                                let refused = view.bridge.refusal().is_some();
+                                if refused != std::mem::replace(&mut view.refused, refused) {
+                                    view.waiting_for_host &= refused;
+                                    cx.notify();
+                                }
                                 view.refresh(window, cx);
                             })
                         })
@@ -992,6 +1007,71 @@ fn show_about() {
     }
 }
 
+/// The open main window and its workspace, which the app's actions act on.
+#[derive(Default)]
+struct MainWindow(Option<(AnyWindowHandle, WeakEntity<Workspace>)>);
+impl Global for MainWindow {}
+
+/// Runs `with` on the main window's workspace, if it is open. Deferred because a shortcut
+/// arrives while the window is mid-update.
+fn with_workspace(
+    cx: &mut App,
+    with: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) {
+    let Some((handle, workspace)) = cx.default_global::<MainWindow>().0.clone() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| {
+            workspace.update(cx, |view, cx| with(view, window, cx))
+        });
+    });
+}
+
+/// The actions that act on the main window. Registered on the app so ⌘N and the menu work
+/// whatever has focus, and once, whichever main window is open.
+fn register_window_actions(cx: &mut App) {
+    cx.on_action(|_: &NewProject, cx| {
+        with_workspace(cx, |view, window, cx| view.new_project(window, cx))
+    });
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        with_workspace(cx, |view, window, cx| {
+            view.sidebar.update(cx, |sidebar, cx| {
+                sidebar.check_for_updates(true, window, cx)
+            })
+        })
+    });
+    // Settings opens these pages in the main window, which comes forward.
+    let open = |page: Page, cx: &mut App| {
+        with_workspace(cx, move |view, window, cx| {
+            window.activate_window();
+            view.handle(&Intent::OpenPage(page), window, cx)
+        })
+    };
+    cx.on_action(move |_: &OpenModels, cx| open(Page::Models, cx));
+    cx.on_action(move |_: &OpenRepositories, cx| open(Page::Repositories, cx));
+}
+
+/// Opens the main window on `bridge`'s host.
+fn open_main_window(bridge: Bridge, cx: &mut App) -> WindowHandle<Root> {
+    let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(960.), px(600.))),
+            titlebar: Some(TitleBar::title_bar_options()),
+            ..Default::default()
+        },
+        |window, cx| {
+            window.set_window_title("Wiffletree");
+            let view = cx.new(|cx| Workspace::new(bridge, window, cx));
+            cx.set_global(MainWindow(Some((window.window_handle(), view.downgrade()))));
+            cx.new(|cx| Root::new(view, window, cx))
+        },
+    )
+    .expect("Open native workspace")
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut home = None;
@@ -1031,131 +1111,75 @@ fn main() -> anyhow::Result<()> {
     let preferences = Preferences::load(&home);
     let bridge = Bridge::start(&home, default_folder, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx| {
-            gpui_component::init(cx);
-            cx.set_global(preferences);
-            cx.set_global(attachment_chips::HostImages::new(bridge.clone()));
-            apply_theme(cx);
-            // Under the System appearance, macOS can switch modes while the app runs. The component
-            // theme only changes when told, so every window re-applies it or keeps stale colours.
-            cx.observe_new(|_: &mut Root, window, _| {
-                if let Some(window) = window {
-                    window
-                        .observe_window_appearance(|_, cx| apply_theme(cx))
-                        .detach();
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    application.on_reopen(background::reopened);
+    application.run(move |cx| {
+        gpui_component::init(cx);
+        cx.set_global(preferences);
+        cx.set_global(attachment_chips::HostImages::new(bridge.clone()));
+        apply_theme(cx);
+        // Under the System appearance, macOS can switch modes while the app runs. The component
+        // theme only changes when told, so every window re-applies it or keeps stale colours.
+        cx.observe_new(|_: &mut Root, window, _| {
+            if let Some(window) = window {
+                window
+                    .observe_window_appearance(|_, cx| apply_theme(cx))
+                    .detach();
+            }
+        })
+        .detach();
+        cx.bind_keys([
+            KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
+            KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
+            KeyBinding::new("cmd-n", NewProject, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-q", Quit, None),
+        ]);
+        cx.on_action(|_: &About, _| show_about());
+        // Settings needs no main window, so it opens even after that one is closed.
+        // Deferred so ⌘, pressed inside Settings can still focus that window.
+        let settings_bridge = bridge.clone();
+        cx.on_action(move |_: &OpenSettings, cx| {
+            let bridge = settings_bridge.clone();
+            cx.defer(move |cx| settings::Settings::open(bridge, cx));
+        });
+        cx.set_menus(vec![
+            Menu::new("Wiffletree").items([
+                MenuItem::action("About Wiffletree", About),
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Quit Wiffletree", Quit),
+            ]),
+            Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
+        ]);
+        register_window_actions(cx);
+        let reopen = bridge.clone();
+        background::install(
+            bridge.clone(),
+            move |cx| {
+                open_main_window(reopen.clone(), cx);
+            },
+            cx,
+        );
+        let window = open_main_window(bridge, cx);
+        if let Some(steps) = steps {
+            // The untyped handle leaves the root view free for the events a step dispatches.
+            let window: AnyWindowHandle = window.into();
+            let _ = automation::NativeWindow::stay_on_stage();
+            cx.spawn(async move |cx| {
+                while let Ok((step, reply)) = steps.recv().await {
+                    let outcome = window
+                        .update(cx, |_, window, cx| step.perform(window, cx))
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = reply.send(outcome).await;
                 }
             })
             .detach();
-            cx.bind_keys([
-                KeyBinding::new("enter", SendMessage, Some("ChatComposer > Input")),
-                KeyBinding::new("cmd-enter", SendMessage, Some("ChatComposer > Input")),
-                KeyBinding::new("cmd-n", NewProject, None),
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("cmd-q", Quit, None),
-            ]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            // Quitting exits the process without dropping the bridge, so a child host is
-            // stopped here, with its running turns, before it could outlive the app.
-            let host = bridge.clone();
-            cx.on_app_quit(move |_| {
-                host.shutdown();
-                async {}
-            })
-            .detach();
-            cx.on_action(|_: &About, _| show_about());
-            // Settings needs no main window, so it opens even after that one is closed.
-            // Deferred so ⌘, pressed inside Settings can still focus that window.
-            let settings_bridge = bridge.clone();
-            cx.on_action(move |_: &OpenSettings, cx| {
-                let bridge = settings_bridge.clone();
-                cx.defer(move |cx| settings::Settings::open(bridge, cx));
-            });
-            cx.set_menus(vec![
-                Menu::new("Wiffletree").items([
-                    MenuItem::action("About Wiffletree", About),
-                    MenuItem::action("Settings…", OpenSettings),
-                    MenuItem::action("Check for Updates…", CheckForUpdates),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit Wiffletree", Quit),
-                ]),
-                Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
-            ]);
-            let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        window_min_size: Some(size(px(960.), px(600.))),
-                        titlebar: Some(TitleBar::title_bar_options()),
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        window.set_window_title("Wiffletree");
-                        let view = cx.new(|cx| Workspace::new(bridge, window, cx));
-                        // Registered on the app so ⌘N and the menu work whatever has focus.
-                        // Deferred because a shortcut arrives while the window is mid-update.
-                        let workspace = view.downgrade();
-                        let handle = window.window_handle();
-                        let new_project = workspace.clone();
-                        cx.on_action(move |_: &NewProject, cx| {
-                            let workspace = new_project.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    workspace.update(cx, |view, cx| view.new_project(window, cx))
-                                });
-                            });
-                        });
-                        let check_for_updates = workspace.clone();
-                        cx.on_action(move |_: &CheckForUpdates, cx| {
-                            let workspace = check_for_updates.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    workspace.update(cx, |view, cx| {
-                                        view.sidebar.update(cx, |sidebar, cx| {
-                                            sidebar.check_for_updates(true, window, cx)
-                                        })
-                                    })
-                                });
-                            });
-                        });
-                        // Settings opens these pages in the main window, which comes forward.
-                        let open = move |page: Page, cx: &mut App| {
-                            let workspace = workspace.clone();
-                            cx.defer(move |cx| {
-                                let _ = handle.update(cx, |_, window, cx| {
-                                    window.activate_window();
-                                    workspace.update(cx, |view, cx| {
-                                        view.handle(&Intent::OpenPage(page), window, cx)
-                                    })
-                                });
-                            });
-                        };
-                        let open_models = open.clone();
-                        cx.on_action(move |_: &OpenModels, cx| open_models(Page::Models, cx));
-                        cx.on_action(move |_: &OpenRepositories, cx| open(Page::Repositories, cx));
-                        cx.new(|cx| Root::new(view, window, cx))
-                    },
-                )
-                .expect("Open native workspace");
-            if let Some(steps) = steps {
-                // The untyped handle leaves the root view free for the events a step dispatches.
-                let window: AnyWindowHandle = window.into();
-                let _ = automation::NativeWindow::stay_on_stage();
-                cx.spawn(async move |cx| {
-                    while let Ok((step, reply)) = steps.recv().await {
-                        let outcome = window
-                            .update(cx, |_, window, cx| step.perform(window, cx))
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = reply.send(outcome).await;
-                    }
-                })
-                .detach();
-            } else {
-                cx.activate(true);
-            }
-        });
+        } else {
+            cx.activate(true);
+        }
+    });
     Ok(())
 }
 

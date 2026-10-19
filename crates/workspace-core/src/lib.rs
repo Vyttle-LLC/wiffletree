@@ -5,6 +5,7 @@ mod context;
 pub mod data_dir;
 mod files;
 mod host;
+pub mod host_copy;
 mod index;
 mod launch;
 mod messages;
@@ -2987,6 +2988,9 @@ pub enum Command {
         #[serde(default)]
         after: Option<Cursor>,
     },
+    /// Socket only: answered with nothing by the connection itself, not the host's actor, so a
+    /// client can tell a quiet host from one that is gone while the actor is busy.
+    Ping,
     /// Which `references` name a file, each as it is or, when relative, under the first of
     /// `bases` that holds it; a `~/` reference is under the host's home folder. Answered with
     /// one `Option<ResolvedPath>` per reference, in order. Reads no file's contents.
@@ -3008,11 +3012,11 @@ pub enum Command {
     /// Read-only: the fixed core instructions the running host gives agents, each with its
     /// text; answered with `Vec<CoreText>`.
     CoreInstructions,
-    /// Stops every running turn as a quit does, then ends the host. Only the human's client
-    /// sends it.
+    /// Stops every running turn as a quit does, then ends the host; answered once the turns are
+    /// stopped. Only the human's client sends it.
     StopAgentsAndQuit,
-    /// Restarts the host into the newest installed version; the only command a connection may
-    /// send after a refused `Hello`.
+    /// Ends the host so the app can start the newest installed version, at once or once no turn
+    /// and no compaction runs; the only command a connection may send after a refused `Hello`.
     RestartHost {
         when: RestartWhen,
     },
@@ -3048,6 +3052,7 @@ impl Command {
             | Self::LeftoverWorktrees
             | Self::Processes { .. }
             | Self::Subscribe { .. }
+            | Self::Ping
             | Self::ResolvePaths { .. }
             | Self::ReadFile { .. }
             | Self::ListFolder { .. }

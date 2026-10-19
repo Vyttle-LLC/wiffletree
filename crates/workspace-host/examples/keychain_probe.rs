@@ -1,4 +1,5 @@
-//! Keychain probe for the client credential (task 0.1 of `openspec/changes/standalone-host`).
+//! Keychain probe for the client credential (task 0.1 of
+//! `openspec/changes/archive/2026-10-19-standalone-host`).
 //!
 //! Creates, reads and deletes a generic-password item the way design §2 describes, and
 //! reports the Keychain's answer without printing the secret. Sign the built example (and

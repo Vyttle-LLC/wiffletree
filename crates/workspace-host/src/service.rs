@@ -598,6 +598,8 @@ pub struct Service {
     host_id: String,
     /// How many agents are in a turn, as of the actor's last event.
     working: Arc<AtomicUsize>,
+    /// Closed once the host has stopped, whether a client or `shutdown` stopped it.
+    ended: Receiver<()>,
 }
 struct Active {
     run: String,
@@ -682,6 +684,10 @@ struct Actor {
     /// A plan step or a turn start may have moved a figure since the last signal.
     progress_dirty: bool,
     working: Arc<AtomicUsize>,
+    /// Held while any turn or compaction runs.
+    awake: power::Awake,
+    /// `RestartHost { when: Idle }` arrived: the host stops once no turn and no compaction runs.
+    restart_when_idle: bool,
     /// Each session's latest step revision, seeded from the store on first use.
     revisions: HashMap<String, u64>,
     active: HashMap<String, Active>,
@@ -734,10 +740,13 @@ impl Service {
         let working = Arc::new(AtomicUsize::new(0));
         let (actor_events, actor_working) = (events.clone(), working.clone());
         let (ready, readiness) = std::sync::mpsc::sync_channel(1);
+        // Never sent on; the host thread drops it as it ends.
+        let (end, ended) = async_channel::bounded::<()>(1);
         let worker = sender.clone();
         let thread = std::thread::Builder::new()
             .name("workspace-host".into())
             .spawn(move || {
+                let _end = end;
                 let setup = (|| -> Result<_> {
                     let mut host = Host::open(home)?;
                     recover_unfinished_turns(&mut host)?;
@@ -824,6 +833,8 @@ impl Service {
                     changes: events::Changes::default(),
                     progress_dirty: false,
                     working: actor_working,
+                    awake: power::Awake::default(),
+                    restart_when_idle: false,
                     revisions: HashMap::new(),
                     active: HashMap::new(),
                     compacting: HashMap::new(),
@@ -867,13 +878,43 @@ impl Service {
                 actor.refresh_settings_sync(now());
                 actor.start_skill_merges();
                 actor.signal(false);
+                // Answered once the shutdown has stopped every turn.
+                let mut quit = None;
                 while let Ok(event) = receiver.recv_blocking() {
-                    if matches!(event, Event::Shutdown) {
+                    match event {
+                        Event::Shutdown => break,
+                        Event::Command(
+                            Command::StopAgentsAndQuit
+                            | Command::RestartHost {
+                                when: RestartWhen::Now,
+                            },
+                            reply,
+                        ) => {
+                            quit = Some(reply);
+                            break;
+                        }
+                        Event::Command(
+                            Command::RestartHost {
+                                when: RestartWhen::Idle,
+                            },
+                            reply,
+                        ) => {
+                            actor.restart_when_idle = true;
+                            let _ = reply.try_send(Ok(Value::Null));
+                        }
+                        event => actor.process(event),
+                    }
+                    if actor.restart_when_idle
+                        && actor.active.is_empty()
+                        && actor.compacting.is_empty()
+                    {
                         break;
                     }
-                    actor.process(event);
                 }
                 actor.stop(&receiver);
+                if let Some(reply) = quit {
+                    let _ = reply.try_send(Ok(Value::Null));
+                }
                 for (_, permission) in actor.permissions.drain() {
                     let _ = permission.reply.try_send(Err("Workspace stopped".into()));
                 }
@@ -891,6 +932,7 @@ impl Service {
             pings,
             host_id,
             working,
+            ended,
         })
     }
     pub fn request(
@@ -925,6 +967,11 @@ impl Service {
     /// How many agents are in a turn.
     pub fn working(&self) -> usize {
         self.working.load(Ordering::Relaxed)
+    }
+    /// Closes once the host has stopped: after `StopAgentsAndQuit`, `RestartHost` or
+    /// `shutdown`. A process serving this host exits then.
+    pub fn ended(&self) -> Receiver<()> {
+        self.ended.clone()
     }
     /// The in-process wakes for each event kind, which a `state` or a `resync` event sends:
     /// reload the snapshot.
@@ -2561,6 +2608,8 @@ impl Actor {
             }
         }
         self.working.store(self.active.len(), Ordering::Relaxed);
+        self.awake
+            .hold(!(self.active.is_empty() && self.compacting.is_empty()));
         self.events.emit(changes);
     }
     /// Tells clients about a state change made outside an event's own handling.
@@ -3974,6 +4023,8 @@ mod tests {
             changes: events::Changes::default(),
             progress_dirty: false,
             working: Arc::default(),
+            awake: power::Awake::default(),
+            restart_when_idle: false,
             revisions: HashMap::new(),
             active: HashMap::new(),
             compacting: HashMap::new(),

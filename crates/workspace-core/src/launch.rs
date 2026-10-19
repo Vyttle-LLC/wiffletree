@@ -1,11 +1,12 @@
 //! How the app starts or finds its host, and the client credential it connects with.
-use crate::{OwnDescriptors as _, SOCKET_FILE};
+use crate::{OwnDescriptors as _, SOCKET_FILE, build_version, host_copy};
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -122,12 +123,19 @@ pub struct Endpoint {
 /// Finds the app's host, starting it when none answers. A client asks again before each
 /// connection, so a host that stopped is started again.
 pub trait Launch: Send {
-    fn endpoint(&mut self) -> io::Result<Endpoint>;
+    /// Waiting for a host that is starting ends early once `stopped` is set, so a client that
+    /// stops is not held up and can stop the host just started.
+    fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint>;
     /// Stops the host if it is the app's own child; a launchd host keeps running.
     fn stop(&mut self) {}
     /// The running child host, when the host is the app's own.
     fn child(&mut self) -> Option<&mut ChildHost> {
         None
+    }
+    /// The host keeps running after the app exits, so quitting may leave agents working and an
+    /// update finds an older host still running.
+    fn outlives_app(&self) -> bool {
+        false
     }
 }
 
@@ -163,7 +171,7 @@ impl ChildLaunch {
     }
 }
 impl Launch for ChildLaunch {
-    fn endpoint(&mut self) -> io::Result<Endpoint> {
+    fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint> {
         let running = match &mut self.host {
             Some(host) => host.try_wait()?.is_none(),
             None => false,
@@ -181,7 +189,7 @@ impl Launch for ChildLaunch {
         }
         let host = self.host.as_mut().expect("started above");
         let socket = self.data.join(SOCKET_FILE);
-        wait_for_socket(&socket, || Ok(host.try_wait()?.is_none()))?;
+        wait_for_socket(&socket, stopped, || Ok(host.try_wait()?.is_none()))?;
         Ok(Endpoint {
             socket,
             credential: Some(host.credential().into()),
@@ -199,13 +207,15 @@ impl Launch for ChildLaunch {
 
 /// A signed app's host on its default data folder: a launchd job loaded from a plist in
 /// `<data folder>/host/`, never from `~/Library/LaunchAgents`, so it does not start at login.
+/// It runs this version's copy of `binary`, the bundle's host, so an update of the bundle never
+/// replaces a running host.
 pub struct LaunchdJob {
     binary: PathBuf,
     data: PathBuf,
     app: PathBuf,
 }
 impl LaunchdJob {
-    pub fn new(binary: &Path, data: &Path, app: &Path) -> Self {
+    fn new(binary: &Path, data: &Path, app: &Path) -> Self {
         Self {
             binary: binary.into(),
             data: data.into(),
@@ -220,16 +230,22 @@ impl LaunchdJob {
             "com.vyttle.wiffletree.host"
         }
     }
-    pub fn plist_path(&self) -> PathBuf {
+    fn plist_path(&self) -> PathBuf {
         self.data
             .join("host")
             .join(format!("{}.plist", Self::label()))
     }
-    /// The job: `serve` for the data folder, trusting the app, restarted only after an
-    /// unsuccessful exit (which also starts it when loaded), logging to `logs/host.log`.
-    pub fn plist(&self) -> String {
+    /// The copy of the host the job runs.
+    fn program(&self) -> PathBuf {
+        host_copy::path(&self.data, build_version())
+    }
+    /// The job: `serve` for the data folder from this version's copy, trusting the app,
+    /// restarted only after an unsuccessful exit (which also starts it when loaded), logging to
+    /// `logs/host.log`.
+    fn plist(&self) -> String {
+        let program = self.program();
         let arguments = [
-            self.binary.as_path(),
+            program.as_path(),
             Path::new("serve"),
             Path::new("--data-dir"),
             self.data.as_path(),
@@ -280,8 +296,10 @@ impl LaunchdJob {
                     && String::from_utf8_lossy(&output.stdout).contains("state = running")
             })
     }
-    /// Writes the plist and bootstraps it, after unloading a job whose host has exited.
+    /// Copies the bundle's host, writes the plist and bootstraps it, after unloading a job whose
+    /// host has exited.
     fn load(&self) -> io::Result<()> {
+        host_copy::install(&self.binary, &self.data, build_version())?;
         let plist = self.plist_path();
         fs::create_dir_all(plist.parent().expect("in host/"))?;
         fs::create_dir_all(self.data.join("logs"))?;
@@ -303,16 +321,19 @@ impl LaunchdJob {
     }
 }
 impl Launch for LaunchdJob {
-    fn endpoint(&mut self) -> io::Result<Endpoint> {
+    fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint> {
         let socket = self.data.join(SOCKET_FILE);
         if UnixStream::connect(&socket).is_err() && !Self::running() {
             self.load()?;
         }
-        wait_for_socket(&socket, || Ok(true))?;
+        wait_for_socket(&socket, stopped, || Ok(true))?;
         Ok(Endpoint {
             socket,
             credential: Some(keychain_credential(&self.data)?),
         })
+    }
+    fn outlives_app(&self) -> bool {
+        true
     }
 }
 
@@ -331,10 +352,18 @@ fn keychain_credential(_data: &Path) -> io::Result<String> {
     Err(io::Error::other("A launchd host needs the macOS Keychain"))
 }
 
-/// Waits until `socket` accepts a connection, while `alive` says the host is still starting.
-fn wait_for_socket(socket: &Path, mut alive: impl FnMut() -> io::Result<bool>) -> io::Result<()> {
+/// Waits until `socket` accepts a connection, while `alive` says the host is still starting and
+/// the client has not `stopped`.
+fn wait_for_socket(
+    socket: &Path,
+    stopped: &AtomicBool,
+    mut alive: impl FnMut() -> io::Result<bool>,
+) -> io::Result<()> {
     let deadline = Instant::now() + START_TIMEOUT;
     while UnixStream::connect(socket).is_err() {
+        if stopped.load(Ordering::Relaxed) {
+            return Err(io::Error::other("The client stopped"));
+        }
         if !alive()? {
             return Err(io::Error::other(
                 "The host stopped as it started; its reason is in the app's log",
@@ -381,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn the_launchd_plist_serves_the_data_folder_for_the_app_and_restarts_only_after_a_failure() {
+    fn the_launchd_plist_runs_the_versioned_copy_for_the_app_and_restarts_only_after_a_failure() {
         let job = LaunchdJob::new(
             Path::new("/Applications/Wiffletree.app/Contents/MacOS/workspace-host"),
             Path::new("/Users/me/Library/Application Support/R&D"),
@@ -394,8 +423,11 @@ mod tests {
             )
         );
         let plist = job.plist();
-        let arguments = "<string>/Applications/Wiffletree.app/Contents/MacOS/workspace-host</string>\n\t\t<string>serve</string>\n\t\t<string>--data-dir</string>\n\t\t<string>/Users/me/Library/Application Support/R&amp;D</string>\n\t\t<string>--app</string>\n\t\t<string>/Applications/Wiffletree.app</string>";
-        assert!(plist.contains(arguments), "{plist}");
+        let version = build_version();
+        let arguments = format!(
+            "<string>/Users/me/Library/Application Support/R&amp;D/host/{version}/workspace-host</string>\n\t\t<string>serve</string>\n\t\t<string>--data-dir</string>\n\t\t<string>/Users/me/Library/Application Support/R&amp;D</string>\n\t\t<string>--app</string>\n\t\t<string>/Applications/Wiffletree.app</string>"
+        );
+        assert!(plist.contains(&arguments), "{plist}");
         assert!(plist.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
         assert!(plist.contains("R&amp;D/logs/host.log</string>"));
         assert!(
