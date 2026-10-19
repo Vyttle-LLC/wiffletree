@@ -3,7 +3,7 @@
 //! Claude reports its own categories through `/context`. Codex reports only how full the window
 //! is, so its categories are estimated from the sizes of the items in its session record.
 use crate::provider::executable;
-use crate::runtime::{LowPriority as _, OwnDescriptors as _};
+use crate::runtime::LowPriority as _;
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::Value;
 use std::{
@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use workspace_core::OwnDescriptors as _;
 use workspace_core::{ContextCategory, ContextUsage, ModelProfile, Provider};
 
 /// The session to inspect, as the host last ran it.

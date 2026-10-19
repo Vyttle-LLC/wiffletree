@@ -1,11 +1,15 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 pub mod ask;
 mod context;
+pub mod data_dir;
 mod files;
+mod host;
 mod index;
+mod launch;
 mod messages;
 mod models;
 mod owners;
+mod process;
 mod progress;
 mod publishing;
 mod selection;
@@ -16,10 +20,13 @@ mod usage;
 use anyhow::{Context, Result, bail, ensure};
 pub use context::*;
 pub use files::*;
+pub use host::*;
 pub use index::WorkspaceIndex;
+pub use launch::*;
 pub use messages::*;
 pub use models::*;
 pub use owners::*;
+pub use process::*;
 pub use progress::*;
 pub use publishing::*;
 pub use selection::*;
@@ -32,7 +39,6 @@ pub use steps::*;
 pub use suggestion::*;
 pub use usage::*;
 
-pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_PAGE: usize = 100;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 
@@ -682,6 +688,9 @@ pub struct Snapshot {
     pub keeper_parts: BTreeMap<String, KeeperPart>,
     #[serde(default)]
     pub skills: Vec<SkillState>,
+    /// The fixed core instructions of the running host, in the order it sends them.
+    #[serde(default)]
+    pub core_instructions: Vec<skills::CoreInstructions>,
     /// What this machine still needs to run the shared settings, one line each.
     #[serde(default)]
     pub still_needs: Vec<StillNeed>,
@@ -2969,6 +2978,39 @@ pub enum Command {
         #[serde(default)]
         groups: Vec<String>,
     },
+    /// Socket only: turns the connection into a subscriber of the host's events, after the
+    /// events following `after` when it is still in the host's log, or after `resync`
+    /// otherwise; answered with `Subscribed`. With no cursor only later events come.
+    Subscribe {
+        #[serde(default)]
+        after: Option<Cursor>,
+    },
+    /// Which `references` name a file, each as it is or, when relative, under the first of
+    /// `bases` that holds it; a `~/` reference is under the host's home folder. Answered with
+    /// one `Option<ResolvedPath>` per reference, in order. Reads no file's contents.
+    ResolvePaths {
+        references: Vec<String>,
+        bases: Vec<PathBuf>,
+    },
+    /// Reads a file under the roots `docs/host-protocol.md` lists, refusing one larger than
+    /// `max_bytes` or `MAX_ATTACHMENT_BYTES`; answered with `FileContents`.
+    ReadFile {
+        path: PathBuf,
+        max_bytes: u64,
+    },
+    /// Names the folders in `path` and which are Git repositories; answered with
+    /// `FolderListing`.
+    ListFolder {
+        path: PathBuf,
+    },
+    /// Stops every running turn as a quit does, then ends the host. Only the human's client
+    /// sends it.
+    StopAgentsAndQuit,
+    /// Restarts the host into the newest installed version; the only command a connection may
+    /// send after a refused `Hello`.
+    RestartHost {
+        when: RestartWhen,
+    },
 }
 impl Command {
     /// Reads change nothing in the store, so the host signals no change for them and clients
@@ -2999,7 +3041,11 @@ impl Command {
             | Self::SkillMergeReview { .. }
             | Self::SkillStockChanges { .. }
             | Self::LeftoverWorktrees
-            | Self::Processes { .. } => true,
+            | Self::Processes { .. }
+            | Self::Subscribe { .. }
+            | Self::ResolvePaths { .. }
+            | Self::ReadFile { .. }
+            | Self::ListFolder { .. } => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
             | Self::RemoveRepositoryRoot { .. }
@@ -3051,7 +3097,36 @@ impl Command {
             | Self::DismissSkillMerge { .. }
             | Self::SetRepositoryChecks { .. }
             | Self::RemoveLeftoverWorktrees { .. }
-            | Self::StopProcesses { .. } => false,
+            | Self::StopProcesses { .. }
+            | Self::StopAgentsAndQuit
+            | Self::RestartHost { .. } => false,
+        }
+    }
+    /// Commands only the human should give: on the host socket they need the app's client
+    /// credential. They answer the Inbox, which also approves a publish, or grant publish or push
+    /// authority without it: owners whose PRs open without asking, the PR keeper's rebases and
+    /// pushes, and a settings repository the host pushes to.
+    pub fn is_human_only(&self) -> bool {
+        matches!(
+            self,
+            Self::ResolveAttention { .. }
+                | Self::DismissAttention { .. }
+                | Self::SetOwnerAllowed { .. }
+                | Self::SetKeeper { .. }
+                | Self::SetUpSettingsRepository { .. }
+                | Self::JoinSettingsRepository { .. }
+        )
+    }
+    /// The capability a host lists when it answers this command.
+    pub fn capability(&self) -> Option<&'static str> {
+        match self {
+            Self::Subscribe { .. } => Some(capability::EVENTS),
+            Self::ResolvePaths { .. } | Self::ReadFile { .. } => Some(capability::FILES),
+            Self::ListFolder { .. } => Some(capability::FOLDERS),
+            Self::RestartHost {
+                when: RestartWhen::Idle,
+            } => Some(capability::RESTART_WHEN_IDLE),
+            _ => None,
         }
     }
 }

@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use workspace_host::runtime::OwnDescriptors as _;
+use workspace_core::OwnDescriptors as _;
 
 pub(crate) const VERSION: Option<&str> = option_env!("WIFFLETREE_VERSION");
 const LATEST_RELEASE: &str = "https://api.github.com/repos/Vyttle-LLC/wiffletree/releases/latest";
@@ -49,7 +49,7 @@ struct Asset {
 pub(crate) fn installed_bundle() -> Option<PathBuf> {
     VERSION?;
     // Releases are the stable app; installing one over the beta would replace it.
-    if crate::data_dir::is_beta() {
+    if workspace_core::data_dir::is_beta() {
         return None;
     }
     let bundle = std::env::current_exe().ok()?.ancestors().nth(3)?.to_owned();

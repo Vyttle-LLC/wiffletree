@@ -1,12 +1,16 @@
+//! Which data folder the default host owns. The app and the host resolve it with this one
+//! function. The pre-rename `Agent Workspace` folder is used in place when no `Wiffletree`
+//! folder exists, never moved: moving it would invalidate absolute worktree and provider-session
+//! paths.
 use std::path::{Path, PathBuf};
 
 /// Set at build time by `package_macos.sh --beta`. A beta runs beside the release app with its
 /// own store, so it never migrates or locks the store live sessions are using.
-pub(crate) fn is_beta() -> bool {
+pub fn is_beta() -> bool {
     option_env!("WIFFLETREE_CHANNEL") == Some("beta")
 }
 
-pub(crate) fn default_directory(home: &Path) -> PathBuf {
+pub fn default_directory(home: &Path) -> PathBuf {
     directory(home, is_beta())
 }
 

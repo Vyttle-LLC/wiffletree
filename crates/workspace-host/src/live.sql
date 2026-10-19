@@ -8,6 +8,8 @@ CREATE INDEX IF NOT EXISTS tickets_state ON tickets(json_extract(data,'$.state')
 CREATE INDEX IF NOT EXISTS sessions_archived ON sessions(coalesce(json_extract(data,'$.archived'),0));
 -- Each turn start counts the session's runs since its parent's last message.
 CREATE INDEX IF NOT EXISTS provider_runs_session_started ON provider_runs(session_id, started_at);
+-- The id clients know this host by.
+CREATE TABLE IF NOT EXISTS host_identity (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL);
 -- Tickets whose worktree removal waits for an agent's turn to end. Only rows here are swept.
 CREATE TABLE IF NOT EXISTS pending_worktree_removals (ticket_id TEXT PRIMARY KEY REFERENCES tickets(id), marked_at INTEGER NOT NULL);
 PRAGMA user_version = 2;

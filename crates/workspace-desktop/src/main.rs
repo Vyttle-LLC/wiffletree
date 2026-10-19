@@ -8,7 +8,6 @@ mod conversation;
 mod conversation_header;
 mod creation;
 mod crew_panel;
-mod data_dir;
 mod events_view;
 mod file_links;
 mod files_view;
@@ -16,7 +15,6 @@ mod history_sheet;
 mod inbox;
 mod inspector;
 mod leftovers;
-mod login_env;
 mod memory_view;
 mod models;
 mod models_view;
@@ -996,7 +994,7 @@ fn show_about() {
 
 fn main() -> anyhow::Result<()> {
     // SAFETY: nothing else has started yet, so no other thread can read the environment.
-    unsafe { login_env::adopt() };
+    unsafe { workspace_host::login_env::adopt() };
     let mut args = std::env::args().skip(1);
     let mut home = None;
     let mut repository = None;
@@ -1027,7 +1025,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let home = home.unwrap_or_else(|| {
-        data_dir::default_directory(&PathBuf::from(
+        workspace_core::data_dir::default_directory(&PathBuf::from(
             std::env::var_os("HOME").expect("macOS home directory"),
         ))
     });

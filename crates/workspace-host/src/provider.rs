@@ -4,7 +4,7 @@ mod constrained;
 mod output;
 use crate::compaction::CompactionRecord;
 use crate::processes::{self, Sighting, Watch};
-use crate::runtime::{LowPriority as _, OwnDescriptors as _};
+use crate::runtime::LowPriority as _;
 use crate::stream::{ClaudeSteps, CodexSteps, StepUpdate};
 use crate::*;
 pub use output::{MAX_BYTES_AFTER_EXIT, READ_LIMIT};
@@ -19,6 +19,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use workspace_core::OwnDescriptors as _;
 
 #[derive(Clone, Debug)]
 pub enum ProviderEvent {
@@ -132,6 +133,12 @@ pub const CORE: [(&str, &str); 5] = [
     ),
     ("the PR keeper", include_str!("../skills/core/keeper.md")),
 ];
+/// The core's parts with their names and versions, for clients.
+pub fn core_instructions() -> Vec<workspace_core::skills::CoreInstructions> {
+    CORE.iter()
+        .map(|(audience, text)| workspace_core::skills::CoreInstructions::new(audience, text))
+        .collect()
+}
 /// The part of a role's instructions the app depends on, which no skill text changes.
 fn core(role: Role) -> &'static str {
     let part = match role {
