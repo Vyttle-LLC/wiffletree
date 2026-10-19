@@ -38,8 +38,11 @@ impl Fixture {
             .arg(data.path())
             .arg("--child")
             .env("SHELL", &login)
-            // No provider CLI is found, so detection at start is quick.
+            // Neither provider is found, whatever this machine has signed in, and detection at
+            // start is quick.
             .env("PATH", "/usr/bin:/bin")
+            .env("WORKSPACE_CLAUDE_BIN", "/nonexistent/claude")
+            .env("WORKSPACE_CODEX_BIN", "/nonexistent/codex")
             .stderr(std::process::Stdio::null());
         let host = ChildHost::start_command(command).unwrap();
         let socket = data.path().join("host.sock");
@@ -314,14 +317,23 @@ fn the_child_hosts_credential_is_in_no_environment_and_no_file() {
 
 #[test]
 fn a_subscription_streams_events_and_resumes_from_its_cursor() {
-    let fixture = Fixture::new(|_| {});
+    // Renaming changes state without starting an agent, so no provider is needed.
+    let project = std::cell::OnceCell::new();
+    let fixture = Fixture::new(|host| {
+        project
+            .set(host.create_project("Events").unwrap().id)
+            .unwrap();
+    });
+    let project = project.into_inner().unwrap();
+    let rename = |name: &str| Command::RenameProject {
+        project_id: project.clone(),
+        name: name.into(),
+    };
     let mut subscriber = fixture.welcomed(None);
     let subscribed: Subscribed =
         serde_json::from_value(subscriber.result(Command::Subscribe { after: None })).unwrap();
     let mut other = fixture.welcomed(None);
-    other.result(Command::CreateProject {
-        name: "First".into(),
-    });
+    other.result(rename("First"));
     let event = std::iter::repeat_with(|| subscriber.event())
         .find(|event| event.kind == EventKind::State)
         .unwrap();
@@ -330,7 +342,7 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
     drop(subscriber);
     // Changes while the client is away are replayed, in order, after its cursor.
     for name in ["Second", "Third"] {
-        other.result(Command::CreateProject { name: name.into() });
+        other.result(rename(name));
     }
     // A reply comes before its change's events; the next command runs after they are emitted.
     other.result(Command::Snapshot);
@@ -350,9 +362,7 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
     let states = missed.iter().filter(|e| e.kind == EventKind::State).count();
     assert_eq!(states, 2, "{missed:?}");
     // Then live events.
-    other.result(Command::CreateProject {
-        name: "Fourth".into(),
-    });
+    other.result(rename("Fourth"));
     assert!(back.event().cursor.seq > resumed.cursor.seq);
     // A cursor from before a restart gets resync first.
     let mut stale = fixture.welcomed(None);
