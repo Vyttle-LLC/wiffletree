@@ -110,12 +110,13 @@ If the socket closes or the host does not answer, the desktop keeps the last sna
 - Quitting with no agent working asks nothing and leaves the host running (7).
 - While the app is in the background, its menu bar icon is always shown, quiet when idle and with a count while agents work; its menu's Quit Wiffletree quits the app and leaves the host running, and a staged update installs on that quit and on Stop agents and quit (7).
 - New turns are not held while an update's restart waits (4); Restart now covers a host that stays busy.
+- The client credential stays in the login keychain (2): another program asking for it gets a dialog that asks for the login keychain password, and that is accepted. The data-protection keychain, which would refuse silently, is a possible later hardening; it needs a Developer ID provisioning profile and the host shipped as a bundle.
 
 ## Risks
 
 - macOS may show a "Background item added" notification for the job and list it in System Settings › Login Items, where the human can turn it off. The app then says the host could not start and how to allow it.
 - Copying the host binary out of the bundle keeps its code signature, but Gatekeeper's treatment of the copy must be checked on a notarized build before release.
-- **The login Keychain item is dialog-guarded, not refusal-guarded** (2, observed by task 0.1). Another program reading it makes macOS ask the human for the login keychain password; a human who types it, or clicks Always Allow, hands the credential to that program. A silent refusal needs the data-protection keychain, a restricted entitlement and a Developer ID provisioning profile with the host shipped as a bundle, which is not yet observed on a signed build.
+- **The login Keychain item is dialog-guarded, not refusal-guarded** (2, settled in 10). Another program reading it makes macOS ask for the login keychain password, which is accepted. What remains is that the human types the password, or clicks Always Allow, in a dialog an agent caused, handing the credential to that program. Moving to the data-protection keychain would remove the dialog, at the cost of a Developer ID provisioning profile and a bundle layout for the host.
 - Agents are same-user peers of `host.sock`. The client credential (2) guards the human-only commands; everything else an agent could do through the socket it can already do as the user.
 - Every reply now crosses a socket. The local transport target in the PRD (low overhead, bounded buffering) is to be measured with the existing host benchmark, not assumed.
 
