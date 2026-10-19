@@ -375,7 +375,7 @@ impl Sidebar {
             return;
         };
         match staged.install_after_exit(true) {
-            Ok(()) => cx.quit(),
+            Ok(()) => crate::background::end_app(cx),
             Err(error) => {
                 cx.global_mut::<PendingUpdate>().0 = Some(staged);
                 toast_error(format!("{error:#}"), window, cx);

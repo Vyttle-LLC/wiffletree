@@ -783,21 +783,23 @@ impl Workspace {
                     crate::sidebar::restart_host(view.bridge.clone(), when, window, cx);
                 }))
         };
+        // Restart now stays, for a host that keeps busy while it waits.
+        let now = restart("restart-host-now", "Restart now", RestartWhen::Now);
         let actions = if !mismatch.restarts {
             None
         } else if self.waiting_for_host {
-            Some(div().child(hint("The host restarts once no agent is working.", p)))
-        } else {
             Some(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
-                    .child(restart("restart-host-now", "Restart now", RestartWhen::Now))
-                    .child(
-                        restart("wait-for-host", "Wait until they finish", RestartWhen::Idle)
-                            .primary(),
-                    ),
+                    .child(hint("The host restarts once no agent is working.", p))
+                    .child(now),
             )
+        } else {
+            Some(div().flex().gap_2().child(now).child(
+                restart("wait-for-host", "Wait until they finish", RestartWhen::Idle).primary(),
+            ))
         };
         div()
             .size_full()

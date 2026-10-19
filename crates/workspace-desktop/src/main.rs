@@ -20,6 +20,7 @@ mod memory_view;
 mod menu_bar;
 mod models;
 mod models_view;
+mod native_quit;
 mod palette;
 mod preferences;
 mod processes_view;

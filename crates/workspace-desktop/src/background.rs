@@ -4,7 +4,7 @@
 //! shows how many work. Only Quit Wiffletree from the icon, or Stop agents and quit, ends the
 //! app, and only then does a staged update install. A child host stops with the app, so the app
 //! simply quits.
-use crate::{bridge::Bridge, menu_bar, update};
+use crate::{bridge::Bridge, menu_bar, native_quit, update};
 use gpui::*;
 use std::{rc::Rc, time::Duration};
 use workspace_core::{Snapshot, Status, ask};
@@ -132,6 +132,15 @@ pub(crate) fn install(bridge: Bridge, open_window: impl Fn(&mut App) + 'static, 
         choices,
     });
     cx.on_action(|_: &crate::Quit, cx| quit(cx));
+    // The Dock's Quit, and other quits from macOS, decide as ⌘Q does.
+    let (requests, requested) = async_channel::unbounded();
+    native_quit::intercept(requests);
+    cx.spawn(async move |cx| {
+        while requested.recv().await.is_ok() {
+            cx.update(quit);
+        }
+    })
+    .detach();
     // Quitting exits the process without dropping the bridge, so a child host is stopped here,
     // with its running turns, before it could outlive the app.
     cx.on_app_quit(|cx| {
@@ -253,7 +262,7 @@ fn come_forward(cx: &mut App) {
 /// when it is out of reach or refuses the app, since then it cannot stop them.
 fn exit(stop_agents: bool, cx: &mut App) {
     if !stop_agents {
-        return cx.quit();
+        return end_app(cx);
     }
     let bridge = cx.global::<Lifecycle>().bridge.clone();
     let stopped =
@@ -262,9 +271,15 @@ fn exit(stop_agents: bool, cx: &mut App) {
         if let Ok(Err(error)) = stopped.recv().await {
             eprintln!("Stop agents and quit: {error}");
         }
-        cx.update(|cx| cx.quit());
+        cx.update(end_app);
     })
     .detach();
+}
+
+/// Ends the app process, which no quit decision holds back.
+pub(crate) fn end_app(cx: &mut App) {
+    native_quit::allow();
+    cx.quit();
 }
 
 /// Shows on the menu bar icon, while there is one, how many agents work.
