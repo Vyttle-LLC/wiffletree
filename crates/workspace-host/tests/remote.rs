@@ -16,16 +16,27 @@ use workspace_core::{
 };
 
 #[test]
-fn off_by_default_on_binds_47821_and_off_closes_a_live_connection() {
+fn turning_remote_access_on_binds_47821() {
+    // Wiffletree's own remote access, or another program, may hold the port on this Mac.
+    if TcpListener::bind((Ipv4Addr::UNSPECIFIED, REMOTE_PORT)).is_err() {
+        eprintln!("Skipped: port {REMOTE_PORT} is taken by another process on this machine");
+        return;
+    }
     let studio = Studio::start(REMOTE_PORT);
-    let state = studio.state();
-    assert!(!state.enabled && state.port.is_none(), "{state:?}");
-    assert!(studio.advertised.lock().unwrap().is_none());
     assert_eq!(studio.on(), REMOTE_PORT);
     assert!(
         TcpListener::bind((Ipv4Addr::UNSPECIFIED, REMOTE_PORT)).is_err(),
         "the host holds 47821"
     );
+}
+
+#[test]
+fn off_by_default_binds_nothing_and_off_closes_a_live_connection() {
+    let studio = Studio::start(0);
+    let state = studio.state();
+    assert!(!state.enabled && state.port.is_none(), "{state:?}");
+    assert!(studio.advertised.lock().unwrap().is_none());
+    let port = studio.on();
     let device = KeyPair::generate().unwrap();
     studio.pair(&device, "MacBook");
     let mut client = studio.connect(&device).unwrap();
@@ -37,13 +48,11 @@ fn off_by_default_on_binds_47821_and_off_closes_a_live_connection() {
 
     assert!(client.closed(), "the live connection closes at once");
     assert!(
-        remote_client::connect(
-            &format!("127.0.0.1:{REMOTE_PORT}"),
-            &studio.key.public_key(),
-            &device
-        )
-        .is_err()
+        TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok(),
+        "the port is released"
     );
+    let address = format!("127.0.0.1:{port}");
+    assert!(remote_client::connect(&address, &studio.key.public_key(), &device).is_err());
     assert_eq!(studio.devices().len(), 1, "the device stays paired");
     assert!(studio.advertised.lock().unwrap().is_none());
     assert!(
@@ -334,8 +343,16 @@ fn an_unknown_device_is_unpaired_and_a_changed_host_key_is_refused_before_any_re
         device_state.last_connected_at, None,
         "the host never got as far as the challenge"
     );
-    studio.connect(&device).unwrap();
+    let connected = studio.connect(&device).unwrap();
+    assert_eq!(
+        connected.socket.level,
+        AccessLevel::Control,
+        "the verdict names the level"
+    );
     assert!(studio.devices()[0].last_connected_at.is_some());
+    studio.level(&device, AccessLevel::ViewOnly);
+    let lowered = studio.connect(&device).unwrap();
+    assert_eq!(lowered.socket.level, AccessLevel::ViewOnly);
 }
 
 #[test]

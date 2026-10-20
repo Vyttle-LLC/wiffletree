@@ -20,6 +20,15 @@ The standard-input mode is for scripts such as `scripts/test_communications.py`:
 - SIGTERM, SIGINT and SIGHUP run the host's shutdown, which stops running turns as a quit does, then remove the socket.
 - A launchd host runs from a versioned copy of its binary, `<data folder>/host/<version>/workspace-host`, which an update of the app does not replace, and starts its agents' helpers from that same copy. Started from a copy, it removes the other version folders under `host/`. A child host runs from the app bundle (or `target/`) and has no copy.
 
+### Remote devices
+
+While remote access is on, paired devices reach the host over TLS 1.3 on TCP port 47821, with one JSON message per WebSocket text frame in place of a line. `docs/remote-protocol.md` will describe pairing and pinning in full; in short:
+
+- `/pair` runs a pairing method while pairing mode is open: `PairStart`, then `PairReply` and `PairConfirm` (`workspace_core::remote`).
+- `/v1` opens with the host's `Challenge`. The device answers with `ChallengeAnswer`, its id and a signature, and the host replies with `ChallengeVerdict`: `{"accepted": {"level": "control"}}` or `"view_only"`, so the client knows what it may do before it sends anything, or `"unpaired"`, after which the host closes the connection with the reason `unpaired`. `Hello` and the rest of this page follow an accepted verdict.
+- Changing a device's level or removing it closes its connections, so it reconnects and reads its new level from the verdict, or is refused.
+- A device's commands are checked against its level, never against the client credential.
+
 ## Framing
 
 Every message is one line of JSON ended by `\n`. A line from the client, `Hello` or a request, is at most 256 KiB; a longer one closes the connection. Lines from the host have no such bound: a `read_file` response carries up to 50 MB as base64, about 67 MiB, so a client accepts host lines of at least 70 MiB. A connection carries:
