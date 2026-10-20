@@ -71,6 +71,32 @@ impl RemoteLaunch {
     fn set(&self, change: impl FnOnce(&mut RemoteState)) {
         change(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
     }
+    fn try_address(&mut self, address: &str) -> Result<(UnixStream, Option<String>), Tried> {
+        match remote_client::connect(address, &self.host_key, &self.device) {
+            Ok(remote) => {
+                self.set(|state| {
+                    state.level = Some(remote.level);
+                    state.turnaway = None;
+                    state.address = Some(address.into());
+                });
+                // The address that answered is tried first next time.
+                self.addresses.retain(|a| a != address);
+                self.addresses.insert(0, address.into());
+                relay(remote.socket).map_err(Tried::Failed)
+            }
+            Err(error @ (RemoteError::KeyChanged | RemoteError::Unpaired)) => {
+                let turnaway = match error {
+                    RemoteError::KeyChanged => Turnaway::KeyChanged,
+                    _ => Turnaway::Unpaired,
+                };
+                self.set(|state| state.turnaway = Some(turnaway));
+                Err(Tried::TurnedAway(io::Error::other(error.to_string())))
+            }
+            Err(error) => Err(Tried::Failed(io::Error::other(format!(
+                "{address}: {error}"
+            )))),
+        }
+    }
 }
 impl Launch for RemoteLaunch {
     fn endpoint(&mut self, _: &AtomicBool) -> io::Result<Endpoint> {
@@ -78,43 +104,43 @@ impl Launch for RemoteLaunch {
             "A paired host is reached over the network",
         ))
     }
+    /// Tries the addresses the host last answered at, newest first, and only then browses for
+    /// it, so a host reached by name, as over Tailscale, comes back without Bonjour.
     fn connect(&mut self, stopped: &AtomicBool) -> io::Result<(UnixStream, Option<String>)> {
-        let mut tried = self.addresses.clone();
-        for found in (self.discover)() {
-            if !tried.contains(&found) {
-                tried.push(found);
-            }
-        }
         let mut last = io::Error::other("No address is known for this host");
-        for address in tried {
+        let mut tried = vec![];
+        for browsed in [false, true] {
             if stopped.load(Ordering::Relaxed) {
                 break;
             }
-            match remote_client::connect(&address, &self.host_key, &self.device) {
-                Ok(remote) => {
-                    self.set(|state| {
-                        state.level = Some(remote.level);
-                        state.turnaway = None;
-                        state.address = Some(address.clone());
-                    });
-                    // The address that answered is tried first next time.
-                    self.addresses.retain(|a| *a != address);
-                    self.addresses.insert(0, address);
-                    return relay(remote.socket);
+            let addresses = match browsed {
+                false => self.addresses.clone(),
+                true => (self.discover)(),
+            };
+            for address in addresses {
+                if stopped.load(Ordering::Relaxed) {
+                    break;
                 }
-                Err(error @ (RemoteError::KeyChanged | RemoteError::Unpaired)) => {
-                    let turnaway = match error {
-                        RemoteError::KeyChanged => Turnaway::KeyChanged,
-                        _ => Turnaway::Unpaired,
-                    };
-                    self.set(|state| state.turnaway = Some(turnaway));
-                    return Err(io::Error::other(error.to_string()));
+                if tried.contains(&address) {
+                    continue;
                 }
-                Err(error) => last = io::Error::other(format!("{address}: {error}")),
+                tried.push(address.clone());
+                match self.try_address(&address) {
+                    Ok(connection) => return Ok(connection),
+                    Err(Tried::TurnedAway(error)) => return Err(error),
+                    Err(Tried::Failed(error)) => last = error,
+                }
             }
         }
         Err(last)
     }
+}
+
+/// How one address failed: the host turned the device away, which ends the try, or it did not
+/// answer, and the next address is tried.
+enum Tried {
+    TurnedAway(io::Error),
+    Failed(io::Error),
 }
 
 /// Relays `socket` to a new socket pair on a thread of its own, and returns the client's end.

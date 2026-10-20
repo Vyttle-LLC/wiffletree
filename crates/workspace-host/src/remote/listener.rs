@@ -104,7 +104,7 @@ fn tls_config(identity: &Identity) -> Result<ServerConfig> {
 }
 
 /// The WebSocket limits: requests are bounded as on the socket, replies are not.
-pub(super) fn websocket_config() -> WebSocketConfig {
+fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(MAX_LINE_BYTES))
         .max_frame_size(Some(MAX_LINE_BYTES))

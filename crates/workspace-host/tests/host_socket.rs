@@ -238,7 +238,8 @@ fn the_handshake_chooses_the_newest_common_protocol() {
             "folders",
             "restart-when-idle",
             "uploads",
-            "attention"
+            "attention",
+            "resubscribe"
         ]
     );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));
@@ -599,15 +600,23 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
         kinds: None,
     });
     assert_eq!(stale.event().kind, EventKind::Resync);
-    // A second subscription on one connection is refused.
-    let twice = stale.request(
+    // Subscribing again changes the kinds in place, with no cursor; naming one is refused.
+    let again = stale.request(
         PROTOCOL_VERSION,
         Command::Subscribe {
             after: None,
             kinds: None,
         },
     );
-    assert!(twice.error.unwrap().contains("already subscribed"));
+    assert_eq!(again.error, None);
+    let resumed = stale.request(
+        PROTOCOL_VERSION,
+        Command::Subscribe {
+            after: Some(read),
+            kinds: None,
+        },
+    );
+    assert!(resumed.error.unwrap().contains("already subscribed"));
 }
 
 #[test]

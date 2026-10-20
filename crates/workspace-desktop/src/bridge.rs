@@ -233,6 +233,10 @@ impl Bridge {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
+    /// The network's share of the latest reply's round trip, in milliseconds.
+    pub(crate) fn network_ms(&self) -> Option<u64> {
+        Some(self.client.as_ref().ok()?.timing()?.network_ms)
+    }
     /// Wakes when the host's count of things that need the human changed.
     pub(crate) fn attention_changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.attention)

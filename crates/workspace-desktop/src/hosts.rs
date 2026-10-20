@@ -69,6 +69,8 @@ pub(crate) struct RemoteHost {
     pub link: Link,
     /// Its count of things that need the human, once it has sent one.
     pub needs_you: Option<usize>,
+    /// The network's share of its latest reply's round trip, in milliseconds.
+    pub network_ms: Option<u64>,
 }
 
 /// One row of the host switcher.
@@ -79,6 +81,8 @@ pub(crate) struct SwitcherRow {
     pub detail: String,
     pub needs_you: usize,
     pub selected: bool,
+    /// For a connected host, its latest network delay.
+    pub tooltip: Option<String>,
 }
 
 /// This Mac, then each paired host, as the switcher lists them.
@@ -99,6 +103,7 @@ pub(crate) fn switcher_rows(
         detail: format!("Local workspace · {projects}"),
         needs_you: local_needs_you,
         selected: *selected == HostChoice::ThisMac,
+        tooltip: None,
     };
     let remotes = remotes.iter().map(|host| {
         let choice = HostChoice::Remote(host.paired.id.clone());
@@ -108,6 +113,9 @@ pub(crate) fn switcher_rows(
             name: host.paired.name.clone(),
             detail: link_detail(host.link, host.paired.last_seen, now),
             needs_you: host.needs_you.unwrap_or(0),
+            tooltip: (host.network_ms)
+                .filter(|_| matches!(host.link, Link::Connected(_)))
+                .map(|ms| format!("Network delay {ms} ms")),
         }
     });
     std::iter::once(this_mac).chain(remotes).collect()
@@ -426,6 +434,7 @@ impl Hosts {
                 paired: remote.paired.clone(),
                 link: Link::of(&remote.bridge),
                 needs_you: remote.bridge.needs_you(),
+                network_ms: remote.bridge.network_ms(),
             })
             .collect()
     }
@@ -601,6 +610,7 @@ mod tests {
             paired: paired(id, name, Some(-120 * MINUTE)),
             link,
             needs_you,
+            network_ms: None,
         }
     }
 
@@ -638,6 +648,22 @@ mod tests {
             ]
         );
         assert_eq!(rows[1].choice, selected);
+    }
+
+    #[test]
+    fn a_connected_hosts_row_shows_its_network_delay_in_its_tooltip() {
+        let host = |link| RemoteHost {
+            network_ms: Some(228),
+            ..connection("studio", "Studio Mac", link, None)
+        };
+        let tooltip = |link| {
+            switcher_rows(0, 0, &[host(link)], &HostChoice::ThisMac, 0)[1]
+                .tooltip
+                .clone()
+        };
+        let connected = Link::Connected(AccessLevel::Control);
+        assert_eq!(tooltip(connected).as_deref(), Some("Network delay 228 ms"));
+        assert_eq!(tooltip(Link::Reconnecting), None);
     }
 
     #[test]

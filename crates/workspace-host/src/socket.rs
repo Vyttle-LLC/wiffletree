@@ -23,13 +23,14 @@ use workspace_core::*;
 const MAX_CONNECTIONS: usize = 64;
 /// Requests one connection may have waiting for a reply.
 const MAX_IN_FLIGHT: usize = 64;
-const CAPABILITIES: [&str; 6] = [
+const CAPABILITIES: [&str; 7] = [
     capability::EVENTS,
     capability::FILES,
     capability::FOLDERS,
     capability::RESTART_WHEN_IDLE,
     capability::UPLOADS,
     capability::ATTENTION,
+    capability::RESUBSCRIBE,
 ];
 /// How long a stopping listener waits for the replies still being written, such as the answer
 /// to the `StopAgentsAndQuit` that stopped the host.
@@ -181,6 +182,9 @@ pub(crate) trait Outbox: Send + Sync {
     fn send(&self, message: Vec<u8>) -> Result<()>;
 }
 
+/// The event kinds a subscription sends; every kind when `None`.
+type Kinds = Arc<Mutex<Option<Vec<EventKindName>>>>;
+
 /// The host protocol over any transport: `Hello` first, then requests answered in any order
 /// and, after `Subscribe`, events.
 pub(crate) struct Session {
@@ -192,8 +196,9 @@ pub(crate) struct Session {
     /// The listener's count of replies being waited for or written, over every connection.
     replying: Arc<AtomicUsize>,
     stage: Stage,
-    /// The subscription's queue, closed when the session ends.
-    events: Option<async_channel::Receiver<Event>>,
+    /// The subscription's queue, closed when the session ends, and the kinds it sends, which a
+    /// later `Subscribe` changes.
+    events: Option<(async_channel::Receiver<Event>, Kinds)>,
     /// When the message being handled was read, for the `host_ms` of its reply.
     read_at: Instant,
 }
@@ -367,11 +372,7 @@ impl Session {
             unreachable!("only a welcomed session subscribes")
         };
         if std::mem::replace(subscribed, true) {
-            return self.reply(
-                version,
-                id,
-                Err("This connection is already subscribed".into()),
-            );
+            return self.subscribe_again(version, id, after, kinds);
         }
         let mut subscription = self.requests.subscribe(after);
         // A subscriber with no count yet, or one told to start over, gets the current one.
@@ -389,7 +390,8 @@ impl Session {
                 kind: EventKind::Attention { count },
             });
         }
-        self.events = Some(subscription.events.clone());
+        let wanted = Kinds::new(Mutex::new(kinds));
+        self.events = Some((subscription.events.clone(), wanted.clone()));
         let cursor = subscription.cursor.clone();
         self.reply(
             version,
@@ -397,9 +399,12 @@ impl Session {
             Ok(serde_json::to_value(Subscribed { cursor })?),
         )?;
         let outbox = self.outbox.clone();
-        let wanted = move |event: &Event| match (&kinds, event.kind.name()) {
-            (Some(kinds), Some(name)) => kinds.contains(&name),
-            _ => true,
+        let wanted = move |event: &Event| {
+            let kinds = wanted.lock().unwrap_or_else(|e| e.into_inner());
+            match (kinds.as_ref(), event.kind.name()) {
+                (Some(kinds), Some(name)) => kinds.contains(&name),
+                _ => true,
+            }
         };
         std::thread::spawn(move || {
             let live = std::iter::from_fn(|| subscription.events.recv_blocking().ok());
@@ -416,6 +421,26 @@ impl Session {
             }
         });
         Ok(())
+    }
+    /// Changes a live subscription's kinds, answered with `null`: events go on from where they
+    /// were, under the new kinds from the next one, with no new cursor and none missed.
+    fn subscribe_again(
+        &self,
+        version: u32,
+        id: String,
+        after: Option<&Cursor>,
+        kinds: Option<Vec<EventKindName>>,
+    ) -> Result<()> {
+        let Some((_, wanted)) = &self.events else {
+            unreachable!("a subscribed session keeps its kinds")
+        };
+        if after.is_some() {
+            return self.reply(version, id, Err(
+                "This connection is already subscribed; send Subscribe without after to change its kinds".into(),
+            ));
+        }
+        *wanted.lock().unwrap_or_else(|e| e.into_inner()) = kinds;
+        self.reply(version, id, Ok(serde_json::Value::Null))
     }
     fn protocol(&self) -> u32 {
         match self.stage {
@@ -444,7 +469,7 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(events) = self.events.take() {
+        if let Some((events, _)) = self.events.take() {
             events.close();
         }
     }
@@ -490,7 +515,7 @@ fn serve_connection(
     }
 }
 
-pub(crate) fn response(
+fn response(
     version: u32,
     id: String,
     result: std::result::Result<serde_json::Value, String>,
