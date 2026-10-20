@@ -843,3 +843,55 @@ fn a_padded_name_over_100_characters_pairs_and_is_kept_trimmed() {
     assert_eq!(paired.name.chars().count(), 100);
     assert!(!paired.name.starts_with(' '));
 }
+
+#[test]
+fn a_message_with_uploads_sent_again_after_a_restart_is_answered_from_the_store() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    client
+        .call(Command::UploadAttachment {
+            upload_id: "u1".into(),
+            name: "shot.png".into(),
+            offset: 0,
+            bytes: base64(b"png"),
+        })
+        .unwrap();
+    let message = Command::Send {
+        id: "kept".into(),
+        sender: None,
+        recipient: studio.coordinator.clone(),
+        body: "The screenshot".into(),
+        attachments: vec![],
+        uploads: vec!["u1".into()],
+    };
+    client.call(message.clone()).unwrap();
+    drop(client);
+    studio.service.shutdown();
+    let Studio {
+        data, coordinator, ..
+    } = studio;
+    let restarted = Studio::from(data, 0, coordinator);
+    restarted.on();
+    let mut client = restarted.connect(&device).unwrap();
+
+    let again: Message = serde_json::from_value(client.call(message).unwrap()).unwrap();
+
+    assert_eq!(again.id, "kept");
+    assert_eq!(again.attachments[0].name(), "shot.png");
+    let messages = restarted
+        .host(Command::Messages {
+            session_id: restarted.coordinator.clone(),
+            before: None,
+            limit: 50,
+        })
+        .unwrap();
+    let stored = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["id"] == "kept");
+    assert_eq!(stored.count(), 1);
+}

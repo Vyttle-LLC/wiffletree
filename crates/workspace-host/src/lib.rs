@@ -1451,8 +1451,22 @@ impl Host {
                 attachments,
                 uploads,
             } => {
-                let mut files = attachments;
-                files.extend(self.upload_files(&uploads)?);
+                // A message sent again, its reply lost, is answered from the store even once
+                // its uploads are gone: the host restarted, or an hour passed.
+                let files = match self.message(&id) {
+                    Ok(stored) if !uploads.is_empty() => {
+                        ensure!(
+                            stored.attachments.len() == attachments.len() + uploads.len(),
+                            "Message ID reused with a different payload"
+                        );
+                        (stored.attachments.into_iter()).map(|a| a.path).collect()
+                    }
+                    _ => {
+                        let mut files = attachments;
+                        files.extend(self.upload_files(&uploads)?);
+                        files
+                    }
+                };
                 let message =
                     self.send_with_files(&id, sender.as_deref(), &recipient, &body, &files)?;
                 self.uploads_used(&uploads, now());
