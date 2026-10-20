@@ -144,6 +144,8 @@ fn probe(dir: &Path, seconds: u64) -> Result<()> {
             EventKind::Progress => 2,
             EventKind::Usage => 3,
             EventKind::Resync => 4,
+            // The count of things needing the human is not a load the benchmark measures.
+            EventKind::Attention { .. } => return,
         };
         counted.lock().unwrap()[slot] += 1;
     });
