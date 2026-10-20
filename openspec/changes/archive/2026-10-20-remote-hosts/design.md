@@ -60,7 +60,7 @@ While its setting is on, the host advertises `_wiffletree._tcp` through the syst
 The app's `Info.plist` gains `NSLocalNetworkUsageDescription` and `NSBonjourServices` with `_wiffletree._tcp`.
 
 ### 7. One connection per paired host
-The client keeps a connection to every paired host it can reach while it runs. For the selected host it subscribes to every event. For the others it subscribes only to a new `attention` event, which carries the host's count of things that need the human: its attention items plus its workspace notes, as the Inbox rail counts them today (`sidebar.rs::needs_you` without the project filter), so the switcher shows counts for every host without loading their snapshots. `Subscribe` gains an optional list of event kinds for this.
+The client keeps a connection to every paired host it can reach while it runs. For the selected host it subscribes to every event. For the others it subscribes only to a new `attention` event, which carries the host's count of things that need the human: its attention items plus its workspace notes, as the Inbox rail counts them today (`sidebar.rs::needs_you` without the project filter), so the switcher shows counts for every host without loading their snapshots. `Subscribe` gains an optional list of event kinds for this. Switching hosts changes two connections' kinds; a host that lists the `resubscribe` capability takes `Subscribe` again on a subscribed connection and changes them in place, with no new cursor and no gap, so switching never shows "Reconnecting…" or fails a change in flight. With an older host, the client reconnects.
 
 Switching hosts never stops anything; each host keeps running on its own, and This Mac keeps its own projects.
 
