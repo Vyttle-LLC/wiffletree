@@ -499,6 +499,38 @@ mod tests {
     }
 
     #[test]
+    fn a_device_neither_lists_nor_resolves_what_lies_outside_the_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("elsewhere")).unwrap();
+        let deny = DenyList::new(Path::new("/nonexistent"), None, None);
+        let roots = Roots::new(
+            [root.path().to_owned()],
+            vec![],
+            data.path(),
+            Path::new("/nonexistent"),
+            deny,
+        )
+        .unwrap();
+        let names = |reader| -> Vec<String> {
+            let listing = list_folder(&roots, root.path(), reader).unwrap();
+            listing.folders.into_iter().map(|f| f.name).collect()
+        };
+        assert_eq!(names(Reader::Host), ["elsewhere", "src"]);
+        assert_eq!(names(Reader::Device(AccessLevel::Control)), ["src"]);
+        let references = ["elsewhere/secret.txt".to_string()];
+        let bases = [root.path().to_owned()];
+        assert!(resolve_paths(&references, &bases, None)[0].is_some());
+        assert_eq!(
+            resolve_paths_within(&roots, &references, &bases, None),
+            [None]
+        );
+    }
+
+    #[test]
     fn references_resolve_under_the_first_base_holding_them() {
         let worktree = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();

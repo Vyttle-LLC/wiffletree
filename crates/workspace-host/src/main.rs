@@ -158,6 +158,7 @@ fn serve(args: &[String]) -> Result<()> {
                 let trusted: Vec<_> = trusted.iter().map(|p| p.as_path()).collect();
                 workspace_host::keychain::host_key(&data, &trusted)
             }),
+            #[cfg(target_os = "macos")]
             advertiser: Box::new(workspace_host::remote::Bonjour::default()),
             binary: binary.clone(),
             ..Default::default()
