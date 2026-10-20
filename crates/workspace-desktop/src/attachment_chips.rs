@@ -2,37 +2,119 @@
 //! sent with a message.
 use super::*;
 use base64::Engine as _;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use ui::icon;
 
 const THUMBNAIL: f32 = 56.;
 
-/// Sent messages' images, each read once from the host's attachment store. The app never reads
-/// the host's files itself.
-pub(super) struct HostImages {
-    bridge: Bridge,
-    /// `None` while a read is on its way.
-    read: HashMap<PathBuf, Option<Result<Arc<Image>, SharedString>>>,
+/// Decoded images kept at once; showing another drops the one shown longest ago.
+const IMAGE_LIMIT: usize = 48;
+/// How long a failed read shows its error before the next draw asks the host again.
+const RETRY_AFTER: Duration = Duration::from_secs(15);
+
+/// Which host's file an image is: `None` for This Mac's host.
+type ImageKey = (Option<String>, PathBuf);
+
+/// What is known of one image.
+enum Held<T> {
+    Reading,
+    Read { image: T, shown: u64 },
+    Failed { error: SharedString, at: Instant },
 }
-impl Global for HostImages {}
-impl HostImages {
-    pub(super) fn new(bridge: Bridge) -> Self {
+
+/// What drawing an image finds.
+#[derive(Debug, PartialEq)]
+enum Found<T> {
+    Image(T),
+    Failed(SharedString),
+    Reading,
+    /// Not held, or failed long enough ago: read it.
+    Read,
+}
+
+/// Images read from their host, each read once while it is held. A failed read is asked for
+/// again after `RETRY_AFTER`, and at most `IMAGE_LIMIT` decoded images are held.
+struct ImageCache<T> {
+    held: HashMap<ImageKey, Held<T>>,
+    /// Counts draws, so the image shown longest ago is the first dropped.
+    draws: u64,
+}
+impl<T: Clone> ImageCache<T> {
+    fn new() -> Self {
         Self {
-            bridge,
-            read: HashMap::new(),
+            held: HashMap::new(),
+            draws: 0,
         }
+    }
+    fn find(&mut self, key: &ImageKey, now: Instant) -> Found<T> {
+        self.draws += 1;
+        match self.held.get_mut(key) {
+            Some(Held::Read { image, shown }) => {
+                *shown = self.draws;
+                Found::Image(image.clone())
+            }
+            Some(Held::Failed { at, .. }) if now.duration_since(*at) >= RETRY_AFTER => Found::Read,
+            Some(Held::Failed { error, .. }) => Found::Failed(error.clone()),
+            Some(Held::Reading) => Found::Reading,
+            None => Found::Read,
+        }
+    }
+    fn reading(&mut self, key: ImageKey) {
+        self.held.insert(key, Held::Reading);
+    }
+    /// Holds what the read of `key` brought; returns the images dropped to stay in bounds.
+    fn read(&mut self, key: ImageKey, read: Result<T, SharedString>, now: Instant) -> Vec<T> {
+        let held = match read {
+            Ok(image) => Held::Read {
+                image,
+                shown: self.draws,
+            },
+            Err(error) => Held::Failed { error, at: now },
+        };
+        self.held.insert(key, held);
+        let mut images: Vec<_> = (self.held.iter())
+            .filter_map(|(key, held)| match held {
+                Held::Read { shown, .. } => Some((*shown, key.clone())),
+                _ => None,
+            })
+            .collect();
+        let over = images.len().saturating_sub(IMAGE_LIMIT);
+        images.sort();
+        (images.into_iter().take(over))
+            .filter_map(|(_, key)| match self.held.remove(&key) {
+                Some(Held::Read { image, .. }) => Some(image),
+                _ => None,
+            })
+            .collect()
     }
 }
 
-/// A sent attachment's image, which the host reads; loading until its bytes arrive.
+/// Sent messages' images, read from the attachment store of the host that holds them. The app
+/// never reads a host's files itself.
+pub(super) struct HostImages(ImageCache<Arc<Image>>);
+impl Global for HostImages {}
+impl HostImages {
+    pub(super) fn new() -> Self {
+        Self(ImageCache::new())
+    }
+}
+
+/// A sent attachment's image, which the selected host reads; loading until its bytes arrive.
 fn host_image(path: PathBuf, format: workspace_core::ImageFormat) -> ImageSource {
     ImageSource::from(move |window: &mut Window, cx: &mut App| {
-        match cx.try_global::<HostImages>()?.read.get(&path) {
-            Some(Some(Ok(image))) => image.clone().use_render_image(window, cx).map(Ok),
-            Some(Some(Err(error))) => Some(Err(ImageCacheError::Asset(error.clone()))),
-            Some(None) => None,
-            None => {
-                read_image(path.clone(), format, cx);
+        let bridge = cx.try_global::<Hosts>()?.bridge();
+        let key = (bridge.remote().map(|r| r.id.clone()), path.clone());
+        cx.try_global::<HostImages>()?;
+        match cx.global_mut::<HostImages>().0.find(&key, Instant::now()) {
+            Found::Image(image) => image.use_render_image(window, cx).map(Ok),
+            Found::Failed(error) => Some(Err(ImageCacheError::Asset(error))),
+            Found::Reading => None,
+            Found::Read => {
+                read_image(&bridge, key, format, cx);
                 None
             }
         }
@@ -41,10 +123,9 @@ fn host_image(path: PathBuf, format: workspace_core::ImageFormat) -> ImageSource
 
 /// Asks the host for an attachment's bytes and redraws once they arrive. While the host is out
 /// of reach the request waits for it.
-fn read_image(path: PathBuf, format: workspace_core::ImageFormat, cx: &mut App) {
-    let images = cx.global_mut::<HostImages>();
-    images.read.insert(path.clone(), None);
-    let reply = (images.bridge).ask(ask::read_file(path.clone(), MAX_ATTACHMENT_BYTES));
+fn read_image(bridge: &Bridge, key: ImageKey, format: workspace_core::ImageFormat, cx: &mut App) {
+    cx.global_mut::<HostImages>().0.reading(key.clone());
+    let reply = bridge.ask(ask::read_file(key.1.clone(), MAX_ATTACHMENT_BYTES));
     cx.spawn(async move |cx| {
         let contents = match reply {
             Ok(reply) => reply.await,
@@ -53,7 +134,10 @@ fn read_image(path: PathBuf, format: workspace_core::ImageFormat, cx: &mut App) 
         let image = contents.and_then(|contents| image(&contents, format).map(Arc::new));
         cx.update(|cx| {
             let image = image.map_err(SharedString::from);
-            cx.global_mut::<HostImages>().read.insert(path, Some(image));
+            let dropped = (cx.global_mut::<HostImages>().0).read(key, image, Instant::now());
+            for image in dropped {
+                image.remove_asset(cx);
+            }
             cx.refresh_windows();
         });
     })
@@ -186,7 +270,8 @@ pub(super) fn chip(
     }
 }
 
-/// A sent message's attachments; clicking one opens it with the system default.
+/// A sent message's attachments; clicking one opens it with the system default. A remote host's
+/// attachment is read through that host and opened as a copy, as its file links are.
 pub(super) fn sent(message: &Message, p: Palette) -> Div {
     div().flex().flex_wrap().justify_end().gap_2().children(
         message.attachments.iter().enumerate().map(|(index, a)| {
@@ -198,20 +283,79 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
                 p,
             )
             .cursor_pointer()
-            .on_click(move |_, _, cx| cx.open_with_system(&path))
+            .on_click(move |_, window, cx| {
+                let bridge = cx.global::<Hosts>().bridge();
+                if bridge.remote().is_none() {
+                    return cx.open_with_system(&path);
+                }
+                // This Mac decides from the copy whether it may be opened.
+                let file = ResolvedPath {
+                    path: path.clone(),
+                    runs_when_opened: true,
+                };
+                file_links::open_file(&file, &bridge, window, cx)
+            })
         }),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::file_size;
+    use super::{Found, IMAGE_LIMIT, ImageCache, RETRY_AFTER, file_size};
+    use std::time::Instant;
     use std::{fs, path::PathBuf};
     use workspace_core::{Attachment, MAX_ATTACHMENT_BYTES, ask};
     use workspace_host::attachments::inspect_all;
 
     fn add_dropped(attached: &mut Vec<Attachment>, paths: &[PathBuf]) -> Vec<String> {
         super::add_dropped(attached, paths, inspect_all(paths))
+    }
+
+    fn key(name: &str) -> super::ImageKey {
+        (None, PathBuf::from(name))
+    }
+
+    #[test]
+    fn a_failed_read_shows_its_error_then_is_read_again() {
+        let mut cache = ImageCache::<u32>::new();
+        let now = Instant::now();
+        assert_eq!(cache.find(&key("a"), now), Found::Read);
+        cache.reading(key("a"));
+        assert_eq!(cache.find(&key("a"), now), Found::Reading, "read once");
+        cache.read(key("a"), Err("The host is busy".into()), now);
+        assert_eq!(
+            cache.find(&key("a"), now),
+            Found::Failed("The host is busy".into())
+        );
+        assert_eq!(cache.find(&key("a"), now + RETRY_AFTER), Found::Read);
+        cache.reading(key("a"));
+        cache.read(key("a"), Ok(7), now + RETRY_AFTER);
+        assert_eq!(
+            cache.find(&key("a"), now + RETRY_AFTER * 9),
+            Found::Image(7)
+        );
+    }
+
+    #[test]
+    fn past_the_bound_the_image_shown_longest_ago_is_dropped() {
+        let mut cache = ImageCache::<usize>::new();
+        let now = Instant::now();
+        for n in 0..IMAGE_LIMIT {
+            cache.reading(key(&n.to_string()));
+            assert!(cache.read(key(&n.to_string()), Ok(n), now).is_empty());
+        }
+        // The first is shown again, so the second is now the one shown longest ago.
+        assert_eq!(cache.find(&key("0"), now), Found::Image(0));
+        let dropped = cache.read(key("new"), Ok(IMAGE_LIMIT), now);
+        assert_eq!(dropped, [1]);
+        assert_eq!(
+            cache.find(&key("1"), now),
+            Found::Read,
+            "read again if shown"
+        );
+        assert_eq!(cache.find(&key("0"), now), Found::Image(0));
+        let other_host = (Some("studio".to_string()), PathBuf::from("0"));
+        assert_eq!(cache.find(&other_host, now), Found::Read, "each host's own");
     }
 
     #[test]

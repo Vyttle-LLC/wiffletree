@@ -165,7 +165,7 @@ impl VerifierEditor {
             Ok(answer) => answer,
             Err(error) => {
                 self.error = Some(error);
-                return;
+                return cx.notify();
             }
         };
         cx.spawn(async move |this, cx| {
@@ -584,6 +584,15 @@ fn cap_selector(
 impl Render for VerifierEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().is_dark());
+        // Changes here save at once, so they wait for a host that takes them.
+        let host = cx.global::<Hosts>().view_of(&self.bridge);
+        let editor = self.editor(p, cx);
+        ui::locked(editor, &host, p)
+    }
+}
+
+impl VerifierEditor {
+    fn editor(&mut self, p: Palette, cx: &mut Context<Self>) -> Div {
         let Some(verification) = &self.verification else {
             return div().children(self.error.clone().map(|e| hint(e, p).text_color(p.red)));
         };

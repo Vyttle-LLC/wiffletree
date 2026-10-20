@@ -22,23 +22,23 @@ Starts once `standalone-host` is archived. Three implementation tickets: the hos
 
 ## 4. Client: connecting and switching (ticket B)
 
-- [ ] 4.1 The device key; the client's list of paired hosts in its own settings; a connection per paired host with the pinning and challenge; full subscription for the selected host and `attention` only for the others.
-- [ ] 4.2 Connect a computer: Bonjour browsing, a typed name or address, and the pairing sheet, worded as in study 3. `Info.plist` keys in `scripts/package_macos.sh`.
-- [ ] 4.3 The host switcher in the sidebar footer with states, counts, Connect a computer… and Remote access settings…, as in study 1. Test the row states and counts from fake connections.
+- [x] 4.1 The device key; the client's list of paired hosts in its own settings; a connection per paired host with the pinning and challenge; full subscription for the selected host and `attention` only for the others.
+- [x] 4.2 Connect a computer: Bonjour browsing, a typed name or address, and the pairing sheet, worded as in study 3. `Info.plist` keys in `scripts/package_macos.sh`.
+- [x] 4.3 The host switcher in the sidebar footer with states, counts, Connect a computer… and Remote access settings…, as in study 1. Test the row states and counts from fake connections.
 
 ## 5. Client: working on a remote host (ticket B)
 
-- [ ] 5.1 Host labels: the sidebar heading, the breadcrumb, the composer's model line, and paths in `file_links.rs` and the leftovers sheet, as in study 4.
-- [ ] 5.2 Opening a host's file as a read-only copy; Reveal in Finder only on This Mac; the in-app folder browser over `ListFolder` for repositories, the workspace folder and the brain folder on a remote host.
-- [ ] 5.3 Uploading attachments to a remote host from the composer.
-- [ ] 5.4 The Workspace pages bound to the selected host; saving turned off with the reason on View only; the split Settings window, as in study 7. Test: a save on a remote host reaches that host only.
+- [x] 5.1 Host labels: the sidebar heading, the breadcrumb, the composer's model line, and paths in `file_links.rs` and the leftovers sheet, as in study 4.
+- [x] 5.2 Opening a host's file as a read-only copy; Reveal in Finder only on This Mac; the in-app folder browser over `ListFolder` for repositories, the workspace folder and the brain folder on a remote host.
+- [x] 5.3 Uploading attachments to a remote host from the composer.
+- [x] 5.4 The Workspace pages bound to the selected host; saving turned off with the reason on View only; the split Settings window, as in study 7. Test: a save on a remote host reaches that host only.
 
 ## 6. Client: disconnected (ticket B)
 
-- [ ] 6.1 The frozen view with its age, the banner, Try now, and other actions disabled.
-- [ ] 6.2 Messages written while disconnected, sent once with their ids; resending a send whose reply was lost. Test with a host whose connection is cut after it stored a message: the conversation shows it once.
-- [ ] 6.3 Backoff (1 s doubling to 30 s with jitter), an immediate try on a network change, and resuming from the cursor or a snapshot. Tests with a fake clock: the delays run 1, 2, 4, 8, 16, 30, 30 s, each within 20%; a network change and Try now each try at once and restart at 1 s. Test against a real host: restart it during a drop, reconnect, and check that the client took a snapshot and that no message, usage entry or operation appears twice.
-- [ ] 6.4 Messages waiting to be sent are kept only while the app runs. Test: quitting the client with one waiting leaves nothing sent after relaunch.
+- [x] 6.1 The frozen view with its age, the banner, Try now, and other actions disabled.
+- [x] 6.2 Messages written while disconnected, sent once with their ids; resending a send whose reply was lost. Test with a host whose connection is cut after it stored a message: the conversation shows it once.
+- [x] 6.3 Backoff (1 s doubling to 30 s with jitter), an immediate try on a network change, and resuming from the cursor or a snapshot. Tests with a fake clock: the delays run 1, 2, 4, 8, 16, 30, 30 s, each within 20%; a network change and Try now each try at once and restart at 1 s. Test against a real host: restart it during a drop, reconnect, and check that the client took a snapshot and that no message, usage entry or operation appears twice.
+- [x] 6.4 Messages waiting to be sent are kept only while the app runs. Test: quitting the client with one waiting leaves nothing sent after relaunch.
 
 ## 7. Phase 2: outside one network (ticket C)
 

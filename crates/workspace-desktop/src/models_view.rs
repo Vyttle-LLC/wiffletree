@@ -10,7 +10,7 @@ use gpui_component::{
 use models::{Cell, Now};
 use ui::{card, hint, icon, pill};
 
-pub(super) fn card_title(title: &'static str, note: &'static str, p: Palette) -> Div {
+pub(super) fn card_title(title: &'static str, note: impl Into<SharedString>, p: Palette) -> Div {
     div()
         .flex()
         .items_baseline()
@@ -350,6 +350,7 @@ impl ModelsPage {
                             .ghost()
                             .small()
                             .label("Dismiss")
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(|v, _, w, c| v.dismiss_notes(w, c))),
                     )
                 }),
@@ -783,7 +784,15 @@ impl ModelsPage {
         let error = self.model_selection.validate().err();
         card(p)
             .gap_3()
-            .child(card_title("Who runs what", "each job's model on this Mac", p))
+            .child(card_title(
+                "Who runs what",
+                (self.shared.host.models_owner())
+                    .map_or("each job's model on this Mac".into(), |o| o.0),
+                p,
+            ))
+            .children(
+                (self.shared.host.models_owner()).map(|(_, note)| hint(note, p)),
+            )
             .child(hint(
                 "First choice is used until its subscription passes the threshold. \"Small work\" is the lighter line the coordinator may ask for; leave it as same to always use the first line.",
                 p,
@@ -958,11 +967,14 @@ impl ModelsPage {
                 )
             })
             .child(
-                button("save-models")
-                    .primary()
-                    .label("Save")
-                    .disabled(!can_save)
-                    .on_click(cx.listener(|v, _, w, c| v.save_model_selection(w, c))),
+                ui::gated(
+                    button("save-models")
+                        .primary()
+                        .label("Save")
+                        .disabled(!can_save),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(|v, _, w, c| v.save_model_selection(w, c))),
             )
     }
 }
@@ -1064,6 +1076,7 @@ impl Render for ModelsPage {
             "Models on this machine",
             self.models_panel(p, cx),
             Some(self.models_footer(p, cx)),
+            &self.shared.host,
             p,
             cx,
         )

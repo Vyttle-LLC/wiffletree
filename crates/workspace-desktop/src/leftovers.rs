@@ -189,7 +189,13 @@ impl LeftoverSheet {
                     .flex()
                     .flex_col()
                     .child(div().text_ellipsis().child(title))
-                    .child(mono(leftover.worktree.clone(), p))
+                    .child(mono(
+                        hosts::labelled_path(
+                            self.bridge.remote().map(|r| r.name.as_str()),
+                            &leftover.worktree,
+                        ),
+                        p,
+                    ))
                     .child(hint(format!("{} at {head}", leftover.branch), p)),
             )
             .child(pill(
@@ -206,6 +212,8 @@ impl LeftoverSheet {
 impl Render for LeftoverSheet {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().is_dark());
+        // Removing waits for a host that takes changes from this device.
+        let host = cx.global::<Hosts>().view_of(&self.bridge);
         let mut body = div().flex().flex_col().gap_3().child(hint(
             "Worktrees left by tickets finished before Wiffletree removed them. Nothing is removed until you select rows and confirm; branches are always kept. Protected rows cannot be selected.",
             p,
@@ -242,6 +250,7 @@ impl Render for LeftoverSheet {
                 button("remove-leftovers")
                     .label("Remove selected…")
                     .disabled(self.pending || selection.selected.is_empty())
+                    .map(|b| ui::gated(b, &host))
                     .on_click(cx.listener(|sheet, _, _, cx| {
                         if let Some(selection) = &mut sheet.selection {
                             selection.confirm();
@@ -272,6 +281,7 @@ impl Render for LeftoverSheet {
                         .small()
                         .label("Remove")
                         .disabled(self.pending)
+                        .map(|b| ui::gated(b, &host))
                         .on_click(cx.listener(|sheet, _, _, cx| sheet.remove(cx))),
                 ),
         });

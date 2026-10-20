@@ -7,26 +7,46 @@ use ui::banner;
 
 const AN_HOUR_MS: i64 = 60 * 60_000;
 
-/// What the Settings window shows of the latest snapshot, which the main window receives.
-#[derive(Clone, Default, PartialEq)]
+/// What the Settings window shows of a host's latest snapshot, which the main window receives.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SyncShown {
     pub(super) status: Option<SyncStatus>,
     pub(super) notes: Vec<PausedSetting>,
     pub(super) still_needs: Vec<StillNeed>,
     pub(super) owners_allowed: bool,
 }
-impl Global for SyncShown {}
+impl SyncShown {
+    fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            status: snapshot.settings_sync.clone(),
+            notes: snapshot.paused_settings().cloned().collect(),
+            still_needs: snapshot.still_needs.clone(),
+            owners_allowed: !snapshot.allowed_owners.is_empty(),
+        }
+    }
+}
 
-/// Hands a snapshot's sync status to the Settings window, which redraws only on a change.
-pub(crate) fn share_sync(snapshot: &Snapshot, cx: &mut App) {
-    let shown = SyncShown {
-        status: snapshot.settings_sync.clone(),
-        notes: snapshot.paused_settings().cloned().collect(),
-        still_needs: snapshot.still_needs.clone(),
-        owners_allowed: !snapshot.allowed_owners.is_empty(),
-    };
-    if cx.try_global::<SyncShown>() != Some(&shown) {
-        cx.set_global(shown);
+/// Each host's sync status, by its id, `None` for This Mac's: every host's workspace keeps
+/// receiving its own, and the Settings window shows only the host it drives.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SyncByHost(std::collections::HashMap<Option<String>, SyncShown>);
+impl Global for SyncByHost {}
+impl SyncByHost {
+    /// Keeps `shown` for `host`; whether it changed.
+    fn publish(&mut self, host: Option<String>, shown: SyncShown) -> bool {
+        self.0.insert(host, shown.clone()) != Some(shown)
+    }
+    pub(in crate::settings) fn of(&self, host: &Option<String>) -> SyncShown {
+        self.0.get(host).cloned().unwrap_or_default()
+    }
+}
+
+/// Hands the snapshot of `host`, `None` for This Mac, to the Settings window, which redraws
+/// only on a change.
+pub(crate) fn share_sync(snapshot: &Snapshot, host: Option<String>, cx: &mut App) {
+    let mut by_host = cx.try_global::<SyncByHost>().cloned().unwrap_or_default();
+    if by_host.publish(host, SyncShown::of(snapshot)) {
+        cx.set_global(by_host);
     }
 }
 
@@ -127,9 +147,10 @@ impl Settings {
         let Ok(snapshot) = self.bridge.ask(ask::snapshot()) else {
             return;
         };
+        let host = self.host_id();
         cx.spawn(async move |_, cx| {
             if let Ok(snapshot) = snapshot.await {
-                cx.update(|cx| share_sync(&snapshot, cx));
+                cx.update(|cx| share_sync(&snapshot, host, cx));
             }
         })
         .detach();
@@ -365,7 +386,8 @@ impl Settings {
 
     /// Redraws for a new sync status, asking again for an open comparison it may have changed.
     pub(in crate::settings) fn sync_shown(&mut self, cx: &mut Context<Self>) {
-        let notes = (cx.try_global::<SyncShown>()).map_or(vec![], |shown| shown.notes.clone());
+        let notes =
+            (cx.try_global::<SyncByHost>()).map_or(vec![], |by| by.of(&self.host_id()).notes);
         if let Some(command) = workspace_notes::recompare(&mut self.compared, &notes) {
             self.ask_note(command, cx);
         }
@@ -493,6 +515,29 @@ mod tests {
             waiting: vec![],
             machine: "Mike’s MacBook Pro".into(),
         }
+    }
+
+    #[test]
+    fn each_host_keeps_its_own_sync_status() {
+        use super::{SyncByHost, SyncShown};
+        let mut by_host = SyncByHost::default();
+        let studio = Some("studio".to_owned());
+        let this_mac = SyncShown {
+            owners_allowed: true,
+            ..SyncShown::default()
+        };
+        assert!(by_host.publish(None, this_mac.clone()));
+        assert_eq!(
+            by_host.of(&studio),
+            SyncShown::default(),
+            "This Mac's is not Studio Mac's"
+        );
+        assert!(by_host.publish(studio.clone(), SyncShown::default()));
+        assert!(
+            !by_host.publish(None, this_mac.clone()),
+            "the same again changes nothing"
+        );
+        assert_eq!(by_host.of(&None), this_mac);
     }
 
     #[test]

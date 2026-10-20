@@ -136,7 +136,7 @@ impl Inbox {
                 pill("Question", p.focus)
             });
         let (body, actions) = match self.publish_card(item) {
-            Some(publish) => publish_approval(item.id.clone(), publish, p, cx),
+            Some(publish) => publish_approval(item.id.clone(), publish, &self.shared.host, p, cx),
             None if item.is_permission() => self.permission(item, p, cx),
             None => self.question(item, answering, max_height.is_none(), p, cx),
         };
@@ -171,6 +171,7 @@ impl Inbox {
                 button(SharedString::from(format!("deny-{id}")))
                     .ghost()
                     .label("Deny")
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(
                         cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c)),
                     ),
@@ -179,6 +180,7 @@ impl Inbox {
                 button(SharedString::from(format!("approve-{approve}")))
                     .primary()
                     .label("Approve once")
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(cx.listener(move |v, _, w, c| {
                         v.resolve_attention(&approve, "approved", w, c)
                     })),
@@ -222,6 +224,7 @@ impl Inbox {
             button(SharedString::from(format!("dismiss-{id}")))
                 .ghost()
                 .label("Dismiss")
+                .map(|b| ui::gated(b, &self.shared.host))
                 .on_click(cx.listener(move |v, _, w, c| {
                     v.request(
                         Command::DismissAttention {
@@ -250,6 +253,7 @@ impl Inbox {
                 button(SharedString::from(format!("answer-{id}")))
                     .primary()
                     .label("Send answer")
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(cx.listener(move |v, _, w, c| {
                         let answer = v.answer.read(c).value().trim().to_string();
                         if !answer.is_empty() {
@@ -262,6 +266,7 @@ impl Inbox {
             let actions = actions.child(
                 button(SharedString::from(format!("start-answer-{id}")))
                     .label("Answer")
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))),
             );
             (body, actions)
@@ -394,6 +399,7 @@ impl Requests for Inbox {
 fn publish_approval(
     id: String,
     card: PublishCard,
+    host: &HostView,
     p: Palette,
     cx: &mut Context<Inbox>,
 ) -> (Div, Div) {
@@ -448,12 +454,14 @@ fn publish_approval(
             button(SharedString::from(format!("deny-{id}")))
                 .ghost()
                 .label("Deny")
+                .map(|b| ui::gated(b, host))
                 .on_click(cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c))),
         )
         .child(
             button(SharedString::from(format!("approve-{approve}")))
                 .primary()
                 .label(card.approve)
+                .map(|b| ui::gated(b, host))
                 .on_click(
                     cx.listener(move |v, _, w, c| v.resolve_attention(&approve, "approved", w, c)),
                 ),

@@ -1,4 +1,5 @@
 //! View choices that belong to this client rather than the host; a remote client keeps its own.
+use crate::hosts::PairedHost;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,9 @@ pub(crate) struct Preferences {
     /// Show projects whose names share a first word under one group row.
     #[serde(default = "on")]
     pub group_projects: bool,
+    /// The hosts this device is paired with; they stay on this device.
+    #[serde(default)]
+    pub paired_hosts: Vec<PairedHost>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -31,6 +35,7 @@ impl Default for Preferences {
             minimize_activity: false,
             appearance: Appearance::default(),
             group_projects: true,
+            paired_hosts: vec![],
             path: PathBuf::new(),
         }
     }
@@ -106,6 +111,28 @@ mod tests {
         preferences.group_projects = true;
         preferences.save().unwrap();
         assert!(Preferences::load(home.path()).group_projects);
+    }
+
+    #[test]
+    fn paired_hosts_survive_a_relaunch_and_an_older_file_has_none() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join("desktop-preferences.json");
+        std::fs::write(&file, r#"{ "appearance": "dark" }"#).unwrap();
+        assert!(Preferences::load(home.path()).paired_hosts.is_empty());
+
+        let studio = PairedHost {
+            id: "ab12".into(),
+            public_key: "BAE=".into(),
+            name: "Studio Mac".into(),
+            addresses: vec!["studio.local:47821".into()],
+            last_seen: Some(5),
+        };
+        let mut preferences = Preferences::load(home.path());
+        preferences.paired_hosts.push(studio.clone());
+        preferences.save().unwrap();
+        let loaded = Preferences::load(home.path());
+        assert_eq!(loaded.paired_hosts, [studio]);
+        assert_eq!(loaded.appearance, Appearance::Dark);
     }
 
     #[test]

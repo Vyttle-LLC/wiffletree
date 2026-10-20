@@ -23,6 +23,8 @@ pub(super) struct Shared {
     pub(super) catalog: Rc<Vec<ModelOption>>,
     /// Whether each provider's CLI is installed and signed in, as the Models page last found.
     pub(super) detection: Rc<Detection>,
+    /// The host this window shows, for labels and what it allows.
+    pub(super) host: HostView,
 }
 impl Default for Shared {
     fn default() -> Self {
@@ -38,6 +40,7 @@ impl Default for Shared {
             quota_pending: false,
             catalog: Rc::new(fallback_catalog()),
             detection: Rc::default(),
+            host: HostView::default(),
         }
     }
 }

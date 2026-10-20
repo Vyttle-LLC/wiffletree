@@ -126,6 +126,16 @@ pub trait Launch: Send {
     /// Waiting for a host that is starting ends early once `stopped` is set, so a client that
     /// stops is not held up and can stop the host just started.
     fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint>;
+    /// A new connection to the host for its protocol, with the credential to say `Hello` with:
+    /// the socket `endpoint` names, or for a remote host, its relayed stream.
+    fn connect(
+        &mut self,
+        stopped: &AtomicBool,
+    ) -> io::Result<(std::os::unix::net::UnixStream, Option<String>)> {
+        let endpoint = self.endpoint(stopped)?;
+        let stream = std::os::unix::net::UnixStream::connect(&endpoint.socket)?;
+        Ok((stream, endpoint.credential))
+    }
     /// Stops the host if it is the app's own child; a launchd host keeps running.
     fn stop(&mut self) {}
     /// The running child host, when the host is the app's own.

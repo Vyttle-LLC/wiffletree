@@ -86,7 +86,9 @@ impl ConversationHeader {
             }
         }
         parts.push(session.role.label().into());
-        parts.join("  ›  ")
+        self.shared
+            .host
+            .breadcrumb(parts.iter().map(String::as_str))
     }
     fn header(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let live = self.shared.live_enabled();
@@ -121,6 +123,7 @@ impl ConversationHeader {
                         } else {
                             "Pause this session · interrupts an active turn"
                         })
+                        .map(|b| ui::gated(b, &self.shared.host))
                         .on_click(cx.listener(|v, _, w, c| v.toggle_pause(w, c))),
                 )
             })
@@ -132,6 +135,7 @@ impl ConversationHeader {
                             .ghost()
                             .icon(icon("plus"))
                             .label("New ticket")
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(|_, _, _, c| {
                                 c.emit(Intent::Create {
                                     kind: Creation::Ticket,
@@ -148,6 +152,7 @@ impl ConversationHeader {
                         .outline()
                         .icon(icon("archive"))
                         .label("Restore")
+                        .map(|b| ui::gated(b, &self.shared.host))
                         .on_click(cx.listener(|v, _, w, c| {
                             if let Some(id) = v.shared.selected.clone() {
                                 v.set_archived(id, false, w, c);
@@ -161,6 +166,7 @@ impl ConversationHeader {
                         .icon(icon("stop").text_color(p.red))
                         .label("Stop")
                         .tooltip("Interrupt this project’s active turns and hold its queue")
+                        .map(|b| ui::gated(b, &self.shared.host))
                         .on_click(cx.listener(|v, _, w, c| {
                             if let Some(project_id) = v.shared.project_id() {
                                 v.set_live(project_id, false, w, c)

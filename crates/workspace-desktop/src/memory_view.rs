@@ -12,14 +12,15 @@ impl Inspector {
     }
 
     fn choose_brain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose the Markdown brain folder".into()),
-        });
+        let paths = folders::choose(
+            &self.bridge,
+            "Choose the Markdown brain folder",
+            false,
+            window,
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await
+            if let Ok(paths) = paths.recv().await
                 && let Some(path) = paths.first()
             {
                 let path = path.to_string_lossy().into_owned();

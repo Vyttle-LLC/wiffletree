@@ -16,7 +16,7 @@ const STOP_WAIT: Duration = Duration::from_secs(60);
 
 /// What quitting does.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Quit {
+enum Quit {
     /// Close the windows and leave the Dock, with the host and its turns still running.
     Background,
     /// Agents are working: ask first.
@@ -26,7 +26,7 @@ pub(crate) enum Quit {
 }
 impl Quit {
     /// What ⌘Q and the app menu's Quit do, with `working` agents in a turn.
-    pub(crate) fn requested(outlives_app: bool, working: usize) -> Self {
+    fn requested(outlives_app: bool, working: usize) -> Self {
         match (outlives_app, working) {
             (false, _) => Self::Exit { stop_agents: false },
             (true, 0) => Self::Background,
@@ -37,14 +37,14 @@ impl Quit {
 
 /// The question before quitting with agents working.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct QuitPrompt {
+struct QuitPrompt {
     working: usize,
 }
 impl QuitPrompt {
-    pub(crate) const TITLE: &str = "Quit Wiffletree?";
+    const TITLE: &str = "Quit Wiffletree?";
     /// The first is the default, which Return chooses.
-    pub(crate) const CHOICES: [&str; 2] = ["Keep them running", "Stop agents and quit"];
-    pub(crate) fn detail(&self) -> String {
+    const CHOICES: [&str; 2] = ["Keep them running", "Stop agents and quit"];
+    fn detail(&self) -> String {
         let working = match self.working {
             1 => "1 agent is".to_string(),
             n => format!("{n} agents are"),
@@ -54,7 +54,7 @@ impl QuitPrompt {
         )
     }
     /// What the button at `index` of `CHOICES` does.
-    pub(crate) fn choose(index: usize) -> Quit {
+    fn choose(index: usize) -> Quit {
         match index {
             0 => Quit::Background,
             _ => Quit::Exit { stop_agents: true },
@@ -91,7 +91,7 @@ pub(crate) fn exiting(
 /// What ⌘Q does beside `bridge`'s host, asking the host how many agents work. A host that is out
 /// of reach, refuses the app or does not answer within `COUNT_WAIT` cannot say, so the app just
 /// quits, which leaves a launchd host and its turns running. Blocks; run it off the main thread.
-pub(crate) fn plan_quit(bridge: &Bridge) -> Quit {
+fn plan_quit(bridge: &Bridge) -> Quit {
     if !bridge.outlives_app() {
         return Quit::Exit { stop_agents: false };
     }
@@ -118,8 +118,72 @@ struct Lifecycle {
     open_window: Rc<dyn Fn(&mut App)>,
     icon: Option<menu_bar::Icon>,
     choices: async_channel::Sender<menu_bar::Choice>,
+    /// A quit is being decided: from asking the host how many agents work until the app acts
+    /// on it, the human's answer to the prompt included.
+    deciding: bool,
 }
 impl Global for Lifecycle {}
+
+/// What acting on a quit does to the app. The app does it; tests stand in for it.
+trait Quitter {
+    /// Whether a quit is being decided, so another, such as the Dock's Quit again while the
+    /// prompt shows, does nothing.
+    fn deciding(&self) -> bool;
+    fn set_deciding(&mut self, deciding: bool);
+    /// Closes every window and leaves the Dock; the menu bar icon stays.
+    fn enter_background(&mut self);
+    /// Asks the human, whose answer comes back through `answered`.
+    fn ask_first(&mut self, prompt: QuitPrompt);
+    /// Ends the app, after the host stops every agent when `stop_agents`.
+    fn exit(&mut self, stop_agents: bool);
+}
+
+/// A quit was asked for: whether to decide it, rather than ignore it while one is decided.
+fn quit_requested(app: &mut impl Quitter) -> bool {
+    !app.deciding() && {
+        app.set_deciding(true);
+        true
+    }
+}
+
+/// Acts on a decided quit. Asking keeps the quit being decided until the human answers, and
+/// exiting until the app ends.
+fn act(plan: Quit, app: &mut impl Quitter) {
+    match plan {
+        Quit::Background => {
+            app.set_deciding(false);
+            app.enter_background();
+        }
+        Quit::Exit { stop_agents } => app.exit(stop_agents),
+        Quit::Ask(prompt) => app.ask_first(prompt),
+    }
+}
+
+/// The human answered the prompt with the choice at `index`, or it closed without an answer.
+fn answered(index: Option<usize>, app: &mut impl Quitter) {
+    match index {
+        Some(index) => act(QuitPrompt::choose(index), app),
+        None => app.set_deciding(false),
+    }
+}
+
+impl Quitter for App {
+    fn deciding(&self) -> bool {
+        self.global::<Lifecycle>().deciding
+    }
+    fn set_deciding(&mut self, deciding: bool) {
+        self.global_mut::<Lifecycle>().deciding = deciding;
+    }
+    fn enter_background(&mut self) {
+        enter_background(self);
+    }
+    fn ask_first(&mut self, prompt: QuitPrompt) {
+        ask_first(prompt, self);
+    }
+    fn exit(&mut self, stop_agents: bool) {
+        exit(stop_agents, self);
+    }
+}
 
 /// Sets up quitting for `bridge`'s host. `open_window` opens the main window again.
 pub(crate) fn install(bridge: Bridge, open_window: impl Fn(&mut App) + 'static, cx: &mut App) {
@@ -130,6 +194,7 @@ pub(crate) fn install(bridge: Bridge, open_window: impl Fn(&mut App) + 'static, 
         open_window: Rc::new(open_window),
         icon: None,
         choices,
+        deciding: false,
     });
     cx.on_action(|_: &crate::Quit, cx| quit(cx));
     // The Dock's Quit, and other quits from macOS, decide as ⌘Q does.
@@ -181,8 +246,11 @@ pub(crate) fn install(bridge: Bridge, open_window: impl Fn(&mut App) + 'static, 
     }
 }
 
-/// ⌘Q: quits as `plan_quit` says.
+/// ⌘Q: quits as `plan_quit` says, unless a quit is already being decided.
 fn quit(cx: &mut App) {
+    if !quit_requested(cx) {
+        return;
+    }
     let bridge = cx.global::<Lifecycle>().bridge.clone();
     let plan = off_main_thread(move || plan_quit(&bridge));
     cx.spawn(async move |cx| {
@@ -201,17 +269,9 @@ pub(crate) fn reopened(cx: &mut App) {
     }
 }
 
-fn act(plan: Quit, cx: &mut App) {
-    match plan {
-        Quit::Background => enter_background(cx),
-        Quit::Exit { stop_agents } => exit(stop_agents, cx),
-        Quit::Ask(prompt) => ask_first(prompt, cx),
-    }
-}
-
 fn ask_first(prompt: QuitPrompt, cx: &mut App) {
     let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
-        return enter_background(cx);
+        return act(Quit::Background, cx);
     };
     let answer = window.update(cx, |_, window, cx| {
         window.prompt(
@@ -223,12 +283,11 @@ fn ask_first(prompt: QuitPrompt, cx: &mut App) {
         )
     });
     let Ok(answer) = answer else {
-        return;
+        return answered(None, cx);
     };
     cx.spawn(async move |cx| {
-        if let Ok(index) = answer.await {
-            cx.update(|cx| act(QuitPrompt::choose(index), cx));
-        }
+        let index = answer.await.ok();
+        cx.update(|cx| answered(index, cx));
     })
     .detach();
 }
@@ -306,7 +365,8 @@ fn count_working(cx: &mut App) {
 mod tests {
     // Not a glob: gpui's `test` attribute would shadow the standard one.
     use super::{
-        Bridge, PendingUpdate, Quit, QuitPrompt, exiting, menu_bar, plan_quit, update, working,
+        Bridge, PendingUpdate, Quit, QuitPrompt, Quitter, act, answered, exiting, menu_bar,
+        plan_quit, quit_requested, update, working,
     };
     use crate::bridge::tests::serve;
     use std::{
@@ -337,11 +397,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_nothing_working_quitting_asks_nothing_and_stops_nothing() {
-        assert_eq!(Quit::requested(true, 0), Quit::Background);
-    }
-
     /// A launchd host at `socket`, as far as the bridge can tell.
     struct Launchd(std::path::PathBuf);
     impl Launch for Launchd {
@@ -356,12 +411,84 @@ mod tests {
         }
     }
 
+    /// An app that records what quitting did to it, with a staged update that only exiting
+    /// installs.
+    #[derive(Default)]
+    struct Recorded {
+        deciding: bool,
+        prompts: usize,
+        backgrounds: usize,
+        exits: Vec<bool>,
+        pending: PendingUpdate,
+        installed: Option<String>,
+    }
+    impl Quitter for Recorded {
+        fn deciding(&self) -> bool {
+            self.deciding
+        }
+        fn set_deciding(&mut self, deciding: bool) {
+            self.deciding = deciding;
+        }
+        fn enter_background(&mut self) {
+            self.backgrounds += 1;
+        }
+        fn ask_first(&mut self, _: QuitPrompt) {
+            self.prompts += 1;
+        }
+        fn exit(&mut self, stop_agents: bool) {
+            self.exits.push(stop_agents);
+            if let Some(staged) = self.pending.0.take() {
+                self.installed = Some(staged.version);
+            }
+        }
+    }
+
     #[test]
-    fn quitting_beside_a_reachable_launchd_host_with_nothing_working_goes_to_the_background() {
+    fn quitting_with_nothing_working_goes_to_the_background_stops_nothing_and_keeps_the_update() {
         let served = serve(|_| {});
         let bridge = Bridge::connect(Box::new(Launchd(served.data.path().join(SOCKET_FILE))));
-        assert_eq!(plan_quit(&bridge), Quit::Background);
+        let mut app = Recorded {
+            pending: PendingUpdate(Some(update::Staged::fake("9.9.9"))),
+            ..Recorded::default()
+        };
+
+        assert!(quit_requested(&mut app));
+        act(plan_quit(&bridge), &mut app);
+
+        assert_eq!((app.backgrounds, app.prompts), (1, 0));
+        assert!(app.exits.is_empty(), "no exit, so no stop: {:?}", app.exits);
+        assert!(
+            app.pending.0.is_some() && app.installed.is_none(),
+            "still staged"
+        );
+        assert!(!app.deciding, "the next quit is decided again");
         bridge.shutdown();
+    }
+
+    #[test]
+    fn a_quit_while_the_prompt_shows_does_nothing_until_it_is_answered() {
+        let mut app = Recorded::default();
+        assert!(quit_requested(&mut app));
+        act(Quit::requested(true, 2), &mut app);
+        assert_eq!(app.prompts, 1);
+
+        assert!(!quit_requested(&mut app), "the Dock's Quit again");
+        assert_eq!(app.prompts, 1, "no second prompt");
+
+        answered(None, &mut app);
+        assert!(
+            quit_requested(&mut app),
+            "a closed prompt lets the next quit ask"
+        );
+        act(Quit::requested(true, 2), &mut app);
+        answered(Some(0), &mut app);
+        assert_eq!((app.prompts, app.backgrounds), (2, 1), "Keep them running");
+        assert!(app.exits.is_empty());
+        assert!(quit_requested(&mut app));
+        act(Quit::requested(true, 2), &mut app);
+        answered(Some(1), &mut app);
+        assert_eq!(app.exits, [true], "Stop agents and quit");
+        assert!(!quit_requested(&mut app), "nothing more while the app ends");
     }
 
     #[test]

@@ -1,8 +1,11 @@
 //! Provider-neutral contracts. No renderer, database or provider runtime dependencies.
 pub mod ask;
+pub mod backoff;
 mod client;
 mod context;
 pub mod data_dir;
+#[cfg(target_os = "macos")]
+pub mod device_key;
 mod files;
 mod host;
 pub mod host_copy;
@@ -17,6 +20,7 @@ mod progress;
 mod publishing;
 mod remote;
 pub mod remote_client;
+pub mod remote_launch;
 mod selection;
 pub mod skills;
 mod steps;

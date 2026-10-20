@@ -663,6 +663,7 @@ impl Render for UsagePage {
             "Account limits and tokens across every project",
             self.body(p, cx),
             None,
+            &self.shared.host,
             p,
             cx,
         )
