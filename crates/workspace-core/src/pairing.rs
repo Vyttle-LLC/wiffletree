@@ -77,6 +77,11 @@ fn unhex(text: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+/// Whether `key` is a P-256 public key, SEC1 uncompressed.
+pub fn is_public_key(key: &[u8]) -> bool {
+    key.len() == 65 && VerifyingKey::from_sec1_bytes(key).is_ok()
+}
+
 /// Whether `signature`, raw `r ‖ s`, signs `message` under the SEC1 `public_key`.
 pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     let (Ok(key), Ok(signature)) = (

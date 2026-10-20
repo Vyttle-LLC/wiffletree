@@ -150,7 +150,21 @@ fn serve(args: &[String]) -> Result<()> {
         trusted.extend(app.as_deref());
         workspace_host::keychain::credential(&data, &trusted)?
     };
-    let service = workspace_host::service::Service::start(data.clone(), binary.clone())?;
+    let remote = {
+        let (data, mut trusted) = (data.clone(), vec![binary.clone()]);
+        trusted.extend(app.clone());
+        workspace_host::remote::Options {
+            key: Box::new(move || {
+                let trusted: Vec<_> = trusted.iter().map(|p| p.as_path()).collect();
+                workspace_host::keychain::host_key(&data, &trusted)
+            }),
+            advertiser: Box::new(workspace_host::remote::Bonjour::default()),
+            binary: binary.clone(),
+            ..Default::default()
+        }
+    };
+    let service =
+        workspace_host::service::Service::start_with(data.clone(), binary.clone(), remote)?;
     // Only now that this host owns the store is no other copy in use.
     workspace_core::host_copy::remove_unused(&data, &binary);
     let options = workspace_host::socket::Options {

@@ -1,4 +1,5 @@
 //! Event-driven host actor: all SQLite access stays on one thread; provider I/O never blocks it.
+mod remote_access;
 mod scheduling;
 
 use crate::agent_processes::StopReason;
@@ -501,6 +502,8 @@ enum Event {
     CreationInspected(Box<checkout::Creation>, Result<Vec<String>>, Reply),
     CreationCompleted(Box<checkout::ReservedCreation>, Result<()>),
     Command(Command, Reply),
+    /// What a remote device's connection sent or learned.
+    Remote(remote::ToActor),
     /// A sync pass finished on its own thread.
     Synced(Result<sync::Passed>),
     /// A skill merge's model run finished on its own thread.
@@ -593,13 +596,70 @@ impl Drop for Handle {
 #[derive(Clone)]
 pub struct Service {
     handle: Arc<Handle>,
-    events: EventLog,
+    requests: Requests,
     pings: Pings,
+    /// Closed once the host has stopped, whether a client or `shutdown` stopped it.
+    ended: Receiver<()>,
+}
+/// What a connection asks the host through: its requests and its event stream. Unlike
+/// `Service` it does not own the host thread, so the actor can hand it to the connections of
+/// remote devices.
+#[derive(Clone)]
+pub struct Requests {
+    sender: Sender<Event>,
+    events: EventLog,
     host_id: String,
     /// How many agents are in a turn, as of the actor's last event.
     working: Arc<AtomicUsize>,
-    /// Closed once the host has stopped, whether a client or `shutdown` stopped it.
-    ended: Receiver<()>,
+}
+impl Requests {
+    pub fn request(
+        &self,
+        command: Command,
+    ) -> std::result::Result<Receiver<std::result::Result<Value, String>>, String> {
+        let (reply, receive) = async_channel::bounded(1);
+        self.sender
+            .try_send(Event::Command(command, reply))
+            .map_err(|_| "Host queue is full or disconnected".to_string())?;
+        Ok(receive)
+    }
+    /// A command from the paired device `device`, which the host checks against the device's
+    /// access level first.
+    pub fn request_from(
+        &self,
+        device: &str,
+        command: Command,
+    ) -> std::result::Result<Receiver<std::result::Result<Value, String>>, String> {
+        let (reply, receive) = async_channel::bounded(1);
+        let request = remote::ToActor::Command {
+            device: device.into(),
+            command,
+            reply,
+        };
+        self.sender
+            .try_send(Event::Remote(request))
+            .map_err(|_| "Host queue is full or disconnected".to_string())?;
+        Ok(receive)
+    }
+    /// Sends the actor something a remote connection learned, waiting for room.
+    pub(crate) fn tell(&self, message: remote::ToActor) -> Result<()> {
+        self.sender
+            .send_blocking(Event::Remote(message))
+            .map_err(|_| anyhow::anyhow!("Workspace stopped"))
+    }
+    /// Subscribes to the host's events; see `EventLog::subscribe`.
+    pub fn subscribe(&self, after: Option<&Cursor>) -> Subscription {
+        self.events.subscribe(after)
+    }
+    pub fn epoch(&self) -> String {
+        self.events.epoch()
+    }
+    pub fn host_id(&self) -> &str {
+        &self.host_id
+    }
+    pub fn working(&self) -> usize {
+        self.working.load(Ordering::Relaxed)
+    }
 }
 struct Active {
     run: String,
@@ -727,9 +787,16 @@ struct Actor {
     /// `gh` as every GitHub read runs it, and Git as publish steps run it.
     publish_tools: publish::Tools,
     sync_pace: sync::Pace,
+    /// The listener for paired devices, open while remote access is on.
+    remote: remote::Remote,
 }
 impl Service {
+    /// A host whose remote access cannot be turned on; see `start_with`.
     pub fn start(home: PathBuf, helper: PathBuf) -> Result<Self> {
+        Self::start_with(home, helper, remote::Options::default())
+    }
+    /// Starts the host thread with `remote` for its remote access.
+    pub fn start_with(home: PathBuf, helper: PathBuf, remote: remote::Options) -> Result<Self> {
         ensure!(
             helper.is_file(),
             "workspace-host helper is missing; rebuild the app bundle"
@@ -760,10 +827,16 @@ impl Service {
                     let host_id = host.host_id()?;
                     Ok((host, directory, socket, listener, host_id))
                 })();
-                let (mut host, directory, socket, listener) = match setup {
+                let (mut host, directory, socket, listener, requests) = match setup {
                     Ok((host, directory, socket, listener, host_id)) => {
-                        let _ = ready.send(Ok(host_id));
-                        (host, directory, socket, listener)
+                        let _ = ready.send(Ok(host_id.clone()));
+                        let requests = Requests {
+                            sender: worker.clone(),
+                            events: actor_events.clone(),
+                            host_id,
+                            working: actor_working.clone(),
+                        };
+                        (host, directory, socket, listener, requests)
                     }
                     Err(e) => {
                         let _ = ready.send(Err(format!("{e:#}")));
@@ -861,7 +934,11 @@ impl Service {
                     github_reading: false,
                     publish_tools: publish::Tools::default(),
                     sync_pace: sync::Pace::default(),
+                    remote: remote::Remote::new(remote, requests),
                 };
+                if actor.host.settings().remote_access {
+                    actor.remote.apply(true);
+                }
                 for creation in checkout::pending_creations(&actor.host).unwrap_or_else(|error| {
                     eprintln!("Recover ticket checkouts: {error:#}");
                     vec![]
@@ -924,14 +1001,17 @@ impl Service {
             })?;
         let host_id = readiness.recv()?.map_err(anyhow::Error::msg)?;
         Ok(Self {
+            requests: Requests {
+                sender: sender.clone(),
+                events,
+                host_id,
+                working,
+            },
             handle: Arc::new(Handle {
                 sender,
                 worker: std::sync::Mutex::new(Some(thread)),
             }),
-            events,
             pings,
-            host_id,
-            working,
             ended,
         })
     }
@@ -939,12 +1019,7 @@ impl Service {
         &self,
         command: Command,
     ) -> std::result::Result<Receiver<std::result::Result<Value, String>>, String> {
-        let (reply, receive) = async_channel::bounded(1);
-        self.handle
-            .sender
-            .try_send(Event::Command(command, reply))
-            .map_err(|_| "Host queue is full or disconnected".to_string())?;
-        Ok(receive)
+        self.requests.request(command)
     }
     /// Stops every running turn and then the host, returning once those turns' process groups
     /// are stopped. Dropping the last handle does the same; an app that exits without dropping
@@ -954,19 +1029,22 @@ impl Service {
     }
     /// Subscribes to the host's events; see `EventLog::subscribe`.
     pub fn subscribe(&self, after: Option<&Cursor>) -> Subscription {
-        self.events.subscribe(after)
+        self.requests.subscribe(after)
     }
     /// New each time the host starts.
     pub fn epoch(&self) -> String {
-        self.events.epoch()
+        self.requests.epoch()
     }
     /// Stays the same for the data folder across restarts.
     pub fn host_id(&self) -> &str {
-        &self.host_id
+        self.requests.host_id()
     }
     /// How many agents are in a turn.
     pub fn working(&self) -> usize {
-        self.working.load(Ordering::Relaxed)
+        self.requests.working()
+    }
+    pub fn requests(&self) -> Requests {
+        self.requests.clone()
     }
     /// Closes once the host has stopped: after `StopAgentsAndQuit`, `RestartHost` or
     /// `shutdown`. A process serving this host exits then.
@@ -1250,7 +1328,7 @@ impl Actor {
             Command::ListFolder { path } => {
                 let (roots, path, reply) = (self.host.file_roots()?, path.clone(), reply.clone());
                 std::thread::spawn(move || {
-                    let listed = host_files::list_folder(&roots, &path, true)
+                    let listed = host_files::list_folder(&roots, &path, host_files::Reader::Host)
                         .and_then(|listing| Ok(serde_json::to_value(listing)?));
                     let _ = reply.try_send(listed.map_err(|e| format!("{e:#}")));
                 });
@@ -1294,6 +1372,13 @@ impl Actor {
 
     /// Handles one event, then starts what it made due.
     fn process(&mut self, event: Event) {
+        let event = match event {
+            Event::Remote(message) => match self.remote_message(message) {
+                Some(command) => command,
+                None => return self.signal(false),
+            },
+            event => event,
+        };
         if self.checkout_conflict(&event) {
             self.checkout_deferred.push(event);
             return;
@@ -1662,6 +1747,16 @@ impl Actor {
                         .map_err(|e| format!("{e:#}")),
                 );
                 added
+            }
+            // `process` takes these in first; this is for a caller that hands events straight here.
+            Event::Remote(message) => match self.remote_message(message) {
+                Some(command) => self.handle(command),
+                None => false,
+            },
+            Event::Command(command, reply) if command.is_remote_access() => {
+                let result = self.remote_access(&command);
+                let _ = reply.try_send(result.map_err(|e| format!("{e:#}")));
+                true
             }
             Event::Command(command, reply) => {
                 match self.scan_in_background(&command, &reply) {
@@ -4015,6 +4110,12 @@ mod tests {
                 (ticket.id, (plan, Ok(())))
             })
             .collect();
+        let requests = Requests {
+            sender: sender.clone(),
+            events: events.clone(),
+            host_id: String::new(),
+            working: Arc::default(),
+        };
         let actor = Actor {
             host,
             schedule_runs: 0,
@@ -4051,6 +4152,7 @@ mod tests {
             github_reading: false,
             publish_tools: publish::Tools::default(),
             sync_pace: sync::Pace::default(),
+            remote: remote::Remote::new(remote::Options::default(), requests),
         };
         (actor, pings.state, pings.steps)
     }

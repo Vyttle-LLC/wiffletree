@@ -927,6 +927,9 @@ pub struct HostSettings {
     /// The repository the shared folder is a clone of. Kept on this machine only.
     #[serde(default)]
     pub settings_repository: Option<SettingsRepository>,
+    /// "Let other devices use this Mac's Wiffletree". Kept on this machine only.
+    #[serde(default)]
+    pub remote_access: bool,
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1085,6 +1088,7 @@ impl HostSettings {
             allowed_owners: vec![],
             keeper: KeeperSettings::default(),
             settings_repository: None,
+            remote_access: false,
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {

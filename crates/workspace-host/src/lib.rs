@@ -1637,9 +1637,11 @@ impl Host {
                 &path,
                 max_bytes,
             )?)?,
-            Command::ListFolder { path } => {
-                serde_json::to_value(host_files::list_folder(&self.file_roots()?, &path, true)?)?
-            }
+            Command::ListFolder { path } => serde_json::to_value(host_files::list_folder(
+                &self.file_roots()?,
+                &path,
+                host_files::Reader::Host,
+            )?)?,
             Command::Subscribe { .. } | Command::Ping => {
                 bail!("Subscribe and Ping are answered only on the host socket")
             }

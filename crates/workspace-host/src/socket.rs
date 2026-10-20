@@ -1,6 +1,7 @@
 //! The host's client socket, `<data folder>/host.sock`: JSON lines, a `Hello` first on every
-//! connection, then requests answered in any order and, after `Subscribe`, events.
-use crate::service::Service;
+//! connection, then requests answered in any order and, after `Subscribe`, events. `Session` is
+//! that protocol over any transport; remote devices speak it over a WebSocket.
+use crate::service::{Requests, Service};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs,
@@ -15,17 +16,20 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 use workspace_core::*;
 
 const MAX_CONNECTIONS: usize = 64;
 /// Requests one connection may have waiting for a reply.
 const MAX_IN_FLIGHT: usize = 64;
-const CAPABILITIES: [&str; 4] = [
+const CAPABILITIES: [&str; 6] = [
     capability::EVENTS,
     capability::FILES,
     capability::FOLDERS,
     capability::RESTART_WHEN_IDLE,
+    capability::UPLOADS,
+    capability::ATTENTION,
 ];
 /// How long a stopping listener waits for the replies still being written, such as the answer
 /// to the `StopAgentsAndQuit` that stopped the host.
@@ -103,12 +107,11 @@ pub fn listen(service: Service, data: &Path, options: Options) -> Result<Listene
                 connections.fetch_sub(1, Ordering::Relaxed);
                 continue;
             }
-            let (service, options, count) = (service.clone(), options.clone(), connections.clone());
+            let (requests, options, count) =
+                (service.requests(), options.clone(), connections.clone());
             let replying = all_replies.clone();
             std::thread::spawn(move || {
-                if let Err(error) =
-                    Connection::new(service, options, replying, stream).and_then(Connection::run)
-                {
+                if let Err(error) = serve_connection(requests, &options, replying, stream) {
                     eprintln!("Host connection: {error:#}");
                 }
                 count.fetch_sub(1, Ordering::Relaxed);
@@ -151,10 +154,10 @@ fn peer_user(stream: &UnixStream) -> std::io::Result<libc::uid_t> {
     }
 }
 
-/// Where a connection is in its handshake.
+/// Where a session is in its handshake.
 enum Stage {
     AwaitingHello,
-    /// No protocol in common: only `RestartHost`.
+    /// No protocol in common: only `RestartHost`, and only on the host's own socket.
     Refused,
     Welcomed {
         protocol: u32,
@@ -163,65 +166,64 @@ enum Stage {
     },
 }
 
-struct Connection {
-    service: Service,
-    options: Arc<Options>,
-    reader: BufReader<UnixStream>,
-    writer: Arc<Mutex<UnixStream>>,
+/// Who is on the other end of a session.
+pub(crate) enum Peer {
+    /// A client on the host's own socket, which is the host itself. The human-only commands
+    /// need `credential` in its `Hello`.
+    Local { credential: String },
+    /// A paired device over the network; the host checks its access level for each command.
+    Device { id: String },
+}
+
+/// Where a session's messages go, each one JSON message: a line on the socket, a text frame on
+/// a WebSocket.
+pub(crate) trait Outbox: Send + Sync {
+    fn send(&self, message: Vec<u8>) -> Result<()>;
+}
+
+/// The host protocol over any transport: `Hello` first, then requests answered in any order
+/// and, after `Subscribe`, events.
+pub(crate) struct Session {
+    requests: Requests,
+    peer: Peer,
+    binary: PathBuf,
+    outbox: Arc<dyn Outbox>,
     in_flight: Arc<AtomicUsize>,
     /// The listener's count of replies being waited for or written, over every connection.
     replying: Arc<AtomicUsize>,
     stage: Stage,
-    /// The subscription's queue, closed when the connection ends.
+    /// The subscription's queue, closed when the session ends.
     events: Option<async_channel::Receiver<Event>>,
+    /// When the message being handled was read, for the `host_ms` of its reply.
+    read_at: Instant,
 }
-impl Connection {
-    fn new(
-        service: Service,
-        options: Arc<Options>,
+impl Session {
+    pub(crate) fn new(
+        requests: Requests,
+        peer: Peer,
+        binary: PathBuf,
+        outbox: Arc<dyn Outbox>,
         replying: Arc<AtomicUsize>,
-        stream: UnixStream,
-    ) -> Result<Self> {
-        Ok(Self {
-            service,
-            options,
-            reader: BufReader::new(stream.try_clone()?),
-            writer: Arc::new(Mutex::new(stream)),
+    ) -> Self {
+        Self {
+            requests,
+            peer,
+            binary,
+            outbox,
             in_flight: Arc::default(),
             replying,
             stage: Stage::AwaitingHello,
             events: None,
-        })
-    }
-    fn run(mut self) -> Result<()> {
-        let result = self.serve();
-        if let Some(events) = self.events.take() {
-            events.close();
+            read_at: Instant::now(),
         }
-        result
     }
-    fn serve(&mut self) -> Result<()> {
-        while let Some(line) = self.read_line()? {
-            match self.stage {
-                Stage::AwaitingHello => self.hello(&line)?,
-                _ => self.request(&line)?,
-            }
+    /// Handles one message the client sent, read at `read_at`.
+    pub(crate) fn receive(&mut self, message: &[u8], read_at: Instant) -> Result<()> {
+        self.read_at = read_at;
+        match self.stage {
+            Stage::AwaitingHello => self.hello(message),
+            _ => self.request(message),
         }
-        Ok(())
-    }
-    fn read_line(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut line = Vec::new();
-        let count = (&mut self.reader)
-            .take(MAX_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)?;
-        if count == 0 {
-            return Ok(None);
-        }
-        ensure!(
-            line.len() <= MAX_LINE_BYTES,
-            "A line exceeds the 256 KiB bound"
-        );
-        Ok(Some(line))
     }
     fn hello(&mut self, line: &[u8]) -> Result<()> {
         let Ok(HelloLine { hello }) = serde_json::from_slice::<HelloLine>(line) else {
@@ -229,10 +231,13 @@ impl Connection {
         };
         let answer = match choose_protocol(PROTOCOLS, hello.protocols) {
             Some(protocol) => {
-                let human = hello
-                    .credential
-                    .as_deref()
-                    .is_some_and(|given| same_secret(given, &self.options.credential));
+                let human = match &self.peer {
+                    Peer::Local { credential } => hello
+                        .credential
+                        .as_deref()
+                        .is_some_and(|given| same_secret(given, credential)),
+                    Peer::Device { .. } => false,
+                };
                 self.stage = Stage::Welcomed {
                     protocol,
                     human,
@@ -240,11 +245,11 @@ impl Connection {
                 };
                 HelloAnswer::Welcome(Welcome {
                     protocol,
-                    host_id: self.service.host_id().into(),
+                    host_id: self.requests.host_id().into(),
                     host_version: host_version().into(),
-                    epoch: self.service.epoch(),
+                    epoch: self.requests.epoch(),
                     capabilities: CAPABILITIES.map(String::from).to_vec(),
-                    binary: self.options.binary.clone(),
+                    binary: self.binary.clone(),
                 })
             }
             None => {
@@ -253,11 +258,11 @@ impl Connection {
                     host_protocols: PROTOCOLS,
                     client_protocols: hello.protocols,
                     host_version: host_version().into(),
-                    working: self.service.working(),
+                    working: self.requests.working(),
                 })
             }
         };
-        self.write(&answer)
+        self.outbox.send(serde_json::to_vec(&answer)?)
     }
     fn request(&mut self, line: &[u8]) -> Result<()> {
         let request = match serde_json::from_slice::<Request>(line) {
@@ -272,11 +277,14 @@ impl Connection {
             id,
             command,
         } = request;
+        let local = matches!(self.peer, Peer::Local { .. });
         let (protocol, human) = match self.stage {
             Stage::Welcomed {
                 protocol, human, ..
             } => (protocol, human),
-            Stage::Refused if matches!(command, Command::RestartHost { .. }) => (version, false),
+            Stage::Refused if local && matches!(command, Command::RestartHost { .. }) => {
+                (version, false)
+            }
             Stage::Refused => {
                 return self.reply(version, id, Err(
                     "This host shares no protocol with the client; only RestartHost is accepted".into(),
@@ -291,13 +299,15 @@ impl Connection {
                 Err(format!("Use protocol {protocol} on this connection")),
             );
         }
-        if command.is_human_only() && !human {
+        if local && command.is_human_only() && !human {
             return self.reply(version, id, Err(
                 "Only the Wiffletree app can give this command: its client credential is missing".into(),
             ));
         }
         match &command {
-            Command::Subscribe { after, .. } => return self.subscribe(version, id, after.as_ref()),
+            Command::Subscribe { after, kinds } => {
+                return self.subscribe(version, id, after.as_ref(), kinds.clone());
+            }
             Command::Ping => return self.reply(version, id, Ok(serde_json::Value::Null)),
             _ => {}
         }
@@ -309,29 +319,43 @@ impl Connection {
                 Err("Too many requests are waiting for a reply".into()),
             );
         }
-        let receive = match self.service.request(command) {
+        let sent = match &self.peer {
+            Peer::Local { .. } => self.requests.request(command),
+            Peer::Device { id } => self.requests.request_from(id, command),
+        };
+        let receive = match sent {
             Ok(receive) => receive,
             Err(error) => {
                 self.in_flight.fetch_sub(1, Ordering::Relaxed);
                 return self.reply(version, id, Err(error));
             }
         };
-        let (writer, in_flight) = (self.writer.clone(), self.in_flight.clone());
-        let replying = self.replying.clone();
+        let (outbox, in_flight) = (self.outbox.clone(), self.in_flight.clone());
+        let (replying, read_at) = (self.replying.clone(), self.read_at);
         replying.fetch_add(1, Ordering::Relaxed);
         std::thread::spawn(move || {
             let result = receive
                 .recv_blocking()
                 .unwrap_or_else(|_| Err("Workspace stopped".into()));
-            let _ = write_line(&writer, &response(version, id, result));
+            let mut answer = response(version, id, result);
+            answer.host_ms = Some(read_at.elapsed().as_millis() as u64);
+            if let Ok(message) = serde_json::to_vec(&answer) {
+                let _ = outbox.send(message);
+            }
             in_flight.fetch_sub(1, Ordering::Relaxed);
             replying.fetch_sub(1, Ordering::Relaxed);
         });
         Ok(())
     }
-    fn subscribe(&mut self, version: u32, id: String, after: Option<&Cursor>) -> Result<()> {
+    fn subscribe(
+        &mut self,
+        version: u32,
+        id: String,
+        after: Option<&Cursor>,
+        kinds: Option<Vec<EventKindName>>,
+    ) -> Result<()> {
         let Stage::Welcomed { subscribed, .. } = &mut self.stage else {
-            unreachable!("only a welcomed connection subscribes")
+            unreachable!("only a welcomed session subscribes")
         };
         if std::mem::replace(subscribed, true) {
             return self.reply(
@@ -340,7 +364,7 @@ impl Connection {
                 Err("This connection is already subscribed".into()),
             );
         }
-        let subscription = self.service.subscribe(after);
+        let subscription = self.requests.subscribe(after);
         self.events = Some(subscription.events.clone());
         let cursor = subscription.cursor.clone();
         self.reply(
@@ -348,11 +372,21 @@ impl Connection {
             id,
             Ok(serde_json::to_value(Subscribed { cursor })?),
         )?;
-        let writer = self.writer.clone();
+        let outbox = self.outbox.clone();
+        let wanted = move |event: &Event| match (&kinds, event.kind.name()) {
+            (Some(kinds), Some(name)) => kinds.contains(&name),
+            _ => true,
+        };
         std::thread::spawn(move || {
             let live = std::iter::from_fn(|| subscription.events.recv_blocking().ok());
             for event in subscription.missed.into_iter().chain(live) {
-                if write_line(&writer, &EventLine { event }).is_err() {
+                if !wanted(&event) {
+                    continue;
+                }
+                let Ok(message) = serde_json::to_vec(&EventLine { event }) else {
+                    continue;
+                };
+                if outbox.send(message).is_err() {
                     break;
                 }
             }
@@ -365,7 +399,7 @@ impl Connection {
             _ => PROTOCOL_VERSION,
         }
     }
-    /// Answers a line that is not a command it can run, with its id when it has one.
+    /// Answers a message that is not a command it can run, with its id when it has one.
     fn refuse(&self, line: &[u8], version: u32, error: &str) -> Result<()> {
         let id = serde_json::from_slice::<serde_json::Value>(line)
             .ok()
@@ -379,14 +413,60 @@ impl Connection {
         id: String,
         result: std::result::Result<serde_json::Value, String>,
     ) -> Result<()> {
-        write_line(&self.writer, &response(version, id, result))
+        let mut answer = response(version, id, result);
+        answer.host_ms = Some(self.read_at.elapsed().as_millis() as u64);
+        self.outbox.send(serde_json::to_vec(&answer)?)
     }
-    fn write(&self, value: &impl serde::Serialize) -> Result<()> {
-        write_line(&self.writer, value)
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(events) = self.events.take() {
+            events.close();
+        }
     }
 }
 
-fn response(
+/// A socket connection: JSON lines, each written whole.
+struct Lines(Mutex<UnixStream>);
+impl Outbox for Lines {
+    fn send(&self, mut message: Vec<u8>) -> Result<()> {
+        message.push(b'\n');
+        let mut stream = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        stream.write_all(&message)?;
+        Ok(stream.flush()?)
+    }
+}
+
+/// Serves one connection on the socket until it closes.
+fn serve_connection(
+    requests: Requests,
+    options: &Options,
+    replying: Arc<AtomicUsize>,
+    stream: UnixStream,
+) -> Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let peer = Peer::Local {
+        credential: options.credential.clone(),
+    };
+    let outbox = Arc::new(Lines(Mutex::new(stream)));
+    let mut session = Session::new(requests, peer, options.binary.clone(), outbox, replying);
+    loop {
+        let mut line = Vec::new();
+        let count = (&mut reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)?;
+        if count == 0 {
+            return Ok(());
+        }
+        ensure!(
+            line.len() <= MAX_LINE_BYTES,
+            "A line exceeds the 256 KiB bound"
+        );
+        session.receive(&line, Instant::now())?;
+    }
+}
+
+pub(crate) fn response(
     version: u32,
     id: String,
     result: std::result::Result<serde_json::Value, String>,
@@ -402,15 +482,6 @@ fn response(
         error,
         host_ms: None,
     }
-}
-
-/// Writes one whole line, so replies and events never interleave.
-fn write_line(writer: &Mutex<UnixStream>, value: &impl serde::Serialize) -> Result<()> {
-    let mut line = serde_json::to_vec(value)?;
-    line.push(b'\n');
-    let mut stream = writer.lock().unwrap_or_else(|e| e.into_inner());
-    stream.write_all(&line)?;
-    Ok(stream.flush()?)
 }
 
 /// Compares in time that does not depend on where the secrets differ.
