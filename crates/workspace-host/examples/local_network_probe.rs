@@ -29,17 +29,20 @@ fn main() {
         ("pairing", "0"),
     ])
     .unwrap();
-    let _advertisement =
-        match workspace_host::remote::bonjour::Advertisement::register("Wiffletree probe", port, &txt) {
-            Ok(advertisement) => {
-                say(format!("advertise: registered as {:?}", advertisement.name));
-                Some(advertisement)
-            }
-            Err(error) => {
-                say(format!("advertise: refused: {error:#}"));
-                None
-            }
-        };
+    let _advertisement = match workspace_host::remote::bonjour::Advertisement::register(
+        "Wiffletree probe",
+        port,
+        &txt,
+    ) {
+        Ok(advertisement) => {
+            say(format!("advertise: registered as {:?}", advertisement.name));
+            Some(advertisement)
+        }
+        Err(error) => {
+            say(format!("advertise: refused: {error:#}"));
+            None
+        }
+    };
     if let Some(target) = args.get(2) {
         let address = target.parse().expect("an address:port");
         match std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(5)) {

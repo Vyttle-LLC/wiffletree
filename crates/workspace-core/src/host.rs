@@ -33,6 +33,10 @@ pub mod capability {
     pub const FOLDERS: &str = "folders";
     /// `RestartHost { when: Idle }`.
     pub const RESTART_WHEN_IDLE: &str = "restart-when-idle";
+    /// `UploadAttachment` and `Send`'s `uploads`.
+    pub const UPLOADS: &str = "uploads";
+    /// `Subscribe`'s `kinds` and the `attention` event.
+    pub const ATTENTION: &str = "attention";
 }
 
 /// The newest protocol both ranges, each `[oldest, newest]`, include.
@@ -114,8 +118,34 @@ pub enum EventKind {
     Progress,
     /// Fetch usage and quotas.
     Usage,
+    /// How many things need the human on this host: its attention items and workspace notes,
+    /// as the Inbox counts them. Sent when the count changes.
+    Attention { count: usize },
     /// Events were lost: take a fresh snapshot, then continue from this event's cursor.
     Resync,
+}
+impl EventKind {
+    /// Its name in `Subscribe`'s `kinds`; `Resync` reaches every subscriber.
+    pub fn name(&self) -> Option<EventKindName> {
+        match self {
+            Self::State => Some(EventKindName::State),
+            Self::Steps { .. } => Some(EventKindName::Steps),
+            Self::Progress => Some(EventKindName::Progress),
+            Self::Usage => Some(EventKindName::Usage),
+            Self::Attention { .. } => Some(EventKindName::Attention),
+            Self::Resync => None,
+        }
+    }
+}
+/// An event kind, as `Subscribe` names the kinds it wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKindName {
+    State,
+    Steps,
+    Progress,
+    Usage,
+    Attention,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {

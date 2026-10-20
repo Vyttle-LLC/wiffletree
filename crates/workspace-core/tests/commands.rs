@@ -172,6 +172,7 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             recipient: text(),
             body: text(),
             attachments: vec![],
+            uploads: vec![],
         },
         Command::SetModelSelection {
             selection: Box::default(),

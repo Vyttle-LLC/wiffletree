@@ -92,6 +92,7 @@ fn a_running_implementer_gets_saved_rules_from_its_next_turn() {
             recipient: implementer.id.clone(),
             body: "JUST_REPLY".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     until("the next turn", || turns().len() == 2);

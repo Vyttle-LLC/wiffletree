@@ -24,15 +24,8 @@ pub fn txt_record(fields: &[(&str, &str)]) -> Result<Vec<u8>> {
 }
 
 type ServiceRef = *mut c_void;
-type RegisterReply = extern "C" fn(
-    ServiceRef,
-    u32,
-    i32,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    *mut c_void,
-);
+type RegisterReply =
+    extern "C" fn(ServiceRef, u32, i32, *const c_char, *const c_char, *const c_char, *mut c_void);
 
 unsafe extern "C" {
     #[allow(clippy::too_many_arguments)]

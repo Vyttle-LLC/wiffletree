@@ -89,12 +89,14 @@ fn main() -> Result<()> {
                         id: request.id,
                         result: Some(value),
                         error: None,
+                        host_ms: None,
                     },
                     Err(error) => Response {
                         version: STDIN_PROTOCOL,
                         id: request.id,
                         result: None,
                         error: Some(error),
+                        host_ms: None,
                     },
                 }
             }
@@ -103,6 +105,7 @@ fn main() -> Result<()> {
                 id: "invalid".into(),
                 result: None,
                 error: Some(format!("Invalid command: {error}")),
+                host_ms: None,
             },
         };
         serde_json::to_writer(&mut output, &response).context("Write response")?;

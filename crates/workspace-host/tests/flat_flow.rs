@@ -93,6 +93,7 @@ fn a_single_repository_ticket_runs_without_relay_turns_and_verifies_concurrently
             recipient: main.id.clone(),
             body: "START_HANDOFF FAIL_CODEX_ROUND_1".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     // While round 1 runs, the ticket's one worktree is the only one on its branch.

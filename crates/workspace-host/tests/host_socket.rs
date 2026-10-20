@@ -332,6 +332,7 @@ fn with_no_common_protocol_the_refusal_counts_working_agents_and_restart_now_sto
         recipient: main.id.clone(),
         body: "Keep working".into(),
         attachments: vec![],
+        uploads: vec![],
     });
     let deadline = Instant::now() + Duration::from_secs(30);
     while snapshot(&mut app)
@@ -543,8 +544,11 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
         name: name.into(),
     };
     let mut subscriber = fixture.welcomed(None);
-    let subscribed: Subscribed =
-        serde_json::from_value(subscriber.result(Command::Subscribe { after: None })).unwrap();
+    let subscribed: Subscribed = serde_json::from_value(subscriber.result(Command::Subscribe {
+        after: None,
+        kinds: None,
+    }))
+    .unwrap();
     let mut other = fixture.welcomed(None);
     other.result(rename("First"));
     let event = std::iter::repeat_with(|| subscriber.event())
@@ -562,6 +566,7 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
     let mut back = fixture.welcomed(None);
     let resumed: Subscribed = serde_json::from_value(back.result(Command::Subscribe {
         after: Some(read.clone()),
+        kinds: None,
     }))
     .unwrap();
     let missed: Vec<_> = (read.seq + 1..=resumed.cursor.seq)
@@ -584,10 +589,17 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
             epoch: "an earlier start".into(),
             seq: read.seq,
         }),
+        kinds: None,
     });
     assert_eq!(stale.event().kind, EventKind::Resync);
     // A second subscription on one connection is refused.
-    let twice = stale.request(PROTOCOL_VERSION, Command::Subscribe { after: None });
+    let twice = stale.request(
+        PROTOCOL_VERSION,
+        Command::Subscribe {
+            after: None,
+            kinds: None,
+        },
+    );
     assert!(twice.error.unwrap().contains("already subscribed"));
 }
 
@@ -672,6 +684,7 @@ fn a_message_from_the_human_needs_the_apps_credential() {
                 recipient: coordinator.clone(),
                 body: "Ship it".into(),
                 attachments: vec![],
+                uploads: vec![],
             },
         )
     };
@@ -897,6 +910,7 @@ fn a_message_sent_as_the_child_host_is_killed_is_stored_once() {
             recipient: coordinator.clone(),
             body: "Across the drop".into(),
             attachments: vec![],
+            uploads: vec![],
         };
         client.request(send).unwrap()
     };

@@ -1236,12 +1236,14 @@ impl Host {
                 id: request.id,
                 result: Some(result),
                 error: None,
+                host_ms: None,
             },
             Err(error) => Response {
                 version,
                 id: request.id,
                 result: None,
                 error: Some(format!("{error:#}")),
+                host_ms: None,
             },
         }
     }
@@ -1432,13 +1434,17 @@ impl Host {
                 recipient,
                 body,
                 attachments,
-            } => serde_json::to_value(self.send_with_files(
-                &id,
-                sender.as_deref(),
-                &recipient,
-                &body,
-                &attachments,
-            )?)?,
+                uploads,
+            } => {
+                ensure!(uploads.is_empty(), "Uploads are not supported yet");
+                serde_json::to_value(self.send_with_files(
+                    &id,
+                    sender.as_deref(),
+                    &recipient,
+                    &body,
+                    &attachments,
+                )?)?
+            }
             Command::Messages {
                 session_id,
                 before,
@@ -1638,6 +1644,15 @@ impl Host {
             }
             Command::StopAgentsAndQuit | Command::RestartHost { .. } => {
                 bail!("Only the running host's service stops or restarts it")
+            }
+            Command::RemoteAccess
+            | Command::SetRemoteAccess { .. }
+            | Command::OpenPairing
+            | Command::CancelPairing
+            | Command::SetDeviceLevel { .. }
+            | Command::RemoveDevice { .. }
+            | Command::UploadAttachment { .. } => {
+                bail!("Remote access runs only in the host's service")
             }
         })
     }

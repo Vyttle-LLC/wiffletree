@@ -63,6 +63,7 @@ impl Wakes {
             }
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
+            EventKind::Attention { .. } => vec![],
             EventKind::Resync => {
                 self.progress_resynced.store(true, Ordering::Relaxed);
                 self.changed_steps().all = true;

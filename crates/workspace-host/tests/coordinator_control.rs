@@ -54,6 +54,7 @@ fn control(service: &Service, main: &str, command: &str) -> Value {
             recipient: main.into(),
             body: command.into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     until(command, || replies(service) > before);
@@ -177,6 +178,7 @@ fn a_coordinator_stops_and_resumes_its_children_and_hears_of_a_human_stop() {
             recipient: child.id.clone(),
             body: "JUST_REPLY HANG_UNTIL_CANCELLED".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     until("the second long turn", || working(&service));

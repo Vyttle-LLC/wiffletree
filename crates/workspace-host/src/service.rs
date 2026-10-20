@@ -6382,6 +6382,7 @@ mod tests {
                 recipient: root.clone(),
                 body: "Keep going".into(),
                 attachments: vec![],
+                uploads: vec![],
             },
         )
         .unwrap();

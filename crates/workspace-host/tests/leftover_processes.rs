@@ -237,6 +237,7 @@ fn a_quit_stops_running_turns_before_it_returns() {
             recipient: main.id.clone(),
             body: "LINGER".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     until(&service, "the provider to start", |s| {
@@ -467,6 +468,7 @@ fn send(service: &Service, id: &str, recipient: &Session, body: &str) {
             recipient: recipient.id.clone(),
             body: body.into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
 }

@@ -71,6 +71,7 @@ impl PingSenders {
             EventKind::Steps { .. } => vec![&self.steps],
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
+            EventKind::Attention { .. } => vec![],
             EventKind::Resync => vec![&self.state, &self.steps, &self.progress, &self.usage],
         };
         for sender in senders {

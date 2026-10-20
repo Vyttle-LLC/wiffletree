@@ -97,6 +97,7 @@ fn every_way_a_turn_ends_stops_its_whole_process_group_promptly() {
                 recipient: main.id.clone(),
                 body: body.into(),
                 attachments: vec![],
+                uploads: vec![],
             },
         );
     };

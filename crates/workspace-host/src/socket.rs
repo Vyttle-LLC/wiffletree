@@ -297,7 +297,7 @@ impl Connection {
             ));
         }
         match &command {
-            Command::Subscribe { after } => return self.subscribe(version, id, after.as_ref()),
+            Command::Subscribe { after, .. } => return self.subscribe(version, id, after.as_ref()),
             Command::Ping => return self.reply(version, id, Ok(serde_json::Value::Null)),
             _ => {}
         }
@@ -400,6 +400,7 @@ fn response(
         id,
         result,
         error,
+        host_ms: None,
     }
 }
 

@@ -373,6 +373,7 @@ mod tests {
                 recipient: session_id(),
                 body: "Go".into(),
                 attachments: vec![],
+                uploads: vec![],
             },
             Command::SetArchived {
                 session_id: session_id(),

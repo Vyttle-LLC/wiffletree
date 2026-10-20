@@ -344,6 +344,7 @@ impl World {
             recipient: session.into(),
             body: body.into(),
             attachments: vec![],
+            uploads: vec![],
         });
         id
     }
