@@ -7,11 +7,15 @@ use serde_json::Value;
 use std::{
     net::{Ipv4Addr, TcpListener},
     path::Path,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use workspace_core::{
     pairing::{KeyPair, short_id},
     remote_client::{self, RemoteError},
+    remote_launch::{self, Discovered, RemoteLaunch},
     *,
 };
 
@@ -614,6 +618,149 @@ fn a_device_subscribed_to_attention_hears_only_the_count() {
             .all(|kind| matches!(kind, EventKind::Attention { .. })),
         "{events:?}"
     );
+}
+
+#[test]
+fn a_host_reached_by_name_is_reached_by_it_again_before_any_browsing() {
+    let studio = Studio::start(0);
+    let port = studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let browsed = Arc::new(AtomicUsize::new(0));
+    let counted = browsed.clone();
+    let discover = Box::new(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+        Discovered::default()
+    });
+    // A name, as typed for a host over Tailscale, where nothing is browsed.
+    let by_name = format!("localhost:{port}");
+    let launcher = RemoteLaunch::new(
+        studio.key.public_key(),
+        device,
+        vec![by_name.clone()],
+        discover,
+    );
+    let reached = launcher.state();
+    let client = Client {
+        name: "Wiffletree".into(),
+        kind: "desktop".into(),
+    };
+    let client = HostClient::keep_connecting(Box::new(launcher), client, Box::new(|_| {})).unwrap();
+    // The first try is the client's worker's, so the snapshot waits for it.
+    let snapshot = client.request(Command::Snapshot).unwrap();
+    snapshot.recv_blocking().unwrap().unwrap();
+    assert_eq!(reached.lock().unwrap().address, Some(by_name));
+    assert_eq!(browsed.load(Ordering::Relaxed), 0, "never browsed");
+    client.stop();
+}
+
+#[test]
+fn another_key_at_a_lan_address_is_passed_over_and_at_a_name_is_a_changed_key() {
+    let (studio, office) = (Studio::start(0), Studio::start(0));
+    studio.on();
+    office.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    // Studio Mac's old LAN address now belongs to another Wiffletree Mac.
+    let launch = |addresses: Vec<String>, same_name_other_id| {
+        let discovered = Discovered {
+            addresses,
+            same_name_other_id,
+        };
+        let discover = Box::new(move || discovered.clone());
+        let mut launcher = RemoteLaunch::new(
+            studio.key.public_key(),
+            device.clone(),
+            vec![office.address()],
+            discover,
+        );
+        let reached = launcher.state();
+        let connected = launcher.connect(&std::sync::atomic::AtomicBool::new(false));
+        let turnaway = reached.lock().unwrap().turnaway;
+        (connected.map(|_| ()).map_err(|e| e.to_string()), turnaway)
+    };
+
+    let key_changed = Some(remote_launch::Turnaway::KeyChanged);
+    assert_eq!(launch(vec![studio.address()], false), (Ok(()), None));
+    // A host advertising Studio Mac's name under another id says nothing once Studio Mac answers.
+    assert_eq!(launch(vec![studio.address()], true), (Ok(()), None));
+    let (missing, turnaway) = launch(vec![], false);
+    assert!(missing.unwrap_err().contains("another machine"));
+    assert_eq!(
+        turnaway, None,
+        "another Mac at an old address is no key change"
+    );
+    // An address found under Studio Mac's id that shows another key is one.
+    let (changed, turnaway) = launch(vec![office.address()], false);
+    assert!(changed.is_err());
+    assert_eq!(turnaway, key_changed);
+    // So is Studio Mac's name advertised under another id, as after a reinstall.
+    let (reinstalled, turnaway) = launch(vec![], true);
+    assert!(reinstalled.is_err());
+    assert_eq!(turnaway, key_changed);
+
+    // A name, as typed over Tailscale where nothing is browsed, names one machine: another key
+    // there is Studio Mac's key changed, at once.
+    let port = office.address().rsplit_once(':').unwrap().1.to_owned();
+    let browsed = Arc::new(AtomicUsize::new(0));
+    let counted = browsed.clone();
+    let mut by_name = RemoteLaunch::new(
+        studio.key.public_key(),
+        device.clone(),
+        vec![format!("localhost:{port}")],
+        Box::new(move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Discovered::default()
+        }),
+    );
+    let reached = by_name.state();
+    assert!(
+        by_name
+            .connect(&std::sync::atomic::AtomicBool::new(false))
+            .is_err()
+    );
+    assert_eq!(reached.lock().unwrap().turnaway, key_changed);
+    assert_eq!(browsed.load(Ordering::Relaxed), 0, "never browsed");
+}
+
+#[test]
+fn subscribing_again_changes_the_kinds_without_a_new_cursor_or_a_gap() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    let subscribe = |after: Option<Cursor>, kinds| Command::Subscribe { after, kinds };
+    let narrow = Some(vec![EventKindName::Attention]);
+    let subscribed = client.call(subscribe(None, narrow)).unwrap();
+    let cursor: Cursor = serde_json::from_value(subscribed["cursor"].clone()).unwrap();
+    let next = |client: &mut Connection| loop {
+        let message: Value = client.socket.receive().unwrap();
+        if let Some(event) = message.get("event") {
+            return serde_json::from_value::<Event>(event.clone()).unwrap().kind;
+        }
+    };
+    assert_eq!(next(&mut client), EventKind::Attention { count: 1 });
+
+    let snapshot = client.call(Command::Snapshot).unwrap();
+    let project = snapshot["projects"][0]["id"].as_str().unwrap().to_owned();
+    let rename = |name: &str| Command::RenameProject {
+        project_id: project.clone(),
+        name: name.into(),
+    };
+    // While narrowed, a rename's state event is skipped and the count's arrives.
+    studio.host(rename("Narrowed")).unwrap();
+    let question = snapshot["attention"][0]["id"].as_str().unwrap().to_owned();
+    client.send(Command::DismissAttention { id: question });
+    assert_eq!(next(&mut client), EventKind::Attention { count: 0 });
+
+    // Widened in place: answered with no cursor, and the next change arrives.
+    assert_eq!(client.call(subscribe(None, None)), Ok(Value::Null));
+    studio.host(rename("Widened")).unwrap();
+    assert_eq!(next(&mut client), EventKind::State);
+
+    let error = client.call(subscribe(Some(cursor), None)).unwrap_err();
+    assert!(error.contains("without after"), "{error}");
 }
 
 #[test]

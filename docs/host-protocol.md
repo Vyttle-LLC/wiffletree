@@ -22,7 +22,7 @@ The standard-input mode is for scripts such as `scripts/test_communications.py`:
 
 ### Remote devices
 
-While remote access is on, paired devices reach the host over TLS 1.3 on TCP port 47821, with one JSON message per WebSocket text frame in place of a line. `docs/remote-protocol.md` will describe pairing and pinning in full; in short:
+While remote access is on, paired devices reach the host over TLS 1.3 on TCP port 47821, with one JSON message per WebSocket text frame in place of a line. `docs/remote-protocol.md` describes the transport, pairing and pinning in full, for clients written in any language; in short:
 
 - `/pair` runs a pairing method while pairing mode is open: `PairStart`, then `PairReply` and `PairConfirm` (`workspace_core::remote`).
 - `/v1` opens with the host's `Challenge`. The device answers with `ChallengeAnswer`, its id and a signature, and the host replies with `ChallengeVerdict`: `{"accepted": {"level": "control"}}` or `"view_only"`, so the client knows what it may do before it sends anything, or `"unpaired"`, after which the host closes the connection with the reason `unpaired`. `Hello` and the rest of this page follow an accepted verdict.
@@ -85,8 +85,9 @@ A client never sends a command for a capability the host did not list.
 | `restart-when-idle` | `restart_host` with `when: "idle"` |
 | `uploads` | `upload_attachment`, and `send`'s `uploads` |
 | `attention` | `subscribe`'s `kinds`, and the `attention` event |
+| `resubscribe` | `subscribe` again on a subscribed connection, to change its `kinds` |
 
-This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads` and `attention`, and refuses a command whose capability it does not list.
+This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads`, `attention` and `resubscribe`, and refuses a command whose capability it does not list.
 
 ### Ending the host
 
@@ -100,7 +101,7 @@ Some commands are only the human's to give: a `send` with no `sender`, which is 
 
 ## Events
 
-`subscribe` turns the connection into a subscriber; a connection subscribes at most once. Its reply is `Subscribed`, the cursor of the host's latest event:
+`subscribe` turns the connection into a subscriber. Its reply is `Subscribed`, the cursor of the host's latest event:
 
 ```json
 {"version": 2, "id": "…", "result": {"cursor": {"epoch": "…", "seq": 41}}, "error": null}
@@ -130,6 +131,8 @@ Events say only what to fetch again, never workspace state, so a missed event ca
 - `subscribe` with `after` set to a cursor of the current epoch still in that log first sends every later event in order, then live events.
 - Any other cursor, including one from an earlier epoch or one the log no longer holds, gets `resync` first.
 - With no `after`, only events after the subscription come; take a snapshot after the reply.
+- A subscriber with no `after`, or one that gets `resync`, then gets one `attention` event with the host's current count, once the host has counted, so it need not read a snapshot to show it. That event carries the cursor of the `Subscribed` reply, and comes after the `resync`. Later `attention` events come only when the count changes. A subscription whose `kinds` leave out `attention` gets none of them.
+- A subscribed connection may send `subscribe` again, without `after`, to a host that lists `resubscribe`. Its `kinds` replace the subscription's from the next event on, and the reply is `null`: no new cursor, and no event after the reply is missed. Events the old `kinds` left out are not sent again, so a client that widens its `kinds` reads what it shows anew. With `after`, it is refused. A host without `resubscribe` refuses any second `subscribe`; reconnect to change the `kinds` there.
 - Each subscriber has a queue of 256 events. A subscriber whose queue is full has it cleared and gets one `resync`, so a slow client never holds the host.
 
 ## Host files
@@ -229,7 +232,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `remove_leftover_worktrees` | `ticket_ids: Vec<String>` | change | Removes the worktrees of the tickets the human selected from the listing, re-checking each first; answered with `Vec<LeftoverRemoval>`. |
 | `processes` | `session_id: String` | read | What the agent has left running, or for a coordinator every agent of its project; answered with `Vec<AgentProcesses>`. Groups that have exited are forgotten. |
 | `stop_processes` | `session_id: String`, `groups?: Vec<String>` | change | Stops these groups of the Processes panel of `session_id`, or with none named every group it lists, as the human's stop; answered as `Processes`. The agents keep working. |
-| `subscribe` | `after?: Option<Cursor>`, `kinds?: Option<Vec<EventKindName>>` | read | Socket only: turns the connection into a subscriber of the host's events, after the events following `after` when it is still in the host's log, or after `resync` otherwise; answered with `Subscribed`. With no cursor only later events come. `kinds` limits the events to those kinds, and `resync`. |
+| `subscribe` | `after?: Option<Cursor>`, `kinds?: Option<Vec<EventKindName>>` | read | Socket only: turns the connection into a subscriber of the host's events, after the events following `after` when it is still in the host's log, or after `resync` otherwise; answered with `Subscribed`. With no cursor only later events come, after an `attention` event with the current count. `kinds` limits the events to those kinds, and `resync`. Sent again on a subscribed connection without `after`, it changes the `kinds` in place and is answered with `null` (`resubscribe`). |
 | `ping` | — | read | Socket only: answered with nothing by the connection itself, without waiting for the host's actor. A client that has heard nothing for a while sends it to tell a quiet or busy host from one that is gone. |
 | `resolve_paths` | `references: Vec<String>`, `bases: Vec<PathBuf>` | read | Which `references` name a file, each as it is or, when relative, under the first of `bases` that holds it; a `~/` reference is under the host's home folder. Answered with one `Option<ResolvedPath>` per reference, in order. Reads no file's contents. |
 | `read_file` | `path: PathBuf`, `max_bytes: u64` | read | Reads a file under the roots `docs/host-protocol.md` lists, refusing one larger than `max_bytes` or `MAX_ATTACHMENT_BYTES`; answered with `FileContents`. |

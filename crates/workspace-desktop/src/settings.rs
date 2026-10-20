@@ -1,12 +1,12 @@
 //! The Settings window, in two parts (design 10 of `remote-hosts`): this Mac's app, with its
-//! appearance and the computers it is paired with, and the host the window drives, with its
+//! appearance, layout, finding other Macs and the computers it is paired with, and the host the window drives, with its
 //! workspace folder, check-in thresholds and settings repository, and on This Mac its remote
 //! access. A setting belongs to the Mac whose agents it runs.
 mod remote_access;
 mod repository;
 
 use super::*;
-use gpui_component::{ActiveTheme, Disableable, button::ButtonVariants};
+use gpui_component::{ActiveTheme, Disableable, button::ButtonVariants, switch::Switch};
 use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
 use ui::{card, hint, icon, mono, over_dimmed, section, segment, setting};
@@ -304,6 +304,63 @@ impl Settings {
             ))
     }
 
+    /// The sidebar's and the transcript's own layout toggles, here too, saved the same way.
+    fn layout_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let preferences = cx.global::<Preferences>();
+        let (grouped, minimized) = (preferences.group_projects, preferences.minimize_activity);
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("LAYOUT", p))
+            .child(switch_row(
+                Switch::new("group-projects")
+                    .checked(grouped)
+                    .on_click(|on: &bool, _, cx| {
+                        set_group_projects(*on, cx);
+                        cx.refresh_windows();
+                    }),
+                "Group projects that share a first word",
+            ))
+            .child(switch_row(
+                Switch::new("minimize-activity")
+                    .checked(minimized)
+                    .on_click(|on: &bool, _, cx| {
+                        set_minimize_activity(*on, cx);
+                        cx.refresh_windows();
+                    }),
+                "Show a working agent's activity as one line",
+            ))
+            .child(hint(
+                "The same choices as the sidebar's and the transcript's own toggles.",
+                p,
+            ))
+    }
+
+    /// Whether this Mac looks around the network for Wiffletree, which macOS asks about.
+    fn other_macs_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let finding = cx.global::<Preferences>().find_on_network;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("OTHER MACS", p))
+            .child(switch_row(
+                Switch::new("find-on-network")
+                    .checked(finding)
+                    .on_click(|on: &bool, _, cx| set_find_on_network(*on, cx)),
+                "Find Wiffletree on other Macs on this network",
+            ))
+            .child(hint(
+                "Off: this Mac never looks around the network, and macOS doesn't ask about it. You can still connect a computer by typing its name or address, and paired computers still reconnect.",
+                p,
+            ))
+            .child(hint(
+                "On: Connect a computer lists the Macs it finds, and a paired Mac that changes address is found again. macOS asks once to allow it.",
+                p,
+            ))
+    }
+
     /// The hosts this Mac is paired with, which only this Mac keeps.
     fn paired_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let paired = &cx.global::<Preferences>().paired_hosts;
@@ -446,6 +503,17 @@ fn part(title: &str, holds: &'static str, p: Palette) -> Div {
         .child(hint(holds, p))
 }
 
+/// A setting's label with its switch at the end of the row.
+fn switch_row(switch: Switch, label: &'static str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(div().flex_1().min_w_0().child(label))
+        .child(switch)
+}
+
 /// One button per preset; choosing one saves both thresholds at once.
 fn threshold_selector(
     driving: &HostView,
@@ -516,10 +584,14 @@ impl Render for Settings {
                     .gap_4()
                     .child(part(
                         "This Mac · the app",
-                        "Appearance and theme · computers you've paired with · window layout",
+                        "Appearance · layout · other Macs · computers you've paired with",
                         p,
                     ))
                     .child(self.appearance_section(p, cx))
+                    .child(rule())
+                    .child(self.layout_section(p, cx))
+                    .child(rule())
+                    .child(self.other_macs_section(p, cx))
                     .child(rule())
                     .child(self.paired_section(p, cx))
                     .child(rule())

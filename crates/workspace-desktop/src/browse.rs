@@ -1,11 +1,15 @@
 //! Wiffletree hosts on this network (design 6 of `remote-hosts`): browsing `_wiffletree._tcp`
 //! through the system's DNS-SD service, `dns_sd.h` in libSystem, and resolving each to its
 //! address and TXT fields. Connect a computer lists them, and a paired host that moved is found
-//! again by its id.
+//! again by its id. It browses only while "Find Wiffletree on other Macs on this network" is on,
+//! so macOS asks about the local network only once someone turns that on.
 use std::{
     collections::BTreeMap,
     ffi::{CStr, CString, c_char, c_void},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use workspace_core::SERVICE_TYPE;
@@ -31,15 +35,46 @@ const FRESH_EVERY: Duration = Duration::from_secs(2);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_LAST: Duration = Duration::from_secs(60);
 
+/// Starts a browse that runs until its flag is set: Bonjour in the app, a stand-in in tests.
+type Start = Box<dyn Fn(Hosts, Arc<AtomicBool>) + Send + Sync>;
+
 /// What browsing has found, shared with the browsing thread.
-#[derive(Default)]
 pub(crate) struct Browsed {
     /// Each host by its advertised service name.
     found: Mutex<BTreeMap<String, Found>>,
     /// Known hosts are resolved again until then.
     fresh_until: Mutex<Option<Instant>>,
+    /// The running browse's stop flag, while browsing.
+    browsing: Mutex<Option<Arc<AtomicBool>>>,
+    start: Start,
 }
 impl Browsed {
+    fn new(start: Start) -> Hosts {
+        Arc::new(Self {
+            found: Mutex::default(),
+            fresh_until: Mutex::default(),
+            browsing: Mutex::default(),
+            start,
+        })
+    }
+    /// Browses while `on`: turning it on starts at once, and turning it off stops and forgets
+    /// what was found.
+    pub(crate) fn browse_while(self: &Arc<Self>, on: bool) {
+        let mut browsing = self.browsing.lock().unwrap_or_else(|e| e.into_inner());
+        match (on, browsing.as_ref()) {
+            (true, None) => {
+                let stop = Arc::new(AtomicBool::new(false));
+                (self.start)(self.clone(), stop.clone());
+                *browsing = Some(stop);
+            }
+            (false, Some(stop)) => {
+                stop.store(true, Ordering::Relaxed);
+                *browsing = None;
+                self.clear();
+            }
+            _ => {}
+        }
+    }
     pub(crate) fn found(&self) -> Vec<Found> {
         let found = self.found.lock().unwrap_or_else(|e| e.into_inner());
         found.values().cloned().collect()
@@ -67,34 +102,39 @@ impl Browsed {
 }
 pub(crate) type Hosts = Arc<Browsed>;
 
-/// Starts browsing for as long as the app runs, and returns what it finds.
-pub(crate) fn start() -> Hosts {
-    let hosts = Hosts::default();
-    let browsed = hosts.clone();
+/// What browsing finds through Bonjour, once `browse_while` turns it on.
+pub(crate) fn hosts() -> Hosts {
+    Browsed::new(Box::new(start))
+}
+
+/// Browses on a thread of its own until `stop` is set.
+fn start(hosts: Hosts, stop: Arc<AtomicBool>) {
     let started = std::thread::Builder::new()
         .name("bonjour-browse".into())
         .spawn(move || {
-            // Browsing ends only when the daemon's connection fails, as when mDNSResponder
-            // restarts; it starts again after a wait that grows while it keeps failing.
+            // A browse ends when the daemon's connection fails, as when mDNSResponder restarts;
+            // it starts again after a wait that grows while it keeps failing.
             let mut wait = RETRY_FIRST;
-            loop {
+            while !stop.load(Ordering::Relaxed) {
                 let started = Instant::now();
                 // A new browse reports every host again, and one gone meanwhile not at all.
-                browsed.clear();
-                if let Err(error) = browse(&browsed) {
+                hosts.clear();
+                if let Err(error) = browse(&hosts, &stop) {
                     eprintln!("Browsing for Wiffletree hosts: {error}");
                 }
                 if started.elapsed() > RETRY_LAST {
                     wait = RETRY_FIRST;
                 }
-                std::thread::sleep(wait);
+                let until = Instant::now() + wait;
+                while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
                 wait = (wait * 2).min(RETRY_LAST);
             }
         });
     if let Err(error) = started {
         eprintln!("Browsing for Wiffletree hosts: {error}");
     }
-    hosts
 }
 
 /// What a TXT record's fields say, or `None` when it lacks the id.
@@ -255,8 +295,8 @@ fn process(service: ServiceRef, wait: Duration) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Browses until the daemon's connection fails.
-fn browse(hosts: &Hosts) -> anyhow::Result<()> {
+/// Browses until the daemon's connection fails or `stop` is set.
+fn browse(hosts: &Hosts, stop: &AtomicBool) -> anyhow::Result<()> {
     let kind = CString::new(SERVICE_TYPE)?;
     let mut seen: Vec<Seen> = vec![];
     let mut service: ServiceRef = std::ptr::null_mut();
@@ -276,13 +316,17 @@ fn browse(hosts: &Hosts) -> anyhow::Result<()> {
     anyhow::ensure!(status == 0, "Bonjour refused to browse: {status}");
     let mut known: BTreeMap<String, Seen> = BTreeMap::new();
     loop {
-        if let Err(error) = process(service, FRESH_EVERY) {
+        let processed = process(service, FRESH_EVERY);
+        if processed.is_err() || stop.load(Ordering::Relaxed) {
             // SAFETY: allocated above and no longer used.
             unsafe { DNSServiceRefDeallocate(service) };
-            return Err(error);
+            return processed;
         }
         for change in std::mem::take(&mut seen) {
             let resolved = change.added.then(|| resolve(&change)).flatten();
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             hosts.set(&change.name, resolved);
             match change.added {
                 true => known.insert(change.name.clone(), change),
@@ -291,7 +335,12 @@ fn browse(hosts: &Hosts) -> anyhow::Result<()> {
         }
         if hosts.wants_fresh() {
             for (name, service) in &known {
-                hosts.set(name, resolve(service));
+                let resolved = resolve(service);
+                // A resolve takes up to seconds; what a stopped browse finds is not kept.
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                hosts.set(name, resolved);
             }
         }
     }
@@ -338,6 +387,34 @@ fn resolve(seen: &Seen) -> Option<Found> {
 mod tests {
     use super::*;
 
+    /// Hosts whose browses only count how many started and stopped.
+    fn counted() -> (Hosts, Arc<Mutex<Vec<Arc<AtomicBool>>>>) {
+        let started = Arc::new(Mutex::new(vec![]));
+        let record = started.clone();
+        let hosts = Browsed::new(Box::new(move |_, stop| record.lock().unwrap().push(stop)));
+        (hosts, started)
+    }
+
+    #[test]
+    fn nothing_browses_while_finding_is_off_and_turning_it_on_and_off_starts_and_stops() {
+        let (hosts, started) = counted();
+        hosts.browse_while(false);
+        assert!(started.lock().unwrap().is_empty(), "off browses nothing");
+
+        hosts.browse_while(true);
+        hosts.browse_while(true);
+        assert_eq!(started.lock().unwrap().len(), 1, "on starts one browse");
+        let found = found("studio.local:47821".into(), b"\x07id=aaaa").unwrap();
+        hosts.set("Studio Mac", Some(found));
+
+        hosts.browse_while(false);
+        let first = started.lock().unwrap()[0].clone();
+        assert!(first.load(Ordering::Relaxed), "off stops it");
+        assert!(hosts.found().is_empty(), "and forgets what it found");
+        hosts.browse_while(true);
+        assert_eq!(started.lock().unwrap().len(), 2, "on again starts afresh");
+    }
+
     #[test]
     #[ignore = "advertises on this Mac's Bonjour service"]
     fn a_host_that_opens_pairing_after_it_was_found_reads_as_pairing() {
@@ -353,7 +430,8 @@ mod tests {
             .unwrap()
         };
         let advertised = Advertisement::register(&format!("Probe {id}"), 47999, &txt("0")).unwrap();
-        let browsed = start();
+        let browsed = hosts();
+        browsed.browse_while(true);
         let pairing = |browsed: &Hosts| {
             browsed.keep_fresh();
             (browsed.found().into_iter())
@@ -370,6 +448,7 @@ mod tests {
         until(false);
         advertised.update(&txt("1")).unwrap();
         until(true);
+        browsed.browse_while(false);
     }
 
     #[test]

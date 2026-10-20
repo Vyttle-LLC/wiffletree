@@ -233,6 +233,10 @@ impl Bridge {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
+    /// The network's share of the latest reply's round trip, in milliseconds.
+    pub(crate) fn network_ms(&self) -> Option<u64> {
+        Some(self.client.as_ref().ok()?.timing()?.network_ms)
+    }
     /// Wakes when the host's count of things that need the human changed.
     pub(crate) fn attention_changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.attention)
@@ -620,7 +624,7 @@ pub(crate) mod tests {
                 self.paired.public_key.clone(),
                 self.device.clone(),
                 vec![address],
-                Box::new(Vec::new),
+                Box::new(Default::default),
             );
             Bridge::remote_host(name, launcher)
         }
@@ -756,7 +760,7 @@ pub(crate) mod tests {
         };
         let device = workspace_core::pairing::KeyPair::generate().unwrap();
         let nowhere = vec!["127.0.0.1:1".to_owned()];
-        let launcher = RemoteLaunch::new(vec![4; 65], device, nowhere, Box::new(Vec::new));
+        let launcher = RemoteLaunch::new(vec![4; 65], device, nowhere, Box::new(Default::default));
         let away = Bridge::remote_host(name, launcher);
 
         let error = away.request(Command::SetCheckIns {

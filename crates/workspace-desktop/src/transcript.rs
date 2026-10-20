@@ -695,6 +695,14 @@ impl Transcript {
             view.back_to_latest(window, cx)
         })
         .detach();
+        let mut minimized = cx.global::<Preferences>().minimize_activity;
+        cx.observe_global::<Preferences>(move |view, cx| {
+            let now = cx.global::<Preferences>().minimize_activity;
+            if std::mem::replace(&mut minimized, now) != now {
+                view.activity_resized(cx);
+            }
+        })
+        .detach();
         Self {
             bridge,
             shared: Shared::default(),
@@ -1123,12 +1131,12 @@ impl Transcript {
     }
 
     pub(super) fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        let preferences = cx.global_mut::<Preferences>();
-        preferences.minimize_activity = !preferences.minimize_activity;
-        if let Err(error) = preferences.save() {
-            eprintln!("Saving preferences: {error}");
-        }
-        // The trailing row changed height; the list measures it again.
+        let minimized = cx.global::<Preferences>().minimize_activity;
+        set_minimize_activity(!minimized, cx);
+    }
+
+    /// The activity card changed height, here or from Settings; the list measures it again.
+    fn activity_resized(&mut self, cx: &mut Context<Self>) {
         let shown = self.shown.messages.len();
         if self.list.item_count() > shown {
             self.list.splice(shown..shown + 1, 1);

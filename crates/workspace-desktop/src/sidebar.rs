@@ -1862,9 +1862,15 @@ pub(super) fn shown_status(session: &Session, index: &WorkspaceIndex) -> Status 
     }
 }
 
-/// A host in the switcher: its name over its state, and what needs the human there.
-fn switcher_row(row: &hosts::SwitcherRow, p: Palette) -> Div {
+/// A host in the switcher: its name over its state, and what needs the human there, with a
+/// connected host's network delay in its tooltip.
+fn switcher_row(row: &hosts::SwitcherRow, p: Palette) -> Stateful<Div> {
+    let tooltip = row.tooltip.clone();
     div()
+        .id(SharedString::from(format!("host-row-{}", row.name)))
+        .when_some(tooltip, |d, tooltip| {
+            d.tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
+        })
         .min_w(px(240.))
         .flex()
         .items_center()

@@ -1,7 +1,7 @@
 //! Remote access: paired devices drive a host over TLS and WebSocket, as
-//! `openspec/changes/remote-hosts/design.md` describes. These are the types both sides share:
-//! access levels, the host's remote-access state, uploads, and the JSON messages of the pairing
-//! exchange on `/pair` and the challenge on `/v1`.
+//! `docs/remote-protocol.md` describes. These are the types both sides share: access levels, the
+//! host's remote-access state, uploads, and the JSON messages of the pairing exchange on `/pair`
+//! and the challenge on `/v1`.
 use serde::{Deserialize, Serialize};
 
 /// The TCP port a host listens on while remote access is on.

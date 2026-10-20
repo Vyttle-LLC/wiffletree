@@ -1,5 +1,5 @@
 //! Local Network privacy probe for the remote listener (task 1.1 of
-//! `openspec/changes/remote-hosts`).
+//! `openspec/changes/archive/2026-10-20-remote-hosts`).
 //!
 //! Listens on TCP on every interface and advertises `_wiffletree._tcp`, then reports what the
 //! system allowed. Sign it, run the signed copy as a launchd agent and connect from another

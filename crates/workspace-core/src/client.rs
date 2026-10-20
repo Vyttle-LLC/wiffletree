@@ -36,7 +36,8 @@ const DISCONNECTED: &str = "Not connected to the host";
 
 type Reply = Box<dyn FnOnce(Result<Value, String>) + Send>;
 /// Called on the client's reading thread with each event the host sends, and with `Resync` when
-/// a host refuses the client or one that had refused it answers.
+/// a host refuses the client or one that had refused it answers, or, on the caller's thread, when
+/// `subscribe_to` widens a subscription in place, since the events it skipped are not sent.
 pub type OnEvent = Box<dyn Fn(&EventKind) + Send + Sync>;
 
 struct Pending {
@@ -48,6 +49,29 @@ struct Pending {
     repeatable: bool,
     /// When it was asked, so requests are written in order.
     order: u64,
+    /// Its command's `type`, which the latency log names.
+    kind: String,
+    /// When it was written on the current connection, for its round trip.
+    written_at: Option<Instant>,
+}
+
+/// One reply's timing (design 12 of `remote-hosts`): its round trip, the part the host spent
+/// between reading the request and writing the reply, and the rest, the network's delay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timing {
+    pub round_trip_ms: u64,
+    pub host_ms: u64,
+    pub network_ms: u64,
+}
+impl Timing {
+    fn of(round_trip: Duration, host_ms: u64) -> Self {
+        let round_trip_ms = round_trip.as_millis() as u64;
+        Self {
+            round_trip_ms,
+            host_ms,
+            network_ms: round_trip_ms.saturating_sub(host_ms),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -66,6 +90,10 @@ struct State {
     heard_at: Option<SystemTime>,
     /// The event kinds to subscribe to, from a host that can narrow them; every kind when `None`.
     kinds: Option<Vec<EventKindName>>,
+    /// The host last connected to, as the latency log names it.
+    host_id: String,
+    /// The latest reply's timing.
+    timing: Option<Timing>,
 }
 
 /// Whether the client is connected, and when it last heard from the host.
@@ -156,15 +184,36 @@ impl HostClient {
         })
     }
     /// Subscribes to only `kinds` of event, or to every kind with `None`, from a host that can
-    /// narrow them. A subscription is made once per connection, so a change connects again.
+    /// narrow them. A host that takes `Subscribe` again changes the live subscription; with an
+    /// older one, a change connects again. Widening it in place gives `Resync`, so what reads
+    /// the host reads it whole.
     pub fn subscribe_to(&self, kinds: Option<Vec<EventKindName>>) {
         let mut writer = self.0.writer();
-        if std::mem::replace(&mut self.0.state().kinds, kinds.clone()) == kinds {
+        let (widened, in_place) = {
+            let mut state = self.0.state();
+            if state.kinds == kinds {
+                return;
+            }
+            let widened = std::mem::replace(&mut state.kinds, kinds.clone()).is_some();
+            let in_place = writer.is_some()
+                && (state.capabilities.iter()).any(|c| c == capability::RESUBSCRIBE);
+            (widened, in_place)
+        };
+        if !in_place {
+            if let Some(stream) = writer.take() {
+                self.0.resubscribing.store(true, Ordering::Relaxed);
+                let _ = stream.shutdown(Shutdown::Both);
+            }
             return;
         }
-        if let Some(stream) = writer.take() {
-            self.0.resubscribing.store(true, Ordering::Relaxed);
-            let _ = stream.shutdown(Shutdown::Both);
+        drop(writer);
+        // Should the connection drop first, the next one subscribes with these kinds anyway.
+        let subscribe = Command::Subscribe { after: None, kinds };
+        if let Err(error) = self.0.submit_as(subscribe, Box::new(|_| {}), false) {
+            eprintln!("Change the subscription: {error}");
+        }
+        if widened {
+            (self.0.on_event)(&EventKind::Resync);
         }
     }
     /// Sends `command`; its reply arrives on the receiver. While disconnected it waits to be
@@ -201,6 +250,10 @@ impl HostClient {
     }
     fn connected(&self) -> bool {
         self.0.writer().is_some()
+    }
+    /// The latest reply's timing, once one has come.
+    pub fn timing(&self) -> Option<Timing> {
+        self.0.state().timing
     }
     /// Whether connected now, and when the host last sent anything.
     pub fn link(&self) -> LinkState {
@@ -333,6 +386,7 @@ impl Shared {
                 && (welcome.capabilities.iter()).any(|c| c == capability::RESTART_WHEN_IDLE);
             state.capabilities = welcome.capabilities;
             state.host_version = Some(welcome.host_version);
+            state.host_id = welcome.host_id;
             state.heard_at = Some(SystemTime::now());
             (state.refusal.take().is_some(), restart_when_idle)
         };
@@ -480,12 +534,29 @@ impl Shared {
         let response: Response = serde_json::from_value(value)?;
         let pending = self.state().pending.remove(&response.id);
         if let Some(pending) = pending {
+            if let (Some(host_ms), Some(written_at)) = (response.host_ms, pending.written_at) {
+                self.timed(&pending.kind, Timing::of(written_at.elapsed(), host_ms));
+            }
             (pending.reply)(match response.error {
                 Some(error) => Err(error),
                 None => Ok(response.result.unwrap_or_default()),
             });
         }
         Ok(())
+    }
+    /// Keeps `timing` as the latest and logs it, so a local and a remote host can be compared.
+    fn timed(&self, kind: &str, timing: Timing) {
+        let mut state = self.state();
+        state.timing = Some(timing);
+        let Timing {
+            round_trip_ms,
+            host_ms,
+            network_ms,
+        } = timing;
+        let host = crate::pairing::short_id(&state.host_id);
+        eprintln!(
+            "Latency to host {host}, {kind}: round trip {round_trip_ms} ms, on the host {host_ms} ms, network {network_ms} ms"
+        );
     }
     /// Forgets the connection: what may be repeated waits for the next, the rest fails.
     fn disconnected(&self) {
@@ -499,6 +570,7 @@ impl Shared {
                 .collect();
             for pending in state.pending.values_mut() {
                 pending.written = false;
+                pending.written_at = None;
             }
             ids.iter()
                 .filter_map(|id| state.pending.remove(id))
@@ -532,11 +604,12 @@ impl Shared {
                 id: new_id(),
                 command,
             };
-            if serde_json::to_vec(&request)
-                .map_err(|e| e.to_string())?
-                .len()
-                >= MAX_LINE_BYTES
-            {
+            let line = serde_json::to_value(&request).map_err(|e| e.to_string())?;
+            let kind = line["command"]["type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if serde_json::to_vec(&line).map_err(|e| e.to_string())?.len() >= MAX_LINE_BYTES {
                 return Err(format!(
                     "This is too large to send: the host takes at most {} KiB at once",
                     MAX_LINE_BYTES / 1024
@@ -550,6 +623,8 @@ impl Shared {
                 reply,
                 written: false,
                 order: state.asked,
+                kind,
+                written_at: None,
             };
             state.pending.insert(id, pending);
         }
@@ -572,6 +647,7 @@ impl Shared {
             let requests: Vec<_> = (waiting.into_iter())
                 .map(|(id, pending)| {
                     pending.written = true;
+                    pending.written_at = Some(Instant::now());
                     Request {
                         version,
                         id: id.clone(),
@@ -805,7 +881,7 @@ mod tests {
                                 id: request.id,
                                 result: Some(result),
                                 error: None,
-                                host_ms: None,
+                                host_ms: Some(0),
                             };
                             write_line(&mut stream, &response).unwrap();
                         }
@@ -1179,6 +1255,66 @@ mod tests {
             started.elapsed()
         );
         assert!(!client.link().connected);
+        client.stop();
+    }
+
+    #[test]
+    fn a_host_that_takes_subscribe_again_changes_the_kinds_on_the_same_connection() {
+        let mut offering = welcome("t");
+        if let HelloAnswer::Welcome(welcome) = &mut offering {
+            (welcome.capabilities)
+                .extend([capability::ATTENTION, capability::RESUBSCRIBE].map(String::from));
+        }
+        let host = FakeHost::start(offering);
+        let resyncs = Arc::new(AtomicUsize::new(0));
+        let counted = resyncs.clone();
+        let on_event: OnEvent = Box::new(move |kind| {
+            if *kind == EventKind::Resync {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let client = connect(&host, false, on_event);
+        let subscriptions = || loop {
+            if let Command::Subscribe { after, kinds } = host.requests.recv_blocking().unwrap() {
+                return (after.is_some(), kinds);
+            }
+        };
+        assert_eq!(subscriptions(), (false, None), "the first subscription");
+
+        client.subscribe_to(Some(vec![EventKindName::Attention]));
+        // A new connection would resume from its cursor; this one names none.
+        let attention = Some(vec![EventKindName::Attention]);
+        assert_eq!(subscriptions(), (false, attention));
+        assert_eq!(
+            resyncs.load(Ordering::Relaxed),
+            0,
+            "narrowing skips nothing"
+        );
+
+        client.subscribe_to(None);
+        assert_eq!(subscriptions(), (false, None));
+        assert_eq!(resyncs.load(Ordering::Relaxed), 1, "widening reads anew");
+        assert!(client.link().connected);
+        client.stop();
+    }
+
+    #[test]
+    fn a_reply_splits_its_round_trip_into_the_hosts_time_and_the_networks() {
+        let timing = Timing::of(Duration::from_millis(240), 12);
+        assert_eq!((timing.host_ms, timing.network_ms), (12, 228));
+        assert_eq!(timing.round_trip_ms, 240);
+        // A clock that disagrees never makes the network's share negative.
+        assert_eq!(Timing::of(Duration::from_millis(5), 12).network_ms, 0);
+
+        let host = FakeHost::start(welcome("t"));
+        let client = connect(&host, false, Box::new(|_| {}));
+        assert_eq!(client.timing(), None);
+        client
+            .request_blocking(Command::Snapshot, Duration::from_secs(5))
+            .unwrap();
+        let timing = client.timing().expect("the reply was timed");
+        assert_eq!(timing.host_ms, 0);
+        assert_eq!(timing.network_ms, timing.round_trip_ms);
         client.stop();
     }
 }

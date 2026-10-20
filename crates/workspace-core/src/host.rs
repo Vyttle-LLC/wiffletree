@@ -37,6 +37,8 @@ pub mod capability {
     pub const UPLOADS: &str = "uploads";
     /// `Subscribe`'s `kinds` and the `attention` event.
     pub const ATTENTION: &str = "attention";
+    /// `Subscribe` again on a subscribed connection, which changes its kinds in place.
+    pub const RESUBSCRIBE: &str = "resubscribe";
 }
 
 /// The newest protocol both ranges, each `[oldest, newest]`, include.

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use workspace_core::{
     AccessLevel,
     pairing::{KeyPair, short_id},
-    remote_launch::{RemoteLaunch, Turnaway},
+    remote_launch::{Discovered, RemoteLaunch, Turnaway},
 };
 
 /// A host paired with this device, kept in its client settings, never synced.
@@ -69,6 +69,8 @@ pub(crate) struct RemoteHost {
     pub link: Link,
     /// Its count of things that need the human, once it has sent one.
     pub needs_you: Option<usize>,
+    /// The network's share of its latest reply's round trip, in milliseconds.
+    pub network_ms: Option<u64>,
 }
 
 /// One row of the host switcher.
@@ -79,6 +81,8 @@ pub(crate) struct SwitcherRow {
     pub detail: String,
     pub needs_you: usize,
     pub selected: bool,
+    /// For a connected host, its latest network delay.
+    pub tooltip: Option<String>,
 }
 
 /// This Mac, then each paired host, as the switcher lists them.
@@ -99,6 +103,7 @@ pub(crate) fn switcher_rows(
         detail: format!("Local workspace · {projects}"),
         needs_you: local_needs_you,
         selected: *selected == HostChoice::ThisMac,
+        tooltip: None,
     };
     let remotes = remotes.iter().map(|host| {
         let choice = HostChoice::Remote(host.paired.id.clone());
@@ -108,6 +113,9 @@ pub(crate) fn switcher_rows(
             name: host.paired.name.clone(),
             detail: link_detail(host.link, host.paired.last_seen, now),
             needs_you: host.needs_you.unwrap_or(0),
+            tooltip: (host.network_ms)
+                .filter(|_| matches!(host.link, Link::Connected(_)))
+                .map(|ms| format!("Network delay {ms} ms")),
         }
     });
     std::iter::once(this_mac).chain(remotes).collect()
@@ -362,12 +370,8 @@ impl Hosts {
             return Bridge::unreachable(name);
         };
         let (browsed, short) = (self.browsed.clone(), short_id(&paired.id).to_owned());
-        let discover = Box::new(move || {
-            (browsed.found().into_iter())
-                .filter(|found| found.short_id == short)
-                .map(|found| found.address.clone())
-                .collect()
-        });
+        let host_name = paired.name.clone();
+        let discover = Box::new(move || discovered(&browsed.found(), &short, &host_name));
         let launcher = RemoteLaunch::new(key, device, paired.addresses.clone(), discover);
         Bridge::remote_host(name, launcher)
     }
@@ -426,6 +430,7 @@ impl Hosts {
                 paired: remote.paired.clone(),
                 link: Link::of(&remote.bridge),
                 needs_you: remote.bridge.needs_you(),
+                network_ms: remote.bridge.network_ms(),
             })
             .collect()
     }
@@ -465,6 +470,18 @@ pub(crate) fn follow(id: String, bridge: Bridge, cx: &mut gpui::App) {
             }
         })
         .detach();
+    }
+}
+
+/// What browsing found for the paired host with the short id `short` and the name `name`.
+fn discovered(found: &[browse::Found], short: &str, name: &str) -> Discovered {
+    Discovered {
+        addresses: (found.iter())
+            .filter(|found| found.short_id == short)
+            .map(|found| found.address.clone())
+            .collect(),
+        same_name_other_id: (found.iter())
+            .any(|found| found.name == name && found.short_id != short),
     }
 }
 
@@ -601,6 +618,7 @@ mod tests {
             paired: paired(id, name, Some(-120 * MINUTE)),
             link,
             needs_you,
+            network_ms: None,
         }
     }
 
@@ -638,6 +656,45 @@ mod tests {
             ]
         );
         assert_eq!(rows[1].choice, selected);
+    }
+
+    #[test]
+    fn browsing_finds_a_host_by_its_id_and_notices_its_name_under_another() {
+        let found = |name: &str, short_id: &str, address: &str| browse::Found {
+            address: address.into(),
+            short_id: short_id.into(),
+            name: name.into(),
+            version: "0.9".into(),
+            pairing: false,
+        };
+        let browsed = [
+            found("Studio Mac", "aaaa", "studio.local:47821"),
+            found("Office iMac", "bbbb", "office.local:47821"),
+        ];
+        let studio = discovered(&browsed, "aaaa", "Studio Mac");
+        assert_eq!(studio.addresses, ["studio.local:47821"]);
+        assert!(!studio.same_name_other_id);
+        // Studio Mac reinstalled: its name under a new id.
+        let reinstalled = [found("Studio Mac", "cccc", "studio.local:47821")];
+        let studio = discovered(&reinstalled, "aaaa", "Studio Mac");
+        assert!(studio.addresses.is_empty());
+        assert!(studio.same_name_other_id);
+    }
+
+    #[test]
+    fn a_connected_hosts_row_shows_its_network_delay_in_its_tooltip() {
+        let host = |link| RemoteHost {
+            network_ms: Some(228),
+            ..connection("studio", "Studio Mac", link, None)
+        };
+        let tooltip = |link| {
+            switcher_rows(0, 0, &[host(link)], &HostChoice::ThisMac, 0)[1]
+                .tooltip
+                .clone()
+        };
+        let connected = Link::Connected(AccessLevel::Control);
+        assert_eq!(tooltip(connected).as_deref(), Some("Network delay 228 ms"));
+        assert_eq!(tooltip(Link::Reconnecting), None);
     }
 
     #[test]

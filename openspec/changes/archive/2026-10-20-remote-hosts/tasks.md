@@ -4,6 +4,8 @@ Starts once `standalone-host` is archived. Three implementation tickets: the hos
 
 - [ ] 1.1 On a notarized build, check how macOS Local Network privacy treats the launchd host copy when it listens and advertises, and record the result in design.md. If it is not prompted for, move advertising to the app as design.md's Risks describe.
 
+  Left open at archiving: the check on a notarized build is a release check. Design.md's "Local Network privacy, checked" records what an Apple Development build showed, and what a Developer ID and notarization, and a second Mac, must still confirm before the first launchd release with remote access.
+
 ## 2. Host: keys, listener and pairing (ticket A)
 
 - [x] 2.1 `workspace-core`: access levels, the remote-access, pairing and device commands, `UploadAttachment`, the `attention` event and `Subscribe`'s list of kinds, `host_ms` on replies.
@@ -42,12 +44,14 @@ Starts once `standalone-host` is archived. Three implementation tickets: the hos
 
 ## 7. Phase 2: outside one network (ticket C)
 
-- [ ] 7.1 Reconnecting a paired host by its last address before browsing, so a host reached by name over Tailscale reconnects without Bonjour.
-- [ ] 7.2 Latency: `host_ms`, the round trip and the network delay per request kind in the log; the tooltip on a connected host's row. Test: a 240 ms round trip with `host_ms` 12 records 12 ms on the host and 228 ms of network delay.
+- [x] 7.1 Reconnecting a paired host by its last address before browsing, so a host reached by name over Tailscale reconnects without Bonjour.
+- [x] 7.2 Latency: `host_ms`, the round trip and the network delay per request kind in the log; the tooltip on a connected host's row. Test: a 240 ms round trip with `host_ms` 12 records 12 ms on the host and 228 ms of network delay.
 - [ ] 7.3 Two Macs over Tailscale on different networks: pair by name, drive a project, drop and restore the connection. Record the local and remote latency figures in `docs/performance/`.
+
+  Left open at archiving: it needs Michael's two Macs on different networks. Its steps went to him with ticket C; the figures go to `docs/performance/remote-latency.md`, and this task is ticked then.
 
 ## 8. Docs (ticket C)
 
-- [ ] 8.1 `docs/remote-protocol.md` as design.md 14 lists, with test vectors for the `code` method from 2.4 and for the `qr` method, checked against CryptoKit's HMAC-SHA256.
-- [ ] 8.2 `docs/DEVELOPMENT.md`: turning on remote access, pairing, removing a device, and what View only and Control allow. `docs/PRD.md` stays in step with what shipped.
-- [ ] 8.3 When archiving this change, repoint the links to `openspec/changes/remote-hosts/` in `docs/PRD.md` and `design/README.md`, the study's link included, to its archived path under `openspec/changes/archive/`.
+- [x] 8.1 `docs/remote-protocol.md` as design.md 14 lists, with test vectors for the `code` method from 2.4 and for the `qr` method, checked against CryptoKit's HMAC-SHA256.
+- [x] 8.2 `docs/DEVELOPMENT.md`: turning on remote access, pairing, removing a device, and what View only and Control allow. `docs/PRD.md` stays in step with what shipped.
+- [x] 8.3 When archiving this change, repoint the links to `openspec/changes/remote-hosts/` in `docs/PRD.md` and `design/README.md`, the study's link included, to its archived path under `openspec/changes/archive/`.

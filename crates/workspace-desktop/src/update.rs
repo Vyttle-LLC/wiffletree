@@ -301,17 +301,17 @@ mod tests {
     #[test]
     fn its_commands_leave_the_child_only_its_standard_streams() {
         // An inheritable descriptor, as a provider's pipe is between being made and marked.
+        // The test owns both ends, so closing them touches no other test's descriptors.
         let mut ends = [0; 2];
         assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
-        let held = 100;
-        assert_eq!(unsafe { libc::dup2(ends[1], held) }, held);
+        let held = ends[1];
         let output = command("/bin/sh")
             .args([
                 "-c",
                 &format!("test -e /dev/fd/{held} && echo held || echo closed"),
             ])
             .output();
-        for descriptor in [ends[0], ends[1], held] {
+        for descriptor in ends {
             unsafe { libc::close(descriptor) };
         }
         assert_eq!(String::from_utf8_lossy(&output.unwrap().stdout), "closed\n");

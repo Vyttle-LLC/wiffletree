@@ -14,7 +14,7 @@ use rustls::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fmt, io,
-    net::{TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -195,6 +195,27 @@ pub fn split_address(address: &str) -> (String, u16) {
     }
 }
 
+/// Connects to each of the addresses `host` names in turn until one answers, since a name, as
+/// Tailscale gives, may name an IPv6 address first while the host listens on IPv4.
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, RemoteError> {
+    connect_any((host, port).to_socket_addrs()?)
+        .map_err(|error| error.unwrap_or_else(|| anyhow!("{host} has no address").into()))
+}
+
+/// The first of `targets` that answers, or the last failure; `None` when there are none.
+fn connect_any(
+    targets: impl IntoIterator<Item = SocketAddr>,
+) -> Result<TcpStream, Option<RemoteError>> {
+    let mut last = None;
+    for target in targets {
+        match TcpStream::connect_timeout(&target, CONNECT_TIMEOUT) {
+            Ok(tcp) => return Ok(tcp),
+            Err(error) => last = Some(error.into()),
+        }
+    }
+    Err(last)
+}
+
 /// TCP, then TLS 1.3 checked by `pin`, then a WebSocket on `path`. Returns the key the host's
 /// certificate carries.
 fn open(
@@ -203,11 +224,7 @@ fn open(
     path: &str,
 ) -> Result<(RemoteWebSocket, Vec<u8>), RemoteError> {
     let (host, port) = split_address(address);
-    let target = (host.as_str(), port)
-        .to_socket_addrs()?
-        .next()
-        .with_context(|| format!("{host} has no address"))?;
-    let tcp = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT)?;
+    let tcp = connect_tcp(&host, port)?;
     tcp.set_read_timeout(Some(STEP_TIMEOUT))?;
     tcp.set_write_timeout(Some(STEP_TIMEOUT))?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -359,6 +376,19 @@ impl ServerCertVerifier for Pin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_whose_first_address_does_not_answer_is_reached_at_the_next() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let targets: Vec<SocketAddr> = [format!("[::1]:{port}"), format!("127.0.0.1:{port}")]
+            .iter()
+            .map(|t| t.parse().unwrap())
+            .collect();
+        let tcp = connect_any(targets).unwrap();
+        assert_eq!(tcp.peer_addr().unwrap().port(), port);
+        assert!(connect_any(vec![]).unwrap_err().is_none());
+    }
 
     #[test]
     fn addresses_take_the_default_port_unless_they_name_one() {
