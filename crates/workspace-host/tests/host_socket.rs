@@ -232,7 +232,14 @@ fn the_handshake_chooses_the_newest_common_protocol() {
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
     assert_eq!(
         welcome.capabilities,
-        ["events", "files", "folders", "restart-when-idle"]
+        [
+            "events",
+            "files",
+            "folders",
+            "restart-when-idle",
+            "uploads",
+            "attention"
+        ]
     );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));
     assert!(welcome.binary.ends_with("workspace-host"));

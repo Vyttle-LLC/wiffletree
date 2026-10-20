@@ -274,7 +274,8 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use super::time_left;
 
     #[test]
     fn time_left_counts_whole_seconds_up() {

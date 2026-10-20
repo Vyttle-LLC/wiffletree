@@ -42,7 +42,7 @@ Pairing methods are pluggable. The first message on `/pair` names the method, an
 
 1. The device opens TLS to the host without checking its certificate yet, and connects to `/pair`. It notes the certificate's public key.
 2. Both sides run SPAKE2 (the Ed25519 group, as the RustCrypto `spake2` crate implements it) with the code as the password and fixed identities `wiffletree-device` and `wiffletree-host`.
-3. Each side sends a confirmation, an HMAC over the transcript under the derived key. The transcript holds the host's public key as each side sees it (from the TLS certificate on the device, its own key on the host), the device's public key, its name and the host's name. A wrong code, or a machine in the middle presenting another certificate, makes a confirmation fail.
+3. Each side sends a confirmation, an HMAC over the transcript under the derived key: the device first, and the host, which counts a failed one as a wrong try, answers with its own only once the device's holds. The transcript holds the host's public key as each side sees it (from the TLS certificate on the device, its own key on the host), the device's public key, its name and the host's name. A wrong code, or a machine in the middle presenting another certificate, makes a confirmation fail.
 4. On success the host stores the device with level **Control** and closes pairing mode, so the code is used once. The device stores the host. Each side shows the other's name.
 
 Each failed confirmation counts as a wrong try. After 3 wrong tries, pairing mode closes and the code no longer works; the human starts pairing again at the host. One pairing exchange runs at a time; a second device trying meanwhile is told to wait.

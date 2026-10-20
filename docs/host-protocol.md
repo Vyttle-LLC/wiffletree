@@ -77,7 +77,7 @@ A client never sends a command for a capability the host did not list.
 | `uploads` | `upload_attachment`, and `send`'s `uploads` |
 | `attention` | `subscribe`'s `kinds`, and the `attention` event |
 
-This host lists `events`, `files`, `folders` and `restart-when-idle`.
+This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads` and `attention`, and refuses a command whose capability it does not list.
 
 ### Ending the host
 

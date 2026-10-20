@@ -25,15 +25,11 @@ pub fn credential(data: &Path, trusted: &[&Path]) -> Result<String> {
 /// The host's long-term P-256 key, created the first time remote access needs it and kept as
 /// its secret scalar in hex, with `trusted` as its access list.
 pub fn host_key(data: &Path, trusted: &[&Path]) -> Result<workspace_core::pairing::KeyPair> {
-    use workspace_core::pairing::{KeyPair, hex};
+    use workspace_core::pairing::{KeyPair, hex, unhex};
     let secret = secret(HOST_KEY_SERVICE, "host key", data, trusted, || {
         Ok(hex(&KeyPair::generate()?.secret()))
     })?;
-    let bytes: Vec<u8> = (0..secret.len())
-        .step_by(2)
-        .filter_map(|i| u8::from_str_radix(secret.get(i..i + 2)?, 16).ok())
-        .collect();
-    KeyPair::from_secret(&bytes)
+    KeyPair::from_secret(&unhex(&secret)?)
 }
 
 /// The generic-password item `service`, the `label`, for the data folder, created with

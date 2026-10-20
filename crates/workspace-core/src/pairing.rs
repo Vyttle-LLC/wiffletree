@@ -69,8 +69,8 @@ pub fn short_id(id: &str) -> &str {
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn unhex(text: &str) -> Result<Vec<u8>> {
-    ensure!(text.len() % 2 == 0, "Not hex");
+pub fn unhex(text: &str) -> Result<Vec<u8>> {
+    ensure!(text.len().is_multiple_of(2), "Not hex");
     (0..text.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).context("Not hex"))

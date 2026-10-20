@@ -2717,13 +2717,18 @@ impl Actor {
         let mut changes = std::mem::take(&mut self.changes);
         changes.state |= state_changed;
         if changes.state || self.attention.is_none() {
-            match self.host.attention_count() {
-                Ok(count) if self.attention != Some(count) => {
+            match (self.host.attention_count(), self.attention) {
+                // The first count is only known, for subscribers to start from.
+                (Ok(count), None) => {
+                    self.attention = Some(count);
+                    self.events.know_attention(count);
+                }
+                (Ok(count), Some(sent)) if sent != count => {
                     self.attention = Some(count);
                     changes.attention = Some(count);
                 }
-                Ok(_) => {}
-                Err(e) => eprintln!("Workspace attention count: {e:#}"),
+                (Ok(_), Some(_)) => {}
+                (Err(e), _) => eprintln!("Workspace attention count: {e:#}"),
             }
         }
         if std::mem::take(&mut self.progress_dirty) || changes.state {

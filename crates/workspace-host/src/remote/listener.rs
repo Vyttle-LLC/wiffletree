@@ -110,6 +110,8 @@ fn serve(
             tls.conn.complete_io(&mut tls.sock)?;
         }
         let mut path = String::new();
+        // tungstenite's handshake callback fixes the error type.
+        #[allow(clippy::result_large_err)]
         let route = |request: &Request, response: Response| {
             path = request.uri().path().to_owned();
             Ok(response)

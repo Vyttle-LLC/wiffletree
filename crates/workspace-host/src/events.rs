@@ -154,6 +154,11 @@ impl EventLog {
             }
         }
     }
+    /// Records the count of things that need the human without sending an event, as the host
+    /// learns it at start.
+    pub(crate) fn know_attention(&self, count: usize) {
+        self.log().attention = Some(count);
+    }
     /// Subscribes after `after`: a cursor of this epoch still in the log gets every later
     /// event, any other cursor `resync` first, and none only what comes next.
     pub fn subscribe(&self, after: Option<&Cursor>) -> Subscription {
