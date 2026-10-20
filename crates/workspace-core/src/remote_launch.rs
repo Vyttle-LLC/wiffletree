@@ -6,6 +6,7 @@
 use crate::{pairing::KeyPair, remote_client::RemoteError, *};
 use std::{
     io::{self, ErrorKind, Read, Write},
+    net::IpAddr,
     net::Shutdown,
     os::{fd::AsRawFd, unix::net::UnixStream},
     sync::{
@@ -112,10 +113,11 @@ impl Launch for RemoteLaunch {
         ))
     }
     /// Tries the addresses the host last answered at, newest first, and only then browses for
-    /// it, so a host reached by name, as over Tailscale, comes back without Bonjour. An address
-    /// that shows another key is another machine now, so the next is tried. When nothing shows
-    /// the pinned key, the host's key has changed if an address browsed for under its id shows
-    /// another, or a host advertises its name under another id.
+    /// it, so a host reached by name, as over Tailscale, comes back without Bonjour. Another key
+    /// at a name or a Tailscale address is the host's key changed, since those name one machine.
+    /// Another key at any other IP address, which a LAN may give to another machine, passes it
+    /// over. When nothing shows the pinned key, the host's key has changed too if an address
+    /// browsed for under its id shows another, or a host advertises its name under another id.
     fn connect(&mut self, stopped: &AtomicBool) -> io::Result<(UnixStream, Option<String>)> {
         let mut last = io::Error::other("No address is known for this host");
         let (mut tried, mut other_key) = (vec![], vec![]);
@@ -144,6 +146,10 @@ impl Launch for RemoteLaunch {
                     Err(Tried::Unpaired) => {
                         return Err(io::Error::other(RemoteError::Unpaired.to_string()));
                     }
+                    Err(Tried::OtherKey) if names_one_machine(&address) => {
+                        self.set(|state| state.turnaway = Some(Turnaway::KeyChanged));
+                        return Err(io::Error::other(RemoteError::KeyChanged.to_string()));
+                    }
                     Err(Tried::OtherKey) => {
                         last = io::Error::other(format!("{address} is another machine now"));
                         other_key.push(address);
@@ -158,6 +164,18 @@ impl Launch for RemoteLaunch {
             return Err(io::Error::other(RemoteError::KeyChanged.to_string()));
         }
         Err(last)
+    }
+}
+
+/// Whether `address` always names the same machine: a DNS name, as typed for Tailscale or
+/// `.local`, or a Tailscale address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). Any other IP
+/// address may pass to another machine on a LAN.
+fn names_one_machine(address: &str) -> bool {
+    let (host, _) = remote_client::split_address(address);
+    match host.parse::<IpAddr>() {
+        Err(_) => true,
+        Ok(IpAddr::V4(ip)) => ip.octets()[0] == 100 && ip.octets()[1] & 0xc0 == 64,
+        Ok(IpAddr::V6(ip)) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
     }
 }
 
@@ -288,5 +306,31 @@ impl Relay {
         // a second.
         // SAFETY: `fds` is a valid array of two pollfd for the call.
         unsafe { libc::poll(fds.as_mut_ptr(), 2, 1000) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_and_tailscale_addresses_name_one_machine_and_lan_addresses_do_not() {
+        for one in [
+            "studio.tail4c2e.ts.net",
+            "studio.local:9000",
+            "100.64.0.1",
+            "100.127.255.254:47821",
+            "[fd7a:115c:a1e0::1]:47821",
+        ] {
+            assert!(names_one_machine(one), "{one}");
+        }
+        for any in [
+            "192.168.1.20",
+            "100.128.0.1",
+            "10.0.0.5:47821",
+            "[fe80::1]:47821",
+        ] {
+            assert!(!names_one_machine(any), "{any}");
+        }
     }
 }

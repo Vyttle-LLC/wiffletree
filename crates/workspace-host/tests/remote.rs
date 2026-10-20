@@ -655,13 +655,13 @@ fn a_host_reached_by_name_is_reached_by_it_again_before_any_browsing() {
 }
 
 #[test]
-fn another_mac_at_a_stored_address_is_passed_over_and_the_host_is_found_by_browsing() {
+fn another_key_at_a_lan_address_is_passed_over_and_at_a_name_is_a_changed_key() {
     let (studio, office) = (Studio::start(0), Studio::start(0));
     studio.on();
     office.on();
     let device = KeyPair::generate().unwrap();
     studio.pair(&device, "MacBook");
-    // Studio Mac's old address now belongs to another Wiffletree Mac.
+    // Studio Mac's old LAN address now belongs to another Wiffletree Mac.
     let launch = |addresses: Vec<String>, same_name_other_id| {
         let discovered = Discovered {
             addresses,
@@ -698,6 +698,29 @@ fn another_mac_at_a_stored_address_is_passed_over_and_the_host_is_found_by_brows
     let (reinstalled, turnaway) = launch(vec![], true);
     assert!(reinstalled.is_err());
     assert_eq!(turnaway, key_changed);
+
+    // A name, as typed over Tailscale where nothing is browsed, names one machine: another key
+    // there is Studio Mac's key changed, at once.
+    let port = office.address().rsplit_once(':').unwrap().1.to_owned();
+    let browsed = Arc::new(AtomicUsize::new(0));
+    let counted = browsed.clone();
+    let mut by_name = RemoteLaunch::new(
+        studio.key.public_key(),
+        device.clone(),
+        vec![format!("localhost:{port}")],
+        Box::new(move || {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Discovered::default()
+        }),
+    );
+    let reached = by_name.state();
+    assert!(
+        by_name
+            .connect(&std::sync::atomic::AtomicBool::new(false))
+            .is_err()
+    );
+    assert_eq!(reached.lock().unwrap().turnaway, key_changed);
+    assert_eq!(browsed.load(Ordering::Relaxed), 0, "never browsed");
 }
 
 #[test]
