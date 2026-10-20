@@ -494,6 +494,8 @@ struct Watcher {
     next_key: u64,
     /// The process ids of the last listing, in order; only ids not in it are read.
     listed: Vec<i32>,
+    /// The ids the last scan could not read, in order. Each is read once more.
+    unread: Vec<i32>,
     scanned_at: Option<Instant>,
     /// How many times the process table has been listed.
     listings: u64,
@@ -512,6 +514,7 @@ impl Watcher {
         if !continuous {
             // After a pause, such as no run being watched, any id may name a new process.
             self.listed.clear();
+            self.unread.clear();
         }
         // Members first, so a new process is matched against what is alive now.
         for tree in self.trees.values_mut() {
@@ -520,10 +523,17 @@ impl Watcher {
         let mut pids = os::all();
         pids.sort_unstable();
         self.listings += 1;
+        let mut unread = Vec::new();
         let mut fresh: Vec<ProcessInfo> = pids
             .iter()
             .filter(|pid| self.listed.binary_search(pid).is_err())
-            .filter_map(|pid| read(*pid))
+            .filter_map(|pid| {
+                let process = read(*pid);
+                if process.is_none() && self.unread.binary_search(pid).is_err() {
+                    unread.push(*pid);
+                }
+                process
+            })
             .collect();
         // A parent and its child can both be new; the child is adopted on the pass after.
         loop {
@@ -538,7 +548,11 @@ impl Watcher {
                 break;
             }
         }
+        // A process part way through an exec cannot be read, so one that could not be is read
+        // again at the next scan. One that still cannot, such as another user's, is not.
+        pids.retain(|pid| unread.binary_search(pid).is_err());
         self.listed = pids;
+        self.unread = unread;
         // Nobody takes a handed-over tree's sightings, and one with nothing left to follow has
         // nothing left to name.
         self.trees.retain(|_, tree| {
@@ -1361,6 +1375,18 @@ sys.stdin.readline()
                 [(provider.pid(), provider.pid())]
             );
         }
+    }
+
+    #[test]
+    fn a_process_that_cannot_be_read_is_read_once_more_and_then_left() {
+        // launchd belongs to root, so it can never be read.
+        let launchd = 1;
+        assert!(read(launchd).is_none());
+        let mut watcher = Watcher::default();
+        watcher.scan();
+        assert!(watcher.listed.binary_search(&launchd).is_err());
+        watcher.scan();
+        assert!(watcher.listed.binary_search(&launchd).is_ok());
     }
 
     #[test]

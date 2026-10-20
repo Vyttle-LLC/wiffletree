@@ -81,17 +81,17 @@ while True:
 ' "$ready";;
 *LEAVE_ORPHANS*)
   # The tool shell leads the group and starts two children. It exits when the test has seen
-  # them recorded, and the turn ends after it has: whether the watcher lists a short-lived
-  # shell in time is the known gap BRIEF_SHELL is for.
+  # them recorded, and the turn ends after it has.
   tool sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; for n in 1 2; do sleep 300 & echo $! >> "$WORKSPACE_TEST_PIDS"; done; touch "$0"; while [ ! -e "$0.exit" ]; do sleep 0.01; done' "$ready"
   shell=$!
   started
   wait "$shell"
   finish;;
 *BRIEF_SHELL*)
-  # A shell in a group of its own that starts a child and is gone 20 ms later.
+  # A shell in a group of its own. When the test has seen it recorded, it starts a child and
+  # exits at once, so no scan need ever see the child while the shell lives.
   set -m
-  sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; sleep 300 >/dev/null 2>&1 & echo $! >> "$WORKSPACE_TEST_PIDS"; sleep 0.02' >/dev/null 2>&1 &
+  sh -c 'echo $$ >> "$WORKSPACE_TEST_PIDS"; while [ ! -e "$0.exit" ]; do sleep 0.01; done; sleep 300 >/dev/null 2>&1 & echo $! >> "$WORKSPACE_TEST_PIDS"' "$ready" >/dev/null 2>&1 &
   wait
   finish;;
 *LEAVE*)
@@ -816,7 +816,7 @@ fn archiving_stops_orphans_whose_group_leader_exited_before_the_turn_ended() {
 }
 
 #[test]
-fn a_tool_shell_that_lives_a_few_scan_intervals_is_seen_and_its_child_recorded() {
+fn a_child_started_by_a_tool_shell_on_its_way_out_is_recorded_in_the_shells_group() {
     let _environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();
@@ -824,12 +824,27 @@ fn a_tool_shell_that_lives_a_few_scan_intervals_is_seen_and_its_child_recorded()
     let (_, main) = project(home.path(), scratch.path(), "Brief");
     let service = start(home.path());
 
-    // A Claude Code tool shell that starts a background process and returns lives about 10 ms.
-    // This one lives 20 ms, five of the watcher's 4 ms intervals, and is gone long before the
-    // provider's own 50 ms loop would have looked.
+    // Only the watcher's own scans record anything while a turn runs. How short a shell they
+    // catch depends on the scan interval, which a unit test bounds, as it does the scan that
+    // finds a child only in its exited shell's group. Here the shell is seen first, then starts
+    // its child and exits at once, and the child is recorded in the shell's group.
     send(&service, "brief", &main, "BRIEF_SHELL");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let shell = loop {
+        if let [shell] = ids(&provider.pids)[..]
+            && recorded(home.path(), &main)
+                .iter()
+                .any(|r| r.group == shell)
+        {
+            break shell;
+        }
+        assert!(Instant::now() < deadline, "timed out: the tool shell");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let ready = format!("{}.{}", provider.pids.display(), groups(&provider)[0]);
+    std::fs::write(format!("{ready}.exit"), "").unwrap();
     until_finished(home.path(), &main, 1);
-    let [shell, child] = ids(&provider.pids)[..] else {
+    let [_, child] = ids(&provider.pids)[..] else {
         panic!("the brief shell and its child")
     };
     assert_eq!(unsafe { libc::kill(shell, 0) }, -1);
