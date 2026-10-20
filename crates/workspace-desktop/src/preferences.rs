@@ -25,6 +25,9 @@ pub(crate) struct Preferences {
     /// The hosts this device is paired with; they stay on this device.
     #[serde(default)]
     pub paired_hosts: Vec<PairedHost>,
+    /// Look for Wiffletree on other Macs on this network; off, macOS never asks about it.
+    #[serde(default)]
+    pub find_on_network: bool,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -36,6 +39,7 @@ impl Default for Preferences {
             appearance: Appearance::default(),
             group_projects: true,
             paired_hosts: vec![],
+            find_on_network: false,
             path: PathBuf::new(),
         }
     }
@@ -133,6 +137,20 @@ mod tests {
         let loaded = Preferences::load(home.path());
         assert_eq!(loaded.paired_hosts, [studio]);
         assert_eq!(loaded.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn finding_other_macs_starts_off_even_in_an_older_file_and_survives_a_relaunch() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!Preferences::load(home.path()).find_on_network);
+        let file = home.path().join("desktop-preferences.json");
+        std::fs::write(&file, r#"{ "appearance": "dark", "paired_hosts": [] }"#).unwrap();
+        assert!(!Preferences::load(home.path()).find_on_network);
+
+        let mut preferences = Preferences::load(home.path());
+        preferences.find_on_network = true;
+        preferences.save().unwrap();
+        assert!(Preferences::load(home.path()).find_on_network);
     }
 
     #[test]

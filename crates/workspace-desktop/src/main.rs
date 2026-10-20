@@ -997,8 +997,25 @@ fn set_appearance(appearance: Appearance, cx: &mut App) {
 
 /// A view choice of this client, remembered for the next launch; the host's order is untouched.
 fn set_group_projects(grouped: bool, cx: &mut App) {
+    change_preferences(cx, |preferences| preferences.group_projects = grouped);
+}
+
+/// Shows a working agent's activity as one line, or as the full card.
+fn set_minimize_activity(minimized: bool, cx: &mut App) {
+    change_preferences(cx, |preferences| preferences.minimize_activity = minimized);
+}
+
+/// Finds Wiffletree on other Macs on this network while `on`; turning it off stops browsing and
+/// clears what it found. Paired hosts still reconnect by their stored addresses either way.
+fn set_find_on_network(on: bool, cx: &mut App) {
+    change_preferences(cx, |preferences| preferences.find_on_network = on);
+    cx.global::<Hosts>().browsed.browse_while(on);
+    cx.refresh_windows();
+}
+
+fn change_preferences(cx: &mut App, change: impl FnOnce(&mut Preferences)) {
     let preferences = cx.global_mut::<Preferences>();
-    preferences.group_projects = grouped;
+    change(preferences);
     if let Err(error) = preferences.save() {
         eprintln!("Saving preferences: {error}");
     }
@@ -1305,10 +1322,12 @@ fn main() -> anyhow::Result<()> {
     application.on_reopen(background::reopened);
     application.run(move |cx| {
         gpui_component::init(cx);
+        let browsed = browse::hosts();
+        browsed.browse_while(preferences.find_on_network);
         cx.set_global(Hosts::new(
             bridge.clone(),
             &preferences.paired_hosts,
-            browse::start(),
+            browsed,
         ));
         cx.set_global(preferences);
         cx.set_global(attachment_chips::HostImages::new());

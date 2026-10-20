@@ -6,11 +6,19 @@ How the desktop app pairs with other Macs and drives them: Connect a computer, o
 ## Requirements
 
 ### Requirement: Connect a computer
-The switcher's **Connect a computer…** SHALL open a sheet titled "Connect a computer" that lists the Wiffletree hosts found on this network, each with its name and either "Pairing now · Wiffletree <version>" with **Pair**, or "Pairing is off there", under "Wiffletree hosts on this network. Turn on pairing on the other Mac first." It SHALL also accept a typed name or address, with an optional port, under "Not listed, or on Tailscale or a VPN? Enter its name or address." Pair SHALL ask "Pair with <host>", "Type the 4 digits <host> is showing.", saying "<host>'s key will be remembered. If it ever changes, Wiffletree will refuse to connect and ask you to pair again." A paired host SHALL stay in the switcher until the human removes it, and SHALL be reconnected by its last address and by its id on the network without the human typing anything again.
+The switcher's **Connect a computer…** SHALL open a sheet titled "Connect a computer" that, while finding other Macs is on, lists the Wiffletree hosts found on this network, each with its name and either "Pairing now · Wiffletree <version>" with **Pair**, or "Pairing is off there", under "Wiffletree hosts on this network. Turn on pairing on the other Mac first." It SHALL also accept a typed name or address, with an optional port, under "Not listed, or on Tailscale or a VPN? Enter its name or address." Pair SHALL ask "Pair with <host>", "Type the 4 digits <host> is showing.", saying "<host>'s key will be remembered. If it ever changes, Wiffletree will refuse to connect and ask you to pair again." A paired host SHALL stay in the switcher until the human removes it, and SHALL be reconnected by its last address and by its id on the network without the human typing anything again. Finding other Macs SHALL be this Mac's app setting "Find Wiffletree on other Macs on this network" in Settings › This Mac · the app, under OTHER MACS, off by default, including for a preferences file saved before it existed. While it is off, the app SHALL NOT browse the network, so macOS does not ask about the local network. The sheet SHALL then say "Finding Wiffletree on this network is off. Turn it on to list the Macs nearby, or type a name or address.", where **Turn it on** turns on the same setting. Typing a name or address SHALL work either way, and paired hosts SHALL still be reconnected by their stored addresses. Turning the setting on SHALL start browsing at once; turning it off SHALL stop browsing and forget what it found.
 
 #### Scenario: A host on the same network
-- **WHEN** Studio Mac has pairing open on the same network
+- **WHEN** finding other Macs is on and Studio Mac has pairing open on the same network
 - **THEN** the sheet lists "Studio Mac · Pairing now · Wiffletree 0.4" with Pair, without anything typed
+
+#### Scenario: Finding other Macs is off
+- **WHEN** the human opens Connect a computer while finding other Macs is off, as it is after installing or updating
+- **THEN** no host is listed and the app has not browsed the network, the sheet says "Finding Wiffletree on this network is off. Turn it on to list the Macs nearby, or type a name or address.", and a typed name or address still pairs
+
+#### Scenario: Turning finding on from the sheet
+- **WHEN** the human chooses Turn it on in Connect a computer
+- **THEN** the setting in Settings is on too, browsing starts at once, and the hosts it finds are listed
 
 #### Scenario: A host over Tailscale
 - **WHEN** the human types `studio.tail4c2e.ts.net` and the 4 digits Studio Mac shows

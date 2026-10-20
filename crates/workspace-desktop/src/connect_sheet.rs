@@ -1,6 +1,6 @@
 //! Connect a computer (design 4 and 6 of `remote-hosts`, study 3 of its mockup): the Wiffletree
-//! hosts browsing finds on this network, or one typed by name or address, then the 4 digits the
-//! host shows. A paired host joins the switcher and stays there.
+//! hosts browsing finds on this network while finding is on, or one typed by name or address,
+//! then the 4 digits the host shows. A paired host joins the switcher and stays there.
 use super::*;
 use crate::{browse::Found, hosts::PairedHost};
 use base64::Engine as _;
@@ -166,6 +166,26 @@ fn browsed(cx: &App) -> Vec<Found> {
     found
 }
 
+/// While finding is off, the sheet says so, and Turn it on flips the same setting as Settings.
+fn finding_off(p: Palette) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .child(hint("Finding Wiffletree on this network is off.", p))
+        .child(
+            button("find-on-network")
+                .link()
+                .label("Turn it on")
+                .on_click(|_, _, cx| set_find_on_network(true, cx)),
+        )
+        .child(hint(
+            "to list the Macs nearby, or type a name or address.",
+            p,
+        ))
+}
+
 /// What a failed pairing says.
 fn failure(error: &RemoteError, host: &str) -> String {
     match error {
@@ -228,6 +248,35 @@ impl Render for ConnectSheet {
 
 impl ConnectSheet {
     fn choose(&self, body: Div, p: Palette, cx: &mut Context<Self>) -> Div {
+        let nearby = match cx.global::<Preferences>().find_on_network {
+            true => self.nearby(p, cx),
+            false => finding_off(p),
+        };
+        body.child(nearby).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section("BY NAME OR ADDRESS", p))
+                .child(hint(
+                    "Not listed, or on Tailscale or a VPN? Enter its name or address.",
+                    p,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Input::new(&self.address).flex_1())
+                        .child(
+                            button("pair-typed")
+                                .label("Pair")
+                                .on_click(cx.listener(|sheet, _, w, c| sheet.typed(w, c))),
+                        ),
+                ),
+        )
+    }
+    /// The hosts browsing finds, each with Pair while its pairing is open.
+    fn nearby(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let mut nearby = div().flex().flex_col().gap_2().child(hint(
             "Wiffletree hosts on this network. Turn on pairing on the other Mac first.",
             p,
@@ -263,28 +312,7 @@ impl ConnectSheet {
                     }),
             );
         }
-        body.child(nearby).child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(section("BY NAME OR ADDRESS", p))
-                .child(hint(
-                    "Not listed, or on Tailscale or a VPN? Enter its name or address.",
-                    p,
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(Input::new(&self.address).flex_1())
-                        .child(
-                            button("pair-typed")
-                                .label("Pair")
-                                .on_click(cx.listener(|sheet, _, w, c| sheet.typed(w, c))),
-                        ),
-                ),
-        )
+        nearby
     }
     fn code_step(&self, body: Div, name: &str, p: Palette, cx: &mut Context<Self>) -> Div {
         body.child(hint(format!("Type the 4 digits {name} is showing."), p))
