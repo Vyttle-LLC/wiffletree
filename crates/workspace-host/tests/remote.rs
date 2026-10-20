@@ -47,9 +47,10 @@ fn off_by_default_binds_nothing_and_off_closes_a_live_connection() {
         .unwrap();
 
     assert!(client.closed(), "the live connection closes at once");
+    // The listener is closed, though the port's old connections may still be winding down.
     assert!(
-        TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok(),
-        "the port is released"
+        std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(),
+        "nothing listens on the port"
     );
     let address = format!("127.0.0.1:{port}");
     assert!(remote_client::connect(&address, &studio.key.public_key(), &device).is_err());
@@ -823,4 +824,22 @@ fn an_unused_upload_is_deleted_after_an_hour_with_nothing_else_happening() {
         uploads: vec!["idle".into()],
     };
     assert!(client.call(send).is_err());
+}
+
+#[test]
+fn a_padded_name_over_100_characters_pairs_and_is_kept_trimmed() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    let long = format!("  Michael's {}  ", "MacBook Air ".repeat(12));
+    let code = studio.open_pairing();
+
+    remote_client::pair(&studio.address(), &code, &device, &long).unwrap();
+
+    let [paired] = &studio.devices()[..] else {
+        panic!("{:?}", studio.devices())
+    };
+    assert_eq!(paired.name, workspace_core::pairing::device_name(&long));
+    assert_eq!(paired.name.chars().count(), 100);
+    assert!(!paired.name.starts_with(' '));
 }

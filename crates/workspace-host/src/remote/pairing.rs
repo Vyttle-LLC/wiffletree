@@ -8,9 +8,6 @@ use workspace_core::{
     pairing::{self, CodeExchange, Side},
 };
 
-/// The longest device name kept.
-const MAX_NAME: usize = 100;
-
 pub(super) fn serve(mut socket: ServerSocket, identity: &Identity, shared: &Shared) -> Result<()> {
     let start: PairStart = websocket::receive(&mut socket)?;
     let reply = match exchange(&mut socket, start, identity, shared) {
@@ -38,7 +35,7 @@ fn exchange(
         "{host} does not offer pairing by {}",
         start.method
     );
-    let device_name: String = start.device_name.trim().chars().take(MAX_NAME).collect();
+    let device_name = pairing::device_name(&start.device_name);
     anyhow::ensure!(!device_name.is_empty(), "Name this device");
     let device_key = BASE64
         .decode(&start.device_key)

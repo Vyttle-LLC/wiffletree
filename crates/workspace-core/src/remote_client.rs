@@ -99,6 +99,7 @@ pub fn pair(
     device: &KeyPair,
     device_name: &str,
 ) -> Result<PairedHost, RemoteError> {
+    let device_name = &pairing::device_name(device_name);
     let (mut socket, host_key) = open(address, None, PAIR_PATH)?;
     let (exchange, message) = CodeExchange::start(Side::Device, code)?;
     send(
@@ -285,7 +286,7 @@ fn decode(text: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 /// The SEC1 uncompressed P-256 key a certificate carries.
-pub fn certificate_key(certificate: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn certificate_key(certificate: &[u8]) -> anyhow::Result<Vec<u8>> {
     use p256::pkcs8::DecodePublicKey;
     let der = CertificateDer::from(certificate);
     let parsed = webpki::EndEntityCert::try_from(&der).map_err(|e| anyhow!("{e:?}"))?;

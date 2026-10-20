@@ -56,9 +56,6 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// The local network was refused to this process, as Local Network privacy does.
-pub const POLICY_DENIED: i32 = -65570;
-
 /// What the daemon answered a registration: its result and the name it registered.
 #[derive(Default)]
 struct Reply {

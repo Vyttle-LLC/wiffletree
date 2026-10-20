@@ -203,6 +203,15 @@ impl CodeExchange {
     }
 }
 
+/// The longest device name a host keeps, in characters.
+pub const MAX_DEVICE_NAME: usize = 100;
+
+/// A device's name as both sides put it in the transcript: trimmed, and at most
+/// `MAX_DEVICE_NAME` characters.
+pub fn device_name(name: &str) -> String {
+    name.trim().chars().take(MAX_DEVICE_NAME).collect()
+}
+
 /// Whether `code` is a 4-digit code.
 pub fn is_code(code: &str) -> bool {
     code.len() == 4 && code.bytes().all(|b| b.is_ascii_digit())
