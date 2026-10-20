@@ -284,8 +284,13 @@ pub(super) trait Requests: Sized + 'static {
         then: impl FnOnce(&mut Self, Result<R, String>, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let command = ask.command().clone();
+        let stage = match command {
+            Command::Snapshot => "decode snapshot",
+            _ => "decode other",
+        };
         send(self, command, window, cx, move |view, reply, window, cx| {
-            then(view, reply.and_then(|reply| ask.decode(reply)), window, cx)
+            let reply = render_counts::timed(stage, || reply.and_then(|reply| ask.decode(reply)));
+            then(view, reply, window, cx)
         });
     }
 }

@@ -281,6 +281,8 @@ impl Workspace {
         view.watch_steps(window, cx);
         view.watch_progress(window, cx);
         view.watch_usage(window, cx);
+        render_counts::watch_stalls(cx);
+        view.count_notifies(cx);
         view.refresh(window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
@@ -319,6 +321,17 @@ impl Workspace {
         })
         .detach();
         view
+    }
+    /// Counts the notifies of the views that redraw on their own, for `render_counts`.
+    fn count_notifies(&self, cx: &mut Context<Self>) {
+        use render_counts::count_notifies;
+        count_notifies(&cx.entity(), "Workspace", cx);
+        count_notifies(&self.sidebar, "Sidebar", cx);
+        count_notifies(&self.conversation, "Conversation", cx);
+        let transcript = self.conversation.read(cx).transcript.clone();
+        count_notifies(&transcript, "Transcript", cx);
+        count_notifies(&self.inspector, "Inspector", cx);
+        count_notifies(&self.inbox, "Inbox", cx);
     }
     /// Routes a view's intents to the shell.
     fn adopt<V: EventEmitter<Intent>>(
@@ -366,6 +379,9 @@ impl Workspace {
     }
     /// Hands every view the shared state as it is now.
     fn share(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        render_counts::timed("share", || self.share_now(window, cx));
+    }
+    fn share_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let shared = self.shared.clone();
         self.usage
             .update(cx, |usage, cx| usage.share(shared.clone(), window, cx));
@@ -693,7 +709,8 @@ impl Workspace {
         }
     }
     fn accept_snapshot(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
-        let index = WorkspaceIndex::new(snapshot, self.shared.archive());
+        let archive = self.shared.archive();
+        let index = render_counts::timed("index", || WorkspaceIndex::new(snapshot, archive));
         // A selected session the held archive is out of date for may be in the next one, which
         // `accept_archive` checks.
         let gone = |id: &String| index.session(id).is_none() && !index.archive_is_stale();
