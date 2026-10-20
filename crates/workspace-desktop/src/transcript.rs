@@ -993,12 +993,17 @@ impl Transcript {
         let owed = self.step_fetch.finish();
         match result {
             Ok(page) if self.shared.selected.as_deref() == Some(session_id) => {
-                let activity = match &mut self.activity {
-                    Some(activity) if activity.session_id == session_id => activity,
-                    other => other.insert(RunActivity::new(session_id)),
+                // A page with nothing new redraws nothing.
+                let changed = match &mut self.activity {
+                    Some(activity) if activity.session_id == session_id => activity.merge(page),
+                    other => {
+                        other.insert(RunActivity::new(session_id)).merge(page);
+                        true
+                    }
                 };
-                activity.merge(page);
-                cx.notify();
+                if changed {
+                    cx.notify();
+                }
             }
             Ok(_) => {}
             Err(error) => eprintln!("Work steps: {error}"),

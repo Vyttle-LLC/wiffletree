@@ -5,9 +5,10 @@ use async_channel::{Receiver, Sender};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -38,6 +39,8 @@ struct Wakes {
     usage: (Sender<()>, Receiver<()>),
     /// Set by `resync`: the host may have restarted, and its progress revisions with it.
     progress_resynced: Arc<AtomicBool>,
+    /// Whose steps changed since the step wake was last read.
+    changed_steps: Arc<Mutex<ChangedSteps>>,
 }
 impl Wakes {
     fn new() -> Self {
@@ -49,16 +52,24 @@ impl Wakes {
             progress: wake(),
             usage: wake(),
             progress_resynced: Arc::default(),
+            changed_steps: Arc::default(),
         }
+    }
+    fn changed_steps(&self) -> std::sync::MutexGuard<'_, ChangedSteps> {
+        self.changed_steps.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn wake(&self, kind: &EventKind) {
         let woken = match kind {
             EventKind::State => vec![&self.state, &self.menu_bar],
-            EventKind::Steps { .. } => vec![&self.steps],
+            EventKind::Steps { sessions } => {
+                (self.changed_steps().sessions).extend(sessions.iter().cloned());
+                vec![&self.steps]
+            }
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
             EventKind::Resync => {
                 self.progress_resynced.store(true, Ordering::Relaxed);
+                self.changed_steps().all = true;
                 vec![
                     &self.state,
                     &self.menu_bar,
@@ -71,6 +82,19 @@ impl Wakes {
         for (sender, _) in woken {
             let _ = sender.try_send(());
         }
+    }
+}
+
+/// The sessions whose work steps changed, or every session's after a resync, when events
+/// may have been lost.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ChangedSteps {
+    pub(crate) sessions: BTreeSet<String>,
+    pub(crate) all: bool,
+}
+impl ChangedSteps {
+    pub(crate) fn includes(&self, session_id: &str) -> bool {
+        self.all || self.sessions.contains(session_id)
     }
 }
 
@@ -223,9 +247,14 @@ impl Bridge {
     pub(crate) fn menu_bar_changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.menu_bar)
     }
-    /// Wakes when some session's work steps changed; fetch them with `Command::Steps`.
+    /// Wakes when some session's work steps changed; `take_changed_steps` says whose, and
+    /// `Command::Steps` fetches them.
     pub(crate) fn step_changes(&self) -> Option<Receiver<()>> {
         self.wake(&self.wakes.steps)
+    }
+    /// Whose steps changed since this was last taken.
+    pub(crate) fn take_changed_steps(&self) -> ChangedSteps {
+        std::mem::take(&mut *self.wakes.changed_steps())
     }
     /// Wakes when a figure on the progress board changed; fetch it with `Command::Progress`.
     pub(crate) fn progress_changes(&self) -> Option<Receiver<()>> {
@@ -313,6 +342,22 @@ pub(crate) mod tests {
         bridge.wakes.wake(&EventKind::Resync);
         assert!(bridge.take_progress_resync());
         assert!(!bridge.take_progress_resync());
+    }
+
+    #[test]
+    fn step_wakes_say_whose_steps_changed_and_a_resync_says_everyone_s() {
+        let bridge = Bridge::unavailable(String::new());
+        let steps = |sessions: &[&str]| EventKind::Steps {
+            sessions: sessions.iter().map(|s| s.to_string()).collect(),
+        };
+        bridge.wakes.wake(&steps(&["a"]));
+        bridge.wakes.wake(&steps(&["b", "a"]));
+        let changed = bridge.take_changed_steps();
+        assert!(changed.includes("a") && changed.includes("b") && !changed.includes("c"));
+        assert_eq!(bridge.take_changed_steps(), ChangedSteps::default());
+        bridge.wakes.wake(&EventKind::Resync);
+        assert!(bridge.take_changed_steps().includes("c"));
+        assert!(!bridge.take_changed_steps().includes("c"), "once");
     }
 
     #[test]

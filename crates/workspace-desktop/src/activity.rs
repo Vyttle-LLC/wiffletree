@@ -33,23 +33,28 @@ impl RunActivity {
             ..Default::default()
         }
     }
-    /// Applies a page of changes; a different run replaces the steps shown.
-    pub(crate) fn merge(&mut self, page: StepPage) {
-        if page.run_id != self.run_id {
+    /// Applies a page of changes; a different run replaces the steps shown. Returns whether
+    /// anything shown changed, which a page with nothing new leaves alone.
+    pub(crate) fn merge(&mut self, page: StepPage) -> bool {
+        let mut changed = page.run_id != self.run_id;
+        if changed {
             self.steps.clear();
             self.run_id = page.run_id;
         }
-        self.running = page.running;
-        self.started_at = page.started_at;
-        self.finished_at = page.finished_at;
+        let times = (page.running, page.started_at, page.finished_at);
+        changed |= times != (self.running, self.started_at, self.finished_at);
+        (self.running, self.started_at, self.finished_at) = times;
         self.revision = self.revision.max(page.revision);
         for step in page.steps {
             match self.steps.iter_mut().find(|s| s.id == step.id) {
+                Some(shown) if *shown == step => continue,
                 Some(shown) => *shown = step,
                 None => self.steps.push(step),
             }
+            changed = true;
         }
         self.steps.sort_by_key(|s| s.seq);
+        changed
     }
     /// What the card shows; nothing from a previous run while the next one starts.
     pub(crate) fn card(&self) -> Card {
@@ -417,6 +422,20 @@ mod tests {
         assert_eq!(activity.revision, 3);
         activity.merge(page("b", vec![step("cat", 0, StepKind::Command, 4)]));
         assert_eq!(activity.steps.len(), 1);
+    }
+
+    #[test]
+    fn only_a_page_that_changes_what_is_shown_counts_as_a_change() {
+        let mut activity = RunActivity::new("session");
+        assert!(activity.merge(page("a", vec![step("ls", 0, StepKind::Command, 1)])));
+        assert!(!activity.merge(page("a", vec![])), "nothing new");
+        let same = step("ls", 0, StepKind::Command, 1);
+        assert!(!activity.merge(page("a", vec![same])), "the step as shown");
+        assert!(activity.merge(page("a", vec![step("cat", 1, StepKind::Command, 2)])));
+        let mut finished = page("a", vec![]);
+        finished.running = false;
+        assert!(activity.merge(finished), "the run ended");
+        assert!(activity.merge(page("b", vec![])), "a new run");
     }
 
     #[test]

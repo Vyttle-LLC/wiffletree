@@ -45,7 +45,7 @@ mod verifiers;
 mod welcome;
 mod wording;
 mod workspace_notes;
-use bridge::Bridge;
+use bridge::{Bridge, ChangedSteps};
 use creation::{Creation, CreationForm};
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -144,6 +144,27 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
                 .messages
                 .iter()
                 .any(|m| m.sender.as_deref().is_some_and(archived)))
+}
+
+/// Whether changed steps include the selected session's, which its transcript shows.
+fn shows_steps_of_selected(shared: &Shared, changed: &ChangedSteps) -> bool {
+    shared
+        .selected
+        .as_deref()
+        .is_some_and(|id| changed.includes(id))
+}
+
+/// Whether changed steps include files the Files panel lists for the selected session: its
+/// own, or for a project coordinator, its agents' too.
+fn shows_files_of(shared: &Shared, changed: &ChangedSteps) -> bool {
+    let Some(selected) = shared.selected_session() else {
+        return false;
+    };
+    let coordinator = selected.role == Role::ProjectOrchestrator;
+    let mut agents = (shared.index.iter())
+        .flat_map(|index| index.sessions())
+        .filter(|s| coordinator && s.parent_id.as_ref() == Some(&selected.id));
+    changed.includes(&selected.id) || agents.any(|s| changed.includes(&s.id))
 }
 
 /// Replaces the readings held only when a read brings different ones: the same readings again
@@ -281,6 +302,8 @@ impl Workspace {
         view.watch_steps(window, cx);
         view.watch_progress(window, cx);
         view.watch_usage(window, cx);
+        render_counts::watch_stalls(cx);
+        view.count_notifies(cx);
         view.refresh(window, cx);
         view.refresh_quota(window, cx);
         view.refresh_repositories(false, window, cx);
@@ -319,6 +342,17 @@ impl Workspace {
         })
         .detach();
         view
+    }
+    /// Counts the notifies of the views that redraw on their own, for `render_counts`.
+    fn count_notifies(&self, cx: &mut Context<Self>) {
+        use render_counts::count_notifies;
+        count_notifies(&cx.entity(), "Workspace", cx);
+        count_notifies(&self.sidebar, "Sidebar", cx);
+        count_notifies(&self.conversation, "Conversation", cx);
+        let transcript = self.conversation.read(cx).transcript.clone();
+        count_notifies(&transcript, "Transcript", cx);
+        count_notifies(&self.inspector, "Inspector", cx);
+        count_notifies(&self.inbox, "Inbox", cx);
     }
     /// Routes a view's intents to the shell.
     fn adopt<V: EventEmitter<Intent>>(
@@ -366,6 +400,9 @@ impl Workspace {
     }
     /// Hands every view the shared state as it is now.
     fn share(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        render_counts::timed("share", || self.share_now(window, cx));
+    }
+    fn share_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let shared = self.shared.clone();
         self.usage
             .update(cx, |usage, cx| usage.share(shared.clone(), window, cx));
@@ -494,7 +531,8 @@ impl Workspace {
             });
         }
     }
-    /// Step changes go to the transcript, for its activity card, and to the Files panel.
+    /// Step changes go to the transcript, for its activity card, and to the Files panel, each
+    /// only when they concern a session it shows.
     fn watch_steps(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(changes) = self.bridge.step_changes() else {
             return;
@@ -503,10 +541,16 @@ impl Workspace {
             while changes.recv().await.is_ok() {
                 let fetched = cx.update(|window, cx| {
                     this.update(cx, |view, cx| {
-                        let transcript = view.conversation.read(cx).transcript.clone();
-                        transcript.update(cx, |transcript, cx| transcript.fetch_steps(window, cx));
-                        view.inspector
-                            .update(cx, |inspector, cx| inspector.fetch_files(window, cx));
+                        let changed = view.bridge.take_changed_steps();
+                        if shows_steps_of_selected(&view.shared, &changed) {
+                            let transcript = view.conversation.read(cx).transcript.clone();
+                            transcript
+                                .update(cx, |transcript, cx| transcript.fetch_steps(window, cx));
+                        }
+                        if shows_files_of(&view.shared, &changed) {
+                            view.inspector
+                                .update(cx, |inspector, cx| inspector.fetch_files(window, cx));
+                        }
                     })
                 });
                 if !matches!(fetched, Ok(Ok(()))) {
@@ -693,7 +737,8 @@ impl Workspace {
         }
     }
     fn accept_snapshot(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
-        let index = WorkspaceIndex::new(snapshot, self.shared.archive());
+        let archive = self.shared.archive();
+        let index = render_counts::timed("index", || WorkspaceIndex::new(snapshot, archive));
         // A selected session the held archive is out of date for may be in the next one, which
         // `accept_archive` checks.
         let gone = |id: &String| index.session(id).is_none() && !index.archive_is_stale();
@@ -1185,7 +1230,10 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveDemand, Coalesced, Page, Panel, keep_quotas, wants_archive};
+    use super::{
+        ArchiveDemand, ChangedSteps, Coalesced, Page, Panel, Shared, keep_quotas, shows_files_of,
+        shows_steps_of_selected, wants_archive,
+    };
     use serde_json::json;
     use std::rc::Rc;
     use workspace_core::*;
@@ -1344,6 +1392,55 @@ mod tests {
         keep_quotas(&mut held, vec![reading(41.)]);
         assert!(!Rc::ptr_eq(&held, &before));
         assert_eq!(*held, vec![reading(41.)]);
+    }
+
+    /// A coordinator with one agent and another project's coordinator, with `selected` selected.
+    fn selecting(selected: &str) -> Shared {
+        let mut agent = session("agent", false);
+        (agent.parent_id, agent.role) = (Some("live".into()), Role::Implementer);
+        let snapshot = Snapshot {
+            sessions: vec![session("live", false), agent, session("other", false)],
+            ..Default::default()
+        };
+        Shared {
+            index: Some(Rc::new(WorkspaceIndex::new(snapshot, Rc::default()))),
+            selected: Some(selected.into()),
+            ..Default::default()
+        }
+    }
+
+    fn changed(sessions: &[&str]) -> ChangedSteps {
+        ChangedSteps {
+            sessions: sessions.iter().map(|s| s.to_string()).collect(),
+            all: false,
+        }
+    }
+
+    #[test]
+    fn steps_are_fetched_only_for_the_sessions_shown() {
+        let coordinator = selecting("live");
+        assert!(!shows_steps_of_selected(
+            &coordinator,
+            &changed(&["agent", "other"])
+        ));
+        assert!(shows_steps_of_selected(&coordinator, &changed(&["live"])));
+        // The Files panel rolls up a coordinator's agents.
+        assert!(shows_files_of(&coordinator, &changed(&["agent"])));
+        assert!(!shows_files_of(&coordinator, &changed(&["other"])));
+        let agent = selecting("agent");
+        assert!(!shows_files_of(&agent, &changed(&["live"])));
+        assert!(shows_files_of(&agent, &changed(&["agent"])));
+    }
+
+    #[test]
+    fn after_a_resync_every_shown_session_s_steps_are_fetched() {
+        let resynced = ChangedSteps {
+            all: true,
+            ..Default::default()
+        };
+        let shared = selecting("live");
+        assert!(shows_steps_of_selected(&shared, &resynced));
+        assert!(shows_files_of(&shared, &resynced));
     }
 
     #[test]
