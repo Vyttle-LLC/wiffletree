@@ -750,7 +750,6 @@ fn answer<R: serde::de::DeserializeOwned>(client: &HostClient, ask: ask::Ask<R>)
     ask.decode(value).unwrap()
 }
 
-/// A scratch folder short enough for a socket path under `Library/Application Support`.
 /// The labels of the Wiffletree host jobs launchd has loaded for this user, such as
 /// `LaunchdJob::label()`; the running apps' own `application.…` entries are not jobs.
 fn wiffletree_jobs() -> Vec<String> {
@@ -770,6 +769,7 @@ fn wiffletree_jobs() -> Vec<String> {
         .collect()
 }
 
+/// A scratch folder short enough for a socket path under `Library/Application Support`.
 fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new().tempdir_in("/tmp").unwrap()
 }
@@ -938,4 +938,57 @@ fn a_message_sent_as_the_child_host_is_killed_is_stored_once() {
     // The restarted host is a new epoch, so the subscription resumed with resync.
     assert!(events.lock().unwrap().contains(&EventKind::Resync));
     client.stop();
+}
+
+#[test]
+fn a_send_whose_reply_was_lost_is_stored_once_when_sent_again() {
+    let mut coordinator = None;
+    let fixture = Fixture::new(|host| {
+        let project = host.create_project("Quiet").unwrap();
+        host.set_live(&project.id, false).unwrap();
+        let sessions = host.sessions().unwrap().into_iter();
+        coordinator = sessions.rev().find(|s| s.project_id == project.id);
+    });
+    let coordinator = coordinator.unwrap().id;
+    let send = Command::Send {
+        id: "lost-reply".into(),
+        sender: None,
+        recipient: coordinator.clone(),
+        body: "Are the alerts fixed?".into(),
+        attachments: vec![],
+        uploads: vec![],
+    };
+    let stored = |client: &mut Connection| -> usize {
+        let messages = client.result(Command::Messages {
+            session_id: coordinator.clone(),
+            before: None,
+            limit: 50,
+        });
+        let messages = messages.as_array().unwrap().iter();
+        messages.filter(|m| m["id"] == "lost-reply").count()
+    };
+    // The request is written and the connection closes before its reply is read.
+    let mut lost = fixture.welcomed(Some(fixture.credential()));
+    let request = Request {
+        version: PROTOCOL_VERSION,
+        id: "first".into(),
+        command: send.clone(),
+    };
+    lost.send(serde_json::to_value(request).unwrap());
+    drop(lost);
+    let mut watcher = fixture.welcomed(None);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while stored(&mut watcher) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the host never stored the message"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut again = fixture.welcomed(Some(fixture.credential()));
+    let message: Message = serde_json::from_value(again.result(send)).unwrap();
+
+    assert_eq!(message.id, "lost-reply");
+    assert_eq!(stored(&mut watcher), 1, "stored once");
 }

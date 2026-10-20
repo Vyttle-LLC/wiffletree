@@ -299,6 +299,15 @@ impl Session {
                 Err(format!("Use protocol {protocol} on this connection")),
             );
         }
+        if let Some(needed) = command.capability()
+            && !CAPABILITIES.contains(&needed)
+        {
+            return self.reply(
+                version,
+                id,
+                Err(format!("This host does not offer {needed}")),
+            );
+        }
         if local && command.is_human_only() && !human {
             return self.reply(version, id, Err(
                 "Only the Wiffletree app can give this command: its client credential is missing".into(),
