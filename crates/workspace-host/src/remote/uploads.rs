@@ -29,7 +29,38 @@ fn plain(name: &str, limit: usize) -> bool {
         && !name.contains(['/', '\0'])
 }
 
+/// Adds the table of the upload ids each message was stored with (schema 8), so a message sent
+/// again is recognised by exactly those ids after its uploads are gone.
+pub(crate) fn migrate(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS message_uploads (
+             message_id TEXT NOT NULL,
+             position INTEGER NOT NULL,
+             upload_id TEXT NOT NULL,
+             PRIMARY KEY (message_id, position)
+         );",
+    )?;
+    Ok(())
+}
+
 impl Host {
+    /// The upload ids a message was stored with, in order.
+    pub(crate) fn message_uploads(&self, message: &str) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT upload_id FROM message_uploads WHERE message_id = ?1 ORDER BY position",
+        )?;
+        let ids = statement.query_map([message], |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
+    }
+    pub(crate) fn record_message_uploads(&self, message: &str, uploads: &[String]) -> Result<()> {
+        for (position, upload) in uploads.iter().enumerate() {
+            self.db.execute(
+                "INSERT INTO message_uploads (message_id, position, upload_id) VALUES (?1, ?2, ?3)",
+                params![message, position as i64, upload],
+            )?;
+        }
+        Ok(())
+    }
     fn uploads_folder(&self) -> PathBuf {
         self.home.join(FOLDER)
     }

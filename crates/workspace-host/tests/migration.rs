@@ -698,20 +698,24 @@ fn an_existing_store_opens_newest_first_and_loses_nothing() {
 }
 
 #[test]
-fn a_schema_7_store_gains_an_empty_device_table_and_loses_nothing() {
+fn a_schema_7_store_gains_empty_device_and_message_upload_tables_and_loses_nothing() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path();
     let mut host = Host::open_set_up(home).unwrap();
     host.create_project("Calls").unwrap();
     drop(host);
     raw(home)
-        .execute_batch("DROP TABLE devices; PRAGMA user_version = 7;")
+        .execute_batch("DROP TABLE devices; DROP TABLE message_uploads; PRAGMA user_version = 7;")
         .unwrap();
 
     let host = Host::open_set_up(home).unwrap();
 
     assert_eq!(version(home), 8);
     assert!(host.devices().unwrap().is_empty());
+    let uploads: i64 = raw(home)
+        .query_row("SELECT count(*) FROM message_uploads", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(uploads, 0);
     let names: Vec<String> = host
         .projects()
         .unwrap()

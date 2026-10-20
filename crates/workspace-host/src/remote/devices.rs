@@ -1,7 +1,8 @@
-//! Paired devices in the store (schema 8): each device's key, name and access level.
+//! Paired devices in the store (schema 8, with `message_uploads`): each device's key, name and
+//! access level.
 use crate::*;
 
-/// Adds the device table.
+/// Adds the device table and sets schema 8, after `uploads::migrate`.
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS devices (

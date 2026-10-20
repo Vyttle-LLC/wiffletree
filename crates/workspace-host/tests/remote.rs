@@ -895,3 +895,43 @@ fn a_message_with_uploads_sent_again_after_a_restart_is_answered_from_the_store(
         .filter(|m| m["id"] == "kept");
     assert_eq!(stored.count(), 1);
 }
+
+#[test]
+fn a_resend_naming_another_upload_is_refused_and_leaves_that_upload_alone() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    for (id, name) in [("first", "shot.png"), ("second", "notes.txt")] {
+        client
+            .call(Command::UploadAttachment {
+                upload_id: id.into(),
+                name: name.into(),
+                offset: 0,
+                bytes: base64(name.as_bytes()),
+            })
+            .unwrap();
+    }
+    let send = |id: &str, upload: &str| Command::Send {
+        id: id.into(),
+        sender: None,
+        recipient: studio.coordinator.clone(),
+        body: "Look".into(),
+        attachments: vec![],
+        uploads: vec![upload.into()],
+    };
+    client.call(send("look", "first")).unwrap();
+
+    let reused = client.call(send("look", "second")).unwrap_err();
+
+    assert_eq!(reused, "Message ID reused with a different payload");
+    assert!(studio.data.path().join("uploads/second/notes.txt").exists());
+    let own: Message =
+        serde_json::from_value(client.call(send("notes", "second")).unwrap()).unwrap();
+    assert_eq!(own.attachments[0].name(), "notes.txt");
+    // The original message is still answered when sent again as it was.
+    let again: Message =
+        serde_json::from_value(client.call(send("look", "first")).unwrap()).unwrap();
+    assert_eq!(again.attachments[0].name(), "shot.png");
+}

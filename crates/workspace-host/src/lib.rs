@@ -288,6 +288,7 @@ impl Host {
         agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
         order::migrate(&db)?;
+        remote::uploads::migrate(&db)?;
         remote::devices::migrate(&db)?;
         let mut host = Self {
             db,
@@ -1451,24 +1452,29 @@ impl Host {
                 attachments,
                 uploads,
             } => {
-                // A message sent again, its reply lost, is answered from the store even once
-                // its uploads are gone: the host restarted, or an hour passed.
-                let files = match self.message(&id) {
-                    Ok(stored) if !uploads.is_empty() => {
-                        ensure!(
-                            stored.attachments.len() == attachments.len() + uploads.len(),
-                            "Message ID reused with a different payload"
-                        );
-                        (stored.attachments.into_iter()).map(|a| a.path).collect()
-                    }
-                    _ => {
-                        let mut files = attachments;
-                        files.extend(self.upload_files(&uploads)?);
-                        files
-                    }
-                };
+                // A message sent again, its reply lost, is answered from the store, even once
+                // its uploads are gone, when it names exactly the uploads it was stored with.
+                // It consumes nothing.
+                if !uploads.is_empty()
+                    && let Ok(stored) = self.message(&id)
+                {
+                    ensure!(
+                        self.message_uploads(&id)? == uploads
+                            && stored.attachments.len() == attachments.len() + uploads.len(),
+                        "Message ID reused with a different payload"
+                    );
+                    let mut files = attachments;
+                    let uploaded = stored.attachments.into_iter().skip(files.len());
+                    files.extend(uploaded.map(|a| a.path));
+                    let message =
+                        self.send_with_files(&id, sender.as_deref(), &recipient, &body, &files)?;
+                    return Ok(serde_json::to_value(message)?);
+                }
+                let mut files = attachments;
+                files.extend(self.upload_files(&uploads)?);
                 let message =
                     self.send_with_files(&id, sender.as_deref(), &recipient, &body, &files)?;
+                self.record_message_uploads(&id, &uploads)?;
                 self.uploads_used(&uploads, now());
                 serde_json::to_value(message)?
             }
