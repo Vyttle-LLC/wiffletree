@@ -277,34 +277,43 @@ impl Conversation {
             };
             return self.request(send, window, cx);
         }
-        // A remote host stores this Mac's files from uploads, which the message names.
+        // A remote host stores this Mac's files from uploads, which the message names. The
+        // worker sends the message itself, so it goes even if this view closes meanwhile, as
+        // when the app goes to the background; the view only shows the answer.
         let bridge = self.bridge.clone();
-        let (sender, uploaded) = async_channel::bounded(1);
+        let (sender, answered) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let uploads: Result<Vec<_>, _> = (attachments.iter())
                 .map(|path| uploads::upload(&bridge, path))
                 .collect();
-            let _ = sender.send_blocking(uploads);
+            let send = uploads.map(|uploads| Command::Send {
+                id,
+                sender: None,
+                recipient: recipient.clone(),
+                body,
+                attachments: vec![],
+                uploads,
+            });
+            let reply = (send.clone()).and_then(|send| bridge.request(send));
+            let _ = sender.send_blocking((recipient, send, reply));
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(uploads) = uploaded.recv().await else {
+            let Ok((recipient, send, reply)) = answered.recv().await else {
                 return;
             };
-            let _ = this.update_in(cx, |view, window, cx| match uploads {
-                Ok(uploads) => {
-                    let send = Command::Send {
-                        id,
-                        sender: None,
-                        recipient,
-                        body,
-                        attachments: vec![],
-                        uploads,
-                    };
-                    view.request(send, window, cx)
+            let answer = match reply {
+                Ok(reply) => {
+                    (reply.recv().await).unwrap_or_else(|_| Err("Host disconnected".into()))
                 }
-                Err(error) => {
+                Err(error) => Err(error),
+            };
+            let _ = this.update_in(cx, |view, window, cx| match send {
+                Ok(send) => view.accept(send, answer, window, cx),
+                Err(_) => {
                     view.sending.remove(&recipient);
-                    toast_error(error, window, cx);
+                    if let Err(error) = answer {
+                        toast_error(error, window, cx);
+                    }
                     cx.notify();
                 }
             });
