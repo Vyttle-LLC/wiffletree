@@ -222,6 +222,7 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
             recipient: worker.id.clone(),
             body: "JUST_REPLY SET_PLAN".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     let board = |service: &Service| -> ProgressPage {
@@ -253,6 +254,7 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
             recipient: worker.id.clone(),
             body: "JUST_REPLY SET_PLAN".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     assert_eq!(messages(&service, &worker.id).len(), transcript.len());
@@ -313,6 +315,7 @@ fn a_live_project_resumes_after_a_restart_except_for_the_session_it_interrupted(
             recipient: worker.id.clone(),
             body: "JUST_REPLY HANG_UNTIL_CANCELLED".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     let agent = |page: ProgressPage| page.agents.into_iter().find(|a| a.session_id == worker.id);

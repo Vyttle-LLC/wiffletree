@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use workspace_core::{
-    FileContents, FolderEntry, FolderListing, MAX_ATTACHMENT_BYTES, ResolvedPath,
+    AccessLevel, FileContents, FolderEntry, FolderListing, MAX_ATTACHMENT_BYTES, ResolvedPath,
 };
 
 /// Credential locations no root ever serves, under the host user's home folder unless noted.
@@ -230,6 +230,19 @@ pub fn resolve_paths(
         .collect()
 }
 
+/// `resolve_paths` for a paired device: only files within the roots, never a credential.
+pub fn resolve_paths_within(
+    roots: &Roots,
+    references: &[String],
+    bases: &[PathBuf],
+    home: Option<&Path>,
+) -> Vec<Option<ResolvedPath>> {
+    resolve_paths(references, bases, home)
+        .into_iter()
+        .map(|found| found.filter(|found| roots.check(&found.path, false).is_ok()))
+        .collect()
+}
+
 /// Whether opening `path` would run it instead of showing it: an executable, or a script
 /// Terminal runs.
 fn runs_when_opened(path: &Path) -> bool {
@@ -281,10 +294,31 @@ pub fn read_file(roots: &Roots, path: &Path, max_bytes: u64) -> Result<FileConte
     })
 }
 
-/// The folders in `path`, leaving out credential locations. `home` allows folders under the
-/// host's home folder, as for the host's own clients.
-pub fn list_folder(roots: &Roots, path: &Path, home: bool) -> Result<FolderListing> {
-    let resolved = roots.check(path, home)?;
+/// Who a path is read for: the host itself, or a paired device at its access level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reader {
+    Host,
+    Device(AccessLevel),
+}
+impl Reader {
+    /// May list folders under the host's home folder, outside the roots.
+    fn home(self) -> bool {
+        self != Self::Device(AccessLevel::ViewOnly)
+    }
+}
+
+/// The folders in `path`, leaving out credential locations. The host itself and a Control
+/// device may list folders under the host's home folder too, and name it `~`. For a device, a folder whose
+/// resolved target is outside what it may list is left out as well.
+pub fn list_folder(roots: &Roots, path: &Path, reader: Reader) -> Result<FolderListing> {
+    // A leading `~` names the host's home folder, where a folder browser starts.
+    let path = match path.strip_prefix("~") {
+        Ok(rest) if reader.home() => roots.home.join(rest),
+        Ok(_) => bail!("View only lists folders within what the host serves, not its home folder"),
+        Err(_) => path.to_owned(),
+    };
+    let path = path.as_path();
+    let resolved = roots.check(path, reader.home())?;
     if !resolved.is_dir() {
         bail!("{} is not a folder", path.display());
     }
@@ -292,8 +326,11 @@ pub fn list_folder(roots: &Roots, path: &Path, home: bool) -> Result<FolderListi
     for entry in fs::read_dir(&resolved)? {
         let entry = entry?;
         let path = entry.path();
-        let shown =
-            resolve(&path).is_ok_and(|target| target.is_dir() && !roots.deny.denies(&target));
+        let shown = resolve(&path).is_ok_and(|target| {
+            target.is_dir()
+                && !roots.deny.denies(&target)
+                && (reader == Reader::Host || roots.check(&target, reader.home()).is_ok())
+        });
         if shown && !roots.deny.denies(&path) {
             folders.push(FolderEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
@@ -380,7 +417,7 @@ mod tests {
             );
         }
         for folder in [".ssh", ".config/gh", ".gnupg", ".aws", "Library/Keychains"] {
-            let error = list_folder(&roots, &home.join(folder), true).unwrap_err();
+            let error = list_folder(&roots, &home.join(folder), Reader::Host).unwrap_err();
             assert!(
                 error.to_string().contains("credential"),
                 "{folder}: {error}"
@@ -388,7 +425,7 @@ mod tests {
         }
         // Nor is one named in a listing of the folder holding it.
         let names = |folder: &str| -> Vec<String> {
-            let listing = list_folder(&roots, &home.join(folder), true).unwrap();
+            let listing = list_folder(&roots, &home.join(folder), Reader::Host).unwrap();
             listing.folders.into_iter().map(|f| f.name).collect()
         };
         assert!(!names(".config").contains(&"gh".to_string()));
@@ -451,9 +488,10 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let deny = DenyList::new(home.path(), None, None);
         let roots = Roots::new([root], vec![], data.path(), home.path(), deny).unwrap();
-        assert!(list_folder(&roots, Path::new("/etc"), true).is_err());
-        assert!(list_folder(&roots, &elsewhere, false).is_err());
-        let listing = list_folder(&roots, &elsewhere, true).unwrap();
+        assert!(list_folder(&roots, Path::new("/etc"), Reader::Host).is_err());
+        let view_only = Reader::Device(AccessLevel::ViewOnly);
+        assert!(list_folder(&roots, &elsewhere, view_only).is_err());
+        let listing = list_folder(&roots, &elsewhere, Reader::Host).unwrap();
         let entries = [
             FolderEntry {
                 name: "plain".into(),
@@ -465,6 +503,67 @@ mod tests {
             },
         ];
         assert_eq!(listing.folders, entries, "folders and repositories only");
+    }
+
+    #[test]
+    fn a_device_neither_lists_nor_resolves_what_lies_outside_the_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("elsewhere")).unwrap();
+        let deny = DenyList::new(Path::new("/nonexistent"), None, None);
+        let roots = Roots::new(
+            [root.path().to_owned()],
+            vec![],
+            data.path(),
+            Path::new("/nonexistent"),
+            deny,
+        )
+        .unwrap();
+        let names = |reader| -> Vec<String> {
+            let listing = list_folder(&roots, root.path(), reader).unwrap();
+            listing.folders.into_iter().map(|f| f.name).collect()
+        };
+        assert_eq!(names(Reader::Host), ["elsewhere", "src"]);
+        assert_eq!(names(Reader::Device(AccessLevel::Control)), ["src"]);
+        let references = ["elsewhere/secret.txt".to_string()];
+        let bases = [root.path().to_owned()];
+        assert!(resolve_paths(&references, &bases, None)[0].is_some());
+        assert_eq!(
+            resolve_paths_within(&roots, &references, &bases, None),
+            [None]
+        );
+    }
+
+    #[test]
+    fn a_leading_tilde_lists_the_home_folder_except_for_view_only() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join("dev/tidepool/.git")).unwrap();
+        let deny = DenyList::new(home.path(), None, None);
+        let roots = Roots::new(
+            [home.path().join("dev")],
+            vec![],
+            data.path(),
+            home.path(),
+            deny,
+        )
+        .unwrap();
+        let resolved_home = fs::canonicalize(home.path()).unwrap();
+        for reader in [Reader::Host, Reader::Device(AccessLevel::Control)] {
+            let listing = list_folder(&roots, Path::new("~"), reader).unwrap();
+            assert_eq!(listing.path, resolved_home);
+            assert_eq!(listing.folders[0].name, "dev");
+            let dev = list_folder(&roots, Path::new("~/dev"), reader).unwrap();
+            assert_eq!(dev.folders[0].name, "tidepool");
+            assert!(dev.folders[0].repository);
+        }
+        let view_only = Reader::Device(AccessLevel::ViewOnly);
+        assert!(list_folder(&roots, Path::new("~"), view_only).is_err());
+        assert!(list_folder(&roots, Path::new("~/dev"), view_only).is_err());
+        assert!(list_folder(&roots, &home.path().join("dev"), view_only).is_ok());
     }
 
     #[test]

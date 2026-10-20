@@ -220,7 +220,7 @@ impl Shared {
         let subscribe = Request {
             version: welcome.protocol,
             id: new_id(),
-            command: Command::Subscribe { after },
+            command: Command::Subscribe { after, kinds: None },
         };
         write_line(&mut stream, &subscribe)?;
         // Nothing else is written yet, so the next line answers it.
@@ -569,6 +569,7 @@ mod tests {
                             id: subscribe.id,
                             result: Some(subscribed),
                             error: None,
+                            host_ms: None,
                         };
                         write_line(&mut stream, &answer).unwrap();
                         while let Ok(request) = read_line::<Value>(&mut reader) {
@@ -644,6 +645,7 @@ mod tests {
             recipient: "coordinator".into(),
             body: "x".repeat(300 * 1024),
             attachments: vec![],
+            uploads: vec![],
         };
         let error = client.request(send).unwrap_err();
         assert!(error.contains("too large to send"), "{error}");
@@ -653,6 +655,7 @@ mod tests {
             recipient: "coordinator".into(),
             body: "Hello".into(),
             attachments: vec![],
+            uploads: vec![],
         };
         let _reply = client.request(small).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -699,6 +702,7 @@ mod tests {
                                 id: request.id,
                                 result: Some(result),
                                 error: None,
+                                host_ms: None,
                             };
                             write_line(&mut stream, &response).unwrap();
                         }

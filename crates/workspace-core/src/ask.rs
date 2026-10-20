@@ -166,6 +166,37 @@ pub fn settings() -> Ask<HostSettings> {
 pub fn set_workspaces_dir(path: String) -> Ask<HostSettings> {
     Ask::new(Command::SetWorkspacesDir { path })
 }
+pub fn remote_access() -> Ask<RemoteAccess> {
+    Ask::new(Command::RemoteAccess)
+}
+pub fn set_remote_access(enabled: bool) -> Ask<RemoteAccess> {
+    Ask::new(Command::SetRemoteAccess { enabled })
+}
+pub fn open_pairing() -> Ask<RemoteAccess> {
+    Ask::new(Command::OpenPairing)
+}
+pub fn cancel_pairing() -> Ask<RemoteAccess> {
+    Ask::new(Command::CancelPairing)
+}
+pub fn set_device_level(device_id: String, level: AccessLevel) -> Ask<RemoteAccess> {
+    Ask::new(Command::SetDeviceLevel { device_id, level })
+}
+pub fn remove_device(device_id: String) -> Ask<RemoteAccess> {
+    Ask::new(Command::RemoveDevice { device_id })
+}
+pub fn upload_attachment(
+    upload_id: String,
+    name: String,
+    offset: u64,
+    bytes: String,
+) -> Ask<Uploaded> {
+    Ask::new(Command::UploadAttachment {
+        upload_id,
+        name,
+        offset,
+        bytes,
+    })
+}
 pub fn set_check_ins(child_turns: u32, human_turns: u32) -> Ask<HostSettings> {
     Ask::new(Command::SetCheckIns {
         child_turns,

@@ -11,9 +11,12 @@ mod launch;
 mod messages;
 mod models;
 mod owners;
+pub mod pairing;
 mod process;
 mod progress;
 mod publishing;
+mod remote;
+pub mod remote_client;
 mod selection;
 pub mod skills;
 mod steps;
@@ -32,6 +35,7 @@ pub use owners::*;
 pub use process::*;
 pub use progress::*;
 pub use publishing::*;
+pub use remote::*;
 pub use selection::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -923,6 +927,9 @@ pub struct HostSettings {
     /// The repository the shared folder is a clone of. Kept on this machine only.
     #[serde(default)]
     pub settings_repository: Option<SettingsRepository>,
+    /// "Let other devices use this Mac's Wiffletree". Kept on this machine only.
+    #[serde(default)]
+    pub remote_access: bool,
 }
 /// A private GitHub repository the shared folder syncs with, as this machine recorded it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1081,6 +1088,7 @@ impl HostSettings {
             allowed_owners: vec![],
             keeper: KeeperSettings::default(),
             settings_repository: None,
+            remote_access: false,
         }
     }
     pub fn validate_check_ins(child_turns: u32, human_turns: u32) -> Result<()> {
@@ -2739,6 +2747,9 @@ pub enum Command {
         /// Files the human attached; the host stores copies of them with the message.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<PathBuf>,
+        /// Uploads a remote device made with `UploadAttachment`, attached as files would be.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        uploads: Vec<String>,
     },
     Messages {
         session_id: String,
@@ -2987,6 +2998,9 @@ pub enum Command {
     Subscribe {
         #[serde(default)]
         after: Option<Cursor>,
+        /// Only these kinds of event, and `resync`; every kind when left out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kinds: Option<Vec<EventKindName>>,
     },
     /// Socket only: answered with nothing by the connection itself, not the host's actor, so a
     /// client can tell a quiet host from one that is gone while the actor is busy.
@@ -3005,7 +3019,7 @@ pub enum Command {
         max_bytes: u64,
     },
     /// Names the folders in `path` and which are Git repositories; answered with
-    /// `FolderListing`.
+    /// `FolderListing`. A leading `~` is the host's home folder, except for a View only device.
     ListFolder {
         path: PathBuf,
     },
@@ -3019,6 +3033,38 @@ pub enum Command {
     /// and no compaction runs; the only command a connection may send after a refused `Hello`.
     RestartHost {
         when: RestartWhen,
+    },
+    /// This Mac's remote access: the switch, its name and addresses, pairing mode with its code,
+    /// and the paired devices; answered with `RemoteAccess`. Only the host itself sends it.
+    RemoteAccess,
+    /// Turns "Let other devices use this Mac's Wiffletree" on or off; answered with
+    /// `RemoteAccess`. Off closes the listener and every remote connection; paired devices stay.
+    SetRemoteAccess {
+        enabled: bool,
+    },
+    /// Opens pairing mode with a new 4-digit code for 2 minutes; answered with `RemoteAccess`.
+    OpenPairing,
+    /// Closes pairing mode; answered with `RemoteAccess`.
+    CancelPairing,
+    /// Changes what a paired device may do and closes its connections; answered with
+    /// `RemoteAccess`.
+    SetDeviceLevel {
+        device_id: String,
+        level: AccessLevel,
+    },
+    /// Forgets a paired device and closes its connections; answered with `RemoteAccess`.
+    RemoveDevice {
+        device_id: String,
+    },
+    /// Stores a piece of a file a remote device attaches, at `offset`, from the base64 `bytes`
+    /// of at most `UPLOAD_PIECE_BYTES`. A piece is stored only where the upload ends, so a piece
+    /// sent again changes nothing; answered with `Uploaded`, where the next piece starts.
+    UploadAttachment {
+        upload_id: String,
+        /// The file's name, which the stored attachment keeps.
+        name: String,
+        offset: u64,
+        bytes: String,
     },
 }
 impl Command {
@@ -3056,7 +3102,8 @@ impl Command {
             | Self::ResolvePaths { .. }
             | Self::ReadFile { .. }
             | Self::ListFolder { .. }
-            | Self::CoreInstructions => true,
+            | Self::CoreInstructions
+            | Self::RemoteAccess => true,
             Self::ImportRepositories { .. }
             | Self::RefreshRepositories
             | Self::RemoveRepositoryRoot { .. }
@@ -3110,13 +3157,20 @@ impl Command {
             | Self::RemoveLeftoverWorktrees { .. }
             | Self::StopProcesses { .. }
             | Self::StopAgentsAndQuit
-            | Self::RestartHost { .. } => false,
+            | Self::RestartHost { .. }
+            | Self::SetRemoteAccess { .. }
+            | Self::OpenPairing
+            | Self::CancelPairing
+            | Self::SetDeviceLevel { .. }
+            | Self::RemoveDevice { .. }
+            | Self::UploadAttachment { .. } => false,
         }
     }
     /// Commands only the human should give: on the host socket they need the app's client
     /// credential. They send a message as the human, answer the Inbox, which also approves a
     /// publish, or grant publish or push authority without it: owners whose PRs open without
     /// asking, the PR keeper's rebases and pushes, and a settings repository the host pushes to.
+    /// Remote access is the human's too: its state carries the pairing code.
     pub fn is_human_only(&self) -> bool {
         matches!(
             self,
@@ -3127,6 +3181,24 @@ impl Command {
                 | Self::SetKeeper { .. }
                 | Self::SetUpSettingsRepository { .. }
                 | Self::JoinSettingsRepository { .. }
+                | Self::RemoteAccess
+                | Self::SetRemoteAccess { .. }
+                | Self::OpenPairing
+                | Self::CancelPairing
+                | Self::SetDeviceLevel { .. }
+                | Self::RemoveDevice { .. }
+        )
+    }
+    /// Remote access, pairing and devices, which only the host itself may read or change.
+    pub fn is_remote_access(&self) -> bool {
+        matches!(
+            self,
+            Self::RemoteAccess
+                | Self::SetRemoteAccess { .. }
+                | Self::OpenPairing
+                | Self::CancelPairing
+                | Self::SetDeviceLevel { .. }
+                | Self::RemoveDevice { .. }
         )
     }
     /// The capability a host lists when it answers this command.
@@ -3138,6 +3210,7 @@ impl Command {
             Self::RestartHost {
                 when: RestartWhen::Idle,
             } => Some(capability::RESTART_WHEN_IDLE),
+            Self::UploadAttachment { .. } => Some(capability::UPLOADS),
             _ => None,
         }
     }
@@ -3154,4 +3227,7 @@ pub struct Response {
     pub id: String,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// Milliseconds from the host reading the request to writing this reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ms: Option<u64>,
 }

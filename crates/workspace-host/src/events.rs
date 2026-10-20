@@ -19,6 +19,8 @@ pub(crate) struct Changes {
     pub steps: BTreeSet<String>,
     pub progress: bool,
     pub usage: bool,
+    /// The new count of things that need the human, when it changed.
+    pub attention: Option<usize>,
 }
 impl Changes {
     fn kinds(self) -> Vec<EventKind> {
@@ -37,6 +39,9 @@ impl Changes {
         if self.usage {
             kinds.push(EventKind::Usage);
         }
+        if let Some(count) = self.attention {
+            kinds.push(EventKind::Attention { count });
+        }
         kinds
     }
 }
@@ -47,6 +52,8 @@ pub struct Subscription {
     pub cursor: Cursor,
     pub missed: Vec<Event>,
     pub events: Receiver<Event>,
+    /// The latest count of things that need the human, for a subscriber that has none yet.
+    pub attention: Option<usize>,
 }
 
 /// The in-process form of a subscription: one bounded wake per kind, each coalescing any
@@ -71,6 +78,7 @@ impl PingSenders {
             EventKind::Steps { .. } => vec![&self.steps],
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
+            EventKind::Attention { .. } => vec![],
             EventKind::Resync => vec![&self.state, &self.steps, &self.progress, &self.usage],
         };
         for sender in senders {
@@ -93,6 +101,7 @@ struct Log {
     recent: VecDeque<Event>,
     queues: Vec<Queue>,
     pings: Vec<PingSenders>,
+    attention: Option<usize>,
 }
 impl Default for EventLog {
     fn default() -> Self {
@@ -102,6 +111,7 @@ impl Default for EventLog {
             recent: VecDeque::with_capacity(LOG_EVENTS),
             queues: vec![],
             pings: vec![],
+            attention: None,
         })))
     }
 }
@@ -116,6 +126,7 @@ impl EventLog {
     /// subscriber that stops reading never holds the caller.
     pub(crate) fn emit(&self, changes: Changes) {
         let mut log = self.log();
+        log.attention = changes.attention.or(log.attention);
         for kind in changes.kinds() {
             log.seq += 1;
             let event = Event {
@@ -143,6 +154,11 @@ impl EventLog {
             }
         }
     }
+    /// Records the count of things that need the human without sending an event, as the host
+    /// learns it at start.
+    pub(crate) fn know_attention(&self, count: usize) {
+        self.log().attention = Some(count);
+    }
     /// Subscribes after `after`: a cursor of this epoch still in the log gets every later
     /// event, any other cursor `resync` first, and none only what comes next.
     pub fn subscribe(&self, after: Option<&Cursor>) -> Subscription {
@@ -161,6 +177,7 @@ impl EventLog {
             cursor,
             missed,
             events: receiver,
+            attention: log.attention,
         }
     }
     pub fn pings(&self) -> Pings {
@@ -301,6 +318,7 @@ mod tests {
             steps: ["b".to_string(), "a".to_string()].into(),
             progress: true,
             usage: false,
+            attention: None,
         });
         let kinds: Vec<_> = drain(&subscription.events)
             .into_iter()

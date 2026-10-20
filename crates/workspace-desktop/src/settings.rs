@@ -1,12 +1,13 @@
 //! The Settings window: this client's appearance, the host's workspace folder, its check-in
-//! thresholds and the settings repository.
+//! thresholds, the settings repository and remote access.
+mod remote_access;
 mod repository;
 
 use super::*;
 use gpui_component::{ActiveTheme, Disableable};
 use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
-use ui::{hint, icon, mono, over_dimmed, section, segment, setting};
+use ui::{card, hint, icon, mono, over_dimmed, section, segment, setting};
 
 /// The open Settings window, so ⌘, focuses it instead of opening a second one.
 #[derive(Clone)]
@@ -31,6 +32,11 @@ pub(super) struct Settings {
     confirming: Option<Confirm>,
     /// The paused setting open in Compare.
     compared: crate::workspace_notes::Compared,
+    /// This Mac's remote access, as the host last answered.
+    remote: Option<RemoteAccess>,
+    remote_error: Option<String>,
+    /// The page is looking again on a timer.
+    watching_remote: bool,
 }
 
 /// The agent check-in presets; the host accepts any value in `CHECKIN_CHILD_TURNS`.
@@ -88,8 +94,12 @@ impl Settings {
                         asking: false,
                         confirming: None,
                         compared: None,
+                        remote: None,
+                        remote_error: None,
+                        watching_remote: false,
                     };
                     view.ask_host(ask::settings(), cx);
+                    view.ask_remote(ask::remote_access(), cx);
                     view.refresh_sync(cx);
                     cx.observe_global::<repository::SyncShown>(|view, cx| view.sync_shown(cx))
                         .detach();
@@ -367,7 +377,9 @@ impl Render for Settings {
                     .child(rule())
                     .child(self.check_in_section(p, cx))
                     .child(rule())
-                    .child(self.repository_section(p, cx));
+                    .child(self.repository_section(p, cx))
+                    .child(rule())
+                    .child(self.remote_access_section(p, cx));
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
                 match dialog {

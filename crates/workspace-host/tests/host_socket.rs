@@ -232,7 +232,14 @@ fn the_handshake_chooses_the_newest_common_protocol() {
     assert_eq!(welcome.protocol, PROTOCOL_VERSION);
     assert_eq!(
         welcome.capabilities,
-        ["events", "files", "folders", "restart-when-idle"]
+        [
+            "events",
+            "files",
+            "folders",
+            "restart-when-idle",
+            "uploads",
+            "attention"
+        ]
     );
     assert_eq!(welcome.host_version, env!("CARGO_PKG_VERSION"));
     assert!(welcome.binary.ends_with("workspace-host"));
@@ -332,6 +339,7 @@ fn with_no_common_protocol_the_refusal_counts_working_agents_and_restart_now_sto
         recipient: main.id.clone(),
         body: "Keep working".into(),
         attachments: vec![],
+        uploads: vec![],
     });
     let deadline = Instant::now() + Duration::from_secs(30);
     while snapshot(&mut app)
@@ -543,8 +551,11 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
         name: name.into(),
     };
     let mut subscriber = fixture.welcomed(None);
-    let subscribed: Subscribed =
-        serde_json::from_value(subscriber.result(Command::Subscribe { after: None })).unwrap();
+    let subscribed: Subscribed = serde_json::from_value(subscriber.result(Command::Subscribe {
+        after: None,
+        kinds: None,
+    }))
+    .unwrap();
     let mut other = fixture.welcomed(None);
     other.result(rename("First"));
     let event = std::iter::repeat_with(|| subscriber.event())
@@ -562,6 +573,7 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
     let mut back = fixture.welcomed(None);
     let resumed: Subscribed = serde_json::from_value(back.result(Command::Subscribe {
         after: Some(read.clone()),
+        kinds: None,
     }))
     .unwrap();
     let missed: Vec<_> = (read.seq + 1..=resumed.cursor.seq)
@@ -584,10 +596,17 @@ fn a_subscription_streams_events_and_resumes_from_its_cursor() {
             epoch: "an earlier start".into(),
             seq: read.seq,
         }),
+        kinds: None,
     });
     assert_eq!(stale.event().kind, EventKind::Resync);
     // A second subscription on one connection is refused.
-    let twice = stale.request(PROTOCOL_VERSION, Command::Subscribe { after: None });
+    let twice = stale.request(
+        PROTOCOL_VERSION,
+        Command::Subscribe {
+            after: None,
+            kinds: None,
+        },
+    );
     assert!(twice.error.unwrap().contains("already subscribed"));
 }
 
@@ -672,6 +691,7 @@ fn a_message_from_the_human_needs_the_apps_credential() {
                 recipient: coordinator.clone(),
                 body: "Ship it".into(),
                 attachments: vec![],
+                uploads: vec![],
             },
         )
     };
@@ -737,7 +757,6 @@ fn answer<R: serde::de::DeserializeOwned>(client: &HostClient, ask: ask::Ask<R>)
     ask.decode(value).unwrap()
 }
 
-/// A scratch folder short enough for a socket path under `Library/Application Support`.
 /// The labels of the Wiffletree host jobs launchd has loaded for this user, such as
 /// `LaunchdJob::label()`; the running apps' own `application.…` entries are not jobs.
 fn wiffletree_jobs() -> Vec<String> {
@@ -757,6 +776,7 @@ fn wiffletree_jobs() -> Vec<String> {
         .collect()
 }
 
+/// A scratch folder short enough for a socket path under `Library/Application Support`.
 fn short_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new().tempdir_in("/tmp").unwrap()
 }
@@ -897,6 +917,7 @@ fn a_message_sent_as_the_child_host_is_killed_is_stored_once() {
             recipient: coordinator.clone(),
             body: "Across the drop".into(),
             attachments: vec![],
+            uploads: vec![],
         };
         client.request(send).unwrap()
     };
@@ -924,4 +945,57 @@ fn a_message_sent_as_the_child_host_is_killed_is_stored_once() {
     // The restarted host is a new epoch, so the subscription resumed with resync.
     assert!(events.lock().unwrap().contains(&EventKind::Resync));
     client.stop();
+}
+
+#[test]
+fn a_send_whose_reply_was_lost_is_stored_once_when_sent_again() {
+    let mut coordinator = None;
+    let fixture = Fixture::new(|host| {
+        let project = host.create_project("Quiet").unwrap();
+        host.set_live(&project.id, false).unwrap();
+        let sessions = host.sessions().unwrap().into_iter();
+        coordinator = sessions.rev().find(|s| s.project_id == project.id);
+    });
+    let coordinator = coordinator.unwrap().id;
+    let send = Command::Send {
+        id: "lost-reply".into(),
+        sender: None,
+        recipient: coordinator.clone(),
+        body: "Are the alerts fixed?".into(),
+        attachments: vec![],
+        uploads: vec![],
+    };
+    let stored = |client: &mut Connection| -> usize {
+        let messages = client.result(Command::Messages {
+            session_id: coordinator.clone(),
+            before: None,
+            limit: 50,
+        });
+        let messages = messages.as_array().unwrap().iter();
+        messages.filter(|m| m["id"] == "lost-reply").count()
+    };
+    // The request is written and the connection closes before its reply is read.
+    let mut lost = fixture.welcomed(Some(fixture.credential()));
+    let request = Request {
+        version: PROTOCOL_VERSION,
+        id: "first".into(),
+        command: send.clone(),
+    };
+    lost.send(serde_json::to_value(request).unwrap());
+    drop(lost);
+    let mut watcher = fixture.welcomed(None);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while stored(&mut watcher) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the host never stored the message"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut again = fixture.welcomed(Some(fixture.credential()));
+    let message: Message = serde_json::from_value(again.result(send)).unwrap();
+
+    assert_eq!(message.id, "lost-reply");
+    assert_eq!(stored(&mut watcher), 1, "stored once");
 }

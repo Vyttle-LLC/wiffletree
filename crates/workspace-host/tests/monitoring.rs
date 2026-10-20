@@ -77,6 +77,7 @@ fn coordinators_run_scheduled_checks_themselves_and_post_each_result() {
             recipient: main.id.clone(),
             body: "SCHEDULE_MONITOR".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     let mut timer = None;

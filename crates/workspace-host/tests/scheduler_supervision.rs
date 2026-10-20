@@ -136,6 +136,7 @@ fn a_waiting_round_holds_no_one_and_a_coordinator_runs_past_a_hundred_turns() {
             recipient: other.id.clone(),
             body: "JUST_REPLY again".into(),
             attachments: vec![],
+            uploads: vec![],
         },
     );
     until(&service, "the other worker's second turn", |_| {

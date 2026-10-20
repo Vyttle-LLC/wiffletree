@@ -50,6 +50,7 @@ The app and its host are separate processes. The desktop reaches the host only o
 - **`--data-dir`, and every unsigned or ad-hoc-signed build**, start `workspace-host serve --data-dir <dir> --child` as the app's own child, straight from the bundle (or `target/`). There is no plist, no versioned copy and no launchd job, and the child stops when the app exits, stopping its turns. Only a Developer ID signature counts as signed here (`workspace_core::developer_id_signed`).
 - **Its log** is `<data folder>/logs/host.log` for the launchd host. A child host writes to the app's standard error.
 - **To stop it**, choose **Stop agents and quit** from the menu bar icon: the host stops every turn as a quit does, records them as interrupted, and exits cleanly, so launchd leaves it stopped. From a shell, `launchctl bootout gui/$(id -u)/com.vyttle.wiffletree.host` stops it the same way. **To remove it**, boot it out and delete `<data folder>/host/`. Its client credential is the login keychain item `com.vyttle.wiffletree.client-credential` whose account is the data folder; delete it in Keychain Access, or with `security delete-generic-password -s com.vyttle.wiffletree.client-credential -a "<data folder>"`.
+- **The host key** for remote access is the login keychain item `com.vyttle.wiffletree.host-key` whose account is the data folder, created the first time remote access is turned on, with the same access list as the client credential. A child host keeps one too. An unsigned development build cannot read it again after a rebuild, since its access list names that build alone; delete it with `security delete-generic-password -s com.vyttle.wiffletree.host-key -a "<data folder>"` and turn remote access on again.
 - **The client credential** guards the commands only the human should give: a message from the human, answering the Inbox, and granting publish or push authority. The launchd host creates it at its first start, in a login keychain item that only the signed app and the host's copies read without a dialog. Any other program, an agent's shell among them, gets a dialog asking for the login keychain password. A child host gets a fresh one on its standard input each launch, never in its environment or a file. This raises the bar for an agent that tries to answer its own questions; **it is not a sandbox**. Agents run as you, can open the socket, and can run any command you can.
 
 Quitting follows the host:
@@ -333,6 +334,19 @@ codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.host
 ```
 
 `--data-protection` and `--access-group <team ID>.<group>` use the data-protection keychain instead, which needs the `keychain-access-groups` entitlement and a provisioning profile. Use only a test service name, never a real Wiffletree item.
+
+`crates/workspace-host/examples/local_network_probe.rs` checks how Local Network privacy treats the launchd host copy (`openspec/changes/remote-hosts/design.md`, "Local Network privacy, checked"). It listens on a port on every interface, advertises `_wiffletree._tcp`, optionally connects to an address on the network, and prints what each step got. Sign a copy, run it as a launchd agent, and read `nehelper`'s decisions from the log:
+
+```sh
+cargo build --release -p workspace-host --example local_network_probe
+mkdir -p /tmp/ln && cp target/release/examples/local_network_probe /tmp/ln/workspace-host
+codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.lnhost --sign "<identity>" /tmp/ln/workspace-host
+# A plist labelled com.vyttle.wiffletree.spike.lnhost running: /tmp/ln/workspace-host 47831 90 <router>:80
+launchctl bootstrap gui/$(id -u) /tmp/ln/lnhost.plist && launchctl kickstart gui/$(id -u)/com.vyttle.wiffletree.spike.lnhost
+/usr/bin/log show --last 2m --info --style compact | grep nehelper | grep -E "prompting|response"
+dns-sd -B _wiffletree._tcp   # on this Mac and on another one
+launchctl bootout gui/$(id -u)/com.vyttle.wiffletree.spike.lnhost
+```
 
 Only a signed build runs its host as a launchd job, so its tests cannot cover that the host does not start at login. Before a release, check it by hand on a test account:
 

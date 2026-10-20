@@ -20,6 +20,15 @@ The standard-input mode is for scripts such as `scripts/test_communications.py`:
 - SIGTERM, SIGINT and SIGHUP run the host's shutdown, which stops running turns as a quit does, then remove the socket.
 - A launchd host runs from a versioned copy of its binary, `<data folder>/host/<version>/workspace-host`, which an update of the app does not replace, and starts its agents' helpers from that same copy. Started from a copy, it removes the other version folders under `host/`. A child host runs from the app bundle (or `target/`) and has no copy.
 
+### Remote devices
+
+While remote access is on, paired devices reach the host over TLS 1.3 on TCP port 47821, with one JSON message per WebSocket text frame in place of a line. `docs/remote-protocol.md` will describe pairing and pinning in full; in short:
+
+- `/pair` runs a pairing method while pairing mode is open: `PairStart`, then `PairReply` and `PairConfirm` (`workspace_core::remote`).
+- `/v1` opens with the host's `Challenge`. The device answers with `ChallengeAnswer`, its id and a signature, and the host replies with `ChallengeVerdict`: `{"accepted": {"level": "control"}}` or `"view_only"`, so the client knows what it may do before it sends anything, or `"unpaired"`, after which the host closes the connection with the reason `unpaired`. `Hello` and the rest of this page follow an accepted verdict.
+- Changing a device's level or removing it closes its connections, so it reconnects and reads its new level from the verdict, or is refused.
+- A device's commands are checked against its level, never against the client credential.
+
 ## Framing
 
 Every message is one line of JSON ended by `\n`. A line from the client, `Hello` or a request, is at most 256 KiB; a longer one closes the connection. Lines from the host have no such bound: a `read_file` response carries up to 50 MB as base64, about 67 MiB, so a client accepts host lines of at least 70 MiB. A connection carries:
@@ -34,7 +43,7 @@ Requests are answered in any order; match a response to its request by `id`. Wri
 {"version": 2, "id": "c4a1…", "result": {…}, "error": null}
 ```
 
-`command` is tagged by `type` in snake_case, with the fields below. A response has `result` or, when the command failed or was refused, `error`, a sentence for a person. `version` in a response is the request's.
+`command` is tagged by `type` in snake_case, with the fields below. A response has `result` or, when the command failed or was refused, `error`, a sentence for a person. `version` in a response is the request's. `host_ms`, when present, is how long the host took from reading the request to writing the reply.
 
 Types in the command table are Rust's: `String` and `PathBuf` are JSON strings, `Option<T>` is `T` or `null`, `Vec<T>` an array, integers are numbers, and named types are the `workspace-core` structs and enums of that name in their serde form. A field marked `?` may be left out.
 
@@ -74,8 +83,10 @@ A client never sends a command for a capability the host did not list.
 | `files` | `resolve_paths`, `read_file` |
 | `folders` | `list_folder` |
 | `restart-when-idle` | `restart_host` with `when: "idle"` |
+| `uploads` | `upload_attachment`, and `send`'s `uploads` |
+| `attention` | `subscribe`'s `kinds`, and the `attention` event |
 
-This host lists `events`, `files`, `folders` and `restart-when-idle`.
+This host lists `events`, `files`, `folders`, `restart-when-idle`, `uploads` and `attention`, and refuses a command whose capability it does not list.
 
 ### Ending the host
 
@@ -107,6 +118,7 @@ Events then arrive beside responses:
 | `steps` | `sessions`, the ids whose steps changed | `steps` for those sessions |
 | `progress` | nothing | `progress` |
 | `usage` | nothing | `usage` and `quotas` |
+| `attention` | `count`, the things that need the human: attention items and workspace notes, as the Inbox counts them | nothing; sent when the count changes |
 | `resync` | nothing | take a fresh `snapshot`, then continue from this event's cursor |
 
 Events say only what to fetch again, never workspace state, so a missed event can leave a value stale but never wrong. The host emits at most one event of each kind for each thing that happens.
@@ -130,7 +142,7 @@ Events say only what to fetch again, never workspace state, so a missed event ca
 - **The data folder.** Inside it, only the attachment stores and project homes are served, and only one reached through real folders: a store or home that is a symlink, or lies under one inside the data folder, serves nothing. Whatever the root, the store (`workspace.sqlite3`, its `-wal` and `-shm` files and earlier copies such as `.pre-flatten`), `backups/`, `host/`, `logs/` and the host's settings (`settings.json`, `shared/`) are never served.
 - **Credentials.** Over every root, these are refused: `~/.ssh`, `~/.config/gh`, `~/.gnupg`, `~/.aws`, `~/.netrc`, `~/.git-credentials`, `~/.config/git/credentials`, `$XDG_CONFIG_HOME/git/credentials`, `~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/auth.json`, `$CODEX_HOME/auth.json` and `~/Library/Keychains`. A listing leaves them out too.
 - **Size.** `read_file` refuses a file larger than `max_bytes` or 50 MB, whichever is less. It answers `FileContents`, whose `data` is the file's bytes in standard base64.
-- **Listings.** `list_folder` answers `FolderListing`: the folders in the path, each with its name and whether it is a Git repository, and nothing about files. The host's own clients may also list folders under the host's home folder, which choosing a new repository needs.
+- **Listings.** `list_folder` answers `FolderListing`: the folders in the path, each with its name and whether it is a Git repository, and nothing about files. The host's own clients and Control devices may also list folders under the host's home folder, which choosing a new repository needs, and may name it with a leading `~`, as `~` or `~/dev`, since a remote client does not know the host's home folder. A View only device lists only within the roots, and a `~` path is refused. `resolve_paths` takes `~/` references from every client, and for a remote device answers only files within the roots.
 
 All three run off the host's main thread.
 
@@ -169,7 +181,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `create_session` | `project_id: String`, `parent_id: String`, `repository_id: Option<String>`, `name: String`, `role: Role`, `profile: ModelProfile` | change |  |
 | `set_status` | `session_id: String`, `status: Status` | change |  |
 | `set_archived` | `session_id: String`, `archived: bool` | change | Archives or restores a session together with the sessions it owns. |
-| `send` | `id: String`, `sender: Option<String>`, `recipient: String`, `body: String`, `attachments?: Vec<PathBuf>` | change, human only | Human only with no `sender`, which is a message from the human; an agent's message names its sender. Sent again with the same `id`, it is stored once. |
+| `send` | `id: String`, `sender: Option<String>`, `recipient: String`, `body: String`, `attachments?: Vec<PathBuf>`, `uploads?: Vec<String>` | change, human only | Human only with no `sender`, which is a message from the human; an agent's message names its sender. Sent again with the same `id`, it is stored once. `uploads` names files a remote device sent with `upload_attachment`, attached as `attachments` are. |
 | `messages` | `session_id: String`, `before: Option<i64>`, `limit: usize` | read |  |
 | `steps` | `session_id: String`, `run_id: Option<String>`, `after: u64` | read | One run's steps changed after `after`: `run_id` names the run, or `None` for the session's latest. Answered with a `StepPage`. |
 | `files` | `session_id: String`, `whole_tree?: bool` | read | The files a ticket agent touched, or every agent's on a coordinator's open tickets; answered with `Vec<TicketFiles>`. `whole_tree` also lists each worktree's files. |
@@ -217,11 +229,18 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `remove_leftover_worktrees` | `ticket_ids: Vec<String>` | change | Removes the worktrees of the tickets the human selected from the listing, re-checking each first; answered with `Vec<LeftoverRemoval>`. |
 | `processes` | `session_id: String` | read | What the agent has left running, or for a coordinator every agent of its project; answered with `Vec<AgentProcesses>`. Groups that have exited are forgotten. |
 | `stop_processes` | `session_id: String`, `groups?: Vec<String>` | change | Stops these groups of the Processes panel of `session_id`, or with none named every group it lists, as the human's stop; answered as `Processes`. The agents keep working. |
-| `subscribe` | `after?: Option<Cursor>` | read | Socket only: turns the connection into a subscriber of the host's events, after the events following `after` when it is still in the host's log, or after `resync` otherwise; answered with `Subscribed`. With no cursor only later events come. |
+| `subscribe` | `after?: Option<Cursor>`, `kinds?: Option<Vec<EventKindName>>` | read | Socket only: turns the connection into a subscriber of the host's events, after the events following `after` when it is still in the host's log, or after `resync` otherwise; answered with `Subscribed`. With no cursor only later events come. `kinds` limits the events to those kinds, and `resync`. |
 | `ping` | — | read | Socket only: answered with nothing by the connection itself, without waiting for the host's actor. A client that has heard nothing for a while sends it to tell a quiet or busy host from one that is gone. |
 | `resolve_paths` | `references: Vec<String>`, `bases: Vec<PathBuf>` | read | Which `references` name a file, each as it is or, when relative, under the first of `bases` that holds it; a `~/` reference is under the host's home folder. Answered with one `Option<ResolvedPath>` per reference, in order. Reads no file's contents. |
 | `read_file` | `path: PathBuf`, `max_bytes: u64` | read | Reads a file under the roots `docs/host-protocol.md` lists, refusing one larger than `max_bytes` or `MAX_ATTACHMENT_BYTES`; answered with `FileContents`. |
-| `list_folder` | `path: PathBuf` | read | Names the folders in `path` and which are Git repositories; answered with `FolderListing`. |
+| `list_folder` | `path: PathBuf` | read | Names the folders in `path` and which are Git repositories; answered with `FolderListing`, whose `path` is the resolved one. A leading `~` is the host's home folder, except for a View only device. |
 | `core_instructions` | — | read | The fixed core instructions the host gives agents, each with its text; answered with `Vec<CoreText>`, each part's `name`, `audience`, `version` and `text`. The snapshot's `core_instructions` carries the same parts without their text. |
 | `stop_agents_and_quit` | — | change | Stops every running turn as a quit does, then ends the host; answered with nothing once the turns are stopped. Only the human's client sends it. |
 | `restart_host` | `when: RestartWhen` | change | Ends the host so the app can start the newest installed version: `now` as `stop_agents_and_quit` does, `idle` once no turn and no compaction runs, answered at once. The only command a connection may send after a refused `Hello`. |
+| `remote_access` | — | read, human only | This Mac's remote access: the switch, its name and addresses, pairing mode with its code, and the paired devices; answered with `RemoteAccess`. Only the host itself, never a remote device. |
+| `set_remote_access` | `enabled: bool` | change, human only | Turns remote access on or off; answered with `RemoteAccess`. Off closes the listener and every remote connection; paired devices stay paired. |
+| `open_pairing` | — | change, human only | Opens pairing mode with a new 4-digit code for 2 minutes; answered with `RemoteAccess`. |
+| `cancel_pairing` | — | change, human only | Closes pairing mode; answered with `RemoteAccess`. |
+| `set_device_level` | `device_id: String`, `level: AccessLevel` | change, human only | Changes what a paired device may do and closes its open connections; answered with `RemoteAccess`. |
+| `remove_device` | `device_id: String` | change, human only | Forgets a paired device and closes its open connections; answered with `RemoteAccess`. |
+| `upload_attachment` | `upload_id: String`, `name: String`, `offset: u64`, `bytes: String` | change | Stores a piece of at most 128 KiB, base64 in `bytes`, of a file a remote device attaches. A piece is stored only at the upload's end, so one sent again changes nothing; answered with `Uploaded`, the offset of the next piece. An upload no `send` names is deleted after an hour. |

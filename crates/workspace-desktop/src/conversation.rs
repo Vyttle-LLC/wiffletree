@@ -247,6 +247,7 @@ impl Conversation {
                 recipient,
                 body,
                 attachments,
+                uploads: vec![],
             },
             window,
             cx,
