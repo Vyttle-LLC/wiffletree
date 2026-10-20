@@ -54,7 +54,6 @@ pub(super) fn count(view: &'static str) {
     });
 }
 
-/// Runs `work`, timing it as `stage`.
 pub(super) fn timed<R>(stage: &'static str, work: impl FnOnce() -> R) -> R {
     if !*ENABLED {
         return work();
@@ -74,7 +73,6 @@ fn record(stage: &'static str, took: Duration) {
     });
 }
 
-/// Counts each notify of `view` as `name`.
 pub(super) fn count_notifies<T: 'static, V: 'static>(
     view: &gpui::Entity<V>,
     name: &'static str,
@@ -114,7 +112,6 @@ pub(super) fn watch_stalls(cx: &mut gpui::App) {
     .detach();
 }
 
-/// The CPU time this thread has used.
 fn thread_cpu() -> Duration {
     let mut time = libc::timespec {
         tv_sec: 0,
