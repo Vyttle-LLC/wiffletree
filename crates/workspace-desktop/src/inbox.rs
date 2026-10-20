@@ -109,10 +109,13 @@ impl Inbox {
         }
     }
     /// One inbox item with everything needed to settle it. `answering` opens the answer box.
+    /// With `max_height`, everything between the header and the buttons scrolls as one, so the
+    /// buttons stay in view; without it, only a long question's prompt scrolls.
     pub(super) fn attention_card(
         &self,
         item: &Attention,
         answering: bool,
+        max_height: Option<Pixels>,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -120,56 +123,78 @@ impl Inbox {
             .shared
             .session(&item.session_id)
             .map_or("Agent".to_owned(), |s| s.name.clone());
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(hint(asker, p).text_ellipsis())
+            .child(if item.is_permission() {
+                pill("Approval", p.yellow)
+            } else {
+                pill("Question", p.focus)
+            });
+        let (body, actions) = match self.publish_card(item) {
+            Some(publish) => publish_approval(item.id.clone(), publish, p, cx),
+            None if item.is_permission() => self.permission(item, p, cx),
+            None => self.question(item, answering, max_height.is_none(), p, cx),
+        };
+        let body = body.flex().flex_col().gap_2();
+        let entry = card(p).child(header);
+        match max_height {
+            // Keyed by item, so stepping to another decision starts at its top.
+            Some(height) => entry.max_h(height).child(
+                body.overflow_y_scrollbar()
+                    .id(SharedString::from(format!("attention-body-{}", item.id))),
+            ),
+            None => entry.child(body),
+        }
+        .child(actions)
+    }
+    /// A permission request's operation, then Deny and Approve once.
+    fn permission(&self, item: &Attention, p: Palette, cx: &mut Context<Self>) -> (Div, Div) {
+        let (id, approve) = (item.id.clone(), item.id.clone());
+        let body = div()
+            .child(
+                div()
+                    .text_size(px(font::TEXT))
+                    .line_height(relative(1.5))
+                    .child(item.prompt.clone()),
+            )
+            .child(hint(format!("{} · {}", item.host, item.operation_id), p));
+        let actions = div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                button(SharedString::from(format!("deny-{id}")))
+                    .ghost()
+                    .label("Deny")
+                    .on_click(
+                        cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c)),
+                    ),
+            )
+            .child(
+                button(SharedString::from(format!("approve-{approve}")))
+                    .primary()
+                    .label("Approve once")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        v.resolve_attention(&approve, "approved", w, c)
+                    })),
+            );
+        (body, actions)
+    }
+    /// A question's prompt, choices and answer box, then Dismiss and Answer or Send answer.
+    /// `cap_prompt` gives a long prompt its own scroll.
+    fn question(
+        &self,
+        item: &Attention,
+        answering: bool,
+        cap_prompt: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> (Div, Div) {
         let id = item.id.clone();
-        let entry = card(p).child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(hint(asker, p).text_ellipsis())
-                .child(if item.is_permission() {
-                    pill("Approval", p.yellow)
-                } else {
-                    pill("Question", p.focus)
-                }),
-        );
-        if let Some(publish) = self.publish_card(item) {
-            return publish_approval(entry, id, publish, p, cx);
-        }
-        if item.is_permission() {
-            let approve = id.clone();
-            return entry
-                .child(
-                    div()
-                        .text_size(px(font::TEXT))
-                        .line_height(relative(1.5))
-                        .child(item.prompt.clone()),
-                )
-                .child(hint(format!("{} · {}", item.host, item.operation_id), p))
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            button(SharedString::from(format!("deny-{id}")))
-                                .ghost()
-                                .label("Deny")
-                                .on_click(cx.listener(move |v, _, w, c| {
-                                    v.resolve_attention(&id, "denied", w, c)
-                                })),
-                        )
-                        .child(
-                            button(SharedString::from(format!("approve-{approve}")))
-                                .primary()
-                                .label("Approve once")
-                                .on_click(cx.listener(move |v, _, w, c| {
-                                    v.resolve_attention(&approve, "approved", w, c)
-                                })),
-                        ),
-                );
-        }
         let mut choices = div().flex().flex_col().gap_1p5();
         for (ix, option) in item.options.iter().enumerate() {
             let (id, option) = (id.clone(), option.clone());
@@ -206,37 +231,39 @@ impl Inbox {
                     )
                 })),
         );
-        let entry = entry
-            .child(
-                div()
+        let prompt = div().children(self.prompts.get(&id).map(Linked::view));
+        let body = div()
+            .child(if cap_prompt {
+                prompt
                     .max_h(px(280.))
                     .overflow_y_scrollbar()
                     .id(SharedString::from(format!("question-{id}")))
-                    .children(self.prompts.get(&id).map(Linked::view)),
-            )
+                    .into_any_element()
+            } else {
+                prompt.into_any_element()
+            })
             .when(!item.options.is_empty(), |d| d.child(choices));
         if answering {
-            entry.child(Textarea::new(&self.answer).w_full()).child(
-                actions.child(
-                    button(SharedString::from(format!("answer-{id}")))
-                        .primary()
-                        .label("Send answer")
-                        .on_click(cx.listener(move |v, _, w, c| {
-                            let answer = v.answer.read(c).value().trim().to_string();
-                            if !answer.is_empty() {
-                                v.resolve_attention(&id, &answer, w, c);
-                            }
-                        })),
-                ),
-            )
+            let body = body.child(Textarea::new(&self.answer).w_full());
+            let actions = actions.child(
+                button(SharedString::from(format!("answer-{id}")))
+                    .primary()
+                    .label("Send answer")
+                    .on_click(cx.listener(move |v, _, w, c| {
+                        let answer = v.answer.read(c).value().trim().to_string();
+                        if !answer.is_empty() {
+                            v.resolve_attention(&id, &answer, w, c);
+                        }
+                    })),
+            );
+            (body, actions)
         } else {
-            entry.child(
-                actions.child(
-                    button(SharedString::from(format!("start-answer-{id}")))
-                        .label("Answer")
-                        .on_click(cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))),
-                ),
-            )
+            let actions = actions.child(
+                button(SharedString::from(format!("start-answer-{id}")))
+                    .label("Answer")
+                    .on_click(cx.listener(move |v, _, w, c| v.start_answer(&id, w, c))),
+            );
+            (body, actions)
         }
     }
     /// A paused setting's note: the setting, what happened, Compare and the choices that settle
@@ -364,12 +391,11 @@ impl Requests for Inbox {
 
 /// A publish approval: what would leave the machine, then Deny and the step's own approve button.
 fn publish_approval(
-    entry: Div,
     id: String,
     card: PublishCard,
     p: Palette,
     cx: &mut Context<Inbox>,
-) -> Div {
+) -> (Div, Div) {
     let row = |label: &'static str, value: AnyElement| {
         div()
             .flex()
@@ -404,7 +430,7 @@ fn publish_approval(
         rows = rows.child(row("Description", block.into_any_element()));
     }
     let approve = id.clone();
-    entry
+    let body = div()
         .child(
             div()
                 .text_size(px(font::TEXT))
@@ -412,27 +438,24 @@ fn publish_approval(
                 .child(card.title),
         )
         .child(rows)
-        .child(hint(card.note, p))
+        .child(hint(card.note, p));
+    let actions = div()
+        .flex()
+        .justify_end()
+        .gap_2()
         .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    button(SharedString::from(format!("deny-{id}")))
-                        .ghost()
-                        .label("Deny")
-                        .on_click(
-                            cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c)),
-                        ),
-                )
-                .child(
-                    button(SharedString::from(format!("approve-{approve}")))
-                        .primary()
-                        .label(card.approve)
-                        .on_click(cx.listener(move |v, _, w, c| {
-                            v.resolve_attention(&approve, "approved", w, c)
-                        })),
-                ),
+            button(SharedString::from(format!("deny-{id}")))
+                .ghost()
+                .label("Deny")
+                .on_click(cx.listener(move |v, _, w, c| v.resolve_attention(&id, "denied", w, c))),
         )
+        .child(
+            button(SharedString::from(format!("approve-{approve}")))
+                .primary()
+                .label(card.approve)
+                .on_click(
+                    cx.listener(move |v, _, w, c| v.resolve_attention(&approve, "approved", w, c)),
+                ),
+        );
+    (body, actions)
 }

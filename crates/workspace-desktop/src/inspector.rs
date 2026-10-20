@@ -699,10 +699,9 @@ impl Inspector {
             .children(notes.iter().map(|note| self.note_card(note, p, cx)));
         for item in items {
             let open = answering.as_ref() == Some(&item.id);
-            body = body.child(
-                self.inbox
-                    .update(cx, |inbox, cx| inbox.attention_card(item, open, p, cx)),
-            );
+            body = body.child(self.inbox.update(cx, |inbox, cx| {
+                inbox.attention_card(item, open, None, p, cx)
+            }));
         }
         body
     }
