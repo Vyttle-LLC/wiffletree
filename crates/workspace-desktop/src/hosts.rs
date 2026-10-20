@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use workspace_core::{
     AccessLevel,
     pairing::{KeyPair, short_id},
-    remote_launch::{RemoteLaunch, Turnaway},
+    remote_launch::{Discovered, RemoteLaunch, Turnaway},
 };
 
 /// A host paired with this device, kept in its client settings, never synced.
@@ -370,12 +370,8 @@ impl Hosts {
             return Bridge::unreachable(name);
         };
         let (browsed, short) = (self.browsed.clone(), short_id(&paired.id).to_owned());
-        let discover = Box::new(move || {
-            (browsed.found().into_iter())
-                .filter(|found| found.short_id == short)
-                .map(|found| found.address.clone())
-                .collect()
-        });
+        let host_name = paired.name.clone();
+        let discover = Box::new(move || discovered(&browsed.found(), &short, &host_name));
         let launcher = RemoteLaunch::new(key, device, paired.addresses.clone(), discover);
         Bridge::remote_host(name, launcher)
     }
@@ -474,6 +470,18 @@ pub(crate) fn follow(id: String, bridge: Bridge, cx: &mut gpui::App) {
             }
         })
         .detach();
+    }
+}
+
+/// What browsing found for the paired host with the short id `short` and the name `name`.
+fn discovered(found: &[browse::Found], short: &str, name: &str) -> Discovered {
+    Discovered {
+        addresses: (found.iter())
+            .filter(|found| found.short_id == short)
+            .map(|found| found.address.clone())
+            .collect(),
+        same_name_other_id: (found.iter())
+            .any(|found| found.name == name && found.short_id != short),
     }
 }
 
@@ -648,6 +656,29 @@ mod tests {
             ]
         );
         assert_eq!(rows[1].choice, selected);
+    }
+
+    #[test]
+    fn browsing_finds_a_host_by_its_id_and_notices_its_name_under_another() {
+        let found = |name: &str, short_id: &str, address: &str| browse::Found {
+            address: address.into(),
+            short_id: short_id.into(),
+            name: name.into(),
+            version: "0.9".into(),
+            pairing: false,
+        };
+        let browsed = [
+            found("Studio Mac", "aaaa", "studio.local:47821"),
+            found("Office iMac", "bbbb", "office.local:47821"),
+        ];
+        let studio = discovered(&browsed, "aaaa", "Studio Mac");
+        assert_eq!(studio.addresses, ["studio.local:47821"]);
+        assert!(!studio.same_name_other_id);
+        // Studio Mac reinstalled: its name under a new id.
+        let reinstalled = [found("Studio Mac", "cccc", "studio.local:47821")];
+        let studio = discovered(&reinstalled, "aaaa", "Studio Mac");
+        assert!(studio.addresses.is_empty());
+        assert!(studio.same_name_other_id);
     }
 
     #[test]

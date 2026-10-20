@@ -624,7 +624,7 @@ pub(crate) mod tests {
                 self.paired.public_key.clone(),
                 self.device.clone(),
                 vec![address],
-                Box::new(Vec::new),
+                Box::new(Default::default),
             );
             Bridge::remote_host(name, launcher)
         }
@@ -760,7 +760,7 @@ pub(crate) mod tests {
         };
         let device = workspace_core::pairing::KeyPair::generate().unwrap();
         let nowhere = vec!["127.0.0.1:1".to_owned()];
-        let launcher = RemoteLaunch::new(vec![4; 65], device, nowhere, Box::new(Vec::new));
+        let launcher = RemoteLaunch::new(vec![4; 65], device, nowhere, Box::new(Default::default));
         let away = Bridge::remote_host(name, launcher);
 
         let error = away.request(Command::SetCheckIns {

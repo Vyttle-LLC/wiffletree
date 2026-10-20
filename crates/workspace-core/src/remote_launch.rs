@@ -38,8 +38,18 @@ pub struct RemoteState {
     pub address: Option<String>,
 }
 
-/// Finds addresses for a paired host by its id, such as by browsing for it.
-pub type Discover = Box<dyn Fn() -> Vec<String> + Send>;
+/// What browsing found for a paired host.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Discovered {
+    /// The addresses advertised under the host's id.
+    pub addresses: Vec<String>,
+    /// A host advertises the paired host's name under another id, as one whose key was made
+    /// anew does after a reinstall.
+    pub same_name_other_id: bool,
+}
+
+/// Browses for a paired host by its id and name.
+pub type Discover = Box<dyn Fn() -> Discovered + Send>;
 
 /// Reaches a paired host by its stored addresses, then by those `discover` finds.
 pub struct RemoteLaunch {
@@ -103,23 +113,24 @@ impl Launch for RemoteLaunch {
     }
     /// Tries the addresses the host last answered at, newest first, and only then browses for
     /// it, so a host reached by name, as over Tailscale, comes back without Bonjour. An address
-    /// that shows another key is another machine now, so the next is tried. The host's key has
-    /// changed only when nothing shows the pinned key and an address browsed for under the
-    /// host's id shows another.
+    /// that shows another key is another machine now, so the next is tried. When nothing shows
+    /// the pinned key, the host's key has changed if an address browsed for under its id shows
+    /// another, or a host advertises its name under another id.
     fn connect(&mut self, stopped: &AtomicBool) -> io::Result<(UnixStream, Option<String>)> {
         let mut last = io::Error::other("No address is known for this host");
-        let (mut tried, mut other_key, mut browsed) = (vec![], vec![], vec![]);
+        let (mut tried, mut other_key) = (vec![], vec![]);
+        let mut discovered = Discovered::default();
         for browsing in [false, true] {
             if stopped.load(Ordering::Relaxed) {
                 break;
             }
             let addresses = match browsing {
                 false => self.addresses.clone(),
-                true => (self.discover)(),
+                true => {
+                    discovered = (self.discover)();
+                    discovered.addresses.clone()
+                }
             };
-            if browsing {
-                browsed.clone_from(&addresses);
-            }
             for address in addresses {
                 if stopped.load(Ordering::Relaxed) {
                     break;
@@ -141,7 +152,8 @@ impl Launch for RemoteLaunch {
                 }
             }
         }
-        if browsed.iter().any(|address| other_key.contains(address)) {
+        let browsed_other_key = (discovered.addresses.iter()).any(|a| other_key.contains(a));
+        if browsed_other_key || discovered.same_name_other_id {
             self.set(|state| state.turnaway = Some(Turnaway::KeyChanged));
             return Err(io::Error::other(RemoteError::KeyChanged.to_string()));
         }

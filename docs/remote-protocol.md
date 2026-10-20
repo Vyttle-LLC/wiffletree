@@ -14,7 +14,7 @@ Binary values are standard base64 with padding in JSON, unless this page says he
 
 - While remote access is on, the host listens on TCP port 47821 on every IPv4 interface and advertises `_wiffletree._tcp` through DNS-SD. The TXT record holds `id` (the short host id), `name`, `version` and `pairing`, which is `1` while pairing mode is open and `0` otherwise.
 - A typed address is `name`, `name:port`, `address:port` or `[ipv6]:port`; the port defaults to 47821. Over Tailscale or a VPN nothing is advertised, so the human types the host's name, such as `studio.tail4c2e.ts.net`. A client tries each address the name resolves to in turn.
-- A client reconnects a paired host by the addresses it last answered at, newest first, and only then by browsing for its id. An address whose certificate shows another key is taken for another machine, and the next is tried. The host's key counts as changed only when nothing shows the pinned key and an address found under the host's id shows another.
+- A client reconnects a paired host by the addresses it last answered at, newest first, and only then by browsing for its id. An address whose certificate shows another key is taken for another machine, and the next is tried. When nothing shows the pinned key, the host's key counts as changed if an address found under the host's id shows another key, or a host advertises the paired host's name under another id, as after a reinstall.
 
 ## TLS and pinning
 

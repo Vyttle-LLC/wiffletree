@@ -15,7 +15,7 @@ use std::{
 use workspace_core::{
     pairing::{KeyPair, short_id},
     remote_client::{self, RemoteError},
-    remote_launch::{self, RemoteLaunch},
+    remote_launch::{self, Discovered, RemoteLaunch},
     *,
 };
 
@@ -630,7 +630,7 @@ fn a_host_reached_by_name_is_reached_by_it_again_before_any_browsing() {
     let counted = browsed.clone();
     let discover = Box::new(move || {
         counted.fetch_add(1, Ordering::Relaxed);
-        vec![]
+        Discovered::default()
     });
     // A name, as typed for a host over Tailscale, where nothing is browsed.
     let by_name = format!("localhost:{port}");
@@ -662,8 +662,12 @@ fn another_mac_at_a_stored_address_is_passed_over_and_the_host_is_found_by_brows
     let device = KeyPair::generate().unwrap();
     studio.pair(&device, "MacBook");
     // Studio Mac's old address now belongs to another Wiffletree Mac.
-    let launch = |browsed: Vec<String>| {
-        let discover = Box::new(move || browsed.clone());
+    let launch = |addresses: Vec<String>, same_name_other_id| {
+        let discovered = Discovered {
+            addresses,
+            same_name_other_id,
+        };
+        let discover = Box::new(move || discovered.clone());
         let mut launcher = RemoteLaunch::new(
             studio.key.public_key(),
             device.clone(),
@@ -676,17 +680,24 @@ fn another_mac_at_a_stored_address_is_passed_over_and_the_host_is_found_by_brows
         (connected.map(|_| ()).map_err(|e| e.to_string()), turnaway)
     };
 
-    assert_eq!(launch(vec![studio.address()]), (Ok(()), None));
-    let (missing, turnaway) = launch(vec![]);
+    let key_changed = Some(remote_launch::Turnaway::KeyChanged);
+    assert_eq!(launch(vec![studio.address()], false), (Ok(()), None));
+    // A host advertising Studio Mac's name under another id says nothing once Studio Mac answers.
+    assert_eq!(launch(vec![studio.address()], true), (Ok(()), None));
+    let (missing, turnaway) = launch(vec![], false);
     assert!(missing.unwrap_err().contains("another machine"));
     assert_eq!(
         turnaway, None,
         "another Mac at an old address is no key change"
     );
-    // Only an address found under Studio Mac's id that shows another key is one.
-    let (changed, turnaway) = launch(vec![office.address()]);
+    // An address found under Studio Mac's id that shows another key is one.
+    let (changed, turnaway) = launch(vec![office.address()], false);
     assert!(changed.is_err());
-    assert_eq!(turnaway, Some(remote_launch::Turnaway::KeyChanged));
+    assert_eq!(turnaway, key_changed);
+    // So is Studio Mac's name advertised under another id, as after a reinstall.
+    let (reinstalled, turnaway) = launch(vec![], true);
+    assert!(reinstalled.is_err());
+    assert_eq!(turnaway, key_changed);
 }
 
 #[test]
