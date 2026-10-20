@@ -27,4 +27,5 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["std"
 security-framework = "3.7"
 
 [dev-dependencies]
+rand_core = "0.6"
 tempfile = "3.23"

@@ -9008,6 +9008,7 @@ dependencies = [
  "hmac 0.13.0",
  "libc",
  "p256",
+ "rand_core 0.6.4",
  "rustls",
  "rustls-webpki",
  "security-framework",

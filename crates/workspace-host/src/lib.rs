@@ -264,7 +264,7 @@ impl Host {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 7, "Store schema is newer than this application");
+        ensure!(version <= 8, "Store schema is newer than this application");
         if version == 0 {
             db.execute_batch(&format!(
                 "BEGIN IMMEDIATE; {} COMMIT;",
@@ -286,6 +286,7 @@ impl Host {
         agent_processes::migrate(&db)?;
         flatten::migrate(&home, &db, version)?;
         order::migrate(&db)?;
+        remote::devices::migrate(&db)?;
         let mut host = Self {
             db,
             _lock: lock,
