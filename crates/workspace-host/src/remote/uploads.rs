@@ -43,6 +43,21 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Records the upload ids a message is stored with, in order, in the message's own transaction.
+pub(crate) fn record_message_uploads(
+    db: &Connection,
+    message: &str,
+    uploads: &[String],
+) -> Result<()> {
+    for (position, upload) in uploads.iter().enumerate() {
+        db.execute(
+            "INSERT INTO message_uploads (message_id, position, upload_id) VALUES (?1, ?2, ?3)",
+            params![message, position as i64, upload],
+        )?;
+    }
+    Ok(())
+}
+
 impl Host {
     /// The upload ids a message was stored with, in order.
     pub(crate) fn message_uploads(&self, message: &str) -> Result<Vec<String>> {
@@ -51,15 +66,6 @@ impl Host {
         )?;
         let ids = statement.query_map([message], |r| r.get(0))?;
         Ok(ids.collect::<rusqlite::Result<_>>()?)
-    }
-    pub(crate) fn record_message_uploads(&self, message: &str, uploads: &[String]) -> Result<()> {
-        for (position, upload) in uploads.iter().enumerate() {
-            self.db.execute(
-                "INSERT INTO message_uploads (message_id, position, upload_id) VALUES (?1, ?2, ?3)",
-                params![message, position as i64, upload],
-            )?;
-        }
-        Ok(())
     }
     fn uploads_folder(&self) -> PathBuf {
         self.home.join(FOLDER)

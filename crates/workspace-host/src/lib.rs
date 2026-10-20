@@ -917,7 +917,20 @@ impl Host {
         body: &str,
         files: &[PathBuf],
     ) -> Result<Message> {
-        self.queue(id, sender, recipient, body, files, Delivery::Turn)
+        self.queue(id, sender, recipient, body, files, &[], Delivery::Turn)
+    }
+    /// `send_with_files`, recording in the same transaction which uploads `files` ends with, so
+    /// the message is recognised by them when sent again.
+    pub(crate) fn send_uploaded(
+        &mut self,
+        id: &str,
+        sender: Option<&str>,
+        recipient: &str,
+        body: &str,
+        files: &[PathBuf],
+        uploads: &[String],
+    ) -> Result<Message> {
+        self.queue(id, sender, recipient, body, files, uploads, Delivery::Turn)
     }
     /// Queues a message that rides along with the recipient's next turn without starting one.
     pub(crate) fn send_quietly(
@@ -927,7 +940,7 @@ impl Host {
         recipient: &str,
         body: &str,
     ) -> Result<Message> {
-        self.queue(id, sender, recipient, body, &[], Delivery::Quiet)
+        self.queue(id, sender, recipient, body, &[], &[], Delivery::Quiet)
     }
     /// Queues a notice of the human's own action past the recipient cap: human clicks bound
     /// these, and losing one would hide an emergency stop from the parent.
@@ -938,7 +951,7 @@ impl Host {
         recipient: &str,
         body: &str,
     ) -> Result<Message> {
-        self.queue(id, sender, recipient, body, &[], Delivery::PastCap)
+        self.queue(id, sender, recipient, body, &[], &[], Delivery::PastCap)
     }
     /// Queues the one result of an accepted publish request past the recipient cap: each
     /// request sends exactly one, and a refused one would leave its caller waiting for a result
@@ -949,8 +962,10 @@ impl Host {
         recipient: &str,
         body: &str,
     ) -> Result<Message> {
-        self.queue(id, None, recipient, body, &[], Delivery::PastCap)
+        self.queue(id, None, recipient, body, &[], &[], Delivery::PastCap)
     }
+    /// `uploads` are the upload ids `files` ends with, recorded with the message.
+    #[allow(clippy::too_many_arguments)]
     fn queue(
         &mut self,
         id: &str,
@@ -958,6 +973,7 @@ impl Host {
         recipient: &str,
         body: &str,
         files: &[PathBuf],
+        uploads: &[String],
         delivery: Delivery,
     ) -> Result<Message> {
         let quiet = delivery == Delivery::Quiet;
@@ -1016,17 +1032,22 @@ impl Host {
             "Recipient queue is full; accepted messages are preserved"
         );
         if files.is_empty() {
-            self.insert_message(id, &target, sender, body, &[], quiet)?;
+            self.insert_message(id, &target, sender, body, &[], uploads, quiet)?;
         } else {
             let directory = attachments::directory(&self.home, &target.project_id, id)?;
             let stored = attachments::store(&directory, files)?;
-            if let Err(error) = self.insert_message(id, &target, sender, body, &stored, quiet) {
+            if let Err(error) =
+                self.insert_message(id, &target, sender, body, &stored, uploads, quiet)
+            {
                 let _ = fs::remove_dir_all(&directory);
                 return Err(error);
             }
         }
         self.message(id)
     }
+    /// Stores the message and the upload ids it was sent with in one transaction, so a resend
+    /// is always recognised by them.
+    #[allow(clippy::too_many_arguments)]
     fn insert_message(
         &mut self,
         id: &str,
@@ -1034,11 +1055,13 @@ impl Host {
         sender: Option<&str>,
         body: &str,
         attachments: &[Attachment],
+        uploads: &[String],
         quiet: bool,
     ) -> Result<()> {
         let recipient = target.id.as_str();
         let tx = self.db.savepoint()?;
         tx.execute("INSERT INTO messages(id,project_id,sender,recipient,body,receipt,created_at,attachments,quiet) VALUES (?1,?2,?3,?4,?5,'queued',?6,?7,?8)", params![id, target.project_id, sender, recipient, body, now(), encode(&attachments)?, quiet])?;
+        remote::uploads::record_message_uploads(&tx, id, uploads)?;
         Self::event(
             &tx,
             &target.project_id,
@@ -1472,9 +1495,14 @@ impl Host {
                 }
                 let mut files = attachments;
                 files.extend(self.upload_files(&uploads)?);
-                let message =
-                    self.send_with_files(&id, sender.as_deref(), &recipient, &body, &files)?;
-                self.record_message_uploads(&id, &uploads)?;
+                let message = self.send_uploaded(
+                    &id,
+                    sender.as_deref(),
+                    &recipient,
+                    &body,
+                    &files,
+                    &uploads,
+                )?;
                 self.uploads_used(&uploads, now());
                 serde_json::to_value(message)?
             }

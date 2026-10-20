@@ -933,3 +933,55 @@ fn a_resend_naming_another_upload_is_refused_and_leaves_that_upload_alone() {
         serde_json::from_value(client.call(send("look", "first")).unwrap()).unwrap();
     assert_eq!(again.attachments[0].name(), "shot.png");
 }
+
+#[test]
+fn a_message_and_its_upload_ids_are_stored_together_or_not_at_all() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    client
+        .call(Command::UploadAttachment {
+            upload_id: "u1".into(),
+            name: "shot.png".into(),
+            offset: 0,
+            bytes: base64(b"png"),
+        })
+        .unwrap();
+    let store = rusqlite::Connection::open(studio.data.path().join("workspace.sqlite3")).unwrap();
+    store
+        .execute_batch(
+            "CREATE TRIGGER fail BEFORE INSERT ON message_uploads
+             BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;",
+        )
+        .unwrap();
+    let message = Command::Send {
+        id: "kept".into(),
+        sender: None,
+        recipient: studio.coordinator.clone(),
+        body: "The screenshot".into(),
+        attachments: vec![],
+        uploads: vec!["u1".into()],
+    };
+    let failed = client.call(message.clone()).unwrap_err();
+    assert!(failed.contains("injected storage failure"), "{failed}");
+    let stored = |id: &str| -> i64 {
+        store
+            .query_row("SELECT count(*) FROM messages WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        stored("kept"),
+        0,
+        "the message is not stored without its upload ids"
+    );
+
+    store.execute_batch("DROP TRIGGER fail;").unwrap();
+    let sent: Message = serde_json::from_value(client.call(message.clone()).unwrap()).unwrap();
+    assert_eq!(sent.attachments[0].name(), "shot.png");
+    client.call(message).unwrap();
+    assert_eq!(stored("kept"), 1);
+}
