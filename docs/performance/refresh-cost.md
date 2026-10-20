@@ -40,7 +40,7 @@ Each run seeds a fresh store, opens the app on it with the coordinator of the fi
 selected, waits 20 s and measures 60 s:
 
 ```sh
-cargo build --locked --release -p workspace-desktop -p workspace-host --example many_agents
+cargo build --locked --release -p workspace-desktop -p workspace-host --bins --example many_agents
 target/release/examples/many_agents seed /tmp/many
 WORKSPACE_CLAUDE_BIN=$PWD/crates/workspace-host/examples/busy_provider.py WIFFLETREE_RENDER_COUNTS=1 \
   target/release/workspace-desktop --data-dir /tmp/many/home 2> /tmp/many/desktop.log &
@@ -107,7 +107,8 @@ main-thread CPU, with p95 stalls of 11 ms. No run missed more than one 60 Hz fra
 
 - Whole-window renders fell by about 30% and transcript notifies by about 40%, consistently.
   Main-thread CPU and stalls moved within this machine's noise, so no stall improvement is
-  claimed.
+  claimed. The ticket's stall criterion was waived for this change, because the baseline already
+  missed no frames and so had no stall to remove.
 - The PRD's p95 target of 8 ms of main-thread work per UI update batch while streaming is not
   directly measured. The longest stall per second, a frame's render included, stayed at 11–15 ms
   at p95, and frames were not missed.
