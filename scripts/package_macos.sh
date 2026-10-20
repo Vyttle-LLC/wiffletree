@@ -62,6 +62,8 @@ cat > "$app_bundle/Contents/Info.plist" <<PLIST
 <key>NSHighResolutionCapable</key><true/>
 <key>NSHumanReadableCopyright</key><string>© 2026 Vyttle LLC · MIT License</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSLocalNetworkUsageDescription</key><string>Wiffletree finds your other Macs running Wiffletree on this network and connects to the ones you pair with.</string>
+<key>NSBonjourServices</key><array><string>_wiffletree._tcp</string></array>
 </dict></plist>
 PLIST
 if [ "$identity" = "-" ]; then

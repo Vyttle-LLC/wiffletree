@@ -2,7 +2,7 @@
 //! the event stream and the replies of the host-file commands. `docs/host-protocol.md` is its
 //! reference.
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The host's client socket, in its data folder.
 pub const SOCKET_FILE: &str = "host.sock";
@@ -170,6 +170,21 @@ pub struct ResolvedPath {
     pub path: PathBuf,
     /// Opening it would run it: an executable, or a script Terminal runs.
     pub runs_when_opened: bool,
+}
+/// Whether opening `path` on this Mac would run it instead of showing it: an executable, or a
+/// script Terminal runs. A host decides it for its own files, and a client for a copy it made.
+pub fn runs_when_opened(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    const LAUNCHERS: [&str; 3] = ["command", "tool", "terminal"];
+    let executable = path
+        .metadata()
+        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0);
+    let launcher = path.extension().is_some_and(|extension| {
+        LAUNCHERS
+            .iter()
+            .any(|launcher| extension.eq_ignore_ascii_case(launcher))
+    });
+    executable || launcher
 }
 /// `ReadFile`'s reply.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

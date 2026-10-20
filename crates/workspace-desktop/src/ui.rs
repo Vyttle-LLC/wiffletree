@@ -2,7 +2,7 @@
 use super::*;
 use crate::welcome::StartScreen;
 use gpui_component::{
-    Icon, IconName, Selectable, Size,
+    Disableable, Icon, IconName, Selectable, Size,
     button::ButtonVariants,
     resizable::{h_resizable, resizable_panel},
 };
@@ -595,12 +595,44 @@ pub(super) fn full() -> StyleRefinement {
     StyleRefinement::default().size_full()
 }
 
-/// A full-width page about the whole workspace, shown in place of the conversation.
+/// A button that changes the host, turned off with the reason while the host refuses changes
+/// from this device.
+pub(super) fn gated(button: Button, host: &HostView) -> Button {
+    match host.changes_refused() {
+        Some(reason) => button.disabled(true).tooltip(reason),
+        None => button,
+    }
+}
+
+/// Controls that save at once, turned off together with the reason while the host refuses
+/// changes from this device: dimmed, under a cover that takes their clicks, and deaf to keys,
+/// since a focused button would still act on Enter or Space.
+pub(super) fn locked(controls: Div, host: &HostView, p: Palette) -> Div {
+    let Some(reason) = host.changes_refused() else {
+        return controls;
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(hint(reason, p))
+        .child(
+            div()
+                .relative()
+                .capture_key_down(|_, window, _| window.prevent_default())
+                .child(controls.opacity(0.5))
+                .child(div().absolute().inset_0().occlude()),
+        )
+}
+
+/// A full-width page about the whole workspace, shown in place of the conversation. On a remote
+/// host it is that host's, and says so; on one that refuses changes, it says why saving is off.
 pub(super) fn page<V: EventEmitter<Intent>>(
     title: &'static str,
     subtitle: &'static str,
     body: impl IntoElement,
     footer: Option<Div>,
+    host: &HostView,
     p: Palette,
     cx: &mut Context<V>,
 ) -> Div {
@@ -612,7 +644,7 @@ pub(super) fn page<V: EventEmitter<Intent>>(
         .bg(p.base)
         .child(
             page_header(
-                div().child(format!("Workspace  ›  {subtitle}")),
+                div().child(host.breadcrumb(["Workspace", subtitle])),
                 div().child(title),
                 p,
             )
@@ -635,7 +667,17 @@ pub(super) fn page<V: EventEmitter<Intent>>(
                 .overflow_y_scrollbar()
                 .px_6()
                 .py_5()
-                .child(div().w_full().max_w(px(COLUMN)).mx_auto().child(body)),
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(COLUMN))
+                        .mx_auto()
+                        .children(
+                            host.changes_refused()
+                                .map(|reason| hint(reason, p).pb_3().flex().items_center().gap_2()),
+                        )
+                        .child(body),
+                ),
         )
         .when_some(footer, |d, footer| {
             d.child(
@@ -651,6 +693,42 @@ pub(super) fn page<V: EventEmitter<Intent>>(
 }
 
 impl Workspace {
+    /// Over a remote host's view while it does not answer: what it shows is what the host last
+    /// sent, with its age counting up, and Try now.
+    fn frozen_banner(&self, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let frozen = self.shared.host.frozen(now())?;
+        Some(
+            div()
+                .flex_none()
+                .px_6()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .bg(p.yellow.opacity(0.12))
+                .border_b_1()
+                .border_color(p.yellow.opacity(0.4))
+                .child(Spinner::new().small().color(p.yellow))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(frozen.title))
+                        .child(
+                            div()
+                                .text_size(px(font::SMALL))
+                                .text_color(p.subtle)
+                                .child(frozen.detail),
+                        ),
+                )
+                .child(
+                    button("try-now")
+                        .small()
+                        .label("Try now")
+                        .on_click(cx.listener(|v, _, _, _| v.bridge.try_now())),
+                ),
+        )
+    }
     /// Shown in place of the conversation until a session can be selected.
     fn start_screen(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let kind = self.start_screen_kind(cx);
@@ -731,14 +809,14 @@ impl Workspace {
 
 /// What the app says when its host shares no protocol with it.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Mismatch {
-    pub(crate) title: &'static str,
-    pub(crate) body: String,
+struct Mismatch {
+    title: &'static str,
+    body: String,
     /// Restarting the host would bring it to this app's version; otherwise the app is the older.
-    pub(crate) restarts: bool,
+    restarts: bool,
 }
 impl Mismatch {
-    pub(crate) fn of(refusal: &Refusal) -> Self {
+    fn of(refusal: &Refusal) -> Self {
         let host = &refusal.host_version;
         if refusal.client_protocols[1] < refusal.host_protocols[0] {
             return Self {
@@ -883,7 +961,19 @@ impl Render for Workspace {
                                             .child(
                                                 resizable_panel()
                                                     .size_range(px(340.)..Pixels::MAX)
-                                                    .child(main),
+                                                    .child(
+                                                        div()
+                                                            .size_full()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .children(self.frozen_banner(p, cx))
+                                                            .child(
+                                                                div()
+                                                                    .flex_1()
+                                                                    .min_h_0()
+                                                                    .child(main),
+                                                            ),
+                                                    ),
                                             )
                                             .child(
                                                 resizable_panel()

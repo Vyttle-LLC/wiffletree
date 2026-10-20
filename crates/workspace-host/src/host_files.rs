@@ -7,9 +7,10 @@ use base64::Engine as _;
 use std::{
     fs,
     io::Read,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
+use workspace_core::runs_when_opened;
 use workspace_core::{
     AccessLevel, FileContents, FolderEntry, FolderListing, MAX_ATTACHMENT_BYTES, ResolvedPath,
 };
@@ -243,21 +244,6 @@ pub fn resolve_paths_within(
         .collect()
 }
 
-/// Whether opening `path` would run it instead of showing it: an executable, or a script
-/// Terminal runs.
-fn runs_when_opened(path: &Path) -> bool {
-    const LAUNCHERS: [&str; 3] = ["command", "tool", "terminal"];
-    let executable = path
-        .metadata()
-        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0);
-    let launcher = path.extension().is_some_and(|extension| {
-        LAUNCHERS
-            .iter()
-            .any(|launcher| extension.eq_ignore_ascii_case(launcher))
-    });
-    executable || launcher
-}
-
 pub fn read_file(roots: &Roots, path: &Path, max_bytes: u64) -> Result<FileContents> {
     let resolved = roots.check(path, false)?;
     let limit = max_bytes.min(MAX_ATTACHMENT_BYTES);
@@ -348,6 +334,7 @@ pub fn list_folder(roots: &Roots, path: &Path, reader: Reader) -> Result<FolderL
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// A home folder whose workspace folder is the home itself, with every credential location.
     struct Home {

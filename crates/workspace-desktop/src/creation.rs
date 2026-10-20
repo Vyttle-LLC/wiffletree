@@ -439,14 +439,17 @@ impl CreationForm {
     }
 
     fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: true,
-            prompt: Some("Choose repositories or parent folders".into()),
-        });
+        let paths = super::folders::choose(
+            &self.bridge,
+            "Choose repositories or parent folders",
+            true,
+            window,
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await {
+            if let Ok(paths) = paths.recv().await
+                && !paths.is_empty()
+            {
                 let _ = cx.update(|window, cx| {
                     this.update(cx, |form, cx| {
                         if form.pending || form.scanning {
@@ -463,14 +466,15 @@ impl CreationForm {
     }
 
     fn choose_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose the repository folder".into()),
-        });
+        let paths = super::folders::choose(
+            &self.bridge,
+            "Choose the repository folder",
+            false,
+            window,
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await
+            if let Ok(paths) = paths.recv().await
                 && let Some(path) = paths.first()
             {
                 let path = path.to_string_lossy().into_owned();

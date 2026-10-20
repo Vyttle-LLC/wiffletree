@@ -7,7 +7,7 @@ mod synced;
 use super::*;
 use gpui_component::button::ButtonVariants;
 pub(crate) use join::Joined;
-pub(crate) use synced::{Mark, SyncShown, share_sync};
+pub(crate) use synced::{Mark, SyncByHost, SyncShown, share_sync};
 use ui::{confirm_card, pill};
 
 /// The section's place among the scrolled body's children: three sections and their rules.
@@ -91,7 +91,8 @@ fn confirmation(confirm: Confirm, repository: &SettingsRepository) -> Vec<String
 
 impl Settings {
     pub(super) fn repository_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let shown = cx.try_global::<SyncShown>().cloned().unwrap_or_default();
+        let shown = (cx.try_global::<SyncByHost>())
+            .map_or_else(Default::default, |by| by.of(&self.host_id()));
         let chosen = (self.host.as_ref()).and_then(|h| h.settings_repository.as_ref());
         let section = div().flex().flex_col().gap_2();
         let section = match (chosen, &shown.status, &self.checked) {
@@ -129,11 +130,15 @@ impl Settings {
         };
         self.asking = true;
         let input = self.repository_input.read(cx).value().to_string();
+        let origin = self.host_id();
         cx.spawn(async move |this, cx| {
             let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
                 shared::replied(&sent, answer.is_ok(), cx);
                 view.asking = false;
+                if view.host_id() != origin {
+                    return;
+                }
                 let shown = answer.and_then(|value| {
                     if checking {
                         let check = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -169,7 +174,7 @@ impl Settings {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let act = button("confirm-repository");
+        let act = ui::gated(button("confirm-repository"), &self.driving);
         let (repository, command, act) = match confirm {
             Confirm::SetUp | Confirm::Replace => {
                 let (input, check) = self.checked.as_ref()?;

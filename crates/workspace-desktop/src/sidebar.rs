@@ -438,10 +438,7 @@ impl Sidebar {
     fn sidebar(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let dark = is_dark(cx);
         // The snapshot lists every session that is not archived.
-        let projects = (self.shared.snapshot().iter())
-            .flat_map(|s| &s.sessions)
-            .filter(|s| s.parent_id.is_none() && !s.archived)
-            .count();
+        let projects = self.shared.snapshot().map_or(0, |s| hosts::counts(s).0);
         let offers_new_project = self.shared.offers_new_project();
         let grouped = cx.global::<Preferences>().group_projects;
         let archived = self.shared.snapshot().map_or(0, |s| s.archived_sessions);
@@ -497,6 +494,7 @@ impl Sidebar {
                             })
                             .when(!offers_new_project, |d| d.opacity(0.4))
                             .disabled(self.creating_project)
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(|v, _, w, c| v.new_project(w, c))),
                     ),
             )
@@ -508,7 +506,7 @@ impl Sidebar {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(eyebrow(format!("PROJECTS · {projects}"), p))
+                    .child(eyebrow(self.shared.host.projects_heading(projects), p))
                     .child(
                         div()
                             .flex()
@@ -607,7 +605,12 @@ impl Sidebar {
             .gap(px(1.))
             .border_t_1()
             .border_color(p.edge.opacity(edge::LIGHT))
-            .child(div().px_2().pb_1().child(eyebrow("WORKSPACE", p)));
+            .child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .child(eyebrow(self.shared.host.workspace_heading(), p)),
+            );
         for (page, label, glyph) in [
             (Page::Repositories, "Repositories", "folder"),
             (Page::Usage, "Usage and limits", "activity"),
@@ -661,16 +664,7 @@ impl Sidebar {
                         .tooltip(format!("Wiffletree {} is ready", staged.version))
                         .on_click(cx.listener(|v, _, w, c| v.restart_to_update(w, c)))
                         .into_any_element(),
-                    None => div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(font::CAPTION))
-                        .text_color(p.subtle)
-                        .child(div().flex_none().size(px(6.)).rounded_full().bg(p.green))
-                        .child(div().min_w_0().truncate().child("Local workspace"))
-                        .into_any_element(),
+                    None => self.host_switcher(p, cx).into_any_element(),
                 },
             )
             .child(
@@ -701,6 +695,68 @@ impl Sidebar {
             )
     }
 
+    /// The footer's host line, which opens the switcher: This Mac and each paired host with its
+    /// state and what needs the human there, then Connect a computer… and Remote access
+    /// settings….
+    fn host_switcher(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let host = &self.shared.host;
+        let dot = match host.remote.as_ref().map(|r| r.link) {
+            None | Some(hosts::Link::Connected(_)) => p.green,
+            Some(hosts::Link::Reconnecting) => p.yellow,
+            Some(hosts::Link::Offline) => p.subtle,
+            Some(hosts::Link::TurnedAway(_)) => p.red,
+        };
+        let hosts = cx.global::<Hosts>();
+        let (projects, needs_you) = match (host.remote.as_ref(), self.shared.snapshot()) {
+            (None, Some(snapshot)) => hosts::counts(snapshot),
+            // Elsewhere, This Mac's host still counts what needs the human there.
+            _ => {
+                let (projects, counted) = hosts.this_mac_counts;
+                (projects, hosts.this_mac.needs_you().unwrap_or(counted))
+            }
+        };
+        let rows = hosts::switcher_rows(
+            projects,
+            needs_you,
+            &hosts.remote_hosts(),
+            &hosts.selected,
+            now(),
+        );
+        button("host-switcher")
+            .ghost()
+            .xsmall()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(font::CAPTION))
+                    .text_color(p.subtle)
+                    .child(div().flex_none().size(px(6.)).rounded_full().bg(dot))
+                    .child(div().min_w_0().truncate().child(hosts::footer_line(host)))
+                    .child(icon("chevron-up").size(px(12.))),
+            )
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |mut menu, _, _| {
+                for row in &rows {
+                    let (shown, choice) = (row.clone(), row.choice.clone());
+                    let item = PopupMenuItem::element(move |_, _| switcher_row(&shown, p))
+                        .checked(row.selected)
+                        .on_click(move |_, window, cx| select_host(choice.clone(), window, cx));
+                    menu = menu.item(item);
+                }
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new("Connect a computer…")
+                            .icon(icon("plus"))
+                            .on_click(|_, window, cx| connect_sheet::open(window, cx)),
+                    )
+                    .item(PopupMenuItem::new("Remote access settings…").on_click(
+                        |_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx),
+                    ))
+            })
+    }
+
     /// While a settings repository is chosen, how sync is doing; it opens Settings at its section.
     fn sync_mark(&self, p: Palette) -> Option<Stateful<Div>> {
         let snapshot = self.shared.snapshot()?;
@@ -712,7 +768,6 @@ impl Sidebar {
         let mark = settings::Mark::of(status, notes.len(), now);
         let tint = mark.tint(p);
         let tooltip = mark.tooltip(status, &notes);
-        let bridge = self.bridge.clone();
         Some(
             div()
                 .id("sync-mark")
@@ -729,9 +784,7 @@ impl Sidebar {
                 .child(icon(mark.icon()).size(px(13.)))
                 .child(mark.label(status, now))
                 .tooltip(move |w, c| Tooltip::new(tooltip.clone()).build(w, c))
-                .on_click(move |_, _, cx| {
-                    settings::Settings::open_at_repository(bridge.clone(), cx)
-                }),
+                .on_click(move |_, _, cx| settings::Settings::open_at_repository(cx)),
         )
     }
 
@@ -1807,6 +1860,33 @@ pub(super) fn shown_status(session: &Session, index: &WorkspaceIndex) -> Status 
     } else {
         session.status
     }
+}
+
+/// A host in the switcher: its name over its state, and what needs the human there.
+fn switcher_row(row: &hosts::SwitcherRow, p: Palette) -> Div {
+    div()
+        .min_w(px(240.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().truncate().child(row.name.clone()))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(font::CAPTION))
+                        .text_color(p.subtle)
+                        .child(row.detail.clone()),
+                ),
+        )
+        .when(row.needs_you > 0, |d| {
+            d.child(needs_you_badge(row.needs_you, p))
+        })
 }
 
 /// What a project's badge counts: its attention items, and the workspace notes, as the Inbox rail does.

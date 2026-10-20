@@ -4,6 +4,8 @@ mod attachment_chips;
 mod automation;
 mod background;
 mod bridge;
+mod browse;
+mod connect_sheet;
 mod context_view;
 mod conversation;
 mod conversation_header;
@@ -12,7 +14,9 @@ mod crew_panel;
 mod events_view;
 mod file_links;
 mod files_view;
+mod folders;
 mod history_sheet;
+mod hosts;
 mod inbox;
 mod inspector;
 mod leftovers;
@@ -40,6 +44,7 @@ mod transcript;
 mod tree;
 mod ui;
 mod update;
+mod uploads;
 mod usage_view;
 mod verifiers;
 mod welcome;
@@ -55,6 +60,7 @@ use gpui_component::{
     notification::Notification,
     scroll::ScrollableElement,
 };
+use hosts::{HostChoice, HostView, Hosts};
 use palette::{Palette, palette};
 use preferences::{Appearance, Preferences};
 use serde_json::Value;
@@ -213,7 +219,7 @@ struct Workspace {
     progress_fetch: activity::StepFetch,
 }
 impl Workspace {
-    fn new(bridge: Bridge, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(bridge: Bridge, host: HostView, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let verifiers = cx.new(|cx| verifiers::VerifierEditor::new(bridge.clone(), window, cx));
         let models = cx
             .new(|cx| models_view::ModelsPage::new(bridge.clone(), verifiers.clone(), window, cx));
@@ -256,7 +262,10 @@ impl Workspace {
         Self::adopt(&usage, window, cx);
         let mut view = Self {
             bridge,
-            shared: Shared::default(),
+            shared: Shared {
+                host,
+                ..Shared::default()
+            },
             snapshot_request: Coalesced::default(),
             quota_request: Coalesced::default(),
             archive_pending: false,
@@ -299,6 +308,7 @@ impl Workspace {
             })
             .detach();
         }
+        view.watch_link(window, cx);
         view.watch_steps(window, cx);
         view.watch_progress(window, cx);
         view.watch_usage(window, cx);
@@ -531,6 +541,37 @@ impl Workspace {
             });
         }
     }
+    /// On a remote host, follows the connection each second: the view freezes while the host does
+    /// not answer, and the banner's age counts up meanwhile. The connection's own wake belongs to
+    /// `hosts::follow`, which redraws the switcher.
+    fn watch_link(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shared.host.remote.is_none() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let ticked = cx.update(|window, cx| {
+                    this.update(cx, |view, cx| {
+                        let host = cx.global::<Hosts>().view_of(&view.bridge);
+                        if host != view.shared.host {
+                            view.shared.host = host;
+                            view.share(window, cx);
+                            cx.notify();
+                        } else if view.shared.host.frozen(ui::now()).is_some() {
+                            cx.notify();
+                        }
+                    })
+                });
+                if !matches!(ticked, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
     /// Step changes go to the transcript, for its activity card, and to the Files panel, each
     /// only when they concern a session it shows.
     fn watch_steps(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -745,7 +786,11 @@ impl Workspace {
         if self.shared.selected.as_ref().is_none_or(gone) {
             self.shared.selected = index.sessions().find(|s| !s.archived).map(|s| s.id.clone());
         }
-        settings::share_sync(index.snapshot(), cx);
+        let host = self.bridge.remote().map(|r| r.id.clone());
+        settings::share_sync(index.snapshot(), host, cx);
+        if self.shared.host.remote.is_none() {
+            cx.global_mut::<Hosts>().this_mac_counts = hosts::counts(index.snapshot());
+        }
         self.shared.index = Some(Rc::new(index));
         self.load_error = None;
         self.share(window, cx);
@@ -1057,6 +1102,106 @@ fn show_about() {
 struct MainWindow(Option<(AnyWindowHandle, WeakEntity<Workspace>)>);
 impl Global for MainWindow {}
 
+/// The main window's content: the selected host's workspace, built anew when another host is
+/// selected. Switching hosts stops nothing on any of them.
+struct HostWindow {
+    workspace: Entity<Workspace>,
+    /// Each host's workspace once shown, kept with its view, drafts and sends in flight, so
+    /// switching back finds it as it was and only one workspace waits on each host's wakes.
+    kept: std::collections::HashMap<HostChoice, Entity<Workspace>>,
+}
+#[derive(Default)]
+struct MainShell(Option<WeakEntity<HostWindow>>);
+impl Global for MainShell {}
+impl Render for HostWindow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.clone()
+    }
+}
+impl HostWindow {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let workspace = Self::workspace(window, cx);
+        let selected = cx.global::<Hosts>().selected.clone();
+        Self {
+            kept: [(selected, workspace.clone())].into(),
+            workspace,
+        }
+    }
+    /// Shows the selected host's workspace, built anew when it was never shown or `fresh`, as
+    /// after pairing again.
+    fn show(&mut self, fresh: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = cx.global::<Hosts>().selected.clone();
+        let kept = self.kept.get(&selected).filter(|_| !fresh).cloned();
+        self.workspace = match kept {
+            Some(workspace) => {
+                cx.set_global(MainWindow(Some((
+                    window.window_handle(),
+                    workspace.downgrade(),
+                ))));
+                workspace.update(cx, |view, cx| view.refresh(window, cx));
+                workspace
+            }
+            None => {
+                let workspace = Self::workspace(window, cx);
+                self.kept.insert(selected, workspace.clone());
+                workspace
+            }
+        };
+        cx.notify();
+    }
+    /// The selected host's workspace, which the app's actions then act on.
+    fn workspace(window: &mut Window, cx: &mut App) -> Entity<Workspace> {
+        let hosts = cx.global::<Hosts>();
+        let (bridge, host) = (hosts.bridge(), hosts.view());
+        let workspace = cx.new(|cx| Workspace::new(bridge, host, window, cx));
+        cx.set_global(MainWindow(Some((
+            window.window_handle(),
+            workspace.downgrade(),
+        ))));
+        workspace
+    }
+}
+
+/// Forgets the paired host `id` on this device: it leaves the switcher and the client settings,
+/// and the main window shows This Mac if it showed that host. Nothing changes at the host.
+fn forget_host(id: &str, cx: &mut App) {
+    if cx.global::<Hosts>().selected == HostChoice::Remote(id.into())
+        && let Some((handle, _)) = cx.default_global::<MainWindow>().0.clone()
+    {
+        let _ = handle.update(cx, |_, window, cx| {
+            select_host(HostChoice::ThisMac, window, cx)
+        });
+    }
+    cx.global_mut::<Hosts>().remove(id);
+    if let Some(shell) = (cx.default_global::<MainShell>().0.clone()).and_then(|s| s.upgrade()) {
+        shell.update(cx, |shell, _| {
+            shell.kept.remove(&HostChoice::Remote(id.into()))
+        });
+    }
+    let preferences = cx.global_mut::<Preferences>();
+    preferences.paired_hosts.retain(|h| h.id != id);
+    if let Err(error) = preferences.save() {
+        eprintln!("Saving preferences: {error}");
+    }
+    cx.refresh_windows();
+}
+
+/// Shows `choice`'s workspace in the main window.
+fn select_host(choice: HostChoice, window: &mut Window, cx: &mut App) {
+    if cx.global::<Hosts>().selected != choice {
+        show_host(choice, false, window, cx);
+    }
+}
+
+/// Shows `choice`'s workspace, built anew when `fresh`, as after its connection was replaced.
+fn show_host(choice: HostChoice, fresh: bool, window: &mut Window, cx: &mut App) {
+    cx.global_mut::<Hosts>().select(choice);
+    if let Some(shell) = (cx.default_global::<MainShell>().0.clone()).and_then(|s| s.upgrade()) {
+        shell.update(cx, |shell, cx| shell.show(fresh, window, cx));
+    }
+    settings::Settings::host_selected(cx);
+}
+
 /// Runs `with` on the main window's workspace, if it is open. Deferred because a shortcut
 /// arrives while the window is mid-update.
 fn with_workspace(
@@ -1097,8 +1242,8 @@ fn register_window_actions(cx: &mut App) {
     cx.on_action(move |_: &OpenRepositories, cx| open(Page::Repositories, cx));
 }
 
-/// Opens the main window on `bridge`'s host.
-fn open_main_window(bridge: Bridge, cx: &mut App) -> WindowHandle<Root> {
+/// Opens the main window on the selected host.
+fn open_main_window(cx: &mut App) -> WindowHandle<Root> {
     let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
     cx.open_window(
         WindowOptions {
@@ -1109,8 +1254,8 @@ fn open_main_window(bridge: Bridge, cx: &mut App) -> WindowHandle<Root> {
         },
         |window, cx| {
             window.set_window_title("Wiffletree");
-            let view = cx.new(|cx| Workspace::new(bridge, window, cx));
-            cx.set_global(MainWindow(Some((window.window_handle(), view.downgrade()))));
+            let view = cx.new(|cx| HostWindow::new(window, cx));
+            cx.set_global(MainShell(Some(view.downgrade())));
             cx.new(|cx| Root::new(view, window, cx))
         },
     )
@@ -1160,8 +1305,13 @@ fn main() -> anyhow::Result<()> {
     application.on_reopen(background::reopened);
     application.run(move |cx| {
         gpui_component::init(cx);
+        cx.set_global(Hosts::new(
+            bridge.clone(),
+            &preferences.paired_hosts,
+            browse::start(),
+        ));
         cx.set_global(preferences);
-        cx.set_global(attachment_chips::HostImages::new(bridge.clone()));
+        cx.set_global(attachment_chips::HostImages::new());
         apply_theme(cx);
         // Under the System appearance, macOS can switch modes while the app runs. The component
         // theme only changes when told, so every window re-applies it or keeps stale colours.
@@ -1183,10 +1333,8 @@ fn main() -> anyhow::Result<()> {
         cx.on_action(|_: &About, _| show_about());
         // Settings needs no main window, so it opens even after that one is closed.
         // Deferred so ⌘, pressed inside Settings can still focus that window.
-        let settings_bridge = bridge.clone();
         cx.on_action(move |_: &OpenSettings, cx| {
-            let bridge = settings_bridge.clone();
-            cx.defer(move |cx| settings::Settings::open(bridge, cx));
+            cx.defer(settings::Settings::open);
         });
         cx.set_menus(vec![
             Menu::new("Wiffletree").items([
@@ -1199,15 +1347,15 @@ fn main() -> anyhow::Result<()> {
             Menu::new("File").items([MenuItem::action("New Project", NewProject)]),
         ]);
         register_window_actions(cx);
-        let reopen = bridge.clone();
+        hosts::watch(cx);
         background::install(
-            bridge.clone(),
-            move |cx| {
-                open_main_window(reopen.clone(), cx);
+            bridge,
+            |cx| {
+                open_main_window(cx);
             },
             cx,
         );
-        let window = open_main_window(bridge, cx);
+        let window = open_main_window(cx);
         if let Some(steps) = steps {
             // The untyped handle leaves the root view free for the events a step dispatches.
             let window: AnyWindowHandle = window.into();

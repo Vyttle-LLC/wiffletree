@@ -175,26 +175,50 @@ impl Conversation {
             return;
         };
         self.drop_checks.started(&session);
-        let ask = ask::inspect_attachments(paths.clone());
-        self.ask(ask, window, cx, move |view, inspected, window, cx| {
-            let inspected = match inspected {
-                Ok(inspected) => inspected,
-                Err(error) => {
-                    // A send pressed meanwhile is not made; its draft stays to send again.
-                    view.drop_checks.finished(&session, false);
-                    return toast_error(error, window, cx);
-                }
+        // The files are this Mac's, so This Mac's host checks them whichever host shows.
+        let inspector = match self.bridge.remote() {
+            Some(_) => cx.global::<Hosts>().this_mac.clone(),
+            None => self.bridge.clone(),
+        };
+        let reply = inspector.ask(ask::inspect_attachments(paths.clone()));
+        cx.spawn_in(window, async move |this, cx| {
+            let inspected = match reply {
+                Ok(reply) => reply.await,
+                Err(error) => Err(error),
             };
-            let attached = view.attached.entry(session.clone()).or_default();
-            let refused = attachment_chips::add_dropped(attached, &paths, inspected);
-            // Why files were refused shows only with the conversation they were dropped on.
-            if view.shared.selected.as_ref() == Some(&session) {
-                view.refused_files = refused;
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.checked(session, paths, inspected, window, cx)
+            });
+        })
+        .detach();
+    }
+    /// Attaches the dropped files the check accepted, and makes a send held for the check.
+    fn checked(
+        &mut self,
+        session: String,
+        paths: Vec<PathBuf>,
+        inspected: Result<Vec<Result<Attachment, String>>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inspected = match inspected {
+            Ok(inspected) => inspected,
+            Err(error) => {
+                // A send pressed meanwhile is not made; its draft stays to send again.
+                self.drop_checks.finished(&session, false);
+                return toast_error(error, window, cx);
             }
-            if let Some(body) = view.drop_checks.finished(&session, true) {
-                view.send_draft(session, body, window, cx);
-            }
-        });
+        };
+        let attached = self.attached.entry(session.clone()).or_default();
+        let refused = attachment_chips::add_dropped(attached, &paths, inspected);
+        // Why files were refused shows only with the conversation they were dropped on.
+        if self.shared.selected.as_ref() == Some(&session) {
+            self.refused_files = refused;
+        }
+        if let Some(body) = self.drop_checks.finished(&session, true) {
+            self.send_draft(session, body, window, cx);
+        }
+        cx.notify();
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(files) = self
@@ -240,18 +264,61 @@ impl Conversation {
             self.refused_files.clear();
         }
         self.sending.insert(recipient.clone());
-        self.request(
-            Command::Send {
-                id: new_id(),
+        // The message has its id from now on, so however often it is sent, it is stored once.
+        let id = new_id();
+        if self.bridge.remote().is_none() || attachments.is_empty() {
+            let send = Command::Send {
+                id,
                 sender: None,
                 recipient,
                 body,
                 attachments,
                 uploads: vec![],
-            },
-            window,
-            cx,
-        );
+            };
+            return self.request(send, window, cx);
+        }
+        // A remote host stores this Mac's files from uploads, which the message names. The
+        // worker sends the message itself, so it goes even if this view closes meanwhile, as
+        // when the app goes to the background; the view only shows the answer.
+        let bridge = self.bridge.clone();
+        let (sender, answered) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let uploads: Result<Vec<_>, _> = (attachments.iter())
+                .map(|path| uploads::upload(&bridge, path))
+                .collect();
+            let send = uploads.map(|uploads| Command::Send {
+                id,
+                sender: None,
+                recipient: recipient.clone(),
+                body,
+                attachments: vec![],
+                uploads,
+            });
+            let reply = (send.clone()).and_then(|send| bridge.request(send));
+            let _ = sender.send_blocking((recipient, send, reply));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok((recipient, send, reply)) = answered.recv().await else {
+                return;
+            };
+            let answer = match reply {
+                Ok(reply) => {
+                    (reply.recv().await).unwrap_or_else(|_| Err("Host disconnected".into()))
+                }
+                Err(error) => Err(error),
+            };
+            let _ = this.update_in(cx, |view, window, cx| match send {
+                Ok(send) => view.accept(send, answer, window, cx),
+                Err(_) => {
+                    view.sending.remove(&recipient);
+                    if let Err(error) = answer {
+                        toast_error(error, window, cx);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
     fn reconcile(&mut self, retry: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session_id) = self.shared.selected.clone() {
@@ -549,8 +616,9 @@ impl Conversation {
             .runtime(&session.id)
             .is_some_and(|runtime| runtime.provider_session_id.is_some());
         let busy = session.status == Status::Working;
+        let refused = self.shared.host.changes_refused();
         // A PR keeper agent keeps the model chosen in Models when it was created.
-        let fixed = busy || session.role == Role::Keeper;
+        let fixed = busy || session.role == Role::Keeper || refused.is_some();
         let models = self.chat_models.clone();
         // A model pinned before it left the catalog and the allowed list is still listed.
         let pinned = (!unchosen)
@@ -572,12 +640,14 @@ impl Conversation {
             .disabled(fixed)
             .label(label)
             .dropdown_caret(true)
-            .tooltip(if session.role == Role::Keeper {
-                "The PR keeper's model comes from its row in Models → Who runs what"
+            .tooltip(if let Some(refused) = &refused {
+                refused.clone()
+            } else if session.role == Role::Keeper {
+                "The PR keeper's model comes from its row in Models → Who runs what".into()
             } else if busy {
-                "Pause the active turn to change the model"
+                "Pause the active turn to change the model".into()
             } else {
-                "Model for this agent only"
+                "Model for this agent only".into()
             })
             .dropdown_menu(move |mut menu, _, _| {
                 let mut entries: Vec<_> = (models.iter())
@@ -657,11 +727,41 @@ impl Conversation {
                 }
                 menu
             });
+        let p = palette(is_dark(cx));
         div()
             .flex()
             .items_center()
             .child(model)
             .when(!unchosen, |d| d.child(effort))
+            .children(self.shared.host.on_host().map(|on| {
+                div()
+                    .px_1()
+                    .text_size(px(font::META))
+                    .text_color(p.subtle)
+                    .child(on)
+            }))
+    }
+    /// While the host does not answer: the composer still works, and says when it sends.
+    fn waiting_line(&self, session: &Session, p: Palette) -> Option<Div> {
+        let frozen = self.shared.host.frozen(ui::now())?;
+        // A message sent meanwhile waits with its id, and goes once the host answers.
+        let kept = match self.sending.contains(&session.id) {
+            true => "Waiting to send",
+            false => "Draft kept",
+        };
+        Some(
+            div()
+                .w_full()
+                .max_w(px(COLUMN))
+                .px_1()
+                .flex()
+                .justify_between()
+                .gap_2()
+                .text_size(px(font::SMALL))
+                .text_color(p.subtle)
+                .child(div().text_ellipsis().child(frozen.composer))
+                .child(div().flex_none().child(kept)),
+        )
     }
     /// Who chose this agent's model and why, above the composer's model pills.
     fn chosen_by_line(&self, session: &Session, p: Palette) -> Option<Div> {
@@ -716,6 +816,7 @@ impl Conversation {
                     .map(|notice| notice.max_w(px(COLUMN))),
             )
             .children(self.chosen_by_line(session, p))
+            .children(self.waiting_line(session, p))
             .child(
                 div()
                     .w_full()
@@ -832,15 +933,18 @@ impl Requests for Conversation {
             recipient,
             body,
             attachments,
+            uploads,
             ..
         } = command
         else {
             return;
         };
-        if self
-            .attached
-            .get(&recipient)
-            .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
+        // A remote host's message carries uploads of the files attached, in their place.
+        if !uploads.is_empty()
+            || self
+                .attached
+                .get(&recipient)
+                .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
         {
             self.attached.remove(&recipient);
         }

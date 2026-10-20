@@ -1,6 +1,7 @@
-//! The app's link to its host, over `host.sock`: a launchd job for a signed app on its default
-//! data folder, otherwise the app's own child host. Views send commands through it and are woken
-//! by the host's events.
+//! The app's link to a host: This Mac's over `host.sock`, a launchd job for a signed app on its
+//! default data folder and otherwise the app's own child host, or a paired host's over the
+//! network through `RemoteLaunch`. Views send commands through it and are woken by the host's
+//! events.
 use async_channel::{Receiver, Sender};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -13,7 +14,11 @@ use std::{
     },
     time::Duration,
 };
-use workspace_core::{ask::Ask, *};
+use workspace_core::{
+    ask::Ask,
+    remote_launch::{RemoteLaunch, RemoteState},
+    *,
+};
 
 /// Waits for the host's answer to `ask`, before the app starts.
 fn answer<R: DeserializeOwned>(client: &HostClient, ask: Ask<R>) -> anyhow::Result<R> {
@@ -33,6 +38,9 @@ struct Wakes {
     steps: (Sender<()>, Receiver<()>),
     progress: (Sender<()>, Receiver<()>),
     usage: (Sender<()>, Receiver<()>),
+    attention: (Sender<()>, Receiver<()>),
+    /// The host's count of things that need the human, from its last `attention` event.
+    needs_you: Arc<Mutex<Option<usize>>>,
     /// Set by `resync`: the host may have restarted, and its progress revisions with it.
     progress_resynced: Arc<AtomicBool>,
     /// Whose steps changed since the step wake was last read.
@@ -47,6 +55,8 @@ impl Wakes {
             steps: wake(),
             progress: wake(),
             usage: wake(),
+            attention: wake(),
+            needs_you: Arc::default(),
             progress_resynced: Arc::default(),
             changed_steps: Arc::default(),
         }
@@ -63,7 +73,10 @@ impl Wakes {
             }
             EventKind::Progress => vec![&self.progress],
             EventKind::Usage => vec![&self.usage],
-            EventKind::Attention { .. } => vec![],
+            EventKind::Attention { count } => {
+                *self.needs_you.lock().unwrap_or_else(|e| e.into_inner()) = Some(*count);
+                vec![&self.attention]
+            }
             EventKind::Resync => {
                 self.progress_resynced.store(true, Ordering::Relaxed);
                 self.changed_steps().all = true;
@@ -95,9 +108,20 @@ impl ChangedSteps {
     }
 }
 
+/// A paired host, as the app names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteName {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct Bridge {
     client: Result<HostClient, String>,
+    /// The paired host this bridge reaches; `None` for This Mac's own host.
+    remote: Option<RemoteName>,
+    /// What the last try at a paired host found.
+    reached: Option<Arc<Mutex<RemoteState>>>,
     wakes: Wakes,
     /// The host is a launchd job, which keeps running after the app exits.
     outlives_app: bool,
@@ -133,22 +157,91 @@ impl Bridge {
         let outlives_app = launcher.outlives_app();
         let wakes = Wakes::new();
         let woken = wakes.clone();
-        let client = Client {
-            name: "Wiffletree".into(),
-            kind: "desktop".into(),
-        };
-        let client = HostClient::connect(launcher, client, Box::new(move |kind| woken.wake(kind)));
+        let client = HostClient::connect(
+            launcher,
+            Self::client(),
+            Box::new(move |kind| woken.wake(kind)),
+        );
         Self {
             client: client.map_err(|e| format!("The host did not start: {e}")),
+            remote: None,
+            reached: None,
             wakes,
             outlives_app,
+        }
+    }
+    /// Keeps a connection to the paired host `host` through `launcher`, while it can be reached.
+    pub(crate) fn remote_host(host: RemoteName, launcher: RemoteLaunch) -> Self {
+        let wakes = Wakes::new();
+        let woken = wakes.clone();
+        let reached = launcher.state();
+        let client = HostClient::keep_connecting(
+            Box::new(launcher),
+            Self::client(),
+            Box::new(move |kind| woken.wake(kind)),
+        );
+        Self {
+            client: client.map_err(|e| format!("Not connected to {}: {e}", host.name)),
+            remote: Some(host),
+            reached: Some(reached),
+            wakes,
+            outlives_app: false,
+        }
+    }
+    fn client() -> Client {
+        Client {
+            name: "Wiffletree".into(),
+            kind: "desktop".into(),
+        }
+    }
+    /// A paired host the app has no connection to.
+    pub(crate) fn unreachable(host: RemoteName) -> Self {
+        Self {
+            remote: Some(host.clone()),
+            ..Self::unavailable(format!("Not connected to {}", host.name))
         }
     }
     fn unavailable(error: String) -> Self {
         Self {
             client: Err(error),
+            remote: None,
+            reached: None,
             wakes: Wakes::new(),
             outlives_app: false,
+        }
+    }
+    /// The paired host this bridge reaches, or `None` for This Mac's.
+    pub(crate) fn remote(&self) -> Option<&RemoteName> {
+        self.remote.as_ref()
+    }
+    /// Whether the app is connected to the host now.
+    pub(crate) fn connected(&self) -> bool {
+        self.client.as_ref().is_ok_and(|c| c.link().connected)
+    }
+    /// What the last try at a paired host found: the level it grants and why it turned this
+    /// device away.
+    pub(crate) fn reached(&self) -> RemoteState {
+        (self.reached.as_ref())
+            .map(|state| state.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default()
+    }
+    /// The host's count of things that need the human, once it has sent one.
+    pub(crate) fn needs_you(&self) -> Option<usize> {
+        *self
+            .wakes
+            .needs_you
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+    /// Wakes when the host's count of things that need the human changed.
+    pub(crate) fn attention_changes(&self) -> Option<Receiver<()>> {
+        self.wake(&self.wakes.attention)
+    }
+    /// Subscribes to every event while the window shows this host, and otherwise only to
+    /// `attention`, which the switcher counts.
+    pub(crate) fn follow(&self, shown: bool) {
+        if let Ok(client) = &self.client {
+            client.subscribe_to((!shown).then(|| vec![EventKindName::Attention]));
         }
     }
     /// Whether the host keeps running, with its agents, after the app exits.
@@ -162,6 +255,22 @@ impl Bridge {
     /// The version of the host, once it has answered.
     pub(crate) fn host_version(&self) -> Option<String> {
         self.client.as_ref().ok()?.host_version()
+    }
+    /// When the host last sent anything, in Unix milliseconds.
+    pub(crate) fn heard_at(&self) -> Option<i64> {
+        let heard = self.client.as_ref().ok()?.link().heard_at?;
+        let since = heard.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(since.as_millis() as i64)
+    }
+    /// Wakes when the connection drops or comes back.
+    pub(crate) fn link_changes(&self) -> Option<Receiver<()>> {
+        Some(self.client.as_ref().ok()?.link_changes())
+    }
+    /// While disconnected, tries to connect at once and starts the delays over.
+    pub(crate) fn try_now(&self) {
+        if let Ok(client) = &self.client {
+            client.try_now();
+        }
     }
     /// Asks the host to restart and waits for its answer; run it off the main thread.
     pub(crate) fn restart_host(&self, when: RestartWhen) -> Result<(), String> {
@@ -184,7 +293,21 @@ impl Bridge {
         &self,
         command: Command,
     ) -> Result<Receiver<Result<Value, String>>, String> {
+        if let Some(reason) = self.refuses(&command) {
+            return Err(reason);
+        }
         self.client.as_ref().map_err(Clone::clone)?.request(command)
+    }
+    /// Why a paired host takes no change now: it does not answer, so the change would wait and
+    /// apply later, or it lets this device only view. Reads, and messages, which wait with their
+    /// ids, always go.
+    fn refuses(&self, command: &Command) -> Option<String> {
+        let host = self.remote.as_ref()?;
+        if command.is_read() || matches!(command, Command::Send { .. }) {
+            return None;
+        }
+        let link = crate::hosts::Link::of(self);
+        crate::hosts::HostView::remote(&host.name, link, None).changes_refused()
     }
     /// Sends `command`; its reply arrives when the host answers, or says the host is gone.
     pub(crate) fn send(
@@ -218,6 +341,9 @@ impl Bridge {
         timeout: Duration,
     ) -> Result<R, String> {
         let client = self.client.as_ref().map_err(Clone::clone)?;
+        if let Some(reason) = self.refuses(ask.command()) {
+            return Err(reason);
+        }
         let reply = client.request_blocking(ask.command().clone(), timeout)?;
         ask.decode(reply)
     }
@@ -271,6 +397,7 @@ impl Bridge {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use workspace_core::remote_client;
     use workspace_host::{Host, service::Service, socket};
 
     /// A host in this process serving `host.sock` in a temporary data folder, as a launchd host
@@ -419,5 +546,299 @@ pub(crate) mod tests {
             assert!(std::time::Instant::now() < deadline, "no state event");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// A host in this process with remote access on, named Studio Mac, and a device paired
+    /// with it, as a second Mac is.
+    pub(crate) struct Studio {
+        pub(crate) data: tempfile::TempDir,
+        service: Option<Service>,
+        key: workspace_core::pairing::KeyPair,
+        port: u16,
+        pub(crate) paired: remote_client::PairedHost,
+        device: workspace_core::pairing::KeyPair,
+        /// The project's coordinator, which takes no turns.
+        pub(crate) coordinator: String,
+    }
+    impl Studio {
+        pub(crate) fn start() -> Self {
+            let data = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+            let mut host = Host::open_set_up(data.path()).unwrap();
+            let workspaces = data.path().join("workspaces");
+            host.set_workspaces_dir(workspaces.to_str().unwrap())
+                .unwrap();
+            let project = host.create_project("Tide alerts").unwrap();
+            host.set_live(&project.id, false).unwrap();
+            let coordinator = (host.sessions().unwrap().into_iter())
+                .find(|s| s.project_id == project.id)
+                .unwrap()
+                .id;
+            drop(host);
+            let key = workspace_core::pairing::KeyPair::generate().unwrap();
+            let service = Self::serve(data.path(), &key, 0);
+            let state = |service: &Service, command| {
+                let reply = service.request(command).unwrap().recv_blocking().unwrap();
+                serde_json::from_value::<RemoteAccess>(reply.unwrap()).unwrap()
+            };
+            let port = state(&service, Command::SetRemoteAccess { enabled: true })
+                .port
+                .expect("listening");
+            let code = state(&service, Command::OpenPairing).pairing.unwrap().code;
+            let device = workspace_core::pairing::KeyPair::generate().unwrap();
+            let address = format!("127.0.0.1:{port}");
+            let paired = remote_client::pair(&address, &code, &device, "Test Mac").unwrap();
+            Self {
+                data,
+                service: Some(service),
+                key,
+                port,
+                paired,
+                device,
+                coordinator,
+            }
+        }
+        fn serve(data: &Path, key: &workspace_core::pairing::KeyPair, port: u16) -> Service {
+            let key = key.clone();
+            let binary = std::env::current_exe().unwrap();
+            let options = workspace_host::remote::Options {
+                port,
+                key: Box::new(move || Ok(key.clone())),
+                name: Some("Studio Mac".into()),
+                binary: binary.clone(),
+                ..Default::default()
+            };
+            Service::start_with(data.into(), binary, options).unwrap()
+        }
+        /// This device's bridge to the host, as the switcher keeps one.
+        pub(crate) fn bridge(&self) -> Bridge {
+            let name = RemoteName {
+                id: self.paired.id.clone(),
+                name: self.paired.name.clone(),
+            };
+            let address = format!("127.0.0.1:{}", self.port);
+            let launcher = RemoteLaunch::new(
+                self.paired.public_key.clone(),
+                self.device.clone(),
+                vec![address],
+                Box::new(Vec::new),
+            );
+            Bridge::remote_host(name, launcher)
+        }
+        /// Stops the host, as a restart does, and starts it again on the same port.
+        fn restart(&mut self) {
+            if let Some(service) = self.service.take() {
+                service.shutdown();
+            }
+            self.service = Some(Self::serve(self.data.path(), &self.key, self.port));
+        }
+        fn stop(&mut self) {
+            if let Some(service) = self.service.take() {
+                service.shutdown();
+            }
+        }
+    }
+    impl Drop for Studio {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// Reaches `host.sock` through a relay that cuts the first connection once the host has
+    /// answered a `Send`, before the answer reaches the client, as a drop after the host stored
+    /// the message does. Later connections go straight to the socket.
+    struct CutAfterSend {
+        endpoint: Endpoint,
+        cut: bool,
+    }
+    impl Launch for CutAfterSend {
+        fn endpoint(&mut self, _: &AtomicBool) -> std::io::Result<Endpoint> {
+            Ok(self.endpoint.clone())
+        }
+        fn connect(
+            &mut self,
+            _: &AtomicBool,
+        ) -> std::io::Result<(std::os::unix::net::UnixStream, Option<String>)> {
+            use std::io::{BufRead, BufReader, Write};
+            use std::os::unix::net::UnixStream;
+            let host = UnixStream::connect(&self.endpoint.socket)?;
+            let credential = self.endpoint.credential.clone();
+            if std::mem::replace(&mut self.cut, true) {
+                return Ok((host, credential));
+            }
+            let (ours, theirs) = UnixStream::pair()?;
+            let send_id = Arc::new(Mutex::new(None::<String>));
+            let (mut to_host, from_client) = (host.try_clone()?, theirs.try_clone()?);
+            let noted = send_id.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(from_client).lines().map_while(Result::ok) {
+                    let request: Value = serde_json::from_str(&line).unwrap_or_default();
+                    if request["command"]["type"] == "send" {
+                        *noted.lock().unwrap() = request["id"].as_str().map(str::to_owned);
+                    }
+                    if writeln!(to_host, "{line}").is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut to_client = theirs;
+            std::thread::spawn(move || {
+                for line in BufReader::new(host.try_clone().unwrap()).lines() {
+                    let Ok(line) = line else { break };
+                    let answer: Value = serde_json::from_str(&line).unwrap_or_default();
+                    let id = send_id.lock().unwrap().clone();
+                    if id.is_some() && answer["id"].as_str() == id.as_deref() {
+                        let _ = host.shutdown(std::net::Shutdown::Both);
+                        let _ = to_client.shutdown(std::net::Shutdown::Both);
+                        break;
+                    }
+                    if writeln!(to_client, "{line}").is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok((ours, credential))
+        }
+    }
+
+    #[test]
+    fn a_message_whose_answer_was_cut_off_is_sent_again_and_shows_once() {
+        let coordinator = std::cell::OnceCell::new();
+        let served = serve(|host| {
+            let project = host.create_project("Cut").unwrap();
+            host.set_live(&project.id, false).unwrap();
+            let main = (host.sessions().unwrap().into_iter())
+                .find(|s| s.project_id == project.id)
+                .unwrap();
+            coordinator.set(main.id).unwrap();
+        });
+        let coordinator = coordinator.into_inner().unwrap();
+        let launcher = CutAfterSend {
+            endpoint: served.endpoint.clone(),
+            cut: false,
+        };
+        let bridge = Bridge::connect(Box::new(launcher));
+        let send = Command::Send {
+            id: new_id(),
+            sender: None,
+            recipient: coordinator.clone(),
+            body: "Stored before the drop".into(),
+            attachments: vec![],
+            uploads: vec![],
+        };
+
+        let answered = bridge.request(send).unwrap().recv_blocking().unwrap();
+
+        assert!(answered.is_ok(), "{answered:?}");
+        let page = bridge
+            .ask_within(
+                ask::messages(coordinator, None, 50),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        let shown = page.iter().filter(|m| m.body == "Stored before the drop");
+        assert_eq!(shown.count(), 1);
+        bridge.shutdown();
+    }
+
+    fn until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_paired_host_that_does_not_answer_takes_no_change_but_reads_and_messages_wait() {
+        let name = RemoteName {
+            id: "studio".into(),
+            name: "Studio Mac".into(),
+        };
+        let device = workspace_core::pairing::KeyPair::generate().unwrap();
+        let nowhere = vec!["127.0.0.1:1".to_owned()];
+        let launcher = RemoteLaunch::new(vec![4; 65], device, nowhere, Box::new(Vec::new));
+        let away = Bridge::remote_host(name, launcher);
+
+        let error = away.request(Command::SetCheckIns {
+            child_turns: 7,
+            human_turns: 11,
+        });
+        assert_eq!(error.unwrap_err(), "Waiting for Studio Mac to answer");
+        assert!(away.request(Command::Snapshot).is_ok(), "a read waits");
+        let send = Command::Send {
+            id: new_id(),
+            sender: None,
+            recipient: "coordinator".into(),
+            body: "Written while away".into(),
+            attachments: vec![],
+            uploads: vec![],
+        };
+        assert!(away.request(send).is_ok(), "a message waits");
+        away.shutdown();
+    }
+
+    #[test]
+    fn a_paired_host_is_driven_through_its_bridge_and_a_save_there_changes_only_it() {
+        let here = serve(|_| {});
+        let studio = Studio::start();
+        let remote = studio.bridge();
+        until("connected", || remote.connected());
+        assert_eq!(remote.reached().level, Some(AccessLevel::Control));
+        let snapshot = remote.ask_now(ask::snapshot()).unwrap();
+        assert!(snapshot.projects.iter().any(|p| p.name == "Tide alerts"));
+
+        let before = here.bridge.ask_now(ask::settings()).unwrap();
+        let saved = remote
+            .ask_within(ask::set_check_ins(7, 11), Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(
+            (saved.checkin_child_turns, saved.checkin_human_turns),
+            (7, 11)
+        );
+        let there = remote.ask_now(ask::settings()).unwrap();
+        assert_eq!(
+            (there.checkin_child_turns, there.checkin_human_turns),
+            (7, 11)
+        );
+        assert_eq!(
+            here.bridge.ask_now(ask::settings()).unwrap(),
+            before,
+            "This Mac's own"
+        );
+        remote.shutdown();
+    }
+
+    #[test]
+    fn a_host_restarted_during_a_drop_is_read_whole_again_and_nothing_repeats() {
+        let mut studio = Studio::start();
+        let remote = studio.bridge();
+        until("connected", || remote.connected());
+        let coordinator = studio.coordinator.clone();
+        let sent = Command::Send {
+            id: new_id(),
+            sender: None,
+            recipient: coordinator.clone(),
+            body: "Before the drop".into(),
+            attachments: vec![],
+            uploads: vec![],
+        };
+        let stored = remote.request(sent).unwrap().recv_blocking().unwrap();
+        stored.unwrap();
+        let messages = || {
+            let page = remote.ask_now(ask::messages(coordinator.clone(), None, 50));
+            page.map(|page| page.iter().filter(|m| m.body == "Before the drop").count())
+        };
+        assert_eq!(messages(), Ok(1));
+        let _ = remote.take_progress_resync();
+
+        studio.restart();
+        until("disconnected and back", || {
+            remote.connected() && remote.take_progress_resync()
+        });
+
+        assert_eq!(messages(), Ok(1), "the message is not repeated");
+        let snapshot = remote.ask_now(ask::snapshot()).unwrap();
+        assert_eq!(snapshot.projects.len(), 1);
+        remote.shutdown();
     }
 }

@@ -1,10 +1,12 @@
-//! The Settings window: this client's appearance, the host's workspace folder, its check-in
-//! thresholds, the settings repository and remote access.
+//! The Settings window, in two parts (design 10 of `remote-hosts`): this Mac's app, with its
+//! appearance and the computers it is paired with, and the host the window drives, with its
+//! workspace folder, check-in thresholds and settings repository, and on This Mac its remote
+//! access. A setting belongs to the Mac whose agents it runs.
 mod remote_access;
 mod repository;
 
 use super::*;
-use gpui_component::{ActiveTheme, Disableable};
+use gpui_component::{ActiveTheme, Disableable, button::ButtonVariants};
 use repository::{Confirm, Joined};
 pub(super) use repository::{Mark, share_sync};
 use ui::{card, hint, icon, mono, over_dimmed, section, segment, setting};
@@ -16,6 +18,8 @@ impl Global for SettingsWindow {}
 
 pub(super) struct Settings {
     bridge: Bridge,
+    /// The host the window drives, as the switcher selected it.
+    driving: HostView,
     host: Option<HostSettings>,
     folder_error: Option<String>,
     check_in_error: Option<String>,
@@ -39,21 +43,81 @@ pub(super) struct Settings {
     watching_remote: bool,
 }
 
+/// A check-in threshold's presets, the unit they count and how a choice sets it.
+struct Threshold {
+    name: &'static str,
+    presets: [u32; 5],
+    unit: &'static str,
+    set: fn(&mut HostSettings, u32),
+}
 /// The agent check-in presets; the host accepts any value in `CHECKIN_CHILD_TURNS`.
-const AGENT_TURNS: [u32; 5] = [10, 25, 50, 100, 250];
+const AGENT_TURNS: Threshold = Threshold {
+    name: "agent-turns",
+    presets: [10, 25, 50, 100, 250],
+    unit: "turns",
+    set: |h, n| h.checkin_child_turns = n,
+};
 /// The human check-in presets; the host accepts any value in `CHECKIN_HUMAN_TURNS`.
-const COORDINATOR_TURNS: [u32; 5] = [50, 100, 250, 500, 1000];
+const COORDINATOR_TURNS: Threshold = Threshold {
+    name: "coordinator-turns",
+    presets: [50, 100, 250, 500, 1000],
+    unit: "coordinator turns",
+    set: |h, n| h.checkin_human_turns = n,
+};
 
 impl Settings {
     /// Focuses the Settings window, opening it first if none is open.
-    pub(super) fn open(bridge: Bridge, cx: &mut App) {
-        Self::open_at(bridge, false, cx);
+    pub(super) fn open(cx: &mut App) {
+        Self::open_at(false, cx);
     }
     /// Opens Settings scrolled to the Settings repository section, as the sync mark does.
-    pub(super) fn open_at_repository(bridge: Bridge, cx: &mut App) {
-        Self::open_at(bridge, true, cx);
+    pub(super) fn open_at_repository(cx: &mut App) {
+        Self::open_at(true, cx);
     }
-    fn open_at(bridge: Bridge, at_repository: bool, cx: &mut App) {
+    /// The switcher selected another host: an open Settings window shows that host's settings.
+    pub(super) fn host_selected(cx: &mut App) {
+        let Some(SettingsWindow(_, view)) = cx.try_global::<SettingsWindow>().cloned() else {
+            return;
+        };
+        let hosts = cx.global::<Hosts>();
+        let (bridge, driving) = (hosts.bridge(), hosts.view());
+        let _ = view.update(cx, |view, cx| {
+            view.bridge = bridge;
+            view.driving = driving;
+            view.host = None;
+            view.checked = None;
+            view.joined = None;
+            view.ask_host(ask::settings(), cx);
+            view.ask_remote_here(cx);
+            view.refresh_sync(cx);
+            cx.notify();
+        });
+    }
+    /// Follows the driven host's connection: saving turns off while it does not answer, and its
+    /// settings are read again once it is back.
+    fn follow_link(&mut self, cx: &mut Context<Self>) {
+        let driving = cx.global::<Hosts>().view_of(&self.bridge);
+        if driving == self.driving {
+            return;
+        }
+        let answering = |view: &HostView| {
+            (view.remote.as_ref()).is_none_or(|r| matches!(r.link, hosts::Link::Connected(_)))
+        };
+        let back = !answering(&self.driving) && answering(&driving);
+        self.driving = driving;
+        if back {
+            self.ask_host(ask::settings(), cx);
+            self.refresh_sync(cx);
+        }
+        cx.notify();
+    }
+    /// Remote access changes only at the host itself, so only This Mac's is asked for.
+    fn ask_remote_here(&mut self, cx: &mut Context<Self>) {
+        if self.driving.remote.is_none() {
+            self.ask_remote(ask::remote_access(), cx);
+        }
+    }
+    fn open_at(at_repository: bool, cx: &mut App) {
         if let Some(SettingsWindow(handle, view)) = cx.try_global::<SettingsWindow>().cloned()
             && handle
                 .update(cx, |_, window, _| window.activate_window())
@@ -64,6 +128,8 @@ impl Settings {
             }
             return;
         }
+        let hosts = cx.global::<Hosts>();
+        let (bridge, driving) = (hosts.bridge(), hosts.view());
         let bounds = Bounds::centered(None, size(px(560.), px(820.)), cx);
         let mut settings = None;
         let opened = cx.open_window(
@@ -82,6 +148,7 @@ impl Settings {
                 let view = cx.new(|cx| {
                     let mut view = Self {
                         bridge,
+                        driving,
                         host: None,
                         folder_error: None,
                         check_in_error: None,
@@ -99,10 +166,21 @@ impl Settings {
                         watching_remote: false,
                     };
                     view.ask_host(ask::settings(), cx);
-                    view.ask_remote(ask::remote_access(), cx);
+                    view.ask_remote_here(cx);
                     view.refresh_sync(cx);
-                    cx.observe_global::<repository::SyncShown>(|view, cx| view.sync_shown(cx))
+                    cx.observe_global::<repository::SyncByHost>(|view, cx| view.sync_shown(cx))
                         .detach();
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(1))
+                                .await;
+                            if this.update(cx, |view, cx| view.follow_link(cx)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
                     if at_repository {
                         view.show_repository(cx);
                     }
@@ -125,20 +203,20 @@ impl Settings {
     }
 
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose the workspace folder".into()),
-        });
+        let paths = folders::choose(
+            &self.bridge,
+            "Choose the workspace folder",
+            false,
+            window,
+            cx,
+        );
         self.choosing_folder = true;
+        let origin = self.host_id();
         cx.spawn_in(window, async move |this, cx| {
-            let chosen = match paths.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            };
+            let chosen = paths.recv().await.ok().and_then(|p| p.into_iter().next());
             let _ = this.update(cx, |view, cx| {
-                match chosen {
+                // A folder chosen on a host the window no longer shows is not saved elsewhere.
+                match chosen.filter(|_| view.host_id() == origin) {
                     Some(path) => {
                         let path = path.to_string_lossy().into_owned();
                         view.ask_host(ask::set_workspaces_dir(path), cx)
@@ -151,9 +229,16 @@ impl Settings {
         .detach();
     }
 
-    /// Shows the host's answer, or its error beside the setting it still uses.
+    /// The paired host the window shows, or `None` for This Mac's.
+    fn host_id(&self) -> Option<String> {
+        self.bridge.remote().map(|r| r.id.clone())
+    }
+
+    /// Shows the host's answer, or its error beside the setting it still uses. An answer from a
+    /// host the window no longer shows is dropped.
     fn ask_host(&mut self, ask: Ask<HostSettings>, cx: &mut Context<Self>) {
         let command = ask.command().clone();
+        let origin = self.host_id();
         let check_ins = matches!(command, Command::SetCheckIns { .. });
         let answer = match self.bridge.ask(ask) {
             Ok(answer) => answer,
@@ -167,6 +252,9 @@ impl Settings {
             let answer = answer.await;
             let _ = this.update(cx, |view, cx| {
                 shared::replied(&command, answer.is_ok(), cx);
+                if view.host_id() != origin {
+                    return;
+                }
                 match answer {
                     Ok(settings) => {
                         view.host = Some(settings);
@@ -216,6 +304,54 @@ impl Settings {
             ))
     }
 
+    /// The hosts this Mac is paired with, which only this Mac keeps.
+    fn paired_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
+        let paired = &cx.global::<Preferences>().paired_hosts;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(section("COMPUTERS YOU'VE PAIRED WITH", p));
+        if paired.is_empty() {
+            return list.child(hint(
+                "None yet. Connect a computer… in the sidebar's host menu pairs one.",
+                p,
+            ));
+        }
+        for (index, host) in paired.iter().enumerate() {
+            let id = host.id.clone();
+            let seen = (host.last_seen).map_or("Not reached yet".into(), |seen| {
+                format!("Last seen {}", hosts::spelled_age(seen, ui::now()))
+            });
+            let reached = host
+                .addresses
+                .first()
+                .map_or(seen.clone(), |address| format!("{seen} · {address}"));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(host.name.clone())
+                            .child(hint(reached, p)),
+                    )
+                    .child(
+                        button(("forget-host", index))
+                            .ghost()
+                            .label("Remove")
+                            .tooltip("Removes it from this Mac; pair again to use it")
+                            .on_click(move |_, _, cx| forget_host(&id, cx)),
+                    ),
+            );
+        }
+        list
+    }
+
     fn folder_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
         let shown = self
             .host
@@ -230,6 +366,7 @@ impl Settings {
                     button("choose-workspaces-dir")
                         .label("Choose…")
                         .disabled(self.choosing_folder)
+                        .map(|b| ui::gated(b, &self.driving))
                         .on_click(
                             cx.listener(|view, _, window, cx| view.choose_folder(window, cx)),
                         ),
@@ -263,21 +400,12 @@ impl Settings {
             .gap_2()
             .child(section("CHECK-INS", p));
         if let Some(host) = &self.host {
-            let agents = threshold_selector(
-                "agent-turns",
-                AGENT_TURNS,
-                host.checkin_child_turns,
-                "turns",
-                |h, n| h.checkin_child_turns = n,
-                p,
-                cx,
-            );
+            let agents =
+                threshold_selector(&self.driving, &AGENT_TURNS, host.checkin_child_turns, p, cx);
             let coordinator = threshold_selector(
-                "coordinator-turns",
-                COORDINATOR_TURNS,
+                &self.driving,
+                &COORDINATOR_TURNS,
                 host.checkin_human_turns,
-                "coordinator turns",
-                |h, n| h.checkin_human_turns = n,
                 p,
                 cx,
             );
@@ -303,24 +431,39 @@ impl Settings {
     }
 }
 
+/// The heading of one part of the window: whose settings follow, and what they are.
+fn part(title: &str, holds: &'static str, p: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(font::BODY))
+                .child(title.to_owned()),
+        )
+        .child(hint(holds, p))
+}
+
 /// One button per preset; choosing one saves both thresholds at once.
 fn threshold_selector(
-    name: &str,
-    presets: [u32; 5],
+    driving: &HostView,
+    threshold: &Threshold,
     current: u32,
-    unit: &'static str,
-    set: fn(&mut HostSettings, u32),
     p: Palette,
     cx: &mut Context<Settings>,
 ) -> Div {
     let mut segments = div().flex().gap_1();
-    for n in presets {
+    let set = threshold.set;
+    for n in threshold.presets {
         segments = segments.child(
             segment(
-                SharedString::from(format!("{name}-{n}")),
+                SharedString::from(format!("{}-{n}", threshold.name)),
                 n.to_string(),
                 n == current,
             )
+            .map(|b| ui::gated(b, driving))
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(mut chosen) = view.host.clone() {
                     set(&mut chosen, n);
@@ -336,7 +479,7 @@ fn threshold_selector(
         .items_center()
         .gap_2()
         .child(segments)
-        .child(hint(unit, p))
+        .child(hint(threshold.unit, p))
 }
 
 impl Render for Settings {
@@ -371,15 +514,39 @@ impl Render for Settings {
                     .flex()
                     .flex_col()
                     .gap_4()
+                    .child(part(
+                        "This Mac · the app",
+                        "Appearance and theme · computers you've paired with · window layout",
+                        p,
+                    ))
                     .child(self.appearance_section(p, cx))
                     .child(rule())
+                    .child(self.paired_section(p, cx))
+                    .child(rule())
+                    .child(part(
+                        &match self.driving.name() {
+                            Some(host) => format!("{host} · the host you're driving"),
+                            None => "This Mac · the host".into(),
+                        },
+                        "Models · repositories and checks · workspace folder · PR owners allowed · check-ins · reviews · skills · settings repository",
+                        p,
+                    ))
+                    .children(self.driving.changes_refused().map(|reason| hint(reason, p)))
                     .child(self.folder_section(p, cx))
                     .child(rule())
                     .child(self.check_in_section(p, cx))
                     .child(rule())
-                    .child(self.repository_section(p, cx))
+                    .child(ui::locked(self.repository_section(p, cx), &self.driving, p))
                     .child(rule())
-                    .child(self.remote_access_section(p, cx));
+                    .child(match self.driving.name() {
+                        None => self.remote_access_section(p, cx),
+                        Some(host) => hint(
+                            format!(
+                                "Remote access (pairing and who can control it) changes only at {host} itself."
+                            ),
+                            p,
+                        ),
+                    });
                 let dialog =
                     (self.confirming).and_then(|confirm| self.confirm_dialog(confirm, p, cx));
                 match dialog {

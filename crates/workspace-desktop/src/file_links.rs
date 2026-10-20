@@ -47,7 +47,8 @@ impl Linked {
         Self {
             id: SharedString::from(format!("message-markdown-{id}")),
             body: SharedString::from(body.to_owned()),
-            resolution: body.contains('`').then(|| Resolution::of(body, &bases)),
+            resolution: (body.contains('`'))
+                .then(|| Resolution::of(body, &bases, bridge.remote().map(|r| r.id.as_str()))),
             bases,
             bridge: bridge.clone(),
         }
@@ -85,6 +86,8 @@ impl Linked {
 struct Resolution {
     body: String,
     bases: Vec<PathBuf>,
+    /// The paired host whose files they are, `None` for This Mac's.
+    host: Option<String>,
     linked: OnceLock<SharedString>,
     /// Taken by whoever asks the host, so a body is asked about once at a time.
     unasked: Mutex<Option<Sender<()>>>,
@@ -96,18 +99,20 @@ impl Resolution {
         static CACHE: OnceLock<Mutex<HashMap<u64, Arc<Resolution>>>> = OnceLock::new();
         CACHE.get_or_init(Mutex::default)
     }
-    fn key(body: &str, bases: &[PathBuf]) -> u64 {
+    fn key(body: &str, bases: &[PathBuf], host: Option<&str>) -> u64 {
         let mut hasher = DefaultHasher::new();
-        (body, bases).hash(&mut hasher);
+        (body, bases, host).hash(&mut hasher);
         hasher.finish()
     }
-    /// The cached resolution of `body` against `bases`, or a new one yet to be asked.
-    fn of(body: &str, bases: &[PathBuf]) -> Arc<Self> {
-        let key = Self::key(body, bases);
+    /// The cached resolution of `body` against `bases` on `host`, `None` for This Mac's, or a
+    /// new one yet to be asked: the same paths on two hosts are different files.
+    fn of(body: &str, bases: &[PathBuf], host: Option<&str>) -> Arc<Self> {
+        let key = Self::key(body, bases, host);
         let mut cache = Self::cache().lock().unwrap();
         if let Some(hit) = cache.get(&key)
             && hit.body == body
             && hit.bases == bases
+            && hit.host.as_deref() == host
         {
             return hit.clone();
         }
@@ -118,6 +123,7 @@ impl Resolution {
         let resolution = Arc::new(Self {
             body: body.to_owned(),
             bases: bases.to_vec(),
+            host: host.map(str::to_owned),
             linked: OnceLock::new(),
             unasked: Mutex::new(Some(sender)),
             settled,
@@ -137,7 +143,11 @@ impl Drop for Asking {
     fn drop(&mut self) {
         let resolution = &self.resolution;
         if resolution.linked.get().is_none() {
-            let key = Resolution::key(&resolution.body, &resolution.bases);
+            let key = Resolution::key(
+                &resolution.body,
+                &resolution.bases,
+                resolution.host.as_deref(),
+            );
             let mut cache = Resolution::cache().lock().unwrap();
             if cache.get(&key).is_some_and(|r| Arc::ptr_eq(r, resolution)) {
                 cache.remove(&key);
@@ -200,6 +210,7 @@ fn resolve(linked: &[&Linked], bridge: &Bridge) -> Option<impl Future<Output = (
         return None;
     }
     let bridge = bridge.clone();
+    let label = bridge.remote().map(|r| r.name.clone());
     Some(async move {
         let mut replies = vec![];
         for (bases, group) in asking {
@@ -230,7 +241,8 @@ fn resolve(linked: &[&Linked], bridge: &Bridge) -> Option<impl Future<Output = (
                 .collect();
             for (asking, candidates) in &batch.bodies {
                 let body = &asking.resolution.body;
-                let text = link_code(body, candidates, |r| files.get(r).cloned());
+                let found = |r: &str| files.get(r).cloned();
+                let text = link_code(body, candidates, label.as_deref(), found);
                 let _ = asking.resolution.linked.set(text.into());
             }
         }
@@ -302,12 +314,15 @@ fn candidates(body: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// Wraps each of the `candidates` that `resolve` finds a file for in a link to that file.
+/// Wraps each of the `candidates` that `resolve` finds a file for in a link to that file, labelled
+/// "Studio Mac: …" when the file is on the remote `host`.
 fn link_code(
     body: &str,
     candidates: &[Candidate],
+    host: Option<&str>,
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> String {
+    let label = host.map(|host| format!("{}: ", escaped_text(host)));
     let mut linked = String::with_capacity(body.len());
     let mut copied = 0;
     for (start, end, reference) in candidates {
@@ -317,7 +332,8 @@ fn link_code(
         };
         linked.push_str(&body[copied..start]);
         linked.push_str(&format!(
-            "[{}](<{}>)",
+            "[{}{}](<{}>)",
+            label.as_deref().unwrap_or_default(),
             &body[start..end],
             destination(&path)
         ));
@@ -325,6 +341,18 @@ fn link_code(
     }
     linked.push_str(&body[copied..]);
     linked
+}
+
+/// `text` with what Markdown would read as markup escaped.
+fn escaped_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 /// The source range and text of every inline code span outside a link, in document order.
@@ -469,13 +497,103 @@ fn link_action(url: &str, event: &ClickEvent) -> LinkAction {
     }
 }
 
-/// Opens a file in its default app, or reveals it in Finder when opening would run it.
-fn open_file(file: &ResolvedPath, cx: &App) {
-    if file.runs_when_opened {
-        cx.reveal_path(&file.path);
+/// Opens a file in its default app, or reveals it in Finder when opening would run it. A remote
+/// host's file is read through that host and opened as a read-only copy on this Mac, never as
+/// a file of the same path here.
+pub(super) fn open_file(file: &ResolvedPath, bridge: &Bridge, window: &mut Window, cx: &mut App) {
+    let Some(host) = bridge.remote() else {
+        return show_file(&file.path, file.runs_when_opened, cx);
+    };
+    let copy = copy_path(&cache_folder(), &host.id, &file.path);
+    let read = bridge.ask(ask::read_file(file.path.clone(), MAX_ATTACHMENT_BYTES));
+    let name = file.path.clone();
+    window
+        .spawn(cx, async move |cx| {
+            let copied = match read {
+                Ok(read) => read.await.and_then(|contents| write_copy(&copy, &contents)),
+                Err(error) => Err(error),
+            };
+            let _ = cx.update(|window, cx| match copied {
+                Ok(()) => show_file(&copy, !opens_copy(&copy), cx),
+                Err(error) => missing(&name.to_string_lossy(), error, window, cx),
+            });
+        })
+        .detach();
+}
+
+fn show_file(path: &Path, runs_when_opened: bool, cx: &App) {
+    if runs_when_opened {
+        cx.reveal_path(path);
     } else {
-        cx.open_with_system(&file.path);
+        cx.open_with_system(path);
     }
+}
+
+/// Whether a copy of a remote host's file may be opened rather than shown in Finder. This Mac
+/// decides from the copy itself, with the rule it uses for its own files, never from what the
+/// host says; a copy it cannot read is shown.
+fn opens_copy(copy: &Path) -> bool {
+    copy.is_file() && !runs_when_opened(copy)
+}
+
+/// Where this Mac keeps read-only copies of remote hosts' files.
+fn cache_folder() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join("Library/Caches/Wiffletree/hosts")
+}
+
+/// Where the copy of `path` on the host `host_id` is kept under `cache`: its folder for the host,
+/// then the path's own folders, never above them.
+fn copy_path(cache: &Path, host_id: &str, path: &Path) -> PathBuf {
+    let mut copy = cache.join(workspace_core::pairing::short_id(host_id));
+    for part in path.components() {
+        if let std::path::Component::Normal(part) = part {
+            copy.push(part);
+        }
+    }
+    copy
+}
+
+/// Marks `copy` as downloaded, as a browser does, so macOS checks it before anything runs it.
+fn quarantine(copy: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(copy.as_os_str().as_bytes())?;
+    let value = format!("0081;{:08x};Wiffletree;", ui::now() / 1000);
+    // SAFETY: the name, path and value are valid for the call.
+    let set = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            c"com.apple.quarantine".as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    match set {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+/// Writes `contents` to `copy` as a read-only, quarantined file, in place of an earlier copy.
+fn write_copy(copy: &Path, contents: &FileContents) -> Result<(), String> {
+    use base64::Engine as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let bytes = (base64::engine::general_purpose::STANDARD.decode(&contents.data))
+        .map_err(|e| e.to_string())?;
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(copy.parent().unwrap_or(copy))?;
+        if copy.exists() {
+            std::fs::set_permissions(copy, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::write(copy, bytes)?;
+        quarantine(copy)?;
+        std::fs::set_permissions(copy, std::fs::Permissions::from_mode(0o444))
+    };
+    write().map_err(|e| format!("the copy could not be written: {e}"))
 }
 
 /// Opens a clicked link: a local file in its default app, anything else in the browser. A
@@ -500,6 +618,7 @@ pub(super) fn open_link(
     let asked = ask::resolve_paths(vec![reference.clone()], bases.to_vec());
     let reply = bridge.ask(asked);
     let deadline = cx.background_executor().timer(CLICK_REPLY);
+    let bridge = bridge.clone();
     window
         .spawn(cx, async move |cx| {
             let resolved = match reply {
@@ -509,23 +628,15 @@ pub(super) fn open_link(
                 Err(error) => Err(error),
             };
             let _ = cx.update(|window, cx| {
-                let missing = match (resolved, menu_at) {
+                let why = match (resolved, menu_at) {
                     (Ok(Some(file)), Some(position)) => {
-                        return show_menu(file, position, window, cx);
+                        return show_menu(file, position, bridge.clone(), window, cx);
                     }
-                    (Ok(Some(file)), None) => return open_file(&file, cx),
+                    (Ok(Some(file)), None) => return open_file(&file, &bridge, window, cx),
                     (Ok(None), _) => "the file no longer exists".to_string(),
                     (Err(error), _) => error,
                 };
-                struct FileMissing;
-                let name = Path::new(&reference)
-                    .file_name()
-                    .map_or(reference.as_str().into(), |name| name.to_string_lossy());
-                window.push_notification(
-                    Notification::warning(format!("Can't open {name}: {missing}."))
-                        .id::<FileMissing>(),
-                    cx,
-                );
+                missing(&reference, why, window, cx);
             });
         })
         .detach();
@@ -543,6 +654,18 @@ async fn in_time<T>(
     .await
 }
 
+/// Says that the file `reference` names could not be opened, and why.
+fn missing(reference: &str, why: String, window: &mut Window, cx: &mut App) {
+    struct FileMissing;
+    let name = Path::new(reference)
+        .file_name()
+        .map_or(reference.into(), |name| name.to_string_lossy());
+    window.push_notification(
+        Notification::warning(format!("Can't open {name}: {why}.")).id::<FileMissing>(),
+        cx,
+    );
+}
+
 /// The menu of the right-clicked file link. The text view only reports the click, so the
 /// workspace draws the menu, through [`link_menu`].
 #[derive(Default)]
@@ -553,21 +676,34 @@ struct LinkMenu {
 }
 impl Global for LinkMenu {}
 
-fn show_menu(file: ResolvedPath, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+/// Reveal in Finder is offered only for a file on this Mac; Copy path copies the host's path.
+fn show_menu(
+    file: ResolvedPath,
+    position: Point<Pixels>,
+    bridge: Bridge,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let here = bridge.remote().is_none();
     let menu = PopupMenu::build(window, cx, |menu, _, _| {
         let (reveal, copy) = (file.path.clone(), file.path.clone());
         let open = file;
-        menu.item(PopupMenuItem::new("Open").on_click(move |_, _, cx| open_file(&open, cx)))
-            .item(
+        menu.item(
+            PopupMenuItem::new("Open")
+                .on_click(move |_, window, cx| open_file(&open, &bridge, window, cx)),
+        )
+        .when(here, |menu| {
+            menu.item(
                 PopupMenuItem::new("Reveal in Finder")
                     .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
             )
-            .separator()
-            .item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(
-                    copy.to_string_lossy().into_owned(),
-                ))
-            }))
+        })
+        .separator()
+        .item(PopupMenuItem::new("Copy path").on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                copy.to_string_lossy().into_owned(),
+            ))
+        }))
     });
     let dismissed = window.subscribe(&menu, cx, |_, _: &DismissEvent, window, cx| {
         cx.default_global::<LinkMenu>().open = None;
@@ -797,7 +933,7 @@ mod tests {
     #[test]
     fn only_code_naming_a_file_becomes_a_link() {
         let link_code = |body: &str, found: fn(&str) -> Option<PathBuf>| {
-            super::link_code(body, &candidates(body), found)
+            super::link_code(body, &candidates(body), None, found)
         };
         let found = |reference: &str| {
             (reference == "src/a b.rs" || reference == "x.rs")
@@ -815,6 +951,93 @@ mod tests {
         );
         assert_eq!(link_code("```\n`x.rs`\n```", found), "```\n`x.rs`\n```");
         assert_eq!(link_code("Wow!`x.rs`", found), "Wow!`x.rs`");
+    }
+
+    #[test]
+    fn a_remote_file_is_copied_under_its_hosts_folder_and_never_above_it() {
+        let cache = PathBuf::from("/c");
+        let copy = |path: &str| super::copy_path(&cache, "0123456789abcdef99", path.as_ref());
+        assert_eq!(
+            copy("/Users/m/dev/tidepool/a.rs"),
+            PathBuf::from("/c/0123456789abcdef/Users/m/dev/tidepool/a.rs")
+        );
+        assert_eq!(
+            copy("/Users/../../etc/passwd"),
+            PathBuf::from("/c/0123456789abcdef/Users/etc/passwd")
+        );
+    }
+
+    #[test]
+    fn a_copy_that_would_run_is_shown_whatever_the_host_says() {
+        let folder = tempfile::tempdir().unwrap();
+        let contents = workspace_core::FileContents {
+            path: PathBuf::new(),
+            data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "rm -rf ~"),
+        };
+        // The host reported it as safe to open; only the copy here decides.
+        let script = folder.path().join("h/x.command");
+        super::write_copy(&script, &contents).unwrap();
+        assert!(
+            !super::opens_copy(&script),
+            "a Terminal script is shown, not opened"
+        );
+        let notes = folder.path().join("h/notes.md");
+        super::write_copy(&notes, &contents).unwrap();
+        assert!(super::opens_copy(&notes));
+        assert!(
+            !super::opens_copy(&folder.path().join("h/gone.md")),
+            "unreadable: shown"
+        );
+
+        let mut value = [0u8; 64];
+        let path = std::ffi::CString::new(script.to_str().unwrap()).unwrap();
+        // SAFETY: the buffer is 64 bytes and the strings are valid for the call.
+        let read = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                c"com.apple.quarantine".as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        assert!(read > 0, "quarantined");
+        assert!(value[..read as usize].ends_with(b";Wiffletree;"));
+    }
+
+    #[test]
+    fn a_copy_is_read_only_and_replaces_the_one_before() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let folder = tempfile::tempdir().unwrap();
+        let copy = folder.path().join("h/notes.md");
+        let contents = |text: &str| workspace_core::FileContents {
+            path: PathBuf::new(),
+            data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, text),
+        };
+        super::write_copy(&copy, &contents("one")).unwrap();
+        super::write_copy(&copy, &contents("two")).unwrap();
+        assert_eq!(fs::read_to_string(&copy).unwrap(), "two");
+        assert_eq!(
+            fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+    }
+
+    #[test]
+    fn a_file_on_a_remote_host_is_labelled_with_the_host() {
+        let body = "In `~/dev/tidepool`, see `notes.md`.";
+        let found = |reference: &str| {
+            (reference == "~/dev/tidepool").then(|| PathBuf::from("/Users/m/dev/tidepool"))
+        };
+        assert_eq!(
+            super::link_code(body, &candidates(body), Some("Studio Mac"), found),
+            "In [Studio Mac: `~/dev/tidepool`](</Users/m/dev/tidepool>), see `notes.md`."
+        );
+        assert_eq!(
+            super::link_code(body, &candidates(body), Some("[Mac]"), found),
+            "In [\\[Mac\\]: `~/dev/tidepool`](</Users/m/dev/tidepool>), see `notes.md`."
+        );
     }
 
     #[test]

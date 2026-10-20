@@ -245,6 +245,9 @@ pub fn resolve_paths(
 pub fn read_file(path: PathBuf, max_bytes: u64) -> Ask<FileContents> {
     Ask::new(Command::ReadFile { path, max_bytes })
 }
+pub fn list_folder(path: PathBuf) -> Ask<FolderListing> {
+    Ask::new(Command::ListFolder { path })
+}
 pub fn core_instructions() -> Ask<Vec<crate::skills::CoreText>> {
     Ask::new(Command::CoreInstructions)
 }

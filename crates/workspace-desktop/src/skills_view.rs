@@ -1279,11 +1279,14 @@ impl SkillsPage {
             button("skill-history").ghost().label("History").on_click(
                 cx.listener(move |v, _, w, c| v.open_skill(SkillView::History(skill), w, c)),
             ),
-            button("reset-skill")
-                .ghost()
-                .label("Reset to stock")
-                .disabled(at_stock)
-                .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
+            ui::gated(
+                button("reset-skill")
+                    .ghost()
+                    .label("Reset to stock")
+                    .disabled(at_stock),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
         ];
         let roles = about(skill).roles;
         let basis = match &state.rewrite {
@@ -1470,6 +1473,7 @@ impl SkillsPage {
                             .ghost()
                             .icon(icon("undo").size(px(13.)))
                             .label("Undo")
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(move |v, _, _, c| {
                                 let note = undo.clone();
                                 v.confirm(Confirm::Undo { note, later: false }, c)
@@ -1479,6 +1483,7 @@ impl SkillsPage {
                         button("dismiss-merge")
                             .link()
                             .label("Dismiss")
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(move |v, _, w, c| {
                                 let entry = dismiss.clone();
                                 v.request(Command::DismissSkillMerge { skill, entry }, w, c)
@@ -1508,17 +1513,19 @@ impl SkillsPage {
         let mergeable = (state.rewrite.as_ref()).is_some_and(|r| !r.base_version.is_empty());
         let undone = state.merge_standing == Some(MergeStanding::Undone);
         let merge = |label: String| {
-            button("merge-update").label(label).on_click(
+            ui::gated(button("merge-update").label(label), &self.shared.host).on_click(
                 cx.listener(move |v, _, w, c| v.request(Command::MergeSkillUpdate { skill }, w, c)),
             )
         };
-        let mark =
+        let mark = ui::gated(
             button("mark-up-to-date")
                 .ghost()
-                .label("Mark as up to date")
-                .on_click(cx.listener(move |v, _, w, c| {
-                    v.request(Command::MarkSkillUpToDate { skill }, w, c)
-                }));
+                .label("Mark as up to date"),
+            &self.shared.host,
+        )
+        .on_click(
+            cx.listener(move |v, _, w, c| v.request(Command::MarkSkillUpToDate { skill }, w, c)),
+        );
         let actions = match offers {
             Offers::Nothing => None,
             Offers::MergeIn => Some(
@@ -1538,6 +1545,7 @@ impl SkillsPage {
                         button("banner-reset")
                             .ghost()
                             .label("Reset to stock")
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(|v, _, _, c| v.confirm(Confirm::Reset, c))),
                     ),
             ),
@@ -1597,6 +1605,7 @@ impl SkillsPage {
             button(id(name))
                 .label(label)
                 .disabled(wordings.is_none())
+                .map(|b| ui::gated(b, &self.shared.host))
                 .on_click(cx.listener(move |v, _, w, c| {
                     let wordings = wordings.clone().unwrap_or_default();
                     v.request(Command::AnswerSkillQuestion { skill, wordings }, w, c)
@@ -1849,6 +1858,7 @@ impl SkillsPage {
                 button("review-undo")
                     .ghost()
                     .label("Undo")
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(cx.listener(move |v, _, _, c| v.confirm(undo.clone(), c))),
             )
             .child(
@@ -1934,14 +1944,19 @@ impl SkillsPage {
                     }),
                 );
                 let entry_name = name.clone();
-                let restore =
-                    action("restore-entry", "Restore").on_click(cx.listener(move |v, _, w, c| {
-                        let entry = entry_name.clone();
-                        match merged_since.clone() {
-                            Some(merged) => v.confirm(Confirm::Restore { entry, merged }, c),
-                            None => v.request(Command::RestoreSkill { skill, entry }, w, c),
-                        }
-                    }));
+                let restore = match self.shared.host.changes_refused() {
+                    // Restoring saves at once, so it waits for a host that takes changes.
+                    Some(_) => action("restore-entry", "Restore").opacity(0.5),
+                    None => action("restore-entry", "Restore").on_click(cx.listener(
+                        move |v, _, w, c| {
+                            let entry = entry_name.clone();
+                            match merged_since.clone() {
+                                Some(merged) => v.confirm(Confirm::Restore { entry, merged }, c),
+                                None => v.request(Command::RestoreSkill { skill, entry }, w, c),
+                            }
+                        },
+                    )),
+                };
                 let merge = merge_note(&name, entry, &self.skill_history.machine);
                 let merge_actions = merge.clone().map(|note| {
                     let entry = note.entry.clone();
@@ -2103,11 +2118,14 @@ impl SkillsPage {
                         )
                     })
                     .child(
-                        button("save-skill-text")
-                            .primary()
-                            .label("Save")
-                            .disabled(!dirty)
-                            .on_click(save),
+                        ui::gated(
+                            button("save-skill-text")
+                                .primary()
+                                .label("Save")
+                                .disabled(!dirty),
+                            &self.shared.host,
+                        )
+                        .on_click(save),
                     ),
             )
     }
@@ -2248,6 +2266,7 @@ impl Render for SkillsPage {
             "How your agents work",
             self.skills_page(p, cx),
             None,
+            &self.shared.host,
             p,
             cx,
         )

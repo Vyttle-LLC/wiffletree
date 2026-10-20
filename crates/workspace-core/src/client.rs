@@ -1,12 +1,12 @@
 //! A client of a host's socket, as `docs/host-protocol.md` describes it: `Hello` with the client
 //! credential, requests matched to their replies by id, and one event subscription. When the
-//! connection drops, it connects again after a growing delay, resumes its subscription from its
+//! connection drops, it connects again as `Backoff` says, resumes its subscription from its
 //! last cursor, and sends again each request that never got its reply and is safe to repeat: a
 //! read, or a `Send`, which the host stores once by its message id.
 //!
 //! A host that shares no protocol with the client refuses it. The client keeps trying, since an
 //! older host restarts into the new version once asked, and says why it is not connected.
-use crate::*;
+use crate::{backoff::Backoff, *};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
@@ -18,12 +18,9 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
-/// The delay before the first try after a drop, doubled after each failed try up to the last.
-const FIRST_RETRY: Duration = Duration::from_millis(500);
-const LAST_RETRY: Duration = Duration::from_secs(30);
 /// How long the host may take to answer `Hello` and `Subscribe`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// After this long without a line from the host the client asks it something; if that goes
@@ -65,6 +62,17 @@ struct State {
     host_version: Option<String>,
     /// Why the host last refused the client, until one welcomes it.
     refusal: Option<Refusal>,
+    /// When the host last sent a line.
+    heard_at: Option<SystemTime>,
+    /// The event kinds to subscribe to, from a host that can narrow them; every kind when `None`.
+    kinds: Option<Vec<EventKindName>>,
+}
+
+/// Whether the client is connected, and when it last heard from the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkState {
+    pub connected: bool,
+    pub heard_at: Option<SystemTime>,
 }
 
 struct Shared {
@@ -76,6 +84,12 @@ struct Shared {
     writer: Mutex<Option<UnixStream>>,
     state: Mutex<State>,
     stopped: AtomicBool,
+    /// Try at once rather than wait out the delay.
+    retry_now: AtomicBool,
+    /// Woken, holding at most one wake, when the connection drops or comes back.
+    link_changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
+    /// The connection was closed to subscribe again, so the next one opens at once.
+    resubscribing: AtomicBool,
 }
 
 /// A connection to a host that keeps itself connected until stopped.
@@ -89,7 +103,41 @@ impl HostClient {
         client: Client,
         on_event: OnEvent,
     ) -> io::Result<Self> {
-        let shared = Arc::new(Shared {
+        let shared = Self::shared(launcher, client, on_event);
+        let reader = match shared.open() {
+            Ok(reader) => Some(reader),
+            Err(_) if shared.state().refusal.is_some() => None,
+            Err(error) => return Err(error),
+        };
+        Self::run(shared, move |_| reader)
+    }
+    /// Connects to the host `launcher` reaches, trying again as `Backoff` says until it answers,
+    /// as for a paired host that may be away. Even the first try is the worker's, so a host that
+    /// is slow to answer never holds up the caller.
+    pub fn keep_connecting(
+        launcher: Box<dyn Launch>,
+        client: Client,
+        on_event: OnEvent,
+    ) -> io::Result<Self> {
+        let shared = Self::shared(launcher, client, on_event);
+        Self::run(shared, |shared| shared.open().ok())
+    }
+    /// Starts the worker on the connection `first` opens, or with none to try again later.
+    fn run(
+        shared: Arc<Shared>,
+        first: impl FnOnce(&Shared) -> Option<BufReader<UnixStream>> + Send + 'static,
+    ) -> io::Result<Self> {
+        let worker = shared.clone();
+        std::thread::Builder::new()
+            .name("host-client".into())
+            .spawn(move || {
+                let reader = first(&worker);
+                worker.run(reader)
+            })?;
+        Ok(Self(shared))
+    }
+    fn shared(launcher: Box<dyn Launch>, client: Client, on_event: OnEvent) -> Arc<Shared> {
+        Arc::new(Shared {
             hello: Hello {
                 protocols: [PROTOCOL_VERSION, PROTOCOL_VERSION],
                 app_version: build_version().into(),
@@ -102,17 +150,22 @@ impl HostClient {
             writer: Mutex::default(),
             state: Mutex::default(),
             stopped: AtomicBool::new(false),
-        });
-        let reader = match shared.open() {
-            Ok(reader) => Some(reader),
-            Err(_) if shared.state().refusal.is_some() => None,
-            Err(error) => return Err(error),
-        };
-        let worker = shared.clone();
-        std::thread::Builder::new()
-            .name("host-client".into())
-            .spawn(move || worker.run(reader))?;
-        Ok(Self(shared))
+            retry_now: AtomicBool::new(false),
+            link_changes: async_channel::bounded(1),
+            resubscribing: AtomicBool::new(false),
+        })
+    }
+    /// Subscribes to only `kinds` of event, or to every kind with `None`, from a host that can
+    /// narrow them. A subscription is made once per connection, so a change connects again.
+    pub fn subscribe_to(&self, kinds: Option<Vec<EventKindName>>) {
+        let mut writer = self.0.writer();
+        if std::mem::replace(&mut self.0.state().kinds, kinds.clone()) == kinds {
+            return;
+        }
+        if let Some(stream) = writer.take() {
+            self.0.resubscribing.store(true, Ordering::Relaxed);
+            let _ = stream.shutdown(Shutdown::Both);
+        }
     }
     /// Sends `command`; its reply arrives on the receiver. While disconnected it waits to be
     /// written once the client connects again.
@@ -148,6 +201,23 @@ impl HostClient {
     }
     fn connected(&self) -> bool {
         self.0.writer().is_some()
+    }
+    /// Whether connected now, and when the host last sent anything.
+    pub fn link(&self) -> LinkState {
+        let connected = self.connected();
+        LinkState {
+            connected,
+            heard_at: self.0.state().heard_at,
+        }
+    }
+    /// Wakes when the connection drops or comes back; read `link` then.
+    pub fn link_changes(&self) -> async_channel::Receiver<()> {
+        self.0.link_changes.1.clone()
+    }
+    /// While disconnected, tries to connect at once and starts the delays over, as the network
+    /// changing or the human pressing Try now does.
+    pub fn try_now(&self) {
+        self.0.retry_now.store(true, Ordering::Relaxed);
     }
     /// Why the host refuses this client, while it does.
     pub fn refusal(&self) -> Option<Refusal> {
@@ -195,15 +265,14 @@ impl Shared {
     /// Connects, says `Hello`, subscribes from the last cursor and writes what waits. A client
     /// stopped meanwhile gives up instead, so it never keeps a host it started.
     fn open(&self) -> io::Result<BufReader<UnixStream>> {
-        let endpoint = self.launcher().endpoint(&self.stopped)?;
+        let (mut stream, credential) = self.launcher().connect(&self.stopped)?;
         if self.stopped.load(Ordering::Relaxed) {
             return Err(io::Error::other(DISCONNECTED));
         }
-        let mut stream = UnixStream::connect(&endpoint.socket)?;
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         let mut reader = BufReader::new(stream.try_clone()?);
         let hello = Hello {
-            credential: endpoint.credential,
+            credential,
             ..self.hello.clone()
         };
         write_line(&mut stream, &HelloLine { hello })?;
@@ -216,11 +285,19 @@ impl Shared {
                 return Err(io::Error::other(message));
             }
         };
-        let after = self.state().cursor.clone();
+        let narrows = (welcome.capabilities.iter()).any(|c| c == capability::ATTENTION);
+        let wanted = |state: &State| state.kinds.clone().filter(|_| narrows);
+        let (after, kinds) = {
+            let state = self.state();
+            (state.cursor.clone(), wanted(&state))
+        };
         let subscribe = Request {
             version: welcome.protocol,
             id: new_id(),
-            command: Command::Subscribe { after, kinds: None },
+            command: Command::Subscribe {
+                after,
+                kinds: kinds.clone(),
+            },
         };
         write_line(&mut stream, &subscribe)?;
         // Nothing else is written yet, so the next line answers it.
@@ -240,6 +317,14 @@ impl Shared {
         if self.stopped.load(Ordering::Relaxed) {
             return Err(io::Error::other(DISCONNECTED));
         }
+        // `subscribe_to` changed the kinds during the handshake and found no connection to
+        // close, so this one subscribes again at once.
+        if wanted(&self.state()) != kinds {
+            self.resubscribing.store(true, Ordering::Relaxed);
+            return Err(io::Error::other(
+                "The subscription changed while connecting",
+            ));
+        }
         let (was_refused, restart_when_idle) = {
             let mut state = self.state();
             state.protocol = welcome.protocol;
@@ -248,11 +333,13 @@ impl Shared {
                 && (welcome.capabilities.iter()).any(|c| c == capability::RESTART_WHEN_IDLE);
             state.capabilities = welcome.capabilities;
             state.host_version = Some(welcome.host_version);
+            state.heard_at = Some(SystemTime::now());
             (state.refusal.take().is_some(), restart_when_idle)
         };
         *writer = Some(stream);
         self.flush(&mut writer);
         drop(writer);
+        let _ = self.link_changes.0.try_send(());
         if was_refused {
             (self.on_event)(&EventKind::Resync);
         }
@@ -271,12 +358,11 @@ impl Shared {
     /// Sends `command`, a `RestartHost`, on a connection of its own to a host that refuses the
     /// client, and waits for the answer.
     fn restart_refused(&self, command: Command) -> io::Result<()> {
-        let endpoint = self.launcher().endpoint(&self.stopped)?;
-        let mut stream = UnixStream::connect(&endpoint.socket)?;
+        let (mut stream, credential) = self.launcher().connect(&self.stopped)?;
         stream.set_read_timeout(Some(RESTART_TIMEOUT))?;
         let mut reader = BufReader::new(stream.try_clone()?);
         let hello = Hello {
-            credential: endpoint.credential,
+            credential,
             ..self.hello.clone()
         };
         write_line(&mut stream, &HelloLine { hello })?;
@@ -304,26 +390,38 @@ impl Shared {
                 self.read(reader);
                 self.disconnected();
             }
-            let mut delay = FIRST_RETRY;
+            self.retry_now.store(false, Ordering::Relaxed);
+            let mut backoff = Backoff::dropped(Instant::now());
+            if self.resubscribing.swap(false, Ordering::Relaxed) {
+                backoff.try_now(Instant::now());
+            }
             reader = loop {
-                if !self.wait(delay) {
+                if !self.wait(&mut backoff) {
                     return;
                 }
                 match self.open() {
                     Ok(reader) => break Some(reader),
                     Err(error) => eprintln!("Connect to the host: {error}"),
                 }
-                delay = (delay * 2).min(LAST_RETRY);
+                backoff.failed(Instant::now());
+                if self.resubscribing.swap(false, Ordering::Relaxed) {
+                    backoff.try_now(Instant::now());
+                }
             };
         }
     }
-    /// Sleeps `delay`, or less once stopped; whether still running.
-    fn wait(&self, delay: Duration) -> bool {
+    /// Sleeps until `backoff` is due, or until asked to try now; whether still running.
+    fn wait(&self, backoff: &mut Backoff) -> bool {
         let step = Duration::from_millis(50);
-        let mut waited = Duration::ZERO;
-        while waited < delay && !self.stopped.load(Ordering::Relaxed) {
-            std::thread::sleep(step);
-            waited += step;
+        while !self.stopped.load(Ordering::Relaxed) {
+            let now = Instant::now();
+            if self.retry_now.swap(false, Ordering::Relaxed) {
+                backoff.try_now(now);
+            }
+            if now >= backoff.due() {
+                break;
+            }
+            std::thread::sleep(step.min(backoff.due() - now));
         }
         !self.stopped.load(Ordering::Relaxed)
     }
@@ -372,6 +470,7 @@ impl Shared {
     }
     fn dispatch(&self, line: &[u8]) -> serde_json::Result<()> {
         let value: Value = serde_json::from_slice(line)?;
+        self.state().heard_at = Some(SystemTime::now());
         if value.get("event").is_some() {
             let EventLine { event } = serde_json::from_value(value)?;
             self.state().cursor = Some(event.cursor);
@@ -406,6 +505,7 @@ impl Shared {
                 .collect()
         };
         drop(writer);
+        let _ = self.link_changes.0.try_send(());
         for pending in lost {
             (pending.reply)(Err(LOST.into()));
         }
@@ -525,7 +625,10 @@ fn read_line<T: DeserializeOwned>(reader: &mut BufReader<UnixStream>) -> io::Res
 mod tests {
     use super::*;
     use std::{
-        os::unix::net::UnixListener, path::PathBuf, sync::atomic::AtomicUsize, time::Instant,
+        os::unix::net::UnixListener,
+        path::{Path, PathBuf},
+        sync::atomic::AtomicUsize,
+        time::Instant,
     };
 
     /// A host that completes the handshake on each connection, then reads every request and
@@ -834,5 +937,248 @@ mod tests {
             refused(&refusal([1, 2], [4, 4]))
                 .ends_with("Restart the host so it runs this version.")
         );
+    }
+
+    /// A host that welcomes each connection, answers `Subscribe`, records every `Send` by its
+    /// message id, and closes the first connection that brings a `Send` without answering it,
+    /// as when the connection drops after the host stored the message.
+    fn losing_first_answer(folder: &Path) -> Arc<Mutex<Vec<String>>> {
+        let listener = UnixListener::bind(folder.join(SOCKET_FILE)).unwrap();
+        let sends = Arc::new(Mutex::new(vec![]));
+        let recorded = sends.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let (Ok(mut stream), sends) = (stream, recorded.clone()) else {
+                    continue;
+                };
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _: HelloLine = read_line(&mut reader).unwrap();
+                    write_line(&mut stream, &welcome("t")).unwrap();
+                    while let Ok(request) = read_line::<Request>(&mut reader) {
+                        let result = match request.command {
+                            Command::Subscribe { .. } => {
+                                serde_json::json!({"cursor": {"epoch": "e", "seq": 0}})
+                            }
+                            Command::Send { id, .. } => {
+                                let mut sends = sends.lock().unwrap();
+                                sends.push(id);
+                                if sends.len() == 1 {
+                                    let _ = stream.shutdown(Shutdown::Both);
+                                    return;
+                                }
+                                Value::Null
+                            }
+                            _ => Value::Null,
+                        };
+                        let response = Response {
+                            version: request.version,
+                            id: request.id,
+                            result: Some(result),
+                            error: None,
+                            host_ms: None,
+                        };
+                        let _ = write_line(&mut stream, &response);
+                    }
+                });
+            }
+        });
+        sends
+    }
+    fn send(body: &str) -> Command {
+        Command::Send {
+            id: new_id(),
+            sender: None,
+            recipient: "coordinator".into(),
+            body: body.into(),
+            attachments: vec![],
+            uploads: vec![],
+        }
+    }
+    fn found(folder: &Path) -> Box<Found> {
+        Box::new(Found {
+            socket: folder.join(SOCKET_FILE),
+            outlives_app: false,
+        })
+    }
+    fn test_client() -> Client {
+        Client {
+            name: "test".into(),
+            kind: "script".into(),
+        }
+    }
+
+    #[test]
+    fn a_send_whose_answer_was_lost_goes_again_with_its_id() {
+        let folder = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let sends = losing_first_answer(folder.path());
+        let client =
+            HostClient::connect(found(folder.path()), test_client(), Box::new(|_| {})).unwrap();
+
+        let message = send("Ship it");
+        let Command::Send { id, .. } = &message else {
+            unreachable!()
+        };
+        let reply = client.request(message.clone()).unwrap();
+        let answered = reply.recv_blocking().unwrap();
+
+        assert!(answered.is_ok(), "{answered:?}");
+        assert_eq!(
+            *sends.lock().unwrap(),
+            [id.clone(), id.clone()],
+            "the same id twice"
+        );
+        client.stop();
+    }
+
+    #[test]
+    fn a_message_waiting_when_the_client_stops_is_never_sent() {
+        let folder = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        // No host answers yet, so the message waits.
+        let away =
+            HostClient::keep_connecting(found(folder.path()), test_client(), Box::new(|_| {}))
+                .unwrap();
+        let _waiting = away.request(send("Written while away")).unwrap();
+        away.stop();
+
+        let sends = losing_first_answer(folder.path());
+        let back =
+            HostClient::connect(found(folder.path()), test_client(), Box::new(|_| {})).unwrap();
+        // The new client is answered, so anything the old one held would have arrived by now.
+        back.request_blocking(Command::Snapshot, Duration::from_secs(5))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            sends.lock().unwrap().is_empty(),
+            "{:?}",
+            sends.lock().unwrap()
+        );
+        back.stop();
+    }
+
+    #[test]
+    fn a_client_subscribes_narrowly_only_where_the_host_offers_it() {
+        let mut offering = welcome("t");
+        if let HelloAnswer::Welcome(welcome) = &mut offering {
+            welcome.capabilities.push(capability::ATTENTION.into());
+        }
+        for (answer, narrowed) in [(welcome("t"), false), (offering, true)] {
+            let host = FakeHost::start(answer);
+            let client = connect(&host, false, Box::new(|_| {}));
+            client.subscribe_to(Some(vec![EventKindName::Attention]));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let kinds = loop {
+                assert!(Instant::now() < deadline, "no second subscription");
+                match host.requests.recv_blocking().unwrap() {
+                    Command::Subscribe {
+                        kinds: Some(kinds), ..
+                    } => break Some(kinds),
+                    Command::Subscribe {
+                        kinds: None,
+                        after: Some(_),
+                    } => break None,
+                    _ => {}
+                }
+            };
+            let expected = narrowed.then(|| vec![EventKindName::Attention]);
+            assert_eq!(kinds, expected, "narrowed: {narrowed}");
+            client.stop();
+        }
+    }
+
+    #[test]
+    fn a_subscription_changed_while_connecting_is_made_on_that_connection_or_the_next() {
+        let folder = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let listener = UnixListener::bind(folder.path().join(SOCKET_FILE)).unwrap();
+        let (subscribed, subscriptions) = async_channel::unbounded();
+        let (release, released) = async_channel::unbounded::<()>();
+        std::thread::spawn(move || {
+            for (index, stream) in listener.incoming().enumerate() {
+                let (Ok(mut stream), subscribed) = (stream, subscribed.clone()) else {
+                    continue;
+                };
+                let released = released.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _: HelloLine = read_line(&mut reader).unwrap();
+                    let mut answer = welcome("t");
+                    if let HelloAnswer::Welcome(welcome) = &mut answer {
+                        welcome.capabilities.push(capability::ATTENTION.into());
+                    }
+                    write_line(&mut stream, &answer).unwrap();
+                    while let Ok(request) = read_line::<Request>(&mut reader) {
+                        if let Command::Subscribe { kinds, .. } = &request.command {
+                            let _ = subscribed.send_blocking(kinds.clone());
+                            match index {
+                                // The first connection drops once subscribed.
+                                0 => return drop(stream.shutdown(Shutdown::Both)),
+                                // The second holds its answer until the test lets it go.
+                                1 => drop(released.recv_blocking()),
+                                _ => {}
+                            }
+                        }
+                        let response = Response {
+                            version: request.version,
+                            id: request.id,
+                            result: Some(serde_json::json!({"cursor": {"epoch": "e", "seq": 0}})),
+                            error: None,
+                            host_ms: None,
+                        };
+                        let _ = write_line(&mut stream, &response);
+                    }
+                });
+            }
+        });
+        let client =
+            HostClient::keep_connecting(found(folder.path()), test_client(), Box::new(|_| {}))
+                .unwrap();
+        let next = || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match subscriptions.try_recv() {
+                    Ok(kinds) => return kinds,
+                    Err(_) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => panic!("no subscription in time"),
+                }
+            }
+        };
+        assert_eq!(next(), None, "the first connection, which drops");
+        assert_eq!(next(), None, "the second, held mid-handshake");
+
+        client.subscribe_to(Some(vec![EventKindName::Attention]));
+        release.send_blocking(()).unwrap();
+
+        assert_eq!(
+            next(),
+            Some(vec![EventKindName::Attention]),
+            "subscribed again"
+        );
+        client.stop();
+    }
+
+    #[test]
+    fn a_host_slow_to_answer_does_not_hold_up_keep_connecting() {
+        struct Slow;
+        impl Launch for Slow {
+            fn endpoint(&mut self, stopped: &AtomicBool) -> io::Result<Endpoint> {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline && !stopped.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(io::Error::other("no answer"))
+            }
+        }
+        let started = Instant::now();
+        let client =
+            HostClient::keep_connecting(Box::new(Slow), test_client(), Box::new(|_| {})).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!client.link().connected);
+        client.stop();
     }
 }

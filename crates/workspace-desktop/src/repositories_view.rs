@@ -101,7 +101,11 @@ impl RepositoriesPage {
         let mut body = div().flex().flex_col().gap_3();
         if !snapshot.repositories.is_empty() {
             body = body
-                .child(self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx))
+                .child(ui::locked(
+                    self.keeper_block(&snapshot.keeper, &snapshot.keeper_held, p, cx),
+                    &self.shared.host,
+                    p,
+                ))
                 .child(self.owners_block(snapshot, p, cx));
         }
         body = body.child(
@@ -116,16 +120,19 @@ impl RepositoriesPage {
                     .on_click(cx.listener(|v, _, w, c| v.open_leftovers(w, c))),
             )
             .child(
-                button("add-workspace-repositories")
-                    .primary()
-                    .icon(icon("plus"))
-                    .label("Add repositories…")
-                    .on_click(cx.listener(|_, _, _, c| {
-                        c.emit(Intent::Create {
-                            kind: Creation::Import,
-                            ticket: None,
-                        })
-                    })),
+                ui::gated(
+                    button("add-workspace-repositories")
+                        .primary()
+                        .icon(icon("plus"))
+                        .label("Add repositories…"),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(|_, _, _, c| {
+                    c.emit(Intent::Create {
+                        kind: Creation::Import,
+                        ticket: None,
+                    })
+                })),
             ),
         );
         if snapshot.repositories.is_empty() {
@@ -209,6 +216,7 @@ impl RepositoriesPage {
                                 "Remove from the workspace; root folders won't add it back. Files on disk are untouched."
                             })
                             .disabled(in_use)
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(move |v, _, w, c| {
                                 v.request(
                                     Command::RemoveRepository {
@@ -246,11 +254,11 @@ impl RepositoriesPage {
             .gap_2()
             .child(Input::new(&self.owner_input).small().flex_1().min_w_0())
             .child(
-                button("add-owner")
-                    .small()
-                    .icon(icon("plus"))
-                    .label("Add")
-                    .on_click(cx.listener(|v, _, w, c| v.add_owner(w, c))),
+                ui::gated(
+                    button("add-owner").small().icon(icon("plus")).label("Add"),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(|v, _, w, c| v.add_owner(w, c))),
             );
         let mut card = div()
             .mb_4()
@@ -296,6 +304,7 @@ impl RepositoriesPage {
                     .xsmall()
                     .icon(icon("close"))
                     .tooltip("Stop opening PRs without asking here")
+                    .map(|b| ui::gated(b, &self.shared.host))
                     .on_click(cx.listener(move |v, _, w, c| {
                         let command = Command::SetOwnerAllowed {
                             entry: id.clone(),
@@ -330,6 +339,7 @@ impl RepositoriesPage {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        let refused = self.shared.host.changes_refused().is_some();
         let save = |keeper: KeeperSettings| {
             cx.listener(move |v, _, w, c| {
                 v.request(
@@ -424,6 +434,7 @@ impl RepositoriesPage {
             ))
             .child(trigger(
                 Checkbox::new("keeper-rebase")
+                    .disabled(refused)
                     .checked(keeper.rebase)
                     .on_click(rebase),
                 KEEPER_REBASE,
@@ -431,6 +442,7 @@ impl RepositoriesPage {
             ))
             .child(trigger(
                 Checkbox::new("keeper-fixes")
+                    .disabled(refused)
                     .checked(fixes_are_on(keeper))
                     .on_click(fixes),
                 KEEPER_TRIES,
@@ -438,6 +450,7 @@ impl RepositoriesPage {
             ))
             .child(trigger(
                 Checkbox::new("keeper-comments")
+                    .disabled(refused)
                     .checked(keeper.comments)
                     .on_click(comments),
                 "Sort new comments",
@@ -504,17 +517,17 @@ impl RepositoriesPage {
         };
         let remove = repository.checks.is_some().then(|| {
             let id = id.clone();
-            button("remove-checks")
-                .ghost()
-                .xsmall()
-                .label("Remove")
-                .on_click(cx.listener(move |v, _, w, c| {
-                    let command = Command::SetRepositoryChecks {
-                        repository_id: id.clone(),
-                        checks: None,
-                    };
-                    v.request(command, w, c)
-                }))
+            ui::gated(
+                button("remove-checks").ghost().xsmall().label("Remove"),
+                &self.shared.host,
+            )
+            .on_click(cx.listener(move |v, _, w, c| {
+                let command = Command::SetRepositoryChecks {
+                    repository_id: id.clone(),
+                    checks: None,
+                };
+                v.request(command, w, c)
+            }))
         });
         row.child(Input::new(&self.checks_command).xsmall().flex_1().min_w_0())
             .child("· stop after")
@@ -523,11 +536,11 @@ impl RepositoriesPage {
             .child(step("+", minutes + 1))
             .child("min")
             .child(
-                button("save-checks")
-                    .primary()
-                    .xsmall()
-                    .label("Save")
-                    .on_click(cx.listener(|v, _, w, c| v.save_checks(w, c))),
+                ui::gated(
+                    button("save-checks").primary().xsmall().label("Save"),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(|v, _, w, c| v.save_checks(w, c))),
             )
             .children(remove)
             .child(
@@ -676,6 +689,7 @@ impl RepositoriesPage {
                             .xsmall()
                             .icon(icon("close"))
                             .tooltip("Stop checking this folder. Its repositories stay.")
+                            .map(|b| ui::gated(b, &self.shared.host))
                             .on_click(cx.listener(move |v, _, w, c| {
                                 v.request(
                                     Command::RemoveRepositoryRoot {
@@ -825,6 +839,7 @@ impl Render for RepositoriesPage {
             "Repositories every project can use",
             self.body(p, cx),
             None,
+            &self.shared.host,
             p,
             cx,
         )

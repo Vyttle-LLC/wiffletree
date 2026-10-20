@@ -1,0 +1,240 @@
+//! A paired host as `HostClient` reaches it (design 5 and 7 of `remote-hosts`): TLS pinned to
+//! the host's key and the challenge, through `remote_client::connect`, then a relay between the
+//! WebSocket and one end of a local socket pair. The client speaks to the other end as it does
+//! to `host.sock`: each line it writes goes as one text frame, and each text frame comes back as
+//! one line.
+use crate::{pairing::KeyPair, remote_client::RemoteError, *};
+use std::{
+    io::{self, ErrorKind, Read, Write},
+    net::Shutdown,
+    os::{fd::AsRawFd, unix::net::UnixStream},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tungstenite::Message;
+
+/// The largest message either way: a `read_file` reply carries up to 50 MB as base64.
+const MAX_MESSAGE: usize = 80 << 20;
+
+/// Why a paired host turned this device away, which trying again does not change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turnaway {
+    /// Its certificate carries another key than the one stored at pairing.
+    KeyChanged,
+    /// It no longer knows this device.
+    Unpaired,
+}
+
+/// What the last try at a paired host found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteState {
+    /// What the host lets this device do, as its last connection said.
+    pub level: Option<AccessLevel>,
+    /// Why the host turned the device away, until a connection succeeds.
+    pub turnaway: Option<Turnaway>,
+    /// The address that last answered.
+    pub address: Option<String>,
+}
+
+/// Finds addresses for a paired host by its id, such as by browsing for it.
+pub type Discover = Box<dyn Fn() -> Vec<String> + Send>;
+
+/// Reaches a paired host by its stored addresses, then by those `discover` finds.
+pub struct RemoteLaunch {
+    host_key: Vec<u8>,
+    device: KeyPair,
+    addresses: Vec<String>,
+    discover: Discover,
+    state: Arc<Mutex<RemoteState>>,
+}
+impl RemoteLaunch {
+    pub fn new(
+        host_key: Vec<u8>,
+        device: KeyPair,
+        addresses: Vec<String>,
+        discover: Discover,
+    ) -> Self {
+        Self {
+            host_key,
+            device,
+            addresses,
+            discover,
+            state: Arc::default(),
+        }
+    }
+    /// What the last try found, shared with whoever shows it.
+    pub fn state(&self) -> Arc<Mutex<RemoteState>> {
+        self.state.clone()
+    }
+    fn set(&self, change: impl FnOnce(&mut RemoteState)) {
+        change(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+}
+impl Launch for RemoteLaunch {
+    fn endpoint(&mut self, _: &AtomicBool) -> io::Result<Endpoint> {
+        Err(io::Error::other(
+            "A paired host is reached over the network",
+        ))
+    }
+    fn connect(&mut self, stopped: &AtomicBool) -> io::Result<(UnixStream, Option<String>)> {
+        let mut tried = self.addresses.clone();
+        for found in (self.discover)() {
+            if !tried.contains(&found) {
+                tried.push(found);
+            }
+        }
+        let mut last = io::Error::other("No address is known for this host");
+        for address in tried {
+            if stopped.load(Ordering::Relaxed) {
+                break;
+            }
+            match remote_client::connect(&address, &self.host_key, &self.device) {
+                Ok(remote) => {
+                    self.set(|state| {
+                        state.level = Some(remote.level);
+                        state.turnaway = None;
+                        state.address = Some(address.clone());
+                    });
+                    // The address that answered is tried first next time.
+                    self.addresses.retain(|a| *a != address);
+                    self.addresses.insert(0, address);
+                    return relay(remote.socket);
+                }
+                Err(error @ (RemoteError::KeyChanged | RemoteError::Unpaired)) => {
+                    let turnaway = match error {
+                        RemoteError::KeyChanged => Turnaway::KeyChanged,
+                        _ => Turnaway::Unpaired,
+                    };
+                    self.set(|state| state.turnaway = Some(turnaway));
+                    return Err(io::Error::other(error.to_string()));
+                }
+                Err(error) => last = io::Error::other(format!("{address}: {error}")),
+            }
+        }
+        Err(last)
+    }
+}
+
+/// Relays `socket` to a new socket pair on a thread of its own, and returns the client's end.
+fn relay(mut socket: remote_client::RemoteWebSocket) -> io::Result<(UnixStream, Option<String>)> {
+    let (ours, theirs) = UnixStream::pair()?;
+    socket.set_config(|config| {
+        config.max_message_size = Some(MAX_MESSAGE);
+        config.max_frame_size = Some(MAX_MESSAGE);
+    });
+    socket.get_mut().sock.set_nonblocking(true)?;
+    theirs.set_nonblocking(true)?;
+    std::thread::Builder::new()
+        .name("remote-relay".into())
+        .spawn(move || {
+            let mut relay = Relay {
+                socket,
+                local: theirs,
+                to_local: vec![],
+                from_local: vec![],
+                sending: false,
+            };
+            relay.run();
+            let _ = relay.local.shutdown(Shutdown::Both);
+            let _ = relay.socket.close(None);
+            let _ = relay.socket.flush();
+        })?;
+    Ok((ours, None))
+}
+
+struct Relay {
+    socket: remote_client::RemoteWebSocket,
+    local: UnixStream,
+    /// Lines from the host not yet written to the client.
+    to_local: Vec<u8>,
+    /// What the client wrote after its last full line.
+    from_local: Vec<u8>,
+    /// Frames to the host wait for the network.
+    sending: bool,
+}
+impl Relay {
+    /// Moves messages both ways until either side closes.
+    fn run(&mut self) {
+        while self.read_host().is_ok() && self.write_client().is_ok() && self.read_client().is_ok()
+        {
+            self.wait();
+        }
+    }
+    /// Reads every message the host has sent so far.
+    fn read_host(&mut self) -> io::Result<()> {
+        loop {
+            match self.socket.read() {
+                Ok(Message::Text(text)) => {
+                    self.to_local.extend_from_slice(text.as_bytes());
+                    self.to_local.push(b'\n');
+                }
+                Ok(Message::Close(_)) => return Err(ErrorKind::ConnectionAborted.into()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
+                    return Ok(());
+                }
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+    }
+    fn write_client(&mut self) -> io::Result<()> {
+        while !self.to_local.is_empty() {
+            match self.local.write(&self.to_local) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(written) => drop(self.to_local.drain(..written)),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+    /// Sends each full line the client has written as a text frame.
+    fn read_client(&mut self) -> io::Result<()> {
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            match self.local.read(&mut buffer) {
+                Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+                Ok(read) => self.from_local.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        }
+        while let Some(end) = self.from_local.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.from_local.drain(..=end).collect();
+            let text = String::from_utf8_lossy(&line[..end]).into_owned();
+            match self.socket.write(Message::text(text)) {
+                Ok(()) => {}
+                Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        self.sending = match self.socket.flush() {
+            Ok(()) => false,
+            Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => true,
+            Err(error) => return Err(io::Error::other(error)),
+        };
+        Ok(())
+    }
+    /// Sleeps until either side can be read, or written where something waits for it.
+    fn wait(&self) {
+        let events = |out: bool| libc::POLLIN | if out { libc::POLLOUT } else { 0 };
+        let mut fds = [
+            libc::pollfd {
+                fd: self.socket.get_ref().sock.as_raw_fd(),
+                events: events(self.sending),
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.local.as_raw_fd(),
+                events: events(!self.to_local.is_empty()),
+                revents: 0,
+            },
+        ];
+        // TLS may hold a decrypted message the socket no longer signals, so wake at least once
+        // a second.
+        // SAFETY: `fds` is a valid array of two pollfd for the call.
+        unsafe { libc::poll(fds.as_mut_ptr(), 2, 1000) };
+    }
+}
