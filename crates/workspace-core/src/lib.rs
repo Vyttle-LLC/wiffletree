@@ -3019,7 +3019,7 @@ pub enum Command {
         max_bytes: u64,
     },
     /// Names the folders in `path` and which are Git repositories; answered with
-    /// `FolderListing`.
+    /// `FolderListing`. A leading `~` is the host's home folder, except for a View only device.
     ListFolder {
         path: PathBuf,
     },

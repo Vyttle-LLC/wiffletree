@@ -308,9 +308,16 @@ impl Reader {
 }
 
 /// The folders in `path`, leaving out credential locations. The host itself and a Control
-/// device may list folders under the host's home folder too. For a device, a folder whose
+/// device may list folders under the host's home folder too, and name it `~`. For a device, a folder whose
 /// resolved target is outside what it may list is left out as well.
 pub fn list_folder(roots: &Roots, path: &Path, reader: Reader) -> Result<FolderListing> {
+    // A leading `~` names the host's home folder, where a folder browser starts.
+    let path = match path.strip_prefix("~") {
+        Ok(rest) if reader.home() => roots.home.join(rest),
+        Ok(_) => bail!("View only lists folders within what the host serves, not its home folder"),
+        Err(_) => path.to_owned(),
+    };
+    let path = path.as_path();
     let resolved = roots.check(path, reader.home())?;
     if !resolved.is_dir() {
         bail!("{} is not a folder", path.display());
@@ -528,6 +535,35 @@ mod tests {
             resolve_paths_within(&roots, &references, &bases, None),
             [None]
         );
+    }
+
+    #[test]
+    fn a_leading_tilde_lists_the_home_folder_except_for_view_only() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join("dev/tidepool/.git")).unwrap();
+        let deny = DenyList::new(home.path(), None, None);
+        let roots = Roots::new(
+            [home.path().join("dev")],
+            vec![],
+            data.path(),
+            home.path(),
+            deny,
+        )
+        .unwrap();
+        let resolved_home = fs::canonicalize(home.path()).unwrap();
+        for reader in [Reader::Host, Reader::Device(AccessLevel::Control)] {
+            let listing = list_folder(&roots, Path::new("~"), reader).unwrap();
+            assert_eq!(listing.path, resolved_home);
+            assert_eq!(listing.folders[0].name, "dev");
+            let dev = list_folder(&roots, Path::new("~/dev"), reader).unwrap();
+            assert_eq!(dev.folders[0].name, "tidepool");
+            assert!(dev.folders[0].repository);
+        }
+        let view_only = Reader::Device(AccessLevel::ViewOnly);
+        assert!(list_folder(&roots, Path::new("~"), view_only).is_err());
+        assert!(list_folder(&roots, Path::new("~/dev"), view_only).is_err());
+        assert!(list_folder(&roots, &home.path().join("dev"), view_only).is_ok());
     }
 
     #[test]
