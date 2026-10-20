@@ -15,10 +15,6 @@ use std::{
 };
 use workspace_core::{ask::Ask, *};
 
-/// How long the app waits for a reply it needs before it can go on, such as which file a link
-/// names.
-const BLOCKING_REPLY: Duration = Duration::from_secs(2);
-
 /// Waits for the host's answer to `ask`, before the app starts.
 fn answer<R: DeserializeOwned>(client: &HostClient, ask: Ask<R>) -> anyhow::Result<R> {
     let reply = client
@@ -207,10 +203,11 @@ impl Bridge {
         let reply = self.send(ask.command().clone())?;
         Ok(async move { reply.await.and_then(|reply| ask.decode(reply)) })
     }
-    /// Sends `ask` and waits briefly for its answer, for a reply the app needs before it can go
-    /// on. Fails at once while the host is out of reach.
+    /// Sends `ask` and waits briefly for its answer, for a test. The app never waits for the
+    /// host on its UI thread. Fails at once while the host is out of reach.
+    #[cfg(test)]
     pub(crate) fn ask_now<R: DeserializeOwned>(&self, ask: Ask<R>) -> Result<R, String> {
-        self.ask_within(ask, BLOCKING_REPLY)
+        self.ask_within(ask, Duration::from_secs(2))
     }
     /// Sends `ask` and waits at most `timeout` for its answer. Fails at once while the host is
     /// out of reach or refuses the app; run it off the main thread.
@@ -288,6 +285,47 @@ pub(crate) mod tests {
         /// A second bridge to the same host, as the app has after it opens again.
         pub(crate) fn reconnect(&self) -> Bridge {
             Bridge::connect(Box::new(Running(self.endpoint.clone())))
+        }
+        /// A bridge to this host through a relay that holds the app's requests while the flag is
+        /// set, as a busy host would.
+        pub(crate) fn busy(&self) -> (Bridge, Arc<AtomicBool>) {
+            use std::io::{BufRead, BufReader, Write};
+            use std::os::unix::net::{UnixListener, UnixStream};
+            let relay = self.data.path().join("relay.sock");
+            let listener = UnixListener::bind(&relay).unwrap();
+            let (host, held) = (
+                self.endpoint.socket.clone(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            let holding = held.clone();
+            std::thread::spawn(move || {
+                for app in listener.incoming() {
+                    let (Ok(app), Ok(mut to_host)) = (app, UnixStream::connect(&host)) else {
+                        return;
+                    };
+                    let (mut to_app, mut from_host) =
+                        (app.try_clone().unwrap(), to_host.try_clone().unwrap());
+                    std::thread::spawn(move || std::io::copy(&mut from_host, &mut to_app));
+                    let holding = holding.clone();
+                    std::thread::spawn(move || {
+                        for line in BufReader::new(app).split(b'\n') {
+                            let Ok(mut line) = line else { return };
+                            while holding.load(Ordering::Relaxed) {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            line.push(b'\n');
+                            if to_host.write_all(&line).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            let endpoint = Endpoint {
+                socket: relay,
+                credential: self.endpoint.credential.clone(),
+            };
+            (Bridge::connect(Box::new(Running(endpoint))), held)
         }
     }
     impl Drop for Served {

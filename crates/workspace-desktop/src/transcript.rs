@@ -214,8 +214,8 @@ impl Senders {
     }
 }
 
-/// The rows for a page of messages, aligned with them; `bridge` asks the host which file
-/// references are files.
+/// The rows for a page of messages, aligned with them; `bridge` is where their file links ask
+/// the host which references are files.
 fn prepare(messages: &[Message], senders: &Senders, bridge: &Bridge) -> Vec<Row> {
     let placements = placements(messages, &senders.session_id);
     let named = |message: &Message| {
@@ -882,6 +882,8 @@ impl Transcript {
                     senders,
                 };
                 view.replace_page(shown.clone());
+                let bodies = shown.rows.iter().filter_map(|row| row.body.as_ref());
+                file_links::link_when_resolved(bodies, &view.bridge, cx);
                 cx.emit(Intent::MessagesShown);
                 view.load_run_summaries(window, cx);
                 if ask.page.is_none() {
@@ -1721,11 +1723,11 @@ mod tests {
             bases: HashMap::new(),
             current: bases,
         };
-        prepare(
-            messages,
-            &senders,
-            &crate::bridge::tests::serve(|_| {}).bridge,
-        )
+        let served = crate::bridge::tests::serve(|_| {});
+        let rows = prepare(messages, &senders, &served.bridge);
+        let bodies = rows.iter().filter_map(|row| row.body.as_ref());
+        crate::file_links::wait_for_links(bodies, &served.bridge);
+        rows
     }
 
     #[test]

@@ -1,51 +1,65 @@
 //! File references in rendered messages. Inline code naming a file on disk, such as
 //! `crates/foo/src/bar.rs:63`, becomes a link that opens the file in its default app, and a
 //! Markdown link to a local path opens the same way. Web links keep opening in the browser.
+//!
+//! Only the host knows which references are files, and the UI thread never waits for it: a
+//! message shows as plain text at once and gains its links when the host answers.
 use super::*;
+use async_channel::{Receiver, Sender};
 use gpui_component::{
     button::ButtonVariants,
     menu::{PopupMenu, PopupMenuItem},
     text::TextView,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
     path::Path,
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
 /// Characters that never appear in a file reference, so code holding them is not looked up.
 const NOT_IN_PATHS: &[char] = &['`', '*', '?', '|', ';', '$', '"', '<', '>', '\\'];
 /// Linked bodies kept before the cache starts over; enough for every message on screen.
 const CACHE_LIMIT: usize = 1024;
+/// The room for references in one request, leaving the rest of the host's line limit for the
+/// bases and the request around them.
+const REFERENCE_BYTES: usize = MAX_LINE_BYTES / 2;
+/// How long a clicked link waits for the host to say where its file is.
+const CLICK_REPLY: Duration = Duration::from_secs(2);
 
-/// Markdown whose file references are already links, so drawing it asks the host nothing.
+/// Markdown whose file references become links once the host has said which are files.
 #[derive(Clone)]
 pub(super) struct Linked {
     id: SharedString,
-    text: SharedString,
+    body: SharedString,
+    /// None when the body has no inline code, so there is nothing to ask.
+    resolution: Option<Arc<Resolution>>,
     bases: Arc<[PathBuf]>,
     bridge: Bridge,
 }
 impl Linked {
-    /// Links `body`'s file references against `bases` in order. That parses the Markdown and
-    /// asks the host which references are files, so it runs when the text arrives, never while
-    /// drawing.
+    /// `body`, whose file references resolve against `bases` in order. It never waits for the
+    /// host: a body resolved before shows its links at once, any other shows plain until
+    /// [`link_when_resolved`] has its answer.
     pub(super) fn new(id: &str, body: &str, bases: Arc<[PathBuf]>, bridge: &Bridge) -> Self {
         Self {
             id: SharedString::from(format!("message-markdown-{id}")),
-            text: linkify(body, &bases, bridge),
+            body: SharedString::from(body.to_owned()),
+            resolution: body.contains('`').then(|| Resolution::of(body, &bases)),
             bases,
             bridge: bridge.clone(),
         }
     }
-    #[cfg(test)]
-    pub(super) fn text(&self) -> &str {
-        &self.text
+    /// The Markdown to draw: with links once they are resolved, the plain body until then.
+    pub(super) fn text(&self) -> SharedString {
+        let linked = self.resolution.as_ref().and_then(|r| r.linked.get());
+        linked.unwrap_or(&self.body).clone()
     }
     pub(super) fn view(&self) -> TextView {
         let (bases, bridge) = (self.bases.clone(), self.bridge.clone());
-        TextView::markdown(self.id.clone(), self.text.clone())
+        TextView::markdown(self.id.clone(), self.text())
             .selectable(true)
             .on_link_click(move |url, event, window, cx| {
                 open_link(url, event, &bases, &bridge, window, cx)
@@ -65,59 +79,212 @@ impl Linked {
     }
 }
 
-/// `body` with its file references turned into links, resolved by the host against `bases` in
-/// order. Each body is resolved once and cached, since a page is prepared again on each refresh;
-/// while the host is out of reach it stays unlinked and uncached.
-fn linkify(body: &str, bases: &[PathBuf], bridge: &Bridge) -> SharedString {
-    if !body.contains('`') {
-        return SharedString::from(body.to_owned());
+/// One body's links against one list of bases, shared by every [`Linked`] showing it. Each body
+/// is resolved once and cached, since a page is prepared again on each refresh; while the host
+/// is out of reach it stays unlinked and leaves the cache, to be asked again when next prepared.
+struct Resolution {
+    body: String,
+    bases: Vec<PathBuf>,
+    linked: OnceLock<SharedString>,
+    /// Taken by whoever asks the host, so a body is asked about once at a time.
+    unasked: Mutex<Option<Sender<()>>>,
+    /// Closes once the host has answered, or the asking gave up.
+    settled: Receiver<()>,
+}
+impl Resolution {
+    fn cache() -> &'static Mutex<HashMap<u64, Arc<Resolution>>> {
+        static CACHE: OnceLock<Mutex<HashMap<u64, Arc<Resolution>>>> = OnceLock::new();
+        CACHE.get_or_init(Mutex::default)
     }
-    struct Linked {
-        body: String,
-        bases: Vec<PathBuf>,
-        text: SharedString,
+    fn key(body: &str, bases: &[PathBuf]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (body, bases).hash(&mut hasher);
+        hasher.finish()
     }
-    static CACHE: OnceLock<Mutex<HashMap<u64, Linked>>> = OnceLock::new();
-    let mut hasher = DefaultHasher::new();
-    (body, bases).hash(&mut hasher);
-    let key = hasher.finish();
-    let cache = CACHE.get_or_init(Mutex::default);
-    if let Some(hit) = cache.lock().unwrap().get(&key)
-        && hit.body == body
-        && hit.bases == bases
-    {
-        return hit.text.clone();
-    }
-    let candidates = candidates(body);
-    let references = candidates.iter().map(|(.., r)| r.clone()).collect();
-    let text = match bridge.ask_now(ask::resolve_paths(references, bases.to_vec())) {
-        Ok(resolved) => {
-            let files: HashMap<&str, PathBuf> = (candidates.iter())
-                .zip(resolved)
-                .filter_map(|((.., reference), file)| Some((reference.as_str(), file?.path)))
-                .collect();
-            SharedString::from(link_code(body, &candidates, |r| files.get(r).cloned()))
+    /// The cached resolution of `body` against `bases`, or a new one yet to be asked.
+    fn of(body: &str, bases: &[PathBuf]) -> Arc<Self> {
+        let key = Self::key(body, bases);
+        let mut cache = Self::cache().lock().unwrap();
+        if let Some(hit) = cache.get(&key)
+            && hit.body == body
+            && hit.bases == bases
+        {
+            return hit.clone();
         }
-        Err(_) => return SharedString::from(body.to_owned()),
-    };
-    let mut cache = cache.lock().unwrap();
-    if cache.len() >= CACHE_LIMIT {
-        cache.clear();
-    }
-    cache.insert(
-        key,
-        Linked {
+        if cache.len() >= CACHE_LIMIT {
+            cache.clear();
+        }
+        let (sender, settled) = async_channel::bounded(1);
+        let resolution = Arc::new(Self {
             body: body.to_owned(),
             bases: bases.to_vec(),
-            text: text.clone(),
-        },
-    );
-    text
+            linked: OnceLock::new(),
+            unasked: Mutex::new(Some(sender)),
+            settled,
+        });
+        cache.insert(key, resolution.clone());
+        resolution
+    }
 }
+
+/// A resolution this caller asks the host about. Dropped unanswered, it leaves the cache, and
+/// its dropped sender wakes everyone waiting for it.
+struct Asking {
+    resolution: Arc<Resolution>,
+    _settles: Sender<()>,
+}
+impl Drop for Asking {
+    fn drop(&mut self) {
+        let resolution = &self.resolution;
+        if resolution.linked.get().is_none() {
+            let key = Resolution::key(&resolution.body, &resolution.bases);
+            let mut cache = Resolution::cache().lock().unwrap();
+            if cache.get(&key).is_some_and(|r| Arc::ptr_eq(r, resolution)) {
+                cache.remove(&key);
+            }
+        }
+    }
+}
+
+/// Resolves every body of `linked` still without links, off the UI thread, and redraws the view
+/// once they have them. One request asks about all the bodies that share their bases; a body
+/// already being asked about elsewhere is waited for, not asked again.
+pub(super) fn link_when_resolved<'a, V: 'static>(
+    linked: impl IntoIterator<Item = &'a Linked>,
+    bridge: &Bridge,
+    cx: &mut Context<V>,
+) {
+    let linked: Vec<_> = linked.into_iter().collect();
+    let Some(resolving) = resolve(&linked, bridge) else {
+        return;
+    };
+    let resolving = cx.background_spawn(resolving);
+    cx.spawn(async move |view, cx| {
+        resolving.await;
+        let _ = view.update(cx, |_, cx| cx.notify());
+    })
+    .detach();
+}
+
+/// Waits until the host has answered for `linked`, as a view's redraw would.
+#[cfg(test)]
+pub(super) fn wait_for_links<'a>(linked: impl IntoIterator<Item = &'a Linked>, bridge: &Bridge) {
+    let linked: Vec<_> = linked.into_iter().collect();
+    if let Some(resolving) = resolve(&linked, bridge) {
+        futures_lite::future::block_on(resolving);
+    }
+}
+
+/// What [`link_when_resolved`] waits for; `None` when every body has its answer already.
+fn resolve(linked: &[&Linked], bridge: &Bridge) -> Option<impl Future<Output = ()> + Send + use<>> {
+    let mut asking: HashMap<Vec<PathBuf>, Vec<Asking>> = HashMap::new();
+    let mut elsewhere = vec![];
+    let waiting = (linked.iter())
+        .filter_map(|linked| linked.resolution.clone())
+        // A body whose asking gave up stays plain until it is prepared again.
+        .filter(|resolution| resolution.linked.get().is_none() && !resolution.settled.is_closed());
+    for resolution in waiting {
+        let sender = resolution.unasked.lock().unwrap().take();
+        match sender {
+            Some(sender) => asking
+                .entry(resolution.bases.clone())
+                .or_default()
+                .push(Asking {
+                    resolution,
+                    _settles: sender,
+                }),
+            None => elsewhere.push(resolution.settled.clone()),
+        }
+    }
+    if asking.is_empty() && elsewhere.is_empty() {
+        return None;
+    }
+    let bridge = bridge.clone();
+    Some(async move {
+        let mut replies = vec![];
+        for (bases, group) in asking {
+            let mut unasked = vec![];
+            for asking in group {
+                let candidates = candidates(&asking.resolution.body);
+                if candidates.is_empty() {
+                    let _ = (asking.resolution.linked).set(asking.resolution.body.clone().into());
+                } else {
+                    unasked.push((asking, candidates));
+                }
+            }
+            for batch in batches(unasked) {
+                let asked = ask::resolve_paths(batch.references.clone(), bases.clone());
+                // Unsent, the batch is dropped, so its bodies stay unlinked and uncached.
+                if let Ok(reply) = bridge.ask(asked) {
+                    replies.push((batch, reply));
+                }
+            }
+        }
+        for (batch, reply) in replies {
+            let Ok(resolved) = reply.await else {
+                continue;
+            };
+            let files: HashMap<&str, PathBuf> = (batch.references.iter())
+                .zip(resolved)
+                .filter_map(|(reference, file)| Some((reference.as_str(), file?.path)))
+                .collect();
+            for (asking, candidates) in &batch.bodies {
+                let body = &asking.resolution.body;
+                let text = link_code(body, candidates, |r| files.get(r).cloned());
+                let _ = asking.resolution.linked.set(text.into());
+            }
+        }
+        for settled in elsewhere {
+            let _ = settled.recv().await;
+        }
+    })
+}
+
+/// One request's worth of bodies that share their bases, with each reference among them once.
+#[derive(Default)]
+struct Batch {
+    bodies: Vec<(Asking, Vec<Candidate>)>,
+    references: Vec<String>,
+    asked: HashSet<String>,
+    /// The references' size in the request.
+    bytes: usize,
+}
+
+/// `bodies`, each with its candidates, in requests small enough for the host to take. A body
+/// too large for a request even alone gets one to itself, which is refused, so it stays plain.
+fn batches(bodies: Vec<(Asking, Vec<Candidate>)>) -> Vec<Batch> {
+    let size = |reference: &String| serde_json::to_string(reference).map_or(0, |r| r.len()) + 1;
+    let mut batches: Vec<Batch> = vec![];
+    for (asking, candidates) in bodies {
+        let unasked: HashSet<&String> = (candidates.iter())
+            .map(|(.., reference)| reference)
+            .filter(|reference| !batches.last().is_some_and(|b| b.asked.contains(*reference)))
+            .collect();
+        let bytes: usize = unasked.into_iter().map(size).sum();
+        if batches
+            .last()
+            .is_none_or(|b| b.bytes + bytes > REFERENCE_BYTES)
+        {
+            batches.push(Batch::default());
+        }
+        let batch = batches.last_mut().unwrap();
+        for (.., reference) in &candidates {
+            if batch.asked.insert(reference.clone()) {
+                batch.bytes += size(reference);
+                batch.references.push(reference.clone());
+            }
+        }
+        batch.bodies.push((asking, candidates));
+    }
+    batches
+}
+
+/// An inline code span's source range, with its code or the file reference the code names.
+type Candidate = (usize, usize, String);
 
 /// The source range of each inline code span in `body` that may name a file, with the
 /// reference it names.
-fn candidates(body: &str) -> Vec<(usize, usize, String)> {
+fn candidates(body: &str) -> Vec<Candidate> {
     let mut options = markdown::ParseOptions::gfm();
     // As the text view parses, so code inside math is not mistaken for a code span.
     options.constructs.math_text = true;
@@ -138,7 +305,7 @@ fn candidates(body: &str) -> Vec<(usize, usize, String)> {
 /// Wraps each of the `candidates` that `resolve` finds a file for in a link to that file.
 fn link_code(
     body: &str,
-    candidates: &[(usize, usize, String)],
+    candidates: &[Candidate],
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> String {
     let mut linked = String::with_capacity(body.len());
@@ -161,7 +328,7 @@ fn link_code(
 }
 
 /// The source range and text of every inline code span outside a link, in document order.
-fn code_spans(node: &markdown::mdast::Node, spans: &mut Vec<(usize, usize, String)>) {
+fn code_spans(node: &markdown::mdast::Node, spans: &mut Vec<Candidate>) {
     use markdown::mdast::Node;
     match node {
         Node::InlineCode(code) => {
@@ -314,7 +481,7 @@ fn open_file(file: &ResolvedPath, cx: &App) {
 /// Opens a clicked link: a local file in its default app, anything else in the browser. A
 /// right-click on a file offers Open, Reveal in Finder and Copy path instead. A file that is
 /// gone by now, such as one in a removed worktree, says so. The host says where the file is and
-/// whether opening it would run it; this app, on the host's Mac, opens it.
+/// whether opening it would run it; this app, on the host's Mac, opens it when it answers.
 pub(super) fn open_link(
     url: &str,
     event: &ClickEvent,
@@ -329,23 +496,51 @@ pub(super) fn open_link(
         LinkAction::Open(target) => (target, None),
         LinkAction::Menu(target, position) => (target, Some(position)),
     };
-    let reference = without_location(&target);
-    let asked = ask::resolve_paths(vec![reference.into()], bases.to_vec());
-    let resolved = bridge.ask_now(asked).map(|mut found| found.pop().flatten());
-    let missing = match (resolved, menu_at) {
-        (Ok(Some(file)), Some(position)) => return show_menu(file, position, window, cx),
-        (Ok(Some(file)), None) => return open_file(&file, cx),
-        (Ok(None), _) => "the file no longer exists".to_string(),
-        (Err(error), _) => error,
-    };
-    struct FileMissing;
-    let name = Path::new(reference)
-        .file_name()
-        .map_or(reference.into(), |name| name.to_string_lossy());
-    window.push_notification(
-        Notification::warning(format!("Can't open {name}: {missing}.")).id::<FileMissing>(),
-        cx,
-    );
+    let reference = without_location(&target).to_owned();
+    let asked = ask::resolve_paths(vec![reference.clone()], bases.to_vec());
+    let reply = bridge.ask(asked);
+    let deadline = cx.background_executor().timer(CLICK_REPLY);
+    window
+        .spawn(cx, async move |cx| {
+            let resolved = match reply {
+                Ok(reply) => in_time(reply, deadline)
+                    .await
+                    .map(|mut found| found.pop().flatten()),
+                Err(error) => Err(error),
+            };
+            let _ = cx.update(|window, cx| {
+                let missing = match (resolved, menu_at) {
+                    (Ok(Some(file)), Some(position)) => {
+                        return show_menu(file, position, window, cx);
+                    }
+                    (Ok(Some(file)), None) => return open_file(&file, cx),
+                    (Ok(None), _) => "the file no longer exists".to_string(),
+                    (Err(error), _) => error,
+                };
+                struct FileMissing;
+                let name = Path::new(&reference)
+                    .file_name()
+                    .map_or(reference.as_str().into(), |name| name.to_string_lossy());
+                window.push_notification(
+                    Notification::warning(format!("Can't open {name}: {missing}."))
+                        .id::<FileMissing>(),
+                    cx,
+                );
+            });
+        })
+        .detach();
+}
+
+/// `reply`, or an error once `deadline` passes first, when the late reply is dropped.
+async fn in_time<T>(
+    reply: impl Future<Output = Result<T, String>>,
+    deadline: impl Future,
+) -> Result<T, String> {
+    futures_lite::future::or(reply, async {
+        deadline.await;
+        Err("The host did not answer in time".to_string())
+    })
+    .await
 }
 
 /// The menu of the right-clicked file link. The text view only reports the click, so the
@@ -402,13 +597,22 @@ pub(super) fn link_menu(cx: &App) -> Option<impl IntoElement> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bridge, LinkAction, Linked, candidates, link_action, local_target, reference};
+    use super::{
+        Bridge, LinkAction, Linked, candidates, in_time, link_action, local_target, reference,
+        resolve, wait_for_links,
+    };
     use crate::bridge::tests::serve;
     use gpui::{
         ClickEvent, KeyboardClickEvent, MouseButton, MouseClickEvent, MouseUpEvent,
         TouchClickEvent, point, px,
     };
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::PathBuf,
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    };
     use workspace_core::{ResolvedPath, ask};
 
     fn mouse(button: MouseButton) -> ClickEvent {
@@ -454,6 +658,13 @@ mod tests {
         bridge.ask_now(asked).unwrap().pop().flatten()
     }
 
+    /// `body` linked against `bases`, once the host has answered.
+    fn linked(body: &str, bases: &[PathBuf], bridge: &Bridge) -> Linked {
+        let linked = Linked::new("m", body, bases.to_vec().into(), bridge);
+        wait_for_links([&linked], bridge);
+        linked
+    }
+
     #[test]
     fn the_host_resolves_relative_paths_in_the_worktree_before_the_project_home() {
         let served = serve(|_| {});
@@ -477,7 +688,7 @@ mod tests {
 
         // Linking asks once for the whole body.
         let body = "See `src/lib.rs:12`, `plan.md` and `missing.md`, then run `cargo test`.";
-        let linked = Linked::new("m", body, bases.to_vec().into(), &served.bridge);
+        let linked = linked(body, &bases, &served.bridge);
         let lib = worktree.path().join("src/lib.rs");
         let plan = worktree.path().join("plan.md");
         assert_eq!(
@@ -496,13 +707,91 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("notes.md"), "").unwrap();
         served.bridge.shutdown();
-        let linked = Linked::new(
-            "m",
-            "`notes.md`",
-            vec![dir.path().into()].into(),
-            &served.bridge,
-        );
+        let linked = linked("`notes.md`", &[dir.path().into()], &served.bridge);
         assert_eq!(linked.text(), "`notes.md`");
+    }
+
+    #[test]
+    fn a_busy_host_shows_the_message_at_once_and_links_it_when_it_answers() {
+        let served = serve(|_| {});
+        let (busy, held) = served.busy();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.md"), "").unwrap();
+        let bases = [dir.path().to_owned()];
+        held.store(true, Ordering::Relaxed);
+
+        let started = Instant::now();
+        let linked = Linked::new("m", "See `notes.md`", bases.to_vec().into(), &busy);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(
+            linked.text(),
+            "See `notes.md`",
+            "plain until the host answers"
+        );
+
+        // The request is out, and the same body prepared again is not asked about twice.
+        let mut resolving = Box::pin(resolve(&[&linked], &busy).unwrap());
+        assert!(
+            futures_lite::future::block_on(futures_lite::future::poll_once(&mut resolving))
+                .is_none()
+        );
+        let again = Linked::new("m", "See `notes.md`", bases.to_vec().into(), &busy);
+        assert_eq!(again.text(), "See `notes.md`");
+
+        held.store(false, Ordering::Relaxed);
+        futures_lite::future::block_on(resolving);
+        let file = dir.path().join("notes.md");
+        let expected = format!("See [`notes.md`](<{}>)", file.display());
+        assert_eq!(linked.text(), expected);
+        assert_eq!(again.text(), expected, "both show the one answer");
+        busy.shutdown();
+    }
+
+    #[test]
+    fn a_page_too_large_for_one_request_is_asked_about_in_several() {
+        let served = serve(|_| {});
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "").unwrap();
+        let bases: std::sync::Arc<[PathBuf]> = vec![dir.path().to_owned()].into();
+        // 40 bodies of 300 distinct references each: about 450 KiB, past the host's 256 KiB
+        // line, though each body alone fits.
+        let body = |i: usize, references: usize| {
+            let missing =
+                (0..references).map(|j| format!("`docs/missing-{i}-{j}-of-the-page.md` "));
+            format!("`README.md` {}", missing.collect::<String>())
+        };
+        let page: Vec<_> = (0..40)
+            .map(|i| Linked::new("m", &body(i, 300), bases.clone(), &served.bridge))
+            .collect();
+        // One body too large for any request stays plain, as it always did.
+        let huge = Linked::new("m", &body(40, 8000), bases.clone(), &served.bridge);
+        wait_for_links(page.iter().chain([&huge]), &served.bridge);
+
+        let readme = format!(
+            "[`README.md`](<{}>)",
+            dir.path().join("README.md").display()
+        );
+        assert!(page.iter().all(|linked| linked.text().starts_with(&readme)));
+        assert!(huge.text().starts_with("`README.md`"));
+    }
+
+    #[test]
+    fn a_click_gives_up_on_a_host_that_does_not_answer_in_time() {
+        let served = serve(|_| {});
+        let (busy, held) = served.busy();
+        let asked = || {
+            busy.ask(ask::resolve_paths(vec!["notes.md".into()], vec![]))
+                .unwrap()
+        };
+        held.store(true, Ordering::Relaxed);
+        let late = futures_lite::future::block_on(in_time(asked(), std::future::ready(())));
+        assert_eq!(late.unwrap_err(), "The host did not answer in time");
+
+        held.store(false, Ordering::Relaxed);
+        let answered =
+            futures_lite::future::block_on(in_time(asked(), std::future::pending::<()>()));
+        assert_eq!(answered.unwrap(), vec![None]);
+        busy.shutdown();
     }
 
     #[test]
@@ -561,8 +850,9 @@ mod tests {
         fs::write(dir.path().join("a b.md"), "").unwrap();
         let bases = [dir.path().to_owned()];
 
-        let linked = Linked::new("m", "`a%20b #1.md`", bases.to_vec().into(), &served.bridge);
-        let url = (linked.text().split_once("(<"))
+        let linked = linked("`a%20b #1.md`", &bases, &served.bridge);
+        let text = linked.text();
+        let url = (text.split_once("(<"))
             .and_then(|(_, rest)| rest.split_once(">)"))
             .unwrap()
             .0;
