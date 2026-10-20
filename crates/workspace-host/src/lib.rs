@@ -92,6 +92,8 @@ fn sessions_where(live: bool) -> String {
 }
 pub struct Host {
     pub(crate) db: Connection,
+    /// Files remote devices are uploading, kept while the host runs.
+    uploads: remote::uploads::Uploads,
     _lock: StoreLock,
     pub home: PathBuf,
     /// When each timer whose last fire failed may try again; see `fire_due_schedules`.
@@ -314,7 +316,9 @@ impl Host {
             merge_tries: Default::default(),
             merge_runs: vec![],
             detected: Default::default(),
+            uploads: Default::default(),
         };
+        host.clear_uploads()?;
         host.recover()?;
         host.end_interrupted_publishes()?;
         host.end_keeper_work()?;
@@ -453,6 +457,16 @@ impl Host {
                 decode(row, 0)
             })
             .context("Repository not found")
+    }
+    /// How many things need the human: unanswered attention items and workspace notes, as the
+    /// Inbox counts them.
+    pub fn attention_count(&self) -> Result<usize> {
+        let waiting: usize = self.db.query_row(
+            "SELECT count(*) FROM attention WHERE json_extract(data,'$.answer') IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(waiting + self.workspace_notes(&self.skill_states()?)?.len())
     }
     /// The live workspace; `archive` has the rest.
     pub fn snapshot(&self) -> Result<Snapshot> {
@@ -1437,14 +1451,12 @@ impl Host {
                 attachments,
                 uploads,
             } => {
-                ensure!(uploads.is_empty(), "Uploads are not supported yet");
-                serde_json::to_value(self.send_with_files(
-                    &id,
-                    sender.as_deref(),
-                    &recipient,
-                    &body,
-                    &attachments,
-                )?)?
+                let mut files = attachments;
+                files.extend(self.upload_files(&uploads)?);
+                let message =
+                    self.send_with_files(&id, sender.as_deref(), &recipient, &body, &files)?;
+                self.uploads_used(&uploads, now());
+                serde_json::to_value(message)?
             }
             Command::Messages {
                 session_id,
@@ -1648,13 +1660,24 @@ impl Host {
             Command::StopAgentsAndQuit | Command::RestartHost { .. } => {
                 bail!("Only the running host's service stops or restarts it")
             }
+            Command::UploadAttachment {
+                upload_id,
+                name,
+                offset,
+                bytes,
+            } => serde_json::to_value(self.upload_piece(
+                &upload_id,
+                &name,
+                offset,
+                &bytes,
+                now(),
+            )?)?,
             Command::RemoteAccess
             | Command::SetRemoteAccess { .. }
             | Command::OpenPairing
             | Command::CancelPairing
             | Command::SetDeviceLevel { .. }
-            | Command::RemoveDevice { .. }
-            | Command::UploadAttachment { .. } => {
+            | Command::RemoveDevice { .. } => {
                 bail!("Remote access runs only in the host's service")
             }
         })

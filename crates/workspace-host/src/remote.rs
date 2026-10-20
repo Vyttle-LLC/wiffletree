@@ -7,6 +7,7 @@ pub mod bonjour;
 pub(crate) mod devices;
 mod listener;
 mod pairing;
+pub(crate) mod uploads;
 mod websocket;
 
 use crate::service::Requests;
@@ -352,6 +353,10 @@ impl Remote {
     }
     pub(crate) fn host_id(&self) -> String {
         self.key.as_ref().map(KeyPair::id).unwrap_or_default()
+    }
+    /// The time as remote access counts it, for pairing mode and uploads.
+    pub(crate) fn now(&self) -> i64 {
+        self.shared.now()
     }
 }
 impl Drop for Remote {

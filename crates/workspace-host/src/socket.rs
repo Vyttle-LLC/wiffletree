@@ -364,7 +364,22 @@ impl Session {
                 Err("This connection is already subscribed".into()),
             );
         }
-        let subscription = self.requests.subscribe(after);
+        let mut subscription = self.requests.subscribe(after);
+        // A subscriber with no count yet, or one told to start over, gets the current one.
+        let starting = after.is_none()
+            || matches!(
+                &subscription.missed[..],
+                [Event {
+                    kind: EventKind::Resync,
+                    ..
+                }]
+            );
+        if let Some(count) = subscription.attention.filter(|_| starting) {
+            subscription.missed.push(Event {
+                cursor: subscription.cursor.clone(),
+                kind: EventKind::Attention { count },
+            });
+        }
         self.events = Some(subscription.events.clone());
         let cursor = subscription.cursor.clone();
         self.reply(

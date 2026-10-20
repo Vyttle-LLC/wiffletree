@@ -17,6 +17,18 @@ use workspace_core::{
 };
 use workspace_host::{Host, remote, service::Service};
 
+/// Points both providers at a missing binary, so a message the host delivers starts no real
+/// agent, whatever this Mac has signed in.
+fn no_providers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: every test sets the same values here before its host starts, and the first holds
+    // the others back until it has.
+    ONCE.call_once(|| unsafe {
+        std::env::set_var("WORKSPACE_CLAUDE_BIN", "/nonexistent/claude");
+        std::env::set_var("WORKSPACE_CODEX_BIN", "/nonexistent/codex");
+    });
+}
+
 /// What the host advertises: its name, port and TXT fields, while it advertises.
 type Advertised = Arc<Mutex<Option<(String, u16, Vec<(String, String)>)>>>;
 
@@ -33,7 +45,8 @@ impl remote::Advertiser for Recorder {
 }
 
 /// A host named Studio Mac with a fixed key, a clock the test moves and a recorded
-/// advertisement, and one project whose coordinator takes no turns.
+/// advertisement, and one project whose coordinator takes no turns and has asked the human one
+/// question.
 struct Studio {
     data: tempfile::TempDir,
     service: Service,
@@ -44,6 +57,7 @@ struct Studio {
 }
 impl Studio {
     fn start(port: u16) -> Self {
+        no_providers();
         let data = tempfile::tempdir().unwrap();
         let mut host = Host::open_set_up(data.path()).unwrap();
         let project = host.create_project("Tide alerts").unwrap();
@@ -52,6 +66,8 @@ impl Studio {
             .find(|s| s.project_id == project.id)
             .unwrap()
             .id;
+        host.request_attention(&coordinator, "host", "Merge", "Merge the alerts PR?", &[])
+            .unwrap();
         drop(host);
         Self::from(data, port, coordinator)
     }
@@ -753,31 +769,113 @@ fn changing_a_level_or_removing_a_device_closes_its_connection_at_once() {
 }
 
 #[test]
-fn a_device_subscribed_to_attention_gets_only_attention_and_resync() {
+fn a_device_subscribed_to_attention_hears_only_the_count() {
     let studio = Studio::start(0);
     studio.on();
     let device = KeyPair::generate().unwrap();
     studio.pair(&device, "MacBook");
     let mut client = studio.connect(&device).unwrap();
-    client
-        .call(Command::Subscribe {
-            after: None,
-            kinds: Some(vec![EventKindName::Attention]),
-        })
-        .unwrap();
-    // A rename changes state, which an attention-only subscriber does not hear about.
-    let project = studio
-        .host(Command::CreateProject {
-            name: "Calls".into(),
-        })
-        .unwrap();
-    let id = project["id"].as_str().unwrap().to_owned();
+    let attention_only = Command::Subscribe {
+        after: None,
+        kinds: Some(vec![EventKindName::Attention]),
+    };
+    client.send(attention_only);
+    let mut events = vec![];
+    let mut next = |client: &mut Client| loop {
+        let message: Value = client.socket.receive().unwrap();
+        if let Some(event) = message.get("event") {
+            let event: Event = serde_json::from_value(event.clone()).unwrap();
+            events.push(event.kind.clone());
+            return event.kind;
+        }
+    };
+    assert_eq!(
+        next(&mut client),
+        EventKind::Attention { count: 1 },
+        "the count at once"
+    );
+    // A rename changes state, which this subscriber does not hear about; answering the
+    // question changes the count, which it does.
+    let snapshot = client.call(Command::Snapshot).unwrap();
+    let project = snapshot["projects"][0]["id"].as_str().unwrap().to_owned();
     studio
         .host(Command::RenameProject {
-            project_id: id,
-            name: "Calls again".into(),
+            project_id: project,
+            name: "Tide alerts, renamed".into(),
         })
         .unwrap();
-    let reply = client.call(Command::Snapshot).unwrap();
-    assert!(reply["sessions"].is_array());
+    let question = snapshot["attention"][0]["id"].as_str().unwrap().to_owned();
+    client.send(Command::DismissAttention { id: question });
+    assert_eq!(next(&mut client), EventKind::Attention { count: 0 });
+    assert!(
+        events
+            .iter()
+            .all(|kind| matches!(kind, EventKind::Attention { .. })),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn an_upload_resumes_after_a_drop_and_is_stored_once_with_its_message() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let file: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let upload = |client: &mut Client, offset: usize| -> Uploaded {
+        let end = (offset + UPLOAD_PIECE_BYTES).min(file.len());
+        let piece = client.call(Command::UploadAttachment {
+            upload_id: "u1".into(),
+            name: "shot.png".into(),
+            offset: offset as u64,
+            bytes: base64(&file[offset..end]),
+        });
+        serde_json::from_value(piece.unwrap()).unwrap()
+    };
+    let mut client = studio.connect(&device).unwrap();
+    assert_eq!(upload(&mut client, 0).stored, UPLOAD_PIECE_BYTES as u64);
+    // The connection drops, and the device sends the first piece again.
+    drop(client);
+    let mut client = studio.connect(&device).unwrap();
+    let mut stored = upload(&mut client, 0).stored as usize;
+    assert_eq!(stored, UPLOAD_PIECE_BYTES, "the piece is stored once");
+    while stored < file.len() {
+        stored = upload(&mut client, stored).stored as usize;
+    }
+    let message = Command::Send {
+        id: "with-shot".into(),
+        sender: None,
+        recipient: studio.coordinator.clone(),
+        body: "Here is the screenshot".into(),
+        attachments: vec![],
+        uploads: vec!["u1".into()],
+    };
+    let sent: Message = serde_json::from_value(client.call(message.clone()).unwrap()).unwrap();
+    let [attachment] = &sent.attachments[..] else {
+        panic!("{:?}", sent.attachments)
+    };
+    assert_eq!(
+        (attachment.name().as_str(), attachment.size),
+        ("shot.png", 300_000)
+    );
+    assert_eq!(std::fs::read(&attachment.path).unwrap(), file);
+    assert!(
+        !studio.data.path().join("uploads/u1").exists(),
+        "the upload is used up"
+    );
+    // Its reply lost, the message is sent again with its id and stored once.
+    client.call(message).unwrap();
+    let messages = studio
+        .host(Command::Messages {
+            session_id: studio.coordinator.clone(),
+            before: None,
+            limit: 50,
+        })
+        .unwrap();
+    let stored = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["id"] == "with-shot");
+    assert_eq!(stored.count(), 1, "{messages}");
 }

@@ -789,6 +789,8 @@ struct Actor {
     sync_pace: sync::Pace,
     /// The listener for paired devices, open while remote access is on.
     remote: remote::Remote,
+    /// The count of things that need the human, as last sent.
+    attention: Option<usize>,
 }
 impl Service {
     /// A host whose remote access cannot be turned on; see `start_with`.
@@ -935,6 +937,7 @@ impl Service {
                     publish_tools: publish::Tools::default(),
                     sync_pace: sync::Pace::default(),
                     remote: remote::Remote::new(remote, requests),
+                    attention: None,
                 };
                 if actor.host.settings().remote_access {
                     actor.remote.apply(true);
@@ -1753,6 +1756,23 @@ impl Actor {
                 Some(command) => self.handle(command),
                 None => false,
             },
+            Event::Command(
+                Command::UploadAttachment {
+                    upload_id,
+                    name,
+                    offset,
+                    bytes,
+                },
+                reply,
+            ) => {
+                let at = self.remote.now();
+                let stored = self
+                    .host
+                    .upload_piece(&upload_id, &name, offset, &bytes, at);
+                let stored = stored.and_then(|stored| Ok(serde_json::to_value(stored)?));
+                let _ = reply.try_send(stored.map_err(|e| format!("{e:#}")));
+                false
+            }
             Event::Command(command, reply) if command.is_remote_access() => {
                 let result = self.remote_access(&command);
                 let _ = reply.try_send(result.map_err(|e| format!("{e:#}")));
@@ -2696,6 +2716,16 @@ impl Actor {
     fn signal(&mut self, state_changed: bool) {
         let mut changes = std::mem::take(&mut self.changes);
         changes.state |= state_changed;
+        if changes.state || self.attention.is_none() {
+            match self.host.attention_count() {
+                Ok(count) if self.attention != Some(count) => {
+                    self.attention = Some(count);
+                    changes.attention = Some(count);
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("Workspace attention count: {e:#}"),
+            }
+        }
         if std::mem::take(&mut self.progress_dirty) || changes.state {
             match self.host.refresh_progress() {
                 Ok(changed) => changes.progress = changed,
@@ -4153,6 +4183,7 @@ mod tests {
             publish_tools: publish::Tools::default(),
             sync_pace: sync::Pace::default(),
             remote: remote::Remote::new(remote::Options::default(), requests),
+            attention: None,
         };
         (actor, pings.state, pings.steps)
     }
