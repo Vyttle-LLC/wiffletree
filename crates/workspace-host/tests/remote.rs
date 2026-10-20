@@ -47,11 +47,9 @@ fn off_by_default_binds_nothing_and_off_closes_a_live_connection() {
         .unwrap();
 
     assert!(client.closed(), "the live connection closes at once");
-    // The listener is closed, though the port's old connections may still be winding down.
-    assert!(
-        std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(),
-        "nothing listens on the port"
-    );
+    // The listener is closed. Another test may already listen on the freed port, so this host
+    // is told apart by its key.
+    assert_eq!(studio.state().port, None);
     let address = format!("127.0.0.1:{port}");
     assert!(remote_client::connect(&address, &studio.key.public_key(), &device).is_err());
     assert_eq!(studio.devices().len(), 1, "the device stays paired");
