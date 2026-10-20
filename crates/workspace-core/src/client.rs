@@ -64,7 +64,7 @@ pub struct Timing {
     pub network_ms: u64,
 }
 impl Timing {
-    pub fn of(round_trip: Duration, host_ms: u64) -> Self {
+    fn of(round_trip: Duration, host_ms: u64) -> Self {
         let round_trip_ms = round_trip.as_millis() as u64;
         Self {
             round_trip_ms,

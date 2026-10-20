@@ -84,13 +84,10 @@ impl RemoteLaunch {
                 self.addresses.insert(0, address.into());
                 relay(remote.socket).map_err(Tried::Failed)
             }
-            Err(error @ (RemoteError::KeyChanged | RemoteError::Unpaired)) => {
-                let turnaway = match error {
-                    RemoteError::KeyChanged => Turnaway::KeyChanged,
-                    _ => Turnaway::Unpaired,
-                };
-                self.set(|state| state.turnaway = Some(turnaway));
-                Err(Tried::TurnedAway(io::Error::other(error.to_string())))
+            Err(RemoteError::KeyChanged) => Err(Tried::OtherKey),
+            Err(RemoteError::Unpaired) => {
+                self.set(|state| state.turnaway = Some(Turnaway::Unpaired));
+                Err(Tried::Unpaired)
             }
             Err(error) => Err(Tried::Failed(io::Error::other(format!(
                 "{address}: {error}"
@@ -105,18 +102,24 @@ impl Launch for RemoteLaunch {
         ))
     }
     /// Tries the addresses the host last answered at, newest first, and only then browses for
-    /// it, so a host reached by name, as over Tailscale, comes back without Bonjour.
+    /// it, so a host reached by name, as over Tailscale, comes back without Bonjour. An address
+    /// that shows another key is another machine now, so the next is tried. The host's key has
+    /// changed only when nothing shows the pinned key and an address browsed for under the
+    /// host's id shows another.
     fn connect(&mut self, stopped: &AtomicBool) -> io::Result<(UnixStream, Option<String>)> {
         let mut last = io::Error::other("No address is known for this host");
-        let mut tried = vec![];
-        for browsed in [false, true] {
+        let (mut tried, mut other_key, mut browsed) = (vec![], vec![], vec![]);
+        for browsing in [false, true] {
             if stopped.load(Ordering::Relaxed) {
                 break;
             }
-            let addresses = match browsed {
+            let addresses = match browsing {
                 false => self.addresses.clone(),
                 true => (self.discover)(),
             };
+            if browsing {
+                browsed.clone_from(&addresses);
+            }
             for address in addresses {
                 if stopped.load(Ordering::Relaxed) {
                     break;
@@ -127,19 +130,30 @@ impl Launch for RemoteLaunch {
                 tried.push(address.clone());
                 match self.try_address(&address) {
                     Ok(connection) => return Ok(connection),
-                    Err(Tried::TurnedAway(error)) => return Err(error),
+                    Err(Tried::Unpaired) => {
+                        return Err(io::Error::other(RemoteError::Unpaired.to_string()));
+                    }
+                    Err(Tried::OtherKey) => {
+                        last = io::Error::other(format!("{address} is another machine now"));
+                        other_key.push(address);
+                    }
                     Err(Tried::Failed(error)) => last = error,
                 }
             }
+        }
+        if browsed.iter().any(|address| other_key.contains(address)) {
+            self.set(|state| state.turnaway = Some(Turnaway::KeyChanged));
+            return Err(io::Error::other(RemoteError::KeyChanged.to_string()));
         }
         Err(last)
     }
 }
 
-/// How one address failed: the host turned the device away, which ends the try, or it did not
-/// answer, and the next address is tried.
+/// How one address failed: the host no longer knows the device, which ends the try; it showed
+/// another key than the pinned one; or it did not answer.
 enum Tried {
-    TurnedAway(io::Error),
+    Unpaired,
+    OtherKey,
     Failed(io::Error),
 }
 

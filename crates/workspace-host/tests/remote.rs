@@ -15,7 +15,7 @@ use std::{
 use workspace_core::{
     pairing::{KeyPair, short_id},
     remote_client::{self, RemoteError},
-    remote_launch::RemoteLaunch,
+    remote_launch::{self, RemoteLaunch},
     *,
 };
 
@@ -652,6 +652,41 @@ fn a_host_reached_by_name_is_reached_by_it_again_before_any_browsing() {
     assert_eq!(reached.lock().unwrap().address, Some(by_name));
     assert_eq!(browsed.load(Ordering::Relaxed), 0, "never browsed");
     client.stop();
+}
+
+#[test]
+fn another_mac_at_a_stored_address_is_passed_over_and_the_host_is_found_by_browsing() {
+    let (studio, office) = (Studio::start(0), Studio::start(0));
+    studio.on();
+    office.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    // Studio Mac's old address now belongs to another Wiffletree Mac.
+    let launch = |browsed: Vec<String>| {
+        let discover = Box::new(move || browsed.clone());
+        let mut launcher = RemoteLaunch::new(
+            studio.key.public_key(),
+            device.clone(),
+            vec![office.address()],
+            discover,
+        );
+        let reached = launcher.state();
+        let connected = launcher.connect(&std::sync::atomic::AtomicBool::new(false));
+        let turnaway = reached.lock().unwrap().turnaway;
+        (connected.map(|_| ()).map_err(|e| e.to_string()), turnaway)
+    };
+
+    assert_eq!(launch(vec![studio.address()]), (Ok(()), None));
+    let (missing, turnaway) = launch(vec![]);
+    assert!(missing.unwrap_err().contains("another machine"));
+    assert_eq!(
+        turnaway, None,
+        "another Mac at an old address is no key change"
+    );
+    // Only an address found under Studio Mac's id that shows another key is one.
+    let (changed, turnaway) = launch(vec![office.address()]);
+    assert!(changed.is_err());
+    assert_eq!(turnaway, Some(remote_launch::Turnaway::KeyChanged));
 }
 
 #[test]
