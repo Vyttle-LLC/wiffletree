@@ -36,8 +36,9 @@ pub fn host_key(data: &Path, trusted: &[&Path]) -> Result<workspace_core::pairin
     KeyPair::from_secret(&bytes)
 }
 
-/// The generic-password item `service`, the `label`, for the data folder, created with `create`'s value and
-/// `trusted` as its access list when there is none.
+/// The generic-password item `service`, the `label`, for the data folder, created with
+/// `create`'s value and `trusted` as its access list when there is none. The access list is set
+/// as the item is added, so changing it never needs the login password.
 #[cfg(target_os = "macos")]
 fn secret(
     service: &str,
@@ -55,14 +56,9 @@ fn secret(
         return String::from_utf8(password.to_owned()).context("The Keychain item is not text");
     }
     let value = create()?;
-    let keychain = SecKeychain::default()?;
-    keychain.add_generic_password(service, &account, value.as_bytes())?;
-    let (_, item) = keychain.find_generic_password(service, &account)?;
-    if let Err(error) = access::limit(&item, trusted) {
-        // An item any program could read is worse than none.
-        item.delete();
-        return Err(error.context(format!("Limit the {label} to Wiffletree")));
-    }
+    // An item any program could read is worse than none, so none is added without the list.
+    let list = access::list(trusted).with_context(|| format!("Limit the {label} to Wiffletree"))?;
+    access::add(service, &account, value.as_bytes(), &list)?;
     Ok(value)
 }
 
@@ -77,20 +73,27 @@ fn secret(
     anyhow::bail!("Keychain items need macOS; start the host with --child")
 }
 
-/// Access lists, which the crate does not wrap.
+/// Access lists and adding an item with one, which the crate does not wrap.
 #[cfg(target_os = "macos")]
 mod access {
     use anyhow::{Result, ensure};
     use core_foundation::{
         array::CFArray,
         base::{CFType, CFTypeRef, OSStatus, TCFType},
+        data::CFData,
+        dictionary::CFDictionary,
         string::{CFString, CFStringRef},
     };
-    use security_framework::os::macos::keychain_item::SecKeychainItem;
     use std::{ffi::CString, os::unix::ffi::OsStrExt, path::Path};
 
     #[link(name = "Security", kind = "framework")]
     unsafe extern "C" {
+        static kSecClass: CFStringRef;
+        static kSecClassGenericPassword: CFStringRef;
+        static kSecAttrService: CFStringRef;
+        static kSecAttrAccount: CFStringRef;
+        static kSecAttrAccess: CFStringRef;
+        static kSecValueData: CFStringRef;
         fn SecTrustedApplicationCreateFromPath(
             path: *const std::ffi::c_char,
             app: *mut CFTypeRef,
@@ -100,11 +103,11 @@ mod access {
             trusted: core_foundation::array::CFArrayRef,
             access: *mut CFTypeRef,
         ) -> OSStatus;
-        fn SecKeychainItemSetAccess(item: CFTypeRef, access: CFTypeRef) -> OSStatus;
+        fn SecItemAdd(attributes: CFTypeRef, result: *mut CFTypeRef) -> OSStatus;
     }
 
-    /// Replaces the item's access list with exactly the `trusted` programs.
-    pub(super) fn limit(item: &SecKeychainItem, trusted: &[&Path]) -> Result<()> {
+    /// An access list of exactly the `trusted` programs.
+    pub(super) fn list(trusted: &[&Path]) -> Result<CFType> {
         let mut apps = vec![];
         for path in trusted {
             let path = CString::new(path.as_os_str().as_bytes())?;
@@ -119,7 +122,7 @@ mod access {
             apps.push(unsafe { CFType::wrap_under_create_rule(app) });
         }
         let apps = CFArray::from_CFTypes(&apps);
-        let descriptor = CFString::new("Wiffletree client credential");
+        let descriptor = CFString::new("Wiffletree");
         let mut access: CFTypeRef = std::ptr::null();
         // SAFETY: both arguments are live CF objects; `access` receives an owned reference.
         let status = unsafe {
@@ -134,11 +137,39 @@ mod access {
             "Create the access list: {status}"
         );
         // SAFETY: created above, so this takes ownership of the one reference.
-        let access = unsafe { CFType::wrap_under_create_rule(access) };
-        // SAFETY: the item and the access list are live for the call.
-        let status =
-            unsafe { SecKeychainItemSetAccess(item.as_CFTypeRef(), access.as_CFTypeRef()) };
-        ensure!(status == 0, "Set the access list: {status}");
+        Ok(unsafe { CFType::wrap_under_create_rule(access) })
+    }
+
+    /// Adds a generic-password item to the login keychain with `access` as its access list.
+    pub(super) fn add(service: &str, account: &str, value: &[u8], access: &CFType) -> Result<()> {
+        // SAFETY: the constants are static CF strings the framework owns.
+        let key = |constant: CFStringRef| unsafe { CFString::wrap_under_get_rule(constant) };
+        let attributes = CFDictionary::from_CFType_pairs(&[
+            (
+                key(unsafe { kSecClass }),
+                key(unsafe { kSecClassGenericPassword }).as_CFType(),
+            ),
+            (
+                key(unsafe { kSecAttrService }),
+                CFString::new(service).as_CFType(),
+            ),
+            (
+                key(unsafe { kSecAttrAccount }),
+                CFString::new(account).as_CFType(),
+            ),
+            (
+                key(unsafe { kSecValueData }),
+                CFData::from_buffer(value).as_CFType(),
+            ),
+            (key(unsafe { kSecAttrAccess }), access.clone()),
+        ]);
+        // SAFETY: a live dictionary; no result is asked for.
+        let status = unsafe { SecItemAdd(attributes.as_CFTypeRef(), std::ptr::null_mut()) };
+        ensure!(
+            status == 0,
+            "Add the Keychain item: {}",
+            security_framework::base::Error::from_code(status)
+        );
         Ok(())
     }
 }
