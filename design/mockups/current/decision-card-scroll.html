@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Long decisions stay reachable</title>
+<!--
+  Static study: capping the decision card above the composer (conversation.rs `decisions`)
+  so a long approval scrolls inside the card and its buttons stay on screen. No script.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--yellow:#77551C;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--yellow:#E4C17A;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+p{margin:0}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.intro{max-width:760px;margin-bottom:24px}
+.intro p{color:var(--subtle);font-size:12px}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;align-items:start}
+.caption{margin:10px 2px 0;font-size:11px;color:var(--subtle)}
+.caption b{color:var(--text);font-weight:500}
+.new{outline:2px dashed color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:3px;border-radius:6px}
+.pane{height:620px;display:flex;flex-direction:column;background:var(--base);border:1px solid var(--edge);border-radius:12px;overflow:hidden}
+.title{padding:12px 20px;border-bottom:1px solid color-mix(in srgb,var(--edge) 50%,transparent);font-weight:600;font-size:15px;flex:none}
+.transcript{flex:1;min-height:60px;overflow:hidden;padding:16px 24px;font-size:14px;line-height:1.6;-webkit-mask-image:linear-gradient(to bottom,transparent,black 40px)}
+.bottom{flex:none;padding:4px 24px 16px;display:flex;flex-direction:column;gap:8px;min-height:0}
+.nav{display:flex;align-items:center;gap:4px}
+.hint{font-size:12px;color:var(--subtle)}
+.grow{flex:1}
+.ghost{font-size:11.5px;padding:2px 8px;border-radius:6px}
+.card{background:var(--surface);border:1px solid color-mix(in srgb,var(--yellow) 45%,transparent);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:0}
+.card-head{display:flex;justify-content:space-between;align-items:center;flex:none}
+.pill{font-size:10.5px;padding:1px 8px;border-radius:999px;color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.body{display:flex;flex-direction:column;gap:6px;min-height:0}
+.capped{max-height:300px;overflow-y:scroll;padding-right:6px}
+.row{display:grid;grid-template-columns:90px 1fr;gap:10px;font-size:12px}
+.row span:first-child{color:var(--subtle)}
+.desc{background:var(--overlay);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.5}
+.actions{display:flex;justify-content:flex-end;gap:8px;flex:none;padding-top:6px;border-top:1px solid color-mix(in srgb,var(--edge) 40%,transparent)}
+.btn{font-size:11.5px;padding:3px 10px;border-radius:6px;border:1px solid var(--edge);background:var(--surface)}
+.primary{background:var(--focus);color:var(--surface);border-color:var(--focus)}
+.offscreen{opacity:.35}
+.composer{flex:none;border:1px solid color-mix(in srgb,var(--edge) 70%,transparent);border-radius:14px;background:var(--surface);padding:10px 12px;color:var(--muted);font-size:14px;min-height:56px}
+.notes{max-width:760px;margin-top:26px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+.notes b{color:var(--text);font-weight:500}
+@media(max-width:1000px){.two{grid-template-columns:minmax(0,1fr)}body{padding:16px}}
+</style>
+</head>
+<body>
+<header class="intro">
+  <div class="eyebrow">Design study · decision card</div>
+  <h1>Long decisions stay reachable</h1>
+  <p>Today a long approval, such as a pull request with a full description, grows the decision card past the bottom of the window, so Deny and Open pull request cannot be reached. The fix caps the card's height and scrolls its middle, while the header and the buttons stay in view. Dashed outlines mark what changes.</p>
+</header>
+
+<div class="two">
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(a) Today: the card runs off the window</div>
+    <div class="pane">
+      <div class="title">Stockpot - Next Step</div>
+      <div class="bottom" style="flex:1;overflow:hidden">
+        <div class="nav"><span class="hint">Your coordinator is waiting on 2 decisions · 1 of 2</span><span class="grow"></span><span class="ghost">‹ ›</span><span class="ghost">Open inbox</span><span class="ghost">⌄</span></div>
+        <div class="card">
+          <div class="card-head"><span class="hint">Stockpot - Next Step</span><span class="pill">Approval</span></div>
+          <div style="font-size:13.5px">Open this pull request in Vyttle-LLC/Stockpot-ios?</div>
+          <div class="body">
+            <div class="row"><span>Repository</span><span>Vyttle-LLC/Stockpot-ios · private</span></div>
+            <div class="row"><span>Branches</span><span>wiffletree/propose-openspec-… → main</span></div>
+            <div class="row"><span>Commit</span><span>a256458 · 3 commits · 9 files changed</span></div>
+            <div class="row"><span>Review</span><span>Cycle 3 · Full passed at this commit</span></div>
+            <div class="row"><span>Description</span><div class="desc">Adds the OpenSpec change add-ocr-and-share-capture for roadmap milestone M5…<br><br>## Approved by the owner on 2026-10-20<br>- English is the only promised OCR language…<br>- The share extension only stages items…<br>- Duplicate shares are caught among waiting items…<br>- No copy of a scan is kept…<br><br>## Design highlights<br>- Capture produces text or a web address…<br>- The inbox commits each item atomically…<br>- A new StockpotInbox package…<br><br>## Tasks<br>…</div></div>
+          </div>
+          <div class="actions offscreen"><span class="btn">Deny</span><span class="btn primary">Open pull request</span></div>
+        </div>
+        <div class="composer offscreen">Message the coordinator…</div>
+      </div>
+    </div>
+    <p class="caption"><b>Problem.</b> The buttons and the composer are pushed below the window edge and nothing scrolls.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow" style="margin-bottom:8px">(b) Proposed: capped card, scrolling middle</div>
+    <div class="pane">
+      <div class="title">Stockpot - Next Step</div>
+      <div class="transcript">…the conversation keeps a strip of space above.</div>
+      <div class="bottom">
+        <div class="nav"><span class="hint">Your coordinator is waiting on 2 decisions · 1 of 2</span><span class="grow"></span><span class="ghost">‹ ›</span><span class="ghost">Open inbox</span><span class="ghost">⌄</span></div>
+        <div class="card">
+          <div class="card-head"><span class="hint">Stockpot - Next Step</span><span class="pill">Approval</span></div>
+          <div class="body capped new">
+            <div style="font-size:13.5px">Open this pull request in Vyttle-LLC/Stockpot-ios?</div>
+            <div class="row"><span>Repository</span><span>Vyttle-LLC/Stockpot-ios · private</span></div>
+            <div class="row"><span>Branches</span><span>wiffletree/propose-openspec-… → main</span></div>
+            <div class="row"><span>Commit</span><span>a256458 · 3 commits · 9 files changed</span></div>
+            <div class="row"><span>Review</span><span>Cycle 3 · Full passed at this commit</span></div>
+            <div class="row"><span>Description</span><div class="desc">Adds the OpenSpec change add-ocr-and-share-capture for roadmap milestone M5…<br><br>## Approved by the owner on 2026-10-20<br>- English is the only promised OCR language…<br>- The share extension only stages items…<br>- Duplicate shares are caught among waiting items…<br>- No copy of a scan is kept…<br><br>## Design highlights<br>- Capture produces text or a web address…<br>- The inbox commits each item atomically…<br>- A new StockpotInbox package…<br><br>## Tasks<br>…</div></div>
+          </div>
+          <div class="actions new"><span class="btn">Deny</span><span class="btn primary">Open pull request</span></div>
+        </div>
+        <div class="composer">Message the coordinator…</div>
+      </div>
+    </div>
+    <p class="caption"><b>Fix.</b> The middle scrolls; the header, the buttons and the composer stay visible.</p>
+  </section>
+</div>
+
+<ul class="notes">
+  <li><b>Cap.</b> The card is at most about half the conversation pane's height. Short cards look exactly as they do now, with no scroll bar.</li>
+  <li><b>What scrolls.</b> Everything between the card's header and its buttons: the prompt, the detail rows, the description, and a question's choices and answer box.</li>
+  <li><b>What stays put.</b> The header row with the Approval or Question pill, the button row (Deny / Approve, Dismiss, Answer) and the composer below.</li>
+  <li><b>Every kind of decision.</b> Questions, permission approvals and pull request approvals all behave alike. Switching decisions with the arrows starts the next one scrolled to the top.</li>
+  <li><b>Inbox panel.</b> Unchanged; it already scrolls as a whole list.</li>
+</ul>
+</body>
+</html>

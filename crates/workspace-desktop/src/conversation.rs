@@ -357,8 +357,15 @@ impl Conversation {
         notices
     }
     /// The project's open decisions, one at a time, so the human can settle them in place.
-    /// Hidden while the inbox is open, which already lists them all.
-    fn decisions(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+    /// Hidden while the inbox is open, which already lists them all. The card takes at most
+    /// half the window's height, so a long one keeps its buttons and the composer in view.
+    fn decisions(
+        &self,
+        session: &Session,
+        window: &Window,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         if session.role != Role::ProjectOrchestrator || self.shared.panel == Some(Panel::Attention)
         {
             return None;
@@ -446,7 +453,10 @@ impl Conversation {
                 .child(navigation)
                 .child(
                     (self.inbox)
-                        .update(cx, |inbox, cx| inbox.attention_card(item, true, p, cx))
+                        .update(cx, |inbox, cx| {
+                            let max_height = window.viewport_size().height / 2.;
+                            inbox.attention_card(item, true, Some(max_height), p, cx)
+                        })
                         .border_color(p.yellow.opacity(0.45)),
                 ),
         )
@@ -667,7 +677,13 @@ impl Conversation {
                 .child(models::chosen_by(selection, index)),
         )
     }
-    fn composer(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn composer(
+        &self,
+        session: &Session,
+        window: &Window,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let sending = self.sending.contains(&session.id);
         let attached = self.attached.get(&session.id).cloned().unwrap_or_default();
         let empty = self.input.read(cx).value().trim().is_empty() && attached.is_empty();
@@ -692,7 +708,7 @@ impl Conversation {
             .flex_col()
             .items_center()
             .gap_2()
-            .children(self.decisions(session, p, cx))
+            .children(self.decisions(session, window, p, cx))
             .children(
                 self.notices(session, p, cx)
                     .into_iter()
@@ -842,7 +858,7 @@ impl Requests for Conversation {
     }
 }
 impl Render for Conversation {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_counts::count("Conversation");
         let p = palette(is_dark(cx));
         let Some(session) = self.shared.selected_session() else {
@@ -862,7 +878,7 @@ impl Render for Conversation {
                 (self.transcript.clone())
                     .cached(StyleRefinement::default().w_full().flex_1().min_h_0()),
             )
-            .child(self.composer(session, p, cx))
+            .child(self.composer(session, window, p, cx))
     }
 }
 
