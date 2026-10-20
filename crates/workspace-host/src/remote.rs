@@ -119,10 +119,16 @@ pub(crate) enum ToActor {
     },
     /// Pairing mode or the open connections changed on their own.
     Changed,
+    /// A minute passed while listening, so the actor deletes uploads unused for an hour even
+    /// when nothing else happens.
+    Tick,
 }
 
 /// Pairing mode while it is open.
 struct Mode {
+    /// Tells this pairing mode from one opened after it, so an exchange begun under one can only
+    /// complete under it.
+    generation: u64,
     code: String,
     expires_at: i64,
     wrong: u32,
@@ -308,6 +314,7 @@ impl Remote {
         );
         let expires_at = self.shared.now() + PAIRING_MS;
         *self.shared.pairing() = Some(Mode {
+            generation: self.shared.next.fetch_add(1, Ordering::Relaxed),
             code: new_code()?,
             expires_at,
             wrong: 0,

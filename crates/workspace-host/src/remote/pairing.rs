@@ -50,7 +50,7 @@ fn exchange(
     let theirs = BASE64
         .decode(start.spake.as_deref().unwrap_or_default())
         .context("Malformed pairing message")?;
-    let code = {
+    let (code, generation) = {
         let mut pairing = shared.open_pairing();
         let mode = pairing
             .as_mut()
@@ -60,9 +60,9 @@ fn exchange(
             "Another device is pairing with {host}. Try again in a moment."
         );
         mode.busy = true;
-        mode.code.clone()
+        (mode.code.clone(), mode.generation)
     };
-    let _release = Release(shared);
+    let _release = Release(shared, generation);
     let (spake, ours) = CodeExchange::start(Side::Host, &code)?;
     let key = spake.finish(&theirs)?;
     websocket::send(
@@ -77,13 +77,20 @@ fn exchange(
         pairing::transcript(&identity.key.public_key(), &device_key, &device_name, host);
     let given = BASE64.decode(&confirm.confirm).unwrap_or_default();
     if !pairing::confirms(&key, Side::Device, &transcript, &given) {
-        wrong_try(shared);
+        wrong_try(shared, generation);
         anyhow::bail!("The code did not match");
     }
-    anyhow::ensure!(
-        shared.open_pairing().is_some(),
-        "Pairing closed on {host} before the code was typed"
-    );
+    // The code works once: this exchange takes its own pairing mode, still open, or fails.
+    {
+        let mut pairing = shared.open_pairing();
+        anyhow::ensure!(
+            pairing
+                .as_ref()
+                .is_some_and(|mode| mode.generation == generation),
+            "Pairing closed on {host} before the code was typed"
+        );
+        *pairing = None;
+    }
     let (reply, stored) = async_channel::bounded(1);
     shared.requests.tell(ToActor::Paired {
         key: device_key,
@@ -100,13 +107,16 @@ fn exchange(
     })
 }
 
-/// Counts a failed confirmation; the third closes pairing mode.
-fn wrong_try(shared: &Shared) {
+/// Counts a failed confirmation against the pairing mode it was made under; the third closes
+/// that mode.
+fn wrong_try(shared: &Shared, generation: u64) {
     let mut pairing = shared.pairing();
-    let closed = pairing.as_mut().is_some_and(|mode| {
-        mode.wrong += 1;
-        mode.wrong >= PAIRING_TRIES
-    });
+    let closed = (pairing.as_mut())
+        .filter(|mode| mode.generation == generation)
+        .is_some_and(|mode| {
+            mode.wrong += 1;
+            mode.wrong >= PAIRING_TRIES
+        });
     if closed {
         *pairing = None;
         drop(pairing);
@@ -114,11 +124,11 @@ fn wrong_try(shared: &Shared) {
     }
 }
 
-/// Lets another exchange start once this one ends, however it ends.
-struct Release<'a>(&'a Shared);
+/// Lets another exchange start under the same pairing mode once this one ends, however it ends.
+struct Release<'a>(&'a Shared, u64);
 impl Drop for Release<'_> {
     fn drop(&mut self) {
-        if let Some(mode) = self.0.pairing().as_mut() {
+        if let Some(mode) = (self.0.pairing().as_mut()).filter(|mode| mode.generation == self.1) {
             mode.busy = false;
         }
     }

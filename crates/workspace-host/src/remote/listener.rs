@@ -1,6 +1,6 @@
 //! The TCP listener: TLS 1.3 with a self-signed certificate carrying the host's key, then a
 //! WebSocket on `/pair` or `/v1`.
-use super::{Identity, Shared, pairing, websocket};
+use super::{Identity, Shared, ToActor, pairing, websocket};
 use anyhow::{Context, Result, ensure};
 use rustls::{
     ServerConfig, ServerConnection, StreamOwned,
@@ -25,19 +25,25 @@ use workspace_core::{MAX_LINE_BYTES, PAIR_PATH, V1_PATH};
 const MAX_CONNECTIONS: usize = 64;
 /// How long the TLS and WebSocket handshakes, and each step before the host protocol, may take.
 pub(super) const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the actor looks for uploads to expire while the host listens.
+const TICK: Duration = Duration::from_secs(60);
 
 pub(super) type ServerSocket = WebSocket<StreamOwned<ServerConnection, TcpStream>>;
 
-/// Accepts connections until dropped.
+/// Accepts connections until dropped; the port is free again once it is.
 pub(crate) struct Listening {
     pub port: u16,
     stopping: Arc<AtomicBool>,
+    accepting: Option<std::thread::JoinHandle<()>>,
 }
 impl Drop for Listening {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Relaxed);
-        // Wakes the accepting thread, which then stops.
+        // Wakes the accepting thread, which then stops and closes the listener.
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
+        if let Some(accepting) = self.accepting.take() {
+            let _ = accepting.join();
+        }
     }
 }
 
@@ -48,8 +54,14 @@ pub(super) fn listen(port: u16, identity: Arc<Identity>, shared: Arc<Shared>) ->
         .with_context(|| format!("Listen on port {port}"))?;
     let port = listener.local_addr()?.port();
     let stopping = Arc::new(AtomicBool::new(false));
+    let (stop, requests) = (stopping.clone(), shared.requests.clone());
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) && requests.tell(ToActor::Tick).is_ok() {
+            std::thread::sleep(TICK);
+        }
+    });
     let stop = stopping.clone();
-    std::thread::Builder::new()
+    let accepting = std::thread::Builder::new()
         .name("remote-listener".into())
         .spawn(move || {
             for stream in listener.incoming() {
@@ -68,7 +80,11 @@ pub(super) fn listen(port: u16, identity: Arc<Identity>, shared: Arc<Shared>) ->
                 });
             }
         })?;
-    Ok(Listening { port, stopping })
+    Ok(Listening {
+        port,
+        stopping,
+        accepting: Some(accepting),
+    })
 }
 
 /// A server configuration for TLS 1.3 only, with a self-signed certificate for the host's key.
@@ -102,7 +118,9 @@ fn serve(
     shared: &Arc<Shared>,
 ) -> Result<()> {
     let connection = shared.track(&stream)?;
-    let served = (|| {
+    // Forgotten however serving ends, a panic included, so no slot is kept.
+    let _tracked = Tracked(shared, connection);
+    (|| {
         stream.set_read_timeout(Some(STEP_TIMEOUT))?;
         stream.set_write_timeout(Some(STEP_TIMEOUT))?;
         let mut tls = StreamOwned::new(ServerConnection::new(config)?, stream);
@@ -126,7 +144,12 @@ fn serve(
             PAIR_PATH => pairing::serve(socket, identity, shared),
             _ => websocket::serve(socket, connection, identity, shared),
         }
-    })();
-    shared.forget(connection);
-    served
+    })()
+}
+
+struct Tracked<'a>(&'a Shared, u64);
+impl Drop for Tracked<'_> {
+    fn drop(&mut self) {
+        self.0.forget(self.1);
+    }
 }

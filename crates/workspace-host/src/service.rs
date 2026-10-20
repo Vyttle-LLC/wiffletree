@@ -1375,6 +1375,7 @@ impl Actor {
 
     /// Handles one event, then starts what it made due.
     fn process(&mut self, event: Event) {
+        self.host.expire_uploads(self.remote.now());
         let event = match event {
             Event::Remote(message) => match self.remote_message(message) {
                 Some(command) => command,

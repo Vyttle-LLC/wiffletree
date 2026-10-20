@@ -70,7 +70,10 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 pub fn unhex(text: &str) -> Result<Vec<u8>> {
-    ensure!(text.len().is_multiple_of(2), "Not hex");
+    ensure!(
+        text.len().is_multiple_of(2) && text.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Not hex"
+    );
     (0..text.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).context("Not hex"))
@@ -218,6 +221,8 @@ mod tests {
         assert!(verify(&device.public_key(), &message, &signature));
         assert!(!verify(&other.public_key(), &message, &signature));
         assert!(!verify(&device.public_key(), b"another", &signature));
+        assert!(challenge_message(&[7; 32], &other.id(), "aéa").is_err());
+        assert!(unhex("zz").is_err());
         let again = KeyPair::from_secret(&device.secret()).unwrap();
         assert_eq!(again.id(), device.id());
     }

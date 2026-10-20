@@ -84,12 +84,15 @@ impl Actor {
                 None
             }
             ToActor::Paired { key, name, reply } => {
+                // The exchange has taken its pairing mode already; one opened since stays open.
                 let stored = self.host.add_device(&key, &name, now());
-                self.remote.close_pairing();
+                self.remote.refresh();
                 self.state_changed();
                 let _ = reply.try_send(stored.map(|_| ()).map_err(|e| format!("{e:#}")));
                 None
             }
+            // `process` deletes expired uploads before every event.
+            ToActor::Tick => None,
             ToActor::Changed => {
                 self.remote.refresh();
                 self.state_changed();

@@ -159,14 +159,30 @@ fn qr_start(address: &str, device: &KeyPair) -> String {
 }
 
 /// A WebSocket on the host's `/pair`, trusting any certificate.
-fn raw_pair_socket(
-    address: &str,
-) -> tungstenite::WebSocket<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>> {
+type RawSocket =
+    tungstenite::WebSocket<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>;
+
+fn raw_pair_socket(address: &str) -> RawSocket {
+    raw_socket(address, PAIR_PATH)
+}
+
+/// A WebSocket on the host's `path`, trusting any certificate.
+fn raw_socket(address: &str, path: &str) -> RawSocket {
     let tcp = std::net::TcpStream::connect(address).unwrap();
     let tls = rustls::StreamOwned::new(trusting_client(), tcp);
-    tungstenite::client::client(format!("ws://{address}{PAIR_PATH}").as_str(), tls)
+    tungstenite::client::client(format!("ws://{address}{path}").as_str(), tls)
         .unwrap()
         .0
+}
+
+fn put(socket: &mut RawSocket, value: &impl serde::Serialize) {
+    let text = serde_json::to_string(value).unwrap();
+    socket.send(tungstenite::Message::text(text)).unwrap();
+}
+
+fn take<T: serde::de::DeserializeOwned>(socket: &mut RawSocket) -> T {
+    let text = socket.read().unwrap().into_text().unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 fn trusting_client() -> rustls::ClientConnection {
@@ -664,4 +680,147 @@ fn an_upload_resumes_after_a_drop_and_is_stored_once_with_its_message() {
         .iter()
         .filter(|m| m["id"] == "with-shot");
     assert_eq!(stored.count(), 1, "{messages}");
+}
+
+#[test]
+fn an_exchange_begun_before_pairing_reopened_cannot_complete() {
+    use workspace_core::pairing::{CodeExchange, Side, confirmation, transcript};
+    let studio = Studio::start(0);
+    studio.on();
+    let code = studio.open_pairing();
+    let device = KeyPair::generate().unwrap();
+    let mut socket = raw_pair_socket(&studio.address());
+    let (exchange, message) = CodeExchange::start(Side::Device, &code).unwrap();
+    put(
+        &mut socket,
+        &PairStart {
+            method: PAIR_METHOD_CODE.into(),
+            device_name: "MacBook".into(),
+            device_key: base64(&device.public_key()),
+            spake: Some(base64(&message)),
+        },
+    );
+    let PairReply::Spake { spake, host_name } = take(&mut socket) else {
+        panic!("no SPAKE2 message")
+    };
+    // The human cancels and opens pairing again while the device is still typing.
+    studio.host(Command::CancelPairing).unwrap();
+    studio.open_pairing();
+    use base64::Engine as _;
+    let theirs = base64::engine::general_purpose::STANDARD
+        .decode(spake)
+        .unwrap();
+    let key = exchange.finish(&theirs).unwrap();
+    let transcript = transcript(
+        &studio.key.public_key(),
+        &device.public_key(),
+        "MacBook",
+        &host_name,
+    );
+    let confirm = base64(&confirmation(&key, Side::Device, &transcript));
+    put(&mut socket, &PairConfirm { confirm });
+
+    let reply: PairReply = take(&mut socket);
+
+    assert!(matches!(reply, PairReply::Refused { .. }), "{reply:?}");
+    assert!(studio.devices().is_empty());
+    assert!(
+        studio.state().pairing.is_some(),
+        "the new pairing mode stays open"
+    );
+}
+
+#[test]
+fn a_device_answering_with_a_malformed_id_is_unpaired() {
+    let studio = Studio::start(0);
+    studio.on();
+    for _ in 0..3 {
+        let mut socket = raw_socket(&studio.address(), V1_PATH);
+        let _: Challenge = take(&mut socket);
+        put(
+            &mut socket,
+            &ChallengeAnswer {
+                device_id: "aéa".into(),
+                signature: base64(&[0; 64]),
+            },
+        );
+        let verdict: ChallengeVerdict = take(&mut socket);
+        assert_eq!(verdict, ChallengeVerdict::Unpaired);
+    }
+    // The host still serves a paired device.
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    studio.connect(&device).unwrap();
+}
+
+#[test]
+fn a_burst_of_pings_sent_at_once_is_answered_in_full() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    let socket = &mut client.socket.socket;
+    for n in 0..200 {
+        let ping = Request {
+            version: PROTOCOL_VERSION,
+            id: format!("ping-{n}"),
+            command: Command::Ping,
+        };
+        let text = serde_json::to_string(&ping).unwrap();
+        socket.write(tungstenite::Message::text(text)).unwrap();
+    }
+    socket.flush().unwrap();
+    socket
+        .get_mut()
+        .sock
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let answered = (0..200)
+        .filter(|_| matches!(socket.read(), Ok(tungstenite::Message::Text(_))))
+        .count();
+    assert_eq!(answered, 200);
+    // Removing the device still closes the connection at once.
+    studio
+        .host(Command::RemoveDevice {
+            device_id: device.id(),
+        })
+        .unwrap();
+    assert!(client.closed());
+}
+
+#[test]
+fn an_unused_upload_is_deleted_after_an_hour_with_nothing_else_happening() {
+    let studio = Studio::start(0);
+    studio.on();
+    let device = KeyPair::generate().unwrap();
+    studio.pair(&device, "MacBook");
+    let mut client = studio.connect(&device).unwrap();
+    client
+        .call(Command::UploadAttachment {
+            upload_id: "idle".into(),
+            name: "note.txt".into(),
+            offset: 0,
+            bytes: base64(b"note"),
+        })
+        .unwrap();
+    let staged = studio.data.path().join("uploads/idle/note.txt");
+    assert!(staged.exists());
+
+    studio
+        .clock
+        .fetch_add(UPLOAD_KEPT_MS + 1_000, Ordering::Relaxed);
+    // Any event the host handles, such as a read or the listener's minute tick, expires it.
+    client.call(Command::Snapshot).unwrap();
+
+    assert!(!staged.exists(), "the upload is deleted");
+    let send = Command::Send {
+        id: "late".into(),
+        sender: None,
+        recipient: studio.coordinator.clone(),
+        body: "The note".into(),
+        attachments: vec![],
+        uploads: vec!["idle".into()],
+    };
+    assert!(client.call(send).is_err());
 }

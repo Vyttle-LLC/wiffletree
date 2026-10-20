@@ -6,10 +6,12 @@ use anyhow::{Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{ErrorKind, Read, Write},
     os::fd::{AsRawFd, FromRawFd},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    thread::ThreadId,
     time::Instant,
 };
 use tungstenite::{
@@ -86,18 +88,47 @@ pub(super) fn serve(
     served
 }
 
-/// Messages for the device: queued for the I/O thread, which a byte on a pipe wakes.
+/// Replies the I/O thread may hold for the device before the connection is closed as stuck: a
+/// device that sends that many requests the connection answers itself, such as `Ping`, without
+/// reading their replies.
+const OWN_REPLIES: usize = 1024;
+
+/// Messages for the device: queued for the I/O thread, which a byte on a pipe wakes. Other
+/// threads wait for room in `queue`; the I/O thread's own replies go to `own`, since it is the
+/// one that drains both and must never wait on itself.
 struct Frames {
     queue: async_channel::Sender<Vec<u8>>,
+    own: Mutex<VecDeque<Vec<u8>>>,
+    io_thread: ThreadId,
     wake: File,
 }
 impl Outbox for Frames {
     fn send(&self, message: Vec<u8>) -> Result<()> {
+        if std::thread::current().id() == self.io_thread {
+            let mut own = self.own.lock().unwrap_or_else(|e| e.into_inner());
+            anyhow::ensure!(
+                own.len() < OWN_REPLIES,
+                "The device sends requests without reading their replies"
+            );
+            own.push_back(message);
+            return Ok(());
+        }
         self.queue
             .send_blocking(message)
             .map_err(|_| anyhow::anyhow!("The device's connection closed"))?;
         let _ = (&self.wake).write(&[1]);
         Ok(())
+    }
+}
+impl Frames {
+    /// The next message to write: the I/O thread's own replies first.
+    fn next(&self, queued: &async_channel::Receiver<Vec<u8>>) -> Option<Vec<u8>> {
+        let own = self
+            .own
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front();
+        own.or_else(|| queued.try_recv().ok())
     }
 }
 
@@ -108,13 +139,15 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
     let (queue, queued) = async_channel::bounded(64);
     let outbox = Arc::new(Frames {
         queue,
+        own: Mutex::default(),
+        io_thread: std::thread::current().id(),
         wake: wake_write,
     });
     let mut session = Session::new(
         shared.requests.clone(),
         Peer::Device { id: device },
         shared.binary.clone(),
-        outbox,
+        outbox.clone(),
         shared.replying.clone(),
     );
     socket.get_mut().sock.set_nonblocking(true)?;
@@ -144,7 +177,7 @@ fn pump(mut socket: ServerSocket, device: String, shared: &Arc<Shared>) -> Resul
                     Err(error) => return Err(error.into()),
                 }
             }
-            while let Some(message) = waiting.take().or_else(|| queued.try_recv().ok().map(text)) {
+            while let Some(message) = waiting.take().or_else(|| outbox.next(&queued).map(text)) {
                 match socket.write(message) {
                     Ok(()) => {}
                     Err(tungstenite::Error::WriteBufferFull(message)) => {
