@@ -42,3 +42,7 @@ path = "examples/keychain_probe.rs"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 core-foundation = "0.10"
+
+[[example]]
+name = "local_network_probe"
+path = "examples/local_network_probe.rs"

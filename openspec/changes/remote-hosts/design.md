@@ -102,10 +102,24 @@ No command or event carries a provider, GitHub or Git credential, a token, or th
 
 ## Risks
 
-- **Local Network privacy.** macOS asks before an app uses the local network. The host binary runs from a copy outside the app bundle under launchd, and how macOS attributes its advertising and listening must be checked first (task 1.1). If macOS does not prompt for it, the app advertises on the host's behalf while the setting is on.
+- **Local Network privacy.** macOS asks before an app uses the local network. The host binary runs from a copy outside the app bundle under launchd, and how macOS attributes its advertising and listening must be checked first (task 1.1). If macOS does not prompt for it, the app advertises on the host's behalf while the setting is on. What task 1.1 found is under Local Network privacy, checked below.
 - **Four digits.** The code is safe only because SPAKE2 allows one guess per try and pairing closes after 3 wrong ones; the code must never be checked any other way.
 - **Agents on a driving Mac.** The client's own host socket and its paired hosts are reachable by that Mac's agents, which run as the same user. Device private keys stay in a Keychain item limited to the signed app, so an agent cannot sign the challenge as the device; this is defence in depth, not a sandbox.
 - **A lost device.** Anyone holding a paired Mac with Control can run commands on the host, since agents run with permission prompts off. Remove at the host is the remedy, and it applies at once.
+
+## Local Network privacy, checked
+
+Checked on October 20, 2026, on macOS 27.0.1 (26A434), with `crates/workspace-host/examples/local_network_probe.rs` copied out of the build, signed with *Apple Development: Michael Hohlios (PF6B6HV656)* and the hardened runtime under its own identifier, and run as a `gui/<uid>` launchd agent as the host copy is. Not with a Developer ID and not notarized. The probe listens on every interface, registers `_wiffletree._tcp`, and opens a TCP connection to the router; `nehelper` and `UserEventAgent` log macOS's decisions.
+
+- **The host copy is prompted for, not silently denied.** Its first connection to the local network is refused with `EHOSTUNREACH` while macOS shows the Local Network alert, even though the agent is not in the foreground. The alert names the copy's file name (`workspace-host`) and is keyed by its signing identifier. Once allowed, the same binary connects at every later start.
+- **Listening and advertising do not prompt.** Binding a TCP port on `0.0.0.0` and `DNSServiceRegister` succeed before any decision, and a browse on the same Mac lists the service. Accepting a connection from the same Mac's own network addresses works too.
+- **A rebuilt copy is prompted again.** A build with a new Mach-O UUID under the same identifier and identity was asked about afresh ("Local network preference not yet set"); `nehelper` found no team ID for a binary outside a bundle. Each host update, a new copy under `host/<version>/`, would therefore ask again with this signature.
+- **An embedded `Info.plist`** (`-sectcreate __TEXT __info_plist`) with `CFBundleIdentifier`, `NSLocalNetworkUsageDescription` and `NSBonjourServices` changes nothing above: same identifier keying, same re-prompt for a new UUID.
+
+So the host advertises and listens itself, as decisions 3 and 6 say, and needs no outgoing local-network connection. Still to confirm:
+
+- **With a second Mac** (Michael's): that it browses the host's advertisement and connects to 47821 both before the host copy has a Local Network decision and after one is denied. If an undecided or denied copy is not reachable from another Mac, the listener moves into the app's process as the fallback above describes, since the app keeps one decision across updates.
+- **With a Developer ID and notarization:** whether the decision then follows the team and identifier across host updates, or every new `host/<version>/` copy asks again. If it asks again, advertising and listening move to the app.
 
 ## Open questions
 

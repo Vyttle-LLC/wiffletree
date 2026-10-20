@@ -334,6 +334,19 @@ codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.host
 
 `--data-protection` and `--access-group <team ID>.<group>` use the data-protection keychain instead, which needs the `keychain-access-groups` entitlement and a provisioning profile. Use only a test service name, never a real Wiffletree item.
 
+`crates/workspace-host/examples/local_network_probe.rs` checks how Local Network privacy treats the launchd host copy (`openspec/changes/remote-hosts/design.md`, "Local Network privacy, checked"). It listens on a port on every interface, advertises `_wiffletree._tcp`, optionally connects to an address on the network, and prints what each step got. Sign a copy, run it as a launchd agent, and read `nehelper`'s decisions from the log:
+
+```sh
+cargo build --release -p workspace-host --example local_network_probe
+mkdir -p /tmp/ln && cp target/release/examples/local_network_probe /tmp/ln/workspace-host
+codesign --force --options runtime --identifier com.vyttle.wiffletree.spike.lnhost --sign "<identity>" /tmp/ln/workspace-host
+# A plist labelled com.vyttle.wiffletree.spike.lnhost running: /tmp/ln/workspace-host 47831 90 <router>:80
+launchctl bootstrap gui/$(id -u) /tmp/ln/lnhost.plist && launchctl kickstart gui/$(id -u)/com.vyttle.wiffletree.spike.lnhost
+/usr/bin/log show --last 2m --info --style compact | grep nehelper | grep -E "prompting|response"
+dns-sd -B _wiffletree._tcp   # on this Mac and on another one
+launchctl bootout gui/$(id -u)/com.vyttle.wiffletree.spike.lnhost
+```
+
 Only a signed build runs its host as a launchd job, so its tests cannot cover that the host does not start at login. Before a release, check it by hand on a test account:
 
 1. Open the signed app with its default data folder, so it loads the job from `<data folder>/host/com.vyttle.wiffletree.host.plist`.

@@ -24,6 +24,7 @@ mod processes;
 mod progress;
 pub mod provider;
 mod publish;
+pub mod remote;
 mod repositories;
 mod revisions;
 pub mod runtime;
