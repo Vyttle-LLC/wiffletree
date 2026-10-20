@@ -12,16 +12,22 @@ use gpui_component::{
     text::TextView,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
     path::Path,
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 
 /// Characters that never appear in a file reference, so code holding them is not looked up.
 const NOT_IN_PATHS: &[char] = &['`', '*', '?', '|', ';', '$', '"', '<', '>', '\\'];
 /// Linked bodies kept before the cache starts over; enough for every message on screen.
 const CACHE_LIMIT: usize = 1024;
+/// The room for references in one request, leaving the rest of the host's line limit for the
+/// bases and the request around them.
+const REFERENCE_BYTES: usize = MAX_LINE_BYTES / 2;
+/// How long a clicked link waits for the host to say where its file is.
+const CLICK_REPLY: Duration = Duration::from_secs(2);
 
 /// Markdown whose file references become links once the host has said which are files.
 #[derive(Clone)]
@@ -197,33 +203,32 @@ fn resolve(linked: &[&Linked], bridge: &Bridge) -> Option<impl Future<Output = (
     Some(async move {
         let mut replies = vec![];
         for (bases, group) in asking {
-            let candidates: Vec<_> = (group.iter())
-                .map(|asking| candidates(&asking.resolution.body))
-                .collect();
-            let references: Vec<_> = (candidates.iter().flatten())
-                .map(|(.., reference)| reference.clone())
-                .collect();
-            if references.is_empty() {
-                for asking in &group {
+            let mut unasked = vec![];
+            for asking in group {
+                let candidates = candidates(&asking.resolution.body);
+                if candidates.is_empty() {
                     let _ = (asking.resolution.linked).set(asking.resolution.body.clone().into());
+                } else {
+                    unasked.push((asking, candidates));
                 }
-                continue;
             }
-            // Unsent, the group is dropped, so its bodies stay unlinked and uncached.
-            if let Ok(reply) = bridge.ask(ask::resolve_paths(references, bases)) {
-                replies.push((group, candidates, reply));
+            for batch in batches(unasked) {
+                let asked = ask::resolve_paths(batch.references.clone(), bases.clone());
+                // Unsent, the batch is dropped, so its bodies stay unlinked and uncached.
+                if let Ok(reply) = bridge.ask(asked) {
+                    replies.push((batch, reply));
+                }
             }
         }
-        for (group, candidates, reply) in replies {
+        for (batch, reply) in replies {
             let Ok(resolved) = reply.await else {
                 continue;
             };
-            let mut resolved = resolved.into_iter();
-            for (asking, candidates) in group.iter().zip(&candidates) {
-                let files: HashMap<&str, PathBuf> = (candidates.iter())
-                    .zip(resolved.by_ref())
-                    .filter_map(|((.., reference), file)| Some((reference.as_str(), file?.path)))
-                    .collect();
+            let files: HashMap<&str, PathBuf> = (batch.references.iter())
+                .zip(resolved)
+                .filter_map(|(reference, file)| Some((reference.as_str(), file?.path)))
+                .collect();
+            for (asking, candidates) in &batch.bodies {
                 let body = &asking.resolution.body;
                 let text = link_code(body, candidates, |r| files.get(r).cloned());
                 let _ = asking.resolution.linked.set(text.into());
@@ -235,9 +240,51 @@ fn resolve(linked: &[&Linked], bridge: &Bridge) -> Option<impl Future<Output = (
     })
 }
 
+/// One request's worth of bodies that share their bases, with each reference among them once.
+#[derive(Default)]
+struct Batch {
+    bodies: Vec<(Asking, Vec<Candidate>)>,
+    references: Vec<String>,
+    asked: HashSet<String>,
+    /// The references' size in the request.
+    bytes: usize,
+}
+
+/// `bodies`, each with its candidates, in requests small enough for the host to take. A body
+/// too large for a request even alone gets one to itself, which is refused, so it stays plain.
+fn batches(bodies: Vec<(Asking, Vec<Candidate>)>) -> Vec<Batch> {
+    let size = |reference: &String| serde_json::to_string(reference).map_or(0, |r| r.len()) + 1;
+    let mut batches: Vec<Batch> = vec![];
+    for (asking, candidates) in bodies {
+        let unasked: HashSet<&String> = (candidates.iter())
+            .map(|(.., reference)| reference)
+            .filter(|reference| !batches.last().is_some_and(|b| b.asked.contains(*reference)))
+            .collect();
+        let bytes: usize = unasked.into_iter().map(size).sum();
+        if batches
+            .last()
+            .is_none_or(|b| b.bytes + bytes > REFERENCE_BYTES)
+        {
+            batches.push(Batch::default());
+        }
+        let batch = batches.last_mut().unwrap();
+        for (.., reference) in &candidates {
+            if batch.asked.insert(reference.clone()) {
+                batch.bytes += size(reference);
+                batch.references.push(reference.clone());
+            }
+        }
+        batch.bodies.push((asking, candidates));
+    }
+    batches
+}
+
+/// An inline code span's source range, with its code or the file reference the code names.
+type Candidate = (usize, usize, String);
+
 /// The source range of each inline code span in `body` that may name a file, with the
 /// reference it names.
-fn candidates(body: &str) -> Vec<(usize, usize, String)> {
+fn candidates(body: &str) -> Vec<Candidate> {
     let mut options = markdown::ParseOptions::gfm();
     // As the text view parses, so code inside math is not mistaken for a code span.
     options.constructs.math_text = true;
@@ -258,7 +305,7 @@ fn candidates(body: &str) -> Vec<(usize, usize, String)> {
 /// Wraps each of the `candidates` that `resolve` finds a file for in a link to that file.
 fn link_code(
     body: &str,
-    candidates: &[(usize, usize, String)],
+    candidates: &[Candidate],
     resolve: impl Fn(&str) -> Option<PathBuf>,
 ) -> String {
     let mut linked = String::with_capacity(body.len());
@@ -281,7 +328,7 @@ fn link_code(
 }
 
 /// The source range and text of every inline code span outside a link, in document order.
-fn code_spans(node: &markdown::mdast::Node, spans: &mut Vec<(usize, usize, String)>) {
+fn code_spans(node: &markdown::mdast::Node, spans: &mut Vec<Candidate>) {
     use markdown::mdast::Node;
     match node {
         Node::InlineCode(code) => {
@@ -452,10 +499,13 @@ pub(super) fn open_link(
     let reference = without_location(&target).to_owned();
     let asked = ask::resolve_paths(vec![reference.clone()], bases.to_vec());
     let reply = bridge.ask(asked);
+    let deadline = cx.background_executor().timer(CLICK_REPLY);
     window
         .spawn(cx, async move |cx| {
             let resolved = match reply {
-                Ok(reply) => reply.await.map(|mut found| found.pop().flatten()),
+                Ok(reply) => in_time(reply, deadline)
+                    .await
+                    .map(|mut found| found.pop().flatten()),
                 Err(error) => Err(error),
             };
             let _ = cx.update(|window, cx| {
@@ -479,6 +529,18 @@ pub(super) fn open_link(
             });
         })
         .detach();
+}
+
+/// `reply`, or an error once `deadline` passes first, when the late reply is dropped.
+async fn in_time<T>(
+    reply: impl Future<Output = Result<T, String>>,
+    deadline: impl Future,
+) -> Result<T, String> {
+    futures_lite::future::or(reply, async {
+        deadline.await;
+        Err("The host did not answer in time".to_string())
+    })
+    .await
 }
 
 /// The menu of the right-clicked file link. The text view only reports the click, so the
@@ -536,8 +598,8 @@ pub(super) fn link_menu(cx: &App) -> Option<impl IntoElement> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bridge, LinkAction, Linked, candidates, link_action, local_target, reference, resolve,
-        wait_for_links,
+        Bridge, LinkAction, Linked, candidates, in_time, link_action, local_target, reference,
+        resolve, wait_for_links,
     };
     use crate::bridge::tests::serve;
     use gpui::{
@@ -682,6 +744,53 @@ mod tests {
         let expected = format!("See [`notes.md`](<{}>)", file.display());
         assert_eq!(linked.text(), expected);
         assert_eq!(again.text(), expected, "both show the one answer");
+        busy.shutdown();
+    }
+
+    #[test]
+    fn a_page_too_large_for_one_request_is_asked_about_in_several() {
+        let served = serve(|_| {});
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "").unwrap();
+        let bases: std::sync::Arc<[PathBuf]> = vec![dir.path().to_owned()].into();
+        // 40 bodies of 300 distinct references each: about 450 KiB, past the host's 256 KiB
+        // line, though each body alone fits.
+        let body = |i: usize, references: usize| {
+            let missing =
+                (0..references).map(|j| format!("`docs/missing-{i}-{j}-of-the-page.md` "));
+            format!("`README.md` {}", missing.collect::<String>())
+        };
+        let page: Vec<_> = (0..40)
+            .map(|i| Linked::new("m", &body(i, 300), bases.clone(), &served.bridge))
+            .collect();
+        // One body too large for any request stays plain, as it always did.
+        let huge = Linked::new("m", &body(40, 8000), bases.clone(), &served.bridge);
+        wait_for_links(page.iter().chain([&huge]), &served.bridge);
+
+        let readme = format!(
+            "[`README.md`](<{}>)",
+            dir.path().join("README.md").display()
+        );
+        assert!(page.iter().all(|linked| linked.text().starts_with(&readme)));
+        assert!(huge.text().starts_with("`README.md`"));
+    }
+
+    #[test]
+    fn a_click_gives_up_on_a_host_that_does_not_answer_in_time() {
+        let served = serve(|_| {});
+        let (busy, held) = served.busy();
+        let asked = || {
+            busy.ask(ask::resolve_paths(vec!["notes.md".into()], vec![]))
+                .unwrap()
+        };
+        held.store(true, Ordering::Relaxed);
+        let late = futures_lite::future::block_on(in_time(asked(), std::future::ready(())));
+        assert_eq!(late.unwrap_err(), "The host did not answer in time");
+
+        held.store(false, Ordering::Relaxed);
+        let answered =
+            futures_lite::future::block_on(in_time(asked(), std::future::pending::<()>()));
+        assert_eq!(answered.unwrap(), vec![None]);
         busy.shutdown();
     }
 
