@@ -54,6 +54,7 @@ impl Inbox {
                 (item.id.clone(), linked)
             };
             self.prompts = snapshot.attention.iter().map(link).collect();
+            file_links::link_when_resolved(self.prompts.values(), &self.bridge, cx);
         }
         if before.as_ref() != Some(&synced(snapshot)) {
             let paused = snapshot.paused_settings();

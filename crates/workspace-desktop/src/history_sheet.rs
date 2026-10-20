@@ -103,6 +103,7 @@ impl HistorySheet {
                         self.narration.insert(step.id.clone(), linked);
                     }
                 }
+                file_links::link_when_resolved(self.narration.values(), &self.bridge, cx);
                 let (shown, rows) = (self.list.item_count(), self.run.steps.len());
                 if unchanged < rows || shown != rows {
                     self.list.splice(unchanged..shown, rows - unchanged);
