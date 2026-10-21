@@ -16,16 +16,53 @@ fn is_shared(path: &str) -> bool {
     path == SHARED_PATHS[0] || path.starts_with("settings/") || path.starts_with("skills/")
 }
 
-/// GitHub's owner and name, and the URL to push to: the URL named, or HTTPS for `owner/name`.
-fn parse(input: &str) -> Result<(String, String, String)> {
+/// GitHub's owner and name, and the URLs to try reaching it by, in order: the URL named, or for
+/// `owner/name` the URL of gh's Git `protocol` first and then the other's.
+fn candidates(input: &str, protocol: &str) -> Result<(String, String, Vec<String>)> {
     let input = input.trim();
-    let url = match input.contains(':') {
+    let named = input.contains(':');
+    let url = match named {
         true => input.to_owned(),
         false => format!("https://github.com/{input}.git"),
     };
     let (owner, name) = pr_watch::github_repository(&url)
         .context("Name a repository on github.com as owner/name or by its URL")?;
-    Ok((owner, name, url))
+    let ssh = format!("git@github.com:{owner}/{name}.git");
+    let urls = match (named, protocol) {
+        (true, _) => vec![url],
+        (false, "ssh") => vec![ssh, url],
+        (false, _) => vec![url, ssh],
+    };
+    Ok((owner, name, urls))
+}
+
+/// The Git protocol gh uses for github.com: `ssh`, or `https`, gh's default.
+fn gh_protocol(tools: &Tools, home: &Path) -> String {
+    let args = [
+        "config",
+        "get",
+        "git_protocol",
+        "-h",
+        repositories::GITHUB_HOST,
+    ];
+    match (tools.gh)(home, &args) {
+        Ok(answer) if answer.status.success() => answer.output.trim().to_owned(),
+        _ => "https".into(),
+    }
+}
+
+/// Git options that give Git gh's GitHub login for one command over HTTPS, in place of any
+/// credential helper Git has, so no token is stored or named on a command line.
+fn gh_login(url: &str) -> &'static [&'static str] {
+    match url.starts_with("https://github.com/") {
+        true => &[
+            "-c",
+            "credential.https://github.com.helper=",
+            "-c",
+            "credential.https://github.com.helper=!gh auth git-credential",
+        ],
+        false => &[],
+    }
 }
 
 /// Runs Git through `git`, refusing a failed command with Git's reason.
@@ -34,10 +71,15 @@ fn run(git: &GitTool, path: &Path, args: &[&str]) -> Result<String> {
     ensure!(
         answer.status.success(),
         "git {} failed{}",
-        args[0],
+        publish::subcommand(args),
         answer.reason()
     );
     Ok(answer.output)
+}
+
+/// `run` for a command that reaches the repository at `url`: over HTTPS with gh's login.
+fn run_at(git: &GitTool, path: &Path, url: &str, args: &[&str]) -> Result<String> {
+    run(git, path, &[gh_login(url), args].concat())
 }
 
 fn gh_json(tools: &Tools, home: &Path, endpoint: &str) -> Result<Value> {
@@ -83,23 +125,39 @@ fn read_machine_name() -> String {
         .unwrap_or_else(|| "Unnamed machine".into())
 }
 
-/// The branch's head on GitHub, or `None` while the repository has no commit on it. Reading it
+/// The branch's head at `url`, or `None` while the repository has no commit on it. Reading it
 /// is how this machine's access is checked.
-fn remote_head(
-    path: &Path,
-    repository: &SettingsRepository,
-    git: &GitTool,
-) -> Result<Option<String>> {
-    let reference = format!("refs/heads/{}", repository.branch);
-    let heads = run(git, path, &["ls-remote", &repository.push_url, &reference])
-        .context("This machine cannot read the repository")?;
+fn remote_head(path: &Path, url: &str, branch: &str, git: &GitTool) -> Result<Option<String>> {
+    let reference = format!("refs/heads/{branch}");
+    let heads = run_at(git, path, url, &["ls-remote", url, &reference])?;
     Ok(heads.split_whitespace().next().map(str::to_owned))
+}
+
+/// The first of `urls` this machine can read `branch` at, with the branch's head there, or
+/// every URL tried and why it could not be read.
+fn first_readable(
+    path: &Path,
+    urls: Vec<String>,
+    branch: &str,
+    git: &GitTool,
+) -> Result<(String, Option<String>)> {
+    let mut reasons = vec![];
+    for url in urls {
+        match remote_head(path, &url, branch, git) {
+            Ok(head) => return Ok((url, head)),
+            Err(error) => reasons.push(format!("{url}: {error:#}")),
+        }
+    }
+    bail!(
+        "This machine cannot read the repository. Tried {}. Add an SSH key to GitHub, sign gh in with gh auth login, or check that the repository exists and is yours to read.",
+        reasons.join("; tried ")
+    )
 }
 
 /// What GitHub and Git say about the repository, with a clone of its branch in a new folder of
 /// the data folder that is removed when dropped.
 fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCheck, TempDir)> {
-    let (owner, name, push_url) = parse(input)?;
+    let (owner, name, urls) = candidates(input, &gh_protocol(tools, home))?;
     let facts = gh_json(tools, home, &format!("repos/{owner}/{name}"))?;
     ensure!(
         facts["private"] == true,
@@ -125,13 +183,14 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
         },
     };
     let field = |key: &str| facts[key].as_str().map(str::to_owned);
+    let branch = field("default_branch").context("GitHub named no default branch")?;
+    let (push_url, head) = first_readable(home, urls, &branch, &tools.git)?;
     let repository = SettingsRepository {
         name: field("full_name").context("GitHub named no repository")?,
         push_url,
-        branch: field("default_branch").context("GitHub named no default branch")?,
+        branch,
         readers,
     };
-    let head = remote_head(home, &repository, &tools.git)?;
     let staging = tempfile::Builder::new()
         .prefix("shared-staging-")
         .tempdir_in(home)?;
@@ -144,7 +203,7 @@ fn read(home: &Path, input: &str, tools: &Tools) -> Result<(SettingsRepositoryCh
         clone.extend(["--branch", &repository.branch]);
     }
     clone.extend([repository.push_url.as_str(), into]);
-    run(&tools.git, home, &clone)?;
+    run_at(&tools.git, home, &repository.push_url, &clone)?;
     if head.is_none() {
         let branch = format!("refs/heads/{}", repository.branch);
         run(
@@ -431,7 +490,9 @@ pub(crate) fn push(clone: &Path, repository: &SettingsRepository, git: &GitTool)
     let head = runtime::git_output(clone, &["rev-parse", "HEAD"])?
         .trim()
         .to_owned();
-    let range = match remote_head(clone, repository, git)? {
+    let remote = remote_head(clone, &repository.push_url, &repository.branch, git)
+        .context("This machine cannot read the repository")?;
+    let range = match remote {
         Some(remote) => {
             ensure!(
                 publish::is_ancestor(clone, &remote, &head),
@@ -462,11 +523,8 @@ pub(crate) fn push(clone: &Path, repository: &SettingsRepository, git: &GitTool)
     }
     let refspec = format!("{head}:refs/heads/{}", repository.branch);
     let args = ["push", "--no-follow-tags", "--recurse-submodules=no"];
-    run(
-        git,
-        clone,
-        &[&args[..], &[&repository.push_url, &refspec]].concat(),
-    )?;
+    let url = repository.push_url.as_str();
+    run_at(git, clone, url, &[&args[..], &[url, &refspec]].concat())?;
     Ok(())
 }
 
@@ -879,10 +937,12 @@ pub(crate) fn pass(pass: Pass, tools: &Tools) -> Result<Passed> {
     let repository = &passed.repository;
     let branch = format!("refs/heads/{}", repository.branch);
     let fetch = ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"];
-    run(
+    let url = repository.push_url.as_str();
+    run_at(
         &tools.git,
         &clone,
-        &[&fetch[..], &[&repository.push_url, &branch]].concat(),
+        url,
+        &[&fetch[..], &[url, &branch]].concat(),
     )?;
     let remote = runtime::git_output(&clone, &["rev-parse", "FETCH_HEAD"])?
         .trim()
@@ -1525,6 +1585,11 @@ pub(crate) mod tests {
         git: Mutex<Vec<Vec<String>>>,
         /// Git cannot reach GitHub.
         offline: AtomicBool,
+        /// The Git protocol gh is configured with.
+        protocol: Mutex<&'static str>,
+        /// The beginnings of URLs Git cannot read the repository by, as without an SSH key or
+        /// HTTPS login.
+        unreadable: Mutex<Vec<&'static str>>,
         /// Runs before the next Git command of that name, as another machine's push or a
         /// save made meanwhile would.
         before: Mutex<Option<Hook>>,
@@ -1556,6 +1621,8 @@ pub(crate) mod tests {
                 gh: Mutex::default(),
                 git: Mutex::default(),
                 offline: AtomicBool::new(false),
+                protocol: Mutex::new("https"),
+                unreadable: Mutex::default(),
                 before: Mutex::default(),
             }
         }
@@ -1567,6 +1634,14 @@ pub(crate) mod tests {
                     .lock()
                     .unwrap()
                     .push(args.iter().map(|a| a.to_string()).collect());
+                if args[0] == "config" {
+                    assert_eq!(args, ["config", "get", "git_protocol", "-h", "github.com"]);
+                    return Ok(runtime::GhAnswer {
+                        status: exit(0),
+                        output: format!("{}\n", github.protocol.lock().unwrap()),
+                        error: String::new(),
+                    });
+                }
                 assert_eq!(args[..3], ["api", "--hostname", "github.com"], "reads only");
                 assert_eq!(args.len(), 4, "a GET with no fields: {args:?}");
                 let answer = match args[3].split_once('/') {
@@ -1590,28 +1665,41 @@ pub(crate) mod tests {
                 let (name, email) = github.identity;
                 let (name, email) = (format!("user.name={name}"), format!("user.email={email}"));
                 let mut local = vec!["-c", &name, "-c", &email];
-                local.extend(
-                    args.iter()
-                        .map(|a| if a.contains("github.com") { bare } else { a }),
-                );
-                if github.offline.load(Ordering::Relaxed)
-                    && args.iter().any(|a| a.contains("github.com"))
-                {
+                let is_url = |a: &str| {
+                    ["https://github.com/", "git@github.com:"]
+                        .iter()
+                        .any(|p| a.starts_with(p))
+                };
+                local.extend(args.iter().map(|&a| if is_url(a) { bare } else { a }));
+                let url = args.iter().find(|a| is_url(a));
+                if github.offline.load(Ordering::Relaxed) && url.is_some() {
                     return Ok(runtime::GitAnswer {
                         status: exit(128),
                         output: String::new(),
                         error: "fatal: unable to access 'https://github.com/MHohlios/wiffletree-storage.git/': Could not resolve host: github.com".into(),
                     });
                 }
+                let unreadable = github.unreadable.lock().unwrap().clone();
+                if let Some(url) = url.filter(|url| unreadable.iter().any(|p| url.starts_with(p))) {
+                    let error = match url.starts_with("git@") {
+                        true => "git@github.com: Permission denied (publickey).",
+                        false => {
+                            "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+                        }
+                    };
+                    return Ok(runtime::GitAnswer {
+                        status: exit(128),
+                        output: String::new(),
+                        error: error.into(),
+                    });
+                }
+                let command = publish::subcommand(args);
                 let mut before = github.before.lock().unwrap();
-                if before
-                    .as_ref()
-                    .is_some_and(|(command, _)| *command == args[0])
-                {
+                if before.as_ref().is_some_and(|(c, _)| *c == command) {
                     before.take().unwrap().1();
                 }
                 drop(before);
-                match args[0] {
+                match command {
                     "push" => runtime::git_push(path, &local),
                     _ => runtime::git_answer(path, &local),
                 }
@@ -1640,13 +1728,22 @@ pub(crate) mod tests {
         fn commit(&self, file: &str, content: impl AsRef<[u8]>) {
             commit_on(&self.bare, file, content);
         }
-        fn pushes(&self) -> usize {
+        /// Every Git command of that name sent, with the options before it.
+        fn calls(&self, command: &str) -> Vec<Vec<String>> {
+            let named = |args: &&Vec<String>| {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                publish::subcommand(&args) == command
+            };
             self.git
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|a| a[0] == "push")
-                .count()
+                .filter(named)
+                .cloned()
+                .collect()
+        }
+        fn pushes(&self) -> usize {
+            self.calls("push").len()
         }
     }
 
@@ -1684,21 +1781,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_repository_is_named_as_owner_and_name_or_by_its_github_url() {
+    fn a_repository_is_named_as_owner_and_name_tried_by_ghs_protocol_first_or_by_its_url() {
         let https = "https://github.com/MHohlios/wiffletree-storage.git";
-        for (input, url) in [
-            (NAME, https),
-            (" MHohlios/wiffletree-storage ", https),
-            (https, https),
-            (
-                "git@github.com:MHohlios/wiffletree-storage.git",
-                "git@github.com:MHohlios/wiffletree-storage.git",
-            ),
+        let ssh = "git@github.com:MHohlios/wiffletree-storage.git";
+        for (input, protocol, urls) in [
+            (NAME, "https", vec![https, ssh]),
+            (" MHohlios/wiffletree-storage ", "ssh", vec![ssh, https]),
+            (NAME, "", vec![https, ssh]),
+            (https, "ssh", vec![https]),
+            (ssh, "https", vec![ssh]),
         ] {
-            let parsed = parse(input).unwrap();
+            let urls: Vec<String> = urls.into_iter().map(str::to_owned).collect();
             assert_eq!(
-                parsed,
-                ("MHohlios".into(), "wiffletree-storage".into(), url.into())
+                candidates(input, protocol).unwrap(),
+                ("MHohlios".into(), "wiffletree-storage".into(), urls)
             );
         }
         for input in [
@@ -1707,8 +1803,139 @@ pub(crate) mod tests {
             "me",
             "/tmp/storage.git",
         ] {
-            assert!(parse(input).is_err(), "{input}");
+            assert!(candidates(input, "https").is_err(), "{input}");
         }
+    }
+
+    #[test]
+    fn only_https_on_github_is_given_ghs_login_and_never_a_token() {
+        let login = gh_login("https://github.com/MHohlios/wiffletree-storage.git");
+        assert_eq!(
+            login,
+            [
+                "-c",
+                "credential.https://github.com.helper=",
+                "-c",
+                "credential.https://github.com.helper=!gh auth git-credential"
+            ]
+        );
+        for url in [
+            "git@github.com:MHohlios/wiffletree-storage.git",
+            "ssh://git@github.com/MHohlios/wiffletree-storage.git",
+        ] {
+            assert!(gh_login(url).is_empty(), "{url}");
+        }
+        assert_eq!(
+            publish::subcommand(&[login, &["ls-remote"]].concat()),
+            "ls-remote"
+        );
+    }
+
+    #[test]
+    fn with_ghs_ssh_protocol_set_up_and_sync_reach_github_over_ssh_without_ghs_login() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        *github.protocol.lock().unwrap() = "ssh";
+        *github.unreadable.lock().unwrap() = vec!["https://"];
+        let ssh = "git@github.com:MHohlios/wiffletree-storage.git";
+        let check = check(&host.home, NAME, &github.tools()).unwrap();
+        assert_eq!(check.repository.push_url, ssh);
+        host.set_check_ins(10, 300).unwrap();
+        host.choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        github.commit("notes.md", "From GitHub.\n");
+        host.set_check_ins(20, 300).unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(status(&host).error, None);
+        assert!(github.show(shared::CHECK_INS).unwrap().contains("20"));
+        assert!(home.path().join("shared/notes.md").exists());
+        for command in ["ls-remote", "clone", "fetch", "push"] {
+            let calls = github.calls(command);
+            assert!(!calls.is_empty(), "{command}");
+            for call in calls {
+                assert!(
+                    call.contains(&ssh.to_owned()) && call[0] == command,
+                    "{call:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_an_ssh_key_set_up_and_sync_reach_github_over_https_with_ghs_login() {
+        let (home, mut host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        *github.protocol.lock().unwrap() = "ssh";
+        *github.unreadable.lock().unwrap() = vec!["git@"];
+        let https = "https://github.com/MHohlios/wiffletree-storage.git";
+        host.set_check_ins(10, 300).unwrap();
+        let settings = host
+            .choose_settings_repository(NAME, None, &github.tools())
+            .unwrap();
+        assert_eq!(settings.settings_repository.unwrap().push_url, https);
+        github.commit("notes.md", "From GitHub.\n");
+        host.set_check_ins(20, 300).unwrap();
+        host.sync_now(&github.tools()).unwrap();
+        assert_eq!(status(&host).error, None);
+        assert!(github.show(shared::CHECK_INS).unwrap().contains("20"));
+        assert!(home.path().join("shared/notes.md").exists());
+        let ls_remote = github.calls("ls-remote");
+        assert!(
+            ls_remote[0].contains(&"git@github.com:MHohlios/wiffletree-storage.git".to_owned())
+        );
+        for command in ["ls-remote", "clone", "fetch", "push"] {
+            for call in github
+                .calls(command)
+                .into_iter()
+                .filter(|c| c.contains(&https.to_owned()))
+            {
+                assert_eq!(call[..4], *gh_login(https), "{call:?}");
+            }
+        }
+        assert_eq!(github.calls("fetch").len(), 1);
+        assert_eq!(github.calls("push").len(), 2);
+    }
+
+    #[test]
+    fn a_url_the_human_names_is_the_only_one_tried() {
+        let (home, host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        *github.protocol.lock().unwrap() = "ssh";
+        let https = "https://github.com/MHohlios/wiffletree-storage.git";
+        let check = check(&host.home, https, &github.tools()).unwrap();
+        assert_eq!(check.repository.push_url, https);
+        let ls_remote = github.calls("ls-remote");
+        assert_eq!(ls_remote.len(), 1);
+        assert_eq!(ls_remote[0][..4], *gh_login(https));
+        *github.unreadable.lock().unwrap() = vec!["git@"];
+        let ssh = "git@github.com:MHohlios/wiffletree-storage.git";
+        let error = format!(
+            "{:#}",
+            super::check(&host.home, ssh, &github.tools()).unwrap_err()
+        );
+        assert!(error.contains(ssh) && !error.contains(https), "{error}");
+    }
+
+    #[test]
+    fn when_no_way_reads_the_repository_each_url_and_its_reason_is_named() {
+        let (home, host) = host();
+        let github = Arc::new(GitHub::new(home.path(), true));
+        *github.protocol.lock().unwrap() = "ssh";
+        *github.unreadable.lock().unwrap() = vec!["git@", "https://"];
+        let before = listing(home.path());
+        let error = format!(
+            "{:#}",
+            check(&host.home, NAME, &github.tools()).unwrap_err()
+        );
+        assert_eq!(
+            error,
+            "This machine cannot read the repository. \
+             Tried git@github.com:MHohlios/wiffletree-storage.git: git ls-remote failed: git@github.com: Permission denied (publickey).; \
+             tried https://github.com/MHohlios/wiffletree-storage.git: git ls-remote failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled. \
+             Add an SSH key to GitHub, sign gh in with gh auth login, or check that the repository exists and is yours to read."
+        );
+        assert_eq!(listing(home.path()), before);
+        assert!(github.calls("clone").is_empty());
     }
 
     #[test]
@@ -1768,7 +1995,7 @@ pub(crate) mod tests {
             assert!(check.organization);
             assert_eq!(check.repository.readers, readers);
             let calls = github.gh.lock().unwrap().clone();
-            assert_eq!(calls[1][3], "orgs/Sage-Social");
+            assert_eq!(calls[2][3], "orgs/Sage-Social");
         }
     }
 
@@ -1823,8 +2050,9 @@ pub(crate) mod tests {
                 readme.then_some(README)
             );
             // The push named one branch at the push URL, sent no tags and was not forced.
-            let git_calls = github.git.lock().unwrap().clone();
-            let push = git_calls.iter().find(|a| a[0] == "push").unwrap();
+            let push = github.calls("push").remove(0);
+            assert_eq!(push[..4], *gh_login(&push[7]), "gh's login over HTTPS");
+            let push = &push[4..];
             assert_eq!(
                 push[..3],
                 ["push", "--no-follow-tags", "--recurse-submodules=no"]
