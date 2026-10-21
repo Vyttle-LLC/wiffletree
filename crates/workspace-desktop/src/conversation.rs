@@ -7,7 +7,7 @@ use gpui_component::{
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
 };
-use staging::Staging;
+use staging::{Hold, Staging};
 use transcript::Transcript;
 use ui::{banner, hint, icon};
 use wording::{effort_label, plural};
@@ -71,6 +71,11 @@ pub(super) struct Conversation {
     drafts: BTreeMap<String, String>,
     /// Files dropped on each session's conversation, waiting to go with its draft.
     attached: BTreeMap<String, Vec<Attachment>>,
+    /// The drafts' holds on their staged copies, by path. Dropped with the view, so no copy
+    /// outlives its draft.
+    staged: BTreeMap<PathBuf, Hold>,
+    /// Each local send's holds on the copies it sends, until the host answers.
+    sent_holds: BTreeMap<String, Vec<Hold>>,
     /// Why files in the selected conversation's last drop were not attached.
     refused_files: Vec<String>,
     sending: BTreeSet<String>,
@@ -116,6 +121,8 @@ impl Conversation {
             input,
             drafts: BTreeMap::new(),
             attached: BTreeMap::new(),
+            staged: BTreeMap::new(),
+            sent_holds: BTreeMap::new(),
             refused_files: vec![],
             sending: BTreeSet::new(),
             drop_checks: DropChecks::default(),
@@ -237,7 +244,7 @@ impl Conversation {
         cx.spawn_in(window, async move |this, cx| {
             let staged = staged.await;
             let copies = (staged.iter())
-                .filter_map(|(_, copy)| copy.clone().ok())
+                .filter_map(|(_, copy)| Some(copy.as_ref().ok()?.path().to_path_buf()))
                 .collect();
             let inspected = match inspector.ask(ask::inspect_attachments(copies)) {
                 Ok(reply) => reply.await,
@@ -258,22 +265,21 @@ impl Conversation {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let staging = cx.global::<Staging>().clone();
         let inspected = match inspected {
             Ok(inspected) => inspected,
             Err(error) => {
-                for (_, copy) in &staged {
-                    if let Ok(copy) = copy {
-                        staging.release(copy);
-                    }
-                }
                 // A send pressed meanwhile is not made; its draft stays to send again.
                 self.drop_checks.finished(&session, false);
                 return toast_error(error, window, cx);
             }
         };
         let attached = self.attached.entry(session.clone()).or_default();
-        let refused = attachment_chips::add_staged(&staging, attached, staged, inspected);
+        let (refused, holds) = attachment_chips::add_staged(attached, staged, inspected);
+        (self.staged).extend(
+            holds
+                .into_iter()
+                .map(|hold| (hold.path().to_path_buf(), hold)),
+        );
         // Why files were refused shows only with the conversation they were dropped on.
         if self.shared.selected.as_ref() == Some(&session) {
             self.refused_files = refused;
@@ -290,10 +296,7 @@ impl Conversation {
         if let Some(files) = self.attached.get_mut(&session) {
             files.retain(|a| a.path != path);
         }
-        // A message being sent may still be reading it; the next start removes it then.
-        if !self.sending.contains(&session) {
-            cx.global::<Staging>().release(path);
-        }
+        self.staged.remove(path);
         cx.notify();
     }
     /// Sends the selected session's draft as it reads now, or once its dropped files are checked.
@@ -329,9 +332,14 @@ impl Conversation {
             self.refused_files.clear();
         }
         self.sending.insert(recipient.clone());
+        // The copies stay until the host has read them, even if taken out of the draft meanwhile.
+        let holds: Vec<Hold> = (attachments.iter())
+            .filter_map(|path| self.staged.get(path).cloned())
+            .collect();
         // The message has its id from now on, so however often it is sent, it is stored once.
         let id = new_id();
         if self.bridge.remote().is_none() || attachments.is_empty() {
+            self.sent_holds.insert(recipient.clone(), holds);
             let send = Command::Send {
                 id,
                 sender: None,
@@ -348,6 +356,7 @@ impl Conversation {
         let bridge = self.bridge.clone();
         let (sender, answered) = async_channel::bounded(1);
         std::thread::spawn(move || {
+            let _holds = holds;
             let uploads: Result<Vec<_>, _> = (attachments.iter())
                 .map(|path| uploads::upload(&bridge, path))
                 .collect();
@@ -997,6 +1006,7 @@ impl Requests for Conversation {
     ) {
         if let Command::Send { recipient, .. } = &command {
             self.sending.remove(recipient);
+            self.sent_holds.remove(recipient);
         }
         if let Err(error) = reply {
             return toast_error(error, window, cx);
@@ -1018,10 +1028,8 @@ impl Requests for Conversation {
                 .get(&recipient)
                 .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
         {
-            let sent = self.attached.remove(&recipient).unwrap_or_default();
-            let staging = cx.global::<Staging>();
-            for file in sent {
-                staging.release(&file.path);
+            for file in self.attached.remove(&recipient).unwrap_or_default() {
+                self.staged.remove(&file.path);
             }
         }
         let selected = self.shared.selected.as_deref() == Some(&recipient);

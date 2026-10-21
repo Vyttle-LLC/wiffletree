@@ -1,8 +1,8 @@
 ## 1. Desktop
 
-- [x] 1.1 Add `staging.rs`: open (empty at start), stage a dropped file, save a pasted image as PNG, release a copy, name pasted images.
+- [x] 1.1 Add `staging.rs`: open (empty at start), stage a dropped file, save a pasted image as PNG, hold a copy until its last hold drops, name pasted images.
 - [x] 1.2 Stage drops and pastes before `InspectAttachments`; merge the results with `add_staged`, which releases copies left out.
-- [x] 1.3 Release copies when a draft is sent or a file is removed; take image and file pastes through `Textarea::on_paste`.
+- [x] 1.3 Keep the drafts' holds in the conversation and a send's holds until it ends; take image and file pastes through `Textarea::on_paste`.
 
 ## 2. Docs
 

@@ -6,7 +6,7 @@ The human cannot attach screenshots on macOS. Dragging a screenshot's floating t
 
 - **Copy on drop.** The desktop copies each dropped file into a staging folder in its data folder when it is dropped, and the draft attaches that copy. A file that cannot be copied is refused at the drop with its reason. Send copies from the staged copy as before.
 - **Paste files and images.** Cmd+V in the composer with an image on the clipboard saves it as a PNG named like `Pasted image 2026-10-21 at 14.03.12.png` in the same staging folder and attaches it like a drop. Files copied in Finder are attached like a drop. Text pastes as before.
-- **Staged copies are temporary.** A copy is removed when its draft is sent or it is taken out of the draft, and the whole staging folder when the app starts.
+- **Staged copies are temporary.** A copy is removed when its draft is sent, it is taken out of the draft (after any send reading it ends) or the window closes, and the whole staging folder when the app starts.
 - **Unchanged.** The host's checks (size, type, duplicate names), the chips, the refusal notice, the message store and delivery to Claude and Codex.
 
 ## Capabilities
@@ -20,7 +20,7 @@ The human cannot attach screenshots on macOS. Dragging a screenshot's floating t
 ## Impact
 
 - `crates/workspace-desktop/src/staging.rs` (new): the staging folder, copies, pasted PNGs and their names.
-- `crates/workspace-desktop/src/conversation.rs`: drop and paste stage files before the host checks them; send and remove release copies.
-- `crates/workspace-desktop/src/attachment_chips.rs`: `add_staged` merges staging and the host's check and releases copies left out.
+- `crates/workspace-desktop/src/conversation.rs`: drop and paste stage files before the host checks them; the view holds its drafts' copies and each send holds the copies it reads.
+- `crates/workspace-desktop/src/attachment_chips.rs`: `add_staged` merges staging and the host's check and drops the holds on copies left out.
 - `crates/workspace-desktop/Cargo.toml`: `image`, to convert a pasted non-PNG image.
 - Docs: `docs/DEVELOPMENT.md`. No host, storage or protocol change.

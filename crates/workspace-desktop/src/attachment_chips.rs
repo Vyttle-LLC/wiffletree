@@ -1,7 +1,7 @@
 //! Attached files: dropped into a draft, and shown as chips pending in the composer or
 //! sent with a message.
 use super::*;
-use crate::staging::Staging;
+use crate::staging::Hold;
 use base64::Engine as _;
 use std::{
     collections::HashMap,
@@ -160,36 +160,29 @@ fn image(contents: &FileContents, format: workspace_core::ImageFormat) -> Result
 
 /// A file on its way into a draft: the path it was dropped or pasted as, which names it, and its
 /// staged copy or why it could not be copied.
-pub(super) type Staged = (PathBuf, Result<PathBuf, String>);
+pub(super) type Staged = (PathBuf, Result<Hold, String>);
 
-/// Adds staged files to a draft's attachments, as the host `inspected` their copies in order,
-/// and returns why any were refused. Each copy left out of the draft is released.
+/// Adds staged files to a draft's attachments, as the host `inspected` their copies in order.
+/// Returns why any were refused, and the holds on the copies attached; the rest are dropped.
 pub(super) fn add_staged(
-    staging: &Staging,
     attached: &mut Vec<Attachment>,
     staged: Vec<Staged>,
     inspected: Vec<Result<Attachment, String>>,
-) -> Vec<String> {
-    let copies: Vec<_> = (staged.iter())
-        .filter_map(|(_, copy)| copy.clone().ok())
-        .collect();
+) -> (Vec<String>, Vec<Hold>) {
     let mut inspected = inspected.into_iter();
+    let mut holds = vec![];
     let (paths, files): (Vec<_>, Vec<_>) = (staged.into_iter())
         .map(|(path, copy)| {
-            let file = copy.and_then(|_| {
+            let file = copy.and_then(|held| {
+                holds.push(held);
                 (inspected.next()).unwrap_or_else(|| Err("The host did not check it".into()))
             });
             (path, file)
         })
         .unzip();
     let refused = add_dropped(attached, &paths, files);
-    for copy in copies
-        .iter()
-        .filter(|c| !attached.iter().any(|a| &a.path == *c))
-    {
-        staging.release(copy);
-    }
-    refused
+    holds.retain(|held| attached.iter().any(|a| a.path == held.path()));
+    (refused, holds)
 }
 
 /// Adds dropped files, as the host `inspected` them, to a draft's attachments and returns why
@@ -337,7 +330,7 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Found, IMAGE_LIMIT, ImageCache, RETRY_AFTER, file_size};
-    use crate::staging::Staging;
+    use crate::staging::{Hold, Staging};
     use std::time::Instant;
     use std::{fs, path::PathBuf};
     use workspace_core::{Attachment, MAX_ATTACHMENT_BYTES, ask};
@@ -438,19 +431,19 @@ mod tests {
     }
 
     /// Drops `paths` as the composer does: each is staged, the host checks the copies, and the
-    /// draft takes those it accepts.
+    /// draft takes those it accepts, with their holds.
     fn drop_staged(
         staging: &Staging,
         attached: &mut Vec<Attachment>,
         paths: &[PathBuf],
-    ) -> Vec<String> {
+    ) -> (Vec<String>, Vec<Hold>) {
         let staged: Vec<_> = (paths.iter())
             .map(|p| (p.clone(), staging.stage(p)))
             .collect();
         let copies: Vec<_> = (staged.iter())
-            .filter_map(|(_, c)| c.clone().ok())
+            .filter_map(|(_, c)| Some(c.as_ref().ok()?.path().to_path_buf()))
             .collect();
-        super::add_staged(staging, attached, staged, inspect_all(&copies))
+        super::add_staged(attached, staged, inspect_all(&copies))
     }
 
     fn staged_files(home: &std::path::Path) -> usize {
@@ -466,7 +459,8 @@ mod tests {
         fs::write(&shot, b"\x89PNG\r\n\x1a\nshot").unwrap();
 
         let mut attached = vec![];
-        assert!(drop_staged(&staging, &mut attached, std::slice::from_ref(&shot)).is_empty());
+        let (refused, _held) = drop_staged(&staging, &mut attached, std::slice::from_ref(&shot));
+        assert!(refused.is_empty());
         let copy = attached[0].path.clone();
         assert!(
             copy.starts_with(home.path().join("staged-attachments")),
@@ -504,7 +498,7 @@ mod tests {
         fs::write(&notes, b"notes").unwrap();
 
         let mut attached = vec![];
-        let refused = drop_staged(&staging, &mut attached, &[locked, notes]);
+        let (refused, _held) = drop_staged(&staging, &mut attached, &[locked, notes]);
         assert_eq!(refused.len(), 1);
         assert!(
             refused[0].starts_with("Could not copy locked.png: "),
@@ -522,15 +516,16 @@ mod tests {
         let notes = home.path().join("notes.txt");
         fs::write(&notes, b"notes").unwrap();
         let mut attached = vec![];
-        drop_staged(&staging, &mut attached, std::slice::from_ref(&notes));
+        let (_, _held) = drop_staged(&staging, &mut attached, std::slice::from_ref(&notes));
 
         // The same file again, and a folder, which the host refuses and is never copied.
-        let refused = drop_staged(
+        let (refused, held) = drop_staged(
             &staging,
             &mut attached,
             &[notes, home.path().join("staged-attachments")],
         );
         assert_eq!(refused.len(), 2, "{refused:?}");
+        assert!(held.is_empty());
         assert_eq!(attached.len(), 1);
         assert_eq!(staged_files(home.path()), 1);
         assert!(home.path().join("notes.txt").exists());
