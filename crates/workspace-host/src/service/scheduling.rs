@@ -151,6 +151,10 @@ impl Actor {
             let Some(input) = self.due_input(&session.id)? else {
                 continue;
             };
+            let input = self.without_unshown_reports(input);
+            if input.is_empty() {
+                continue;
+            }
             let runtime = self.host.session_runtime(&session.id)?;
             if let Some(ticket) = &runtime.ticket_id
                 && self.worktree_busy(ticket, &session)?
@@ -327,6 +331,17 @@ impl Actor {
         }
         self.wake(due);
         Ok(None)
+    }
+    /// Leaves out the reports of a reporter whose turn still hides the ticket state it reported
+    /// (see `Host::shown_ticket`), so its parent wakes to them only when that state shows. The
+    /// reporter's turn ending admits them.
+    fn without_unshown_reports(&self, input: Vec<Message>) -> Vec<Message> {
+        let reporters = self.host.mid_turn_reports.values().map(|r| &r.reporter);
+        let prefixes: Vec<String> = reporters.map(|r| format!("report:{r}:")).collect();
+        input
+            .into_iter()
+            .filter(|m| !prefixes.iter().any(|prefix| m.id.starts_with(prefix)))
+            .collect()
     }
     /// Arms one wake-up for `at` unless an earlier one is already armed.
     pub(super) fn wake(&mut self, at: i64) {

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic end-to-end transport, scheduling, permission and recovery checks. No inference."""
+import inspect
 import json
 import os
 from pathlib import Path
@@ -13,8 +14,8 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
     tmp=Path(tmp);repo=tmp/'repo';repo.mkdir()
     for args in [['init'],['-c','user.name=Workspace Test','-c','user.email=test@example.invalid','commit','--allow-empty','-m','Fixture']]:
         subprocess.run(['git',*args],cwd=repo,check=True,capture_output=True)
-    (tmp/'usage').mkdir()
-    env={**os.environ,'WORKSPACE_TEST_USAGE_DIR':str(tmp/'usage'),'WORKSPACE_CODEX_BIN':str(fake),'WORKSPACE_CLAUDE_BIN':str(fake)}
+    (tmp/'usage').mkdir();prompts=tmp/'prompts';prompts.mkdir()
+    env={**os.environ,'WORKSPACE_TEST_USAGE_DIR':str(tmp/'usage'),'WORKSPACE_TEST_PROMPT_DIR':str(prompts),'WORKSPACE_CODEX_BIN':str(fake),'WORKSPACE_CLAUDE_BIN':str(fake)}
     def start():return subprocess.Popen([str(root/'target/debug/workspace-host'),'--data-dir',str(tmp/'home')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=env)
     host=start()
     def request(command):
@@ -24,13 +25,37 @@ with tempfile.TemporaryDirectory(prefix='workspace-protocol-test-') as tmp:
         return value['result']
     def snapshot():return request({'type':'snapshot'})
     def archive():return request({'type':'archive'})
+    def diagnosis():
+        # What a timeout needs to say why: who was working, where each ticket stood, and what each session last heard and did.
+        live,history=snapshot(),archive()
+        runtimes={r['session_id']:r for r in live['runtimes']+history['runtimes']}
+        lines=['Sessions:']
+        for s in live['sessions']+history['sessions']:
+            r=runtimes.get(s['id'],{})
+            lines.append(f"  {s['id']} {s['role']} {s['provider']} {s['status']}{' archived' if s['archived'] else ''} ticket={r.get('ticket_id')} error={r.get('last_error')!r}")
+        lines.append('Tickets:')
+        for t in live['tickets']+history['tickets']:
+            lines.append(f"  {t['id']} {t['state']} worktree={t['worktree']} exists={bool(t['worktree']) and Path(t['worktree']).exists()}")
+        lines+=[f"Undelivered: {live['undelivered']}",f"Attention: {[a['prompt'] for a in live['attention']]}"]
+        for s in live['sessions']+history['sessions']:
+            lines.append(f"Session {s['id']} ({s['role']}) messages:")
+            for m in request({'type':'messages','session_id':s['id'],'before':None,'limit':100})[-6:]:
+                lines.append(f"  #{m['sequence']} {m['receipt']} from={m['sender']} {m['body'][:300]!r}")
+            prompt=prompts/f"{s['id']}.txt"
+            if prompt.exists():lines+=[f'  prompt: {turn[:1500]!r}' for turn in prompt.read_text().split('\n=====\n')[-4:-1]]
+            lines.append('  steps: '+', '.join(f"{x['kind']}:{x['state']}:{x['title'][:60]}" for x in request({'type':'steps','session_id':s['id'],'run_id':None,'after':0})['steps'][-8:]))
+        return '\n'.join(lines)
     def until(predicate,seconds=10,read=snapshot):
         deadline=time.monotonic()+seconds
         while time.monotonic()<deadline:
             value=read()
             if predicate(value):return value
             time.sleep(.02)
-        raise AssertionError(value)
+        waiting_for=inspect.getsource(predicate).strip()
+        # A host that has exited cannot be asked; say so rather than hide the timeout.
+        try:details=diagnosis()
+        except Exception as error:details=f'No diagnosis: {error!r} (host exit code {host.poll()})'
+        raise AssertionError(f'Timed out after {seconds}s waiting for: {waiting_for}\nLast read: {str(value)[:2000]}\n{details}')
     try:
         # A cross-provider handoff: Codex implements and Claude tests.
         # A fresh store has no setup and starts nothing until one is saved.

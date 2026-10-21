@@ -1133,6 +1133,14 @@ fn a_restart_stops_what_a_killed_host_left_running_mid_turn_and_between_turns() 
     until_finished(home.path(), &between, 1);
     let left = until_tool_running(home.path(), &between);
     let tool = until_tool_running(home.path(), &working);
+    // The unfinished turn's provider forks nothing more once it has saved the `sleep` it waits
+    // on, after both tools. A process it forked while startup signals its group would join the
+    // group after startup confirmed it, and by design that is left running with a note.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while ids(&provider.pids).len() < 3 {
+        assert!(Instant::now() < deadline, "timed out: the provider's wait");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     headless.kill().unwrap();
     headless.wait().unwrap();
     let providers = groups(&provider);
