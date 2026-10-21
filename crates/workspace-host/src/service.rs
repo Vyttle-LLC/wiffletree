@@ -5179,6 +5179,48 @@ mod tests {
     }
 
     #[test]
+    fn a_coordinator_wakes_to_a_mid_turn_report_only_when_its_state_shows() {
+        let (_home, mut actor, _, implementer, coordinator) = implementer_in_turn("assigned");
+        actor.host.set_live(&coordinator.project_id, true).unwrap();
+        // Waiting for Codex's reset, reaching the coordinator holds its turn instead of starting one.
+        spend(&mut actor.host, Provider::Codex, 99.);
+        let mut runtime = actor.host.session_runtime(&coordinator.id).unwrap();
+        runtime.profile = Some(ModelProfile {
+            provider: Provider::Codex,
+            model: "gpt-6.1-sol".into(),
+            effort: "medium".into(),
+        });
+        runtime.waiting = true;
+        actor.host.save_runtime(&runtime).unwrap();
+        let report = json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"});
+        actor
+            .host
+            .agent_tool(&implementer.id, "report", report)
+            .unwrap();
+        // Input after the report waits with it, so delivery keeps the recipient's order.
+        actor
+            .host
+            .send("later", None, &coordinator.id, "Later")
+            .unwrap();
+        let reached = |actor: &Actor| actor.host.session_runtime(&coordinator.id).unwrap().held;
+        let receipts = |actor: &Actor| {
+            let report = format!("report:{}:ready", implementer.id);
+            [report.as_str(), "later"].map(|id| actor.host.message(id).unwrap().receipt)
+        };
+        actor.schedule().unwrap();
+        assert!(!reached(&actor), "woken while its context showed assigned");
+        assert_eq!(receipts(&actor), [Receipt::Queued; 2]);
+
+        finish_turn(&mut actor, &implementer, "run");
+        actor.schedule().unwrap();
+        assert!(reached(&actor));
+        assert_eq!(
+            shown_ticket_state(&actor.host, &coordinator).1,
+            "ready_for_testing"
+        );
+    }
+
+    #[test]
     fn a_ticket_another_operation_moved_stops_showing_its_state_before_the_report() {
         let (_home, mut actor, ticket, implementer, coordinator) = implementer_in_turn("assigned");
         let report = json!({"message_id":"ready","kind":"ready_for_testing","body":"Done"});
