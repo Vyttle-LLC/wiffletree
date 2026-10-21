@@ -295,7 +295,7 @@ Each part of the window is its own view, and a cached view draws again only when
 
 ## Releases and updates
 
-Every pull request and every push to `main` runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. Merging does not release anything. Both workflows run on GitHub-hosted macOS runners (`macos-15`).
+Every pull request runs `.github/workflows/ci.yml`: formatting, warnings-as-errors Clippy, all Rust tests and the deterministic communication tests. A pull request must be up to date with `main` before it merges, so nothing reruns on `main` after the merge, and merging does not release anything. The Release workflow reruns the checks on the tagged commit. Both workflows run on GitHub-hosted macOS runners (`macos-15`).
 
 To release, tag a commit on `main` with its version and push the tag:
 
