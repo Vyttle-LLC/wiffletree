@@ -278,6 +278,20 @@ pub(super) trait Requests: Sized + 'static {
             view.accept(command, reply, window, cx)
         });
     }
+    /// `request`, keeping `kept` until the host replies, even if the view is gone by then.
+    fn request_keeping(
+        &mut self,
+        command: Command,
+        kept: impl Sized + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sent = command.clone();
+        send(self, sent, window, cx, move |view, reply, window, cx| {
+            drop(kept);
+            view.accept(command, reply, window, cx)
+        });
+    }
     /// Sends `ask`; its reply, decoded as what the host answers it with, comes back to `then`.
     fn ask<R: DeserializeOwned + 'static>(
         &mut self,

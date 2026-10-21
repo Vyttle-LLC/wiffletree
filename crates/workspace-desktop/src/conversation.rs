@@ -7,6 +7,7 @@ use gpui_component::{
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
 };
+use staging::{Hold, Staging};
 use transcript::Transcript;
 use ui::{banner, hint, icon};
 use wording::{effort_label, plural};
@@ -70,6 +71,11 @@ pub(super) struct Conversation {
     drafts: BTreeMap<String, String>,
     /// Files dropped on each session's conversation, waiting to go with its draft.
     attached: BTreeMap<String, Vec<Attachment>>,
+    /// The drafts' holds on their staged copies, by path. Dropped with the view, so no copy
+    /// outlives its draft.
+    staged: BTreeMap<PathBuf, Hold>,
+    /// The names of each session's pasted images still being saved or checked.
+    pasting: BTreeMap<String, BTreeSet<String>>,
     /// Why files in the selected conversation's last drop were not attached.
     refused_files: Vec<String>,
     sending: BTreeSet<String>,
@@ -115,6 +121,8 @@ impl Conversation {
             input,
             drafts: BTreeMap::new(),
             attached: BTreeMap::new(),
+            staged: BTreeMap::new(),
+            pasting: BTreeMap::new(),
             refused_files: vec![],
             sending: BTreeSet::new(),
             drop_checks: DropChecks::default(),
@@ -168,39 +176,103 @@ impl Conversation {
             input.set_placeholder(placeholder, window, cx)
         });
     }
-    /// Adds dropped files to the selected session's draft. Each refused file is named with
-    /// its reason; the rest are still attached.
+    /// Adds dropped files to the selected session's draft as copies made now, while macOS still
+    /// lets this app read them. Each refused file is named with its reason; the rest are still
+    /// attached.
     fn attach_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.shared.selected.clone() else {
             return;
         };
+        let staging = cx.global::<Staging>().clone();
+        let staged = cx.background_spawn(async move {
+            (paths.into_iter())
+                .map(|path| {
+                    let copy = staging.stage(&path);
+                    (path, copy)
+                })
+                .collect()
+        });
+        self.attach_staged(session, staged, window, cx);
+    }
+    /// Adds a pasted image to the selected session's draft as a PNG, as a dropped file is.
+    fn attach_image(&mut self, image: Image, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.shared.selected.clone() else {
+            return;
+        };
+        let attached = self.attached.get(&session).map(Vec::as_slice);
+        let pasting = self.pasting.entry(session.clone()).or_default();
+        let taken = |name: &str| {
+            (attached.unwrap_or_default().iter()).any(|a| same_file_name(&a.name(), name))
+                || pasting.iter().any(|pasted| same_file_name(pasted, name))
+        };
+        let name = staging::pasted_image_name(chrono::Local::now(), taken);
+        pasting.insert(name.clone());
+        let staging = cx.global::<Staging>().clone();
+        let staged = cx.background_spawn(async move {
+            let copy = staging.stage_image(&name, &image);
+            vec![(PathBuf::from(name), copy)]
+        });
+        self.attach_staged(session, staged, window, cx);
+    }
+    /// Takes a paste of copied files or an image, attaching them; text is left for the input.
+    fn paste(
+        &mut self,
+        clipboard: &ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match clipboard.entries().first() {
+            Some(ClipboardEntry::ExternalPaths(paths)) => {
+                self.attach_files(paths.paths().to_vec(), window, cx)
+            }
+            Some(ClipboardEntry::Image(image)) => self.attach_image(image.clone(), window, cx),
+            _ => return false,
+        }
+        true
+    }
+    /// Has This Mac's host check the staged copies, whichever host shows, since the files are
+    /// this Mac's.
+    fn attach_staged(
+        &mut self,
+        session: String,
+        staged: Task<Vec<attachment_chips::Staged>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.drop_checks.started(&session);
-        // The files are this Mac's, so This Mac's host checks them whichever host shows.
         let inspector = match self.bridge.remote() {
             Some(_) => cx.global::<Hosts>().this_mac.clone(),
             None => self.bridge.clone(),
         };
-        let reply = inspector.ask(ask::inspect_attachments(paths.clone()));
         cx.spawn_in(window, async move |this, cx| {
-            let inspected = match reply {
+            let staged = staged.await;
+            let copies = (staged.iter())
+                .filter_map(|(_, copy)| Some(copy.as_ref().ok()?.path().to_path_buf()))
+                .collect();
+            let inspected = match inspector.ask(ask::inspect_attachments(copies)) {
                 Ok(reply) => reply.await,
                 Err(error) => Err(error),
             };
             let _ = this.update_in(cx, |view, window, cx| {
-                view.checked(session, paths, inspected, window, cx)
+                view.checked(session, staged, inspected, window, cx)
             });
         })
         .detach();
     }
-    /// Attaches the dropped files the check accepted, and makes a send held for the check.
+    /// Attaches the staged files the check accepted, and makes a send held for the check.
     fn checked(
         &mut self,
         session: String,
-        paths: Vec<PathBuf>,
+        staged: Vec<attachment_chips::Staged>,
         inspected: Result<Vec<Result<Attachment, String>>, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(pasting) = self.pasting.get_mut(&session) {
+            for (path, _) in &staged {
+                pasting.remove(path.to_string_lossy().as_ref());
+            }
+        }
         let inspected = match inspected {
             Ok(inspected) => inspected,
             Err(error) => {
@@ -210,7 +282,12 @@ impl Conversation {
             }
         };
         let attached = self.attached.entry(session.clone()).or_default();
-        let refused = attachment_chips::add_dropped(attached, &paths, inspected);
+        let (refused, holds) = attachment_chips::add_staged(attached, staged, inspected);
+        (self.staged).extend(
+            holds
+                .into_iter()
+                .map(|hold| (hold.path().to_path_buf(), hold)),
+        );
         // Why files were refused shows only with the conversation they were dropped on.
         if self.shared.selected.as_ref() == Some(&session) {
             self.refused_files = refused;
@@ -221,14 +298,13 @@ impl Conversation {
         cx.notify();
     }
     fn remove_attachment(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(files) = self
-            .shared
-            .selected
-            .as_ref()
-            .and_then(|s| self.attached.get_mut(s))
-        {
+        let Some(session) = self.shared.selected.clone() else {
+            return;
+        };
+        if let Some(files) = self.attached.get_mut(&session) {
             files.retain(|a| a.path != path);
         }
+        self.staged.remove(path);
         cx.notify();
     }
     /// Sends the selected session's draft as it reads now, or once its dropped files are checked.
@@ -264,6 +340,10 @@ impl Conversation {
             self.refused_files.clear();
         }
         self.sending.insert(recipient.clone());
+        // The copies stay until the host has read them, even if taken out of the draft meanwhile.
+        let holds: Vec<Hold> = (attachments.iter())
+            .filter_map(|path| self.staged.get(path).cloned())
+            .collect();
         // The message has its id from now on, so however often it is sent, it is stored once.
         let id = new_id();
         if self.bridge.remote().is_none() || attachments.is_empty() {
@@ -275,7 +355,7 @@ impl Conversation {
                 attachments,
                 uploads: vec![],
             };
-            return self.request(send, window, cx);
+            return self.request_keeping(send, holds, window, cx);
         }
         // A remote host stores this Mac's files from uploads, which the message names. The
         // worker sends the message itself, so it goes even if this view closes meanwhile, as
@@ -283,6 +363,7 @@ impl Conversation {
         let bridge = self.bridge.clone();
         let (sender, answered) = async_channel::bounded(1);
         std::thread::spawn(move || {
+            let _holds = holds;
             let uploads: Result<Vec<_>, _> = (attachments.iter())
                 .map(|path| uploads::upload(&bridge, path))
                 .collect();
@@ -835,6 +916,13 @@ impl Conversation {
                     })
                     .child(
                         Textarea::new(&self.input)
+                            .on_paste({
+                                let view = cx.weak_entity();
+                                move |clipboard, window, cx| {
+                                    (view.update(cx, |v, cx| v.paste(clipboard, window, cx)))
+                                        .unwrap_or(false)
+                                }
+                            })
                             .w_full()
                             .appearance(false)
                             .bordered(false),
@@ -946,7 +1034,9 @@ impl Requests for Conversation {
                 .get(&recipient)
                 .is_some_and(|files| files.iter().map(|f| &f.path).eq(attachments.iter()))
         {
-            self.attached.remove(&recipient);
+            for file in self.attached.remove(&recipient).unwrap_or_default() {
+                self.staged.remove(&file.path);
+            }
         }
         let selected = self.shared.selected.as_deref() == Some(&recipient);
         if selected && self.input.read(cx).value().as_str() == body {

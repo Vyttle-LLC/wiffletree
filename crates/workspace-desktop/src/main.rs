@@ -37,6 +37,7 @@ mod settings;
 mod shared;
 mod sidebar;
 mod skills_view;
+mod staging;
 mod team_view;
 #[cfg(test)]
 mod test_support;
@@ -1316,6 +1317,7 @@ fn main() -> anyhow::Result<()> {
         ))
     });
     let preferences = Preferences::load(&home);
+    let staging = staging::Staging::open(&home);
     let bridge = Bridge::start(&home, default_folder, repository);
     let steps = automation.as_deref().map(automation::listen).transpose()?;
     let application = gpui_platform::application().with_assets(assets::Assets);
@@ -1331,6 +1333,7 @@ fn main() -> anyhow::Result<()> {
         ));
         cx.set_global(preferences);
         cx.set_global(attachment_chips::HostImages::new());
+        cx.set_global(staging);
         apply_theme(cx);
         // Under the System appearance, macOS can switch modes while the app runs. The component
         // theme only changes when told, so every window re-applies it or keeps stale colours.
