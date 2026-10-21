@@ -5197,9 +5197,19 @@ mod tests {
             .host
             .agent_tool(&implementer.id, "report", report)
             .unwrap();
+        // Input after the report waits with it, so delivery keeps the recipient's order.
+        actor
+            .host
+            .send("later", None, &coordinator.id, "Later")
+            .unwrap();
         let reached = |actor: &Actor| actor.host.session_runtime(&coordinator.id).unwrap().held;
+        let receipts = |actor: &Actor| {
+            let report = format!("report:{}:ready", implementer.id);
+            [report.as_str(), "later"].map(|id| actor.host.message(id).unwrap().receipt)
+        };
         actor.schedule().unwrap();
         assert!(!reached(&actor), "woken while its context showed assigned");
+        assert_eq!(receipts(&actor), [Receipt::Queued; 2]);
 
         finish_turn(&mut actor, &implementer, "run");
         actor.schedule().unwrap();
