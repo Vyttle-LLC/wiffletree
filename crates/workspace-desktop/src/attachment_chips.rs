@@ -1,6 +1,7 @@
 //! Attached files: dropped into a draft, and shown as chips pending in the composer or
 //! sent with a message.
 use super::*;
+use crate::staging::Staging;
 use base64::Engine as _;
 use std::{
     collections::HashMap,
@@ -157,10 +158,44 @@ fn image(contents: &FileContents, format: workspace_core::ImageFormat) -> Result
     Ok(Image::from_bytes(format, bytes))
 }
 
+/// A file on its way into a draft: the path it was dropped or pasted as, which names it, and its
+/// staged copy or why it could not be copied.
+pub(super) type Staged = (PathBuf, Result<PathBuf, String>);
+
+/// Adds staged files to a draft's attachments, as the host `inspected` their copies in order,
+/// and returns why any were refused. Each copy left out of the draft is released.
+pub(super) fn add_staged(
+    staging: &Staging,
+    attached: &mut Vec<Attachment>,
+    staged: Vec<Staged>,
+    inspected: Vec<Result<Attachment, String>>,
+) -> Vec<String> {
+    let copies: Vec<_> = (staged.iter())
+        .filter_map(|(_, copy)| copy.clone().ok())
+        .collect();
+    let mut inspected = inspected.into_iter();
+    let (paths, files): (Vec<_>, Vec<_>) = (staged.into_iter())
+        .map(|(path, copy)| {
+            let file = copy.and_then(|_| {
+                (inspected.next()).unwrap_or_else(|| Err("The host did not check it".into()))
+            });
+            (path, file)
+        })
+        .unzip();
+    let refused = add_dropped(attached, &paths, files);
+    for copy in copies
+        .iter()
+        .filter(|c| !attached.iter().any(|a| &a.path == *c))
+    {
+        staging.release(copy);
+    }
+    refused
+}
+
 /// Adds dropped files, as the host `inspected` them, to a draft's attachments and returns why
 /// any were refused. A file whose name is already attached, ignoring case, is refused (the same
 /// file again included), since a message stores its files by name.
-pub(super) fn add_dropped(
+fn add_dropped(
     attached: &mut Vec<Attachment>,
     paths: &[PathBuf],
     inspected: Vec<Result<Attachment, String>>,
@@ -302,6 +337,7 @@ pub(super) fn sent(message: &Message, p: Palette) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Found, IMAGE_LIMIT, ImageCache, RETRY_AFTER, file_size};
+    use crate::staging::Staging;
     use std::time::Instant;
     use std::{fs, path::PathBuf};
     use workspace_core::{Attachment, MAX_ATTACHMENT_BYTES, ask};
@@ -399,6 +435,105 @@ mod tests {
         );
         let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
         assert_eq!(names, ["notes.txt", "shot.png", "plan.md"]);
+    }
+
+    /// Drops `paths` as the composer does: each is staged, the host checks the copies, and the
+    /// draft takes those it accepts.
+    fn drop_staged(
+        staging: &Staging,
+        attached: &mut Vec<Attachment>,
+        paths: &[PathBuf],
+    ) -> Vec<String> {
+        let staged: Vec<_> = (paths.iter())
+            .map(|p| (p.clone(), staging.stage(p)))
+            .collect();
+        let copies: Vec<_> = (staged.iter())
+            .filter_map(|(_, c)| c.clone().ok())
+            .collect();
+        super::add_staged(staging, attached, staged, inspect_all(&copies))
+    }
+
+    fn staged_files(home: &std::path::Path) -> usize {
+        fs::read_dir(home.join("staged-attachments")).map_or(0, Iterator::count)
+    }
+
+    #[test]
+    fn a_dropped_file_is_sent_from_its_copy_after_the_original_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = Staging::open(home.path());
+        let dropped = tempfile::tempdir().unwrap();
+        let shot = dropped.path().join("Screenshot.png");
+        fs::write(&shot, b"\x89PNG\r\n\x1a\nshot").unwrap();
+
+        let mut attached = vec![];
+        assert!(drop_staged(&staging, &mut attached, std::slice::from_ref(&shot)).is_empty());
+        let copy = attached[0].path.clone();
+        assert!(
+            copy.starts_with(home.path().join("staged-attachments")),
+            "{copy:?}"
+        );
+        assert_eq!(attached[0].name(), "Screenshot.png");
+        assert!(attached[0].image.is_some());
+
+        // As macOS withdraws a screenshot thumbnail's file once the drop is over.
+        fs::remove_file(&shot).unwrap();
+        let mut host = workspace_host::Host::open_set_up(home.path()).unwrap();
+        let project = host.create_project("Pictures").unwrap();
+        let coordinator = (host.sessions().unwrap().into_iter())
+            .find(|s| s.project_id == project.id)
+            .unwrap();
+        let sent = host
+            .send_with_files("m1", None, &coordinator.id, "Look", &[copy])
+            .unwrap();
+        assert_eq!(sent.attachments[0].name(), "Screenshot.png");
+        assert_eq!(
+            fs::read(&sent.attachments[0].path).unwrap(),
+            b"\x89PNG\r\n\x1a\nshot"
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_copied_is_refused_at_the_drop() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let staging = Staging::open(home.path());
+        let locked = home.path().join("locked.png");
+        fs::write(&locked, b"png").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let notes = home.path().join("notes.txt");
+        fs::write(&notes, b"notes").unwrap();
+
+        let mut attached = vec![];
+        let refused = drop_staged(&staging, &mut attached, &[locked, notes]);
+        assert_eq!(refused.len(), 1);
+        assert!(
+            refused[0].starts_with("Could not copy locked.png: "),
+            "{refused:?}"
+        );
+        let names: Vec<_> = attached.iter().map(|a| a.name()).collect();
+        assert_eq!(names, ["notes.txt"]);
+        assert_eq!(staged_files(home.path()), 1, "only the attached copy");
+    }
+
+    #[test]
+    fn copies_left_out_of_the_draft_are_released() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = Staging::open(home.path());
+        let notes = home.path().join("notes.txt");
+        fs::write(&notes, b"notes").unwrap();
+        let mut attached = vec![];
+        drop_staged(&staging, &mut attached, std::slice::from_ref(&notes));
+
+        // The same file again, and a folder, which the host refuses and is never copied.
+        let refused = drop_staged(
+            &staging,
+            &mut attached,
+            &[notes, home.path().join("staged-attachments")],
+        );
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(staged_files(home.path()), 1);
+        assert!(home.path().join("notes.txt").exists());
     }
 
     #[test]
