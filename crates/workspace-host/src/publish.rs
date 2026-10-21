@@ -22,12 +22,24 @@ impl Default for Tools {
             gh: Arc::new(runtime::gh_answer),
             // A push runs hooks, and sync's clone, fetch and access check wait on GitHub:
             // minutes each.
-            git: Arc::new(|path, args| match args.first() {
-                Some(&"push" | &"clone" | &"fetch" | &"ls-remote") => runtime::git_push(path, args),
+            git: Arc::new(|path, args| match subcommand(args) {
+                "push" | "clone" | "fetch" | "ls-remote" => runtime::git_push(path, args),
                 _ => runtime::git_answer(path, args),
             }),
         }
     }
+}
+
+/// Git's command in `args`, after any `-c name=value` options before it.
+pub(crate) fn subcommand<'a>(args: &[&'a str]) -> &'a str {
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        match arg {
+            "-c" => _ = args.next(),
+            command => return command,
+        }
+    }
+    ""
 }
 
 /// How a step ended, reported back to the host thread.
