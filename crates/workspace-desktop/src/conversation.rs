@@ -74,8 +74,8 @@ pub(super) struct Conversation {
     /// The drafts' holds on their staged copies, by path. Dropped with the view, so no copy
     /// outlives its draft.
     staged: BTreeMap<PathBuf, Hold>,
-    /// Each local send's holds on the copies it sends, until the host answers.
-    sent_holds: BTreeMap<String, Vec<Hold>>,
+    /// The names of each session's pasted images still being saved or checked.
+    pasting: BTreeMap<String, BTreeSet<String>>,
     /// Why files in the selected conversation's last drop were not attached.
     refused_files: Vec<String>,
     sending: BTreeSet<String>,
@@ -122,7 +122,7 @@ impl Conversation {
             drafts: BTreeMap::new(),
             attached: BTreeMap::new(),
             staged: BTreeMap::new(),
-            sent_holds: BTreeMap::new(),
+            pasting: BTreeMap::new(),
             refused_files: vec![],
             sending: BTreeSet::new(),
             drop_checks: DropChecks::default(),
@@ -200,10 +200,13 @@ impl Conversation {
             return;
         };
         let attached = self.attached.get(&session).map(Vec::as_slice);
+        let pasting = self.pasting.entry(session.clone()).or_default();
         let taken = |name: &str| {
             (attached.unwrap_or_default().iter()).any(|a| same_file_name(&a.name(), name))
+                || pasting.iter().any(|pasted| same_file_name(pasted, name))
         };
         let name = staging::pasted_image_name(chrono::Local::now(), taken);
+        pasting.insert(name.clone());
         let staging = cx.global::<Staging>().clone();
         let staged = cx.background_spawn(async move {
             let copy = staging.stage_image(&name, &image);
@@ -265,6 +268,11 @@ impl Conversation {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(pasting) = self.pasting.get_mut(&session) {
+            for (path, _) in &staged {
+                pasting.remove(path.to_string_lossy().as_ref());
+            }
+        }
         let inspected = match inspected {
             Ok(inspected) => inspected,
             Err(error) => {
@@ -339,7 +347,6 @@ impl Conversation {
         // The message has its id from now on, so however often it is sent, it is stored once.
         let id = new_id();
         if self.bridge.remote().is_none() || attachments.is_empty() {
-            self.sent_holds.insert(recipient.clone(), holds);
             let send = Command::Send {
                 id,
                 sender: None,
@@ -348,7 +355,7 @@ impl Conversation {
                 attachments,
                 uploads: vec![],
             };
-            return self.request(send, window, cx);
+            return self.request_keeping(send, holds, window, cx);
         }
         // A remote host stores this Mac's files from uploads, which the message names. The
         // worker sends the message itself, so it goes even if this view closes meanwhile, as
@@ -1006,7 +1013,6 @@ impl Requests for Conversation {
     ) {
         if let Command::Send { recipient, .. } = &command {
             self.sending.remove(recipient);
-            self.sent_holds.remove(recipient);
         }
         if let Err(error) = reply {
             return toast_error(error, window, cx);

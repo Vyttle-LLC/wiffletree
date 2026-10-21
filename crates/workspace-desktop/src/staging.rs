@@ -118,7 +118,6 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// The image's bytes as a PNG.
 fn png(image: &gpui::Image) -> Result<Vec<u8>, String> {
     if image.format == gpui::ImageFormat::Png {
         return Ok(image.bytes.clone());
