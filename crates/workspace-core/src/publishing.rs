@@ -158,9 +158,10 @@ pub fn publish_card(
         format!("{} · {visibility} · {rule}", request.repository),
     )];
     match (request.step, open_pr) {
-        (PublishStep::Push, Some(pr)) => {
+        (PublishStep::Push | PublishStep::EditPullRequest, Some(pr)) => {
             rows.push(("Updates", format!("PR #{} · {}", pr.number, request.branch)));
         }
+        (PublishStep::EditPullRequest, None) => rows.push(("Branch", request.branch.clone())),
         (PublishStep::Push, None) if ticket.pushed.is_none() && ticket.pull_request.is_none() => {
             rows.push(("Branch", format!("{} · not on GitHub yet", request.branch)));
         }
@@ -170,8 +171,9 @@ pub fn publish_card(
         }
     }
     rows.push(("Commit", format!("{commit} · {}", request.size)));
-    if request.step == PublishStep::OpenPullRequest {
-        rows.push(("Title", request.title.clone().unwrap_or_default()));
+    let shows_words = request.step != PublishStep::Push;
+    if let Some(title) = request.title.clone().filter(|_| shows_words) {
+        rows.push(("Title", title));
     }
     let mut findings = vec![];
     if let Some(verification) = &ticket.verification {
@@ -236,12 +238,18 @@ pub fn publish_card(
             format!(
                 "Wiffletree runs the push itself, for exactly this commit. If the branch has moved by the time you answer, nothing is pushed.{}",
                 match (
-                    request.opens_pull_request(),
+                    request.after_push(),
                     ask == PublishAsk::NotAllowed || ticket.ended_pull_request().is_some(),
                 ) {
-                    (false, _) => "",
-                    (true, true) => " Opening the pull request is a separate approval.",
-                    (true, false) => " Wiffletree then opens the pull request without asking again.",
+                    (None, _) => "",
+                    (Some(PublishStep::EditPullRequest), true) => {
+                        " Editing the pull request is a separate approval."
+                    }
+                    (Some(PublishStep::EditPullRequest), false) => {
+                        " Wiffletree then edits the pull request without asking again."
+                    }
+                    (Some(_), true) => " Opening the pull request is a separate approval.",
+                    (Some(_), false) => " Wiffletree then opens the pull request without asking again.",
                 }
             ),
             "Push once",
@@ -251,17 +259,35 @@ pub fn publish_card(
             "The title and description are the agent’s words, shown in full. Anyone who can see the repository will see them.".to_owned(),
             "Open pull request",
         ),
+        (_, PublishStep::EditPullRequest) => (
+            format!(
+                "Change the {} of PR #{} in {}?",
+                request.edited_fields(),
+                request.edits.unwrap_or_default(),
+                request.repository
+            ),
+            "The new words are the agent’s, shown in full. Anyone who can see the repository will see them.".to_owned(),
+            "Update pull request",
+        ),
     };
     PublishCard {
         title,
         rows,
         findings,
-        would_send: covers_commit.then(|| match &request.title {
-            Some(title) => format!("{pushes} and open its pull request, “{title}”"),
-            None => pushes,
+        would_send: covers_commit.then(|| match (request.edits, &request.title) {
+            (Some(number), Some(title)) => match request.body {
+                Some(_) => format!(
+                    "{pushes} and change PR #{number}’s title to “{title}” and its description"
+                ),
+                None => format!("{pushes} and change PR #{number}’s title to “{title}”"),
+            },
+            (Some(number), None) => format!("{pushes} and change PR #{number}’s description"),
+            (None, Some(title)) => format!("{pushes} and open its pull request, “{title}”"),
+            (None, None) => pushes,
         }),
-        // One approval that covers the commit also opens the pull request, so it shows its words.
-        description: match covers_commit || request.step == PublishStep::OpenPullRequest {
+        // One approval that covers the commit also opens or edits the pull request, so it shows
+        // its words.
+        description: match covers_commit || shows_words {
             true => request.body.clone(),
             false => None,
         },

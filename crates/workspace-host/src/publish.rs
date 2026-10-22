@@ -55,6 +55,8 @@ pub(crate) enum StepResult {
     Pushed { already: bool },
     /// The pull request's URL.
     Opened(String),
+    /// The open pull request's title or description was changed.
+    Edited,
     /// GitHub reports the repository under another owner or name, or as a fork when it was
     /// not: nothing was sent.
     Moved(String),
@@ -187,6 +189,7 @@ pub(crate) fn run(job: &Job, tools: &Tools) -> Outcome {
             None => match job.request.step {
                 PublishStep::Push => push(job, tools),
                 PublishStep::OpenPullRequest => open_pull_request(job, tools),
+                PublishStep::EditPullRequest => edit_pull_request(job, tools),
             },
         },
     };
@@ -390,6 +393,29 @@ fn open_pull_request(job: &Job, tools: &Tools) -> StepResult {
     }
 }
 
+/// Changes the open pull request's title, description or both, as the frozen request gives them.
+fn edit_pull_request(job: &Job, tools: &Tools) -> StepResult {
+    let request = &job.request;
+    if let Err(changed) = recheck_stored(job) {
+        return StepResult::Changed(format!("{changed:#}"));
+    }
+    let repository = format!("{}/{}", repositories::GITHUB_HOST, request.repository);
+    let number = request.edits.unwrap_or_default().to_string();
+    let mut args = vec!["pr", "edit", &number, "--repo", &repository];
+    if let Some(title) = &request.title {
+        args.extend(["--title", title]);
+    }
+    if let Some(body) = &request.body {
+        args.extend(["--body", body]);
+    }
+    match (tools.gh)(&job.worktree, &args) {
+        Ok(answer) if answer.status.success() => StepResult::Edited,
+        Ok(answer) => StepResult::Failed(format!("gh pr edit failed: {}", answer.error)),
+        // `gh` was started and gave no answer: it was stopped at its deadline.
+        Err(_) => StepResult::Unfinished,
+    }
+}
+
 pub(crate) fn check_with_size(
     ticket: &Ticket,
     repository: Repository,
@@ -451,24 +477,20 @@ impl Host {
                 .is_some_and(|r| r.waiting.is_none()),
             "A publish step for this ticket is running; its result will arrive as a message"
         );
-        match (ticket.open_pull_request(), title, body) {
-            (None, Some(title), Some(body)) => {
-                ensure!(
-                    !title.trim().is_empty()
-                        && title.chars().count() <= TITLE_CHARS
-                        && !title.contains('\n'),
-                    "Give the pull request a one-line title of at most {TITLE_CHARS} characters"
-                );
-                text(body, MAX_TEXT_BYTES)?;
-            }
-            (None, ..) => bail!(
-                "This ticket has no open pull request, so publishing it opens one: give its title and body"
-            ),
-            (Some(_), None, None) => {}
-            (Some(open), ..) => bail!(
-                "PR #{} is open: publish_ticket only pushes to it and cannot edit its title or description. Call it without title and body",
-                open.number
-            ),
+        ensure!(
+            ticket.open_pull_request().is_some() || (title.is_some() && body.is_some()),
+            "This ticket has no open pull request, so publishing it opens one: give its title and body"
+        );
+        if let Some(title) = title {
+            ensure!(
+                !title.trim().is_empty()
+                    && title.chars().count() <= TITLE_CHARS
+                    && !title.contains('\n'),
+                "Give the pull request a one-line title of at most {TITLE_CHARS} characters"
+            );
+        }
+        if let Some(body) = body {
+            text(body, MAX_TEXT_BYTES)?;
         }
         Ok(ticket)
     }
@@ -538,6 +560,10 @@ impl Host {
         keeper: bool,
     ) -> Result<Option<Job>> {
         let worktree = Path::new(&ticket.worktree);
+        let edits = ticket
+            .open_pull_request()
+            .filter(|_| title.is_some() || body.is_some())
+            .map(|pr| pr.number);
         let size = match checked.size.clone() {
             Some(size) => size,
             None => commit_size(
@@ -560,6 +586,7 @@ impl Host {
             size,
             title: title.map(Into::into),
             body: body.map(Into::into),
+            edits,
             step: PublishStep::Push,
             waiting: None,
             blocked_review_approved: false,
@@ -587,6 +614,7 @@ impl Host {
         let step = match request.step {
             PublishStep::Push => "push",
             PublishStep::OpenPullRequest => "pull_request",
+            PublishStep::EditPullRequest => "pull_request_edit",
         };
         let item = self.request_attention(
             &request.caller,
@@ -623,9 +651,10 @@ impl Host {
             return json!({"status": "ended"});
         };
         if request.waiting.is_none() {
-            let steps: &[&str] = match request.opens_pull_request() {
-                true => &["push", "pull request"],
-                false => &["push"],
+            let steps: &[&str] = match request.after_push() {
+                Some(PublishStep::EditPullRequest) => &["push", "pull request edit"],
+                Some(_) => &["push", "pull request"],
+                None => &["push"],
             };
             return json!({"status": "publishing", "steps": steps,
                 "repository": request.repository, "branch": request.branch,
@@ -835,8 +864,8 @@ impl Host {
                         &detail,
                     )?;
                 }
-                if request.opens_pull_request() {
-                    request.step = PublishStep::OpenPullRequest;
+                if let Some(next) = request.after_push() {
+                    request.step = next;
                     ticket.publishing = Some(request);
                     self.save_ticket(&ticket)?;
                     return self.continue_request(&mut ticket);
@@ -866,6 +895,24 @@ impl Host {
                 };
                 format!("{approved}Pushed {sent} and opened PR #{number}: {url}")
             }
+            StepResult::Edited => {
+                let number = request.edits.unwrap_or_default();
+                let detail = format!("{}: PR #{number}", ticket.id);
+                Self::event(
+                    &self.db,
+                    &project,
+                    Some(&request.caller),
+                    "pull_request_edited",
+                    &detail,
+                )?;
+                format!(
+                    "Changed the {} of PR #{number} in {}. GitHub's {} is at {}.",
+                    request.edited_fields(),
+                    request.repository,
+                    request.branch,
+                    short_sha(&request.commit)
+                )
+            }
             StepResult::Changed(changed) => changed_notice(&request, &changed),
             StepResult::Unfinished => {
                 let stopped = match request.step {
@@ -876,6 +923,11 @@ impl Host {
                     PublishStep::OpenPullRequest => format!(
                         "Opening the pull request for {} in {} did not finish within 30 seconds",
                         request.branch, request.repository
+                    ),
+                    PublishStep::EditPullRequest => format!(
+                        "Editing PR #{} in {} did not finish within 30 seconds",
+                        request.edits.unwrap_or_default(),
+                        request.repository
                     ),
                 };
                 format!(
@@ -923,6 +975,12 @@ impl Host {
                 PublishStep::OpenPullRequest => format!(
                     "The human denied opening the pull request for {} in {}. {} Do not open it another way.",
                     request.branch,
+                    request.repository,
+                    nothing_sent(&request)
+                ),
+                PublishStep::EditPullRequest => format!(
+                    "The human denied editing PR #{} in {}. {} Do not edit it another way.",
+                    request.edits.unwrap_or_default(),
                     request.repository,
                     nothing_sent(&request)
                 ),
@@ -1069,6 +1127,11 @@ fn nothing_sent(request: &PublishRequest) -> String {
             "The branch was pushed at {}; no pull request was opened.",
             short_sha(&request.commit)
         ),
+        PublishStep::EditPullRequest => format!(
+            "GitHub's branch is at {}; PR #{}'s title and description were not changed.",
+            short_sha(&request.commit),
+            request.edits.unwrap_or_default()
+        ),
     }
 }
 
@@ -1079,6 +1142,11 @@ fn possibly_sent(request: &PublishRequest) -> String {
         PublishStep::OpenPullRequest => format!(
             "The branch was pushed at {}; the pull request may or may not have been opened.",
             short_sha(&request.commit)
+        ),
+        PublishStep::EditPullRequest => format!(
+            "GitHub's branch is at {}; PR #{} may or may not have been edited.",
+            short_sha(&request.commit),
+            request.edits.unwrap_or_default()
         ),
     }
 }
@@ -1216,6 +1284,10 @@ pub(crate) mod tests {
         pub create_error: Option<String>,
         /// The arguments of every `gh pr create` call.
         pub created: Vec<Vec<String>>,
+        /// Why `gh pr edit` fails, when it does.
+        pub edit_error: Option<String>,
+        /// The arguments of every `gh pr edit` call.
+        pub edited: Vec<Vec<String>>,
         /// The arguments of every `git ls-remote` and `git push`.
         pub git: Vec<Vec<String>>,
         /// The local bare repository behind each GitHub URL.
@@ -1287,6 +1359,15 @@ pub(crate) mod tests {
                         "",
                     ),
                     None => answer(1, String::new(), "error connecting to api.github.com"),
+                };
+            }
+            if args[..2] == ["pr", "edit"] {
+                state
+                    .edited
+                    .push(args.iter().map(|a| (*a).to_owned()).collect());
+                return match &state.edit_error {
+                    Some(error) => answer(1, String::new(), error),
+                    None => answer(0, String::new(), ""),
                 };
             }
             assert_eq!(
@@ -1924,11 +2005,6 @@ pub(crate) mod tests {
     fn an_update_pushes_the_new_commit_to_the_open_pull_request_and_opens_nothing() {
         let (mut f, remote) = published();
         let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
-        // An open pull request's title and description are not edited.
-        let edit = f
-            .host
-            .publish_ticket(&caller, &ticket, Some("New title"), Some("Why"), None);
-        assert!(edit.unwrap_err().to_string().contains("PR #45 is open"));
         let head = f.commit("c.txt", "three\n");
         f.review(VerificationOutcome::Passed);
         let (status, step) = f
@@ -1964,6 +2040,204 @@ pub(crate) mod tests {
             "{again}"
         );
         assert_eq!(pushes(&remote), before);
+        assert!(remote.github.lock().unwrap().edited.is_empty());
+    }
+
+    fn edits(remote: &Remote) -> Vec<Vec<String>> {
+        remote.github.lock().unwrap().edited.clone()
+    }
+
+    #[test]
+    fn a_new_description_alone_edits_the_open_pull_request_without_pushing() {
+        let (mut f, remote) = published();
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let before = pushes(&remote);
+        let (status, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, Some("New why"), None)
+            .unwrap();
+        assert_eq!(status["steps"], json!(["push", "pull request edit"]));
+        drive(&mut f, &remote, step);
+        assert_eq!(pushes(&remote), before);
+        assert_eq!(
+            edits(&remote),
+            [[
+                "pr",
+                "edit",
+                "45",
+                "--repo",
+                "github.com/allowed-org/app",
+                "--body",
+                "New why"
+            ]]
+        );
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "Changed the description of PR #45 in allowed-org/app. GitHub's {BRANCH} is at {}.",
+                short_sha(&f.head())
+            )
+        );
+        assert!(f.ticket().publishing.is_none());
+    }
+
+    #[test]
+    fn an_edit_pushes_first_when_githubs_branch_was_moved_back() {
+        let (mut f, remote) = published();
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let head = f.head();
+        let reference = format!("refs/heads/{BRANCH}");
+        git(
+            &remote.bare,
+            &["update-ref", &reference, &format!("{head}~1")],
+        );
+        let (_, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, Some("New why"), None)
+            .unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(head));
+        assert_eq!(edits(&remote).len(), 1);
+    }
+
+    #[test]
+    fn a_new_title_with_new_commits_pushes_first_then_edits() {
+        let (mut f, remote) = published();
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let head = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        let (status, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, Some("Better title"), None, None)
+            .unwrap();
+        assert_eq!(status["steps"], json!(["push", "pull request edit"]));
+        // The push runs alone; the edit is the step its result starts.
+        let push = step.unwrap();
+        assert_eq!(push.request.step, PublishStep::Push);
+        let edit = f
+            .host
+            .record_published(run(&push, &remote.tools))
+            .unwrap()
+            .unwrap();
+        assert_eq!(remote.branch(BRANCH), Some(head.clone()));
+        assert!(edits(&remote).is_empty());
+        assert_eq!(edit.request.step, PublishStep::EditPullRequest);
+        drive(&mut f, &remote, Some(edit));
+        assert_eq!(edits(&remote)[0][5..], ["--title", "Better title"]);
+        assert!(
+            results(&f.host)
+                .pop()
+                .unwrap()
+                .1
+                .starts_with("Changed the title of PR #45")
+        );
+    }
+
+    #[test]
+    fn a_failed_edit_says_the_push_landed() {
+        let (mut f, remote) = published();
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let head = f.commit("c.txt", "three\n");
+        f.review(VerificationOutcome::Passed);
+        remote.github.lock().unwrap().edit_error = Some("HTTP 403".into());
+        let (_, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, Some("T"), Some("B"), None)
+            .unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(head.clone()));
+        assert_eq!(
+            results(&f.host).pop().unwrap().1,
+            format!(
+                "Publishing {BRANCH} to allowed-org/app failed: gh pr edit failed: HTTP 403. GitHub's branch is at {}; PR #45's title and description were not changed.",
+                short_sha(&head)
+            )
+        );
+    }
+
+    #[test]
+    fn an_invalid_title_for_an_open_pull_request_is_refused() {
+        let (mut f, remote) = published();
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let long = "x".repeat(TITLE_CHARS + 1);
+        for title in ["Two\nlines", " ", long.as_str()] {
+            let result = f
+                .host
+                .publish_ticket(&caller, &ticket, Some(title), None, None);
+            refused(&mut f, result, "one-line title");
+        }
+        assert!(edits(&remote).is_empty());
+    }
+
+    #[test]
+    fn a_waiting_edit_shows_its_words_and_another_description_replaces_it() {
+        let mut f = fixture();
+        let remote = remote(&f);
+        let caller = f.implementer.id.clone();
+        f.publish(&caller).unwrap();
+        answer(&mut f, &remote, "approved");
+        answer(&mut f, &remote, "approved");
+        watch_open_pr(&mut f, 45);
+        let ticket = f.ticket.clone();
+        let (status, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, Some("New title"), Some("First"), None)
+            .unwrap();
+        assert!(step.is_none());
+        // GitHub already has the commit, so approving the push sends nothing; the edit is its
+        // own approval.
+        assert_eq!(status["step"], "push");
+        let before = pushes(&remote);
+        answer(&mut f, &remote, "approved");
+        assert_eq!(pushes(&remote), before);
+        let first = waiting_item(&f);
+        let request = f.ticket().publishing.unwrap();
+        assert_eq!(
+            first.operation_id,
+            format!("publish:{}:pull_request_edit", request.id)
+        );
+        assert!(
+            first
+                .prompt
+                .starts_with("Change the title and description of PR #45 in allowed-org/app?\n")
+                && first.prompt.contains("\nTitle: New title\n"),
+            "{}",
+            first.prompt
+        );
+        let card = waiting_card(
+            &f.ticket(),
+            &request,
+            &f.host.ticket_repository(&f.ticket()).unwrap(),
+            &[],
+        );
+        assert_eq!(card.description.as_deref(), Some("First"));
+        // The same call again waits on the same item; another description replaces it.
+        f.host
+            .publish_ticket(&caller, &ticket, Some("New title"), Some("First"), None)
+            .unwrap();
+        assert_eq!(waiting_item(&f).id, first.id);
+        f.host
+            .publish_ticket(&caller, &ticket, Some("New title"), Some("Second"), None)
+            .unwrap();
+        assert_ne!(waiting_item(&f).id, first.id);
+        let withdrawn = results(&f.host).pop().unwrap().1;
+        assert!(withdrawn.contains("was withdrawn"), "{withdrawn}");
+        answer(&mut f, &remote, "approved");
+        answer(&mut f, &remote, "approved");
+        assert_eq!(
+            edits(&remote),
+            [[
+                "pr",
+                "edit",
+                "45",
+                "--repo",
+                "github.com/allowed-org/app",
+                "--title",
+                "New title",
+                "--body",
+                "Second"
+            ]]
+        );
     }
 
     #[test]

@@ -1800,11 +1800,14 @@ pub struct PublishRequest {
     pub outcome: VerificationOutcome,
     /// The commit's size, such as "2 commits · 3 files changed, 41 insertions(+)".
     pub size: String,
-    /// Set when the request opens a pull request.
+    /// Set when the request opens a pull request; either or both when it edits the open one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// The open pull request whose title or description the request edits after its push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<u64>,
     /// The step that runs or waits next.
     pub step: PublishStep,
     /// The Inbox item the step waits on.
@@ -1837,19 +1840,36 @@ pub struct CommitWaiver {
 pub enum PublishStep {
     Push,
     OpenPullRequest,
+    EditPullRequest,
 }
 impl PublishStep {
     pub fn label(self) -> &'static str {
         match self {
             Self::Push => "push",
             Self::OpenPullRequest => "pull request",
+            Self::EditPullRequest => "pull request edit",
         }
     }
 }
 impl PublishRequest {
     /// Whether this request opens a pull request after its push.
     pub fn opens_pull_request(&self) -> bool {
-        self.title.is_some()
+        self.edits.is_none() && self.title.is_some()
+    }
+    /// The step after the push, if the request has one.
+    pub fn after_push(&self) -> Option<PublishStep> {
+        match self.edits {
+            Some(_) => Some(PublishStep::EditPullRequest),
+            None => self.title.is_some().then_some(PublishStep::OpenPullRequest),
+        }
+    }
+    /// What an edit changes, such as "title and description".
+    pub fn edited_fields(&self) -> &'static str {
+        match (&self.title, &self.body) {
+            (Some(_), Some(_)) => "title and description",
+            (Some(_), None) => "title",
+            _ => "description",
+        }
     }
 }
 impl Ticket {
@@ -1884,7 +1904,7 @@ impl Ticket {
             .filter(|e| e.status != EntryStatus::Fixed && !e.status.is_settled())
             .collect()
     }
-    /// The ticket's pull request while it is open; a publish then only pushes to it.
+    /// The ticket's pull request while it is open; a publish then pushes to it and may edit it.
     pub fn open_pull_request(&self) -> Option<&PullRequest> {
         self.pull_request
             .as_ref()
