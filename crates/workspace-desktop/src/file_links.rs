@@ -9,7 +9,7 @@ use async_channel::{Receiver, Sender};
 use gpui_component::{
     button::ButtonVariants,
     menu::{PopupMenu, PopupMenuItem},
-    text::TextView,
+    text::{TextView, TextViewStyle},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -28,6 +28,14 @@ const CACHE_LIMIT: usize = 1024;
 const REFERENCE_BYTES: usize = MAX_LINE_BYTES / 2;
 /// How long a clicked link waits for the host to say where its file is.
 const CLICK_REPLY: Duration = Duration::from_secs(2);
+
+/// Tables size their columns to the content, wrap cells down to a floor, and then scroll
+/// sideways rather than squeeze further.
+fn scrolling_table() -> StyleRefinement {
+    let mut table = StyleRefinement::default();
+    table.overflow.x = Some(Overflow::Scroll);
+    table
+}
 
 /// Markdown whose file references become links once the host has said which are files.
 #[derive(Clone)]
@@ -75,6 +83,7 @@ impl Linked {
                         cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()))
                     })
             })
+            .style(TextViewStyle::default().table(scrolling_table()))
             .text_size(px(font::BODY))
             .line_height(relative(1.5))
     }

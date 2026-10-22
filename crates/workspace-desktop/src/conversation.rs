@@ -50,8 +50,9 @@ impl DropChecks {
     }
 }
 
-/// Wide enough for the composer, narrow enough that message lines stay readable.
-pub(super) const COLUMN: f32 = 720.;
+/// Wide enough for tables to keep readable columns, narrow enough that message lines stay
+/// readable.
+pub(super) const COLUMN: f32 = 900.;
 
 /// Forgets the minimized card of every project that has no open decision, so the next one it
 /// brings starts expanded. A decision that merely arrives or changes leaves the card as it is.
