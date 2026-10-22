@@ -74,6 +74,7 @@ fn a_ticket_stored_before_publishing_decodes_and_a_request_round_trips() {
         size: "2 commits · 3 files changed".into(),
         title: Some("Fix".into()),
         body: Some("Why".into()),
+        edits: None,
         step: PublishStep::OpenPullRequest,
         waiting: Some("attention".into()),
         blocked_review_approved: false,

@@ -144,6 +144,7 @@ fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
     for stated in [
         "Coordinator or the ticket's implementer",
         "The workspace runs the push and opens the pull request itself",
+        "replace the open pull request's title and description",
         "waits for the human's approval",
         "arrives later as a message from Wiffletree",
     ] {
