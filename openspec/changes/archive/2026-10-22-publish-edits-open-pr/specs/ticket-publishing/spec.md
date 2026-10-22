@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: The host publishes a ticket on request
-The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an optional title and description, and an optional one-line `waived` reason. The host itself SHALL run the push and open the pull request; the tool SHALL NOT take a branch, a remote or a base. It SHALL push the ticket's own branch to the repository's `origin`. When the ticket has no open pull request, it SHALL then open one from that branch into the repository's configured base branch, and the title and description SHALL be required. When the ticket has an open pull request, it SHALL push, and when a title, a description or both are given it SHALL then change those of the open pull request with `gh pr edit`, validated as when opening one. Without either it SHALL only push. When GitHub already has the commit from the host, the edit SHALL be the request's only step.
+The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an optional title and description, and an optional one-line `waived` reason. The host itself SHALL run the push and open the pull request; the tool SHALL NOT take a branch, a remote or a base. It SHALL push the ticket's own branch to the repository's `origin`. When the ticket has no open pull request, it SHALL then open one from that branch into the repository's configured base branch, and the title and description SHALL be required. When the ticket has an open pull request, it SHALL push, and when a title, a description or both are given it SHALL then change those of the open pull request with `gh pr edit`, validated as when opening one. Without either it SHALL only push. When GitHub's branch, read again before the push, is already at the commit, the host SHALL push nothing and SHALL only edit.
 
 #### Scenario: First publish
 - **WHEN** `publish_ticket` is called with a title and description for a reviewed ticket with no pull request
@@ -16,7 +16,7 @@ The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an o
 - **THEN** the host pushes any new commit, then changes only the given fields of that pull request, and the result says whether the push landed when the edit fails
 
 #### Scenario: Edit without new commits
-- **WHEN** `publish_ticket` is called with a description for a ticket whose open pull request already has the commit the host pushed
+- **WHEN** `publish_ticket` is called with a description for a ticket whose open pull request's branch on GitHub is already at the commit
 - **THEN** the host pushes nothing and only edits the pull request
 
 #### Scenario: Missing title

@@ -4,7 +4,7 @@ Once a ticket's pull request is open, nobody in the workspace can change its tit
 
 ## What Changes
 
-- **Edit through `publish_ticket`.** With an open pull request, `publish_ticket` takes an optional title and an optional description, validated as when opening one. After the push it runs `gh pr edit` with only the given fields. When GitHub already has the commit the host pushed, the edit is the only step.
+- **Edit through `publish_ticket`.** With an open pull request, `publish_ticket` takes an optional title and an optional description, validated as when opening one. After the push it runs `gh pr edit` with only the given fields. When GitHub's branch, read again before the push, is already at the commit, only the edit is sent.
 - **Same rules.** The checks, the allow-list and approvals are unchanged; an edit that asks shows the new words in full on its card. A failed edit says where GitHub's branch is.
 - **Unchanged.** A call with neither field pushes only, and the PR keeper's publish stays push-only.
 

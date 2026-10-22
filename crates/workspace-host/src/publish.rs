@@ -564,11 +564,6 @@ impl Host {
             .open_pull_request()
             .filter(|_| title.is_some() || body.is_some())
             .map(|pr| pr.number);
-        // GitHub already has the commit from the host, so only the edit is left to do.
-        let step = match edits.is_some() && ticket.pushed.as_ref() == Some(&checked.commit) {
-            true => PublishStep::EditPullRequest,
-            false => PublishStep::Push,
-        };
         let size = match checked.size.clone() {
             Some(size) => size,
             None => commit_size(
@@ -592,7 +587,7 @@ impl Host {
             title: title.map(Into::into),
             body: body.map(Into::into),
             edits,
-            step,
+            step: PublishStep::Push,
             waiting: None,
             blocked_review_approved: false,
             approvals: 0,
@@ -656,11 +651,10 @@ impl Host {
             return json!({"status": "ended"});
         };
         if request.waiting.is_none() {
-            let steps: &[&str] = match (request.step, request.after_push()) {
-                (PublishStep::EditPullRequest, _) => &["pull request edit"],
-                (_, Some(PublishStep::EditPullRequest)) => &["push", "pull request edit"],
-                (_, Some(_)) => &["push", "pull request"],
-                (_, None) => &["push"],
+            let steps: &[&str] = match request.after_push() {
+                Some(PublishStep::EditPullRequest) => &["push", "pull request edit"],
+                Some(_) => &["push", "pull request"],
+                None => &["push"],
             };
             return json!({"status": "publishing", "steps": steps,
                 "repository": request.repository, "branch": request.branch,
@@ -2057,14 +2051,14 @@ pub(crate) mod tests {
     fn a_new_description_alone_edits_the_open_pull_request_without_pushing() {
         let (mut f, remote) = published();
         let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
-        let git_calls = remote.git_calls().len();
+        let before = pushes(&remote);
         let (status, step) = f
             .host
             .publish_ticket(&caller, &ticket, None, Some("New why"), None)
             .unwrap();
-        assert_eq!(status["steps"], json!(["pull request edit"]));
+        assert_eq!(status["steps"], json!(["push", "pull request edit"]));
         drive(&mut f, &remote, step);
-        assert_eq!(remote.git_calls().len(), git_calls);
+        assert_eq!(pushes(&remote), before);
         assert_eq!(
             edits(&remote),
             [[
@@ -2085,6 +2079,25 @@ pub(crate) mod tests {
             )
         );
         assert!(f.ticket().publishing.is_none());
+    }
+
+    #[test]
+    fn an_edit_pushes_first_when_githubs_branch_was_moved_back() {
+        let (mut f, remote) = published();
+        let (caller, ticket) = (f.coordinator.id.clone(), f.ticket.clone());
+        let head = f.head();
+        let reference = format!("refs/heads/{BRANCH}");
+        git(
+            &remote.bare,
+            &["update-ref", &reference, &format!("{head}~1")],
+        );
+        let (_, step) = f
+            .host
+            .publish_ticket(&caller, &ticket, None, Some("New why"), None)
+            .unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(head));
+        assert_eq!(edits(&remote).len(), 1);
     }
 
     #[test]
@@ -2171,7 +2184,12 @@ pub(crate) mod tests {
             .publish_ticket(&caller, &ticket, Some("New title"), Some("First"), None)
             .unwrap();
         assert!(step.is_none());
-        assert_eq!(status["step"], "pull request edit");
+        // GitHub already has the commit, so approving the push sends nothing; the edit is its
+        // own approval.
+        assert_eq!(status["step"], "push");
+        let before = pushes(&remote);
+        answer(&mut f, &remote, "approved");
+        assert_eq!(pushes(&remote), before);
         let first = waiting_item(&f);
         let request = f.ticket().publishing.unwrap();
         assert_eq!(
@@ -2204,6 +2222,7 @@ pub(crate) mod tests {
         assert_ne!(waiting_item(&f).id, first.id);
         let withdrawn = results(&f.host).pop().unwrap().1;
         assert!(withdrawn.contains("was withdrawn"), "{withdrawn}");
+        answer(&mut f, &remote, "approved");
         answer(&mut f, &remote, "approved");
         assert_eq!(
             edits(&remote),
