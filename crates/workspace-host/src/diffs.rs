@@ -2,48 +2,69 @@
 //! file's content, or from Git when the provider reports which files changed but not how.
 use crate::runtime::git_answer;
 use serde_json::Value;
-use std::path::Path;
+use std::{
+    io::{BufRead, BufReader},
+    path::Path,
+    process::{Command, Stdio},
+};
 use workspace_core::{DiffHunk, FileDiff, MAX_DIFF_LINES};
 
 /// Longest diff line kept, in characters.
 const MAX_LINE: usize = 400;
-/// Files read from Git for one edit step.
-const MAX_GIT_FILES: usize = 20;
+
+/// A diff built a line at a time: every line is counted, the first `MAX_DIFF_LINES` are kept.
+struct Bounded {
+    diff: FileDiff,
+    room: usize,
+}
+impl Bounded {
+    fn new(path: String, created: bool) -> Self {
+        Self {
+            diff: FileDiff {
+                path,
+                created,
+                added: 0,
+                removed: 0,
+                hunks: vec![],
+                omitted_lines: 0,
+            },
+            room: MAX_DIFF_LINES,
+        }
+    }
+    /// A hunk with no room left for its lines is not kept.
+    fn hunk(&mut self, old_start: u32, new_start: u32) {
+        if self.room > 0 {
+            self.diff.hunks.push(DiffHunk {
+                old_start,
+                new_start,
+                lines: vec![],
+            });
+        }
+    }
+    fn line(&mut self, line: &str) {
+        match line.as_bytes().first() {
+            Some(b'+') => self.diff.added += 1,
+            Some(b'-') => self.diff.removed += 1,
+            _ => {}
+        }
+        match self.diff.hunks.last_mut().filter(|_| self.room > 0) {
+            Some(hunk) => {
+                hunk.lines.push(crate::steps::clip(line, MAX_LINE));
+                self.room -= 1;
+            }
+            None => self.diff.omitted_lines += 1,
+        }
+    }
+}
 
 /// Counts every line of `hunks` and keeps the first `MAX_DIFF_LINES` of them.
 pub(crate) fn file_diff(path: String, created: bool, hunks: Vec<DiffHunk>) -> FileDiff {
-    let mut diff = FileDiff {
-        path,
-        created,
-        added: 0,
-        removed: 0,
-        hunks: vec![],
-        omitted_lines: 0,
-    };
-    let mut room = MAX_DIFF_LINES;
-    for mut hunk in hunks {
-        for line in &hunk.lines {
-            match line.as_bytes().first() {
-                Some(b'+') => diff.added += 1,
-                Some(b'-') => diff.removed += 1,
-                _ => {}
-            }
-        }
-        let kept = hunk.lines.len().min(room);
-        diff.omitted_lines += (hunk.lines.len() - kept) as u32;
-        if kept == 0 {
-            continue;
-        }
-        room -= kept;
-        hunk.lines.truncate(kept);
-        for line in &mut hunk.lines {
-            if line.chars().count() > MAX_LINE {
-                *line = crate::steps::clip(line, MAX_LINE);
-            }
-        }
-        diff.hunks.push(hunk);
+    let mut diff = Bounded::new(path, created);
+    for hunk in hunks {
+        diff.hunk(hunk.old_start, hunk.new_start);
+        hunk.lines.iter().for_each(|line| diff.line(line));
     }
-    diff
+    diff.diff
 }
 
 /// Claude's `structuredPatch`: hunks with their start lines and prefixed lines.
@@ -69,17 +90,14 @@ pub(crate) fn from_structured_patch(path: String, patch: &Value) -> Option<FileD
 
 /// A newly written file: every line is an addition.
 pub(crate) fn new_file(path: String, content: &str) -> FileDiff {
-    let lines: Vec<String> = content.lines().map(|line| format!("+{line}")).collect();
-    let hunks = if lines.is_empty() {
-        vec![]
-    } else {
-        vec![DiffHunk {
-            old_start: 0,
-            new_start: 1,
-            lines,
-        }]
-    };
-    file_diff(path, true, hunks)
+    let mut diff = Bounded::new(path, true);
+    if !content.is_empty() {
+        diff.hunk(0, 1);
+        content
+            .lines()
+            .for_each(|line| diff.line(&format!("+{line}")));
+    }
+    diff.diff
 }
 
 /// Each changed file's diff as Git sees it in `cwd`: against `HEAD`, or as a new file when
@@ -88,58 +106,73 @@ pub(crate) fn new_file(path: String, content: &str) -> FileDiff {
 pub(crate) fn from_git(cwd: &Path, files: &[(&str, String)]) -> Vec<FileDiff> {
     files
         .iter()
-        .take(MAX_GIT_FILES)
-        .filter_map(|(path, shown)| parse_unified(shown.clone(), &git_diff(cwd, path)?))
+        .filter_map(|(path, shown)| git_diff(cwd, path, shown))
         .collect()
 }
 
-fn git_diff(cwd: &Path, path: &str) -> Option<String> {
-    let diff = |args: &[&str]| {
-        let base = ["diff", "--no-color", "--no-ext-diff"];
-        git_answer(cwd, &[&base[..], args].concat()).ok()
-    };
-    let tracked = diff(&["HEAD", "--", path])?;
-    if tracked.status.success() && !tracked.output.is_empty() {
-        return Some(tracked.output);
+fn git_diff(cwd: &Path, path: &str, shown: &str) -> Option<FileDiff> {
+    if let Some(diff) = stream_diff(cwd, &["HEAD", "--", path], shown) {
+        return Some(diff);
     }
     let listed = git_answer(cwd, &["ls-files", "--", path]).ok()?;
     if !listed.status.success() || !listed.output.is_empty() || !cwd.join(path).is_file() {
         return None;
     }
-    // `--no-index` exits 1 when the files differ, which they always do here.
-    Some(diff(&["--no-index", "--", "/dev/null", path])?.output)
+    stream_diff(cwd, &["--no-index", "--", "/dev/null", path], shown)
+}
+
+/// Runs `git diff` and reads its output as it streams, so a diff of any size keeps its first
+/// lines and counts the rest.
+fn stream_diff(cwd: &Path, args: &[&str], shown: &str) -> Option<FileDiff> {
+    let mut git = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["diff", "--no-color", "--no-ext-diff"])
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // The reader is dropped before the wait, so Git stops if it is left unread.
+    let diff = read_unified(shown, BufReader::new(git.stdout.take()?));
+    let _ = git.wait();
+    diff
 }
 
 /// One file's unified diff, as `git diff` prints it.
-fn parse_unified(path: String, text: &str) -> Option<FileDiff> {
+fn read_unified(shown: &str, mut output: impl BufRead) -> Option<FileDiff> {
     let mut created = false;
-    let mut hunks: Vec<DiffHunk> = vec![];
-    for line in text.lines() {
+    let mut diff: Option<Bounded> = None;
+    let mut bytes = vec![];
+    while output.read_until(b'\n', &mut bytes).ok()? > 0 {
+        let text = String::from_utf8_lossy(&bytes);
+        let line = text.trim_end_matches(['\n', '\r']);
         if let Some(header) = line.strip_prefix("@@ ") {
-            hunks.push(hunk_header(header)?);
-        } else if let Some(hunk) = hunks.last_mut() {
+            let (old_start, new_start) = hunk_starts(header)?;
+            diff.get_or_insert_with(|| Bounded::new(shown.to_owned(), created))
+                .hunk(old_start, new_start);
+        } else if let Some(diff) = &mut diff {
             if matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-')) {
-                hunk.lines.push(line.to_owned());
+                diff.line(line);
             }
         } else if line.starts_with("new file mode") {
             created = true;
         }
+        bytes.clear();
     }
-    (!hunks.is_empty()).then(|| file_diff(path, created, hunks))
+    diff.map(|diff| diff.diff)
 }
 
 /// The start lines from "-12,3 +12,4 @@ fn name".
-fn hunk_header(header: &str) -> Option<DiffHunk> {
+fn hunk_starts(header: &str) -> Option<(u32, u32)> {
     let mut ranges = header.split(' ');
     let mut start = |sign: char| -> Option<u32> {
         let range = ranges.next()?.strip_prefix(sign)?;
         range.split(',').next()?.parse().ok()
     };
-    Some(DiffHunk {
-        old_start: start('-')?,
-        new_start: start('+')?,
-        lines: vec![],
-    })
+    Some((start('-')?, start('+')?))
 }
 
 #[cfg(test)]
@@ -238,5 +271,32 @@ mod tests {
         assert!(lines(kept).contains(&"+line thirty"));
         assert_eq!((new.added, new.removed, new.created), (2, 0, true));
         assert_eq!(lines(new), ["+one", "+two"]);
+    }
+
+    #[test]
+    fn git_reads_every_changed_file_and_keeps_the_head_of_a_diff_of_any_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q"]);
+        let mut names: Vec<String> = (0..25).map(|n| format!("file-{n}.txt")).collect();
+        for name in &names {
+            std::fs::write(repo.join(name), "one\n").unwrap();
+        }
+        names.push("big.txt".into());
+        // Over the 4 MiB that a buffered Git answer allows.
+        let wide = "x".repeat(500);
+        let big: String = (0..10_000).map(|n| format!("{n} {wide}\n")).collect();
+        std::fs::write(repo.join("big.txt"), big).unwrap();
+        let files: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), name.clone()))
+            .collect();
+        let diffs = from_git(repo, &files);
+        assert_eq!(diffs.len(), 26);
+        assert!(diffs[..25].iter().all(|d| d.added == 1));
+        let big = &diffs[25];
+        assert_eq!((big.added, big.omitted_lines), (10_000, 10_000 - 40));
+        assert_eq!(lines(big).len(), MAX_DIFF_LINES);
+        assert!(lines(big)[0].starts_with("+0 x"));
     }
 }

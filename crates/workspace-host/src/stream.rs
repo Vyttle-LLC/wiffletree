@@ -200,6 +200,8 @@ impl ClaudeSteps {
             _ => {
                 if failed {
                     step.note = exit_code(&output).map(|code| format!("exit {code}"));
+                    // A failed write changed nothing; its error is the useful detail.
+                    step.diffs.clear();
                 }
                 step.detail = Some(output).filter(|o| !o.trim().is_empty());
             }
@@ -834,6 +836,23 @@ mod tests {
         let diff = &created.diffs[0];
         assert_eq!((diff.added, diff.omitted_lines), (100, 60));
         assert_eq!(diff.hunks[0].lines.len(), workspace_core::MAX_DIFF_LINES);
+    }
+
+    #[test]
+    fn a_failed_write_shows_its_error_not_the_content_it_never_wrote() {
+        let mut claude = ClaudeSteps::new(Path::new(CWD));
+        claude.event(&json!({"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "t1", "name": "Write",
+            "input": {"file_path": "/work/repo/a.rs", "content": "fn a() {}\n"}
+        }]}}));
+        let error = "File has not been read yet. Read it first before writing to it.";
+        let failed = claude.event(&json!({"type": "user", "message": {"content": [{
+            "type": "tool_result", "tool_use_id": "t1", "is_error": true, "content": error
+        }]}}));
+        assert_eq!(failed[0].state, StepState::Failed);
+        assert!(failed[0].diffs.is_empty());
+        assert_eq!(failed[0].note, None);
+        assert_eq!(failed[0].detail.as_deref(), Some(error));
     }
 
     #[test]
