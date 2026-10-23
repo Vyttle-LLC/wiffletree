@@ -23,6 +23,41 @@ fn samples(
         json!({"measure":name,"samples":count,"p50_ms":ms(times[count/2]),"p95_ms":ms(times[count*95/100]),"max_ms":ms(times[count-1])}),
     )
 }
+/// An edit's diff at the stored limit: three hunks, `MAX_DIFF_LINES` lines of code in all.
+fn edit_diff() -> FileDiff {
+    let line = |sign: char, n: usize| {
+        format!("{sign}    let value_{n} = compute(input, {n}).unwrap_or_default();")
+    };
+    let hunk = |start: u32, size: usize| DiffHunk {
+        old_start: start,
+        new_start: start,
+        lines: (0..size)
+            .map(|n| line([' ', '-', '+', '+'][n % 4], n))
+            .collect(),
+    };
+    let sizes = [14, 13, MAX_DIFF_LINES - 27];
+    let hunks: Vec<_> = sizes
+        .iter()
+        .enumerate()
+        .map(|(i, &size)| hunk(40 + 120 * i as u32, size))
+        .collect();
+    let count = |sign: char| {
+        hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .filter(|l| l.starts_with(sign))
+            .count() as u32
+    };
+    FileDiff {
+        path: "crates/workspace-host/src/stacks.rs".into(),
+        created: false,
+        added: count('+'),
+        removed: count('-'),
+        omitted_lines: 0,
+        hunks,
+    }
+}
+
 /// What the desktop waits for from its own host process: a request written to `host.sock`,
 /// the host's actor and JSON, and the reply decoded. The host is the `workspace-host` built
 /// beside this example, started as a child the way the app starts one, with no provider found.
@@ -299,22 +334,24 @@ fn main() -> Result<()> {
             let count = if run == long_run { MAX_RUN_STEPS } else { 20 };
             for seq in 0..count {
                 revision += 1;
+                // Every fourth step is an edit with a full diff, as an implementer's run has.
+                let edit = seq % 4 == 2;
                 let step = Step {
                     run_id: run.into(),
                     id: format!("step-{seq}"),
                     parent_id: None,
-                    kind: if seq % 4 == 0 {
-                        StepKind::Narration
-                    } else {
-                        StepKind::Command
+                    kind: match seq % 4 {
+                        0 => StepKind::Narration,
+                        2 => StepKind::FileEdit,
+                        _ => StepKind::Command,
                     },
                     state: StepState::Succeeded,
                     title: "cargo test --workspace".into(),
                     note: Some("exit 0".into()),
-                    detail: Some("x".repeat(512)),
+                    detail: (!edit).then(|| "x".repeat(512)),
                     paths: vec![],
                     plan: None,
-                    diffs: vec![],
+                    diffs: if edit { vec![edit_diff()] } else { vec![] },
                     omitted: 0,
                     seq: seq as u32,
                     revision,

@@ -326,21 +326,29 @@ fn file_diff(diff: &FileDiff, named: bool, p: Palette) -> Div {
         })
 }
 
-/// Each line with its number in the file: the old one for a removal, the new one otherwise.
-fn hunk_lines(hunk: &DiffHunk, p: Palette) -> impl Iterator<Item = Div> + '_ {
+/// Each line's number in the file, its sign and its text: the old number for a removal, the
+/// new one otherwise.
+fn numbered(hunk: &DiffHunk) -> impl Iterator<Item = (u32, &str, &str)> {
     let (mut old, mut new) = (hunk.old_start, hunk.new_start);
     hunk.lines.iter().map(move |line| {
         let (sign, text) = line.split_at(line.chars().next().map_or(0, char::len_utf8));
-        let (number, color, fill) = match sign {
-            "+" => (new, p.green, Some(p.green.opacity(0.14))),
-            "-" => (old, p.red, Some(p.red.opacity(0.14))),
-            _ => (new, p.subtle, None),
-        };
+        let number = if sign == "-" { old } else { new };
         match sign {
             "+" => new += 1,
             "-" => old += 1,
             _ => (old, new) = (old + 1, new + 1),
         }
+        (number, sign, text)
+    })
+}
+
+fn hunk_lines(hunk: &DiffHunk, p: Palette) -> impl Iterator<Item = Div> + '_ {
+    numbered(hunk).map(move |(number, sign, text)| {
+        let (color, fill) = match sign {
+            "+" => (p.green, Some(p.green.opacity(0.14))),
+            "-" => (p.red, Some(p.red.opacity(0.14))),
+            _ => (p.subtle, None),
+        };
         div()
             .flex()
             .whitespace_nowrap()
@@ -412,5 +420,48 @@ impl Render for HistorySheet {
                     )
                     .vertical_scrollbar(&self.list),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numbered;
+    use workspace_core::DiffHunk;
+
+    #[test]
+    fn a_removal_shows_its_old_number_and_every_other_line_its_new_one() {
+        let hunk = |old_start, new_start, lines: &[&str]| DiffHunk {
+            old_start,
+            new_start,
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+        };
+        let numbers = |hunk: &DiffHunk| -> Vec<(u32, String)> {
+            numbered(hunk)
+                .map(|(n, sign, _)| (n, sign.into()))
+                .collect()
+        };
+        let expected = |list: &[(u32, &str)]| -> Vec<(u32, String)> {
+            list.iter().map(|&(n, sign)| (n, sign.into())).collect()
+        };
+        // Each hunk counts from its own header, not from where the one before ended.
+        let first = hunk(40, 40, &[" a", "-b", "-c", "+b", "+c", "+d", " e"]);
+        let second = hunk(90, 91, &["-x", "+y", " z"]);
+        assert_eq!(
+            numbers(&first),
+            expected(&[
+                (40, " "),
+                (41, "-"),
+                (42, "-"),
+                (41, "+"),
+                (42, "+"),
+                (43, "+"),
+                (44, " ")
+            ])
+        );
+        assert_eq!(
+            numbers(&second),
+            expected(&[(90, "-"), (91, "+"), (92, " ")])
+        );
+        assert_eq!(numbered(&first).nth(1).unwrap().2, "b");
     }
 }

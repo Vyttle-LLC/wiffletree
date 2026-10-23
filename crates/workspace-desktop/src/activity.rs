@@ -417,8 +417,8 @@ pub(super) fn activity_row(
 
 #[cfg(test)]
 mod tests {
-    use super::RunActivity;
-    use workspace_core::{Step, StepKind, StepPage, StepState};
+    use super::{RunActivity, edit_counts};
+    use workspace_core::{FileDiff, Step, StepKind, StepPage, StepState};
 
     fn step(id: &str, seq: u32, kind: StepKind, revision: u64) -> Step {
         Step {
@@ -489,6 +489,22 @@ mod tests {
         finished.running = false;
         assert!(activity.merge(finished), "the run ended");
         assert!(activity.merge(page("b", vec![])), "a new run");
+    }
+
+    #[test]
+    fn an_edit_counts_the_lines_of_all_its_files_once_its_diff_is_known() {
+        let mut edit = step("edit", 0, StepKind::FileEdit, 1);
+        assert_eq!(edit_counts(&edit), None);
+        let diff = |path: &str, added, removed| FileDiff {
+            path: path.into(),
+            created: false,
+            added,
+            removed,
+            hunks: vec![],
+            omitted_lines: 0,
+        };
+        edit.diffs = vec![diff("a.rs", 4, 2), diff("b.rs", 86, 0)];
+        assert_eq!(edit_counts(&edit), Some((90, 2)));
     }
 
     #[test]

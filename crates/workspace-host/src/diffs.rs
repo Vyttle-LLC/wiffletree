@@ -1,16 +1,20 @@
 //! An edit step's changes as bounded diffs: from Claude's structured patch, from a written
 //! file's content, or from Git when the provider reports which files changed but not how.
-use crate::runtime::git_answer;
 use serde_json::Value;
 use std::{
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
+    os::unix::process::CommandExt,
     path::Path,
-    process::{Command, Stdio},
+    process::{ChildStdout, Command, Stdio},
+    sync::mpsc,
+    time::Instant,
 };
 use workspace_core::{DiffHunk, FileDiff, MAX_DIFF_LINES};
 
 /// Longest diff line kept, in characters.
 const MAX_LINE: usize = 400;
+/// Git time for all of one edit's files together; files not reached by then get no diff.
+const GIT_BUDGET: std::time::Duration = crate::runtime::GIT_TIMEOUT;
 
 /// A diff built a line at a time: every line is counted, the first `MAX_DIFF_LINES` are kept.
 struct Bounded {
@@ -42,6 +46,10 @@ impl Bounded {
         }
     }
     fn line(&mut self, line: &str) {
+        // "\ No newline at end of file" is a note about the line before, not a line.
+        if line.starts_with('\\') {
+            return;
+        }
         match line.as_bytes().first() {
             Some(b'+') => self.diff.added += 1,
             Some(b'-') => self.diff.removed += 1,
@@ -58,7 +66,7 @@ impl Bounded {
 }
 
 /// Counts every line of `hunks` and keeps the first `MAX_DIFF_LINES` of them.
-pub(crate) fn file_diff(path: String, created: bool, hunks: Vec<DiffHunk>) -> FileDiff {
+fn file_diff(path: String, created: bool, hunks: Vec<DiffHunk>) -> FileDiff {
     let mut diff = Bounded::new(path, created);
     for hunk in hunks {
         diff.hunk(hunk.old_start, hunk.new_start);
@@ -104,45 +112,80 @@ pub(crate) fn new_file(path: String, content: &str) -> FileDiff {
 /// untracked. This is every uncommitted change to the file, not only the step's own.
 /// `files` pairs the path Git is given with the path shown.
 pub(crate) fn from_git(cwd: &Path, files: &[(&str, String)]) -> Vec<FileDiff> {
+    from_git_by(cwd, files, Instant::now() + GIT_BUDGET)
+}
+
+fn from_git_by(cwd: &Path, files: &[(&str, String)], deadline: Instant) -> Vec<FileDiff> {
     files
         .iter()
-        .filter_map(|(path, shown)| git_diff(cwd, path, shown))
+        .take_while(|_| Instant::now() < deadline)
+        .filter_map(|(path, shown)| git_diff(cwd, path, shown, deadline))
         .collect()
 }
 
-fn git_diff(cwd: &Path, path: &str, shown: &str) -> Option<FileDiff> {
-    if let Some(diff) = stream_diff(cwd, &["HEAD", "--", path], shown) {
+fn git_diff(cwd: &Path, path: &str, shown: &str, deadline: Instant) -> Option<FileDiff> {
+    let diff = |args: &[&str]| {
+        let base = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
+        let shown = shown.to_owned();
+        git_read(cwd, &[&base[..], args].concat(), deadline, move |output| {
+            read_unified(shown, output)
+        })
+    };
+    if let Some((Some(diff), _)) = diff(&["HEAD", "--", path]) {
         return Some(diff);
     }
-    let listed = git_answer(cwd, &["ls-files", "--", path]).ok()?;
-    if !listed.status.success() || !listed.output.is_empty() || !cwd.join(path).is_file() {
+    let listed = git_read(cwd, &["ls-files", "--", path], deadline, |mut output| {
+        let mut listed = String::new();
+        output.read_to_string(&mut listed).map(|_| listed)
+    });
+    let Some((Ok(listed), true)) = listed else {
+        return None;
+    };
+    if !listed.is_empty() || !cwd.join(path).is_file() {
         return None;
     }
-    stream_diff(cwd, &["--no-index", "--", "/dev/null", path], shown)
+    diff(&["--no-index", "--", "/dev/null", path])?.0
 }
 
-/// Runs `git diff` and reads its output as it streams, so a diff of any size keeps its first
-/// lines and counts the rest.
-fn stream_diff(cwd: &Path, args: &[&str], shown: &str) -> Option<FileDiff> {
+/// Runs Git in a process group of its own and reads its output on another thread as it
+/// streams, so a diff of any size keeps its first lines and counts the rest. Answers what
+/// `read` made of the output and whether Git succeeded; past `deadline` the group is killed
+/// and there is no answer.
+fn git_read<T: Send + 'static>(
+    cwd: &Path,
+    args: &[&str],
+    deadline: Instant,
+    read: impl FnOnce(BufReader<ChildStdout>) -> T + Send + 'static,
+) -> Option<(T, bool)> {
     let mut git = Command::new("git")
+        .arg("--no-pager")
         .arg("-C")
         .arg(cwd)
-        .args(["diff", "--no-color", "--no-ext-diff"])
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
-    // The reader is dropped before the wait, so Git stops if it is left unread.
-    let diff = read_unified(shown, BufReader::new(git.stdout.take()?));
-    let _ = git.wait();
-    diff
+    let output = BufReader::new(git.stdout.take()?);
+    let (send, answer) = mpsc::channel();
+    std::thread::spawn(move || drop(send.send(read(output))));
+    let answer = answer
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok();
+    if answer.is_none() {
+        // SAFETY: killpg only sends a signal, to the group Git leads.
+        unsafe { libc::killpg(git.id() as i32, libc::SIGKILL) };
+    }
+    let succeeded = git.wait().is_ok_and(|status| status.success());
+    answer.map(|answer| (answer, succeeded))
 }
 
 /// One file's unified diff, as `git diff` prints it.
-fn read_unified(shown: &str, mut output: impl BufRead) -> Option<FileDiff> {
+fn read_unified(shown: String, mut output: impl BufRead) -> Option<FileDiff> {
     let mut created = false;
     let mut diff: Option<Bounded> = None;
     let mut bytes = vec![];
@@ -151,7 +194,7 @@ fn read_unified(shown: &str, mut output: impl BufRead) -> Option<FileDiff> {
         let line = text.trim_end_matches(['\n', '\r']);
         if let Some(header) = line.strip_prefix("@@ ") {
             let (old_start, new_start) = hunk_starts(header)?;
-            diff.get_or_insert_with(|| Bounded::new(shown.to_owned(), created))
+            diff.get_or_insert_with(|| Bounded::new(shown.clone(), created))
                 .hunk(old_start, new_start);
         } else if let Some(diff) = &mut diff {
             if matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-')) {
@@ -206,6 +249,16 @@ mod tests {
         );
         assert_eq!(lines(&diff), [" a", "-b", "+c", " x", "+y", "+z"]);
         assert!(from_structured_patch("a".into(), &json!([])).is_none());
+    }
+
+    #[test]
+    fn a_missing_newline_note_is_not_a_line() {
+        let patch = json!([{"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 2, "lines": [
+            "-a", "\\ No newline at end of file", "+a", "+b", "\\ No newline at end of file"
+        ]}]);
+        let diff = from_structured_patch("a".into(), &patch).unwrap();
+        assert_eq!(lines(&diff), ["-a", "+a", "+b"]);
+        assert_eq!((diff.added, diff.removed, diff.omitted_lines), (2, 1, 0));
     }
 
     #[test]
@@ -298,5 +351,36 @@ mod tests {
         assert_eq!((big.added, big.omitted_lines), (10_000, 10_000 - 40));
         assert_eq!(lines(big).len(), MAX_DIFF_LINES);
         assert!(lines(big)[0].starts_with("+0 x"));
+    }
+
+    #[test]
+    fn a_hanging_git_is_stopped_and_the_files_left_get_no_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q"]);
+        // A clean filter runs whenever Git reads the working file, so the diff waits on it.
+        git(repo, &["config", "filter.slow.clean", "sleep 30; cat"]);
+        std::fs::write(repo.join(".gitattributes"), "*.txt filter=slow\n").unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(repo.join(name), "one\n").unwrap();
+        }
+        git(repo, &["add", ".gitattributes"]);
+        git(repo, &["commit", "-qm", "base"]);
+        git(
+            repo,
+            &["-c", "filter.slow.clean=cat", "add", "a.txt", "b.txt"],
+        );
+        git(
+            repo,
+            &["-c", "filter.slow.clean=cat", "commit", "-qm", "files"],
+        );
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(repo.join(name), "two\n").unwrap();
+        }
+        let files = [("a.txt", "a.txt".into()), ("b.txt", "b.txt".into())];
+        let started = Instant::now();
+        let deadline = started + std::time::Duration::from_millis(500);
+        assert!(from_git_by(repo, &files, deadline).is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

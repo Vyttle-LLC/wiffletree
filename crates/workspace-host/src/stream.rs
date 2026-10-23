@@ -191,10 +191,13 @@ impl ClaudeSteps {
             StepKind::FileEdit if !failed => {
                 let patch = &result["structuredPatch"];
                 step.note = patch_counts(patch).or(step.note);
-                // A newly written file has no patch and keeps the diff made from its content.
+                // A newly written file has no patch and keeps the diff made from its content;
+                // an overwrite with no patch changed nothing.
                 let path = step.paths.first().cloned().unwrap_or_default();
-                if let Some(diff) = diffs::from_structured_patch(path, patch) {
-                    step.diffs = vec![diff];
+                match diffs::from_structured_patch(path, patch) {
+                    Some(diff) => step.diffs = vec![diff],
+                    None if result["type"] == "update" => step.diffs.clear(),
+                    None => {}
                 }
             }
             _ => {
@@ -826,6 +829,13 @@ mod tests {
         );
         assert!(!overwrite.diffs[0].created);
         assert_eq!(overwrite.diffs[0].added, 2);
+        // Writing a file's own content again changes nothing, so there is no diff.
+        let unchanged = claude_edit(
+            "Write",
+            json!({"file_path": "/work/repo/src/a.rs", "content": "a\nc\n"}),
+            json!({"type": "update", "structuredPatch": []}),
+        );
+        assert!(unchanged.diffs.is_empty());
         // A large new file keeps its first lines and counts the rest.
         let content: String = (0..100).map(|n| format!("line {n}\n")).collect();
         let created = claude_edit(
@@ -879,6 +889,10 @@ mod tests {
             ("notes.txt", 1, 1)
         );
         assert_eq!(diff.hunks[0].lines, [" alpha", "-beta", "+gamma"]);
+        // A failed change reads nothing from Git.
+        let failed = codex.event(&json!({"type": "item.completed", "item": item("failed")}));
+        assert_eq!(failed[0].state, StepState::Failed);
+        assert!(failed[0].diffs.is_empty());
     }
 
     #[test]
