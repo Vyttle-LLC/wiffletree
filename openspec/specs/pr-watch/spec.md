@@ -6,7 +6,7 @@ Follows each open ticket's GitHub pull request without a model session. The PR's
 ## Requirements
 
 ### Requirement: Read-only PR watching without a model
-The host SHALL watch the PRs of open tickets whose coordinator is not archived, using GitHub's API through `gh` and no model session. Each pass SHALL read every such ticket in a repository with one request, or with as few requests as the number of branches requires, and SHALL run off the thread that serves host commands. The watcher SHALL only read from GitHub and Git. It SHALL NOT comment on, label, approve, dismiss reviews of, push to, rebase or merge any PR or branch, and SHALL NOT change any ticket's state. A repository whose base has no remote, or whose remote is not on `github.com`, SHALL NOT be queried and SHALL be shown as not watched.
+The host SHALL watch the PRs of open tickets whose coordinator is not archived, using GitHub's API through `gh` and no model session. Each pass SHALL read every such ticket in a repository with one request, or with as few requests as the number of branches requires, and SHALL run off the thread that serves host commands. The watcher SHALL only read from GitHub and Git. It SHALL NOT comment on, label, approve, dismiss reviews of, push to, rebase or merge any PR or branch, and SHALL NOT change any ticket's state. A repository whose base has no remote, or whose remote is not on `github.com`, SHALL NOT be queried and SHALL be shown as not watched, unless an open ticket in it was created with a `base`: pull requests open on `origin`, so the repository SHALL then be read on `origin`.
 
 #### Scenario: One request per repository
 - **WHEN** a repository has three open tickets and a pass is due
@@ -19,6 +19,10 @@ The host SHALL watch the PRs of open tickets whose coordinator is not archived, 
 #### Scenario: Nothing is written
 - **WHEN** a ticket's PR changes from passing to failing checks
 - **THEN** the host records the new status without commenting, labelling or pushing, and the ticket's state is unchanged
+
+#### Scenario: A ticket on a branch of origin
+- **WHEN** a repository's base is `HEAD` and an open ticket in it was created with `base` `release`
+- **THEN** the repository's pass reads `origin`
 
 ### Requirement: Polling cadence and backoff
 A repository SHALL be checked as soon as the host starts, and within about a minute after it first has an open ticket there. It SHALL also be checked at once after the host pushes a ticket's branch there or opens a ticket's PR there. After a successful pass, it SHALL be checked again after about 60 seconds if any of its open tickets has an open PR, and after about 5 minutes otherwise. After consecutive failures, the next check SHALL wait 5, 10, 20 and then at most 30 minutes, and a success SHALL restore the normal interval. When GitHub reports fewer than 200 remaining API points, the next check SHALL wait at least until GitHub's reported reset time. The host SHALL wake itself for the next due check even when no other event arrives. Checks SHALL continue while a project is paused. Between due checks, the host SHALL read the store for the watched tickets only after something changed, and at most about once a minute, so that ordinary events cost no store read.
