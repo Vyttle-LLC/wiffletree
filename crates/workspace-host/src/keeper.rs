@@ -2682,6 +2682,9 @@ pub(crate) mod tests {
         assert_eq!((worktree(&f), r.branch(BRANCH)), before);
         // The open-branch check finds it too, and the coordinator still hears once.
         f.host.base_deleted(&f.ticket, "origin/release").unwrap();
+        // A branch name of any valid length is told too.
+        let long = format!("origin/release/{}", "a".repeat(240));
+        f.host.base_deleted(&f.ticket, &long).unwrap();
         let told: Vec<String> = (f.host.db)
             .prepare("SELECT body FROM messages WHERE id LIKE 'base-deleted:%'")
             .unwrap()
@@ -2689,8 +2692,9 @@ pub(crate) mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(told.len(), 1);
+        assert_eq!(told.len(), 2);
         assert!(told[0].contains("its base origin/release is no longer on its remote"));
+        assert!(told[1].contains(&long));
         assert!(notices(&f.host).is_empty());
     }
 

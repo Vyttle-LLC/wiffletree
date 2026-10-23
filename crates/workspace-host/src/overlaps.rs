@@ -3,6 +3,7 @@
 //! Read-only apart from fetching the base's remote-tracking ref; branches and worktrees are never
 //! touched. Only committed work is compared.
 use crate::*;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The least time between two checks, and so two fetches, of one repository.
@@ -74,7 +75,10 @@ impl Host {
     /// Tells the ticket's coordinator, once, that its base is no longer on its remote.
     pub(crate) fn base_deleted(&mut self, ticket_id: &str, base: &str) -> Result<()> {
         let ticket = self.ticket(ticket_id)?;
-        let id = format!("base-deleted:{ticket_id}:{base}");
+        // A branch name can outrun a message ID's bound, so the ID names the base by its digest.
+        let digest = Sha256::digest(base);
+        let digest: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let id = format!("base-deleted:{ticket_id}:{digest}");
         if self.message_exists(&id)? {
             return Ok(());
         }
