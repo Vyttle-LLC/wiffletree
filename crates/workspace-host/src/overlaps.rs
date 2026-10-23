@@ -1,14 +1,15 @@
 //! Early warnings for open ticket branches: how far the base has moved on, and which files would
-//! conflict with it or with other open tickets in the same repository, whatever their project.
+//! conflict with it or with other open tickets on the same base, whatever their project.
 //! Read-only apart from fetching the base's remote-tracking ref; branches and worktrees are never
 //! touched. Only committed work is compared.
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The least time between two checks, and so two fetches, of one repository.
 pub(crate) const OVERLAP_REFRESH_MS: i64 = 5 * 60 * 1000;
 
-/// One repository's open ticket branches, gathered on the host thread and checked off it.
+/// The open ticket branches on one base of a repository, gathered on the host thread and
+/// checked off it.
 pub(crate) struct OverlapCheck {
     pub repository: PathBuf,
     pub base: String,
@@ -24,7 +25,8 @@ pub(crate) struct OpenBranch {
 }
 
 impl Host {
-    /// Each repository with an open ticket, keyed by repository ID.
+    /// Each base of a repository with an open ticket, keyed by the repository's ID, followed by
+    /// the base when it is not the repository's.
     pub(crate) fn overlap_checks(&self) -> Result<Vec<(String, OverlapCheck)>> {
         let projects = self.projects()?;
         let sessions = self.sessions()?;
@@ -35,26 +37,34 @@ impl Host {
         let tickets = self.tickets()?;
         let mut checks = vec![];
         for repository in self.repositories()? {
-            let branches: Vec<_> = tickets
+            let mut bases: BTreeMap<String, Vec<OpenBranch>> = BTreeMap::new();
+            for t in tickets
                 .iter()
                 .filter(|t| t.is_open() && t.repository_id == repository.id)
-                .map(|t| OpenBranch {
+            {
+                let base = stacks::effective_base(t, &repository);
+                bases.entry(base).or_default().push(OpenBranch {
                     ticket_id: t.id.clone(),
                     title: t.title.clone(),
                     project: project_of(&t.coordinator_id)
                         .map(|p| p.name.clone())
                         .unwrap_or_default(),
                     branch: t.branch.clone(),
-                })
-                .collect();
-            if !branches.is_empty() {
+                });
+            }
+            for (base, branches) in bases {
+                let key = if base == repository.base {
+                    repository.id.clone()
+                } else {
+                    format!("{} {base}", repository.id)
+                };
                 checks.push((
-                    repository.id.clone(),
+                    key.clone(),
                     OverlapCheck {
-                        repository: repository.path.into(),
-                        base: repository.base,
+                        repository: repository.path.clone().into(),
+                        base,
                         branches,
-                        fetched_at: self.base_fetched_at.get(&repository.id).copied(),
+                        fetched_at: self.base_fetched_at.get(&key).copied(),
                     },
                 ));
             }
@@ -101,8 +111,19 @@ fn among(warnings: &BranchWarnings, open: &HashSet<String>) -> Option<BranchWarn
         .then_some(warnings)
 }
 
+/// A base whose branch its remote no longer has.
+#[derive(Debug)]
+pub(crate) struct BaseDeleted(pub String);
+impl std::fmt::Display for BaseDeleted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is no longer on its remote", self.0)
+    }
+}
+impl std::error::Error for BaseDeleted {}
+
 /// Updates the base's remote-tracking ref when the base is one, such as `origin/main`, and
 /// says whether it did. Only that ref is written, whatever the remote's configured refspecs.
+/// A fetch that failed because the remote no longer has the branch fails with `BaseDeleted`.
 pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
     let Some((remote, branch)) = base.split_once('/') else {
         return Ok(false);
@@ -115,7 +136,7 @@ pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
     }
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     let follow_head = format!("remote.{remote}.followRemoteHEAD=never");
-    runtime::git_output(
+    let fetched = runtime::git_output(
         repository,
         &[
             "-c",
@@ -133,7 +154,16 @@ pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
             remote,
             &refspec,
         ],
-    )?;
+    );
+    if let Err(error) = fetched {
+        let head = format!("refs/heads/{branch}");
+        let listed = runtime::git_answer(repository, &["ls-remote", "--exit-code", remote, &head])?;
+        // `--exit-code` exits 2 when the remote answered without the branch.
+        if listed.status.code() == Some(2) {
+            return Err(BaseDeleted(base.into()).into());
+        }
+        return Err(error);
+    }
     Ok(true)
 }
 

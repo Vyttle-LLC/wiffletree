@@ -115,6 +115,8 @@ pub(crate) enum Rebased {
     Conflict(Vec<String>),
     /// The fetched base is not the commit the quiet period was measured on.
     BaseMoved,
+    /// The PR's base branch is no longer on origin, so nothing was rebased.
+    BaseDeleted,
     Failed(String),
 }
 /// How the repository's checks ended.
@@ -514,7 +516,12 @@ fn result_ref(ticket_id: &str) -> String {
 /// checkout however the rebase ends. `fetch` updates the base's remote-tracking ref alone.
 pub(crate) fn rebase(job: &Job, fetch: impl FnOnce(&Path, &str) -> Result<bool>) -> Outcome {
     let rebased = (|| {
-        fetch(&job.repository, &job.pr_base)?;
+        if let Err(error) = fetch(&job.repository, &job.pr_base) {
+            return match error.downcast::<overlaps::BaseDeleted>() {
+                Ok(_) => Ok(Rebased::BaseDeleted),
+                Err(error) => Err(error),
+            };
+        }
         let base = format!("{}^{{commit}}", job.pr_base);
         let fetched = runtime::git_output(&job.repository, &["rev-parse", "--verify", &base])?;
         if fetched.trim() != job.base_commit {
@@ -1392,6 +1399,16 @@ impl Host {
             Rebased::Failed(error) => {
                 eprintln!("Workspace PR keeper: {}: {error}", ticket.id);
                 return self.rebase_failed(&ticket, rebase).map(|()| false);
+            }
+            Rebased::BaseDeleted => {
+                let base = ticket.pull_request.as_ref().map_or("", |pr| &pr.base);
+                let body = format!(
+                    "{}: its base branch {base} is no longer on origin, so the PR keeper did not rebase it. Nothing was moved or pushed. Retarget the pull request or close the ticket.",
+                    named(&ticket)
+                );
+                let commits = [rebase.head.as_str(), rebase.base.as_str()];
+                return (self.keeper_notice(&ticket, "base-deleted", &commits, &body))
+                    .map(|()| false);
             }
         };
         self.keeper.failures.remove(&ticket.id);
@@ -2627,6 +2644,56 @@ pub(crate) mod tests {
         keep(&mut f, &r, job);
         assert_eq!((worktree(&f), r.branch(BRANCH)), before);
         assert_eq!(notices(&f.host).len(), 1);
+    }
+
+    /// A kept ticket on `release`, whose PR opens into it, and release's new head.
+    fn kept_on_release() -> (Fixture, Remote, String) {
+        let (f, r) = kept();
+        let release = move_base(&f, &r, "release.txt", "1\n");
+        git(
+            &f.repository,
+            &["push", "-q", r.bare.to_str().unwrap(), "main:release"],
+        );
+        let mut ticket = f.ticket();
+        ticket.base = Some("release".into());
+        ticket.pull_request.as_mut().unwrap().base = "release".into();
+        f.host.save_ticket(&ticket).unwrap();
+        (f, r, release)
+    }
+
+    #[test]
+    fn a_ticket_on_another_base_is_rebased_onto_it_and_compared_against_it() {
+        let (mut f, r, release) = kept_on_release();
+        let job = due(&mut f, &release);
+        assert_eq!(job.pr_base, "origin/release");
+        keep(&mut f, &r, job);
+        let pushed = r.branch(BRANCH).unwrap();
+        assert_eq!(pushed, f.head());
+        assert!(publish::is_ancestor(&f.repository, &release, &pushed));
+        assert!(notices(&f.host).is_empty());
+    }
+
+    #[test]
+    fn a_deleted_base_is_reported_and_not_rebased_onto() {
+        let (mut f, r, release) = kept_on_release();
+        let bare = r.bare.to_str().unwrap();
+        git(&r.bare, &["branch", "-q", "-D", "release"]);
+        git(&f.repository, &["remote", "set-url", "origin", bare]);
+        let job = due(&mut f, &release);
+        let before = (worktree(&f), r.branch(BRANCH));
+        let outcome = rebase(&job, overlaps::fetch_base);
+        assert!(matches!(outcome.result, Rebased::BaseDeleted));
+        assert!(!f.host.keeper_rebased(outcome).unwrap());
+        assert_eq!((worktree(&f), r.branch(BRANCH)), before);
+        let notices = notices(&f.host);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0]
+                .2
+                .contains("its base branch release is no longer on origin"),
+            "{}",
+            notices[0].2
+        );
     }
 
     #[test]

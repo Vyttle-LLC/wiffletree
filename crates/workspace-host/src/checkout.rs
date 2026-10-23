@@ -196,6 +196,8 @@ pub(crate) struct Creation {
     title: String,
     brief: String,
     stack_on: Option<String>,
+    /// The branch on origin the request named, which the ticket starts from.
+    base: Option<String>,
     /// The parent's branch, which a stacked ticket's branch starts from.
     parent_branch: Option<String>,
 }
@@ -224,9 +226,17 @@ impl Creation {
         title: &str,
         brief: &str,
         stack_on: Option<&str>,
+        base: Option<&str>,
     ) -> Result<Prepared> {
         text(title, 128)?;
         text(brief, MAX_TEXT_BYTES)?;
+        ensure!(
+            stack_on.is_none() || base.is_none(),
+            "Give stack_on or base, not both: a stacked ticket takes its parent's base"
+        );
+        if let Some(base) = base {
+            text(base, 255)?;
+        }
         let coordinator = host.session(owner)?;
         ensure!(
             coordinator.role == Role::ProjectOrchestrator,
@@ -258,6 +268,10 @@ impl Creation {
                 ticket.stacked_on.as_deref() == stack_on,
                 "Ticket title already exists stacked differently"
             );
+            ensure!(
+                requested_base(&ticket) == base,
+                "Ticket title already exists on another base"
+            );
             return Ok(Prepared::Existing(Box::new(ticket)));
         }
         let parent = match stack_on {
@@ -270,6 +284,7 @@ impl Creation {
             title: title.into(),
             brief: brief.into(),
             stack_on: parent.as_ref().map(|p| p.id.clone()),
+            base: base.map(str::to_owned),
             parent_branch: parent.map(|p| p.branch),
         })))
     }
@@ -282,6 +297,7 @@ impl Creation {
                 &self.title,
                 &self.brief,
                 self.stack_on.as_deref(),
+                self.base.as_deref(),
             )? {
                 Prepared::Existing(ticket) => Some(*ticket),
                 Prepared::Create(_) => None,
@@ -304,6 +320,9 @@ impl Creation {
             "A branch named \"wiffletree\" blocks ticket branches; rename it in {}",
             self.repository.path
         );
+        if let Some(base) = &self.base {
+            fetch_base(git, Path::new(&self.repository.path), base)?;
+        }
         Ok(branches)
     }
     pub(crate) fn reserve(self, host: &Host, branches: &[String]) -> Result<ReservedCreation> {
@@ -314,6 +333,7 @@ impl Creation {
             &self.title,
             &self.brief,
             self.stack_on.as_deref(),
+            self.base.as_deref(),
         )?;
         if let Prepared::Existing(_) = prepared {
             bail!("Ticket was created while its checkout was being prepared; repeat the request");
@@ -335,6 +355,10 @@ impl Creation {
                 pending.ticket.stacked_on == self.stack_on,
                 "Ticket title already exists stacked differently"
             );
+            ensure!(
+                requested_base(&pending.ticket) == self.base.as_deref(),
+                "Ticket title already exists on another base"
+            );
             if same_repository(&pending.repository, &self.repository) {
                 return Ok(pending);
             }
@@ -347,6 +371,10 @@ impl Creation {
         let project = host.project(&coordinator.project_id)?;
         let (path, branch) =
             host.new_ticket_place_observed(&project, &self.repository, &self.title, branches)?;
+        let base = match &self.stack_on {
+            Some(parent) => host.ticket(parent)?.base,
+            None => self.base,
+        };
         let ticket = Ticket {
             id: new_id(),
             coordinator_id: self.owner.clone(),
@@ -356,6 +384,7 @@ impl Creation {
             worktree: path.to_string_lossy().into(),
             branch,
             stacked_on: self.stack_on,
+            base,
             state: TicketState::Planned,
             verification: None,
             previous_cycles: vec![],
@@ -385,7 +414,7 @@ impl ReservedCreation {
     pub(crate) fn run(&self, git: &publish::GitTool) -> Result<()> {
         let start = match &self.parent_branch {
             Some(branch) => format!("refs/heads/{branch}"),
-            None => self.repository.base.clone(),
+            None => stacks::effective_base(&self.ticket, &self.repository),
         };
         worktrees::ensure_worktree_with(
             Path::new(&self.repository.path),
@@ -404,6 +433,7 @@ impl ReservedCreation {
                 &self.ticket.title,
                 &self.ticket.brief,
                 self.ticket.stacked_on.as_deref(),
+                requested_base(&self.ticket),
             )?;
             if matches!(prepared, Prepared::Create(_)) {
                 ensure!(
@@ -451,6 +481,39 @@ impl ReservedCreation {
         )?;
         Ok(())
     }
+}
+/// The base a ticket's request named: none for a stacked ticket, which carries its parent's.
+fn requested_base(ticket: &Ticket) -> Option<&str> {
+    match ticket.stacked_on {
+        Some(_) => None,
+        None => ticket.base.as_deref(),
+    }
+}
+/// Fetches `base` from origin into `origin/<base>`, which a ticket on it starts from. A branch
+/// only this clone has is refused, so the ticket's pull request never crosses repositories.
+fn fetch_base(git: &publish::GitTool, repository: &Path, base: &str) -> Result<()> {
+    let tracking = format!("refs/remotes/origin/{base}");
+    let valid = runtime::git_answer(repository, &["check-ref-format", &tracking])?;
+    ensure!(valid.status.success(), "\"{base}\" is not a branch name");
+    let origin = runtime::git_output(repository, &["remote", "get-url", "origin"])
+        .context("The repository has no origin to fetch the base from")?;
+    let refspec = format!("+refs/heads/{base}:{tracking}");
+    let fetch = [
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--no-recurse-submodules",
+        origin.trim(),
+        &refspec,
+    ];
+    let answer = git(repository, &fetch)?;
+    ensure!(
+        answer.status.success(),
+        "Branch {base} is not on origin{}; give the name of a branch on origin",
+        answer.reason()
+    );
+    Ok(())
 }
 fn same_repository(left: &Repository, right: &Repository) -> bool {
     (left.id.as_str(), left.path.as_str(), left.base.as_str())
@@ -1235,6 +1298,7 @@ mod tests {
             title,
             "Do",
             None,
+            None,
         )
         .unwrap()
         {
@@ -1282,10 +1346,16 @@ mod tests {
     fn a_creation_observed_before_the_coordinator_was_archived_cannot_apply() {
         let mut f = publish::tests::fixture();
         let repository = f.ticket().repository_id;
-        let Prepared::Create(plan) =
-            Creation::prepare(&f.host, &f.coordinator.id, &repository, "Later", "Do", None)
-                .unwrap()
-        else {
+        let Prepared::Create(plan) = Creation::prepare(
+            &f.host,
+            &f.coordinator.id,
+            &repository,
+            "Later",
+            "Do",
+            None,
+            None,
+        )
+        .unwrap() else {
             panic!()
         };
         let git = publish::Tools::default().git;
@@ -1448,6 +1518,7 @@ mod tests {
             &repository.id,
             "Retry",
             "Do",
+            None,
             None,
         )
         .unwrap() else {

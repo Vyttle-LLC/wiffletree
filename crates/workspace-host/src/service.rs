@@ -542,7 +542,7 @@ enum Event {
         run: String,
         event: ProviderEvent,
     },
-    /// A repository's open-branch check finished on its own thread.
+    /// The open-branch check of a repository's base finished on its own thread.
     Overlaps {
         repository: String,
         /// When the check fetched the base, if it did.
@@ -771,9 +771,10 @@ struct Actor {
     resumed: HashSet<String>,
     /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
     stopping: bool,
-    /// When each repository's latest open-branch check started; see `refresh_overlaps`.
+    /// When the latest open-branch check of each repository's base started; see
+    /// `refresh_overlaps`.
     overlaps_checked: HashMap<String, i64>,
-    /// Repositories whose check has not reported yet.
+    /// Repository bases whose check has not reported yet.
     overlaps_running: HashSet<String>,
     /// No repository's check can be due before this.
     overlaps_due_at: i64,
@@ -1149,6 +1150,7 @@ impl Actor {
         );
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn create_ticket(
         &mut self,
         owner: &str,
@@ -1156,9 +1158,13 @@ impl Actor {
         title: &str,
         brief: &str,
         stack_on: Option<&str>,
+        base: Option<&str>,
         reply: Reply,
     ) -> Result<()> {
-        match checkout::Creation::prepare(&self.host, owner, repository, title, brief, stack_on)? {
+        let prepared = checkout::Creation::prepare(
+            &self.host, owner, repository, title, brief, stack_on, base,
+        )?;
+        match prepared {
             checkout::Prepared::Existing(ticket) => {
                 let _ = reply.try_send(Ok(serde_json::to_value(ticket)?));
             }
@@ -1220,6 +1226,7 @@ impl Actor {
                     repository_id,
                     title,
                     brief,
+                    None,
                     None,
                     reply.clone(),
                 )?;
@@ -1552,9 +1559,9 @@ impl Actor {
         }
     }
 
-    /// Checks each repository with open tickets at most every five minutes, after any event,
-    /// so reading `workspace_context` refreshes a stale cache. Fetching and comparing branches
-    /// can take seconds, so Git runs on its own thread, one check per repository at a time, and
+    /// Checks each base of a repository with open tickets at most every five minutes, after any
+    /// event, so reading `workspace_context` refreshes a stale cache. Fetching and comparing
+    /// branches can take seconds, so Git runs on its own thread, one check per base at a time, and
     /// the cached warnings stand until it reports.
     fn refresh_overlaps(&mut self, at: i64) {
         // Most events come well inside the interval; they must not cost a store read.
@@ -1988,6 +1995,7 @@ impl Actor {
                                 string("title")?,
                                 string("brief")?,
                                 args["stack_on"].as_str(),
+                                args["base"].as_str(),
                                 reply.clone(),
                             )?;
                             return Ok(None);
