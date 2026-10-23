@@ -71,6 +71,20 @@ impl Host {
         }
         Ok(checks)
     }
+    /// Tells the ticket's coordinator, once, that its base is no longer on its remote.
+    pub(crate) fn base_deleted(&mut self, ticket_id: &str, base: &str) -> Result<()> {
+        let ticket = self.ticket(ticket_id)?;
+        let id = format!("base-deleted:{ticket_id}:{base}");
+        if self.message_exists(&id)? {
+            return Ok(());
+        }
+        let body = format!(
+            "Ticket \"{}\" ({ticket_id}): its base {base} is no longer on its remote, so nothing is rebased onto it and its pull request cannot merge there. Retarget the ticket's pull request or close the ticket.",
+            ticket.title
+        );
+        self.send(&id, None, &ticket.coordinator_id, &body)
+            .map(drop)
+    }
     /// Replaces a repository's cached warnings; true when they changed.
     pub(crate) fn set_branch_warnings(
         &mut self,
@@ -471,6 +485,22 @@ mod tests {
             git(upstream.path(), &["rev-parse", "main"])
         );
         assert!(!clone.path().join(".git/FETCH_HEAD").exists());
+    }
+
+    #[test]
+    fn a_base_gone_from_its_remote_fails_its_fetch_as_deleted() {
+        let upstream = fixture();
+        git(upstream.path(), &["branch", "release"]);
+        let clone = clone_of(upstream.path());
+        assert!(fetch_base(clone.path(), "origin/release").unwrap());
+        git(upstream.path(), &["branch", "-q", "-D", "release"]);
+        let error = fetch_base(clone.path(), "origin/release").unwrap_err();
+        assert!(error.is::<BaseDeleted>(), "{error:#}");
+        // An unreachable remote is not taken for a deleted base.
+        let url = ["remote", "set-url", "origin", "/nonexistent/upstream"];
+        git(clone.path(), &url);
+        let error = fetch_base(clone.path(), "origin/release").unwrap_err();
+        assert!(!error.is::<BaseDeleted>(), "{error:#}");
     }
 
     #[test]

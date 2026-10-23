@@ -1402,13 +1402,8 @@ impl Host {
             }
             Rebased::BaseDeleted => {
                 let base = ticket.pull_request.as_ref().map_or("", |pr| &pr.base);
-                let body = format!(
-                    "{}: its base branch {base} is no longer on origin, so the PR keeper did not rebase it. Nothing was moved or pushed. Retarget the pull request or close the ticket.",
-                    named(&ticket)
-                );
-                let commits = [rebase.head.as_str(), rebase.base.as_str()];
-                return (self.keeper_notice(&ticket, "base-deleted", &commits, &body))
-                    .map(|()| false);
+                let base = format!("origin/{base}");
+                return self.base_deleted(&ticket.id, &base).map(|()| false);
             }
         };
         self.keeper.failures.remove(&ticket.id);
@@ -2685,15 +2680,18 @@ pub(crate) mod tests {
         assert!(matches!(outcome.result, Rebased::BaseDeleted));
         assert!(!f.host.keeper_rebased(outcome).unwrap());
         assert_eq!((worktree(&f), r.branch(BRANCH)), before);
-        let notices = notices(&f.host);
-        assert_eq!(notices.len(), 1);
-        assert!(
-            notices[0]
-                .2
-                .contains("its base branch release is no longer on origin"),
-            "{}",
-            notices[0].2
-        );
+        // The open-branch check finds it too, and the coordinator still hears once.
+        f.host.base_deleted(&f.ticket, "origin/release").unwrap();
+        let told: Vec<String> = (f.host.db)
+            .prepare("SELECT body FROM messages WHERE id LIKE 'base-deleted:%'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("its base origin/release is no longer on its remote"));
+        assert!(notices(&f.host).is_empty());
     }
 
     #[test]
