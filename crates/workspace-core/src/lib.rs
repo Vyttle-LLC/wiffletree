@@ -1552,6 +1552,11 @@ pub struct Ticket {
     /// parent's branch, is measured against it, and its pull request opens into it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stacked_on: Option<String>,
+    /// The branch on origin, such as `Parental-controls`, that the ticket starts from, is
+    /// measured against and whose pull request opens into it, in place of the repository's base.
+    /// A stacked ticket carries its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     pub state: TicketState,
     /// The latest verification cycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]

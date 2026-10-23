@@ -166,12 +166,30 @@ impl Host {
         brief: &str,
         stack_on: Option<&str>,
     ) -> Result<Ticket> {
-        match checkout::Creation::prepare(self, owner, repository_id, title, brief, stack_on)? {
+        let git = publish::Tools::default().git;
+        self.create_ticket_with(owner, repository_id, title, brief, stack_on, None, &git)
+    }
+    /// `create_stacked_ticket`, or with the branch started from the `base` branch on origin when
+    /// given, running Git's network commands with `git`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_ticket_with(
+        &mut self,
+        owner: &str,
+        repository_id: &str,
+        title: &str,
+        brief: &str,
+        stack_on: Option<&str>,
+        base: Option<&str>,
+        git: &publish::GitTool,
+    ) -> Result<Ticket> {
+        let prepared =
+            checkout::Creation::prepare(self, owner, repository_id, title, brief, stack_on, base)?;
+        match prepared {
             checkout::Prepared::Existing(ticket) => Ok(*ticket),
             checkout::Prepared::Create(plan) => {
-                let branches = plan.inspect(&publish::Tools::default().git)?;
+                let branches = plan.inspect(git)?;
                 let creation = plan.reserve(self, &branches)?;
-                creation.run(&publish::Tools::default().git)?;
+                creation.run(git)?;
                 creation.apply(self)
             }
         }
@@ -568,6 +586,9 @@ impl Host {
                 if let Some(parent) = &ticket.stacked_on {
                     short["stacked_on"] = json!(parent);
                 }
+                if let Some(base) = &ticket.base {
+                    short["base"] = json!(base);
+                }
                 if let Some(pr) = &ticket.pull_request {
                     short["pull_request"] = json!({"number":pr.number,"state":pr.state,"url":pr.url});
                 }
@@ -809,12 +830,14 @@ impl Host {
                     session.role == Role::ProjectOrchestrator,
                     "Only the project coordinator creates tickets"
                 );
-                Ok(serde_json::to_value(self.create_stacked_ticket(
+                Ok(serde_json::to_value(self.create_ticket_with(
                     id,
                     string("repository_id")?,
                     string("title")?,
                     string("brief")?,
                     args["stack_on"].as_str(),
+                    args["base"].as_str(),
+                    &publish::Tools::default().git,
                 )?)?)
             }
             "assign_ticket" => {

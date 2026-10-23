@@ -34,6 +34,7 @@ type Notice = (String, String);
 /// One repository's open tickets, gathered on the host thread and read off it.
 pub(crate) struct Query {
     pub repository: PathBuf,
+    /// A base on the remote whose GitHub repository holds the pull requests.
     pub base: String,
     pub tickets: Vec<TicketBranch>,
 }
@@ -407,13 +408,24 @@ impl Host {
         let tickets = self.tickets()?;
         let mut queries = vec![];
         for repository in self.repositories()? {
-            let watched: Vec<_> = tickets
+            let open: Vec<_> = tickets
                 .iter()
                 .filter(|t| {
                     t.is_open()
                         && t.repository_id == repository.id
                         && !archived.contains(&t.coordinator_id)
                 })
+                .collect();
+            // Pull requests open on origin. When the repository's base is elsewhere, only a
+            // ticket on its own branch of origin can have one, so the pass reads origin.
+            let base = match open.iter().find(|t| t.base.is_some()) {
+                Some(own) if origin_branch(&repository.base).is_none() => {
+                    stacks::effective_base(own, &repository)
+                }
+                _ => repository.base.clone(),
+            };
+            let watched: Vec<_> = open
+                .iter()
                 .map(|t| TicketBranch {
                     ticket_id: t.id.clone(),
                     branch: t.branch.clone(),
@@ -425,7 +437,7 @@ impl Host {
                     repository.id,
                     Query {
                         repository: repository.path.into(),
-                        base: repository.base,
+                        base,
                         tickets: watched,
                     },
                 ));
@@ -1308,6 +1320,18 @@ mod tests {
         let queries = host.pull_request_queries().unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].1.tickets[0].ticket_id, ticket.id);
+    }
+
+    #[test]
+    fn a_ticket_on_its_own_branch_of_origin_is_read_from_origin_whatever_the_repositorys_base() {
+        let (_home, host, mut ticket) = host_with_ticket();
+        assert_eq!(host.pull_request_queries().unwrap()[0].1.base, "HEAD");
+        ticket.base = Some("release".into());
+        host.save_ticket(&ticket).unwrap();
+        assert_eq!(
+            host.pull_request_queries().unwrap()[0].1.base,
+            "origin/release"
+        );
     }
 
     #[test]

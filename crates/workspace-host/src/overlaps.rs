@@ -1,14 +1,16 @@
 //! Early warnings for open ticket branches: how far the base has moved on, and which files would
-//! conflict with it or with other open tickets in the same repository, whatever their project.
+//! conflict with it or with other open tickets on the same base, whatever their project.
 //! Read-only apart from fetching the base's remote-tracking ref; branches and worktrees are never
 //! touched. Only committed work is compared.
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The least time between two checks, and so two fetches, of one repository.
 pub(crate) const OVERLAP_REFRESH_MS: i64 = 5 * 60 * 1000;
 
-/// One repository's open ticket branches, gathered on the host thread and checked off it.
+/// The open ticket branches on one base of a repository, gathered on the host thread and
+/// checked off it.
 pub(crate) struct OverlapCheck {
     pub repository: PathBuf,
     pub base: String,
@@ -24,7 +26,8 @@ pub(crate) struct OpenBranch {
 }
 
 impl Host {
-    /// Each repository with an open ticket, keyed by repository ID.
+    /// Each base of a repository with an open ticket, keyed by the repository's ID, followed by
+    /// the base when it is not the repository's.
     pub(crate) fn overlap_checks(&self) -> Result<Vec<(String, OverlapCheck)>> {
         let projects = self.projects()?;
         let sessions = self.sessions()?;
@@ -35,31 +38,59 @@ impl Host {
         let tickets = self.tickets()?;
         let mut checks = vec![];
         for repository in self.repositories()? {
-            let branches: Vec<_> = tickets
+            let mut bases: BTreeMap<String, Vec<OpenBranch>> = BTreeMap::new();
+            for t in tickets
                 .iter()
                 .filter(|t| t.is_open() && t.repository_id == repository.id)
-                .map(|t| OpenBranch {
+            {
+                let base = stacks::effective_base(t, &repository);
+                bases.entry(base).or_default().push(OpenBranch {
                     ticket_id: t.id.clone(),
                     title: t.title.clone(),
                     project: project_of(&t.coordinator_id)
                         .map(|p| p.name.clone())
                         .unwrap_or_default(),
                     branch: t.branch.clone(),
-                })
-                .collect();
-            if !branches.is_empty() {
+                });
+            }
+            for (base, branches) in bases {
+                let key = if base == repository.base {
+                    repository.id.clone()
+                } else {
+                    format!("{} {base}", repository.id)
+                };
                 checks.push((
-                    repository.id.clone(),
+                    key.clone(),
                     OverlapCheck {
-                        repository: repository.path.into(),
-                        base: repository.base,
+                        repository: repository.path.clone().into(),
+                        base,
                         branches,
-                        fetched_at: self.base_fetched_at.get(&repository.id).copied(),
+                        fetched_at: self.base_fetched_at.get(&key).copied(),
                     },
                 ));
             }
         }
         Ok(checks)
+    }
+    /// Tells the ticket's coordinator, once, that its base is no longer on its remote.
+    pub(crate) fn base_deleted(&mut self, ticket_id: &str, base: &str) -> Result<()> {
+        let ticket = self.ticket(ticket_id)?;
+        if self.session(&ticket.coordinator_id)?.archived {
+            return Ok(());
+        }
+        // A branch name can outrun a message ID's bound, so the ID names the base by its digest.
+        let digest = Sha256::digest(base);
+        let digest: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let id = format!("base-deleted:{ticket_id}:{digest}");
+        if self.message_exists(&id)? {
+            return Ok(());
+        }
+        let body = format!(
+            "Ticket \"{}\" ({ticket_id}): its base {base} is no longer on its remote, so nothing is rebased onto it and its pull request cannot merge there. Retarget the ticket's pull request or close the ticket.",
+            ticket.title
+        );
+        self.send(&id, None, &ticket.coordinator_id, &body)
+            .map(drop)
     }
     /// Replaces a repository's cached warnings; true when they changed.
     pub(crate) fn set_branch_warnings(
@@ -101,8 +132,19 @@ fn among(warnings: &BranchWarnings, open: &HashSet<String>) -> Option<BranchWarn
         .then_some(warnings)
 }
 
+/// A base whose branch its remote no longer has.
+#[derive(Debug)]
+pub(crate) struct BaseDeleted(pub String);
+impl std::fmt::Display for BaseDeleted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is no longer on its remote", self.0)
+    }
+}
+impl std::error::Error for BaseDeleted {}
+
 /// Updates the base's remote-tracking ref when the base is one, such as `origin/main`, and
 /// says whether it did. Only that ref is written, whatever the remote's configured refspecs.
+/// A fetch that failed because the remote no longer has the branch fails with `BaseDeleted`.
 pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
     let Some((remote, branch)) = base.split_once('/') else {
         return Ok(false);
@@ -115,7 +157,7 @@ pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
     }
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     let follow_head = format!("remote.{remote}.followRemoteHEAD=never");
-    runtime::git_output(
+    let fetched = runtime::git_output(
         repository,
         &[
             "-c",
@@ -133,8 +175,41 @@ pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
             remote,
             &refspec,
         ],
-    )?;
+    );
+    if let Err(error) = fetched {
+        let head = format!("refs/heads/{branch}");
+        let listed = runtime::git_answer(repository, &["ls-remote", "--exit-code", remote, &head])?;
+        // `--exit-code` exits 2 when the remote answered without the branch.
+        if listed.status.code() == Some(2) {
+            return Err(BaseDeleted(base.into()).into());
+        }
+        return Err(error);
+    }
     Ok(true)
+}
+
+/// What one check of a base found.
+pub(crate) struct Checked {
+    /// When the check fetched the base, if it did.
+    pub fetched_at: Option<i64>,
+    pub warnings: Vec<BranchWarnings>,
+    /// The base and every open ticket on it, when its branch is gone from its remote.
+    pub base_deleted: Option<(String, Vec<String>)>,
+}
+
+/// Fetches the base at `at` and checks its branches. The tickets on a deleted base come from the
+/// check itself, since a pruned remote-tracking ref leaves Git nothing to compare.
+pub(crate) fn run(check: &OverlapCheck, at: i64) -> Checked {
+    let fetched = fetch_base(&check.repository, &check.base);
+    let deleted = fetched.as_ref().is_err_and(|e| e.is::<BaseDeleted>());
+    Checked {
+        fetched_at: matches!(fetched, Ok(true)).then_some(at),
+        warnings: self::check(check, fetched.as_ref().err()),
+        base_deleted: deleted.then(|| {
+            let tickets = check.branches.iter().map(|b| b.ticket_id.clone());
+            (check.base.clone(), tickets.collect())
+        }),
+    }
 }
 
 /// Warnings for every branch that has any. A branch Git cannot compare, for example one not
@@ -441,6 +516,42 @@ mod tests {
             git(upstream.path(), &["rev-parse", "main"])
         );
         assert!(!clone.path().join(".git/FETCH_HEAD").exists());
+    }
+
+    #[test]
+    fn a_base_gone_from_its_remote_fails_its_fetch_as_deleted() {
+        let upstream = fixture();
+        git(upstream.path(), &["branch", "release"]);
+        let clone = clone_of(upstream.path());
+        assert!(fetch_base(clone.path(), "origin/release").unwrap());
+        git(upstream.path(), &["branch", "-q", "-D", "release"]);
+        let error = fetch_base(clone.path(), "origin/release").unwrap_err();
+        assert!(error.is::<BaseDeleted>(), "{error:#}");
+        // An unreachable remote is not taken for a deleted base.
+        let url = ["remote", "set-url", "origin", "/nonexistent/upstream"];
+        git(clone.path(), &url);
+        let error = fetch_base(clone.path(), "origin/release").unwrap_err();
+        assert!(!error.is::<BaseDeleted>(), "{error:#}");
+    }
+
+    #[test]
+    fn a_deleted_base_whose_tracking_ref_was_pruned_still_names_its_tickets() {
+        let upstream = fixture();
+        git(upstream.path(), &["branch", "release"]);
+        let clone = clone_of(upstream.path());
+        commit(clone.path(), "t1", &[("shared.txt", "ticket\n")]);
+        git(upstream.path(), &["branch", "-q", "-D", "release"]);
+        git(clone.path(), &["fetch", "-q", "--prune"]);
+        let pruned = OverlapCheck {
+            repository: clone.path().into(),
+            base: "origin/release".into(),
+            branches: vec![open("t1", "P")],
+            fetched_at: None,
+        };
+        let checked = super::run(&pruned, 0);
+        assert!(checked.warnings.is_empty());
+        let deleted = checked.base_deleted.unwrap();
+        assert_eq!(deleted, ("origin/release".into(), vec!["t1".into()]));
     }
 
     #[test]

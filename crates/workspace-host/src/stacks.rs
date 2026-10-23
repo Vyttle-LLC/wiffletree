@@ -8,7 +8,7 @@ pub(crate) enum Base {
     /// The repository's base, such as `origin/main`.
     Repository(String),
     Stacked {
-        /// The repository's base.
+        /// The parent's base: its own branch on origin, or the repository's base.
         repository: String,
         /// The parent ticket's branch.
         branch: String,
@@ -24,7 +24,7 @@ impl Base {
     pub(crate) fn of(ticket: &Ticket, repository: &Repository, parent: Option<&Ticket>) -> Self {
         match parent.filter(|p| ticket.stacked_on.as_ref() == Some(&p.id)) {
             Some(parent) => Self::Stacked {
-                repository: repository.base.clone(),
+                repository: effective_base(parent, repository),
                 branch: parent.branch.clone(),
                 parent: parent.title.clone(),
                 pushed: parent.pushed.is_some(),
@@ -33,7 +33,7 @@ impl Base {
                     .as_ref()
                     .is_some_and(|pr| pr.state == PrState::Merged),
             },
-            None => Self::Repository(repository.base.clone()),
+            None => Self::Repository(effective_base(ticket, repository)),
         }
     }
     /// The ref reviews, sizes and merge-bases measure against: the parent's branch for a
@@ -54,7 +54,7 @@ impl Base {
         )
     }
     /// The branch on origin the pull request opens into: the parent's branch once the host has
-    /// pushed it, or the repository's base after the parent's pull request merged.
+    /// pushed it, or the parent's base after the parent's pull request merged.
     pub(crate) fn pull_request_base(&self) -> Result<String> {
         let repository = match self {
             Self::Stacked {
@@ -74,10 +74,19 @@ impl Base {
         };
         let base = origin_branch(repository).with_context(|| {
             format!(
-                "The repository's base {repository} is not on origin, so the ticket's pull request would cross repositories"
+                "The ticket's base {repository} is not on origin, so the ticket's pull request would cross repositories"
             )
         })?;
         Ok(base.to_owned())
+    }
+}
+
+/// The base a ticket that is not stacked starts from and is measured against: `origin/<base>`
+/// for a ticket created on a branch of origin, or else the repository's base.
+pub(crate) fn effective_base(ticket: &Ticket, repository: &Repository) -> String {
+    match &ticket.base {
+        Some(base) => format!("origin/{base}"),
+        None => repository.base.clone(),
     }
 }
 
@@ -123,7 +132,7 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::publish::tests::{Fixture, fixture};
+    use crate::publish::tests::{Fixture, Remote, fixture, remote};
     use crate::test_support::git;
 
     /// A ticket stacked on the fixture's reviewed ticket.
@@ -267,6 +276,136 @@ mod tests {
                 .unwrap(),
             "main"
         );
+    }
+
+    /// A `release` branch one commit past `main`, on GitHub only, and a ticket created on it.
+    fn on_release(f: &mut Fixture) -> (Remote, String, Ticket) {
+        let r = remote(f);
+        git(&f.repository, &["checkout", "-q", "-b", "release"]);
+        fs::write(f.repository.join("r.txt"), "release\n").unwrap();
+        git(&f.repository, &["add", "."]);
+        git(&f.repository, &["commit", "-q", "-m", "r"]);
+        let release = git(&f.repository, &["rev-parse", "HEAD"]);
+        git(
+            &f.repository,
+            &["push", "-q", r.bare.to_str().unwrap(), "release"],
+        );
+        git(&f.repository, &["checkout", "-q", "main"]);
+        git(&f.repository, &["branch", "-q", "-D", "release"]);
+        let ticket = create_on(f, &r, "On release", None, Some("release")).unwrap();
+        (r, release, ticket)
+    }
+    fn create_on(
+        f: &mut Fixture,
+        r: &Remote,
+        title: &str,
+        stack_on: Option<&str>,
+        base: Option<&str>,
+    ) -> Result<Ticket> {
+        let coordinator = f.coordinator.id.clone();
+        let repository = f.ticket().repository_id;
+        (f.host).create_ticket_with(
+            &coordinator,
+            &repository,
+            title,
+            "Do",
+            stack_on,
+            base,
+            &r.tools.git,
+        )
+    }
+
+    #[test]
+    fn a_ticket_on_a_base_starts_there_is_measured_against_it_and_opens_its_pr_into_it() {
+        let mut f = fixture();
+        f.allow("allowed-org");
+        let (r, release, mut ticket) = on_release(&mut f);
+        assert_eq!(ticket.base.as_deref(), Some("release"));
+        let worktree = Path::new(&ticket.worktree);
+        assert_eq!(git(worktree, &["rev-parse", "HEAD"]), release);
+        let context = f.host.agent_context(&f.coordinator.id).unwrap();
+        let shown = context["tickets"].as_array().unwrap();
+        let shown = shown
+            .iter()
+            .find(|t| t["id"] == ticket.id.as_str())
+            .unwrap();
+        assert_eq!(shown["base"], "release");
+
+        fs::write(worktree.join("t.txt"), "ticket\n").unwrap();
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-q", "-m", "t"]);
+        let head = git(worktree, &["rev-parse", "HEAD"]);
+        let lines = f.host.diff_lines(&ticket, &head);
+        assert!(
+            lines.starts_with(&format!("Base: {release} (origin/release)")),
+            "{lines}"
+        );
+        assert!(lines.ends_with("1 file changed, 1 insertion(+)"), "{lines}");
+        let checks = f.host.overlap_checks().unwrap();
+        let on_release = checks.iter().find(|(_, c)| c.base == "origin/release");
+        let branches = &on_release.unwrap().1.branches;
+        assert_eq!(branches.len(), 1, "compared only with tickets on its base");
+
+        let mut verification = f.ticket().verification;
+        verification.as_mut().unwrap().rounds[0].commit = head;
+        ticket.verification = verification;
+        f.host.save_ticket(&ticket).unwrap();
+        let coordinator = f.coordinator.id.clone();
+        let (_, job) = (f.host)
+            .publish_ticket(&coordinator, &ticket.id, Some("T"), Some("Why"), None)
+            .unwrap();
+        assert_eq!(job.unwrap().request.base, "release");
+
+        // A ticket stacked on it opens into its branch, then into release once it merged.
+        let mut child = create_on(&mut f, &r, "Child", Some(&ticket.id), None).unwrap();
+        assert_eq!(child.base.as_deref(), Some("release"));
+        let repository = f.host.ticket_repository(&child).unwrap();
+        ticket.pushed = Some(release);
+        assert_eq!(
+            Base::of(&child, &repository, Some(&ticket))
+                .pull_request_base()
+                .unwrap(),
+            ticket.branch
+        );
+        let mut merged = crate::publish::tests::watch_open_pr(&mut f, 1);
+        merged.state = PrState::Merged;
+        ticket.pull_request = Some(merged);
+        child.stacked_on = Some(ticket.id.clone());
+        assert_eq!(
+            Base::of(&child, &repository, Some(&ticket))
+                .pull_request_base()
+                .unwrap(),
+            "release"
+        );
+    }
+
+    #[test]
+    fn a_base_not_on_origin_with_a_parent_or_on_another_base_is_refused() {
+        let mut f = fixture();
+        let (r, _, ticket) = on_release(&mut f);
+        let refused = |f: &mut Fixture, stack_on: Option<&str>, base: &str, reason: &str| {
+            let error = create_on(f, &r, "Other", stack_on, Some(base))
+                .expect_err("creation was not refused");
+            assert!(format!("{error:#}").contains(reason), "{error:#}");
+        };
+        // A branch only this clone has is not on origin.
+        git(&f.repository, &["branch", "local-only"]);
+        refused(
+            &mut f,
+            None,
+            "local-only",
+            "Branch local-only is not on origin",
+        );
+        refused(&mut f, None, "bad..name", "is not a branch name");
+        refused(&mut f, Some(&ticket.id), "release", "not both");
+        let title = |f: &mut Fixture, base| create_on(f, &r, "On release", None, base);
+        let error = title(&mut f, Some("main")).unwrap_err();
+        assert!(format!("{error:#}").contains("Ticket title already exists on another base"));
+        let error = title(&mut f, None).unwrap_err();
+        assert!(format!("{error:#}").contains("Ticket title already exists on another base"));
+        assert_eq!(title(&mut f, Some("release")).unwrap().id, ticket.id);
+        let tickets = f.host.tickets().unwrap();
+        assert!(!tickets.iter().any(|t| t.title == "Other"));
     }
 
     #[test]

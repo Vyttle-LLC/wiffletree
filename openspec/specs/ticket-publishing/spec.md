@@ -6,7 +6,7 @@ Let agents ask the host to push a ticket's branch and open or update its pull re
 ## Requirements
 
 ### Requirement: The host publishes a ticket on request
-The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an optional title and description, and an optional one-line `waived` reason. The host itself SHALL run the push and open the pull request; the tool SHALL NOT take a branch, a remote or a base. It SHALL push the ticket's own branch to the repository's `origin`. When the ticket has no open pull request, it SHALL then open one from that branch into the repository's configured base branch, and the title and description SHALL be required. When the ticket has an open pull request, it SHALL push, and when a title, a description or both are given it SHALL then change those of the open pull request with `gh pr edit`, validated as when opening one. Without either it SHALL only push. When GitHub's branch, read again before the push, is already at the commit, the host SHALL push nothing and SHALL only edit.
+The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an optional title and description, and an optional one-line `waived` reason. The host itself SHALL run the push and open the pull request; the tool SHALL NOT take a branch, a remote or a base. It SHALL push the ticket's own branch to the repository's `origin`. When the ticket has no open pull request, it SHALL then open one from that branch into the ticket's `base` if it has one, otherwise into the repository's configured base branch, and the title and description SHALL be required. When the ticket has an open pull request, it SHALL push, and when a title, a description or both are given it SHALL then change those of the open pull request with `gh pr edit`, validated as when opening one. Without either it SHALL only push. When GitHub's branch, read again before the push, is already at the commit, the host SHALL push nothing and SHALL only edit.
 
 #### Scenario: First publish
 - **WHEN** `publish_ticket` is called with a title and description for a reviewed ticket with no pull request
@@ -27,6 +27,10 @@ The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an o
 #### Scenario: Missing title
 - **WHEN** `publish_ticket` is called without a title for a ticket with no open pull request
 - **THEN** it is refused and nothing is sent
+
+#### Scenario: A ticket on another base
+- **WHEN** `publish_ticket` is called for a reviewed ticket created with `base` `release` and no pull request
+- **THEN** the pull request opens into `release`
 
 ### Requirement: Only the ticket's coordinator or implementer may publish
 `publish_ticket` SHALL be accepted only from the project coordinator that owns the ticket or from an implementer assigned to it. A tester, a reviewer, or an agent of another ticket SHALL be refused.
@@ -408,7 +412,7 @@ A keeper publish SHALL be started only for a ticket whose publish would run with
 - **THEN** the request is ended, no agent is messaged, and a later pass pushes again only if the checks still pass
 
 ### Requirement: A stacked ticket's pull request opens into its parent's branch
-A new pull request for a stacked ticket SHALL open into its parent's branch. `publish_ticket` SHALL refuse it, sending nothing and creating no request, until the host has pushed the parent's branch, and the refusal SHALL say to publish the parent first. Once the parent's pull request has merged, a new pull request for the child SHALL open into the repository's base branch instead. The size a publish reports SHALL be measured against the ticket's base. A ticket without a parent SHALL publish as before.
+A new pull request for a stacked ticket SHALL open into its parent's branch. `publish_ticket` SHALL refuse it, sending nothing and creating no request, until the host has pushed the parent's branch, and the refusal SHALL say to publish the parent first. Once the parent's pull request has merged, a new pull request for the child SHALL open into the parent's base instead: the parent's `base` if it has one, otherwise the repository's base branch. The size a publish reports SHALL be measured against the ticket's base. A ticket without a parent SHALL publish as before.
 
 #### Scenario: Before the parent is pushed
 - **WHEN** the coordinator publishes a stacked ticket whose parent was never published
@@ -421,6 +425,10 @@ A new pull request for a stacked ticket SHALL open into its parent's branch. `pu
 #### Scenario: The parent's pull request merged
 - **WHEN** the parent's pull request has merged before the child is published
 - **THEN** the child's pull request opens into the repository's base branch
+
+#### Scenario: The parent is on another base
+- **WHEN** the child of a ticket created on `release` is published, first after the parent was pushed and then after the parent's pull request merged
+- **THEN** its pull request opens into the parent's branch, and then into `release`
 
 ### Requirement: A waiver of unreviewed commits always needs the human's approval
 A publish whose `waived` reason covers commits no review checked SHALL NOT push or open a pull request without the human's approval in the Inbox, in every repository, including an allowed owner's after a passed review. The request SHALL record the reason and the commits it covers. The item SHALL list the short SHA of each unreviewed commit and the waiver's reason. In an allowed owner's repository there SHALL be one such approval for the commit, naming everything that would be sent, and approving it SHALL run the commit's steps without a further item; elsewhere each step's approval SHALL show them. The rule that a blocked review always needs the human's approval SHALL be unchanged.

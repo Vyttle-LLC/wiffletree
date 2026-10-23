@@ -332,7 +332,7 @@ fn spawn_job<I: Send + 'static, O: Send + 'static>(
 fn spawn_overlap_check(
     sender: Sender<Event>,
     repository: String,
-    check: impl FnOnce() -> (Option<i64>, Vec<BranchWarnings>) + Send + 'static,
+    check: impl FnOnce() -> overlaps::Checked + Send + 'static,
 ) {
     // The closure itself is consumed by the job; it is never retried after a panic.
     spawn_job(
@@ -340,10 +340,11 @@ fn spawn_overlap_check(
         repository,
         move |_| Some(check()),
         |_| None,
-        |repository, outcome| Event::Overlaps {
+        |repository, outcome: Option<overlaps::Checked>| Event::Overlaps {
             repository,
-            fetched_at: outcome.as_ref().and_then(|(at, _)| *at),
-            warnings: outcome.map(|(_, warnings)| warnings),
+            fetched_at: outcome.as_ref().and_then(|c| c.fetched_at),
+            base_deleted: outcome.as_ref().and_then(|c| c.base_deleted.clone()),
+            warnings: outcome.map(|c| c.warnings),
         },
     );
 }
@@ -542,11 +543,14 @@ enum Event {
         run: String,
         event: ProviderEvent,
     },
-    /// A repository's open-branch check finished on its own thread.
+    /// The open-branch check of a repository's base finished on its own thread.
     Overlaps {
         repository: String,
         /// When the check fetched the base, if it did.
         fetched_at: Option<i64>,
+        /// The base, and the open tickets on it, when the fetch found its branch gone from its
+        /// remote.
+        base_deleted: Option<(String, Vec<String>)>,
         /// `None` when the check panicked; the cached warnings then stand.
         warnings: Option<Vec<BranchWarnings>>,
     },
@@ -771,9 +775,10 @@ struct Actor {
     resumed: HashSet<String>,
     /// Set at shutdown, whose synthetic finishes must not remove worktrees under live processes.
     stopping: bool,
-    /// When each repository's latest open-branch check started; see `refresh_overlaps`.
+    /// When the latest open-branch check of each repository's base started; see
+    /// `refresh_overlaps`.
     overlaps_checked: HashMap<String, i64>,
-    /// Repositories whose check has not reported yet.
+    /// Repository bases whose check has not reported yet.
     overlaps_running: HashSet<String>,
     /// No repository's check can be due before this.
     overlaps_due_at: i64,
@@ -1149,6 +1154,7 @@ impl Actor {
         );
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn create_ticket(
         &mut self,
         owner: &str,
@@ -1156,9 +1162,13 @@ impl Actor {
         title: &str,
         brief: &str,
         stack_on: Option<&str>,
+        base: Option<&str>,
         reply: Reply,
     ) -> Result<()> {
-        match checkout::Creation::prepare(&self.host, owner, repository, title, brief, stack_on)? {
+        let prepared = checkout::Creation::prepare(
+            &self.host, owner, repository, title, brief, stack_on, base,
+        )?;
+        match prepared {
             checkout::Prepared::Existing(ticket) => {
                 let _ = reply.try_send(Ok(serde_json::to_value(ticket)?));
             }
@@ -1220,6 +1230,7 @@ impl Actor {
                     repository_id,
                     title,
                     brief,
+                    None,
                     None,
                     reply.clone(),
                 )?;
@@ -1552,9 +1563,9 @@ impl Actor {
         }
     }
 
-    /// Checks each repository with open tickets at most every five minutes, after any event,
-    /// so reading `workspace_context` refreshes a stale cache. Fetching and comparing branches
-    /// can take seconds, so Git runs on its own thread, one check per repository at a time, and
+    /// Checks each base of a repository with open tickets at most every five minutes, after any
+    /// event, so reading `workspace_context` refreshes a stale cache. Fetching and comparing
+    /// branches can take seconds, so Git runs on its own thread, one check per base at a time, and
     /// the cached warnings stand until it reports.
     fn refresh_overlaps(&mut self, at: i64) {
         // Most events come well inside the interval; they must not cost a store read.
@@ -1581,11 +1592,7 @@ impl Actor {
             self.overlaps_checked.insert(repository.clone(), at);
             self.overlaps_running.insert(repository.clone());
             let sender = self.sender.clone();
-            spawn_overlap_check(sender, repository, move || {
-                let fetched = overlaps::fetch_base(&check.repository, &check.base);
-                let warnings = overlaps::check(&check, fetched.as_ref().err());
-                (matches!(fetched, Ok(true)).then_some(at), warnings)
-            });
+            spawn_overlap_check(sender, repository, move || overlaps::run(&check, at));
         }
     }
 
@@ -1988,6 +1995,7 @@ impl Actor {
                                 string("title")?,
                                 string("brief")?,
                                 args["stack_on"].as_str(),
+                                args["base"].as_str(),
                                 reply.clone(),
                             )?;
                             return Ok(None);
@@ -2072,6 +2080,7 @@ impl Actor {
             Event::Overlaps {
                 repository,
                 fetched_at,
+                base_deleted,
                 warnings,
             } => {
                 self.overlaps_running.remove(&repository);
@@ -2079,6 +2088,13 @@ impl Actor {
                     self.overlaps_due_at = self
                         .overlaps_due_at
                         .min(started + overlaps::OVERLAP_REFRESH_MS);
+                }
+                if let Some((base, tickets)) = base_deleted {
+                    for ticket in tickets {
+                        if let Err(e) = self.host.base_deleted(&ticket, &base) {
+                            eprintln!("Workspace overlap check: {ticket}: {e:#}");
+                        }
+                    }
                 }
                 warnings.is_some_and(|warnings| {
                     self.host
@@ -4294,12 +4310,55 @@ mod tests {
         assert!(actor.handle(Event::Overlaps {
             repository: repository.clone(),
             fetched_at: None,
+            base_deleted: None,
             warnings: Some(vec![warning(&ticket.id, None)]),
         }));
         assert!(actor.overlaps_due_at <= next);
         actor.refresh_overlaps(next);
         assert_eq!(actor.overlaps_checked[&repository], next);
         assert!(actor.overlaps_running.contains(&repository));
+    }
+
+    #[test]
+    fn a_base_gone_from_its_remote_is_told_to_the_coordinator_once() {
+        let (_home, host, ticket, coordinator) = ticket_fixture();
+        let (mut actor, _, _) = idle_actor(host);
+        let checked = |actor: &mut Actor| {
+            actor.handle(Event::Overlaps {
+                repository: ticket.repository_id.clone(),
+                fetched_at: None,
+                base_deleted: Some(("origin/release".into(), vec![ticket.id.clone()])),
+                // A pruned `origin/release` leaves Git nothing to compare, so no warnings.
+                warnings: Some(vec![]),
+            });
+        };
+        checked(&mut actor);
+        checked(&mut actor);
+        let told: Vec<(String, String)> = (actor.host.db)
+            .prepare("SELECT recipient, body FROM messages WHERE id LIKE 'base-deleted:%'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].0, coordinator.id);
+        assert!(
+            told[0]
+                .1
+                .contains("its base origin/release is no longer on its remote")
+        );
+        // An archived coordinator is told nothing, and nothing fails.
+        actor.host.set_archived(&coordinator.id, true).unwrap();
+        actor.host.base_deleted(&ticket.id, "origin/other").unwrap();
+        let count: i64 = (actor.host.db)
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id LIKE 'base-deleted:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -4313,6 +4372,7 @@ mod tests {
         actor.handle(Event::Overlaps {
             repository: repository.clone(),
             fetched_at: None,
+            base_deleted: None,
             warnings: Some(vec![stale]),
         });
         let mut turn = active_turn("coordinating", vec![]);

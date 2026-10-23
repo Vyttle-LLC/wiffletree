@@ -98,9 +98,10 @@ pub struct Host {
     pub home: PathBuf,
     /// When each timer whose last fire failed may try again; see `fire_due_schedules`.
     fire_retries: std::collections::HashMap<String, i64>,
-    /// Each repository's open-branch warnings from its latest check; see `overlaps`.
+    /// The open-branch warnings of each repository's base from its latest check, keyed as
+    /// `overlap_checks` keys them; see `overlaps`.
     branch_warnings: std::collections::HashMap<String, Vec<BranchWarnings>>,
-    /// When this host last fetched each repository's base.
+    /// When this host last fetched each base of a repository, keyed as `overlap_checks` keys it.
     base_fetched_at: std::collections::HashMap<String, i64>,
     /// Each watched repository's latest PR check; see `pr_watch`.
     pull_request_checks: std::collections::HashMap<String, PullRequestCheck>,
