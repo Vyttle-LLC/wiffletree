@@ -5,6 +5,7 @@ mod checkout;
 pub mod compaction;
 pub mod context;
 pub mod detection;
+mod diffs;
 pub mod events;
 mod files;
 mod flatten;

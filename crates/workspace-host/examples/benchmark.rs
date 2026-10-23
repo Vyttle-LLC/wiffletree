@@ -314,6 +314,7 @@ fn main() -> Result<()> {
                     detail: Some("x".repeat(512)),
                     paths: vec![],
                     plan: None,
+                    diffs: vec![],
                     omitted: 0,
                     seq: seq as u32,
                     revision,

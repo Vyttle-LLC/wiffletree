@@ -1,8 +1,9 @@
 //! Decodes provider streams into provider-neutral work steps and the turn's final reply.
 //! Unknown or partial events produce no step; they never fail a turn.
+use crate::diffs;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
-use workspace_core::{MAX_STEP_TITLE, PlanCounts, StepKind, StepState};
+use workspace_core::{FileDiff, MAX_STEP_TITLE, PlanCounts, StepKind, StepState};
 
 /// What an adapter knows about a step. The service assigns its order, revision and times.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +19,8 @@ pub struct StepUpdate {
     pub paths: Vec<String>,
     /// A plan step's checklist counts.
     pub plan: Option<PlanCounts>,
+    /// An edit's changes, one per file.
+    pub diffs: Vec<FileDiff>,
 }
 impl StepUpdate {
     fn new(id: impl Into<String>, kind: StepKind, title: impl Into<String>) -> Self {
@@ -31,6 +34,7 @@ impl StepUpdate {
             detail: None,
             paths: vec![],
             plan: None,
+            diffs: vec![],
         }
     }
 }
@@ -185,7 +189,13 @@ impl ClaudeSteps {
             // The plan itself is the useful detail, not the tool's acknowledgement.
             StepKind::Plan => {}
             StepKind::FileEdit if !failed => {
-                step.note = patch_counts(&result["structuredPatch"]).or(step.note);
+                let patch = &result["structuredPatch"];
+                step.note = patch_counts(patch).or(step.note);
+                // A newly written file has no patch and keeps the diff made from its content.
+                let path = step.paths.first().cloned().unwrap_or_default();
+                if let Some(diff) = diffs::from_structured_patch(path, patch) {
+                    step.diffs = vec![diff];
+                }
             }
             _ => {
                 if failed {
@@ -276,6 +286,15 @@ impl CodexSteps {
                     .map(|p| relative(p, &self.cwd))
                     .collect();
                 let mut step = StepUpdate::new(id, StepKind::FileEdit, paths.join(", "));
+                // Codex reports which files changed but not how; Git knows, once it is done.
+                if completed && state == StepState::Succeeded {
+                    let files: Vec<_> = changes
+                        .iter()
+                        .filter_map(|c| c["path"].as_str())
+                        .zip(paths.iter().cloned())
+                        .collect();
+                    step.diffs = diffs::from_git(Path::new(&self.cwd), &files);
+                }
                 step.paths = paths;
                 if changes.len() > 1 {
                     step.note = Some(format!("{} files", changes.len()));
@@ -361,6 +380,9 @@ fn claude_tool(id: &str, name: &str, input: &Value, cwd: &str) -> StepUpdate {
     if name == "Write" {
         let lines = text("content").lines().count();
         step.note = (lines > 0).then(|| format!("+{lines}"));
+        if let Some(path) = step.paths.first().filter(|_| lines > 0) {
+            step.diffs = vec![diffs::new_file(path.clone(), text("content"))];
+        }
     }
     step
 }
@@ -536,6 +558,12 @@ mod tests {
         assert!(failed.detail.as_deref().unwrap().contains("No such file"));
         let edit = actions.iter().find(|s| s.kind == FileEdit).unwrap();
         assert_eq!(edit.note.as_deref(), Some("+1 −1"));
+        let diff = &edit.diffs[0];
+        assert_eq!(
+            (diff.path.as_str(), diff.added, diff.removed),
+            ("notes.txt", 1, 1)
+        );
+        assert_eq!(diff.hunks[0].lines, [" alpha", "-beta", "+gamma"]);
         // Only read and edit steps name files.
         assert_eq!(
             actions
@@ -618,6 +646,13 @@ mod tests {
         assert!(steps.iter().all(|s| s.plan.is_none() || s.kind == Plan));
         assert_eq!(steps[3].note.as_deref(), Some("+3"));
         assert_eq!(steps[3].paths, ["src/new.rs"]);
+        // A created file has no patch; its diff is the content written.
+        let written = &steps[3].diffs[0];
+        assert!(written.created);
+        assert_eq!(
+            written.hunks[0].lines,
+            ["+fn a() {}", "+fn b() {}", "+fn c() {}"]
+        );
         assert_eq!(
             steps[4].detail.as_deref(),
             Some("Report rejected: missing message_id")
@@ -744,6 +779,87 @@ mod tests {
         }]}});
         let sharpened = claude.event(&full);
         assert_eq!(sharpened[0].paths, ["a.rs"]);
+    }
+
+    /// A Claude edit tool's call and result, as the decoder sees them.
+    fn claude_edit(name: &str, input: Value, result: Value) -> StepUpdate {
+        let mut claude = ClaudeSteps::new(Path::new(CWD));
+        let call = json!({"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "t1", "name": name, "input": input
+        }]}});
+        claude.event(&call);
+        let done = json!({"type": "user", "tool_use_result": result, "message": {"content": [{
+            "type": "tool_result", "tool_use_id": "t1", "content": "ok"
+        }]}});
+        claude.event(&done).remove(0)
+    }
+
+    #[test]
+    fn claude_edits_keep_their_patch_as_a_diff() {
+        let patch = json!([
+            {"oldStart": 2, "oldLines": 2, "newStart": 2, "newLines": 2, "lines": [" a", "-b", "+c"]},
+            {"oldStart": 90, "oldLines": 1, "newStart": 90, "newLines": 2, "lines": [" y", "+z"]}
+        ]);
+        let input = json!({"file_path": "/work/repo/src/a.rs"});
+        for name in ["Edit", "MultiEdit"] {
+            let step = claude_edit(name, input.clone(), json!({"structuredPatch": patch}));
+            let diff = &step.diffs[0];
+            assert_eq!(
+                (diff.path.as_str(), diff.added, diff.removed),
+                ("src/a.rs", 2, 1)
+            );
+            assert_eq!(
+                diff.hunks
+                    .iter()
+                    .map(|h| (h.new_start, h.lines.len()))
+                    .collect::<Vec<_>>(),
+                [(2, 3), (90, 2)]
+            );
+        }
+        // Overwriting a file reports a patch, which replaces the all-new diff of its content.
+        let overwrite = claude_edit(
+            "Write",
+            json!({"file_path": "/work/repo/src/a.rs", "content": "a\nc\n"}),
+            json!({"type": "update", "structuredPatch": patch}),
+        );
+        assert!(!overwrite.diffs[0].created);
+        assert_eq!(overwrite.diffs[0].added, 2);
+        // A large new file keeps its first lines and counts the rest.
+        let content: String = (0..100).map(|n| format!("line {n}\n")).collect();
+        let created = claude_edit(
+            "Write",
+            json!({"file_path": "/work/repo/big.rs", "content": content}),
+            json!({"type": "create", "structuredPatch": []}),
+        );
+        let diff = &created.diffs[0];
+        assert_eq!((diff.added, diff.omitted_lines), (100, 60));
+        assert_eq!(diff.hunks[0].lines.len(), workspace_core::MAX_DIFF_LINES);
+    }
+
+    #[test]
+    fn a_codex_file_change_reads_its_diff_from_git_once_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        crate::test_support::git(repo, &["init", "-q"]);
+        std::fs::write(repo.join("notes.txt"), "alpha\nbeta\n").unwrap();
+        crate::test_support::git(repo, &["add", "."]);
+        crate::test_support::git(repo, &["commit", "-qm", "base"]);
+        std::fs::write(repo.join("notes.txt"), "alpha\ngamma\n").unwrap();
+        let mut codex = CodexSteps::new(repo);
+        let item = |status: &str| {
+            json!({"id": "item_7", "type": "file_change", "status": status, "changes": [
+                {"path": repo.join("notes.txt"), "kind": "update"}
+            ]})
+        };
+        let started = codex.event(&json!({"type": "item.started", "item": item("in_progress")}));
+        assert!(started[0].diffs.is_empty());
+        let done = codex.event(&json!({"type": "item.completed", "item": item("completed")}));
+        let diff = &done[0].diffs[0];
+        assert_eq!(
+            (diff.path.as_str(), diff.added, diff.removed),
+            ("notes.txt", 1, 1)
+        );
+        assert_eq!(diff.hunks[0].lines, [" alpha", "-beta", "+gamma"]);
     }
 
     #[test]
