@@ -1,7 +1,9 @@
 //! One turn's full history in a sheet over the right side of the window: each narration
 //! paragraph followed by the steps that came after it, updating live while the turn runs.
 use super::*;
-use activity::{RunActivity, STEP_PACE, StepFetch, paced_reply, state_glyph, step_row};
+use activity::{
+    RunActivity, STEP_PACE, StepFetch, line_counts, paced_reply, state_glyph, step_row,
+};
 use file_links::Linked;
 use gpui_component::ActiveTheme;
 use std::{collections::HashMap, sync::Arc};
@@ -15,7 +17,8 @@ pub(super) struct HistorySheet {
     run: RunActivity,
     fetch: StepFetch,
     list: ListState,
-    expanded: BTreeSet<String>,
+    /// Steps the reader opened or closed; an edit's diff starts open, other details closed.
+    toggled: BTreeSet<String>,
     /// Where the session's relative file references resolve.
     link_bases: Arc<[PathBuf]>,
     /// Each narration step's text with its file references linked, by step id.
@@ -36,7 +39,7 @@ impl HistorySheet {
             run: RunActivity::new(session_id),
             fetch: StepFetch::default(),
             list: ListState::new(0, ListAlignment::Bottom, px(200.)),
-            expanded: BTreeSet::new(),
+            toggled: BTreeSet::new(),
             link_bases,
             narration: HashMap::new(),
         }
@@ -118,8 +121,8 @@ impl HistorySheet {
     }
 
     fn toggle(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(id) {
-            self.expanded.insert(id.to_owned());
+        if !self.toggled.remove(id) {
+            self.toggled.insert(id.to_owned());
         }
         if let Some(row) = self.run.steps.iter().position(|s| s.id == id) {
             self.list.splice(row..row + 1, 1);
@@ -170,21 +173,20 @@ impl HistorySheet {
                 .child(step.title.clone())
                 .into_any_element(),
             _ => {
-                let open = self.expanded.contains(&step.id);
-                let chevron = div()
-                    .flex_none()
-                    .w(px(14.))
-                    .when(step.detail.is_some(), |d| {
-                        d.child(
-                            icon(if open {
-                                "chevron-down"
-                            } else {
-                                "chevron-right"
-                            })
-                            .size(px(12.))
-                            .text_color(p.subtle),
-                        )
-                    });
+                let has_diff = !step.diffs.is_empty();
+                let openable = has_diff || step.detail.is_some();
+                let open = openable && has_diff != self.toggled.contains(&step.id);
+                let chevron = div().flex_none().w(px(14.)).when(openable, |d| {
+                    d.child(
+                        icon(if open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        })
+                        .size(px(12.))
+                        .text_color(p.subtle),
+                    )
+                });
                 let id = step.id.clone();
                 div()
                     .id(SharedString::from(format!("history-step-{}", step.id)))
@@ -202,12 +204,18 @@ impl HistorySheet {
                             .child(chevron)
                             .child(step_row(step, p).flex_1()),
                     )
-                    .when(step.detail.is_some(), |d| {
+                    .when(openable, |d| {
                         d.cursor_pointer().on_click(move |_, _, cx| {
                             let _ = view.update(cx, |sheet, cx| sheet.toggle(&id, cx));
                         })
                     })
-                    .when(open, |d| d.child(detail(step, p)))
+                    .when(open, |d| {
+                        d.child(if has_diff {
+                            diffs(step, p)
+                        } else {
+                            detail(step, p)
+                        })
+                    })
                     .into_any_element()
             }
         }
@@ -251,6 +259,126 @@ fn detail(step: &Step, p: Palette) -> Div {
         )
 }
 
+/// An edit's files: each one's hunks with line numbers, and a note for the lines not kept.
+/// A single file is already named by the step's row.
+fn diffs(step: &Step, p: Palette) -> Div {
+    let named = step.diffs.len() > 1;
+    div()
+        .ml(px(38.))
+        .mt_1()
+        .mb_2()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .children(step.diffs.iter().map(|diff| file_diff(diff, named, p)))
+}
+
+fn file_diff(diff: &FileDiff, named: bool, p: Palette) -> Div {
+    let header = |text: String, first: bool| {
+        div()
+            .px_2()
+            .py_1()
+            .text_color(p.subtle)
+            .when(!first, |d| {
+                d.border_t_1().border_color(p.edge.opacity(edge::SEPARATOR))
+            })
+            .child(text)
+    };
+    let more = (diff.omitted_lines > 0).then(|| counted(diff.omitted_lines as usize, "more line"));
+    div()
+        .rounded_md()
+        .overflow_hidden()
+        .bg(p.overlay)
+        .flex()
+        .flex_col()
+        .font_family(".SystemMonoFont")
+        .text_size(px(font::CAPTION))
+        .when(named, |d| {
+            d.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .gap_2()
+                    .text_color(p.text)
+                    .child(diff.path.clone())
+                    .child(line_counts((diff.added, diff.removed), p)),
+            )
+        })
+        .children(diff.hunks.iter().enumerate().flat_map(|(index, hunk)| {
+            let title = if diff.created {
+                "new file".to_owned()
+            } else {
+                format!("@@ line {}", hunk.new_start)
+            };
+            std::iter::once(header(title, index == 0 && !named)).chain(hunk_lines(hunk, p))
+        }))
+        .when_some(more, |d, more| {
+            d.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .font_family(".SystemUIFont")
+                    .text_size(px(font::META))
+                    .text_color(p.subtle)
+                    .child(more),
+            )
+        })
+}
+
+/// Each line's number in the file, its sign and its text: the old number for a removal, the
+/// new one otherwise.
+fn numbered(hunk: &DiffHunk) -> impl Iterator<Item = (u32, &str, &str)> {
+    let (mut old, mut new) = (hunk.old_start, hunk.new_start);
+    hunk.lines.iter().map(move |line| {
+        let (sign, text) = line.split_at(line.chars().next().map_or(0, char::len_utf8));
+        let number = if sign == "-" { old } else { new };
+        match sign {
+            "+" => new += 1,
+            "-" => old += 1,
+            _ => (old, new) = (old + 1, new + 1),
+        }
+        (number, sign, text)
+    })
+}
+
+fn hunk_lines(hunk: &DiffHunk, p: Palette) -> impl Iterator<Item = Div> + '_ {
+    numbered(hunk).map(move |(number, sign, text)| {
+        let (color, fill) = match sign {
+            "+" => (p.green, Some(p.green.opacity(0.14))),
+            "-" => (p.red, Some(p.red.opacity(0.14))),
+            _ => (p.subtle, None),
+        };
+        div()
+            .flex()
+            .whitespace_nowrap()
+            .when_some(fill, |d, fill| d.bg(fill))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(38.))
+                    .pr_2()
+                    .flex()
+                    .justify_end()
+                    .text_color(p.subtle)
+                    .child(number.to_string()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(14.))
+                    .text_color(color)
+                    .child(sign.to_owned()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .text_color(p.text)
+                    .child(text.replace('\t', "    ")),
+            )
+    })
+}
+
 impl Render for HistorySheet {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx.theme().is_dark());
@@ -292,5 +420,48 @@ impl Render for HistorySheet {
                     )
                     .vertical_scrollbar(&self.list),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numbered;
+    use workspace_core::DiffHunk;
+
+    #[test]
+    fn a_removal_shows_its_old_number_and_every_other_line_its_new_one() {
+        let hunk = |old_start, new_start, lines: &[&str]| DiffHunk {
+            old_start,
+            new_start,
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+        };
+        let numbers = |hunk: &DiffHunk| -> Vec<(u32, String)> {
+            numbered(hunk)
+                .map(|(n, sign, _)| (n, sign.into()))
+                .collect()
+        };
+        let expected = |list: &[(u32, &str)]| -> Vec<(u32, String)> {
+            list.iter().map(|&(n, sign)| (n, sign.into())).collect()
+        };
+        // Each hunk counts from its own header, not from where the one before ended.
+        let first = hunk(40, 40, &[" a", "-b", "-c", "+b", "+c", "+d", " e"]);
+        let second = hunk(90, 91, &["-x", "+y", " z"]);
+        assert_eq!(
+            numbers(&first),
+            expected(&[
+                (40, " "),
+                (41, "-"),
+                (42, "-"),
+                (41, "+"),
+                (42, "+"),
+                (43, "+"),
+                (44, " ")
+            ])
+        );
+        assert_eq!(
+            numbers(&second),
+            expected(&[(90, "-"), (91, "+"), (92, " ")])
+        );
+        assert_eq!(numbered(&first).nth(1).unwrap().2, "b");
     }
 }

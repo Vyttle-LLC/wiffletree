@@ -2908,6 +2908,7 @@ impl Actor {
                     detail: None,
                     paths: vec![],
                     plan: None,
+                    diffs: vec![],
                     omitted: 0,
                     seq: active.steps.len() as u32,
                     revision,
@@ -2921,7 +2922,8 @@ impl Actor {
         let persist = existing.is_none()
             || step.state != update.state
             || step.paths != update.paths
-            || step.plan != update.plan;
+            || step.plan != update.plan
+            || step.diffs != update.diffs;
         step.parent_id = update.parent_id;
         step.kind = update.kind;
         step.state = update.state;
@@ -2930,6 +2932,7 @@ impl Actor {
         step.detail = update.detail;
         step.paths = update.paths;
         step.plan = update.plan;
+        step.diffs = update.diffs;
         step.omitted = 0;
         step.revision = revision;
         if step.state != StepState::Running {
@@ -3929,6 +3932,7 @@ mod tests {
                     detail: None,
                     paths: vec![],
                     plan: None,
+                    diffs: vec![],
                 }),
             });
         }
@@ -6366,6 +6370,7 @@ mod tests {
             detail: None,
             paths: vec![],
             plan: None,
+            diffs: vec![],
             omitted: 0,
             seq: 0,
             revision: 1,
@@ -7464,6 +7469,7 @@ mod tests {
             detail: Some(title.into()),
             paths: vec![],
             plan: None,
+            diffs: vec![],
         }
     }
 

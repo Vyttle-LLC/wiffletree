@@ -156,12 +156,37 @@ pub(super) fn state_glyph(state: StepState, p: Palette) -> AnyElement {
     }
 }
 
-/// A one-line step: state, kind, title and its note, or "running".
+/// An edit's lines added and removed over all its files; `None` until its diff is known.
+fn edit_counts(step: &Step) -> Option<(u32, u32)> {
+    (!step.diffs.is_empty()).then(|| {
+        step.diffs
+            .iter()
+            .fold((0, 0), |(a, r), d| (a + d.added, r + d.removed))
+    })
+}
+
+/// "+4 −2" in green and red; a side with nothing to count is left out.
+pub(super) fn line_counts((added, removed): (u32, u32), p: Palette) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .gap_1()
+        .text_size(px(font::META))
+        .when(added > 0, |d| {
+            d.child(div().text_color(p.green).child(format!("+{added}")))
+        })
+        .when(removed > 0, |d| {
+            d.child(div().text_color(p.red).child(format!("−{removed}")))
+        })
+}
+
+/// A one-line step: state, kind, title and its note, or "running". An edit shows its counts.
 pub(super) fn step_row(step: &Step, p: Palette) -> Div {
+    let counts = edit_counts(step).filter(|_| step.state != StepState::Running);
     let note = if step.state == StepState::Running {
         Some("running".to_owned())
     } else {
-        step.note.clone()
+        step.note.clone().filter(|_| counts.is_none())
     };
     div()
         .h(px(STEP_ROW))
@@ -199,6 +224,45 @@ pub(super) fn step_row(step: &Step, p: Palette) -> Div {
                     .child(note),
             )
         })
+        .when_some(counts, |d, counts| d.child(line_counts(counts, p)))
+}
+
+/// The minimized card's step: an edit names its file with a pencil and its counts, anything
+/// else shows its title.
+fn current_step(step: Option<&Step>, p: Palette) -> Div {
+    let line = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_size(px(font::SMALL))
+        .whitespace_nowrap()
+        .child("·");
+    match step {
+        Some(step) if step.kind == StepKind::FileEdit => line
+            .child(
+                icon(kind_icon(step.kind))
+                    .size(px(13.))
+                    .text_color(p.subtle)
+                    .flex_none(),
+            )
+            .child(
+                mono(step.title.clone(), p)
+                    .text_size(px(font::SMALL))
+                    .text_color(p.text),
+            )
+            .when_some(edit_counts(step), |d, counts| {
+                d.child(line_counts(counts, p))
+            }),
+        _ => line.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_ellipsis()
+                .child(step.map_or("Starting…".to_owned(), |s| s.title.clone())),
+        ),
+    }
 }
 
 /// "Worked 9m 12s · 23 steps", above a finished turn's reply; it opens that turn's history.
@@ -251,10 +315,6 @@ pub(super) fn activity_row(
         clock(card.started_at),
         counted(card.actions, "step")
     );
-    let current = card
-        .current
-        .as_ref()
-        .map_or("Starting…".to_owned(), |s| s.title.clone());
     let toggle = {
         let view = view.clone();
         button("activity-toggle")
@@ -301,15 +361,7 @@ pub(super) fn activity_row(
                 .child(stats),
         )
         .when(minimized, |d| {
-            d.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(font::SMALL))
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(format!("· {current}")),
-            )
+            d.child(current_step(card.current.as_ref(), p))
         })
         .when(!minimized, |d| {
             d.child(div().flex_1()).child(
@@ -365,8 +417,8 @@ pub(super) fn activity_row(
 
 #[cfg(test)]
 mod tests {
-    use super::RunActivity;
-    use workspace_core::{Step, StepKind, StepPage, StepState};
+    use super::{RunActivity, edit_counts};
+    use workspace_core::{FileDiff, Step, StepKind, StepPage, StepState};
 
     fn step(id: &str, seq: u32, kind: StepKind, revision: u64) -> Step {
         Step {
@@ -380,6 +432,7 @@ mod tests {
             detail: None,
             paths: vec![],
             plan: None,
+            diffs: vec![],
             omitted: 0,
             seq,
             revision,
@@ -436,6 +489,22 @@ mod tests {
         finished.running = false;
         assert!(activity.merge(finished), "the run ended");
         assert!(activity.merge(page("b", vec![])), "a new run");
+    }
+
+    #[test]
+    fn an_edit_counts_the_lines_of_all_its_files_once_its_diff_is_known() {
+        let mut edit = step("edit", 0, StepKind::FileEdit, 1);
+        assert_eq!(edit_counts(&edit), None);
+        let diff = |path: &str, added, removed| FileDiff {
+            path: path.into(),
+            created: false,
+            added,
+            removed,
+            hunks: vec![],
+            omitted_lines: 0,
+        };
+        edit.diffs = vec![diff("a.rs", 4, 2), diff("b.rs", 86, 0)];
+        assert_eq!(edit_counts(&edit), Some((90, 2)));
     }
 
     #[test]

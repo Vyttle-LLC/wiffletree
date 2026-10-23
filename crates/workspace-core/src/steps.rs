@@ -11,6 +11,8 @@ pub const MAX_STEP_NOTE: usize = 40;
 pub const MAX_PLAN_ITEMS: usize = 50;
 /// Largest step detail, in bytes. Output keeps its tail; prose keeps its head.
 pub const MAX_STEP_DETAIL: usize = 4 * 1024;
+/// Diff lines kept per file, from its start; the rest are only counted.
+pub const MAX_DIFF_LINES: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +51,30 @@ pub struct PlanCounts {
     pub current: Option<String>,
 }
 
+/// One file's change from an edit step, bounded to its first `MAX_DIFF_LINES` lines.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub path: String,
+    /// The file did not exist before the edit.
+    #[serde(default)]
+    pub created: bool,
+    /// Counted over the whole change, including lines not kept.
+    pub added: u32,
+    pub removed: u32,
+    pub hunks: Vec<DiffHunk>,
+    /// Lines past `MAX_DIFF_LINES`, not kept.
+    #[serde(default)]
+    pub omitted_lines: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffHunk {
+    pub old_start: u32,
+    pub new_start: u32,
+    /// Each line with its unified-diff prefix: ' ', '-' or '+'.
+    pub lines: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub run_id: String,
@@ -70,6 +96,9 @@ pub struct Step {
     /// A plan step's counts; `None` for other kinds and for plan steps stored before counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<PlanCounts>,
+    /// An edit step's changes, one per file; empty for other kinds and for steps stored before diffs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diffs: Vec<FileDiff>,
     /// Bytes dropped from `detail` to respect `MAX_STEP_DETAIL`.
     #[serde(default)]
     pub omitted: usize,

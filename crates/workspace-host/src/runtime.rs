@@ -185,7 +185,7 @@ fn tool_answer(program: &str, path: &Path, args: &[&str]) -> Result<GhAnswer> {
 }
 
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
-const GIT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(15);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(600);
 const OUTPUT_BOUND: u64 = 4 * 1024 * 1024;
 

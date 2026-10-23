@@ -698,3 +698,29 @@ fn a_step_stored_without_plan_counts_still_decodes() {
     );
     assert_eq!(serde_json::from_value::<Step>(value).unwrap(), step);
 }
+
+#[test]
+fn an_edit_stored_before_diffs_still_decodes_and_round_trips() {
+    let stored = json!({
+        "run_id": "run", "id": "edit", "kind": "file_edit", "state": "succeeded",
+        "title": "src/a.rs", "note": "+1 −1", "paths": ["src/a.rs"], "seq": 0, "revision": 1,
+        "started_at": 0, "finished_at": null
+    });
+    let mut step: Step = serde_json::from_value(stored).unwrap();
+    assert!(step.diffs.is_empty());
+    assert!(serde_json::to_value(&step).unwrap().get("diffs").is_none());
+    step.diffs = vec![FileDiff {
+        path: "src/a.rs".into(),
+        created: false,
+        added: 1,
+        removed: 1,
+        hunks: vec![DiffHunk {
+            old_start: 4,
+            new_start: 4,
+            lines: vec!["-a".into(), "+b".into()],
+        }],
+        omitted_lines: 0,
+    }];
+    let value = serde_json::to_value(&step).unwrap();
+    assert_eq!(serde_json::from_value::<Step>(value).unwrap(), step);
+}

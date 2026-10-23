@@ -2449,7 +2449,7 @@ mod tests {
             [
                 "Contract v9",
                 "Coordinator v3",
-                "Implementer v1",
+                "Implementer v2",
                 "Verifier v1",
                 "PR keeper v1"
             ]

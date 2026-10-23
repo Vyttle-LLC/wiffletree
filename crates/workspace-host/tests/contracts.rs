@@ -407,8 +407,9 @@ fn the_assignment_tools_ask_for_a_job_and_small_work_never_a_model() {
 #[test]
 fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     let core = core(Role::Implementer);
-    assert!(core.contains("Implementer core — v1"));
+    assert!(core.contains("Implementer core — v2"));
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
+    assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
     assert!(implementer.contains("Implementing — v1"));
     assert!(implementer.contains(
