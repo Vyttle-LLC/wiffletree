@@ -332,7 +332,7 @@ fn spawn_job<I: Send + 'static, O: Send + 'static>(
 fn spawn_overlap_check(
     sender: Sender<Event>,
     repository: String,
-    check: impl FnOnce() -> (Option<i64>, Vec<BranchWarnings>, bool) + Send + 'static,
+    check: impl FnOnce() -> overlaps::Checked + Send + 'static,
 ) {
     // The closure itself is consumed by the job; it is never retried after a panic.
     spawn_job(
@@ -340,11 +340,11 @@ fn spawn_overlap_check(
         repository,
         move |_| Some(check()),
         |_| None,
-        |repository, outcome| Event::Overlaps {
+        |repository, outcome: Option<overlaps::Checked>| Event::Overlaps {
             repository,
-            fetched_at: outcome.as_ref().and_then(|(at, _, _)| *at),
-            base_deleted: outcome.as_ref().is_some_and(|(_, _, deleted)| *deleted),
-            warnings: outcome.map(|(_, warnings, _)| warnings),
+            fetched_at: outcome.as_ref().and_then(|c| c.fetched_at),
+            base_deleted: outcome.as_ref().and_then(|c| c.base_deleted.clone()),
+            warnings: outcome.map(|c| c.warnings),
         },
     );
 }
@@ -548,8 +548,9 @@ enum Event {
         repository: String,
         /// When the check fetched the base, if it did.
         fetched_at: Option<i64>,
-        /// The fetch found the base's branch gone from its remote.
-        base_deleted: bool,
+        /// The base, and the open tickets on it, when the fetch found its branch gone from its
+        /// remote.
+        base_deleted: Option<(String, Vec<String>)>,
         /// `None` when the check panicked; the cached warnings then stand.
         warnings: Option<Vec<BranchWarnings>>,
     },
@@ -1591,14 +1592,7 @@ impl Actor {
             self.overlaps_checked.insert(repository.clone(), at);
             self.overlaps_running.insert(repository.clone());
             let sender = self.sender.clone();
-            spawn_overlap_check(sender, repository, move || {
-                let fetched = overlaps::fetch_base(&check.repository, &check.base);
-                let warnings = overlaps::check(&check, fetched.as_ref().err());
-                let deleted = fetched
-                    .as_ref()
-                    .is_err_and(|e| e.is::<overlaps::BaseDeleted>());
-                (matches!(fetched, Ok(true)).then_some(at), warnings, deleted)
-            });
+            spawn_overlap_check(sender, repository, move || overlaps::run(&check, at));
         }
     }
 
@@ -2095,14 +2089,14 @@ impl Actor {
                         .overlaps_due_at
                         .min(started + overlaps::OVERLAP_REFRESH_MS);
                 }
-                warnings.is_some_and(|warnings| {
-                    if base_deleted {
-                        for w in &warnings {
-                            if let Err(e) = self.host.base_deleted(&w.ticket_id, &w.base) {
-                                eprintln!("Workspace overlap check: {}: {e:#}", w.ticket_id);
-                            }
+                if let Some((base, tickets)) = base_deleted {
+                    for ticket in tickets {
+                        if let Err(e) = self.host.base_deleted(&ticket, &base) {
+                            eprintln!("Workspace overlap check: {ticket}: {e:#}");
                         }
                     }
+                }
+                warnings.is_some_and(|warnings| {
                     self.host
                         .set_branch_warnings(repository, fetched_at, warnings)
                 })
@@ -4316,7 +4310,7 @@ mod tests {
         assert!(actor.handle(Event::Overlaps {
             repository: repository.clone(),
             fetched_at: None,
-            base_deleted: false,
+            base_deleted: None,
             warnings: Some(vec![warning(&ticket.id, None)]),
         }));
         assert!(actor.overlaps_due_at <= next);
@@ -4333,8 +4327,9 @@ mod tests {
             actor.handle(Event::Overlaps {
                 repository: ticket.repository_id.clone(),
                 fetched_at: None,
-                base_deleted: true,
-                warnings: Some(vec![warning(&ticket.id, None)]),
+                base_deleted: Some(("origin/release".into(), vec![ticket.id.clone()])),
+                // A pruned `origin/release` leaves Git nothing to compare, so no warnings.
+                warnings: Some(vec![]),
             });
         };
         checked(&mut actor);
@@ -4351,7 +4346,7 @@ mod tests {
         assert!(
             told[0]
                 .1
-                .contains("its base HEAD is no longer on its remote")
+                .contains("its base origin/release is no longer on its remote")
         );
     }
 
@@ -4366,7 +4361,7 @@ mod tests {
         actor.handle(Event::Overlaps {
             repository: repository.clone(),
             fetched_at: None,
-            base_deleted: false,
+            base_deleted: None,
             warnings: Some(vec![stale]),
         });
         let mut turn = active_turn("coordinating", vec![]);

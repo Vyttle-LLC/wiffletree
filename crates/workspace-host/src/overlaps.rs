@@ -181,6 +181,30 @@ pub(crate) fn fetch_base(repository: &Path, base: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// What one check of a base found.
+pub(crate) struct Checked {
+    /// When the check fetched the base, if it did.
+    pub fetched_at: Option<i64>,
+    pub warnings: Vec<BranchWarnings>,
+    /// The base and every open ticket on it, when its branch is gone from its remote.
+    pub base_deleted: Option<(String, Vec<String>)>,
+}
+
+/// Fetches the base at `at` and checks its branches. The tickets on a deleted base come from the
+/// check itself, since a pruned remote-tracking ref leaves Git nothing to compare.
+pub(crate) fn run(check: &OverlapCheck, at: i64) -> Checked {
+    let fetched = fetch_base(&check.repository, &check.base);
+    let deleted = fetched.as_ref().is_err_and(|e| e.is::<BaseDeleted>());
+    Checked {
+        fetched_at: matches!(fetched, Ok(true)).then_some(at),
+        warnings: self::check(check, fetched.as_ref().err()),
+        base_deleted: deleted.then(|| {
+            let tickets = check.branches.iter().map(|b| b.ticket_id.clone());
+            (check.base.clone(), tickets.collect())
+        }),
+    }
+}
+
 /// Warnings for every branch that has any. A branch Git cannot compare, for example one not
 /// created yet, is left out. A failed fetch is a warning on every branch.
 pub(crate) fn check(
@@ -501,6 +525,26 @@ mod tests {
         git(clone.path(), &url);
         let error = fetch_base(clone.path(), "origin/release").unwrap_err();
         assert!(!error.is::<BaseDeleted>(), "{error:#}");
+    }
+
+    #[test]
+    fn a_deleted_base_whose_tracking_ref_was_pruned_still_names_its_tickets() {
+        let upstream = fixture();
+        git(upstream.path(), &["branch", "release"]);
+        let clone = clone_of(upstream.path());
+        commit(clone.path(), "t1", &[("shared.txt", "ticket\n")]);
+        git(upstream.path(), &["branch", "-q", "-D", "release"]);
+        git(clone.path(), &["fetch", "-q", "--prune"]);
+        let pruned = OverlapCheck {
+            repository: clone.path().into(),
+            base: "origin/release".into(),
+            branches: vec![open("t1", "P")],
+            fetched_at: None,
+        };
+        let checked = super::run(&pruned, 0);
+        assert!(checked.warnings.is_empty());
+        let deleted = checked.base_deleted.unwrap();
+        assert_eq!(deleted, ("origin/release".into(), vec!["t1".into()]));
     }
 
     #[test]
