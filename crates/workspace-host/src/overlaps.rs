@@ -75,6 +75,9 @@ impl Host {
     /// Tells the ticket's coordinator, once, that its base is no longer on its remote.
     pub(crate) fn base_deleted(&mut self, ticket_id: &str, base: &str) -> Result<()> {
         let ticket = self.ticket(ticket_id)?;
+        if self.session(&ticket.coordinator_id)?.archived {
+            return Ok(());
+        }
         // A branch name can outrun a message ID's bound, so the ID names the base by its digest.
         let digest = Sha256::digest(base);
         let digest: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();

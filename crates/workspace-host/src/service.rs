@@ -4348,6 +4348,17 @@ mod tests {
                 .1
                 .contains("its base origin/release is no longer on its remote")
         );
+        // An archived coordinator is told nothing, and nothing fails.
+        actor.host.set_archived(&coordinator.id, true).unwrap();
+        actor.host.base_deleted(&ticket.id, "origin/other").unwrap();
+        let count: i64 = (actor.host.db)
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id LIKE 'base-deleted:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
