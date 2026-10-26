@@ -311,6 +311,7 @@ fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     assert!(coordinator.contains("Coordinating — v3"));
     for phrase in [
         "Spend review in proportion to risk",
+        "\"Reviewed with Wiffletree: <N> full reviews and <M> re-checks, <R> rounds (<verifier focuses>)\"",
         "Start a second full review only while an evidenced blocking finding stays open",
         "Reaching the cap is not approval",
         "git diff --shortstat of the first reviewed commit and of the final one against the base",
@@ -415,7 +416,8 @@ fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
-    assert!(implementer.contains("Implementing — v1"));
+    assert!(implementer.contains("Implementing — v2"));
+    assert!(implementer.contains("never by its review round or as \"review fixes\""));
     assert!(implementer.contains(
         "If a finding is wrong or out of scope, tell the coordinator in one sentence with evidence"
     ));

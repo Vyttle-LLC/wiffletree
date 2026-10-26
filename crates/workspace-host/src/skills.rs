@@ -1114,7 +1114,7 @@ mod tests {
         let history = host.skills().history(Skill::Implementing);
         let entry = Entry {
             change: Change::SavedRules,
-            stock_version: "v1".into(),
+            stock_version: "v2".into(),
             edits: Edits {
                 rules: rules.into(),
                 rewrite: None,
@@ -1286,7 +1286,8 @@ mod tests {
         let path = (host.shared().skills_folder().join(skill.folder()))
             .join(format!("history/{name}.json"));
         let entry = fs::read_to_string(&path).unwrap();
-        fs::write(&path, entry.replace("\"v1\"", "\"v0\"")).unwrap();
+        let current = format!("\"{}\"", workspace_core::skills::version(stock(skill)));
+        fs::write(&path, entry.replace(&current, "\"v0\"")).unwrap();
     }
 
     #[test]
@@ -1308,7 +1309,7 @@ mod tests {
         let (_, latest) = host.skills().history(Skill::Implementing).pop().unwrap();
         assert_eq!(
             (latest.stock_version.as_str(), latest.edits.rules.as_str()),
-            ("v1", "Rule")
+            ("v2", "Rule")
         );
     }
 
