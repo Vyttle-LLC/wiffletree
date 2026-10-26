@@ -311,6 +311,7 @@ fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     assert!(coordinator.contains("Coordinating — v3"));
     for phrase in [
         "Spend review in proportion to risk",
+        "the verifiers by focus, with a model only where the workspace records one",
         "\"Reviewed with Wiffletree: <N> full reviews and <M> re-checks, <R> rounds (<verifier focuses>)\"",
         "Start a second full review only while an evidenced blocking finding stays open",
         "Reaching the cap is not approval",
