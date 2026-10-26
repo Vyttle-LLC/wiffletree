@@ -308,10 +308,19 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v2"));
+    assert!(coordinator.contains("Coordinating — v3"));
     for phrase in [
-        "After two or three rounds, remaining non-blocking findings become follow-up tickets",
-        "Never start a fresh cycle to chase them",
+        "Spend review in proportion to risk",
+        "the verifiers by focus, with a model only where the workspace records one",
+        "\"Reviewed with Wiffletree: <N> full reviews and <M> re-checks, <R> rounds (<verifier focuses>)\"",
+        "Start a second full review only while an evidenced blocking finding stays open",
+        "Reaching the cap is not approval",
+        "git diff --shortstat of the first reviewed commit and of the final one against the base",
+        "A round with only non-blocking findings ends the loop, and so do non-blocking findings left after two or three rounds: triage them as follow_up or wont_fix, never fix_now",
+        "overrule it the same way",
+        "has one line last before any footer",
+        "When you ask the implementer to publish, give it this line",
+        "never start a fresh cycle to chase them",
         "product, security or data-loss decision",
         "Treat each check-in as a decision",
         // A finished ticket's summary tells the human where its PR stands and what to watch.
@@ -411,7 +420,8 @@ fn the_implementer_may_object_to_a_finding_instead_of_implementing_it() {
     assert!(core.contains("may rebase this ticket's branch onto its base between your turns"));
     assert!(core.contains("Change files with your edit tools"));
     let implementer = provider::skill(Role::Implementer);
-    assert!(implementer.contains("Implementing — v1"));
+    assert!(implementer.contains("Implementing — v2"));
+    assert!(implementer.contains("never by its review round or as \"review fixes\""));
     assert!(implementer.contains(
         "If a finding is wrong or out of scope, tell the coordinator in one sentence with evidence"
     ));
