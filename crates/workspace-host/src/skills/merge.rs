@@ -130,7 +130,7 @@ mod tests {
     }
 
     fn newer(text: &str) -> String {
-        edit(text, "# Coordinating — v2", "# Coordinating — v3")
+        edit(text, "# Coordinating — v3", "# Coordinating — v4")
     }
 
     const FIRST: &str = "Start by clarifying and planning the goal;";
@@ -151,7 +151,7 @@ mod tests {
             assert_eq!(format!("{title}{}", paragraphs.concat()), text);
         }
         let (title, paragraphs) = split(coordinating());
-        assert_eq!(title, "# Coordinating — v2\n");
+        assert_eq!(title, "# Coordinating — v3\n");
         assert!(paragraphs[0].starts_with(FIRST) && paragraphs[0].ends_with(".\n\n"));
         assert!(paragraphs[4].starts_with(FIFTH));
         // Lines with no blank line between them are one paragraph.
@@ -171,7 +171,7 @@ mod tests {
         assert!(merged.passages().is_empty());
         let sources: Vec<_> = changes.iter().map(|change| change.source).collect();
         assert_eq!(sources, [Source::Update, Source::Update]);
-        assert_eq!(changes[0].after, "# Coordinating — v3\n");
+        assert_eq!(changes[0].after, "# Coordinating — v4\n");
         assert!(changes[1].before.starts_with(FIFTH));
     }
 
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn both_sides_changing_the_title_keeps_the_human_s() {
-        let yours = edit(coordinating(), "# Coordinating — v2", "# How I coordinate");
+        let yours = edit(coordinating(), "# Coordinating — v3", "# How I coordinate");
         let (text, changes) = merge(coordinating(), &newer(coordinating()), &yours)
             .plain()
             .unwrap();

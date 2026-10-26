@@ -308,8 +308,12 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v2"));
+    assert!(coordinator.contains("Coordinating — v3"));
     for phrase in [
+        "Spend review in proportion to risk",
+        "Start a second full review only while an evidenced blocking finding stays open",
+        "Reaching the cap is not approval",
+        "git diff --shortstat of the first reviewed commit and of the final one against the base",
         "After two or three rounds, remaining non-blocking findings become follow-up tickets",
         "Never start a fresh cycle to chase them",
         "product, security or data-loss decision",
