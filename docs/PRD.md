@@ -24,7 +24,7 @@ Primary user: Michael, initially working locally on Apple Silicon with several r
 
 - Each visible agent is an independent session managed by the app. Native provider subagents may be internal helpers, but are not required for orchestration.
 
-- Project orchestrators have no repository or Git branch. Their runtime context lives in app-managed project storage; shared knowledge lives in the Markdown brain of the project's Space.
+- Project orchestrators have no repository or Git branch. Their runtime context lives in app-managed project storage; shared knowledge lives in a team-shared Git brain: the brain of the project's Space, or the brain its repositories map to (two proposals, to be reconciled; see [Markdown storage and ownership](#markdown-storage-and-ownership)).
 
 - The project coordinator owns work allocation across its tickets directly; there is no intermediate coordinator between it and the agents. Concurrent tickets have isolated worktrees and branches. A ticket's implementer writes alone in its workspace, and its verifiers read it together.
 
@@ -91,7 +91,7 @@ New project creates a coordinator. New ticket picks one of the repositories the 
 
 ### UI layout exploration
 
-The current interactive direction uses the Tidal palette with Chat as the default workspace. The conversation fills the available width beside a compact list of projects, whose tickets and agents open in the Agents panel. Files, Overview, Git history, changes, PR feedback, Brain, scheduled work, usage and activity open only when requested in a contextual side panel. The composer supports attachments and scope selection. Enter submits the draft; Shift Enter inserts a newline. Context panels preserve the conversation and draft; closing them restores the full chat width.
+The current interactive direction uses the Tidal palette with Chat as the default workspace. The conversation fills the available width beside a compact list of projects, whose tickets and agents open in the Agents panel. Files, Overview, Git history, changes, PR feedback, Memory, scheduled work, usage and activity open only when requested in a contextual side panel. Brains have their own workspace page; a project's Memory panel summarizes its brain and opens that page. The composer supports attachments and scope selection. Enter submits the draft; Shift Enter inserts a newline. Context panels preserve the conversation and draft; closing them restores the full chat width.
 
 Project/team navigation lives in a compact inspector rail at the right edge of the workspace. It follows the selected conversation and opens an adjacent, resizable inspector whose header names the scope and owner. Projects expose Overview, Tickets, Inbox, Memory and Events; the Tickets inspector lists each ticket with its repository, state, agents and verification rounds. Workers omit human Inbox; the Inbox entry shows the count of open decisions. Every session has a Processes entry beside Files, which carries the count of processes its agents have left running and no count when nothing runs. On an agent the Processes panel lists that agent's process groups; on the coordinator it lists every agent of the project, grouped by agent, with "Nothing running." for agents without any. Each row is one process group: its programs, "8 processes · started 14:27 · group 43477", how long it has run, its CPU summed over the group as a percentage of one core, highlighted at a full core or more, and Stop; one agent's panel also has Stop all. Counts come first in words and programs are named as programs, never as a name beside a bare count. Running time and CPU are read once a second while the panel is open and never while it is closed. A group whose recorded processes are gone but that still runs is shown as one Wiffletree cannot confirm and has no Stop. Stopping from the panel stops only the processes: the agent keeps working and reads at its next turn what was stopped. The rail holds only what belongs to the selected session, including its context window. Information about the whole workspace, namely account limits, recorded usage and who runs each job, opens as full pages from a Workspace section in the sidebar and always covers both providers. A project needs no step to go live: a human message, a retry or an answered decision starts it, and Stop interrupts it. Shared project memory and the workspace-wide Who runs what table are explicitly identified within their views. Closing the inspector restores conversation width while the rail remains available.
 
@@ -223,7 +223,7 @@ Coordinators follow work up later with durable workspace timers: `schedule` (`at
 
 Coordinators delegate for parallel breadth, write work or long-running jobs, and do periodic read-only observation themselves: a timer can run a short check, such as a service's logs or metrics, with no child session. The coordinator's check result is its final message in the human chat. Wiffletree has no turn limits: no project or host-wide cap on concurrent turns, no time limit and no brake after a number of turns. A turn that has run 30 minutes, and every 30 minutes after, sends its parent, the project coordinator, a check-in naming the session, its ticket, the elapsed time and its recent activity; the coordinator's own long turns raise a human inbox item instead. The host also checks in by turn count, and never pauses anything for it: a session that has run `checkin_child_turns` turns (25 by default) without a message from its parent sends the parent a check-in, and the project coordinator, after `checkin_human_turns` turns (100 by default) without the human, raises an inbox item that stays until the human steps in. On any check-in, the parent lets the work continue by doing nothing, or stops it with `stop_agents` and a reason, which keeps the child paused until the parent calls `resume_agent`; only a session's direct parent may do either. The stop uses the normal cancel path and is recorded in the chat and activity log. The stopped turn's input is finished rather than held, because the parent decides what runs next, and the session's next turn is told that its parent stopped it and why.
 
-Expose a small provider-neutral tool contract: create worker, send message, report progress, record a checklist (`set_plan`, display only; see Work progress), read task state, and read scoped activity, append work logs and query the project brain. Dedicated maintenance tools handle compilation and conflict rulings under their recorded policy. The app supplies the sender identity; a session cannot impersonate another agent.
+Expose a small provider-neutral tool contract: create worker, send message, report progress, record a checklist (`set_plan`, display only; see Work progress), read task state, and read scoped activity, log work (`log_work`) and query the brain (`query_brain`). The compile job has its own tools for its session, and conflict rulings are the human's. The app supplies the sender identity; a session cannot impersonate another agent.
 
 Each message carries a stable message ID, sender and recipient session IDs, project and task scope, type, creation time, and optional references to commits, PRs, artifacts or earlier messages. The coordinator stores the message before claiming it is queued.
 
@@ -251,49 +251,71 @@ The application must preserve useful knowledge across sessions and providers. It
 
 ### Markdown storage and ownership
 
-A Space names a brain: an existing documentation repository and a folder in it, or explicit setup of a new one. Every project uses its Space's brain; the per-project brain attachment of earlier releases becomes the brain of a Space at upgrade. A brain may cover several Spaces, projects and repositories, with scope recorded on each entry. A brain other people also push to, such as a team's, is fetched and rebased before every push, same-file appends merge as the union of entries by ID, nothing is force-pushed, and a true conflict pauses with the settings repository's Compare. It remains ordinary Markdown that Michael can inspect with Git, Obsidian or a text editor. This storage attachment does not give the project orchestrator an implementation branch or bind it to a code repository.
+Brains are **team-shared** (decided October 29, 2026). An organization's brain is one GitHub repository that everyone on the team logs to and reads: Michael, RB and Oscar for Sage. Teammates without Wiffletree log through the brain skills and read the brain's Markdown on GitHub. It remains ordinary Markdown that anyone can inspect with Git, Obsidian or a text editor. A brain may cover several Spaces, projects and repositories, with scope recorded on each entry, and gives the project orchestrator no implementation branch.
 
-The execution host owns the brain checkout and serializes app writes to it. Agents submit scoped entries and proposed changes through tools; they do not concurrently rewrite shared files. Existing files and external edits must be preserved. Detect changed source hashes before applying a compilation, reconcile interrupted writes against durable receipts, and hold conflicts for review. Git commit and remote sync are separate jobs owned by the brain service; code workers must not commit or push the brain as a side effect of their work.
+In [Assistant, Spaces, jobs and Boards](#assistant-spaces-jobs-and-boards), a Space names a brain: an existing documentation repository and a folder in it, or explicit setup of a new one. Every project uses its Space's brain, and the per-project brain attachment of earlier releases becomes the brain of a Space at upgrade.
 
-Use the existing second-brain layout as the initial convention:
+**To be reconciled (open for Michael):** two proposals choose a project's brain differently, and they write to it differently.
+- **Choosing the brain:** the Space proposal picks it through the project's Space. `brain-registry-sync` (below) maps each repository to a brain by GitHub owner.
+- **Writing to it:** the Space proposal's defaulted decision (c) fetches and rebases before every push, merges same-file appends as the union of entries by ID, never force-pushes, and pauses a true conflict with the settings repository's Compare. Michael's later decision is that every brain change reaches `main` through a gated PR, with one file per entry. The rules below follow that decision.
+
+Brains are a workspace registry, kept on each machine and shown on a **Brains** page in the sidebar's Workspace section, beside Repositories. Each repository maps to at most one brain. The mapping defaults by GitHub owner (`Sage-Social` → `sagehaven-docs`, `Vyttle-LLC` → `vyttle-docs`) and can be overridden per repository. Personal and unowned repositories default to no brain. A project's brains come from its repositories; a project stores no brain of its own, and this gives the project orchestrator no implementation branch. Settings that every install must agree on, such as the compiler host, the compile time and the gate's required checks, live in `wiffletree-brain.json` in the brain repository and change only through a PR.
+
+**Every change reaches `main` through a pull request that auto-merges when the gate's checks pass** (decided October 29, 2026). The gate has seven deterministic checks: gitleaks, a sensitive-information scan, markdownlint, wikilinks, log schema and size, path ownership, and the gate's own tests. Wiffletree owns the gate logic, the entry contract and their fixture tests, and ships them as a versioned GitHub Action from this repository (decided October 29, 2026). Each brain repository carries only a thin caller pinned to a release and its own organization-specific config: allowed email domains, the allow-list, the size cap, the legacy flag and CODEOWNERS. A brain's Set up installs or updates them through a PR. Log PRs only add entry files, and compile PRs only change the wiki, so PRs never conflict and no merge queue is needed.
+
+The execution host keeps its own checkout of each brain, apart from any clone the human edits, and is its only writer. It only fast-forwards `main` there. It commits each batch on its own branch, pushes that branch, opens the PR and turns on auto-merge. It never pushes `main`, never force-pushes and never merges directly. A failed check, a refused push or a conflict raises one Inbox item on the project that wrote the batch. The human may amend an unmerged batch (redact a line, or add the gate's allow marker); entries are append-only once merged. Agents submit entries through tools and never touch brain files. If anything else changes the host's checkout, the host holds writing and surfaces it instead of overwriting. The legacy launchd safety-net must not write a brain Wiffletree manages.
+
+The brain's layout:
 
 ```text
+wiffletree-brain.json                          Shared brain settings (compiler, schedule, gate config)
+.github/workflows/brain-gate.yml               Thin caller of Wiffletree's gate action, pinned to a release
+brain-gate-allowlist.toml                      This brain's explicit sensitive-scan exceptions
 second-brain/
-  STATUS.md                 Current state and active threads
-  logs/<repo>.md            Work logs for each repository
-  logs/<brain-repo>.md      Planning and cross-repository logs
-  notes/INDEX.md            Index of current knowledge
-  notes/<Title Case>.md     Decisions and observations
-  reconcile-queue.md        Conflicts requiring a ruling
-  archive/                  Retained historical material
+  STATUS.md                                    Current state and active threads
+  logs/<repo>/YYYY/MM/YYYY-MM-DD-<id>.md       One file per log entry, append-only
+  logs/<brain-repo>/…                          Planning and cross-repository entries
+  logs/<repo>.md                               Legacy rolling logs, until imported
+  notes/INDEX.md                               Index of current knowledge and the compile cursor
+  notes/<Title Case>.md                        Decisions and observations
+  reconcile-queue.md                           Export of conflicts awaiting a ruling
+  archive/                                     Retained historical material
 ```
 
 Markdown is the portable source of knowledge. SQLite holds scheduling, delivery receipts, processing cursors and rebuildable search indexes. Preserve stable entry IDs and source references in Markdown so reindexing or moving the brain does not lose provenance. Remote clients browse and request changes through the host API; provider credentials remain on that host.
 
 ### Work logs
 
-Capture a terse entry at meaningful milestones: a decision, completed assignment, handoff, blocker or changed implementation state. Deduplicate by session and milestone identity. Avoid logging every tool call or copying raw transcripts. Separate an agent’s report from verified repository or PR evidence, and retain who reported it, when, and for which project, task, provider and execution host.
+Capture a terse entry at meaningful milestones: a decision, completed assignment, handoff, blocker or changed implementation state. Agents log through the `log_work` tool, which gives only the type, title and the `changed`, `why` and `state` text. The host fills in the rest: the id, date, repository, `ref` from the ticket's worktree, the author's GitHub login and `source`. It also records the provider, machine, project, ticket and session in its own store. When nothing was logged for the ticket, a ready_for_testing report, an accept or a publish asks for one entry. Deduplicate by session and milestone identity. Avoid logging every tool call or copying raw transcripts, and refuse an entry whose body exceeds 2,000 characters. Separate an agent's report from verified repository or PR evidence.
 
-Keep compatibility with our brain-log fields and newest-first repository logs. Preserve existing entries and compiler-owned markers. Assign new entries a stable ID in additional Markdown metadata; accept older entries without IDs. The human-readable core remains:
+Each entry is its own file, so concurrent machines and people never conflict. The contract is shared with the brain's gate and with the skills:
 
 ```markdown
+---
+id: <lowercase ULID, matches filename>
+repo: <repo, matches folder>
+author: <github login>
+source: wiffletree | skill
+---
 ## YYYY-MM-DD — Short title
 - type: decision | observation
-- ref: <branch> @ <sha>[…<sha>][ · PR #NN]   (or —)
+- ref: <branch> @ <sha>[…<sha>][ · PR #NN]   (or <branch> @ —, or —)
 - changed: What changed
 - why: Reason
 - state: Current state or next step
 ```
 
+Entries collect into batches: one per ticket, or per coordinator session, and per brain. A batch opens its PR when the ticket is accepted or closed, when the session is archived, after 24 hours, or on Send now, so there is never one PR per entry. Legacy `logs/<repo>.md` files are imported once into per-entry files, with deterministic ids so a repeat adds nothing.
+
 An observation describes current state. A decision records a commitment, contract, interface or deprecation that later work must not silently contradict. Capture exact repository identity, commit IDs and PR links when available; use an explicit no-code or unverified state otherwise. A commit’s existence verifies a Git anchor, not every claim in the entry or whether a change shipped. Never put credentials or secrets into logs or notes.
 
 ### Wiki and second brain
 
-Compilation processes pending logs, checks available Git and PR evidence, and updates the current STATUS, relevant notes and INDEX. Keep STATUS compact, with an initial target around 500 words. Notes use title, kind, updated and sources frontmatter, with [[wikilinks]] for related topics. Every derived claim must link back to its source entries and applicable evidence; intentions and unverifiable claims must remain labeled.
+Each brain has exactly one compiler: the host named in `wiffletree-brain.json`. It can be changed from the Brains page through a PR. Every other install only logs and reads. Compilation processes pending entries, verifies each `ref` against the workspace's own repositories (commit, merged PR, release tag) as verified, claimed or unverified, and updates STATUS, the relevant notes and INDEX in one compile PR that changes only wiki paths. Keep STATUS compact, with an initial target around 500 words. Notes use title, kind, updated and sources frontmatter, with [[wikilinks]] for related topics. Each claim cites its entries with a Markdown footnote linking to the entry files. Intentions and unverifiable claims must remain labeled.
 
-Fold non-conflicting observations and additive facts automatically under the recorded maintenance policy. Queue contradictions of established decisions, disagreements between agents, and destructive or deprecating changes in reconcile-queue.md. Show the conflicting claims, evidence and a suggested ruling. A human ruling becomes a new decision entry before the wiki is refreshed; preserve the superseded decision and its history.
+Fold non-conflicting observations and additive facts automatically. Queue contradictions of established decisions, disagreements between agents or authors, and destructive or deprecating changes. Queued conflicts become Inbox cards on the projects they touch, with the claim, the established decision, the evidence and a recommended ruling: Uphold existing, Keep new, Keep both or Defer. `reconcile-queue.md` is their export. A ruling writes a new decision entry and starts a compile as soon as that entry merges; preserve the superseded decision and its history.
 
-Treat the derived wiki as compiler-managed. Editing a decision through the app records a new source entry rather than silently overwriting current truth. Preserve external edits and surface conflicts instead of regenerating over them. Retrieval follows the existing cheapest-first ladder: STATUS, INDEX, relevant notes, logs, then archives and Git history. Return compact excerpts with source links, scope and freshness; decisions take precedence over observations, and missing evidence stays explicit.
+Treat the derived wiki as compiler-managed. A human changes current truth with a log entry or a ruling, never by editing a note in the app. Retrieval follows the existing cheapest-first ladder: STATUS, INDEX, relevant notes, logs, then archives and Git history. Return compact excerpts with source links, scope and freshness; decisions take precedence over observations, and missing evidence stays explicit.
 
 ### Timed events and maintenance
 
@@ -303,15 +325,15 @@ Initial built-in jobs and proposed defaults:
 
 | Job | Trigger | Result |
 | --- | --- | --- |
-| Log capture | Meaningful task milestone | Durable entry with source references |
-| Compile logs | Nightly in the configured timezone, or Run now | Verified notes, current STATUS and conflict queue |
-| Brain commit and sync | After successful maintenance, when enabled | Scoped commit; optional push to the configured remote |
+| Log capture | Meaningful task milestone | Durable entry in an open batch |
+| Brain batch | Ticket accepted or closed, session archived, 24 hours, or Send now | One PR adding the batch's entry files, auto-merged when the gate passes |
+| Compile logs | Nightly at the brain's configured time and timezone on its compiler host, Run now, or a merged ruling | One compile PR with verified notes, current STATUS and the conflict export |
 | Review conflicts | Configured morning reminder | Attention item linking unresolved rulings |
 | Archive and prune | Configured weekly run | Reviewable retention changes with recoverable history |
 
-These defaults are product proposals, not automations created by this PRD. The user's own recurring jobs, such as a morning brief, are a separate mechanism owned by the user (see [Assistant, Spaces, jobs and Boards](#assistant-spaces-jobs-and-boards)); coordinator timers are unchanged. A due timer first checks deterministically for pending input. Compilation with no new entries makes no model call. Morning reminders reuse the existing conflict inbox and stay quiet when it is empty. Archival never silently deletes source history. Commit only the job’s changed paths; preserve unrelated dirty files, stop on Git conflicts and never force-push as routine maintenance.
+These defaults are product proposals, not automations created by this PRD. The user's own recurring jobs, such as a morning brief, are a separate mechanism owned by the user (see [Assistant, Spaces, jobs and Boards](#assistant-spaces-jobs-and-boards)); coordinator timers are unchanged. Whether brain compiles run on that scheduled-jobs mechanism is open for reconciliation (see `brain-compile`'s design). A due timer first checks deterministically for pending input. Compilation with no new entries makes no model call. Morning reminders reuse the existing conflict inbox and stay quiet when it is empty. Archival never silently deletes source history. Every brain write is a branch and a PR: never push `main`, never force-push, and stop on Git conflicts.
 
-Use stable run IDs, one active writer per brain, bounded batches and a cursor identifying the exact processed entry or content revision. Date-only markers from existing skills must not cause later entries on the same day to be skipped; import them conservatively and deduplicate processed entries. Advance a cursor only after the notes, queue and run receipt are durably recoverable. After a crash, reconcile written content before retrying so entries and commits are not duplicated.
+Use stable run IDs, one active writer per brain checkout, one compiler and at most one open compile PR per brain, bounded batches, and an entry-ID cursor. The cursor is stored with the wiki in `notes/INDEX.md`, so it moves with the compiler and advances only when the compile PR merges. Date-only markers from existing skills must not cause later entries on the same day to be skipped; import them conservatively and deduplicate processed entries. Advance a cursor only after the notes, queue and run receipt are durably recoverable. After a crash, reconcile written content before retrying so entries and commits are not duplicated.
 
 Record an explicit missed-run policy for sleep or downtime; proposed default is one coalesced catch-up run on recovery rather than replaying every missed timer. Handle timezone and daylight-saving changes without duplicate logical runs. Failed, timed-out or quota-blocked work retains its pending input and visible reason. Approval requests wait for an authorized response; no connected UI is required to preserve them.
 
@@ -319,13 +341,13 @@ Record an explicit missed-run policy for sleep or downtime; proposed default is 
 
 Package log capture, compilation, retrieval and reconciliation as versioned procedures inspired by our brain-log, brain-compile, brain-query and brain-reconcile skills. Keep procedures inspectable as Markdown instructions paired with typed host tools and capabilities. Both Claude and Codex operate on the same files and schema. Scheduled runs record the procedure version used. Initial scope is these built-in procedures; arbitrary workflow scripting and a general plugin marketplace remain deferred.
 
-Expose append work log, query brain, propose decision, inspect compilation and resolve conflict alongside the coordination tools. Derive identity and access scope from the session. A note, log, imported skill or PR comment is source material and cannot grant permissions or create a schedule. Enabling a maintenance job supplies its explicit execution policy.
+Expose `log_work` and `query_brain` alongside the coordination tools; the compile session alone gets its conflict and finish tools, and only the human rules on conflicts. Derive identity and access scope from the session. A note, log, imported skill or PR comment is source material and cannot grant permissions or create a schedule. Enabling a maintenance job supplies its explicit execution policy.
 
 ### Memory interface and performance
 
-Add a project Brain destination with Status, Wiki, Logs and Conflicts views. Show backlinks, source entries, verification state, last compilation and note history. Task-scoped log views connect entries to commits, PRs and the originating conversation. Add a Scheduled work view showing next and last run, owner, pending input, usage, outcomes and failures. Conflict counts join the shared attention inbox; clicking an item opens the evidence and a ruling action.
+Brains have one workspace-level page (decided October 29, 2026; approved design study `design/mockups/current/brains.html`). The Brains page lists the brains, their compiler, the PR gate (each batch from queued to auto-merged) and the repository → brain mapping. Its brain browser, filtered to a project or showing the whole brain, has Status, Wiki, Logs and Conflicts views. It shows backlinks, sources per claim, verification state, last compilation and each entry's PR. Entries written on this machine link to their ticket and originating conversation. A project's Memory panel is the summary that opens the browser; there is no separate project Brain destination. A ⌘K search over notes and logs (SQLite FTS5, indexed incrementally) returns ranked excerpts, with decisions above observations, in one brain at a time; it never spans organizations. Add a Scheduled work view showing next and last run, owner, pending input, usage, outcomes and failures. Conflict counts join the shared attention inbox; clicking an item opens the evidence and a ruling action.
 
-Index changed files incrementally and read or compile only pending entries and relevant notes. Bound compilation context, queue depth, file previews and search caches; paginate logs and history. Background maintenance must yield resources to interactive work. Attribute its token usage to the responsible project and job so maintenance cost appears in usage charts. Idle memory features perform no model work or continuous full-repository scans. Proposed feasibility fixture: 100,000 log entries and 10,000 notes, with cached first-page browsing inside the existing 100 ms UI response target and bounded memory.
+Index changed files incrementally and read or compile only pending entries and relevant notes. Bound compilation context, queue depth, file previews and search caches; paginate logs and history. Background maintenance must yield resources to interactive work. Attribute its token usage to the responsible brain and job, so that maintenance cost appears in usage charts. Idle memory features perform no model work or continuous full-repository scans. Proposed feasibility fixture: 100,000 log entries and 10,000 notes, with cached first-page browsing inside the existing 100 ms UI response target and bounded memory.
 
 Acceptance: a Claude worker records a Git-linked entry, a scheduled Codex compilation turns its verified content into a sourced note, and a replacement session retrieves it. A conflicting decision goes to the inbox without changing the established decision. Two entries on the same day are both processed; a repeated run with unchanged inputs makes no model call and no write. Crash between file writes and cursor advancement, preserve an external edit, miss a scheduled run during sleep, and exhaust a provider quota: recovery must lose no accepted entry, duplicate no processed entry and preserve pending work.
 
@@ -354,7 +376,7 @@ Use a versioned command and event contract with stable operation IDs, request co
 
 GPUI must pass a realistic prototype before full UI development. Its pre-1.0 API changes, text and input behavior, accessibility, and supported platform behavior require validation. Native rendering does not establish low memory use by itself. If GPUI cannot meet the essential interaction or performance requirements within the bounded prototype, evaluate Tauri with TypeScript/Svelte using the same fixtures and budgets. Changing the renderer must not change host ownership, messaging, persistence, Git behavior or provider adapters. Do not build both UIs concurrently. [GPUI documentation](https://github.com/zed-industries/zed/tree/main/crates/gpui), [Tauri process model](https://v2.tauri.app/concept/process-model/)
 
-Use SQLite for durable project, session, message, operation, watcher and scheduled-job state. Keep provider-specific conversation records with their runtimes; store stable session IDs and a normalized, paginated activity projection locally. Keep durable second-brain knowledge in the attached Markdown repository; local search indexes are rebuildable projections.
+Use SQLite for durable project, session, message, operation, watcher and scheduled-job state. Keep provider-specific conversation records with their runtimes; store stable session IDs and a normalized, paginated activity projection locally. Keep durable second-brain knowledge in the brain repository; local search indexes are rebuildable projections.
 
 ### Project home and orchestrator storage — proposed design
 
@@ -365,7 +387,7 @@ A project exists independently of its attached code repositories. Give it a stab
 | Project database | Project and task identities, normalized conversations, messages, file metadata and scopes, context manifests, approvals, job state, event receipts and provider session references | Rust host; transactional SQLite |
 | Immutable file objects | Imported attachments and generated artifacts, keyed by content hash, with original display names in metadata | Project home; outside code repos |
 | Session directories | Provider runtime state and bounded scratch space for the main orchestrator and coordinators | Execution host; recovery capability depends on the provider adapter |
-| Attached Markdown brain | Durable logs, wiki notes and decisions in the existing or explicitly configured brain repository | Ordinary Markdown and Git; remains separately inspectable |
+| Brain repository | Durable logs, wiki notes and decisions in a team-shared brain on GitHub, changed only through pull requests | Ordinary Markdown and Git; the host keeps its own checkout; remains separately inspectable |
 | Rebuildable cache | Extracted text, thumbnails, search indexes and cached remote metadata | App-managed; bounded and disposable |
 | Attached repositories | Code, worktrees, refs, commits and PR associations | Existing repository locations; referenced by stable identity |
 
@@ -598,7 +620,7 @@ Validate text selection and copying, keyboard navigation, input methods, permiss
 
 ### First usable release
 
-Deliver native project and task trees with multiple agents per task, chat-only project orchestrators, isolated workers, provider selection, durable messaging, direct chat, scoped file attachments and project context storage, orchestrator-routed status and escalation, Git branch history, diffs, PR checks and comments, scoped approvals, and restart recovery. Support repository-configured bases and human-directed squash or rebase workflows. Include provider limit indicators, scoped token totals, usage by task and agent, daily charts, weekday patterns, and usage-aware scheduling. Include client-local System, Light and Dark modes, built-in presets, live preview and validated custom theme import and export. Include a project brain attachment, structured log capture, sourced wiki browsing, a conflict inbox, and built-in manual and scheduled compilation with incremental checkpoints and run history.
+Deliver native project and task trees with multiple agents per task, chat-only project orchestrators, isolated workers, provider selection, durable messaging, direct chat, scoped file attachments and project context storage, orchestrator-routed status and escalation, Git branch history, diffs, PR checks and comments, scoped approvals, and restart recovery. Support repository-configured bases and human-directed squash or rebase workflows. Include provider limit indicators, scoped token totals, usage by task and agent, daily charts, weekday patterns, and usage-aware scheduling. Include client-local System, Light and Dark modes, built-in presets, live preview and validated custom theme import and export. Include the Brains registry with PR-gated sync, structured log capture, sourced wiki browsing and search, a conflict inbox, and built-in manual and scheduled compilation with an entry-ID cursor and run history.
 
 Acceptance: Michael coordinates a change spanning two repositories, talks to each worker directly, selects commits for a history instruction, follows both PRs, and resumes after restarting the app. Failed checks and new comments reach the correct owner without duplicate assignments. Readiness always refers to the current head. A task’s log survives session replacement, becomes a sourced note after compilation, and can be retrieved by the other provider; conflicting decisions require a ruling and retries do not duplicate entries.
 
@@ -630,7 +652,7 @@ Release only after measuring the stated budgets, eliminating unexplained sustain
 
 ## Open decisions and evidence
 
-Validate during feasibility: GPUI interaction, accessibility and performance acceptance; a pinned GPUI version and upgrade strategy; exact minimum macOS version; supported Linux configurations for the headless host; the risks recorded in the standalone-host and remote-hosts designs, such as Local Network privacy for the launchd host; Claude SDK helper packaging and signing; shared versus per-session helpers; supported provider versions; recovery of in-flight turns; retention and cache limits; and permissions for automated feature-branch updates. Also validate supported Claude account-limit telemetry, accounting semantics for both runtimes, and treatment of unattributed native subagent usage. Rust and GPUI are the starting decision; Tauri is considered only if the prototype reveals concrete blockers. Validate existing brain-log file compatibility, stable entry identifiers and cursor migration, Markdown indexing limits, maintenance provider defaults, repository sync policy and schedule timezone behavior.
+Validate during feasibility: GPUI interaction, accessibility and performance acceptance; a pinned GPUI version and upgrade strategy; exact minimum macOS version; supported Linux configurations for the headless host; the risks recorded in the standalone-host and remote-hosts designs, such as Local Network privacy for the launchd host; Claude SDK helper packaging and signing; shared versus per-session helpers; supported provider versions; recovery of in-flight turns; retention and cache limits; and permissions for automated feature-branch updates. Also validate supported Claude account-limit telemetry, accounting semantics for both runtimes, and treatment of unattributed native subagent usage. Rust and GPUI are the starting decision; Tauri is considered only if the prototype reveals concrete blockers. Validate existing brain-log file compatibility, stable entry identifiers and cursor migration, Markdown indexing limits, maintenance provider defaults and schedule timezone behavior.
 
 Provider integration facts were checked against official documentation during this product discussion. They support the integration paths, not the performance targets:
 

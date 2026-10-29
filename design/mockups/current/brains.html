@@ -283,16 +283,16 @@ mark{background:color-mix(in srgb,var(--yellow) 30%,transparent);color:var(--tex
 </header>
 
 <details class="questions" open>
-  <summary>Questions this mockup leaves open for Michael</summary>
+  <summary>Decided by Michael on October 29, 2026, when he approved this mockup</summary>
   <ol>
-    <li><b>Where the browser lives.</b> Shown as one workspace page, filtered by a project chip, with the project's Memory panel as a summary that opens it. Should a project also get its own Brain destination, as the PRD's "project Brain destination" suggests?</li>
-    <li><b>Fixing a failed check.</b> The Inbox offers "Redact the line" (the host commits a fix to the batch branch, checks rerun) and "Not sensitive" (an inline allow marker a reviewer sees in the PR). Is amending an unmerged batch acceptable, given entries are append-only once on <code>main</code>?</li>
-    <li><b>Ruling path.</b> A ruling here writes a <code>decision</code> entry into the next log batch PR, and the wiki changes at the next compile. Should a ruling instead trigger a compile right away?</li>
-    <li><b>Ruling names.</b> The brief's uphold / keep / both / defer are shown as "Uphold existing", "Keep new", "Keep both" and "Defer". Are those the meanings you intend?</li>
-    <li><b>Personal and unowned repositories.</b> <code>MHohlios</code> and <code>celadon-theme</code> default to no brain. Should personal repositories log to <code>personal-brain</code>, which today holds only the journal?</li>
-    <li><b>Teammates' entries.</b> RB's and Oscar's entries come from the skill, so they have no Wiffletree ticket or conversation link. Is author plus PR enough, or should the skill record a session reference?</li>
-    <li><b>Search reach.</b> Search covers one brain, scoped to the project or the whole brain. Should it ever search Sage and Vyttle together?</li>
-    <li><b>Compiler host.</b> When Michael's Mac sleeps through a run, one catch-up run happens on wake. Can the compiler move to another Mac from this page, or only by changing the brain's settings in its repository?</li>
+    <li><b>Where the browser lives.</b> One workspace Brain page, filtered by project. A project's Memory panel is the summary that opens it; there is no separate project Brain destination.</li>
+    <li><b>Fixing a failed check.</b> Amending an unmerged batch is fine, either by redacting the line or by adding an inline allow marker. Entries become append-only once merged.</li>
+    <li><b>Ruling path.</b> A ruling writes a <code>decision</code> entry and starts a compile right away.</li>
+    <li><b>Ruling names.</b> "Uphold existing", "Keep new", "Keep both" and "Defer" stay as drawn.</li>
+    <li><b>Personal and unowned repositories.</b> They default to no brain.</li>
+    <li><b>Teammates' entries.</b> Author plus PR is enough for entries the skill writes.</li>
+    <li><b>Search reach.</b> Search never spans organizations: one brain at a time, scoped to a project or the whole brain.</li>
+    <li><b>Compiler host.</b> It can be changed from this page, but it is stored in a config file in the brain repository and changed through a PR, so every install agrees.</li>
   </ol>
 </details>
 
@@ -608,7 +608,7 @@ function conflictCard(c,compact){
   const ruled=state.rulings[c.id];
   const claim=L(c.claim[0]), ex=c.existing[0]&&L(c.existing[0]);
   const side=(label,text,l,fallback)=>`<div class="side-box"><div class="eyebrow">${label}</div>${esc(text)}<div class="small muted" style="margin-top:4px">${l?`<button class="anchor" data-act="log" data-log="${l.id}">${l.date} · ${people[l.author]}</button> ${verifyPill(l.verify)}`:esc(fallback)}</div></div>`;
-  const ruling=ruled?`<div class="recommend"><b>Ruled: ${RULINGS[ruled]}.</b> A decision entry joins this project’s next log batch PR; the wiki changes at the next compile. <button class="btn link" data-act="undo" data-conflict="${c.id}">Undo</button></div>`
+  const ruling=ruled?`<div class="recommend"><b>Ruled: ${RULINGS[ruled]}.</b> A decision entry was written and a compile started. <button class="btn link" data-act="undo" data-conflict="${c.id}">Undo</button></div>`
     :`<div class="recommend"><b>Recommended: ${RULINGS[c.rec]}.</b> ${esc(c.why)}</div><div class="ruling">${Object.entries(RULINGS).map(([k,v])=>`<button class="btn ghost ${k===c.rec?'rec':''}" data-act="rule" data-conflict="${c.id}" data-ruling="${k}">${v}</button>`).join('')}${compact?`<button class="btn link" data-act="conflict-open" data-conflict="${c.id}">Open evidence</button>`:''}</div>`;
   if(compact)return `<div class="card warn"><div class="t">${icon('brain')}<span>${esc(c.title)}</span></div><p>${esc(BRAINS[c.brain].name)} · note <button class="wikilink" data-act="note-open" data-note="${esc(c.note)}">${esc(c.note)}</button></p>${ruling}</div>`;
   return `<div class="conflict ${ruled?'done':''}"><div class="entry-head"><b>${esc(c.title)}</b><span class="pill yellow">conflict</span><span class="small muted">note <button class="wikilink" data-act="note" data-note="${esc(c.note)}">${esc(c.note)}</button> · ${esc(c.repo)}</span></div>
