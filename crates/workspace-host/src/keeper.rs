@@ -4531,15 +4531,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_keeper_review_that_passes_with_a_non_blocking_finding_asks_the_coordinator_to_triage() {
+    fn a_keeper_review_that_passes_with_a_non_blocking_finding_wakes_no_one_and_is_pushed() {
         let (mut f, r) = reviewing("true");
-        under_review(&mut f, &r);
+        let (_, after) = under_review(&mut f, &r);
         verdict(
             &mut f,
             "Correctness",
             "passed",
             json!([finding("non_blocking", "Nit")]),
         );
+        assert_eq!(f.ticket().ledger[0].status, EntryStatus::Noted);
+        assert!(cycle_messages(&f).is_empty(), "a noted entry needs no one");
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(after));
+    }
+
+    #[test]
+    fn a_keeper_review_that_passes_with_an_unevidenced_blocking_finding_asks_the_coordinator_to_triage()
+     {
+        let (mut f, r) = reviewing("true");
+        under_review(&mut f, &r);
+        let mut unevidenced = finding("blocking", "Maybe wrong");
+        unevidenced["evidence"] = json!("");
+        verdict(&mut f, "Correctness", "passed", json!([unevidenced]));
         let ticket = f.ticket();
         assert_eq!(ticket.ledger[0].status, EntryStatus::Untriaged);
         let outcome = format!("verification:{}:2:outcome", f.ticket);

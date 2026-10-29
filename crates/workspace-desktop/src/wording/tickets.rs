@@ -999,7 +999,7 @@ mod tests {
                 EntryStatus::FollowUp,
                 Some("Ticket later"),
             ),
-            entry("F5", Severity::NonBlocking, EntryStatus::Untriaged, None),
+            entry("F5", Severity::NonBlocking, EntryStatus::Noted, None),
         ];
 
         let lines = verification_lines(&ticket);

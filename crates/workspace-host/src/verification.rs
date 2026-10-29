@@ -184,14 +184,16 @@ fn check_findings(findings: &[ReportedFinding]) -> Result<()> {
     Ok(())
 }
 
-/// Each reported id must name an open, follow-up or won't-fix entry of the verifier's focus.
+/// Each reported id must name an open, noted, follow-up or won't-fix entry of the verifier's
+/// focus.
 fn check_ids(ticket: &Ticket, focus: &str, findings: &[ReportedFinding]) -> Result<()> {
     for id in findings.iter().filter_map(|f| f.id.as_deref()) {
         ensure!(
             ticket.ledger.iter().any(|e| e.id == id
                 && e.focus == focus
-                && (e.status == EntryStatus::Open || e.status.is_settled())),
-            "{id} is not an open, follow-up or won't-fix finding of {focus}; report a new finding without an id"
+                && (matches!(e.status, EntryStatus::Open | EntryStatus::Noted)
+                    || e.status.is_settled())),
+            "{id} is not an open, noted, follow-up or won't-fix finding of {focus}; report a new finding without an id"
         );
     }
     Ok(())
@@ -208,8 +210,9 @@ fn is_failing(ledger: &[LedgerEntry], reported: &ReportedFinding) -> bool {
 }
 
 /// Applies a completed check to the ledger: the focus's open entries it did not report again are
-/// fixed, an open entry it reports again stays open with the new report, and new findings are
-/// added. A settled entry reported again is left alone.
+/// fixed, an open entry it reports again stays open with the new report, a noted one becomes open
+/// when reported again as an evidenced blocking finding, and new findings are added. A settled
+/// entry reported again is left alone.
 fn record_findings(
     ticket: &mut Ticket,
     focus: &str,
@@ -221,8 +224,10 @@ fn record_findings(
     let status = |finding: &Finding| {
         if finding.is_evidenced_blocking() {
             EntryStatus::Open
-        } else {
+        } else if finding.severity == Severity::Blocking {
             EntryStatus::Untriaged
+        } else {
+            EntryStatus::Noted
         }
     };
     for entry in ledger
@@ -243,6 +248,9 @@ fn record_findings(
             Some(entry) => {
                 entry.finding = reported.finding.clone();
                 (entry.cycle, entry.round) = (cycle, round);
+                if entry.finding.is_evidenced_blocking() {
+                    entry.status = EntryStatus::Open;
+                }
             }
             None => {
                 let id = format!("F{}", ledger.len() + withdrawn + 1);
@@ -293,8 +301,12 @@ fn entry_text(entry: &LedgerEntry) -> String {
     )
 }
 
-/// The open and untriaged entries and the ids already decided, each as a paragraph.
-fn ledger_summary(ledger: &[LedgerEntry]) -> Vec<String> {
+/// The most noted entries a cycle's outcome message lists one line each.
+const NOTED_LINES: usize = 10;
+
+/// The open and untriaged entries, the noted entries `cycle` recorded, and the ids already
+/// decided or noted earlier, each as a paragraph.
+fn ledger_summary(ledger: &[LedgerEntry], cycle: u32) -> Vec<String> {
     let lines = |status: EntryStatus| {
         ledger
             .iter()
@@ -302,13 +314,16 @@ fn ledger_summary(ledger: &[LedgerEntry]) -> Vec<String> {
             .map(|e| format!("- {}", entry_line(e)))
             .collect::<Vec<_>>()
     };
+    let noted: Vec<&LedgerEntry> = ledger
+        .iter()
+        .filter(|e| e.status == EntryStatus::Noted && e.cycle == cycle)
+        .collect();
     let decided: Vec<&str> = ledger
         .iter()
-        .filter(|e| {
-            matches!(
-                e.status,
-                EntryStatus::FixNow | EntryStatus::FollowUp | EntryStatus::WontFix
-            )
+        .filter(|e| match e.status {
+            EntryStatus::FixNow | EntryStatus::FollowUp | EntryStatus::WontFix => true,
+            EntryStatus::Noted => e.cycle != cycle,
+            _ => false,
         })
         .map(|e| e.id.as_str())
         .collect();
@@ -321,8 +336,24 @@ fn ledger_summary(ledger: &[LedgerEntry]) -> Vec<String> {
             paragraphs.push(format!("{title}:\n{}", lines.join("\n")));
         }
     }
+    if !noted.is_empty() {
+        let mut lines: Vec<String> = (noted.iter().take(NOTED_LINES))
+            .map(|e| format!("- {}", entry_line(e)))
+            .collect();
+        if noted.len() > NOTED_LINES {
+            lines.push(format!(
+                "and {} more in workspace_context",
+                noted.len() - NOTED_LINES
+            ));
+        }
+        paragraphs.push(format!(
+            "Noted findings ({}), not blocking:\n{}",
+            noted.len(),
+            lines.join("\n")
+        ));
+    }
     if !decided.is_empty() {
-        paragraphs.push(format!("Already decided: {}", decided.join(", ")));
+        paragraphs.push(format!("Already decided or noted: {}", decided.join(", ")));
     }
     paragraphs
 }
@@ -753,8 +784,8 @@ impl Host {
         })
     }
     /// Records the coordinator's decision on each named entry, all or none, and wakes nobody. An
-    /// untriaged entry takes any decision; an open one, already routed for a fix, only follow-up
-    /// or won't-fix, which overrules it. A decision never changes.
+    /// untriaged or noted entry takes any decision; an open one, already routed for a fix, only
+    /// follow-up or won't-fix, which overrules it. A decision never changes.
     pub(crate) fn triage_findings(
         &mut self,
         ticket_id: &str,
@@ -778,7 +809,7 @@ impl Host {
                 "Decide {id} with fix_now, follow_up or wont_fix"
             );
             match entry.status {
-                EntryStatus::Untriaged => {}
+                EntryStatus::Untriaged | EntryStatus::Noted => {}
                 EntryStatus::Open => ensure!(
                     triage.decision != EntryStatus::FixNow,
                     "{id} is open and already routed to the implementer; overrule it only with follow_up or wont_fix"
@@ -836,6 +867,18 @@ impl Host {
             memory.push(format!(
                 "Already decided; do not re-raise unless the cited code changed:\n{}",
                 decided.join("\n")
+            ));
+        }
+        let noted: Vec<String> = ticket
+            .ledger
+            .iter()
+            .filter(|e| e.status == EntryStatus::Noted)
+            .map(|e| format!("- {}", entry_line(e)))
+            .collect();
+        if !noted.is_empty() {
+            memory.push(format!(
+                "Already noted; do not raise again. Report one by its id only if you now have an evidenced blocking finding about it:\n{}",
+                noted.join("\n")
             ));
         }
         let memory = memory.join("\n");
@@ -1202,7 +1245,7 @@ impl Host {
         );
         // The cycle ends here, so its message already lists orphaned entries as untriaged.
         untriage_orphans(verification, &mut ticket.ledger);
-        let ledger = ledger_summary(&ticket.ledger);
+        let ledger = ledger_summary(&ticket.ledger, cycle);
         let skipped = (verification.skipped.iter())
             .map(|s| {
                 format!(
@@ -1270,21 +1313,21 @@ impl Host {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let next = if ticket
-                .ledger
-                .iter()
-                .any(|e| e.status == EntryStatus::Untriaged)
-            {
+            let mut next = if (ticket.ledger.iter()).any(|e| e.status == EntryStatus::Untriaged) {
                 "Triage the untriaged findings with triage_findings, then accept the ticket."
+                    .to_owned()
             } else {
-                "Accept the ticket."
+                "Accept the ticket.".to_owned()
             };
+            if (ticket.ledger.iter()).any(|e| e.status == EntryStatus::Noted && e.cycle == cycle) {
+                next.push_str(" To fix a noted finding first, mark it fix_now with triage_findings, send it to the implementer and verify again.");
+            }
             let mut parts = vec![format!(
                 "Wiffletree verification of ticket \"{}\" ({}) passed in {rounds}; verified commit {}.\n{passes}{skipped}",
                 ticket.title, ticket.id, round.commit
             )];
             parts.extend(ledger);
-            parts.push(next.into());
+            parts.push(next);
             (VerificationOutcome::Passed, paragraphs(parts))
         };
         let id = format!("verification:{}:{cycle}:outcome", ticket.id);
@@ -1301,7 +1344,7 @@ impl Host {
         ticket.end_unreviewed();
         self.save_ticket(&ticket)?;
         // A keeper review that passed wakes the coordinator only to triage or to hear of a
-        // skipped verifier, and is pushed.
+        // skipped verifier, not for noted entries, and is pushed.
         let untriaged = ticket
             .ledger
             .iter()

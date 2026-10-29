@@ -168,6 +168,7 @@ fn open_findings_are_those_neither_fixed_nor_settled() {
         entry("F4", EntryStatus::Fixed),
         entry("F5", EntryStatus::FollowUp),
         entry("F6", EntryStatus::WontFix),
+        entry("F7", EntryStatus::Noted),
     ];
     let open: Vec<&str> = ticket
         .open_findings()

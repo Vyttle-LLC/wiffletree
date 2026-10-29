@@ -1359,7 +1359,7 @@ mod tests {
             [Change::SavedRules, previous.clone()]
         );
         let (_, latest) = host.skills().history(Skill::Reviewing).pop().unwrap();
-        assert_eq!(latest.stock_version, "v1");
+        assert_eq!(latest.stock_version, "v2");
         assert_eq!(latest.edits.rules, "Read the tests first");
         // The new stock text is sent with the same rules, and nothing else gains an entry.
         let reviewing = host.skills().state(Skill::Reviewing);
@@ -1380,17 +1380,17 @@ mod tests {
         host.skills()
             .save_rules(Skill::Coordinating, "Rule")
             .unwrap();
-        // The other machine, on v4, recorded its new stock version in the shared history.
+        // The other machine, on v5, recorded its new stock version in the shared history.
         let (name, _) = host.skills().history(Skill::Coordinating).remove(0);
         let history = host.shared().skills_folder().join("coordinating/history");
         let entry = fs::read_to_string(history.join(format!("{name}.json"))).unwrap();
-        let entry = entry.replace("\"v3\"", "\"v4\"");
+        let entry = entry.replace("\"v4\"", "\"v5\"");
         fs::write(history.join("2099-01-01T00-00-00.000Z.json"), entry).unwrap();
         drop(host);
         let host = Host::open(home.path()).unwrap();
         assert_eq!(host.skills().history(Skill::Coordinating).len(), 2);
         let states = host.skill_states().unwrap();
-        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v4"));
+        assert_eq!(states[0].newer_stock_version.as_deref(), Some("v5"));
         assert_eq!(states[1].newer_stock_version, None);
     }
 
@@ -1426,7 +1426,7 @@ mod tests {
         );
         assert_eq!(
             (rewrite.base_version.as_str(), rewrite.out_of_date),
-            ("v3", false)
+            ("v4", false)
         );
         assert_eq!(started.rules, "");
         assert!(!coordinating(&host, "additions.md").exists());
@@ -1558,7 +1558,7 @@ mod tests {
         let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
         assert_eq!(
             (rewrite.base_version.as_str(), rewrite.out_of_date),
-            ("v3", true)
+            ("v4", true)
         );
     }
 
@@ -1872,7 +1872,7 @@ mod tests {
     /// rewrite and base as written.
     fn rewritten_against_v0(host: &Host) -> Rewritten {
         let stock = stock(Skill::Coordinating);
-        let base = (stock.replacen("— v3", "— v0", 1)).replacen(FIFTH, "Ask the human when", 1);
+        let base = (stock.replacen("— v4", "— v0", 1)).replacen(FIFTH, "Ask the human when", 1);
         let text = base.replacen("Start by clarifying", "Start by restating", 1);
         let text = format!("{}  ", text.trim_end());
         host.skills().start_rewrite(Skill::Coordinating).unwrap();
@@ -1920,7 +1920,7 @@ mod tests {
         else {
             panic!("{recorded:?}")
         };
-        assert_eq!((from.as_str(), to.as_str()), ("v0", "v3"));
+        assert_eq!((from.as_str(), to.as_str()), ("v0", "v4"));
         assert_eq!((recorded_before, model), (before.clone(), None));
         assert_eq!((machine, automatic), (sync::machine_name(), false));
         let sources: Vec<_> = merged_changes.iter().map(|change| change.source).collect();
@@ -1937,7 +1937,7 @@ mod tests {
         );
         let undid = Change::UndidMerge {
             entry,
-            to: "v3".into(),
+            to: "v4".into(),
         };
         assert_eq!(changes(&host, Skill::Coordinating).last(), Some(&undid));
         assert!(
@@ -2035,12 +2035,12 @@ mod tests {
                 .out_of_date
         );
         // A base from a newer release is sent as written, neither out of date nor merged.
-        based_on_an_earlier_release(&host, &stock.replacen("— v3", "— v4", 1));
+        based_on_an_earlier_release(&host, &stock.replacen("— v4", "— v5", 1));
         assert!(!host.skill_merge_due(Skill::Coordinating).unwrap());
         let rewrite = host.skills().state(Skill::Coordinating).rewrite.unwrap();
         assert_eq!(
             (rewrite.base_version.as_str(), rewrite.out_of_date),
-            ("v4", false)
+            ("v5", false)
         );
         assert!(
             host.instructions(Role::ProjectOrchestrator)
@@ -2219,7 +2219,7 @@ mod tests {
         let note = MergeNote {
             entry: entry.clone(),
             from: "v0".into(),
-            to: "v3".into(),
+            to: "v4".into(),
             from_update: 2,
             by_model: 0,
             model: None,
@@ -2303,15 +2303,15 @@ mod tests {
         };
         let merged = execute(&mut host, merge.clone()).unwrap();
         assert!(!merged.rewrite.unwrap().out_of_date);
-        assert_eq!(merged.merge_note.unwrap().from, "v3");
+        assert_eq!(merged.merge_note.unwrap().from, "v4");
         // Up to date, or based on a newer release, there is nothing to merge.
         let refused = execute(&mut host, merge.clone()).unwrap_err().to_string();
-        assert_eq!(refused, "Your rewrite is already based on v3");
-        based_on_an_earlier_release(&host, &stock.replacen("— v3", "— v4", 1));
+        assert_eq!(refused, "Your rewrite is already based on v4");
+        based_on_an_earlier_release(&host, &stock.replacen("— v4", "— v5", 1));
         let refused = execute(&mut host, merge).unwrap_err().to_string();
         assert_eq!(
             refused,
-            "Your rewrite is based on v4, not an earlier version than v3"
+            "Your rewrite is based on v5, not an earlier version than v4"
         );
         let state = coordinating_state(&host);
         assert_eq!(
@@ -2434,7 +2434,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         }
 
         host.finish_merge_run(run, Ok(answered));
-        let text = (before.text.replacen("— v0", "— v3", 1)).replacen(&passage.yours, &merged, 1);
+        let text = (before.text.replacen("— v0", "— v4", 1)).replacen(&passage.yours, &merged, 1);
         let stock = stock(Skill::Coordinating);
         assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
         let (_, entry) = host.skills().history(Skill::Coordinating).pop().unwrap();
@@ -2478,7 +2478,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let cases = [
             (
                 json!({"passages": [merged("1", &too_long)]}),
-                "The model's text for passage 1 was longer than v3's version and yours together.",
+                "The model's text for passage 1 was longer than v4's version and yours together.",
             ),
             (json!({"passages": []}), once),
             (
@@ -2609,7 +2609,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         );
         assert_eq!(
             refused.unwrap_err().to_string(),
-            "Choose one wording for each passage your rewrite and v3 both change"
+            "Choose one wording for each passage your rewrite and v4 both change"
         );
 
         let stock = stock(skill);
@@ -2623,7 +2623,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         )
         .unwrap();
         assert_eq!(kept.merge_standing, None);
-        let text = before.text.replacen("— v0", "— v3", 1);
+        let text = before.text.replacen("— v0", "— v4", 1);
         assert_eq!(current(&host), [text.as_bytes(), stock.as_bytes()]);
         let (entry, _) = host.skills().history(skill).pop().unwrap();
         execute(&mut host, Command::UndoSkillMerge { skill, entry }).unwrap();
@@ -2721,11 +2721,11 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         else {
             panic!("{asked:?}")
         };
-        assert_eq!((&**to, &**into), ("v3", stock(skill)));
+        assert_eq!((&**to, &**into), ("v4", stock(skill)));
         assert_eq!(asked.edits.rewrite.as_ref(), Some(&before));
         let question = SkillQuestion {
             skill,
-            to: "v3".into(),
+            to: "v4".into(),
             other_changes: 2,
             model: profile.clone(),
             passages: vec![QuestionedPassage {
@@ -2772,7 +2772,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         };
         let kept = execute(&mut host, keep).unwrap();
         assert!(host.take_merge_runs().is_empty());
-        let text = (before.text.replacen("— v0", "— v3", 1)).replacen(&first.yours, &merged, 1);
+        let text = (before.text.replacen("— v0", "— v4", 1)).replacen(&first.yours, &merged, 1);
         assert_eq!(current(&host), [text.as_bytes(), stock(skill).as_bytes()]);
         let (entry, merge) = host.skills().history(skill).pop().unwrap();
         let Change::Merged { changes, model, .. } = merge.change else {
@@ -2824,7 +2824,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         };
         execute(&mut host, take).unwrap();
         let text =
-            (before.text.replacen("— v0", "— v3", 1)).replacen(&passage.yours, &passage.stock, 1);
+            (before.text.replacen("— v0", "— v4", 1)).replacen(&passage.yours, &passage.stock, 1);
         assert_eq!(current(&host), [text.as_bytes(), stock(skill).as_bytes()]);
         let (_, merge) = host.skills().history(skill).pop().unwrap();
         let Change::Merged { changes, .. } = merge.change else {
@@ -2951,7 +2951,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let entry = asked_on_another_mac(&overlapping, stock(skill));
         write_entry(&mut host, "2090-01-01T00-00-01.000Z", &entry);
         assert!(coordinating_state(&host).question.is_some());
-        let newer = stock(skill).replacen("— v3", "— v4", 1);
+        let newer = stock(skill).replacen("— v4", "— v5", 1);
         based_on_an_earlier_release(&host, &newer);
         let state = coordinating_state(&host);
         assert_eq!(
@@ -2984,9 +2984,9 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         // A later entry that is not a merge.
         let later = Entry {
             change: Change::NewStockVersion {
-                previous: "v3".into(),
+                previous: "v4".into(),
             },
-            stock_version: "v4".into(),
+            stock_version: "v5".into(),
             ..entry
         };
         write_entry(&mut host, "2999-01-01T00-00-00.000Z", &later);
@@ -3027,7 +3027,7 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let from_update = merge::MergedChange {
             source: merge::Source::Update,
             before: "# Coordinating — v0\n".into(),
-            after: "# Coordinating — v3\n".into(),
+            after: "# Coordinating — v4\n".into(),
         };
         let paragraph = before.text.split("\n\n").nth(1).unwrap().to_owned() + "\n\n";
         let by_model = merge::MergedChange {
@@ -3054,14 +3054,14 @@ emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '', '
         let entry = Entry {
             change: Change::Merged {
                 from: "v0".into(),
-                to: "v3".into(),
+                to: "v4".into(),
                 before: before.clone(),
                 changes: vec![from_update, by_model],
                 model: Some(model.clone()),
                 machine: "Mike's MacBook Air".into(),
                 automatic: true,
             },
-            stock_version: "v3".into(),
+            stock_version: "v4".into(),
             edits: Edits {
                 rules: String::new(),
                 rewrite: Some(rewrite.clone()),
