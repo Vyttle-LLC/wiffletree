@@ -1,12 +1,14 @@
 ## 1. Core types and storage
 
-- [ ] 1.1 Add `Brain`, `BrainMapping` (owner defaults and repository overrides), `BrainConfig` (`wiffletree-brain.json` v1) and `BrainBatch` (kind, source project, branch, PR, stage, checks) to `crates/workspace-core/src/lib.rs`.
-- [ ] 1.2 Add `crates/workspace-host/src/brains.sql`: `brains`, `brain_owner_map`, `brain_repo_map`, `brain_batches`, `brain_batch_checks`. Add a migration that drops `Project.brain` and records earlier attached paths as suggestions. Test that a stored project with `brain` set loads without it and that its path is offered.
+Depends on `assistant-spaces-jobs-boards`' Spaces (stage 1), which name each Space's brain.
 
-## 2. Registry, mapping and config
+- [ ] 1.1 Add `Brain`, `BrainConfig` (`wiffletree-brain.json` v1) and `BrainBatch` (kind, source project or thread, branch, PR, stage, checks) to `crates/workspace-core/src/lib.rs`.
+- [ ] 1.2 Add `crates/workspace-host/src/brains.sql`: `brains` (with each brain's push grant), `brain_batches`, `brain_batch_checks`. Hook the `spaces` upgrade so an earlier `Project.brain` with a GitHub `origin` becomes its Space's brain, waiting for the grant. Test the upgrade with and without a GitHub `origin`.
 
-- [ ] 2.1 `brains.rs`: add, remove and list brains (human client only). Find the push URL as the settings repository does, and clone into `<workspaces folder>/brains/<name>` with the managed marker. Refuse a path named by the legacy pointer. Test that agents have no tool for any of these.
-- [ ] 2.2 Mapping: owner defaults, repository overrides, reset, and removal clearing mappings. Derive a project's brains from its repositories. Test owner default, override, reset and personal repositories.
+## 2. Registry and config
+
+- [ ] 2.1 `brains.rs`: build the registry from the brains this machine's Spaces name. A brain is confirmed (granted) by the human only, and leaves the registry with its clone when no Space names it. Find the push URL as the settings repository does, and clone into `<workspaces folder>/brains/<name>` with the managed marker. Refuse a path named by the legacy pointer. Test that agents have no tool for any of these, and that two Spaces naming one brain register it once.
+- [ ] 2.2 Resolve a project's brain from its Space, a thread's or job run's from its own Space, and a `create_project` project's from its creator's Space. Suggest a brain from the code repositories' GitHub owner when a Space is created, pre-filled only. Test the resolution cases and that personal repositories suggest no brain.
 - [ ] 2.3 Read `wiffletree-brain.json` from `main` only. Validate the JSON, the folder and the version. Set up opens one PR with the config file and `brain-gate`'s caller, `gate` config and `CODEOWNERS` lines (`brain-gate` task 4.1). Compiler changes open a config-only batch, keeping unknown keys. Test the missing, invalid and newer-version cases.
 
 ## 3. Checkout and batches
@@ -23,7 +25,7 @@
 
 ## 5. Desktop
 
-- [ ] 5.1 Add Brains to the sidebar's Workspace section. The Brains page shows the brain cards, the PR gate list with checks per batch, and the mapping with overrides, following `design/mockups/current/brains.html`. Add brain, Remove, Sync now, Set up and the compiler change. Show the warnings for auto-merge, required checks and the legacy pointer.
+- [ ] 5.1 Add Brains to the sidebar's Workspace section. The Brains page shows the brain cards with the Spaces that name each, and the PR gate list with checks per batch, following `design/mockups/current/brains.html` minus its superseded repository mapping. It offers Sync now, Set up, the compiler change, the grant confirmation and links to each Space's settings. Show the warnings for auto-merge, required checks and the legacy pointer.
 - [ ] 5.2 Remove the attach-brain control from `memory_view.rs`. The Memory panel shows "No brain" with a link to the Brains page; its full summary arrives in `brain-browser`.
 
 ## 6. Docs and checks

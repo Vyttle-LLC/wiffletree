@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Stable scoped milestones
-Logs SHALL carry project, ticket, session, milestone identity, type, title, reference, changed, why and state, and the host SHALL also record the entry's id, brain, repository folder, author, provider, model and machine. Repeated identical capture under one session and milestone identity SHALL return the original record, and changed content under the same identity SHALL fail. A capture without a milestone identity SHALL always create a new entry. Retrieval SHALL NOT expose another project's entries through a project's own views; the brain browser shows a brain's entries only within the scope rules of `brain-browser`.
+Logs SHALL carry project, ticket, session, milestone identity, type, title, reference, changed, why and state, and the host SHALL also record the entry's id, Space, brain, repository folder, author, provider, model and machine, and for an assistant thread its thread id. Repeated identical capture under one session and milestone identity SHALL return the original record, and changed content under the same identity SHALL fail. A capture without a milestone identity SHALL always create a new entry. Retrieval SHALL NOT expose another project's entries through a project's own views; the brain browser shows a brain's entries only within the scope rules of `brain-browser`.
 
 #### Scenario: Same day milestones
 - **WHEN** a session captures two milestones on one day and repeats the first
@@ -21,25 +21,40 @@ Logs SHALL carry project, ticket, session, milestone identity, type, title, refe
 **Reason**: The export it describes is removed, and with it the maintenance runs. Compilation becomes scheduled compile runs on the brain's compiler host, specified in the `brain-compile` change.
 **Migration**: `maintenance_runs` is dropped after migrating. `brain-compile` specifies compile runs, their history and the rule that a run with nothing pending makes no model call.
 
+### Requirement: Brain pushes from several people
+**Reason**: Michael decided on October 29, 2026 that PR-gated writes supersede `assistant-spaces-jobs-boards`' defaulted decision (c). Brain writes reach `main` only through gated PRs, with one file per entry, so the host never fetches, rebases and pushes `main`, and never merges shared log files as a union.
+**Migration**: The requirements "Entries follow the per-entry file contract" and "Entries reach the brain in batches" here, and `brain-registry`'s batch flow, replace it. This removal applies once `assistant-spaces-jobs-boards` has been archived with the requirement.
+
 ## ADDED Requirements
 
 ### Requirement: Agents log work through the log_work tool
-The host SHALL offer a `log_work` MCP tool to the project coordinator and to implementers, and SHALL NOT offer it to testers, reviewers or the PR keeper. The tool SHALL take `type` (`decision` or `observation`), `title` (one line of at most 80 characters), `changed`, `why` and `state` (each folded to one line), and optionally `repository` and `milestone`. An implementer's entry SHALL be for its ticket's repository, and a `repository` it names SHALL be refused. A coordinator MAY name one of its project's repositories; without one, the entry SHALL be a planning entry in the folder named after the brain repository. The tool SHALL refuse, storing nothing, when no brain applies, when the coordinator's project has more than one brain and no repository is named, or when gh reports no GitHub login. The human's capture form in the Memory panel SHALL use the same path as the project coordinator.
+The host SHALL offer a `log_work` MCP tool to the project coordinator, implementers and assistant threads, and SHALL NOT offer it to testers, reviewers, the PR keeper or job runs. The tool SHALL take `type` (`decision` or `observation`), `title` (one line of at most 80 characters), `changed`, `why` and `state` (each folded to one line), and optionally `repository` and `milestone`.
+
+The entry's brain SHALL be the brain of the caller's Space: the project's Space for a coordinator or implementer, and the thread's own Space for an assistant thread (`brain-registry`, "A project's brain comes from its Space"). Its folder SHALL be chosen as follows:
+- An implementer's entry SHALL be for its ticket's repository, and a `repository` it names SHALL be refused.
+- A coordinator MAY name one of its project's repositories; without one, the entry SHALL be a planning entry in the folder named after the brain repository.
+- An assistant thread's entries SHALL go in the `assistant` folder, and a `repository` it names SHALL be refused.
+
+The tool SHALL refuse, storing nothing, when the caller's Space has no brain or when gh reports no GitHub login. The human's capture form in the Memory panel SHALL use the same path as the project coordinator.
 
 #### Scenario: An implementer logs
 - **WHEN** the implementer of a `sagechat-call-watch-relay` ticket calls `log_work` with a decision, title and the three fields
 - **THEN** the host stores one entry for `sagechat-call-watch-relay` in `sagehaven-docs`'s open batch for that ticket, and returns its id and file path
 
 #### Scenario: No brain
-- **WHEN** an implementer in a `celadon-website` ticket, whose repository maps to no brain, calls `log_work`
-- **THEN** the call is refused, saying the repository maps to no brain, and nothing is stored
+- **WHEN** an implementer in a project whose Space names no brain calls `log_work`
+- **THEN** the call is refused, saying the project's Space has no brain, and nothing is stored
+
+#### Scenario: An assistant thread logs
+- **WHEN** an assistant thread in the Vyttle Space calls `log_work`
+- **THEN** the host stores one entry in `vyttle-docs` at `second-brain/logs/assistant/YYYY/MM/YYYY-MM-DD-<id>.md` with `repo: assistant`, and records the thread's id and Space on the stored entry
 
 #### Scenario: A reviewer has no tool
 - **WHEN** the host builds a reviewer's tool list
 - **THEN** `log_work` is not in it
 
 ### Requirement: The host fills in what the agent cannot know
-The host SHALL mint the entry's id as a lowercase ULID and take its date from the host's local date. It SHALL set `author` to the GitHub login gh reports on this machine and `source` to `wiffletree`. It SHALL compute `ref` from the ticket's worktree: `<branch> @ <sha>` for one commit since the ticket's base, `<branch> @ <first>…<last>` for several, `<branch> @ —` when there is no commit yet, and `—` for a coordinator entry with no repository, appending ` · PR #NN` when the ticket has a known PR. SHAs SHALL be 7 lowercase hex characters. The tool SHALL NOT accept `ref`, `author`, `source`, `id` or a date from the agent. The host SHALL record the provider, model, machine, project, ticket and session on the stored entry.
+The host SHALL mint the entry's id as a lowercase ULID and take its date from the host's local date. It SHALL set `author` to the GitHub login gh reports on this machine and `source` to `wiffletree`. It SHALL compute `ref` from the ticket's worktree: `<branch> @ <sha>` for one commit since the ticket's base, `<branch> @ <first>…<last>` for several, `<branch> @ —` when there is no commit yet, and `—` for a coordinator entry with no repository or an assistant thread's entry, appending ` · PR #NN` when the ticket has a known PR. SHAs SHALL be 7 lowercase hex characters. The tool SHALL NOT accept `ref`, `author`, `source`, `id` or a date from the agent. The host SHALL record the provider, model, machine, Space, project, ticket, session and, for a thread, the thread's id on the stored entry.
 
 #### Scenario: A branch with commits and a PR
 - **WHEN** a ticket's branch `wiffletree/retry-telnyx-timeout` has two commits since its base and PR #92 is open
@@ -50,7 +65,7 @@ The host SHALL mint the entry's id as a lowercase ULID and take its date from th
 - **THEN** the entry's `ref` is `<branch> @ —`
 
 ### Requirement: Entries follow the per-entry file contract
-Each entry SHALL be rendered as one file at `<brain folder>/logs/<repo>/YYYY/MM/YYYY-MM-DD-<id>.md`, in exactly the gate's entry contract: frontmatter with exactly `id`, `repo`, `author` and `source`, then the `## YYYY-MM-DD — Title` heading and the five fields `type`, `ref`, `changed`, `why` and `state` in that order. `<repo>` SHALL be the GitHub repository's name, and names the contract forbids SHALL be refused. The host SHALL refuse an entry whose rendered body exceeds 2,000 characters, saying how many characters to cut, and SHALL NOT truncate an agent's entry. A merged entry file SHALL never be changed by the host.
+Each entry SHALL be rendered as one file at `<brain folder>/logs/<repo>/YYYY/MM/YYYY-MM-DD-<id>.md`, in exactly the gate's entry contract: frontmatter with exactly `id`, `repo`, `author` and `source`, then the `## YYYY-MM-DD — Title` heading and the five fields `type`, `ref`, `changed`, `why` and `state` in that order. `<repo>` SHALL be the GitHub repository's name, or `assistant` for an assistant thread's entry; names the contract forbids SHALL be refused. No assistant thread SHALL write the rolling file `logs/assistant.md`. The host SHALL refuse an entry whose rendered body exceeds 2,000 characters, saying how many characters to cut, and SHALL NOT truncate an agent's entry. A merged entry file SHALL never be changed by the host.
 
 #### Scenario: Rendering
 - **WHEN** an entry is stored for `sagechat-app-watchos` on October 29, 2026
@@ -61,7 +76,7 @@ Each entry SHALL be rendered as one file at `<brain folder>/logs/<repo>/YYYY/MM/
 - **THEN** the call is refused, saying to cut at least 450 characters, and nothing is stored
 
 ### Requirement: Entries reach the brain in batches
-The host SHALL collect entries into batches: an implementer's entries per brain and ticket, and the coordinator's and the human's entries per brain and coordinator session. A batch SHALL close and go to the brain's batch flow (`brain-registry`) when its ticket is accepted or closed, when its session is archived, 24 hours after its first entry, or when the human presses Send now. A batch SHALL hold at most 50 entries. An entry captured after its batch closed, or beyond 50, SHALL start a new batch. A batch's PR SHALL only add entry files.
+The host SHALL collect entries into batches: an implementer's entries per brain and ticket, the coordinator's and the human's entries per brain and coordinator session, and an assistant thread's entries per brain and thread. A batch SHALL close and go to the brain's batch flow (`brain-registry`) when its ticket is accepted or closed, when its session is archived or its thread deleted, 24 hours after its first entry, or when the human presses Send now. A batch SHALL hold at most 50 entries. An entry captured after its batch closed, or beyond 50, SHALL start a new batch. A batch's PR SHALL only add entry files.
 
 #### Scenario: One PR per ticket
 - **WHEN** an implementer logs three entries and the coordinator then accepts the ticket
@@ -72,7 +87,7 @@ The host SHALL collect entries into batches: an implementer's entries per brain 
 - **THEN** its batch opens its PR 24 hours after that entry
 
 ### Requirement: Milestones prompt one log entry
-When an implementer's `report` of kind ready_for_testing, or a successful `accept_ticket` or `publish_ticket`, concerns a ticket whose repository maps to a brain, and the calling session has made no `log_work` call for that ticket since its previous prompted milestone, the tool result SHALL end with one line asking for one terse `log_work` call for this milestone. Each milestone SHALL be prompted at most once, and no prompt SHALL be added when no brain applies.
+When an implementer's `report` of kind ready_for_testing, or a successful `accept_ticket` or `publish_ticket`, concerns a ticket whose project's Space has a brain, and the calling session has made no `log_work` call for that ticket since its previous prompted milestone, the tool result SHALL end with one line asking for one terse `log_work` call for this milestone. Each milestone SHALL be prompted at most once, and no prompt SHALL be added when no brain applies.
 
 #### Scenario: Ready for testing
 - **WHEN** an implementer reports ready_for_testing without having logged for its ticket
@@ -101,8 +116,8 @@ For each brain whose `main` holds legacy `logs/<repo>.md` files, the Brains page
 - **THEN** its entry file fits the cap, keeps its heading and fields, and points to the legacy file at the imported commit
 
 ### Requirement: Existing captured logs carry over
-On upgrade, every stored `work_logs` row SHALL be kept and gain the new fields. A row with an export receipt SHALL be marked as in a legacy file and SHALL NOT be written again. A row never exported SHALL be queued into a batch when its project has a brain, and otherwise SHALL be listed as unsent in the project's Memory panel until a brain applies. The host's export command, the export receipts and the maintenance runs SHALL be removed.
+On upgrade, every stored `work_logs` row SHALL be kept and gain the new fields. A row with an export receipt SHALL be marked as in a legacy file and SHALL NOT be written again. A row never exported SHALL be queued into a batch when its project's Space has a brain, and otherwise SHALL be listed as unsent in the project's Memory panel until a brain applies. The host's export command, the export receipts and the maintenance runs SHALL be removed.
 
 #### Scenario: An unexported row
-- **WHEN** a project has one row that was never exported and its repository maps to `vyttle-docs`
+- **WHEN** a project has one row that was never exported and its Space names `vyttle-docs`
 - **THEN** after the upgrade that row is in an open batch for `vyttle-docs`, and nothing is written to `logs/wiffletree.md`

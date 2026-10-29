@@ -92,7 +92,7 @@ The host SHALL then write the cursor and `reconcile-queue.md` itself. A failed c
 
 ### Requirement: Conflicts are Inbox cards with a ruling
 The host SHALL record each queued conflict with a stable id, the rule it hit, the claim's entry id, what it conflicts with, evidence lines and a recommended ruling with one line of reasoning. It SHALL export the open conflicts to `reconcile-queue.md` in the compile PR, one block each, marked `<!-- conflict:<id> -->`. Every install SHALL show the conflicts from `reconcile-queue.md` on `main`:
-- as a card in the Inbox of each project whose repositories map to the brain and include the claim's repository;
+- as a card in the Inbox of each project in a Space that names the brain whose repositories include the claim's repository;
 - on the Brains page when no project matches;
 - in the brain browser's Conflicts view.
 

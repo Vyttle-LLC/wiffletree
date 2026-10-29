@@ -50,28 +50,30 @@ The frontmatter has exactly these four keys. The body, everything after the fron
    - `type`: `decision` or `observation`.
    - `title`: at most 80 characters, one line.
    - `changed`, `why`, `state`: one line each; newlines are folded into spaces.
-   - `repository`: optional. A worker always logs for its ticket's repository. The coordinator may name one of its project's repositories; without one, the entry is a planning entry under the brain repository's own folder (for example `logs/sagehaven-docs/`).
+   - `repository`: optional, and it only chooses the folder. A worker always logs for its ticket's repository. The coordinator may name one of its project's repositories; without one, the entry is a planning entry under the brain repository's own folder (for example `logs/sagehaven-docs/`). An assistant thread always logs to `logs/assistant/`.
    - `milestone`: optional. A deduplication key; a repeat with the same key and the same content returns the first entry, and with different content it is refused, as today.
-3. **Which brain.** The entry's repository maps to its brain (`brain-registry`). A coordinator planning entry goes to the project's only brain. When the project has more than one brain, the coordinator must name a repository. When no brain applies, the tool refuses and nothing is stored. Silently holding entries for a brain that may never be mapped would hide them.
+3. **Which brain** (decided by Michael, 2026-10-29): the caller's Space's brain. That is the project's Space for coordinators and implementers, and the thread's own Space for assistant threads. A project therefore has one brain at most, whatever repositories it covers, and a project made with `create_project` uses its creator's Space. When the Space has no brain, the tool refuses and nothing is stored. Silently holding entries for a brain that may never be named would hide them.
+   - **Assistant entries** use the per-entry contract, in `logs/assistant/YYYY/MM/YYYY-MM-DD-<id>.md` with `repo: assistant` and `ref: —`. They replace the rolling `logs/assistant.md` that `assistant-spaces-jobs-boards` proposed. The thread's id and Space stay in the host store.
+   - **Job runs** do not get `log_work`; their output is a file in the Space's storage.
 4. **The repository folder** is the GitHub repository's name from the workspace repository's `origin`, so two clones of one repository share a folder. A repository with no GitHub name uses its workspace name, and the host refuses names the contract forbids.
 5. **The date** is the host's local date when the entry is captured. The ULID is minted then, so ids sort by capture time.
 6. **The `ref` is computed by the host from the ticket's worktree**:
    - with commits since the ticket's base: `<branch> @ <first>…<last>`, or `<branch> @ <sha>` for one commit, using 7-character SHAs;
    - with uncommitted work only: `<branch> @ —`;
    - with a known open or merged PR: ` · PR #NN` appended;
-   - for coordinator entries with no repository: `—`.
+   - for coordinator entries with no repository, and for assistant entries: `—`.
 
    Agents cannot supply `ref`, so it cannot be invented.
 7. **The author** is the GitHub login gh reports on this machine, read once and refreshed when gh's login changes. Without a login, the tool refuses and names the fix (sign gh in), because the gate rejects an invalid author.
 8. **The cap** is checked on the exact rendered body, using the same 2,000-character limit. The error says how many characters to cut. The host does not truncate an agent's entry silently.
 9. **Batches:**
-   - Workers' entries collect per brain and ticket; the coordinator's and the human's entries per brain and coordinator session.
-   - A batch closes and goes to `brain-registry-sync` when its ticket is accepted or closed, when its session is archived, 24 hours after its first entry, or when the human presses Send now on the Brains page.
+   - Workers' entries collect per brain and ticket; the coordinator's and the human's entries per brain and coordinator session; an assistant thread's per brain and thread.
+   - A batch closes and goes to `brain-registry-sync` when its ticket is accepted or closed, when its session is archived or its thread deleted, 24 hours after its first entry, or when the human presses Send now on the Brains page.
    - An entry logged after its batch closed starts a new batch.
    - A batch holds at most 50 entries; the 51st starts a new one.
 
    This keeps PRs to about one per ticket. A long-lived coordinator yields at most one PR a day per brain.
-10. **Milestone prompts** are a line appended to the tool result, not a new message. They are added for an implementer's `report` with kind ready_for_testing, and for the coordinator's or implementer's successful `accept_ticket` and `publish_ticket`. A prompt is added only when the ticket's repository maps to a brain and this session has made no `log_work` call for the ticket since the previous prompted milestone. Each milestone is prompted at most once.
+10. **Milestone prompts** are a line appended to the tool result, not a new message. They are added for an implementer's `report` with kind ready_for_testing, and for the coordinator's or implementer's successful `accept_ticket` and `publish_ticket`. A prompt is added only when the project's Space has a brain and this session has made no `log_work` call for the ticket since the previous prompted milestone. Each milestone is prompted at most once.
 11. **The legacy import** is a Brains page action for each brain, offered while any legacy `logs/<repo>.md` exists on `main` and the import is not recorded as done:
     - It parses each `## YYYY-MM-DD — Title` entry and its fields, and writes one entry file per entry with `source: skill`.
     - The id is a ULID whose time is the entry's date at 12:00 UTC and whose random part comes from a hash of the repository, date, title and body, so a repeated import produces the same files and adds nothing.
@@ -130,9 +132,9 @@ These are merged on `main`:
 | Where follow-ups go | `quiet-findings` lists a ticket's `follow_up` findings in its PR description; #162 adds issues | **Align**: a follow-up is work to do, which belongs in an issue rather than a log entry. Logging stays for decisions and state. | Once #162 ships, should the coordinator file follow-ups as issues instead of only listing them in the PR? |
 | Tool results that prompt for more work | Milestone prompts here; `quiet-findings` changes the cycle-outcome message's closing line | **Align**: the log prompt is one line appended after the host's existing text, so the two do not conflict. | None. |
 | The capture surface | `files-panel` records `Step.paths` per step | None now. A later change could suggest a log entry's `changed` from the files a ticket touched. | Not in scope. |
-| Where the assistant's entries go | #163 (merged): a thread's log entries go to its Space's brain in the rolling file `logs/assistant.md`, each with the thread's id and Space | **Align** with the per-entry contract: threads log through `log_work` into per-entry files (for example `logs/assistant/YYYY/MM/…`), with the thread id and Space kept in the host store like a ticket and session. | **Open:** the folder name for assistant entries, and whether scheduled job runs, which are read-only threads, may log at all. |
-| The `project-memory` spec | #163 MODIFIES "Safe Markdown export" (Space brains) and ADDS "Brain pushes from several people"; this change REMOVES "Safe Markdown export" | **Align**: this change archives after #163. Its removal then applies to #163's version, and if Michael confirms PR-only writes, it must also remove "Brain pushes from several people" (see `brain-registry-sync`). | **Open for Michael**, together with #163's defaulted decision (c). |
-| Which brain an entry goes to | #163: the project's or thread's Space; here, the entry repository's mapped brain | See `brain-registry-sync`, "Which brain a project uses". | **Open for Michael.** |
+| Where the assistant's entries go | #163 (merged): a thread's log entries go to its Space's brain in the rolling file `logs/assistant.md`, each with the thread's id and Space | **Decided by Michael, 2026-10-29:** threads log through `log_work` into per-entry files in `logs/assistant/YYYY/MM/…` with `repo: assistant`, with the thread id and Space kept in the host store. #163's assistant delta now says so too. Job runs do not log (decision 3). | None. |
+| The `project-memory` spec | #163 MODIFIES "Safe Markdown export" (Space brains) and ADDS "Brain pushes from several people"; this change REMOVES "Safe Markdown export" | **Decided by Michael, 2026-10-29:** PR-gated writes supersede #163's decision (c). This change archives after #163 and REMOVES both "Safe Markdown export" (in #163's version) and "Brain pushes from several people". | None. |
+| Which brain an entry goes to | #163: the project's or thread's Space | **Decided by Michael, 2026-10-29:** the Space decides; the repository mapping is dropped (decision 3). | None. |
 | Fixed core versions | #164 (merged) moved the coordinator core to v6 | **Align**: the log rules are written against v6 and bump it again. | None. |
 | Projects created by a coordinator | #164: a created project's first message is a brief, and `created_by` records the creator | **Align**: no milestone prompt for creating a project. The creator may log a planning entry about it with `log_work`. | None. |
 

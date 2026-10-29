@@ -1,18 +1,26 @@
 ## ADDED Requirements
 
-### Requirement: Brains are registered on each machine by GitHub repository
-The host SHALL keep, per machine, a registry of brains. Each brain SHALL be one GitHub repository named `owner/name`, with its push URL, its default branch `main`, the path of the host's checkout and its sync state. The human SHALL add and remove brains on the Brains page, and only the human's client SHALL change the registry. Agents SHALL NOT add, remove or change a brain. The registry SHALL NOT be shared through the settings repository. The push URL SHALL be found and used as the settings repository's is: the protocol gh is configured with is tried first, with gh's login through a credential helper given for each command only, and no token is stored, logged or put on a command line.
+### Requirement: A Space registers its brain
+A brain SHALL be registered on a machine when one of that machine's Spaces names it (see `spaces`, "A Space"). Each brain SHALL be one GitHub repository named `owner/name`, with its push URL, its default branch `main`, the path of the host's checkout and its sync state. Several Spaces MAY name one brain, which is registered once. A brain no Space names any longer SHALL leave the registry, after confirmation, and the host's checkout SHALL be deleted; GitHub SHALL be untouched. Only the human, by editing a Space, SHALL add or remove a brain. Agents SHALL NOT. When the human creates a Space or sets its brain, Wiffletree SHALL suggest a brain from the GitHub owner of the Space's code repositories: the brain another Space already names for that owner, or none. The suggestion SHALL be only pre-filled and never applied without the human's confirmation. Personal and unowned repositories SHALL suggest no brain. The push URL SHALL be found and used as the settings repository's is: the protocol gh is configured with is tried first, with gh's login through a credential helper given for each command only, and no token is stored, logged or put on a command line.
 
-#### Scenario: Adding a brain
-- **WHEN** the human adds `Sage-Social/sagehaven-docs` on the Brains page and confirms
-- **THEN** the host clones it into its own checkout, the registry lists it with its remote and sync state, and it survives a restart
+#### Scenario: A Space names a brain
+- **WHEN** the human sets the Sage Space's brain to `Sage-Social/sagehaven-docs` and confirms
+- **THEN** the host clones it into its own checkout, the Brains page lists it as the Sage Space's brain with its remote and sync state, and it survives a restart
+
+#### Scenario: The owner suggests a brain
+- **WHEN** the Vyttle Space names `vyttle-docs`, and the human creates a second Space whose code repositories belong to `Vyttle-LLC`
+- **THEN** the new Space's brain is pre-filled with `vyttle-docs`, and nothing is registered until the human confirms
+
+#### Scenario: A personal Space
+- **WHEN** the human creates a Space whose only repositories belong to `MHohlios`
+- **THEN** no brain is suggested
 
 #### Scenario: An agent cannot add a brain
 - **WHEN** an agent's tool call or message asks the host to add or remove a brain
 - **THEN** no tool does this, and the registry is unchanged
 
-### Requirement: Adding a brain grants only its batch pushes
-Adding a brain SHALL be what allows the host to push to that repository, and the confirmation SHALL say so, naming the repository. The grant SHALL allow exactly these operations on that repository: pushing branches named `wiffletree/brain/<login>/<batch-id>`, opening pull requests from them into `main`, turning on auto-merge for those pull requests, closing a batch pull request the human discards, and deleting a branch the host pushed. The allowed owners for ticket PRs SHALL NOT grant this, and adding a brain SHALL NOT allow ticket PRs or settings sync to that repository or its owner. The host SHALL NOT approve, comment on, label or directly merge any pull request.
+### Requirement: Naming a brain grants only its batch pushes
+Confirming a brain for a Space SHALL be what allows the host to push to that repository, and the confirmation SHALL say so, naming the repository. The grant SHALL allow exactly these operations on that repository: pushing branches named `wiffletree/brain/<login>/<batch-id>`, opening pull requests from them into `main`, turning on auto-merge for those pull requests, closing a batch pull request the human discards, and deleting a branch the host pushed. The allowed owners for ticket PRs SHALL NOT grant this, and adding a brain SHALL NOT allow ticket PRs or settings sync to that repository or its owner. The host SHALL NOT approve, comment on, label or directly merge any pull request.
 
 #### Scenario: An allowed owner without a brain
 - **WHEN** `Sage-Social` is allowed for ticket PRs and no Sage brain is registered
@@ -37,31 +45,20 @@ The host SHALL keep its own clone of each brain at `<workspaces folder>/brains/<
 - **WHEN** the human edits `~/dev/sagehaven/sagehaven-docs` in Obsidian
 - **THEN** the host's checkout and its batches are unaffected, and the human's edit reaches the host only after it merges on `main`
 
-### Requirement: Repositories map to brains by owner with overrides
-The host SHALL map each workspace repository to at most one brain. Each GitHub owner SHALL map to one registered brain or to none, and a repository MAY override its owner with another brain or with none. A repository without a GitHub owner SHALL map only by its override. A new owner SHALL default to no brain, until the human sets it. The mapping SHALL be changed only by the human, on the Brains page, and each change SHALL save at once and survive a restart. Removing a brain SHALL set every owner and repository mapped to it to no brain.
+### Requirement: A project's brain comes from its Space
+A project SHALL store no brain of its own. A project's brain SHALL be its Space's brain, or none when its Space names none. A project a coordinator creates with `create_project` SHALL belong to the creating project's Space and SHALL use that Space's brain. Assistant threads and job runs SHALL use their own Space's brain. Capture, compile, search and `query_brain` SHALL resolve the brain this way and in no other way. A project whose Space has no brain SHALL have none, and its Memory panel SHALL say so with a link to Settings › Spaces.
 
-#### Scenario: Owner default
-- **WHEN** `Sage-Social` maps to `sagehaven-docs` and `sagechat-sms` has no override
-- **THEN** `sagechat-sms` maps to `sagehaven-docs`
+#### Scenario: A project in the Sage Space
+- **WHEN** a project in the Sage Space works in repositories owned by `Sage-Social` and by `Vyttle-LLC`
+- **THEN** its only brain is the Sage Space's brain, `sagehaven-docs`
 
-#### Scenario: Override and reset
-- **WHEN** the human sets `dotfiles` (owner `MHohlios`, no brain) to `vyttle-docs` and later resets it
-- **THEN** `dotfiles` maps to `vyttle-docs` until the reset, and to no brain after it
-
-#### Scenario: Personal repositories
-- **WHEN** a repository owned by `MHohlios` or `celadon-theme` is added and its owner was never set
-- **THEN** it maps to no brain
-
-### Requirement: A project's brains come from its repositories
-A project SHALL store no brain of its own. A project's brains SHALL be the brains its repositories map to, without duplicates. A project whose repositories map to no brain SHALL have none, and its Memory panel SHALL say so with a link to the Brains page.
-
-#### Scenario: A project in one organization
-- **WHEN** a project's three repositories all belong to `Sage-Social`, which maps to `sagehaven-docs`
-- **THEN** the project's only brain is `sagehaven-docs`
+#### Scenario: A project created by a coordinator
+- **WHEN** a coordinator in the Vyttle Space creates a project with `create_project` covering every repository
+- **THEN** the new project is in the Vyttle Space and logs only to `vyttle-docs`
 
 #### Scenario: No brain
-- **WHEN** a project's only repository belongs to `celadon-theme`, which maps to no brain
-- **THEN** the project has no brain and its Memory panel says so
+- **WHEN** a project's Space names no brain
+- **THEN** the project has no brain and its Memory panel says so, with a link to Settings › Spaces
 
 ### Requirement: The brain config file lives in the brain repository
 Each brain's settings that every install must agree on SHALL be read from `wiffletree-brain.json` at the root of the brain repository's `main`: its version, the brain folder (default `second-brain`), the compiler's host id and display name, the compile time and timezone, and the `gate` object that `brain-gate` defines. The host SHALL read only the version merged on `main`, never one on an open branch. A brain without the file SHALL accept log batches, have no compiler, and offer Set up. Set up SHALL open one PR adding the file with this host as compiler, together with the gate's caller, config and `CODEOWNERS` lines as `brain-gate` specifies; that PR waits for the code owner's review. The host SHALL refuse a file that is not valid JSON or names a brain folder outside the repository, and its page SHALL say why. A version newer than the host understands SHALL allow log batches and SHALL NOT compile.
@@ -138,19 +135,18 @@ The host SHALL mark its checkout as managed with `.git/wiffletree-managed`, and 
 - **THEN** the Brains page shows the warning, and the host's checkout under the workspaces folder is unaffected
 
 ### Requirement: Earlier brain attachments are migrated
-Loading a store that has projects with an attached brain path SHALL drop that field and keep the rest of the project. Each distinct attached path whose `origin` names a GitHub repository SHALL be offered on the Brains page as "Found from an earlier attachment", with Add, until it is added or dismissed. `attach_brain` SHALL be removed from the host's commands.
+When the `spaces` upgrade turns each earlier `Project.brain` folder into a Space's brain, a folder whose `origin` names a GitHub repository SHALL become that Space's brain repository. The host SHALL NOT push to it until the human confirms the grant on the Brains page. A folder without a GitHub `origin` SHALL leave its Space with no brain, and the Brains page SHALL say why. `attach_brain` SHALL be removed from the host's commands.
 
 #### Scenario: An attached project
 - **WHEN** a stored project has the brain `~/dev/vyttle/vyttle-docs`, whose origin is `Vyttle-LLC/vyttle-docs`
-- **THEN** the project loads without a brain field, and the Brains page offers `Vyttle-LLC/vyttle-docs` to add
+- **THEN** after the upgrade its Space names `Vyttle-LLC/vyttle-docs`, and the Brains page asks the human to confirm the grant before any batch is pushed
 
-### Requirement: The Brains page shows the registry, compiler, gate and mapping
+### Requirement: The Brains page lists the Spaces' brains
 The sidebar's Workspace section SHALL list Brains beside Repositories. The Brains page SHALL show:
-- each brain with its remote, its checkout path, its sync state, its last PR, the compiler from its config file, and the next and last compile run;
-- the PR gate: each batch that is not yet merged or was merged in the last day, with its kind, source and author, and its stage from queued through PR open and checks to auto-merged or failed;
-- the mapping, with each owner's default and each repository's brain, marking overrides with a way back to the owner's default.
+- each brain named by a Space on this machine, with the Spaces that name it, its remote, its checkout path, its sync state, its last PR, the compiler from its config file, and the next and last compile run;
+- the PR gate: each batch that is not yet merged or was merged in the last day, with its kind, source and author, and its stage from queued through PR open and checks to auto-merged or failed.
 
-Selecting a batch SHALL show its required checks. A failed batch SHALL link to its Inbox item. The page SHALL offer Add brain, Remove, Sync now and changing the compiler.
+Selecting a batch SHALL show its required checks. A failed batch SHALL link to its Inbox item. The page SHALL offer Sync now, Set up, changing the compiler, and a link to each Space's settings, where a brain is added or removed. The page SHALL NOT offer a repository-to-brain mapping.
 
 #### Scenario: The gate on the page
 - **WHEN** one batch is queued, one has checks running, one failed `sensitive-info` and a compile run merged this morning

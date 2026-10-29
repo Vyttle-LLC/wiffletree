@@ -87,7 +87,7 @@ The gate allows a compile PR to change only `second-brain/notes/**`, `second-bra
    - evidence lines (verification states, PR states, the authors);
    - a recommended ruling with one line of reasoning.
 
-   The host writes `reconcile-queue.md` from the open conflicts, one block each, marked `<!-- conflict:<id> -->`, in the same compile PR. Every install shows conflicts from `reconcile-queue.md` on `main`. A card appears in the Inbox of each project whose repositories map to the brain and include the claim's repository. A conflict touching no project appears on the Brains page.
+   The host writes `reconcile-queue.md` from the open conflicts, one block each, marked `<!-- conflict:<id> -->`, in the same compile PR. Every install shows conflicts from `reconcile-queue.md` on `main`. A card appears in the Inbox of each project in a Space that names the brain whose repositories include the claim's repository. A conflict touching no project appears on the Brains page.
 7. **Rulings:**
    - **Uphold existing:** a decision entry restating the established decision, marking the claim as not adopted.
    - **Keep new:** a decision entry adopting the claim; the old decision note becomes an observation marked superseded.
@@ -150,8 +150,6 @@ It stays a separate kind because #163's jobs:
 A compile instead writes the brain through a gated PR, runs only on the brain's compiler host, starts after a ruling merges and makes no model call when nothing is pending.
 
 So the recommendation is to reuse the scheduler and run records and keep the compile-specific rules here. If Michael agrees, the "Compile runs start on schedule, on demand and after a ruling" requirement shrinks to the compile-specific triggers, and #163's scheduled-jobs spec gains a sentence admitting built-in host jobs. Until he decides, this change keeps its own scheduling requirements as written.
-
-| Shared concept
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |

@@ -11,7 +11,7 @@ The settings repository (`openspec/specs/settings-repository`) already pushes fr
 ## Goals / Non-Goals
 
 **Goals:**
-- One registry of brains per machine, mapped from repositories by GitHub owner, replacing the per-machine pointer inside Wiffletree.
+- One registry of brains per machine, built from the brains its Spaces name, replacing the per-machine pointer inside Wiffletree.
 - Every brain change made by Wiffletree reaches `main` only through a PR that auto-merges once the gate passes.
 - One writer per checkout, so Wiffletree and the safety-net never share one.
 - Failures are visible and fixable from the Inbox.
@@ -28,7 +28,8 @@ The settings repository (`openspec/specs/settings-repository`) already pushes fr
 
 - Brains are team-shared, and every change reaches `main` through a PR that auto-merges when its checks pass.
 - There is one Brain page in the workspace, filtered by project.
-- Personal and unowned repositories default to no brain.
+- Personal and unowned repositories default to no brain. Under Spaces, this means they suggest no brain.
+- The Space decides the brain, and the repository → brain owner mapping is dropped (decided after `assistant-spaces-jobs-boards` merged). The GitHub owner only suggests a brain when a Space is created. Capture, compile, search and `query_brain` resolve the brain from the project's Space. The mapping drawn in `brains.html` is superseded.
 - The compiler host can be changed from the page, but it is stored in a config file in the brain repository and changed through a PR, so every install agrees.
 - Amending an unmerged batch to fix a failed check is fine. Entries become append-only once merged.
 
@@ -39,8 +40,8 @@ The settings repository (`openspec/specs/settings-repository`) already pushes fr
    - Obsidian and manual edits in the human's clone stay legal and untouched.
    - The cost is disk space for a second clone, which is small for a Markdown repository.
    - The PRD's earlier rule about detecting external edits by hash still holds: if anything other than the host changes the host's clone, the host stops writing to that brain and raises an Inbox item. It does not overwrite the change.
-2. **The registry and mapping are kept on each machine**, like the allowed owners (`repository-owners`). Adding a brain grants a push, and that grant belongs to the machine. Sharing the registry through the settings repository can come later if two machines drift.
-3. **Adding a brain is a separate grant from allowed owners.** It allows exactly three operations on that one repository: pushing branches under `wiffletree/brain/`, opening PRs into `main`, and turning on auto-merge for them. This follows the settings repository's rule that choosing it is what allows the push.
+2. **The registry and grants are kept on each machine**, like the allowed owners (`repository-owners`). The registry is derived from the Spaces on the machine, and shared Spaces travel through their storage repositories (`spaces`). Confirming a brain grants a push, and that grant belongs to the machine: joining a shared Space that names a brain still asks before this machine pushes to it.
+3. **Confirming a brain is a separate grant from allowed owners.** It allows exactly three operations on that one repository: pushing branches under `wiffletree/brain/`, opening PRs into `main`, and turning on auto-merge for them. This follows the settings repository's rule that choosing it is what allows the push.
    - `ticket-publishing`'s "the host never approves, merges, closes or comments" stays true for ticket PRs. For a brain PR, turning on auto-merge asks GitHub to merge once the required checks pass; the host still never merges directly.
 4. **The config file is `wiffletree-brain.json` at the repository root**, outside `second-brain/`, so a PR that changes it is an "other docs" PR under the gate's path ownership. Its shape (version 1):
    ```json
@@ -64,7 +65,7 @@ The settings repository (`openspec/specs/settings-repository`) already pushes fr
 
    The host commits the amendment on the batch branch, pushes without force and the checks run again. Only the human chooses these actions; agents cannot.
 10. **The safety-net:** the host writes `.git/wiffletree-managed` in its clone. The dotfiles ticket makes the safety-net skip any checkout with that marker and open PRs instead of pushing to `main`. The host also refuses to register a path as its checkout, so the legacy pointer can never name the host's clone. Retiring the pointer belongs to the skills tickets.
-11. **Migrating `Project.brain`:** it is dropped when stored projects are loaded. Each distinct attached path whose `origin` names a GitHub repository is offered on the Brains page as "Found from an earlier attachment", with Add. Adding it still needs the grant in decision 3. `work_logs` and `log_exports` are migrated in `brain-log-capture`.
+11. **Migrating `Project.brain`:** the `spaces` upgrade turns each attached folder into a Space's brain. Where the folder's `origin` names a GitHub repository, that repository becomes the Space's brain, but the host pushes nothing until the human confirms the grant in decision 3. `work_logs` and `log_exports` are migrated in `brain-log-capture`.
 
 ### Options considered
 
@@ -104,19 +105,19 @@ The other proposals are:
 | Where the host keeps its clone | Trackers: `<data folder>/trackers/<owner>-<name>/`; brains: `<workspaces folder>/brains/<name>` (decision 1) | **Align.** Use one root and one naming scheme. The recommendation is `<data folder>/brains/<owner>-<name>/`, beside trackers and the settings clone, which also avoids name clashes between owners. | Confirm the data folder as the root for every host-owned clone. |
 | Files Wiffletree did not write | Trackers hold back a file in this Mac's clone that Wiffletree did not write; brains hold all writing on any unexpected change | **Align** on "never push what Wiffletree did not write". Brains are stricter because their writes are PRs that auto-merge. | None. |
 | Workspace-level registries kept on each machine | Several trackers per Mac, not shared through the settings repository (#162 decision 6); brains (decision 2); allowed owners (`repository-owners`) | **Align**: all per machine, all changed only by the human. | One Workspace page for shared repositories (settings, trackers, brains), or separate Issues and Brains pages as drawn in each mockup? |
-| Repository mapping by GitHub owner | Brains map owner → brain with per-repository overrides; issues list `repositories: owner/name` per issue, and trackers are per team with a prefix | **Align** on one per-owner record. An owner would name its brain, its default tracker and whether ticket PRs are allowed, so a new repository inherits all three. | Should New issue default its tracker from the repository's owner the way log entries default their brain? |
+| Suggesting from the GitHub owner | The brain mapping is dropped (Michael, 2026-10-29): a Space's code repositories' owner only suggests its brain. Issues list `repositories: owner/name` per issue, and trackers are per team with a prefix | **Align**: a Space could name its tracker the way it names its brain, with the owner suggesting both. | Should a Space name its tracker, so that New issue defaults to it? |
 | Identity | Both use gh's `login`, read at set-up and when gh's account changes | **Share** one cached identity for entry authors, issue authors and assignees. | None. |
 | Watching PRs | `pr-watch` watches ticket PRs; #162 adds linked PRs; this change adds batch PRs | **Share** the watcher: one pass per repository covering every kind of PR. | Does one cadence fit all three, or do brain batch PRs need their own faster loop while checks run? |
 | Inbox items | Brain batch failures here; conflicts in `brain-compile`; #162 phase 5 adds issue mentions and paused fields | **Align** on one card per source with at most one open item, cleared by the source's own state. | One Inbox section per kind, or one list sorted by age? |
 | Human-only write commands | #162 decision 11: every tracker write is a human command on the host socket | **Align**: brain registry changes, amendments and rulings are likewise human-only commands. | None. |
 | Inspector rail | `files-panel` and `processes-panel` add rail entries; the Memory panel stays where it is | **Align** the rail order (Git, Files, Processes, Memory). This change only adds the "No brain" state. | None. |
 | Ticket review | `quiet-findings` | None. | None. |
-| Which brain a project uses | #163 (merged): every project belongs to a Space, a Space names a brain (a repository and a folder), and the coordinator logs to its Space's brain. Here, each repository maps to a brain by GitHub owner, and a project's brains come from its repositories | **Align** on one source of truth. Either the Space names the brain and the owner mapping only pre-fills it when a Space is set up, or the mapping decides and the Space shows it. | **Open for Michael:** does the Space or the repository mapping decide a project's brain? Until then both proposals stand as written. |
-| How brain writes reach `main` | #163 (merged) adds `project-memory` "Brain pushes from several people": fetch, rebase and push to `main` with a union merge of shared log files. That is its defaulted decision (c), "confirm at reconciliation" | **Align** on Michael's explicit October 29 decision: every brain change is a gated PR with one file per entry. The gate's path ownership refuses edits to shared log files once the legacy flag is off. | **Open for Michael:** confirm that (c) is superseded, so that #163's added requirement is dropped when the changes are reconciled. |
+| Which brain a project uses | #163 (merged): every project belongs to a Space, a Space names a brain (a repository and a folder), and the coordinator logs to its Space's brain. Here, each repository maps to a brain by GitHub owner, and a project's brains come from its repositories | **Decided by Michael, 2026-10-29:** the Space decides the brain. The owner mapping is dropped, and the owner only suggests a brain when a Space is created. | None. |
+| How brain writes reach `main` | #163 (merged) adds `project-memory` "Brain pushes from several people": fetch, rebase and push to `main` with a union merge of shared log files. That is its defaulted decision (c), "confirm at reconciliation" | **Decided by Michael, 2026-10-29:** PR-gated writes supersede (c). `brain-log-capture` removes #163's "Brain pushes from several people", and assistant entries use the per-entry contract (`logs/assistant/…`). | None. |
 | Brain settings shared in a repository | #163 keeps a Space's definition in its storage repository (`spaces/<name>/space.yaml`) with the settings repository's rules; here, `wiffletree-brain.json` lives in the brain repository and changes only by PR | **Align**: shared facts live in Git and per-machine facts (clone paths, models) stay local, in both. | Should the brain's compiler and gate settings move into the Space definition, or stay with the brain because several Spaces may name one brain? |
 | The Brains page and Settings › Spaces | #163 (merged): Spaces are edited on Settings › Spaces, and the assistant and Boards are pinned above Projects; here, Brains is a Workspace page | **Align** the navigation. | Is a brain configured inside a Space's settings, on its own Brains page, or both? |
 | Host-owned clones | #163 (merged): storage clones live at `<data folder>/storage/<owner>-<name>/` and reuse settings sync | **Share** the repository module, as with trackers. This supports the clone-location recommendation above. | See "Where the host keeps its clone". |
-| Projects created by a coordinator | #164 (merged): `create_project` takes optional `repository_ids` and defaults to every workspace repository; the project records `created_by` | **Align**: under this change, the new project's brains follow its repository selection, so a project with every repository can span several organizations' brains. | **Open:** which brain does a coordinator-created project log to: the creating project's brain, or its Space's (if Spaces decide)? |
+| Projects created by a coordinator | #164 (merged): `create_project` takes optional `repository_ids` and defaults to every workspace repository; the project records `created_by` | **Settled by Michael's Space decision (2026-10-29):** the created project joins the creating project's Space and uses that Space's brain, whatever its repository selection. | None. |
 
 ## Open Questions
 

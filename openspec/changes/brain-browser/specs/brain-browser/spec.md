@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: The brain browser opens from the Brains page and the Memory panel
-The desktop SHALL offer one brain browser page in the workspace. Opening a brain from the Brains page SHALL show that brain with the scope Whole brain. Open brain browser in a project's Memory panel SHALL show the project's brain with the scope set to that project. The browser SHALL show scope chips for each project whose repositories map to the brain, plus Whole brain, and a switcher among the registered brains; choosing another brain SHALL reset the scope to Whole brain. It SHALL have the views Status, Wiki, Logs and Conflicts. It SHALL read the brain's `main` from the host's checkout, plus this machine's unmerged entries in Logs.
+The desktop SHALL offer one brain browser page in the workspace. Opening a brain from the Brains page SHALL show that brain with the scope Whole brain. Open brain browser in a project's Memory panel SHALL show the project's brain, its Space's brain (`brain-registry`), with the scope set to that project. The browser SHALL show scope chips for each project in a Space that names the brain, plus Whole brain, and a switcher among the registered brains; choosing another brain SHALL reset the scope to Whole brain. It SHALL have the views Status, Wiki, Logs and Conflicts. It SHALL read the brain's `main` from the host's checkout, plus this machine's unmerged entries in Logs.
 
 #### Scenario: From the Memory panel
 - **WHEN** the human presses Open brain browser in the Memory panel of "Watch app call relay"
@@ -86,8 +86,10 @@ Selecting an entry SHALL open it in the browser with the project scope. A projec
 ### Requirement: Search is a keyboard quick-open over one brain
 ⌘K and Ctrl+K anywhere in the window, and `/` when focus is not in a text field, SHALL open a search overlay over one brain:
 - in the browser, the browser's brain;
-- in a project, its brain, with chips for its other brains when it has several;
-- otherwise, the first registered brain.
+- in a project or assistant thread, its Space's brain;
+- otherwise, the brain of the Space last used.
+
+A project or thread whose Space has no brain SHALL get an overlay that says so, with a link to Settings › Spaces.
 
 Scope chips SHALL offer this project and Whole brain, and Tab SHALL cycle them. Results SHALL be notes and log entries ranked by relevance, with decisions above observations, each with its title, kind, place and an excerpt with the matched terms marked. Arrow keys SHALL move the selection, Enter SHALL open a note in Wiki or an entry in Logs, and Esc SHALL close the overlay and return focus. Results SHALL never mix brains or organizations.
 
@@ -111,7 +113,7 @@ The host SHALL keep one SQLite FTS5 index per brain over notes, `STATUS.md` and 
 - **THEN** the host rebuilds it from the checkout on start, and search returns the same results
 
 ### Requirement: Agents query the brain with query_brain
-The host SHALL offer a read-only `query_brain` MCP tool to the project coordinator, implementers, testers and reviewers. It SHALL take `question`, and optionally `scope` (`project`, the default, or `brain`) and `repository`. The brain SHALL be the session's repository's brain for a worker; for the coordinator, the project's only brain, or the brain of the named `repository` when the project has several. The tool SHALL refuse when no brain applies, or when the coordinator's project has several brains and no repository is named.
+The host SHALL offer a read-only `query_brain` MCP tool to the project coordinator, implementers, testers and reviewers. It SHALL take `question`, and optionally `scope` (`project`, the default, or `brain`). The brain SHALL be the brain of the session's project's Space (`brain-registry`), so it is never chosen by the agent. The tool SHALL refuse when that Space has no brain.
 
 It SHALL walk the ladder in order:
 1. matching `STATUS.md` excerpts;
@@ -130,5 +132,5 @@ It SHALL stop when about 4,000 characters of excerpts are gathered or the ladder
 - **THEN** the response says the brain has nothing on it, with the last compile time, and invents nothing
 
 #### Scenario: Never across organizations
-- **WHEN** an implementer in a `wiffletree` ticket asks about the call relay
-- **THEN** only `vyttle-docs` is searched, and no `sagehaven-docs` content is returned
+- **WHEN** an implementer in a project of the Vyttle Space asks about the call relay
+- **THEN** only `vyttle-docs`, the Vyttle Space's brain, is searched, and no `sagehaven-docs` content is returned

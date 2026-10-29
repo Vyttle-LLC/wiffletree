@@ -114,7 +114,7 @@ These are merged on `main`:
 | The entry contract | `brain-log-capture`'s renderer | **Share**: one fixture set in `gate/tests/fixtures/`. | None. |
 | Ticket review and inspector panels | `quiet-findings`, `files-panel`, `processes-panel` | None. | None. |
 | Sensitive data in shared outputs | #163 (merged): a shared job's first output waits for the runner's approval, and Space storage syncs by direct push with the settings repository's rules | **Align**: the gate's `sensitive-info` and `secret-scan` checks are generic and could run on pushes to a Space's storage repository, as with trackers. | **Open:** should Space storage repositories get a caller of the gate? |
-| Brain writes | #163's defaulted decision (c), a direct push with union merge, would bypass the gate | See `brain-registry-sync`, "How brain writes reach `main`". | **Open for Michael.** |
+| Brain writes | #163's defaulted decision (c), a direct push with union merge, would bypass the gate | **Decided by Michael, 2026-10-29:** PR-gated writes supersede (c), so every brain write passes this gate. | None. |
 | Projects created by a coordinator | #164 (merged) | None. | None. |
 
 ## Open Questions

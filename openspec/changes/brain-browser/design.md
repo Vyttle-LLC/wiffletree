@@ -57,11 +57,10 @@ The PRD's memory budget is a fixture of 100,000 log entries and 10,000 notes, wi
    - Ranking is BM25, then kind: decisions sort above observations, then by BM25 score.
    - Excerpts come from FTS5 `snippet()`, with the matched terms marked.
 8. **Search UI:**
-   - ⌘K or Ctrl+K anywhere, and `/` when focus is not in a text field, opens the overlay over the current brain: the browser's brain, or the selected project's when it has exactly one.
-   - A project with several brains opens on the first and offers the others as chips; results never mix brains.
+   - ⌘K or Ctrl+K anywhere, and `/` when focus is not in a text field, opens the overlay over the current brain: the browser's brain, or the selected project's or thread's Space's brain (Michael, 2026-10-29: the Space decides the brain, so a project has one at most). Results never mix brains.
    - Arrow keys move, Enter opens the note or the entry in Logs, Tab cycles the scope chips, and Esc closes and returns focus to where it was.
 9. **`query_brain`:**
-   - It takes `question` (free text), and optionally `scope` (`project`, the default, or `brain`) and `repository` (to choose a brain when the project has several).
+   - It takes `question` (free text), and optionally `scope` (`project`, the default, or `brain`). The brain is the session's project's Space's brain, never chosen by the agent.
    - It is offered to the coordinator, implementers, testers and reviewers, because reading is safe. It is not offered to the compile session, which receives its input directly.
    - It walks the ladder, stopping when the budget of about 4,000 characters is filled or the ladder ends:
      1. STATUS excerpts that match;
@@ -119,7 +118,7 @@ These are merged on `main`:
 | Search | #163 (merged): the assistant's search finds threads by title and text, filtered by Space; here, ⌘K searches one brain's notes and logs | **Align** on one ⌘K overlay with source chips (Brain, Threads and, from #162, Issues). It never mixes organizations or Spaces in one result list. | **Open:** one overlay for all three? Is a search scope an organization (brain) or a Space? |
 | Threads reading the brain | #163: threads read their Space's brain and add entries to it; the router never sees brains | **Align**: give threads `query_brain`, which is read-only and so within thread authority, instead of letting them read brain files directly. | **Open:** give threads `query_brain`? |
 | Where the browser sits | #163 pins the assistant and Boards above Projects and edits Spaces in Settings; here, Brains is a Workspace page and the Memory panel opens it | **Align** with `brain-registry-sync`'s navigation question. | See `brain-registry-sync`. |
-| Projects created by a coordinator | #164 (merged) | None: a created project's Memory panel works like any project's. A project with every repository may span several brains, and the panel lists each. | None. |
+| Projects created by a coordinator | #164 (merged) | **Settled by Michael's Space decision (2026-10-29):** a created project joins its creator's Space, so its Memory panel shows that Space's one brain. | None. |
 
 ## Open Questions
 
