@@ -578,7 +578,7 @@ function browserWiki(){
   const hidden=notes.length-shown.length;
   const backlinks=notes.filter(n=>n!==note&&n.body.some(([,t])=>t.includes(`[[${note.title}]]`))).map(n=>n.title);
   const fromStatus=STATUS[state.brain].some(([,t])=>t.includes(`[[${note.title}]]`));
-  const sources=Object.entries(note.claims).map(([id,c])=>`<div class="src ${String(state.claim)===id?'lit':''}" id="claim-${id}"><div class="claim"><b>[${id}]</b><span>${esc(c.text)}</span></div>${c.sources.map(([log,v,anchors])=>{const l=L(log);return `<div class="chain"><button class="anchor" data-act="log" data-log="${log}" title="Open log entry">${l.date} · ${shortId(log)}</button><span class="subtle small">${people[l.author]}</span>${anchors.map(a=>`<span class="arrow">→</span><span class="anchor">${esc(a)}</span>`).join('')} ${verifyPill(v)}</div>`}).join('')}</div>`).join('');
+  const sources=Object.entries(note.claims).map(([id,c])=>`<div class="src ${String(state.claim)===id?'lit':''}" id="claim-${id}"><div class="claim"><b>[${id}]</b><span>${esc(c.text)}</span></div>${c.sources.map(([log,v,anchors])=>{const l=L(log);return `<div class="chain"><button class="anchor" data-act="log" data-log="${log}" title="Open log entry">${l.date} · ${shortId(log)}</button><span class="subtle small">${people[l.author]}</span>${anchors.map(a=>`<span class="arrow">→</span>${anchorBtn(a,l.repo)}`).join('')} ${verifyPill(v)}</div>`}).join('')}</div>`).join('');
   return `<div class="wiki"><nav class="tree" aria-label="Note index"><div class="folder" style="padding-top:0"><span class="mono">notes/INDEX.md</span></div>${tree}${hidden?`<div class="hidden-note">${hidden} note${hidden>1?'s':''} outside this project hidden · <button class="btn link" data-act="scope" data-scope="">show all</button></div>`:''}</nav>
   <article class="md"><h1>${esc(note.title)}</h1><div class="fm">${kindPill(note.kind)}<span>updated ${note.updated}</span><span>· ${Object.keys(note.claims).length} sourced claims</span><span>· ${note.repos.includes('*')?'all repositories':note.repos.join(', ')}</span></div>${renderMd(note.body,state.brain)}
   <div class="backlinks"><div class="eyebrow">Backlinks</div><div class="list">${backlinks.map(t=>`<button class="wikilink" data-act="note" data-note="${esc(t)}">${esc(t)}</button>`).join('')}${fromStatus?`<button class="wikilink" data-act="tab" data-tab="status">STATUS</button>`:''}${!backlinks.length&&!fromStatus?'<span class="muted small">No notes link here.</span>':''}</div></div></article>
@@ -598,7 +598,7 @@ function browserLogs(){
   const entries=slice.map(l=>`<div class="entry ${state.focusLog===l.id?'lit':''}" id="log-${l.id}">
     <div class="entry-head"><b>${esc(l.title)}</b>${kindPill(l.type).replace('kind: ','')}${verifyPill(l.verify)}<span style="flex:1"></span>${prPill(l.pr)}</div>
     <div class="meta">${l.date} · ${esc(l.repo)} · ${people[l.author]} · via ${l.source==='skill'?'brain-log skill':'Wiffletree'} · <span class="mono">logs/${esc(l.repo)}/${l.date.slice(0,4)}/${l.date.slice(5,7)}/${l.date}-${shortId(l.id)}.md</span></div>
-    <dl><dt>ref</dt><dd class="mono">${esc(l.ref)}</dd><dt>changed</dt><dd>${esc(l.changed)}</dd><dt>why</dt><dd>${esc(l.why)}</dd><dt>state</dt><dd>${esc(l.state)}</dd></dl>
+    <dl><dt>ref</dt><dd class="mono">${refHtml(l)}</dd><dt>changed</dt><dd>${esc(l.changed)}</dd><dt>why</dt><dd>${esc(l.why)}</dd><dt>state</dt><dd>${esc(l.state)}</dd></dl>
     <div class="links">${l.ticket?`<button class="btn link" data-act="stub">${icon('task','')}Ticket · ${esc(l.ticket)}</button><button class="btn link" data-act="stub">${icon('chat','')}Conversation · ${esc(l.convo)}</button>`:'<span class="muted">No Wiffletree ticket or conversation: logged by the skill outside Wiffletree</span>'}</div></div>`).join('');
   return `<div class="filters">${opts('repo',uniq('repo'),'Repo')}${opts('type',['decision','observation'],'Type')}${opts('author',uniq('author'),'Author')}${opts('verify',['verified','claimed','unverified'],'Verification')}<span class="hint" style="margin-left:auto">${list.length} entries · newest first</span></div>
   ${entries||'<div class="empty">No entries match these filters.</div>'}
@@ -745,6 +745,34 @@ function render(){
   renderRight();
   let t=document.getElementById('toast');
   if(state.toast){if(!t){t=document.createElement('div');t.id='toast';t.className='toast';t.setAttribute('role','status');document.getElementById('window').appendChild(t)}t.textContent=state.toast}else if(t)t.remove();
+  renderEvidence();
+}
+// Simulated evidence behind a commit, PR or tag anchor: what the host's ref verification found.
+function renderEvidence(){
+  let el=document.getElementById('evidence');
+  if(!state.evidence){if(el)el.remove();return}
+  const {anchor,repo}=state.evidence, kind=anchor.startsWith('PR')?'Pull request':anchor.startsWith('tag')?'Release tag':'Commit';
+  const name=anchor.replace(/^(commit|tag) /,'').replace(/ (merged|open)$/,'');
+  const open=/open$/.test(anchor), onBranch=kind==='Commit'&&LOGS.some(l=>l.ref.includes(name)&&l.verify==='claimed');
+  const found=kind==='Pull request'?(open?'Open, not merged: entries citing it stay claimed.':'Merged into main: entries citing it are verified.')
+    :kind==='Release tag'?'Contains the cited commit: further evidence that the change shipped.'
+    :onBranch?'Exists only on its ticket branch, not on main: entries citing it are claimed.':'Reachable from main: entries citing it are verified.';
+  const cites=LOGS.filter(l=>l.ref.includes(name.replace(/^PR /,''))||(kind!=='Commit'&&l.repo===repo&&l.ref.includes(name)));
+  const html=`<div class="palette" role="dialog" aria-modal="true" aria-label="${kind} ${esc(name)}" style="padding:14px 16px">
+    <div class="eyebrow">${kind} · simulated evidence</div>
+    <h2 style="margin:4px 0 2px" class="mono">${esc(name)}</h2>
+    <p class="hint">${esc(repo)} · read from this machine’s checkout and GitHub by ref verification</p>
+    <p style="margin:10px 0">${esc(found)}</p>
+    ${cites.length?`<div class="eyebrow">Cited by</div>${cites.map(l=>`<button class="mini-entry" data-act="evidence-log" data-log="${l.id}"><div>${esc(l.title)}</div><div class="meta">${l.date} · ${people[l.author]} · ${l.verify}</div></button>`).join('')}`:''}
+    <div class="ruling" style="justify-content:flex-end"><button class="btn ghost" data-act="evidence-github">Open on GitHub</button><button class="btn primary" data-act="evidence-close" id="evidence-close">Close</button></div></div>`;
+  if(!el){el=document.createElement('div');el.id='evidence';el.className='scrim';el.dataset.act='evidence-close';document.getElementById('window').appendChild(el)}
+  el.innerHTML=html;
+  document.getElementById('evidence-close').focus();
+}
+const anchorBtn=(text,repo)=>`<button class="anchor" data-act="evidence" data-anchor="${esc(text)}" data-repo="${esc(repo)}" title="Open evidence">${esc(text)}</button>`;
+// A log entry's ref with its commits and PR as evidence buttons.
+function refHtml(l){
+  return esc(l.ref).replace(/\b([0-9a-f]{7})\b/g,(m,sha)=>anchorBtn('commit '+sha,l.repo)).replace(/PR #(\d+)/g,(m,n)=>anchorBtn(`PR #${n} ${l.verify==='verified'?'merged':'open'}`,l.repo));
 }
 function afterRender(selector){const el=selector&&document.querySelector(selector);if(el)el.scrollIntoView({block:'center'})}
 
@@ -779,13 +807,17 @@ const actions={
   'reset-repo'(d){delete state.overrides[d.repo]},
   search(){openSearch();return false},
   'close-search'(){state.search=null;renderSearch();return false},
+  evidence(d){state.evidence={anchor:d.anchor,repo:d.repo}},
+  'evidence-close'(){state.evidence=null},
+  'evidence-github'(){toast('Simulated: would open GitHub; this study makes no network requests')},
+  'evidence-log'(d){state.evidence=null;state.page='browser';focusLog(d.log);render();afterRender('#log-'+d.log);return false},
   sscope(d){state.search.scope=d.scope||null;state.search.sel=0;renderSearch();document.getElementById('q').focus();return false},
   result(d){openResult(state.search.results[Number(d.i)]);return false}
 };
 document.addEventListener('click',e=>{
   const el=e.target.closest('[data-act]');
   if(!el||el.tagName==='SELECT')return;
-  if(el.id==='scrim'&&e.target!==el)return;
+  if((el.id==='scrim'||el.id==='evidence')&&e.target!==el)return;
   const fn=actions[el.dataset.act]; if(!fn)return;
   e.preventDefault();
   if(fn(el.dataset)!==false)render();
@@ -803,6 +835,7 @@ document.addEventListener('input',e=>{if(e.target.id==='q'){state.search.q=e.tar
 document.addEventListener('keydown',e=>{
   const typing=/INPUT|SELECT|TEXTAREA/.test(e.target.tagName);
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();state.search?(state.search=null,renderSearch()):openSearch();return}
+  if(state.evidence&&e.key==='Escape'){e.preventDefault();state.evidence=null;render();return}
   if(!state.search){
     if(e.key==='/'&&!typing){e.preventDefault();openSearch()}
     else if((e.key==='Enter'||e.key===' ')&&e.target.classList.contains('gate-row')){e.preventDefault();e.target.click()}
