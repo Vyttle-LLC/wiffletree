@@ -1832,6 +1832,19 @@ pub(crate) mod tests {
         assert!(f.open_items().is_empty());
     }
 
+    #[test]
+    fn a_passed_review_with_only_noted_findings_runs_without_asking() {
+        let mut f = fixture();
+        f.allow("allowed-org");
+        let mut ticket = f.ticket();
+        ticket.ledger = vec![finding("F1", Severity::NonBlocking, EntryStatus::Noted)];
+        f.host.save_ticket(&ticket).unwrap();
+        let (status, job) = f.publish(&f.implementer.id.clone()).unwrap();
+        assert_eq!(status["status"], "publishing");
+        assert!(job.is_some());
+        assert!(f.open_items().is_empty());
+    }
+
     /// The call waits for the human for `reason`: one item, written by the host, and no step.
     fn asks(f: &mut Fixture, reason: &str) -> Attention {
         let (status, job) = f.publish(&f.implementer.id.clone()).unwrap();
@@ -3140,7 +3153,7 @@ pub(crate) mod tests {
             finding("F1", Severity::Blocking, EntryStatus::Fixed),
             finding("F4", Severity::Blocking, EntryStatus::Open),
             finding("F5", Severity::NonBlocking, EntryStatus::FollowUp),
-            finding("F6", Severity::NonBlocking, EntryStatus::Untriaged),
+            finding("F6", Severity::Blocking, EntryStatus::Untriaged),
         ];
         f.host.save_ticket(&ticket).unwrap();
     }
@@ -3608,7 +3621,7 @@ pub(crate) mod tests {
                  Review: Cycle 2 ended blocked at {short}, after 1 of 3 rounds · Correctness failed\n\
                  Open findings:\n\
                  F4 · blocking · Correctness · src/f4.rs:412 · F4 is still wrong.\n\
-                 F6 · non-blocking · Correctness · src/f6.rs:412 · F6 is still wrong. Not triaged yet.\n\
+                 F6 · blocking · Correctness · src/f6.rs:412 · F6 is still wrong. Not triaged yet.\n\
                  Would send: Push wiffletree/fix-contrast at {short} and open its pull request, “Fix it”"
             )
         );
@@ -3672,7 +3685,7 @@ pub(crate) mod tests {
             );
             assert!(prompt.contains("Did not check: Tests"), "{prompt}");
             assert!(
-                prompt.contains("F4 · blocking") && prompt.contains("F6 · non-blocking"),
+                prompt.contains("F4 · blocking") && prompt.contains("F6 · blocking"),
                 "{prompt}"
             );
             assert!(

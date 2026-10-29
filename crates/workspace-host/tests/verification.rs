@@ -1327,7 +1327,7 @@ fn a_malformed_finding_or_a_foreign_id_refuses_the_whole_report() {
 }
 
 #[test]
-fn an_id_must_name_an_open_or_settled_entry_of_the_verifiers_own_focus() {
+fn an_id_must_name_an_open_noted_or_settled_entry_of_the_verifiers_own_focus() {
     let mut f = Fixture::ready(
         vec![
             verifier(Role::Tester, "Codex", None),
@@ -1345,23 +1345,30 @@ fn an_id_must_name_an_open_or_settled_entry_of_the_verifiers_own_focus() {
     let again = |id: &str| {
         let mut finding = blocking("Again");
         finding["id"] = json!(id);
-        json!([finding])
+        finding
     };
+    assert_eq!(f.entry("F2").status, EntryStatus::Noted);
 
-    let foreign = f.report_findings(&style, "foreign", "failed", again("F1"));
-    let untriaged = f.report_findings(&codex, "untriaged", "failed", again("F2"));
+    let foreign = f.report_findings(&style, "foreign", "failed", json!([again("F2")]));
 
-    assert!(foreign.unwrap_err().to_string().contains("not an open"));
-    assert!(untriaged.is_err());
+    assert!(
+        foreign
+            .unwrap_err()
+            .to_string()
+            .contains("not an open, noted")
+    );
     assert!(
         f.round()
             .verifiers
             .iter()
             .all(|v| v.result == VerifierResult::Pending)
     );
-    f.report_findings(&codex, "own", "failed", again("F1"))
+    f.report_findings(&codex, "own", "passed", json!([again("F1"), again("F2")]))
         .unwrap();
     assert_eq!(f.entry("F1").finding.summary, "Again");
+    // An evidenced blocking re-report of a noted entry opens it and fails the check.
+    assert_eq!(f.entry("F2").status, EntryStatus::Open);
+    assert_eq!(f.run("Codex").result, VerifierResult::Failed);
 }
 
 #[test]
@@ -1427,7 +1434,7 @@ fn a_pass_with_an_evidenced_blocking_finding_fails() {
 }
 
 #[test]
-fn only_non_blocking_findings_pass_and_await_triage() {
+fn only_non_blocking_findings_pass_and_are_noted() {
     let mut f = one_tester(2);
     let codex = f.verifier("Codex");
     let findings = json!([
@@ -1448,9 +1455,9 @@ fn only_non_blocking_findings_pass_and_await_triage() {
     assert_eq!(
         statuses,
         [
-            ("F1".into(), EntryStatus::Untriaged),
-            ("F2".into(), EntryStatus::Untriaged),
-            ("F3".into(), EntryStatus::Untriaged),
+            ("F1".into(), EntryStatus::Noted),
+            ("F2".into(), EntryStatus::Noted),
+            ("F3".into(), EntryStatus::Noted),
         ]
     );
 }
@@ -1700,7 +1707,7 @@ fn a_triage_call_applies_every_decision_or_none() {
         json!([decision("F2", "fixed", "Not a decision")]),
     ] {
         assert!(f.triage(refused.clone()).is_err(), "{refused}");
-        assert_eq!(f.entry("F2").status, EntryStatus::Untriaged, "{refused}");
+        assert_eq!(f.entry("F2").status, EntryStatus::Noted, "{refused}");
     }
     let implementer = f.implementer.id.clone();
     let worker = f.host.agent_tool(
@@ -1714,7 +1721,24 @@ fn a_triage_call_applies_every_decision_or_none() {
             .to_string()
             .contains("project coordinator")
     );
-    assert_eq!(f.entry("F2").status, EntryStatus::Untriaged);
+    assert_eq!(f.entry("F2").status, EntryStatus::Noted);
+}
+
+#[test]
+fn noted_findings_are_pulled_into_a_fix_in_one_call() {
+    let mut f = three_findings();
+    f.coordinator_reads();
+    let implementer_inputs = f.waking(&f.implementer.id).len();
+
+    f.triage(json!([decision("F2", "fix_now", "Rename it while here")]))
+        .unwrap();
+
+    let entry = f.entry("F2");
+    assert_eq!(entry.status, EntryStatus::FixNow);
+    assert_eq!(entry.reason.as_deref(), Some("Rename it while here"));
+    assert_eq!(f.entry("F3").status, EntryStatus::Noted);
+    assert!(f.waking(&f.coordinator.id).is_empty());
+    assert_eq!(f.waking(&f.implementer.id).len(), implementer_inputs);
 }
 
 #[test]
@@ -1844,6 +1868,22 @@ fn every_round_names_the_diff_and_the_decided_entries() {
 }
 
 #[test]
+fn the_next_cycle_lists_noted_entries_apart_from_decided_ones() {
+    let mut f = three_findings();
+    f.triage(json!([decision("F2", "wont_fix", "Matches the naming")]))
+        .unwrap();
+    end_cycle(&mut f);
+
+    f.verify().unwrap();
+
+    let input = f.round_input(&f.verifier("Codex"));
+    let decided = "Already decided; do not re-raise unless the cited code changed:\n- F2 · src/calls.rs:7 · Naming (won't fix)";
+    let noted = "Already noted; do not raise again. Report one by its id only if you now have an evidenced blocking finding about it:\n- F3 · src/calls.rs:7 · Comment";
+    assert!(input.contains(decided), "{input}");
+    assert!(input.contains(noted), "{input}");
+}
+
+#[test]
 fn round_two_re_checks_only_the_open_findings_and_the_new_diff() {
     let mut f = one_tester(3);
     let first = f.round().commit;
@@ -1902,7 +1942,7 @@ fn a_round_starts_when_the_base_is_unavailable() {
 }
 
 #[test]
-fn a_pass_with_an_untriaged_finding_asks_for_triage_then_acceptance() {
+fn a_pass_with_a_noted_finding_lists_it_and_asks_only_for_acceptance() {
     let mut f = one_tester(2);
     f.coordinator_reads();
     let commit = f.round().commit;
@@ -1921,12 +1961,60 @@ fn a_pass_with_an_untriaged_finding_asks_for_triage_then_acceptance() {
     for expected in [
         "passed in cycle 1, full review 1 of 2 (Full), 1 of 2 rounds".to_owned(),
         format!("Tester · Codex: passed at {commit}"),
-        "Untriaged findings:\n- F1 · src/calls.rs:7 · Naming".into(),
-        "Triage the untriaged findings with triage_findings, then accept the ticket.".into(),
+        "Noted findings (1), not blocking:\n- F1 · src/calls.rs:7 · Naming".into(),
+        "Accept the ticket. To fix a noted finding first, mark it fix_now with triage_findings, send it to the implementer and verify again.".into(),
     ] {
         assert!(body.contains(&expected), "{expected}\n{body}");
     }
-    assert!(!body.contains("fresh cycle"), "{body}");
+    for unexpected in ["Triage", "Untriaged", "fresh cycle"] {
+        assert!(!body.contains(unexpected), "{unexpected}\n{body}");
+    }
+}
+
+#[test]
+fn a_pass_with_an_untriaged_finding_asks_for_triage_then_acceptance() {
+    let mut f = one_tester(2);
+    f.coordinator_reads();
+
+    f.report_findings(
+        &f.verifier("Codex"),
+        "pass",
+        "passed",
+        json!([finding("blocking", "No proof")]),
+    )
+    .unwrap();
+
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    for expected in [
+        "Untriaged findings:\n- F1 · src/calls.rs:7 · No proof",
+        "Triage the untriaged findings with triage_findings, then accept the ticket.",
+    ] {
+        assert!(body.contains(expected), "{expected}\n{body}");
+    }
+    assert!(!body.contains("Noted findings"), "{body}");
+}
+
+#[test]
+fn the_outcome_lists_at_most_ten_noted_findings() {
+    let mut f = one_tester(2);
+    f.coordinator_reads();
+    let findings: Vec<Value> = (1..=14)
+        .map(|n| finding("non_blocking", &format!("Nit {n}")))
+        .collect();
+
+    f.report_findings(&f.verifier("Codex"), "pass", "passed", json!(findings))
+        .unwrap();
+
+    let body = &f.waking(&f.coordinator.id)[0].body;
+    assert!(
+        body.contains("Noted findings (14), not blocking:\n- F1 · src/calls.rs:7 · Nit 1\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- F10 · src/calls.rs:7 · Nit 10\nand 4 more in workspace_context"),
+        "{body}"
+    );
+    assert!(!body.contains("Nit 11"), "{body}");
 }
 
 #[test]
@@ -1998,8 +2086,8 @@ fn workspace_context_lists_each_tickets_ledger_and_earlier_cycles() {
         ledger,
         [
             ("F1", "open", "Codex"),
-            ("F2", "untriaged", "Codex"),
-            ("F3", "untriaged", "Codex")
+            ("F2", "noted", "Codex"),
+            ("F3", "noted", "Codex")
         ]
     );
     assert_eq!(ticket["previous_cycles"][0]["cycle"], 1);
@@ -2072,7 +2160,7 @@ fn a_moved_head_without_a_comparable_patch_is_refused_with_the_reason() {
 #[test]
 fn untriaged_findings_block_acceptance_until_triaged() {
     let mut f = one_tester(2);
-    let findings = json!([finding("non_blocking", "Naming")]);
+    let findings = json!([finding("blocking", "No proof")]);
     f.report_findings(&f.verifier("Codex"), "pass", "passed", findings)
         .unwrap();
 
@@ -2088,6 +2176,22 @@ fn untriaged_findings_block_acceptance_until_triaged() {
     .unwrap();
     f.accept(None).unwrap();
     assert_eq!(f.current().state, TicketState::Accepted);
+}
+
+#[test]
+fn noted_findings_do_not_block_acceptance_and_stay_noted() {
+    let mut f = one_tester(2);
+    let findings = json!([
+        finding("non_blocking", "Naming"),
+        finding("pre_existing", "Old bug")
+    ]);
+    f.report_findings(&f.verifier("Codex"), "pass", "passed", findings)
+        .unwrap();
+
+    f.accept(None).unwrap();
+
+    assert_eq!(f.current().state, TicketState::Accepted);
+    assert!(f.ledger().iter().all(|e| e.status == EntryStatus::Noted));
 }
 
 /// A cycle blocked at a round cap of 1 with F1 open.

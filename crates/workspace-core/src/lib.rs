@@ -1919,11 +1919,14 @@ impl Ticket {
             .rev()
             .find(|v| v.is_full_review() && v.outcome == VerificationOutcome::Passed)
     }
-    /// Every finding that is neither fixed nor settled as follow-up or won't-fix.
+    /// Every finding that is neither fixed, noted nor settled as follow-up or won't-fix.
     pub fn open_findings(&self) -> Vec<&LedgerEntry> {
         self.ledger
             .iter()
-            .filter(|e| e.status != EntryStatus::Fixed && !e.status.is_settled())
+            .filter(|e| {
+                !matches!(e.status, EntryStatus::Fixed | EntryStatus::Noted)
+                    && !e.status.is_settled()
+            })
             .collect()
     }
     /// The ticket's pull request while it is open; a publish then pushes to it and may edit it.
@@ -2448,6 +2451,8 @@ pub enum EntryStatus {
     Fixed,
     /// Waiting for the coordinator's decision.
     Untriaged,
+    /// A non-blocking or pre-existing finding that needs no decision.
+    Noted,
     FixNow,
     FollowUp,
     WontFix,
@@ -2458,6 +2463,7 @@ impl EntryStatus {
             Self::Open => "open",
             Self::Fixed => "fixed",
             Self::Untriaged => "untriaged",
+            Self::Noted => "noted",
             Self::FixNow => "fix now",
             Self::FollowUp => "follow-up",
             Self::WontFix => "won't fix",

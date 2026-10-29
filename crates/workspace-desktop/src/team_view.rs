@@ -365,7 +365,7 @@ fn ledger_list(rows: Vec<wording::LedgerRow>, p: Palette) -> Div {
             EntryStatus::Untriaged => p.focus,
             EntryStatus::FixNow => p.yellow,
             EntryStatus::FollowUp => p.blue,
-            EntryStatus::WontFix => p.subtle,
+            EntryStatus::Noted | EntryStatus::WontFix => p.subtle,
         };
         list = list.child(
             div()

@@ -4531,15 +4531,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_keeper_review_that_passes_with_a_non_blocking_finding_asks_the_coordinator_to_triage() {
+    fn a_keeper_review_that_passes_with_a_non_blocking_finding_wakes_no_one_and_is_pushed() {
         let (mut f, r) = reviewing("true");
-        under_review(&mut f, &r);
+        let (_, after) = under_review(&mut f, &r);
         verdict(
             &mut f,
             "Correctness",
             "passed",
             json!([finding("non_blocking", "Nit")]),
         );
+        assert_eq!(f.ticket().ledger[0].status, EntryStatus::Noted);
+        assert!(cycle_messages(&f).is_empty(), "a noted entry needs no one");
+        let step = f.host.keeper_review_done(&f.ticket.clone()).unwrap();
+        drive(&mut f, &r, step);
+        assert_eq!(r.branch(BRANCH), Some(after));
+    }
+
+    #[test]
+    fn a_keeper_review_that_passes_with_an_unevidenced_blocking_finding_asks_the_coordinator_to_triage()
+     {
+        let (mut f, r) = reviewing("true");
+        under_review(&mut f, &r);
+        let mut unevidenced = finding("blocking", "Maybe wrong");
+        unevidenced["evidence"] = json!("");
+        verdict(&mut f, "Correctness", "passed", json!([unevidenced]));
         let ticket = f.ticket();
         assert_eq!(ticket.ledger[0].status, EntryStatus::Untriaged);
         let outcome = format!("verification:{}:2:outcome", f.ticket);
@@ -4594,6 +4609,39 @@ pub(crate) mod tests {
         );
         assert!(body.contains(&skipped), "{body}");
         assert_eq!(f.host.keeper_reviews_ended(), [f.ticket.clone()]);
+    }
+
+    #[test]
+    fn a_withdrawn_keeper_review_leaves_a_noted_entry_it_reported_again_as_it_was() {
+        let (mut f, r) = reviewing("true");
+        let noted = LedgerEntry {
+            focus: "Correctness".into(),
+            status: EntryStatus::Noted,
+            ..untriaged("F1")
+        };
+        let mut ticket = f.ticket();
+        ticket.ledger.push(noted.clone());
+        f.host.save_ticket(&ticket).unwrap();
+        under_review(&mut f, &r);
+        let again = |severity| {
+            let mut again = finding(severity, "Earlier, again");
+            again["id"] = json!("F1");
+            again
+        };
+        verdict(
+            &mut f,
+            "Correctness",
+            "failed",
+            json!([again("blocking"), again("non_blocking")]),
+        );
+
+        let ticket = f.ticket();
+        assert_eq!(ticket.ledger, [noted]);
+        let withdrawn = ticket.keeper_reviews()[0].withdrawn.clone().unwrap();
+        let entries: Vec<(&str, Severity)> = (withdrawn.entries.iter())
+            .map(|e| (e.id.as_str(), e.finding.severity))
+            .collect();
+        assert_eq!(entries, [("F2", Severity::Blocking)]);
     }
 
     #[test]

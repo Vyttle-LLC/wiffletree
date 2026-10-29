@@ -251,7 +251,15 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v4"));
+    assert!(coordinator.contains("Project coordinator core — v5"));
+    // Noted findings need no decision, and one is pulled into a fix with fix_now.
+    for phrase in [
+        "Non-blocking and pre-existing findings are noted: they need no decision before accepting or publishing",
+        "Triage every untriaged entry once with triage_findings",
+        "To fix a noted finding, mark it fix_now with triage_findings and send it to the implementer",
+    ] {
+        assert!(coordinator.contains(phrase), "{phrase}");
+    }
     for role in Role::ALL {
         let core = core(role);
         assert!(core.contains("Wiffletree communication contract — v10"));
@@ -309,7 +317,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
 #[test]
 fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
     let coordinator = provider::skill(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Coordinating — v3"));
+    assert!(coordinator.contains("Coordinating — v4"));
     for phrase in [
         "Spend review in proportion to risk",
         "the verifiers by focus, with a model only where the workspace records one",
@@ -317,7 +325,9 @@ fn coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human() {
         "Start a second full review only while an evidenced blocking finding stays open",
         "Reaching the cap is not approval",
         "git diff --shortstat of the first reviewed commit and of the final one against the base",
-        "A round with only non-blocking findings ends the loop, and so do non-blocking findings left after two or three rounds: triage them as follow_up or wont_fix, never fix_now",
+        "A round with only non-blocking findings ends the loop, and so do non-blocking findings left after two or three rounds: leave them noted, or mark them follow_up or wont_fix when you decide so; never mark them fix_now to chase them",
+        "Pull a noted finding into a fix only when it matters: mark it fix_now with triage_findings and send it to the implementer",
+        "lists the ticket's follow_up entries under a \"Follow-ups\" heading, one line each with its summary and location, before the Wiffletree line; noted entries are left out",
         "overrule it the same way",
         "has one line last before any footer",
         "When you ask the implementer to publish, give it this line",
@@ -459,8 +469,9 @@ fn verifiers_report_located_evidenced_findings_without_patches() {
         }
         // What counts as blocking is Reviewing's.
         let verifier = provider::skill(role);
-        assert!(verifier.contains("Reviewing — v1"));
+        assert!(verifier.contains("Reviewing — v2"));
         for phrase in [
+            "Report at most five non_blocking or pre_existing findings per round, the most consequential first",
             "A finding is blocking only if it breaks an acceptance criterion",
             "step-by-step trace citing `file:line`",
             "pre_existing",
