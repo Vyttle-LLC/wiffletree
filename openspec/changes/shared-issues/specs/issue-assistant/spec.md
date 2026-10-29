@@ -56,8 +56,12 @@ The assistant's instructions SHALL say that issues and comments are written by p
 - **THEN** the assistant does not propose closing them unless the human asks, and the pane's notice names who wrote the description
 
 ### Requirement: The assistant's model comes from Who runs what
-Each assistant turn SHALL resolve its model from the Issue assistant row of Who runs what, like any agent start. With no row, Ask the assistant and the issue page's assistant SHALL say to choose a model for the Issue assistant in Models, and no session SHALL start. Its usage SHALL be recorded in the usage ledger under the tracker.
+Each assistant turn SHALL resolve its model from the Issue assistant row of Who runs what, like any agent start. The row SHALL name only Claude models, with no then choice, because the assistant runs with its built-in tools off and Codex cannot be started that way; the assistant SHALL never run on Codex. While Claude is spent, a message to the assistant SHALL wait, and the pane SHALL say until when. With no row, Ask the assistant and the issue page's assistant SHALL say to choose a model for the Issue assistant in Models, and no session SHALL start. Its usage SHALL be recorded in the usage ledger under the tracker.
 
 #### Scenario: No row
 - **WHEN** Who runs what has no Issue assistant row and the human chooses Ask the assistant
 - **THEN** the pane says to choose an Issue assistant model in Models, with a link, and no session starts
+
+#### Scenario: Claude is spent
+- **WHEN** the Issue assistant row is Sonnet · low and Claude's weekly limit is past the switch threshold
+- **THEN** the human's message waits until Claude resets, the pane says so, and no turn starts on Codex

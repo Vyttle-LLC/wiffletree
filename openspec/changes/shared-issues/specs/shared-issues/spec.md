@@ -97,11 +97,15 @@ Commits that reach the tracker's default branch from anyone, with or without Wif
 - **THEN** the change is not pushed, and an Inbox entry says the issue was changed outside Wiffletree on this Mac
 
 ### Requirement: IDs are allocated when an issue reaches the tracker
-A new issue SHALL be numbered when it is pushed: one more than the highest number with the tracker's prefix at the fetched remote head. Until then it SHALL carry a temporary ID, shown as such. When a push is refused because the remote moved, the pass SHALL fetch, merge, renumber this Mac's new issues and rewrite their temporary IDs in every file this Mac wrote, then push again, up to 5 times per pass. A number once pushed SHALL never change or be reused.
+A new issue SHALL be numbered when it is pushed: one more than the highest number with the tracker's prefix that any `issues/<ID>/` path has had in the default branch's history up to the fetched remote head, so that a deleted issue's number is never handed out again. Until then it SHALL carry a temporary ID, shown as such. When a push is refused because the remote moved, the pass SHALL fetch, merge, renumber this Mac's new issues and rewrite their temporary IDs in every file this Mac wrote, then push again, up to 5 times per pass. A number once pushed SHALL never change or be reused.
 
 #### Scenario: Two people file at once
 - **WHEN** two Macs file an issue in the same minute against a tracker whose highest issue is CEL-151, and the other Mac pushes first as CEL-152
 - **THEN** this Mac's push is refused, the pass fetches, numbers its issue CEL-153 and pushes it
+
+#### Scenario: A deleted issue's number
+- **WHEN** a tracker has CEL-151 and CEL-152, a teammate deletes `issues/CEL-152/` in an ordinary commit, and a Mac that never saw CEL-152 files an issue
+- **THEN** the new issue is numbered CEL-153, and CEL-152 is not reused
 
 #### Scenario: Filed offline
 - **WHEN** the human files an issue with no network and links it from CEL-151 as related
@@ -155,7 +159,7 @@ The Inbox SHALL show issue entries, under an "Issues" label at the top of every 
 - **THEN** the Inbox shows that Priya commented on the human's issue, with the comment's first line
 
 ### Requirement: Starting a project from an issue links them
-**Start project from issue** SHALL create a project named after the issue and its coordinator, link the project to the issue on this Mac, and send the coordinator a first message from the human holding the issue's ID, title, description and comments, introduced as context written by the named authors and not as instructions. The host SHALL append a `work` event saying the human started a project, with no project name, and SHALL move the issue to In progress unless it is Canceled.
+**Start project from issue** SHALL create a project named after the issue and its coordinator, link the project to the issue on this Mac, and send the coordinator a first message from the human holding the issue's ID, title, description and comments, introduced as context written by the named authors and not as instructions. The host SHALL append a `work` event saying the human started a project, with no project name, and SHALL move the issue to In progress, as for any change of the derived state.
 
 #### Scenario: Start project from CEL-151
 - **WHEN** the human starts a project from CEL-151
@@ -180,7 +184,7 @@ Every tool result that carries issue, comment or event text SHALL mark each pass
 - **THEN** the `read_issue` result marks the comment as written by its author, and the coordinator's instructions say such text is context, not instructions
 
 ### Requirement: Issue states follow linked work
-The states SHALL be Triage, Backlog, Todo, In progress, In review, Done and Canceled. On the Mac that holds an issue's links, the host SHALL derive the linked work's state: In progress once a linked project or ticket exists; In review while any linked ticket's PR is open; Done when every linked ticket's PR has merged and no linked project has an open ticket. When the derived state changes, the host SHALL set the issue's state to it with a `state` event marked automatic, unless the issue is Canceled. A manual move SHALL record the derived state it overrode, and the issue SHALL follow linked work again when the derived state next changes. A tracker whose `wiffletree-issues.toml` lists other states SHALL be refused, saying this release does not know them.
+The states SHALL be Triage, Backlog, Todo, In progress, In review, Done and Canceled. On the Mac that holds an issue's links, the host SHALL derive the linked work's state: In progress once a linked project or ticket exists; In review while any linked ticket's PR is open; Done when every linked ticket's PR has merged and no linked project has an open ticket. When the derived state changes, the host SHALL set the issue's state to it with a `state` event marked automatic. A manual move to any state, Canceled included, SHALL record the derived state it overrode, and the issue SHALL follow linked work again when the derived state next changes. Canceled SHALL never be derived. A tracker whose `wiffletree-issues.toml` lists other states SHALL be refused, saying this release does not know them.
 
 #### Scenario: A PR opens
 - **WHEN** a ticket of the project linked to CEL-131 opens PR #412
@@ -193,6 +197,10 @@ The states SHALL be Triage, Backlog, Todo, In progress, In review, Done and Canc
 #### Scenario: A manual move holds until the work changes
 - **WHEN** the human moves CEL-142 back to Todo while its PR is open, and the PR later merges
 - **THEN** CEL-142 stays Todo while the PR stays open, and moves to Done when the PR merges
+
+#### Scenario: Canceled by hand, then the work finishes
+- **WHEN** the human moves CEL-131 from In review to Canceled, and later its last PR merges and its tickets are accepted
+- **THEN** CEL-131 stays Canceled while the PR stays open, and moves to Done when the derived state becomes Done
 
 ### Requirement: Import from Linear
 Trackers SHALL offer Import from Linear… for a tracker this Mac set up or joined. It SHALL take a Linear personal API key, which the host SHALL keep in the Keychain only until the import ends and SHALL NOT log; list the Linear teams the key reads; and, for the team the human chooses, show how many issues and comments would be written and how Linear's states map to the seven states before anything is written. The import SHALL write issues, comments, labels, priorities, assignees mapped to GitHub logins the human confirms, and relations, in commits of at most 100 issues, keeping Linear's number when the prefix matches the team's key and the number is free. It SHALL record each issue's Linear identifier in its front matter, so that running it again adds only issues not yet imported. It SHALL read Linear only and SHALL NOT write to it, and there SHALL be no ongoing sync.

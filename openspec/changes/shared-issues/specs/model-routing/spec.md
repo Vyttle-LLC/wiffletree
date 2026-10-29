@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Who runs what
-The host SHALL persist, per machine, one row per job: Coordinator, Implementer, Tester, one per configured verifier keyed by its focus, optionally PR keeper, and optionally Issue assistant. Each row SHALL have a first choice (provider, model, effort), a then choice that is a model, wait (the default, saved as no then) or skip, and an optional small-work line with its own first and then. Skip SHALL be offered only on verifier rows, on either line. A save SHALL be refused, whole, with the previous table kept, when a row of Coordinator, Implementer or Tester is missing or doubled, two rows name one verifier, two PR keeper rows or two Issue assistant rows exist, a model or effort is empty or too long, a then choice uses the same provider as its first choice, or a Coordinator, Implementer, Tester, PR keeper or Issue assistant line's then is skip. A table saved before skip existed SHALL load unchanged. The table SHALL NOT be shared through the settings repository. A save that also changes the guide or the switch threshold SHALL change all of them or none, and a save together with the review settings SHALL be checked whole before anything is written.
+The host SHALL persist, per machine, one row per job: Coordinator, Implementer, Tester, one per configured verifier keyed by its focus, optionally PR keeper, and optionally Issue assistant. Each row SHALL have a first choice (provider, model, effort), a then choice that is a model, wait (the default, saved as no then) or skip, and an optional small-work line with its own first and then. Skip SHALL be offered only on verifier rows, on either line. A save SHALL be refused, whole, with the previous table kept, when a row of Coordinator, Implementer or Tester is missing or doubled, two rows name one verifier, two PR keeper rows or two Issue assistant rows exist, a model or effort is empty or too long, a then choice uses the same provider as its first choice, a Coordinator, Implementer, Tester, PR keeper or Issue assistant line's then is skip, or an Issue assistant line names a model that is not Claude or has a then other than wait, because the issue assistant runs with every built-in tool turned off and Codex cannot be started that way. A table saved before skip existed SHALL load unchanged. The table SHALL NOT be shared through the settings repository. A save that also changes the guide or the switch threshold SHALL change all of them or none, and a save together with the review settings SHALL be checked whole before anything is written.
 
 The table SHALL match the configured verifiers whenever it is read: a row for a verifier that is no longer configured SHALL be left out, and a configured verifier without a row SHALL use a copy of the first reviewer's row, or of the Tester row with no reviewer row, and SHALL be named in the table's `copied` list until a save stores its row.
 
@@ -20,6 +20,10 @@ The table SHALL match the configured verifiers whenever it is read: a row for a 
 #### Scenario: An Issue assistant row
 - **WHEN** the human saves an Issue assistant row of Sonnet · low then wait
 - **THEN** the table holds the row, and the next assistant turn resolves Sonnet · low
+
+#### Scenario: A Codex Issue assistant row
+- **WHEN** the human saves the Issue assistant row as GPT 6.1 Sol · medium, or as Sonnet · low then a Codex model
+- **THEN** the save is refused, saying the issue assistant runs only on Claude, and the previous table stays
 
 #### Scenario: A table from before issues
 - **WHEN** a table saved before this change is read
