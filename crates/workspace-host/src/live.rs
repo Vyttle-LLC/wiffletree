@@ -400,18 +400,10 @@ impl Host {
         let waived = waived.map(one_line_reason).transpose()?;
         let unreviewed_waiver = self.unreviewed_waiver(&ticket, waived);
         match (verification.outcome, waived) {
-            (VerificationOutcome::Passed, None) => {}
+            (VerificationOutcome::Passed, None) | (VerificationOutcome::Blocked, Some(_)) => {}
             (VerificationOutcome::Passed, Some(_)) if unreviewed_waiver.is_some() => {}
             (VerificationOutcome::Passed, Some(_)) => bail!(
                 "Verification cycle {} passed; there is nothing to waive",
-                verification.cycle
-            ),
-            (VerificationOutcome::Blocked, Some(_)) => ensure!(
-                verification.latest_results().iter().all(|run| !matches!(
-                    run.result,
-                    VerifierResult::Blocked | VerifierResult::Pending
-                )),
-                "A verifier of cycle {} could not verify or never reported; a waiver covers only checked findings",
                 verification.cycle
             ),
             _ => bail!(
@@ -419,17 +411,7 @@ impl Host {
                 verification.cycle
             ),
         }
-        let untriaged: Vec<&str> = ticket
-            .ledger
-            .iter()
-            .filter(|e| e.status == EntryStatus::Untriaged)
-            .map(|e| e.id.as_str())
-            .collect();
-        ensure!(
-            untriaged.is_empty(),
-            "Triage {} with triage_findings before accepting",
-            untriaged.join(", ")
-        );
+        ensure_findings_settled(&ticket, verification, "accepting")?;
         let verified = verification.verified_commit().context("No round")?;
         let waived_commits = self.check_verified_head(&ticket, verified, unreviewed_waiver)?;
         ensure!(
@@ -1029,6 +1011,34 @@ fn small_work(args: &Value) -> Result<bool> {
         Some(Value::Bool(small)) => Ok(*small),
         Some(_) => bail!("small must be true or false"),
     }
+}
+
+/// Refuses while a finding is untriaged, and while a verifier of a blocked cycle could not
+/// verify or never reported: a waiver covers only findings that were checked and triaged.
+pub(crate) fn ensure_findings_settled(
+    ticket: &Ticket,
+    verification: &Verification,
+    before: &str,
+) -> Result<()> {
+    ensure!(
+        verification.outcome != VerificationOutcome::Blocked
+            || verification.latest_results().iter().all(|run| !matches!(
+                run.result,
+                VerifierResult::Blocked | VerifierResult::Pending
+            )),
+        "A verifier of cycle {} could not verify or never reported; a waiver covers only checked findings",
+        verification.cycle
+    );
+    let untriaged: Vec<&str> = (ticket.ledger.iter())
+        .filter(|e| e.status == EntryStatus::Untriaged)
+        .map(|e| e.id.as_str())
+        .collect();
+    ensure!(
+        untriaged.is_empty(),
+        "Triage {} with triage_findings before {before}",
+        untriaged.join(", ")
+    );
+    Ok(())
 }
 
 /// `Host::check_verified_head` for a caller that has the ticket's base without the store,

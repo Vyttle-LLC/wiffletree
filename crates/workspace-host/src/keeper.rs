@@ -751,8 +751,9 @@ impl Host {
         Ok(())
     }
     /// Whether the keeper may change a kept ticket's branch: exactly when `publish_ticket` would
-    /// push it without asking. The latest cycle passed, the worktree's HEAD is the verified
-    /// commit or patch-equivalent to it and is the PR's head, and no publish request exists.
+    /// push it without asking. The latest cycle passed or the coordinator waived it, the
+    /// worktree's HEAD is the verified commit or patch-equivalent to it and is the PR's head,
+    /// and no publish request exists.
     pub(crate) fn may_change_branch(&self, ticket: &Ticket) -> bool {
         if let Some(may) = self
             .completed_move
@@ -761,12 +762,10 @@ impl Host {
         {
             return may;
         }
-        let passed = ticket
-            .verification
-            .as_ref()
-            .filter(|v| v.outcome == VerificationOutcome::Passed);
         let (Some(verified), Some(pr)) = (
-            passed.and_then(Verification::verified_commit),
+            ticket
+                .standing_review()
+                .and_then(Verification::verified_commit),
             ticket.open_pull_request(),
         ) else {
             return false;
