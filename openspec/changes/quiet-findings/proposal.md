@@ -23,6 +23,7 @@ The live workspace database shows what that costs. Across 200 tickets from 5 to 
 
 ### Modified Capabilities
 - `ticket-verification`: the ledger's statuses and how a finding enters it, triage of `noted` entries, the cycle-outcome message, review memory, re-reporting a ledger entry, and when a passed keeper review wakes the coordinator.
+- `ticket-workspaces`: the project coordinator contract's triage duty and stop rule, now in terms of `noted` findings, and the PR follow-ups list.
 
 ## Impact
 

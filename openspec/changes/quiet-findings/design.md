@@ -25,13 +25,13 @@ Context only: the human will separately remove the Style verifier from the Full 
 - A project-level follow-up tracker (see decision c).
 - Rewriting entries already stored as `untriaged`.
 
-## Decisions for the human
+## Decisions
 
-Each decision gives a recommendation and its trade-off. The specs delta and tasks follow the recommendations; changing a decision changes those artifacts.
+The human approved all four decisions as recommended on 2026-10-29. Each keeps its trade-off for the record. The specs delta and tasks follow them.
 
 ### (a) Default state: a new `noted` status, not automatic `follow_up`
 
-**Recommendation:** add `EntryStatus::Noted`. A `non_blocking` or `pre_existing` finding enters the ledger as `noted` and stays `noted` unless the coordinator decides it. `noted` does not block accept or publish, and it is not "settled": it is not a coordinator decision.
+**Decision (approved by the human, 2026-10-29):** add `EntryStatus::Noted`. A `non_blocking` or `pre_existing` finding enters the ledger as `noted` and stays `noted` unless the coordinator decides it. `noted` does not block accept or publish, and it is not "settled": it is not a coordinator decision.
 
 **Why not automatic `follow_up` when the cycle ends:**
 - `follow_up` means "the coordinator decided to do this later" and carries the coordinator's reason. If the host wrote it by default, the ledger could no longer tell a decision from a default, and the PR's follow-up list (decision c) would fill up with nits nobody chose to keep.
@@ -42,7 +42,7 @@ Each decision gives a recommendation and its trade-off. The specs delta and task
 
 ### (b) What the coordinator sees: one capped list in the outcome message, and the existing batch call
 
-**Recommendation:**
+**Decision (approved by the human, 2026-10-29):**
 - The cycle-outcome message, passed or blocked, gets a paragraph "Noted findings (N), not blocking:" with one `id · location · summary` line per `noted` entry recorded in this cycle, at most 10 lines, followed by "and K more in workspace_context" when there are more.
 - `ledger_summary` (`verification.rs:297`) adds `noted` ids from earlier cycles to its "Already decided" id list, renamed "Already decided or noted", so the coordinator sees each entry in full only once.
 - After a pass the message ends: "Accept the ticket. To fix a noted finding first, mark it fix_now with triage_findings, send it to the implementer and verify again." When untriaged entries remain (kinds 2 and 3 above), it keeps today's "Triage the untriaged findings with triage_findings, then accept the ticket."
@@ -53,7 +53,7 @@ Each decision gives a recommendation and its trade-off. The specs delta and task
 
 ### (c) Where follow-ups go after acceptance: listed in the PR description
 
-**Recommendation:** when a ticket ships as a PR, its description lists the ticket's `follow_up` entries under a short "Follow-ups" heading, one line each (summary and location), before the "Reviewed with Wiffletree" line. This is a Coordinating skill rule, written by whoever publishes, built from the ledger in `workspace_context`. `noted` entries are not listed: nobody chose to keep them, and they stay on the ticket's ledger. A ticket accepted without a PR keeps its follow-ups in the ledger and in the coordinator's final summary, which already has an "open follow-ups" column.
+**Decision (approved by the human, 2026-10-29):** when a ticket ships as a PR, its description lists the ticket's `follow_up` entries under a short "Follow-ups" heading, one line each (summary and location), before the "Reviewed with Wiffletree" line. This is a Coordinating skill rule, written by whoever publishes, built from the ledger in `workspace_context`. `noted` entries are not listed: nobody chose to keep them, and they stay on the ticket's ledger. A ticket accepted without a PR keeps its follow-ups in the ledger and in the coordinator's final summary, which already has an "open follow-ups" column.
 
 **Options considered:**
 - **Nothing** (today): `follow_up` stays a ledger status with no destination, and the coordinator's reasoning is lost once the ticket is accepted.
@@ -64,7 +64,7 @@ Each decision gives a recommendation and its trade-off. The specs delta and task
 
 ### (d) A per-round cap on non-blocking findings in the Reviewing skill: yes, soft, five
 
-**Recommendation:** Reviewing v2 adds: "Report at most five non_blocking or pre_existing findings per round, the most consequential first; fold findings of the same kind into one." The host does not enforce it.
+**Decision (approved by the human, 2026-10-29):** Reviewing v2 adds: "Report at most five non_blocking or pre_existing findings per round, the most consequential first; fold findings of the same kind into one." The host does not enforce it.
 
 **Trade-off:** a soft cap can be ignored, and a verifier may drop a sixth nit that mattered. A host-enforced cap would have to refuse the whole report, since `check_findings` refuses all or nothing (`verification.rs:169`), which costs a verifier turn and could lose its blocking findings with it. Truncating silently would hide findings without telling anyone. The outcome message's cap in (b) already bounds the coordinator's context whatever verifiers report, so the skill cap is mainly about verifier focus and ledger noise.
 
@@ -92,7 +92,7 @@ Each behaviour change and the existing tests it touches. Line numbers are on ori
 | Outcome message lists noted findings, capped, and does not ask to triage them | `a_pass_with_an_untriaged_finding_asks_for_triage_then_acceptance` (1905) now expects "Noted findings (1), not blocking:" and the new closing line, and is renamed; a new test covers the cap of 10 and "and K more" | — | — |
 | A passed keeper review with only noted findings wakes no one | — | — | `keeper.rs` `a_keeper_review_that_passes_with_a_non_blocking_finding_asks_the_coordinator_to_triage` (4536) inverts: no cycle message, pushed; `a_keeper_review_passing_wakes_the_coordinator_only_for_its_own_untriaged_entries` (5090), unchanged |
 | A noted id may be re-reported; evidenced blocking turns it `open` | `an_id_must_name_an_open_or_settled_entry_of_the_verifiers_own_focus` (1330): the `untriaged` re-report of F2 (1352–1355) is now accepted and fails the check, with F2 `open`; a `foreign` re-report is still refused | — | — |
-| Review memory lists noted entries | `every_round_names_the_diff_and_the_decided_entries` (1818) gains the "Already noted" block | — | — |
+| Review memory lists noted entries | `every_round_names_the_diff_and_the_decided_entries` (1818) is unchanged: it triages F2 and F3 first (1819–1825), so nothing is left `noted`. A new test, `the_next_cycle_lists_noted_entries_apart_from_decided_ones`, built on `three_findings`, triages only F2 `wont_fix`, ends the cycle and starts the next. It asserts that the verifier's message lists F2 under "Already decided" and F3, still `noted`, under "Already noted" with the re-report instruction | — | — |
 | Coordinator core v5 | — | `bundled_instructions_describe_the_flat_hierarchy` (246): version string at 254 | — |
 | Coordinating v4 | — | `coordinating_at_stock_states_the_stop_rule_and_when_to_ask_the_human` (310): the phrase at 320 changes, and phrases are added for the PR follow-ups list and pulling noted findings into a fix | — |
 | Reviewing v2 with the soft cap | — | `verifiers_report_located_evidenced_findings_without_patches` (449): version string at 462 and the new cap phrase | — |
