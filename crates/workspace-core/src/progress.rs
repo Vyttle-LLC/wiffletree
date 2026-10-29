@@ -131,7 +131,8 @@ pub struct TicketProgress {
     pub stage: Stage,
     pub state: BarState,
     pub position: u16,
-    /// The agents the crew panel lists, in order; none once the ticket is accepted.
+    /// The agents the Agents panel can list under the ticket, in order; none once the ticket
+    /// is accepted.
     pub agents: Vec<String>,
 }
 

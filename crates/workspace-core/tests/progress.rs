@@ -471,10 +471,10 @@ fn fixes_after_a_pass_return_to_sixty_when_ready() {
     );
 }
 
-// The crew a ticket lists
+// The agents a ticket lists
 
 #[test]
-fn an_archived_passed_verifier_stays_in_the_crew() {
+fn an_archived_passed_verifier_stays_listed() {
     let rounds: &[&[_]] = &[
         &[("tester", Passed), ("reviewer", Failed)],
         &[("reviewer", Pending)],

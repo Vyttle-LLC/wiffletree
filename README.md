@@ -17,7 +17,7 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/tickets.png" alt="The Crew panel beside the coordinator's chat, listing three tickets by stage with their agents, models and progress"></td>
+    <td width="50%"><img src="docs/images/tickets.png" alt="The Agents panel beside the coordinator's chat, listing three tickets by stage with their agents, models and progress"></td>
     <td width="50%"><img src="docs/images/models.png" alt="The Models page: when a subscription runs low, and the Who runs what table, with a first choice, a next choice and a Right now column for each job"></td>
   </tr>
   <tr>

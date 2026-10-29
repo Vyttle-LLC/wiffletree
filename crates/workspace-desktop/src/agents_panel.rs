@@ -76,17 +76,16 @@ impl<'a> Roster<'a> {
             .collect();
         Self { tickets, previous }
     }
-    /// The agents listed under tickets, each ticket's in turn.
-    pub(crate) fn crew(&self) -> Vec<&'a AgentProgress> {
+    /// Each ticket's agents in turn.
+    pub(crate) fn ticket_agents(&self) -> Vec<&'a AgentProgress> {
         let agents = self.tickets.iter().flat_map(|(_, agents)| agents);
         agents.copied().collect()
     }
-    /// How many listed agents are in a turn.
     pub(crate) fn working(&self) -> usize {
         let previous = self.previous.iter().filter(|s| s.status == Status::Working);
-        self.crew().iter().filter(|a| a.working).count() + previous.count()
+        let on_tickets = self.ticket_agents().into_iter().filter(|a| a.working);
+        on_tickets.count() + previous.count()
     }
-    /// How many tickets have an agent in a turn.
     pub(crate) fn busy_tickets(&self) -> usize {
         let busy = |agents: &Vec<&AgentProgress>| agents.iter().any(|a| a.working);
         self.tickets
@@ -94,11 +93,10 @@ impl<'a> Roster<'a> {
             .filter(|(_, agents)| busy(agents))
             .count()
     }
-    /// How many listed agents are stuck.
     pub(crate) fn stuck(&self, index: &WorkspaceIndex) -> usize {
-        let crew = self.crew().into_iter();
-        let crew = crew.filter_map(|a| index.session(&a.session_id));
-        (crew.chain(self.previous.iter().copied()))
+        let on_tickets = self.ticket_agents().into_iter();
+        let on_tickets = on_tickets.filter_map(|a| index.session(&a.session_id));
+        (on_tickets.chain(self.previous.iter().copied()))
             .filter(|s| stuck(s, index.runtime(&s.id)).is_some())
             .count()
     }
@@ -328,8 +326,8 @@ impl Inspector {
     }
 
     fn agents_working(&self) -> bool {
-        let crew = self.shared.roster().map(|roster| roster.crew());
-        clock_runs(self.shared.panel, &crew.unwrap_or_default())
+        let agents = self.shared.roster().map(|roster| roster.ticket_agents());
+        clock_runs(self.shared.panel, &agents.unwrap_or_default())
     }
 
     /// Redraws the elapsed times every half minute, only while the panel is open and a
@@ -361,11 +359,12 @@ impl Inspector {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Panel, Roster, Stuck, clock_runs, stuck};
+    use super::{Panel, Roster, Stuck, clock_runs, previous_label, stuck};
     use crate::progress::ProgressBoard;
     use crate::test_support::ticket_store;
     use std::rc::Rc;
     use workspace_core::*;
+    use workspace_host::Host;
 
     fn agent(working: bool) -> AgentProgress {
         named("agent", working)
@@ -474,14 +473,14 @@ mod tests {
         // another project changes whether the timer runs.
         let runs = |project: &str| {
             let roster = Roster::new(&board, &index, project, &format!("{project}-coordinator"));
-            clock_runs(Some(Panel::Agents), &roster.crew())
+            clock_runs(Some(Panel::Agents), &roster.ticket_agents())
         };
         assert!(runs("working") && !runs("quiet"));
     }
 
     #[test]
     fn every_agent_the_sidebar_lists_is_on_a_ticket_card_or_under_previous_agents() {
-        let (_directory, mut host, root, ticket) = ticket_store();
+        let (directory, mut host, root, ticket) = ticket_store();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
             .unwrap();
@@ -513,6 +512,34 @@ mod tests {
                 Provider::Codex,
             )
             .unwrap();
+        // A repository coordinator kept from a store made before they were removed.
+        drop(host);
+        let retired = Session {
+            id: "retired".into(),
+            name: "sagechat-sms".into(),
+            role: Role::TaskOrchestrator,
+            repository_id: Some(ticket.repository_id.clone()),
+            ..named_session("retired", Status::Ready)
+        };
+        let db =
+            rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO sessions VALUES (?1,?2,?3,'task_orchestrator',?4)",
+            (
+                &retired.id,
+                &root.project_id,
+                &root.id,
+                serde_json::to_string(&Session {
+                    project_id: root.project_id.clone(),
+                    parent_id: Some(root.id.clone()),
+                    ..retired.clone()
+                })
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        drop(db);
+        let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
         let mut page = host.progress(0).unwrap();
         // The board lists the latest cycle's verifiers, archived or not.
         page.tickets[0].agents.push(reviewer.id.clone());
@@ -522,14 +549,19 @@ mod tests {
 
         let roster = Roster::new(&board, &index, &root.project_id, &root.id);
 
-        let crew: Vec<&str> = roster
-            .crew()
+        let on_tickets: Vec<&str> = roster
+            .ticket_agents()
             .iter()
             .map(|a| a.session_id.as_str())
             .collect();
-        assert_eq!(crew, [implementer.id.as_str()]);
+        assert_eq!(on_tickets, [implementer.id.as_str()]);
         let previous: Vec<&str> = roster.previous.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(previous, [&reviewer.id, &earlier.id, &older.id]);
+        assert_eq!(
+            previous,
+            [&reviewer.id, &earlier.id, &older.id, &retired.id]
+        );
+        let retired = index.session(&retired.id).unwrap();
+        assert_eq!(previous_label(&index, retired).0, "sagechat-sms (retired)");
     }
 
     #[test]
