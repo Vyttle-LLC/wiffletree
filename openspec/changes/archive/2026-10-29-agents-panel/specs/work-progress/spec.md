@@ -7,7 +7,7 @@
 ## ADDED Requirements
 
 ### Requirement: Agents panel
-The header of every conversation of a project, its coordinator's and each of its agents', SHALL carry an Agents toggle labelled "Agents · N working", where N is the number of agents the panel lists that are in a turn, or "Agents" when none is. Activating it SHALL open the Agents panel beside the conversation, without replacing it, and activating it again SHALL close it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents and the verifiers of its latest cycle, each once, including a verifier the host archived after it passed. Each agent row SHALL show its role and focus, its figure, its current step while it works, its model, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and an agent listed under a ticket is working. Below the tickets, a "Previous agents (N)" section, folded until the human unfolds it, SHALL list every other agent the sidebar tree lists under the project's coordinator, archived or not: verifiers of earlier cycles and other archived agents, agents of accepted or closed tickets, workers created before tickets existed, and retired repository coordinators. Each previous agent's row SHALL show its role and focus and the ticket it worked on, or, without a ticket, its name, with "(retired)" after a retired repository coordinator's. Selecting any agent row SHALL select that agent's conversation, read-only when the agent is archived, and SHALL leave the panel open, still listing the whole project, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
+The header of every conversation of a project, its coordinator's and each of its agents', SHALL carry an Agents toggle labelled "Agents · N working", where N is the number of agents the panel lists that are in a turn, or "Agents" when none is. Activating it SHALL open the Agents panel beside the conversation, without replacing it, and activating it again SHALL close it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents, each once. Each agent row SHALL show its role and focus, its figure, its current step while it works, its model, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and an agent listed under a ticket is working. Below the tickets, a "Previous agents (N)" section, folded until the human unfolds it, SHALL list every other agent the sidebar tree lists under the project's coordinator, archived or not: archived agents, such as finished verifiers of any cycle, agents of accepted or closed tickets, workers created before tickets existed, and retired repository coordinators. An archived project has no progress, so every agent it has SHALL be listed there, and its conversations SHALL still carry the toggle. Each previous agent's row SHALL show its role and focus and the ticket it worked on, or, without a ticket, its name, with "(retired)" after a retired repository coordinator's, and its figure while the board still lists it, such as "passed". Selecting any agent row SHALL select that agent's conversation, read-only when the agent is archived, and SHALL leave the panel open, still listing the whole project, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
 
 #### Scenario: Open the panel
 - **WHEN** the human activates "Agents · 2 working" in the coordinator's header
@@ -23,7 +23,11 @@ The header of every conversation of a project, its coordinator's and each of its
 
 #### Scenario: Archived passed verifier
 - **WHEN** round 1 ended with the tester passed and archived, and round 2 is running with one reviewer
-- **THEN** the ticket's card still lists the tester as "passed" at 100%, beside the working reviewer
+- **THEN** the ticket's card lists the working reviewer, and the tester is under "Previous agents" as "passed"
+
+#### Scenario: Archived project
+- **WHEN** the human shows archived sessions and selects an archived project's coordinator
+- **THEN** its header offers the Agents toggle, and the panel lists every agent of the project under "Previous agents"
 
 #### Scenario: Earlier cycle's verifiers
 - **WHEN** cycle 2 is running on a ticket whose cycle 1 verifiers were archived
@@ -175,7 +179,7 @@ The host SHALL keep progress current whenever a plan step, a session's status, a
 
 #### Scenario: Restart with an archived verifier
 - **WHEN** a cycle ended blocked with a verifier failed at 4 of 5, the host archived it, and the host restarts
-- **THEN** the Agents panel still lists that verifier as "failed" at 4 of 5
+- **THEN** the board still lists that verifier as "failed" at 4 of 5, and the Agents panel shows it under "Previous agents" as "failed"
 
 #### Scenario: Pruned run
 - **WHEN** an idle agent's latest run finished so long ago that the host pruned its steps

@@ -37,10 +37,11 @@ pub(crate) fn stuck(session: &Session, runtime: Option<&SessionRuntime>) -> Opti
     }
 }
 
-/// Everyone the panel lists for a project: each counted ticket with the agents its card lists,
+/// Everyone the panel lists for a project: each counted ticket with its unarchived agents,
 /// then the project's previous agents. Those are the rest of what the sidebar lists under the
-/// coordinator: archived agents, agents of accepted or closed tickets, workers from before
-/// tickets existed and retired repository coordinators.
+/// coordinator: archived agents, finished verifiers among them, agents of accepted or closed
+/// tickets, workers from before tickets existed and retired repository coordinators. An
+/// archived project has no board entry, so all of its agents are previous.
 pub(crate) struct Roster<'a> {
     pub(crate) tickets: Vec<(&'a TicketProgress, Vec<&'a AgentProgress>)>,
     pub(crate) previous: Vec<&'a Session>,
@@ -49,18 +50,20 @@ impl<'a> Roster<'a> {
     pub(crate) fn new(
         board: &'a ProgressBoard,
         index: &'a WorkspaceIndex,
-        project: &ProjectProgress,
+        project_id: &str,
+        coordinator: &str,
     ) -> Self {
-        let tickets: Vec<(_, Vec<_>)> = (board.tickets_of(project).into_iter())
+        let counted = board.project(project_id).map(|p| board.tickets_of(p));
+        let live = |id: &&String| index.session(id).is_some_and(|s| !s.archived);
+        let tickets: Vec<(_, Vec<_>)> = (counted.unwrap_or_default().into_iter())
             .map(|ticket| {
-                let agents = ticket.agents.iter().filter_map(|id| board.agent(id));
-                (ticket, agents.collect())
+                let agents = ticket.agents.iter().filter(live);
+                (ticket, agents.filter_map(|id| board.agent(id)).collect())
             })
             .collect();
         let listed: HashSet<&str> = (tickets.iter())
             .flat_map(|(_, agents)| agents.iter().map(|a| a.session_id.as_str()))
             .collect();
-        let coordinator = project.coordinator_id.as_str();
         let ticket_agents = (index.tickets_owned_by(coordinator)).flat_map(|t| index.agents(&t.id));
         let without_ticket = index.children(coordinator).filter(|s| {
             index
@@ -220,8 +223,8 @@ impl Inspector {
         )
     }
 
-    /// The folded "Previous agents (N)" section: each agent's name, the ticket it worked on
-    /// and why it is stuck, if it is.
+    /// The folded "Previous agents (N)" section: each agent's name, the ticket it worked on,
+    /// and its figure or why it is stuck.
     fn previous_agents(
         &self,
         index: &WorkspaceIndex,
@@ -259,14 +262,23 @@ impl Inspector {
         let rows = previous.iter().filter(|_| open).map(|&session| {
             let (label, ticket) = previous_label(index, session);
             let stuck = stuck(session, index.runtime(&session.id));
+            // A finished verifier of the latest cycle keeps its word, such as "passed".
+            let agent = self.shared.progress.agent(&session.id);
+            let figure = match stuck {
+                Some(stuck) => Some((stuck.label().to_owned(), p.yellow)),
+                None => agent.and_then(|agent| {
+                    let color = ui::bar_color(agent.state, p.subtle, p);
+                    Some((wording::agent_figure(agent)?, color))
+                }),
+            };
             let head = self
                 .row_head(session, label, stuck.is_some(), p)
-                .children(stuck.map(|stuck| {
+                .children(figure.map(|(figure, color)| {
                     div()
                         .flex_none()
                         .text_size(px(font::CAPTION))
-                        .text_color(p.yellow)
-                        .child(stuck.label())
+                        .text_color(color)
+                        .child(figure)
                 }));
             self.agent_link(session, p, cx)
                 .gap(px(2.))
@@ -370,8 +382,11 @@ mod tests {
         }
     }
     fn session(status: Status) -> Session {
+        named_session("agent", status)
+    }
+    fn named_session(id: &str, status: Status) -> Session {
         Session {
-            id: "agent".into(),
+            id: id.into(),
             project_id: "project".into(),
             parent_id: Some("coordinator".into()),
             repository_id: None,
@@ -448,11 +463,17 @@ mod tests {
             tickets: vec![ticket("one", "busy"), ticket("two", "idle")],
             projects: vec![project("working", "one"), project("quiet", "two")],
         });
-        let index = WorkspaceIndex::new(Snapshot::default(), Default::default());
+        let snapshot = Snapshot {
+            sessions: ["busy", "idle"]
+                .map(|id| named_session(id, Status::Ready))
+                .into(),
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::new(snapshot, Default::default());
         // The open panel lists the selected conversation's project, so a selection in
         // another project changes whether the timer runs.
-        let runs = |project| {
-            let roster = Roster::new(&board, &index, board.project(project).unwrap());
+        let runs = |project: &str| {
+            let roster = Roster::new(&board, &index, project, &format!("{project}-coordinator"));
             clock_runs(Some(Panel::Agents), &roster.crew())
         };
         assert!(runs("working") && !runs("quiet"));
@@ -492,11 +513,14 @@ mod tests {
                 Provider::Codex,
             )
             .unwrap();
+        let mut page = host.progress(0).unwrap();
+        // The board lists the latest cycle's verifiers, archived or not.
+        page.tickets[0].agents.push(reviewer.id.clone());
         let mut board = ProgressBoard::default();
-        board.merge(host.progress(0).unwrap());
+        board.merge(page);
         let index = WorkspaceIndex::new(host.snapshot().unwrap(), Rc::new(host.archive().unwrap()));
 
-        let roster = Roster::new(&board, &index, board.project(&root.project_id).unwrap());
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
 
         let crew: Vec<&str> = roster
             .crew()
@@ -506,6 +530,24 @@ mod tests {
         assert_eq!(crew, [implementer.id.as_str()]);
         let previous: Vec<&str> = roster.previous.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(previous, [&reviewer.id, &earlier.id, &older.id]);
+    }
+
+    #[test]
+    fn an_archived_projects_agents_are_all_previous() {
+        let (_directory, mut host, root, ticket) = ticket_store();
+        let implementer = host
+            .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
+            .unwrap();
+        host.set_archived(&root.id, true).unwrap();
+        let mut board = ProgressBoard::default();
+        board.merge(host.progress(0).unwrap());
+        let index = WorkspaceIndex::new(host.snapshot().unwrap(), Rc::new(host.archive().unwrap()));
+
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
+
+        assert!(board.project(&root.project_id).is_none() && roster.tickets.is_empty());
+        let previous: Vec<&str> = roster.previous.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(previous, [&implementer.id]);
     }
 
     #[test]
@@ -533,7 +575,7 @@ mod tests {
         });
         let index = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
 
-        let roster = Roster::new(&board, &index, board.project(&root.project_id).unwrap());
+        let roster = Roster::new(&board, &index, &root.project_id, &root.id);
 
         assert_eq!((roster.working(), roster.busy_tickets()), (2, 1));
         assert_eq!(roster.stuck(&index), 0);
