@@ -38,8 +38,8 @@ pub(crate) fn stuck(session: &Session, runtime: Option<&SessionRuntime>) -> Opti
 }
 
 /// Everyone the panel lists for a project: each counted ticket with its unarchived agents,
-/// then the project's previous agents. Those are the rest of what the sidebar lists under the
-/// coordinator: archived agents, finished verifiers among them, agents of accepted or closed
+/// then the project's previous agents. Those are the rest of the coordinator's agents: archived
+/// agents, finished verifiers among them, agents of accepted or closed
 /// tickets, workers from before tickets existed and retired repository coordinators. An
 /// archived project has no board entry, so all of its agents are previous.
 pub(crate) struct Roster<'a> {
@@ -102,7 +102,7 @@ impl<'a> Roster<'a> {
     }
 }
 
-/// A previous agent's name as the sidebar gives it, and the ticket it worked on, if any.
+/// A previous agent's name, and the ticket it worked on, if any.
 fn previous_label(index: &WorkspaceIndex, session: &Session) -> (String, Option<String>) {
     if let Some(ticket) = index.ticket_of(&session.id) {
         let ticket = wording::ticket_label(index.snapshot(), ticket);
@@ -112,6 +112,49 @@ fn previous_label(index: &WorkspaceIndex, session: &Session) -> (String, Option<
     } else {
         (session.name.clone(), None)
     }
+}
+
+/// A ticket card's PR line: muted except for passed or failed checks, a conflict, a merge and
+/// commits no review has checked, and the keeper's part at its end.
+fn pr_line(
+    pr: &PullRequest,
+    unreviewed: Option<&Unreviewed>,
+    keeper: Option<KeeperPart>,
+    comments: Option<&KeeperComments>,
+    p: Palette,
+) -> Div {
+    let glyph = if pr.state == PrState::Merged {
+        "git-merge"
+    } else {
+        "git-pull-request"
+    };
+    let mut line = div()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(font::CAPTION))
+        .text_color(p.subtle)
+        .child(icon(glyph).size(px(11.)));
+    for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, ui::now())
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
+        }
+        let color = match part.tone {
+            wording::Tone::Muted => p.subtle,
+            wording::Tone::Good => p.green,
+            wording::Tone::Bad => p.red,
+            wording::Tone::Merged => p.focus,
+            wording::Tone::Warn => p.yellow,
+            wording::Tone::Busy => p.focus,
+        };
+        line = line.child(div().text_color(color).child(part.text));
+    }
+    line
 }
 
 /// The elapsed-time timer runs only while the Agents panel is open and an agent it lists under
@@ -159,7 +202,30 @@ impl Inspector {
                         )
                         .child(hint(wording::stage_figure(progress), p).flex_none()),
                 )
-                .child(progress_bar(Some(progress.position), progress.state, 3., p));
+                .child(progress_bar(Some(progress.position), progress.state, 3., p))
+                .children(ticket.pull_request.as_ref().map(|pr| {
+                    let keeper = (self.shared.snapshot())
+                        .and_then(|s| s.keeper_parts.get(&ticket.id))
+                        .copied();
+                    let keeper = ticket.try_part().or(keeper);
+                    pr_line(
+                        pr,
+                        ticket.unreviewed(),
+                        keeper,
+                        ticket.waiting_comments(),
+                        p,
+                    )
+                }))
+                // A waived acceptance and a publish step waiting for the human both need them.
+                .children(
+                    [
+                        wording::waiver_note(ticket),
+                        wording::publish_waiting(ticket),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|note| hint(note, p).text_color(p.yellow).text_ellipsis()),
+                );
             for agent in agents {
                 ticket_card = ticket_card.children(self.agent_row(index, agent, p, cx));
             }
@@ -479,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_the_sidebar_lists_is_on_a_ticket_card_or_under_previous_agents() {
+    fn every_agent_of_the_project_is_on_a_ticket_card_or_under_previous_agents() {
         let (directory, mut host, root, ticket) = ticket_store();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)

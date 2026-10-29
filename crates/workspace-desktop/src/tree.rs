@@ -1,6 +1,7 @@
 //! The sidebar's shape: projects in the host's order, gathered into groups by first word, each
-//! with its coordinator, its ticket workspaces, and their agents.
-use crate::wording::ticket_label;
+//! one row for its coordinator. Tickets and their agents are listed in the Agents panel.
+use crate::agents_panel::Roster;
+use crate::progress::ProgressBoard;
 use std::collections::BTreeSet;
 use workspace_core::*;
 
@@ -11,15 +12,6 @@ pub(crate) enum Row<'a> {
         /// Its name; inside a group, without the first word the group already shows.
         label: String,
         grouped: bool,
-    },
-    Ticket {
-        ticket: &'a Ticket,
-        label: String,
-    },
-    Agent {
-        session: &'a Session,
-        depth: usize,
-        label: String,
     },
 }
 
@@ -109,21 +101,43 @@ pub(crate) fn entries(
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Rollup {
     NeedsYou(usize),
+    Stuck(usize),
     Blocked,
     Working,
 }
 
-/// A collapsed group's state, from the items in it that need the human and the status each
-/// member's row shows.
-pub(crate) fn rollup(needs_you: usize, shown: &[Status]) -> Option<Rollup> {
+/// A collapsed group's state, from the items in it that need the human, its stuck agents and
+/// the status each member's row shows.
+pub(crate) fn rollup(needs_you: usize, stuck: usize, shown: &[Status]) -> Option<Rollup> {
     if needs_you > 0 {
         Some(Rollup::NeedsYou(needs_you))
+    } else if stuck > 0 {
+        Some(Rollup::Stuck(stuck))
     } else if shown.contains(&Status::Blocked) {
         Some(Rollup::Blocked)
     } else if shown.contains(&Status::Working) {
         Some(Rollup::Working)
     } else {
         None
+    }
+}
+
+/// What a project row says about the agents the Agents panel lists for it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AgentCounts {
+    pub working: usize,
+    pub stuck: usize,
+}
+
+pub(crate) fn agent_counts(
+    board: &ProgressBoard,
+    index: &WorkspaceIndex,
+    coordinator: &Session,
+) -> AgentCounts {
+    let roster = Roster::new(board, index, &coordinator.project_id, &coordinator.id);
+    AgentCounts {
+        working: roster.working(),
+        stuck: roster.stuck(index),
     }
 }
 
@@ -294,13 +308,6 @@ pub(crate) fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
     }
 }
 
-/// How the press that may become a drag began on its row.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct RowPress {
-    pub on_chevron: bool,
-    pub click_count: usize,
-}
-
 /// What releasing a dragged row over itself does.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OwnRelease {
@@ -309,18 +316,14 @@ pub(crate) enum OwnRelease {
     Click,
     /// The second click of a double-click.
     Rename,
-    /// Collapses or expands, as a click on the chevron does.
-    Toggle,
 }
 
-/// A drag that never left its row is a click that moved, so it does what that click would have
-/// done still; `on_chevron` is whether it was released over the row's chevron.
-pub(crate) fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> OwnRelease {
+/// A drag that never left its row is a click that moved, so it does what that click, the
+/// `click_count`th of its press, would have done still.
+pub(crate) fn own_release(left_row: bool, click_count: usize) -> OwnRelease {
     if left_row {
         OwnRelease::Nothing
-    } else if press.on_chevron && on_chevron {
-        OwnRelease::Toggle
-    } else if press.click_count == 2 {
+    } else if click_count == 2 {
         OwnRelease::Rename
     } else {
         OwnRelease::Click
@@ -328,18 +331,13 @@ pub(crate) fn own_release(left_row: bool, press: RowPress, on_chevron: bool) -> 
 }
 
 /// Projects in the host's order, under their group's row while `grouped`; a collapsed group
-/// hides its projects. Archived sessions appear only when `show_archived`, and accepted and
-/// closed tickets then or while an agent of theirs is listed; a ticket whose agents are all
-/// archived goes with them.
+/// hides its projects. Archived projects appear only when `show_archived`.
 pub(crate) fn rows<'a>(
     index: &'a WorkspaceIndex,
     show_archived: bool,
     grouped: bool,
-    collapsed: &BTreeSet<String>,
     collapsed_groups: &BTreeSet<String>,
 ) -> Vec<Row<'a>> {
-    let shown = |s: &&Session| show_archived || !s.archived;
-    let runtime = |id: &str| index.runtime(id);
     let mut rows = vec![];
     for entry in entries(index, show_archived, grouped) {
         let projects = match entry {
@@ -364,48 +362,6 @@ pub(crate) fn rows<'a>(
                 label,
                 grouped,
             });
-            if collapsed.contains(&root.project_id) {
-                continue;
-            }
-            for ticket in index.tickets_owned_by(&root.id) {
-                let agents: Vec<&Session> = index.agents(&ticket.id).filter(shown).collect();
-                let settled = !show_archived && !ticket.is_open();
-                if agents.is_empty() && (settled || index.agents(&ticket.id).next().is_some()) {
-                    continue;
-                }
-                rows.push(Row::Ticket {
-                    ticket,
-                    label: ticket_label(index.snapshot(), ticket),
-                });
-                for session in agents {
-                    rows.push(Row::Agent {
-                        session,
-                        depth: 2,
-                        // The ticket row above already names the work.
-                        label: index.agent_label(session),
-                    });
-                }
-            }
-            // Older stores can contain workers created before ticket ownership existed, and
-            // retired repository coordinators stay readable from the archive.
-            let without_ticket =
-                |s: &&Session| runtime(&s.id).and_then(|r| r.ticket_id.as_ref()).is_none();
-            for session in index
-                .children(&root.id)
-                .filter(shown)
-                .filter(without_ticket)
-            {
-                let label = if session.role == Role::TaskOrchestrator {
-                    format!("{} (retired)", session.name)
-                } else {
-                    session.name.clone()
-                };
-                rows.push(Row::Agent {
-                    session,
-                    depth: 1,
-                    label,
-                });
-            }
         }
     }
     rows
@@ -423,186 +379,90 @@ mod tests {
         WorkspaceIndex::new(host.snapshot().unwrap(), archive)
     }
 
-    fn shape(rows: &[Row]) -> Vec<(usize, String)> {
-        rows.iter()
-            .map(|row| match row {
-                Row::Group(group) => (0, format!("{} ({})", group.label, group.members.len())),
-                Row::Project { label, .. } => (0, label.clone()),
-                Row::Ticket { label, .. } => (1, label.clone()),
-                Row::Agent { depth, label, .. } => (*depth, label.clone()),
-            })
-            .collect()
-    }
-
     #[test]
-    fn a_project_shows_its_coordinator_then_ticket_workspaces_then_their_agents() {
-        let (_directory, mut host, _root, ticket) = store();
-        host.assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
-            .unwrap();
-        for focus in ["Correctness", "Style"] {
-            host.assign_ticket(
-                &ticket.id,
-                Role::Reviewer,
-                Provider::Codex,
-                "Review",
-                Some(focus),
-            )
-            .unwrap();
-        }
-        let snapshot = joined(&host);
-
-        let rows = rows(&snapshot, false, true, &BTreeSet::new(), &BTreeSet::new());
-
-        assert_eq!(
-            shape(&rows),
-            [
-                (0, "Calls".to_owned()),
-                (1, "sagechat-sms · Fix inbound calls".into()),
-                (2, "Implementer".into()),
-                (2, "Reviewer · Correctness".into()),
-                (2, "Reviewer · Style".into()),
-            ]
-        );
-        let Row::Ticket { ticket: shown, .. } = &rows[1] else {
-            panic!("ticket row")
-        };
-        assert_eq!(
-            shown.state,
-            TicketState::Assigned,
-            "the row carries the ticket's state"
-        );
-    }
-
-    #[test]
-    fn the_sidebar_without_archived_sessions_needs_no_archive() {
+    fn a_project_is_one_row_whatever_tickets_and_agents_it_has() {
         let (_directory, mut host, root, ticket) = store();
-        let none = BTreeSet::new();
         host.assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
             .unwrap();
-        let retired = host
+        let finished = host
             .assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
             .unwrap();
-        host.set_archived(&retired.id, true).unwrap();
+        host.set_archived(&finished.id, true).unwrap();
         let repository = host.repositories().unwrap().remove(0);
-        let finished = host
+        let closed = host
             .create_ticket(&root.id, &repository.id, "Old calls", "Done")
             .unwrap();
-        host.close_ticket(&finished.id).unwrap();
-        let live = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
+        host.close_ticket(&closed.id).unwrap();
+        host.create_session(
+            &root.project_id,
+            &root.id,
+            None,
+            "Older worker",
+            Role::Implementer,
+            Provider::Codex,
+        )
+        .unwrap();
+        let snapshot = joined(&host);
 
-        let expected = [
-            (0, "Calls".to_owned()),
-            (1, "sagechat-sms · Fix inbound calls".into()),
-            (2, "Implementer".into()),
-        ];
-        assert_eq!(shape(&rows(&live, false, true, &none, &none)), expected);
-        assert_eq!(
-            shape(&rows(&joined(&host), false, true, &none, &none)),
-            expected,
-            "the archive changes nothing until archived sessions are shown"
-        );
-        assert_eq!(
-            shape(&rows(&joined(&host), true, true, &none, &none)).len(),
-            5
-        );
+        // Open, archived and legacy agents alike are listed in the Agents panel instead.
+        for show_archived in [false, true] {
+            assert_eq!(drawn(&snapshot, show_archived, true), ["Calls"]);
+        }
+    }
+
+    /// The store's index with `agent` in `status`, and its last turn failed when `failed`.
+    fn with_agent(host: &Host, agent: &str, status: Status, failed: bool) -> WorkspaceIndex {
+        let mut snapshot = host.snapshot().unwrap();
+        let session = snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == agent)
+            .unwrap();
+        session.status = status;
+        let runtime = snapshot.runtimes.iter_mut().find(|r| r.session_id == agent);
+        runtime.unwrap().last_error = failed.then(|| "The provider exited".into());
+        WorkspaceIndex::new(snapshot, Default::default())
     }
 
     #[test]
-    fn an_agent_restored_from_a_closed_ticket_is_listed_under_it() {
-        let (_directory, mut host, _root, ticket) = store();
-        let none = BTreeSet::new();
+    fn a_project_row_counts_its_working_and_stuck_agents() {
+        let (_directory, mut host, root, ticket) = store();
         let implementer = host
             .assign_ticket(&ticket.id, Role::Implementer, Provider::Codex, "Fix", None)
             .unwrap();
-        host.close_ticket(&ticket.id).unwrap();
-        host.set_archived(&implementer.id, false).unwrap();
-        let live = WorkspaceIndex::new(host.snapshot().unwrap(), Default::default());
-
-        let expected = [
-            (0, "Calls".to_owned()),
-            (1, "sagechat-sms · Fix inbound calls".into()),
-            (2, "Implementer".into()),
-        ];
-        assert_eq!(shape(&rows(&live, false, true, &none, &none)), expected);
-        assert_eq!(
-            shape(&rows(&joined(&host), false, true, &none, &none)),
-            expected
-        );
-    }
-
-    #[test]
-    fn a_closed_ticket_hides_with_its_agents_and_a_collapsed_project_hides_everything() {
-        let (_directory, mut host, root, ticket) = store();
-        let none = BTreeSet::new();
-        host.assign_ticket(&ticket.id, Role::Reviewer, Provider::Codex, "Review", None)
+        let tester = host
+            .assign_ticket(&ticket.id, Role::Tester, Provider::Codex, "Test", None)
             .unwrap();
-        host.close_ticket(&ticket.id).unwrap();
-        let snapshot = joined(&host);
-
-        assert_eq!(
-            shape(&rows(&snapshot, false, true, &none, &none)),
-            [(0, "Calls".to_owned())]
-        );
-        assert_eq!(shape(&rows(&snapshot, true, true, &none, &none)).len(), 3);
-        let collapsed = BTreeSet::from([root.project_id.clone()]);
-        assert_eq!(rows(&snapshot, true, true, &collapsed, &none).len(), 1);
-    }
-
-    #[test]
-    fn retired_coordinators_and_older_workers_sit_under_the_coordinator() {
-        let (directory, host, root, ticket) = store();
-        drop(host);
-        // A repository coordinator as the previous release stored it, then migrated on open.
-        let retired = Session {
-            id: "retired".into(),
-            project_id: root.project_id.clone(),
-            parent_id: Some(root.id.clone()),
-            repository_id: Some(ticket.repository_id.clone()),
-            name: "sagechat-sms".into(),
-            role: Role::TaskOrchestrator,
-            provider: Provider::Codex,
-            status: Status::Ready,
-            archived: false,
+        let mut board = ProgressBoard::default();
+        board.merge(host.progress(0).unwrap());
+        let working = AgentProgress {
+            working: true,
+            ..board.agent(&implementer.id).unwrap().clone()
         };
-        let db =
-            rusqlite::Connection::open(directory.path().join("home/workspace.sqlite3")).unwrap();
-        db.execute_batch(&format!(
-            "INSERT INTO sessions VALUES ('retired','{}','{}','task_orchestrator','{}'); \
-             UPDATE tickets SET coordinator_id='retired',data=json_set(data,'$.coordinator_id','retired'); \
-             ALTER TABLE messages DROP COLUMN quiet; PRAGMA user_version = 5;",
-            root.project_id,
-            root.id,
-            serde_json::to_string(&retired).unwrap()
-        ))
-        .unwrap();
-        drop(db);
-        let mut host = Host::open_set_up(directory.path().join("home")).unwrap();
-        let older = host
-            .create_session(
-                &root.project_id,
-                &root.id,
-                None,
-                "Older worker",
-                Role::Implementer,
-                Provider::Codex,
-            )
-            .unwrap();
-        let none = BTreeSet::new();
-        let snapshot = joined(&host);
+        board.merge(ProgressPage {
+            revision: 2,
+            complete: false,
+            agents: vec![working],
+            tickets: vec![],
+            projects: vec![],
+        });
+        let counts = |index: &WorkspaceIndex| agent_counts(&board, index, &root);
 
+        let quiet = with_agent(&host, &tester.id, Status::Ready, false);
         assert_eq!(
-            shape(&rows(&snapshot, false, true, &none, &none)),
-            [
-                (0, "Calls".to_owned()),
-                (1, "sagechat-sms · Fix inbound calls".into()),
-                (1, older.name.clone()),
-            ]
+            counts(&quiet),
+            AgentCounts {
+                working: 1,
+                stuck: 0
+            }
         );
-        let archive = shape(&rows(&snapshot, true, true, &none, &none));
-        assert!(
-            archive.contains(&(1, "sagechat-sms (retired)".to_owned())),
-            "{archive:?}"
-        );
+        for (status, failed) in [(Status::Disconnected, false), (Status::Ready, true)] {
+            let stuck = with_agent(&host, &tester.id, status, failed);
+            assert_eq!(counts(&stuck).stuck, 1, "{status:?}");
+        }
+        // The coordinator answers a blocked agent, so nothing is raised for it.
+        let blocked = with_agent(&host, &tester.id, Status::Blocked, true);
+        assert_eq!(counts(&blocked).stuck, 0);
     }
 
     /// A store whose projects read, top to bottom, as `names`.
@@ -660,7 +520,7 @@ mod tests {
             timed(
                 &format!("tree rows, show archived {show_archived}"),
                 &mut || {
-                    std::hint::black_box(rows(&index, show_archived, true, &none, &none));
+                    std::hint::black_box(rows(&index, show_archived, true, &none));
                 },
             );
         }
@@ -668,9 +528,11 @@ mod tests {
 
     /// The project list as drawn: group rows with their count, their projects indented.
     fn drawn(index: &WorkspaceIndex, show_archived: bool, grouped: bool) -> Vec<String> {
-        let none = BTreeSet::new();
-        rows(index, show_archived, grouped, &none, &none)
-            .iter()
+        labels(&rows(index, show_archived, grouped, &BTreeSet::new()))
+    }
+
+    fn labels(rows: &[Row]) -> Vec<String> {
+        rows.iter()
             .map(|row| match row {
                 Row::Group(group) => format!("{} ({})", group.label, group.members.len()),
                 Row::Project {
@@ -679,7 +541,6 @@ mod tests {
                     ..
                 } => format!("  {label}"),
                 Row::Project { label, .. } => label.clone(),
-                Row::Ticket { .. } | Row::Agent { .. } => panic!("no tickets here"),
             })
             .collect()
     }
@@ -788,23 +649,31 @@ mod tests {
     fn a_collapsed_group_hides_its_projects_and_rolls_up_the_most_urgent_state() {
         let (_directory, host) = listed(&["infra: a", "Billing", "infra: b"]);
         let snapshot = joined(&host);
-        let (none, infra) = (BTreeSet::new(), BTreeSet::from(["infra".to_owned()]));
+        let infra = BTreeSet::from(["infra".to_owned()]);
 
-        let collapsed = rows(&snapshot, false, true, &none, &infra);
+        let collapsed = rows(&snapshot, false, true, &infra);
 
-        assert_eq!(
-            shape(&collapsed),
-            [(0, "infra (2)".to_owned()), (0, "Billing".into())]
-        );
+        assert_eq!(labels(&collapsed), ["infra (2)", "Billing"]);
         use Status::*;
         assert_eq!(
-            rollup(2, &[Blocked, Working]),
+            rollup(2, 1, &[Blocked, Working]),
             Some(Rollup::NeedsYou(2)),
             "needs you first"
         );
-        assert_eq!(rollup(0, &[Working, Blocked, Ready]), Some(Rollup::Blocked));
-        assert_eq!(rollup(0, &[Done, Working, Paused]), Some(Rollup::Working));
-        assert_eq!(rollup(0, &[Ready, Done, Paused, Disconnected]), None);
+        assert_eq!(
+            rollup(0, 1, &[Blocked, Working]),
+            Some(Rollup::Stuck(1)),
+            "then stuck agents"
+        );
+        assert_eq!(
+            rollup(0, 0, &[Working, Blocked, Ready]),
+            Some(Rollup::Blocked)
+        );
+        assert_eq!(
+            rollup(0, 0, &[Done, Working, Paused]),
+            Some(Rollup::Working)
+        );
+        assert_eq!(rollup(0, 0, &[Ready, Done, Paused, Disconnected]), None);
     }
 
     /// The order the host would hold after `dragged` is dropped at `drop`.
@@ -991,32 +860,12 @@ mod tests {
 
     #[test]
     fn a_release_on_the_drags_own_row_is_the_click_it_would_have_been_or_a_cancel() {
-        let press = |on_chevron, click_count| RowPress {
-            on_chevron,
-            click_count,
-        };
-        assert_eq!(
-            own_release(false, press(false, 1), false),
-            OwnRelease::Click
-        );
-        assert_eq!(
-            own_release(false, press(false, 2), false),
-            OwnRelease::Rename
-        );
-        assert_eq!(own_release(false, press(true, 1), true), OwnRelease::Toggle);
-        // The chevron takes a double-click as two clicks.
-        assert_eq!(own_release(false, press(true, 2), true), OwnRelease::Toggle);
-        // Pressed on the chevron and released beside it, or the reverse, is a click on the row.
-        assert_eq!(own_release(false, press(true, 1), false), OwnRelease::Click);
-        assert_eq!(own_release(false, press(false, 1), true), OwnRelease::Click);
+        assert_eq!(own_release(false, 1), OwnRelease::Click);
+        assert_eq!(own_release(false, 2), OwnRelease::Rename);
         // A third click is not another rename.
-        assert_eq!(
-            own_release(false, press(false, 3), false),
-            OwnRelease::Click
-        );
-        for (on_chevron, click_count) in [(false, 1), (false, 2), (true, 1)] {
-            let press = press(on_chevron, click_count);
-            assert_eq!(own_release(true, press, on_chevron), OwnRelease::Nothing);
+        assert_eq!(own_release(false, 3), OwnRelease::Click);
+        for click_count in [1, 2] {
+            assert_eq!(own_release(true, click_count), OwnRelease::Nothing);
         }
     }
 }

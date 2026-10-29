@@ -288,15 +288,15 @@ When the ticket's pull request, as the watcher last read it, was closed or merge
 - **THEN** the caller is told the branch was pushed and that the pull request may or may not have been opened, and that calling `publish_ticket` again is safe
 
 ### Requirement: A waiting step shows on the ticket
-While a publish step waits for the human, the ticket's sidebar row SHALL show a line saying which step waits for approval. The line SHALL go when the step is approved, denied or withdrawn, including when the ticket is accepted or closed.
+While a publish step waits for the human, the ticket's card in the Agents panel SHALL show a line saying which step waits for approval. The line SHALL go when the step is approved, denied or withdrawn, including when the ticket is accepted or closed.
 
 #### Scenario: Waiting line
 - **WHEN** a ticket's push waits for the human's approval
-- **THEN** its row shows that the push waits for approval
+- **THEN** its card shows that the push waits for approval
 
 #### Scenario: The ticket is finished
 - **WHEN** a ticket whose push waits for approval is accepted or closed
-- **THEN** its row no longer shows that the push waits for approval
+- **THEN** its card no longer shows that the push waits for approval
 
 ### Requirement: The host never approves, merges, closes or comments
 The host SHALL offer agents no operation that approves, merges, closes, reopens, comments on, labels or reviews a pull request, or that edits an open pull request other than its title and description through `publish_ticket`. Merging SHALL remain the human's, including into a plan's feature branch.
