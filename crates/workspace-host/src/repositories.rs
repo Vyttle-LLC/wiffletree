@@ -631,7 +631,7 @@ impl Host {
             None => "All workspace repositories".to_owned(),
             Some(ids) => format!("{} chosen repositories", ids.len()),
         };
-        let tx = self.db.transaction()?;
+        let tx = self.db.savepoint()?;
         tx.execute(
             "UPDATE projects SET data=?2 WHERE id=?1",
             params![project.id, encode(&project)?],

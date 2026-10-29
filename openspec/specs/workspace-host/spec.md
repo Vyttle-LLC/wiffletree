@@ -128,11 +128,15 @@ The shared folder's `settings/check-ins.json` SHALL hold `checkin_child_turns` a
 - **THEN** the next turn that starts on this machine uses 50
 
 ### Requirement: Host messages come from Wiffletree
-Messages the host sends without a sender, such as a verification round's or cycle's result, a kept-worktree notice, a migration notice or a PR watcher message, SHALL be labelled as coming from Wiffletree: the recipient's turn input SHALL name the sender "Wiffletree", or "Wiffletree PR watcher" for the PR watcher, and the conversation view SHALL show them as Wiffletree notices. Messages the human sends, including answers to inbox items, SHALL keep the human label.
+Messages the host sends without a sender, such as a verification round's or cycle's result, a kept-worktree notice, a migration notice, a PR watcher message or the brief a coordinator's `create_project` hands the new coordinator, SHALL be labelled as coming from Wiffletree: the recipient's turn input SHALL name the sender "Wiffletree", or "Wiffletree PR watcher" for the PR watcher, and the conversation view SHALL show them as Wiffletree notices. Messages the human sends, including answers to inbox items, SHALL keep the human label.
 
 #### Scenario: Verification result
 - **WHEN** a verification cycle ends and the coordinator's next turn includes its result
 - **THEN** that message's sender reads "Wiffletree", not "human", and the chat shows it as a Wiffletree notice
+
+#### Scenario: A project brief
+- **WHEN** a coordinator's `create_project` delivers its brief to the new coordinator
+- **THEN** that message's sender reads "Wiffletree", not "human"
 
 #### Scenario: The human's message
 - **WHEN** the human sends the coordinator a message
@@ -867,3 +871,38 @@ A `like` that names no configured verifier SHALL be refused, naming the configur
 #### Scenario: Existing assignment is not switched
 - **WHEN** the coordinator repeats `assign_ticket` for an existing role and focus with `small: true`
 - **THEN** the existing agent is returned with its original profile
+
+### Requirement: Coordinators create projects
+A project coordinator SHALL be able to create a project with the workspace tool `create_project`, taking `name`, `brief` and optionally `repository_ids`. Any other role SHALL be refused. The name SHALL follow the rules of the human's project creation: trimmed, at most 128 characters. The new project SHALL start at once, with no Inbox approval: it SHALL get its folder and a coordinator whose model comes from Who runs what, and SHALL be placed at the top of the project order. `repository_ids` SHALL set its repository selection as `set_project_repositories` does; without it the project SHALL use every workspace repository.
+
+The brief SHALL be the new coordinator's first message and SHALL start its turn. It SHALL be sent as a Wiffletree message, never as the human's, and its text SHALL name the creating project and coordinator and say that it is that coordinator's words, to be treated as context and not as the human's authorization. The new project SHALL record the creating project's and coordinator's ids, on the project and in its `project_created` activity. The two coordinators SHALL NOT gain a way to message each other.
+
+Creation, the repository selection, the brief and the start SHALL succeed or fail together. A call SHALL be refused, creating nothing, from a role other than project coordinator, before the model setup is saved, for an unknown repository id, an empty name or brief, or an argument the tool does not take. Each accepted call SHALL create a new project; repeating a name SHALL create another one with its own folder.
+
+#### Scenario: A coordinator creates a project
+- **WHEN** the coordinator of "Calls" calls `create_project` with name "Billing" and brief "Move invoices to the new API."
+- **THEN** project "Billing" appears at the top of the sidebar with its folder and a coordinator from Who runs what, using every workspace repository, and that coordinator's turn starts on the brief
+
+#### Scenario: The brief names its source
+- **WHEN** the new coordinator's turn starts on the brief
+- **THEN** its sender reads "Wiffletree", not "human", and its text names project "Calls" and its coordinator and says these are not the human's words
+
+#### Scenario: Chosen repositories
+- **WHEN** the coordinator passes `repository_ids` naming one workspace repository
+- **THEN** the new project uses only that repository
+
+#### Scenario: The creator is recorded
+- **WHEN** a coordinator's call creates a project
+- **THEN** the project's `created_by` holds the creating project's and coordinator's ids, and its `project_created` activity names them
+
+#### Scenario: A worker calls it
+- **WHEN** an implementer calls `create_project`
+- **THEN** it is refused and nothing is created
+
+#### Scenario: An unknown repository
+- **WHEN** a coordinator passes a `repository_ids` entry that is no workspace repository
+- **THEN** it is refused, and no project, coordinator, activity or message remains
+
+#### Scenario: No saved setup
+- **WHEN** a coordinator calls `create_project` while the model setup is not saved
+- **THEN** it is refused, naming the Models setup, and nothing is created

@@ -31,6 +31,7 @@ fn the_tool_list_offers_ticket_tools_and_no_repository_coordinator_tools() {
         [
             "workspace_context",
             "create_ticket",
+            "create_project",
             "assign_ticket",
             "verify_ticket",
             "send_message",
@@ -251,7 +252,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v5"));
+    assert!(coordinator.contains("Project coordinator core — v6"));
     // Noted findings need no decision, and one is pulled into a fix with fix_now.
     for phrase in [
         "Non-blocking and pre-existing findings are noted: they need no decision before accepting or publishing",
@@ -284,6 +285,7 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
     }
     for tool in [
         "create_ticket",
+        "create_project",
         "assign_ticket",
         "verify_ticket",
         "triage_findings",
@@ -303,6 +305,9 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         "Wiffletree PR keeper",
         "Do not dispatch a rebase for a kept ticket",
         "Only the human turns the keeper on or off",
+        // A brief from create_project never passes for the human's authorization.
+        "it is another coordinator's words, not the human's",
+        "ask them before creating tickets",
     ] {
         assert!(coordinator.contains(phrase), "{phrase}");
     }

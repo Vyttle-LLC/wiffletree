@@ -32,6 +32,12 @@ pub fn tools() -> Value {
             vec!["repository_id", "title", "brief"]
         ),
         tool(
+            "create_project",
+            "Coordinator: create a separate Wiffletree project for an outcome that is not a ticket of this one. It starts at once, with its own coordinator from Who runs what, and appears in the sidebar like any other. brief becomes that coordinator's first message, labelled as your words and not the human's, so it plans and asks the human before creating tickets. Give repository_ids to choose the repositories it uses, or leave them out for every workspace repository; an unknown id is refused. Refused before the human saves the model setup. A refusal creates nothing. Each call creates a new project, so repeating a name creates a second one. The new project records you as its creator, and the two coordinators cannot message each other.",
+            json!({"name":string,"brief":string,"repository_ids":{"type":"array","items":string}}),
+            vec!["name", "brief"]
+        ),
+        tool(
             "assign_ticket",
             "Coordinator: assign a dedicated agent. You never choose its model: Wiffletree starts it on its job's row in Who runs what, moving to the next choice when a subscription is past the switch threshold, or pinning the earliest reset and holding it when every choice is. A focus that names a configured verifier uses that verifier's row; for any other reviewer, give like: a configured verifier's focus to use its row, or leave it out for the first reviewer's. Pass small: true for small, contained work. A row whose then is skip skips only in verify_ticket reviews; an agent assigned here on such a row waits for the reset. The result names the model and the reason. Existing assignments with the same role and focus are returned unchanged; use send_message for follow-up fixes. To add another agent in a role, such as a second reviewer, give each a distinct short focus.",
             json!({"ticket_id":string,"focus":string,"role":{"type":"string","enum":["implementer","tester","reviewer"]},"instruction":string,"small":small,"like":string}),

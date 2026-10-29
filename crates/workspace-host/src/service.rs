@@ -264,7 +264,7 @@ fn stopped_by_parent_notice(reason: &str) -> String {
     )
 }
 /// Refuses arguments a tool does not take, so a misspelt one is not silently ignored.
-fn only_arguments(tool: &str, args: &Value, allowed: &[&str]) -> Result<()> {
+pub(crate) fn only_arguments(tool: &str, args: &Value, allowed: &[&str]) -> Result<()> {
     if let Some(unknown) = args
         .as_object()
         .into_iter()
@@ -5031,6 +5031,7 @@ mod tests {
                 format!("verification:{}:1:outcome", ticket.id),
                 "Wiffletree",
             ),
+            (format!("{PROJECT_BRIEF_PREFIX}p1"), "Wiffletree"),
             ("m1".into(), "human"),
         ] {
             host.send(&id, None, &coordinator.id, "Body").unwrap();

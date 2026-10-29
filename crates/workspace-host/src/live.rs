@@ -827,6 +827,23 @@ impl Host {
                     &publish::Tools::default().git,
                 )?)?)
             }
+            "create_project" => {
+                service::only_arguments(
+                    "create_project",
+                    &args,
+                    &["name", "brief", "repository_ids"],
+                )?;
+                let repositories = match args.get("repository_ids").filter(|ids| !ids.is_null()) {
+                    Some(ids) => Some(serde_json::from_value(ids.clone())?),
+                    None => None,
+                };
+                Ok(serde_json::to_value(self.create_project_from(
+                    id,
+                    string("name")?,
+                    string("brief")?,
+                    repositories,
+                )?)?)
+            }
             "assign_ticket" => {
                 let ticket = self.owned_ticket(id, string("ticket_id")?)?;
                 ensure!(ticket.is_open(), "Ticket is already {}", ticket.state);

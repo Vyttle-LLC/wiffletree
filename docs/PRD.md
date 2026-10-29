@@ -59,6 +59,8 @@ Theme rollout                         Project / coordinator
     Tester · Codex                    One ticket · Codex
 ```
 
+A coordinator may create another project with the workspace tool `create_project` when the human asks for work that is a separate outcome rather than a ticket of its own project; no other role may. It takes a name, a brief and optionally the repositories the new project uses, otherwise every workspace repository. The project starts at once, without an Inbox approval, with a coordinator from Who runs what, and appears in the sidebar like any other. Its coordinator's first message is the brief, labelled as Wiffletree's delivery of the creating coordinator's words, naming that coordinator and its project, never as the human's: the new coordinator treats it as context and still plans with the human and asks before creating tickets. The new project records which project and coordinator created it, on the project and in its `project_created` activity. The two coordinators cannot message each other afterwards. Creation is refused before the model setup is saved and for an unknown repository; a refusal creates nothing, and each call creates a new project.
+
 A repository may participate in several projects. The app must arbitrate operations across all of them by canonical repository and branch identity. Two sessions cannot independently own the same writable integration branch or worktree. Assignments declare ownership and dependencies before execution.
 
 ## Interface requirements

@@ -177,7 +177,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `usage` | `days: u16`, `project_id: Option<String>`, `provider: Option<Provider>`, `timezone: String` | read |  |
 | `create_ticket` | `coordinator_id: String`, `repository_id: String`, `title: String`, `brief: String` | change | `coordinator_id` must be a project coordinator whose project uses `repository_id`. |
 | `assign_ticket` | `ticket_id: String`, `role: Role`, `profile: ModelProfile`, `instruction: String`, `focus?: Option<String>` | change | The human assigns an agent; `profile` is never limited by the Who runs what table. |
-| `create_project` | `name: String` | change |  |
+| `create_project` | `name: String` | change | The human creates a project. A coordinator creates one with the workspace tool `create_project`, which also takes a brief and repository ids and records the coordinator in `Project.created_by`. |
 | `rename_project` | `project_id: String`, `name: String` | change |  |
 | `move_projects` | `project_ids: Vec<String>`, `before?: Option<String>` | change | Moves the projects, kept in their relative order, to just before `before`, or to the end of the order. |
 | `attach_repository` | `project_id: Option<String>`, `path: String`, `base: String` | change | Adds one repository with an explicit base, updating the base if it is already known. |
