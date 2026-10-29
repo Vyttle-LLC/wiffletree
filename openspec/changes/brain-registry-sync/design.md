@@ -92,6 +92,8 @@ Rollback: removing a brain deletes the host's clone after confirmation and leave
 
 The other proposals are:
 - PR #162, "Proposal: shared issues in a tracker repository" (`shared-issues`, `issue-assistant`). It is **merged on `main`** as 6194b99a and is an open change there, not yet archived. Where a spec both change, the brain changes go second.
+- PR #163, "Proposal: assistant, Spaces, scheduled jobs and Boards" (`assistant-spaces-jobs-boards`). It is **merged on `main`** as 419a55ef and is an open change there, not yet archived.
+- PR #164, "Coordinators create projects with create_project". It is **merged on `main`** as a8dded2d and its change is archived.
 - the other changes open on `main`: `files-panel`, `processes-panel` and `quiet-findings`;
 - `brain-gate`, in this proposal.
 
@@ -109,6 +111,12 @@ The other proposals are:
 | Human-only write commands | #162 decision 11: every tracker write is a human command on the host socket | **Align**: brain registry changes, amendments and rulings are likewise human-only commands. | None. |
 | Inspector rail | `files-panel` and `processes-panel` add rail entries; the Memory panel stays where it is | **Align** the rail order (Git, Files, Processes, Memory). This change only adds the "No brain" state. | None. |
 | Ticket review | `quiet-findings` | None. | None. |
+| Which brain a project uses | #163 (merged): every project belongs to a Space, a Space names a brain (a repository and a folder), and the coordinator logs to its Space's brain. Here, each repository maps to a brain by GitHub owner, and a project's brains come from its repositories | **Align** on one source of truth. Either the Space names the brain and the owner mapping only pre-fills it when a Space is set up, or the mapping decides and the Space shows it. | **Open for Michael:** does the Space or the repository mapping decide a project's brain? Until then both proposals stand as written. |
+| How brain writes reach `main` | #163 (merged) adds `project-memory` "Brain pushes from several people": fetch, rebase and push to `main` with a union merge of shared log files. That is its defaulted decision (c), "confirm at reconciliation" | **Align** on Michael's explicit October 29 decision: every brain change is a gated PR with one file per entry. The gate's path ownership refuses edits to shared log files once the legacy flag is off. | **Open for Michael:** confirm that (c) is superseded, so that #163's added requirement is dropped when the changes are reconciled. |
+| Brain settings shared in a repository | #163 keeps a Space's definition in its storage repository (`spaces/<name>/space.yaml`) with the settings repository's rules; here, `wiffletree-brain.json` lives in the brain repository and changes only by PR | **Align**: shared facts live in Git and per-machine facts (clone paths, models) stay local, in both. | Should the brain's compiler and gate settings move into the Space definition, or stay with the brain because several Spaces may name one brain? |
+| The Brains page and Settings › Spaces | #163 (merged): Spaces are edited on Settings › Spaces, and the assistant and Boards are pinned above Projects; here, Brains is a Workspace page | **Align** the navigation. | Is a brain configured inside a Space's settings, on its own Brains page, or both? |
+| Host-owned clones | #163 (merged): storage clones live at `<data folder>/storage/<owner>-<name>/` and reuse settings sync | **Share** the repository module, as with trackers. This supports the clone-location recommendation above. | See "Where the host keeps its clone". |
+| Projects created by a coordinator | #164 (merged): `create_project` takes optional `repository_ids` and defaults to every workspace repository; the project records `created_by` | **Align**: under this change, the new project's brains follow its repository selection, so a project with every repository can span several organizations' brains. | **Open:** which brain does a coordinator-created project log to: the creating project's brain, or its Space's (if Spaces decide)? |
 
 ## Open Questions
 

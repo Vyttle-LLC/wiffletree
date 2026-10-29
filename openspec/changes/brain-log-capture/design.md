@@ -113,7 +113,12 @@ The frontmatter has exactly these four keys. The body, everything after the fron
 
 ## Overlaps with other proposals
 
-PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same thing, this change goes second.
+These are merged on `main`:
+- PR #162 (`shared-issues`), as 6194b99a;
+- PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
+- PR #164 (`create_project`), as a8dded2d.
+
+#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same thing as this change, this change goes after them.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
@@ -125,6 +130,11 @@ PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change 
 | Where follow-ups go | `quiet-findings` lists a ticket's `follow_up` findings in its PR description; #162 adds issues | **Align**: a follow-up is work to do, which belongs in an issue rather than a log entry. Logging stays for decisions and state. | Once #162 ships, should the coordinator file follow-ups as issues instead of only listing them in the PR? |
 | Tool results that prompt for more work | Milestone prompts here; `quiet-findings` changes the cycle-outcome message's closing line | **Align**: the log prompt is one line appended after the host's existing text, so the two do not conflict. | None. |
 | The capture surface | `files-panel` records `Step.paths` per step | None now. A later change could suggest a log entry's `changed` from the files a ticket touched. | Not in scope. |
+| Where the assistant's entries go | #163 (merged): a thread's log entries go to its Space's brain in the rolling file `logs/assistant.md`, each with the thread's id and Space | **Align** with the per-entry contract: threads log through `log_work` into per-entry files (for example `logs/assistant/YYYY/MM/…`), with the thread id and Space kept in the host store like a ticket and session. | **Open:** the folder name for assistant entries, and whether scheduled job runs, which are read-only threads, may log at all. |
+| The `project-memory` spec | #163 MODIFIES "Safe Markdown export" (Space brains) and ADDS "Brain pushes from several people"; this change REMOVES "Safe Markdown export" | **Align**: this change archives after #163. Its removal then applies to #163's version, and if Michael confirms PR-only writes, it must also remove "Brain pushes from several people" (see `brain-registry-sync`). | **Open for Michael**, together with #163's defaulted decision (c). |
+| Which brain an entry goes to | #163: the project's or thread's Space; here, the entry repository's mapped brain | See `brain-registry-sync`, "Which brain a project uses". | **Open for Michael.** |
+| Fixed core versions | #164 (merged) moved the coordinator core to v6 | **Align**: the log rules are written against v6 and bump it again. | None. |
+| Projects created by a coordinator | #164: a created project's first message is a brief, and `created_by` records the creator | **Align**: no milestone prompt for creating a project. The creator may log a planning entry about it with `log_work`. | None. |
 
 ## Open Questions
 

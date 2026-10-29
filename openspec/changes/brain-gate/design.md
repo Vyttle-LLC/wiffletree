@@ -97,7 +97,12 @@ Wiffletree is a public repository (`Vyttle-LLC/wiffletree`). Brain repositories 
 
 ## Overlaps with other proposals
 
-PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same thing, this change goes second.
+These are merged on `main`:
+- PR #162 (`shared-issues`), as 6194b99a;
+- PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
+- PR #164 (`create_project`), as a8dded2d.
+
+#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same thing as this change, this change goes after them.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
@@ -108,6 +113,9 @@ PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change 
 | `CODEOWNERS` and auto-merge | Brains need review for gate and config changes; trackers push directly | No overlap today. | None. |
 | The entry contract | `brain-log-capture`'s renderer | **Share**: one fixture set in `gate/tests/fixtures/`. | None. |
 | Ticket review and inspector panels | `quiet-findings`, `files-panel`, `processes-panel` | None. | None. |
+| Sensitive data in shared outputs | #163 (merged): a shared job's first output waits for the runner's approval, and Space storage syncs by direct push with the settings repository's rules | **Align**: the gate's `sensitive-info` and `secret-scan` checks are generic and could run on pushes to a Space's storage repository, as with trackers. | **Open:** should Space storage repositories get a caller of the gate? |
+| Brain writes | #163's defaulted decision (c), a direct push with union merge, would bypass the gate | See `brain-registry-sync`, "How brain writes reach `main`". | **Open for Michael.** |
+| Projects created by a coordinator | #164 (merged) | None. | None. |
 
 ## Open Questions
 

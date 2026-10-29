@@ -2,7 +2,7 @@ Depends on `brain-registry-sync` and `brain-log-capture`.
 
 ## 1. Routing
 
-- [ ] 1.1 Add the optional Brain compiler row to Who runs what (`policies.rs`, `selection.sql`), with no skip and no small-work line. Tables saved before it load unchanged. Extend the table tests with the new refusals and the load case. Because `shared-issues` (merged before this change) also modifies "Who runs what", restate its Issue assistant row in this change's `model-routing` delta before archiving.
+- [ ] 1.1 Add the optional Brain compiler row to Who runs what (`policies.rs`, `selection.sql`), with no skip and no small-work line. Tables saved before it load unchanged. Extend the table tests with the new refusals and the load case. Because `shared-issues` and `assistant-spaces-jobs-boards` (both merged before this change) also modify "Who runs what", restate their Issue assistant, Assistant, Router and Job rows in this change's `model-routing` delta before archiving.
 - [ ] 1.2 Models page: the Brain compiler row with No model.
 
 ## 2. Scheduling and the cursor

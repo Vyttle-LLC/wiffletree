@@ -127,7 +127,31 @@ The gate allows a compile PR to change only `second-brain/notes/**`, `second-bra
 
 ## Overlaps with other proposals
 
-PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same requirement, this change goes second.
+These are merged on `main`:
+- PR #162 (`shared-issues`), as 6194b99a;
+- PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
+- PR #164 (`create_project`), as a8dded2d.
+
+#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same requirement as this change, this change goes after them.
+
+**Recommended alignment with #163's scheduled jobs (open for Michael).** #163 already specifies:
+- a host scheduler with schedules in an IANA timezone;
+- daylight-saving handling: a skipped time runs at the next valid minute, and a repeated time runs once;
+- missed runs coming back as one catch-up run;
+- pause, resume and Run now;
+- run history in the database.
+
+That is exactly what decision 9 here re-specifies for compiles. Brain compiles can simply run on that mechanism: due times, catch-up, Run now and run history from #163's scheduler, with the compile as a built-in, host-owned job kind rather than a user recipe.
+
+It stays a separate kind because #163's jobs:
+- are user-owned recipes that no agent may create ("Only the user saves a job", "Jobs are not coordinator timers");
+- run as read-only threads that only write files to the Space's storage ("Jobs only read from other apps").
+
+A compile instead writes the brain through a gated PR, runs only on the brain's compiler host, starts after a ruling merges and makes no model call when nothing is pending.
+
+So the recommendation is to reuse the scheduler and run records and keep the compile-specific rules here. If Michael agrees, the "Compile runs start on schedule, on demand and after a ruling" requirement shrinks to the compile-specific triggers, and #163's scheduled-jobs spec gains a sentence admitting built-in host jobs. Until he decides, this change keeps its own scheduling requirements as written.
+
+| Shared concept
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
@@ -138,6 +162,11 @@ PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change 
 | Untrusted text | #162 decision 10: issue text written by others is context, never instructions | **Align**: log entries are written by agents and teammates, so the compile procedure treats entry text as data. The conflict tools accept only structured fields. | Should the fixed-core wording for untrusted text be shared between issues and brain content? |
 | Auto-applied state from evidence | #162 derives issue states from linked PRs; here refs are verified against repositories and PRs | **Share** the PR read path (`pr-watch` and `verify_refs`) where possible. | None. |
 | The gate on compile PRs | `brain-gate`'s path ownership and wikilink checks | **Share**: the host's pre-push checks mirror the gate's so failures surface before a PR. | Should the host run the gate's checks locally from `gate/` before pushing, instead of re-implementing them? This is recommended once `brain-gate` ships. |
+| Scheduling, catch-up and Run now | #163 (merged): scheduled jobs with timezones, daylight-saving rules, one catch-up run, Run now, pause and run history | **Share** the scheduler and run records (recommended alignment above); keep the compile-specific rules. | **Open for Michael:** run compiles on #163's scheduler as a built-in job kind? |
+| Who runs what | #163 (merged) adds Assistant, Router and an optional Job row; #162 adds Issue assistant; this change adds Brain compiler | **Align**: this change goes after both and restates all their rows in its "Who runs what" delta (task 1.1). | Should compiles use #163's Job row instead of their own Brain compiler row? |
+| A session outside any project | #163 (merged) admits Assistant and JobRun sessions that belong to a Space, in `workspace-host` "Enforced hierarchy"; #162 uses a hidden `tracker` record | **Align**: a compile session could be a JobRun-like session in the Space whose brain it compiles, instead of a new hidden record. | **Open:** which mechanism hosts the compile session, given that several Spaces may name one brain? |
+| Provider restrictions | #163 runs threads and job runs outside YOLO, with tools limited by the provider | **Align**: a compile session needs file writes in its worktree only; #163's Claude allow-list pattern (writes limited to one folder) fits it. | Should the compile session use #163's restricted launch, with writes limited to its worktree's wiki paths? |
+| Projects created by a coordinator | #164 (merged) | None: compiles are per brain, not per project. | None. |
 
 ## Open Questions
 

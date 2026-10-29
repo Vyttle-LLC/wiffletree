@@ -100,7 +100,12 @@ Ship after `brain-log-capture`. Status and Conflicts show "No compile yet" until
 
 ## Overlaps with other proposals
 
-PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same thing, this change goes second.
+These are merged on `main`:
+- PR #162 (`shared-issues`), as 6194b99a;
+- PR #163 (`assistant-spaces-jobs-boards`), as 419a55ef;
+- PR #164 (`create_project`), as a8dded2d.
+
+#162's and #163's changes are open there, not yet archived; #164's is archived. Where they change the same thing as this change, this change goes after them.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
@@ -110,6 +115,11 @@ PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change 
 | Workspace pages | The Brains page here; #162's Issues page | **Align** with `brain-registry-sync`'s question on one Shared repositories page versus separate pages. | See `brain-registry-sync`. |
 | Inspector rail | `files-panel` and `processes-panel` | **Align**: the Memory panel keeps its place after Git, Files and Processes. Its new summary does not change the rail. | None. |
 | Rendering Markdown | Issue descriptions and comments (#162); notes and STATUS here | **Share** one Markdown renderer with wikilink and footnote support. | None. |
+| Libraries of rendered Markdown with history | #163 (merged): Boards lists outputs, renders Markdown natively, and keeps each output's Git history | **Share** the Markdown renderer and the history view. Brain notes stay in the brain browser, because Boards holds outputs, not knowledge. | Should Boards link to the brain notes a job cites? |
+| Search | #163 (merged): the assistant's search finds threads by title and text, filtered by Space; here, ⌘K searches one brain's notes and logs | **Align** on one ⌘K overlay with source chips (Brain, Threads and, from #162, Issues). It never mixes organizations or Spaces in one result list. | **Open:** one overlay for all three? Is a search scope an organization (brain) or a Space? |
+| Threads reading the brain | #163: threads read their Space's brain and add entries to it; the router never sees brains | **Align**: give threads `query_brain`, which is read-only and so within thread authority, instead of letting them read brain files directly. | **Open:** give threads `query_brain`? |
+| Where the browser sits | #163 pins the assistant and Boards above Projects and edits Spaces in Settings; here, Brains is a Workspace page and the Memory panel opens it | **Align** with `brain-registry-sync`'s navigation question. | See `brain-registry-sync`. |
+| Projects created by a coordinator | #164 (merged) | None: a created project's Memory panel works like any project's. A project with every repository may span several brains, and the panel lists each. | None. |
 
 ## Open Questions
 
