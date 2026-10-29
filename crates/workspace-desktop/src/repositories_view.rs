@@ -4,10 +4,10 @@ use gpui_component::{
     Disableable, Sizable,
     button::ButtonVariants,
     checkbox::Checkbox,
-    input::Input,
+    input::{Escape, Input, InputEvent},
     menu::{DropdownMenu, PopupMenuItem},
 };
-use ui::{banner, empty_state, hint, icon, mono, pill, section};
+use ui::{banner, card, empty_state, hint, icon, mono, pill, section};
 use wording::{age, counted, from_now};
 
 const WITHOUT_ASKING: &str =
@@ -25,11 +25,18 @@ const SORT: &str = "Tells the coordinator which need a change or an answer.";
 /// The name of the one trigger for tries at conflicts and failed checks.
 const NO_CHECKS: &str = "none entered · rebases and comment sorting work; a conflict or a failed check goes to the coordinator";
 const OWNER_PLACEHOLDER: &str = "An owner, or owner/name for one fork";
+const BASE_HINT: &str = "Changes the base used for tickets and publishing. Existing branches and worktrees are not rebased.";
 
 /// A repository's checks command being edited on its row, with the limit chosen so far.
 pub(super) struct ChecksEdit {
     repository_id: String,
     minutes: u32,
+}
+
+/// A repository's base being edited under its row, with why the host refused the last save.
+pub(super) struct BaseEdit {
+    repository_id: String,
+    error: Option<String>,
 }
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
@@ -53,6 +60,8 @@ pub(super) struct RepositoriesPage {
     shared: Shared,
     checks_command: Entity<InputState>,
     checks_edit: Option<ChecksEdit>,
+    base_input: Entity<InputState>,
+    base_edit: Option<BaseEdit>,
     /// The owner being added to those allowed to have PRs opened without asking.
     owner_input: Entity<InputState>,
     /// The saved review levels, which the keeper's review level picks from.
@@ -67,6 +76,13 @@ impl RepositoriesPage {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&verifiers, |_, _, cx| cx.notify()).detach();
+        let base_input = cx.new(|cx| InputState::new(window, cx).placeholder("origin/main"));
+        cx.subscribe_in(&base_input, window, |v, _, event, w, c| {
+            if let InputEvent::PressEnter { .. } = event {
+                v.save_base(w, c)
+            }
+        })
+        .detach();
         Self {
             verifiers,
             bridge,
@@ -75,6 +91,8 @@ impl RepositoriesPage {
                 InputState::new(window, cx).placeholder("The command that runs its checks")
             }),
             checks_edit: None,
+            base_input,
+            base_edit: None,
             owner_input: cx.new(|cx| InputState::new(window, cx).placeholder(OWNER_PLACEHOLDER)),
         }
     }
@@ -160,6 +178,8 @@ impl RepositoriesPage {
             let missing = snapshot.missing_repositories.contains(&repository.id);
             let kept = kept_label(repository, &snapshot.allowed_owners, &snapshot.keeper);
             let checks = self.checks_field(repository, kept == Some("kept"), p, cx);
+            let base_editor = self.base_editor(repository, p, cx);
+            let edit_id = id.clone();
             let row = div()
                     .flex()
                     .items_center()
@@ -206,6 +226,18 @@ impl RepositoriesPage {
                     }))
                     .child(pill(repository.base.clone(), p.subtle))
                     .child(
+                        button(SharedString::from(format!("edit-base-{id}")))
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("pencil"))
+                            .label("Edit")
+                            .tooltip("Change the base")
+                            .map(|b| ui::gated(b, &self.shared.host))
+                            .on_click(cx.listener(move |v, _, w, c| {
+                                v.begin_base_edit(&edit_id, w, c)
+                            })),
+                    )
+                    .child(
                         button(SharedString::from(format!("remove-repository-{id}")))
                             .ghost()
                             .xsmall()
@@ -234,6 +266,7 @@ impl RepositoriesPage {
                     .border_b_1()
                     .border_color(p.edge.opacity(edge::HAIRLINE))
                     .child(row)
+                    .children(base_editor)
                     .child(checks.pl(px(28.))),
             );
         }
@@ -568,6 +601,7 @@ impl RepositoriesPage {
             .flat_map(|s| &s.repositories)
             .find(|r| r.id == repository_id)
             .and_then(|r| r.checks.clone());
+        self.base_edit = None;
         let command = checks
             .as_ref()
             .map_or("", |c| c.command.as_str())
@@ -593,6 +627,116 @@ impl RepositoriesPage {
         let command = Command::SetRepositoryChecks {
             repository_id: edit.repository_id.clone(),
             checks: Some(checks),
+        };
+        self.request(command, window, cx);
+    }
+
+    /// The editor under a repository's row while the human changes its base.
+    fn base_editor(
+        &self,
+        repository: &Repository,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let edit = (self.base_edit.as_ref()).filter(|e| e.repository_id == repository.id)?;
+        let field = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Input::new(&self.base_input).xsmall().flex_1().min_w_0())
+            .child(
+                button("cancel-base")
+                    .ghost()
+                    .xsmall()
+                    .label("Cancel")
+                    .on_click(cx.listener(|v, _, _, c| v.cancel_base_edit(c))),
+            )
+            .child(
+                ui::gated(
+                    button("save-base").primary().xsmall().label("Save"),
+                    &self.shared.host,
+                )
+                .on_click(cx.listener(|v, _, w, c| v.save_base(w, c))),
+            );
+        Some(
+            card(p)
+                .mt_2()
+                .ml(px(28.))
+                .w_auto()
+                .gap_1()
+                .on_action(cx.listener(|v, _: &Escape, _, c| {
+                    v.cancel_base_edit(c);
+                    c.stop_propagation();
+                }))
+                .child(hint(
+                    format!("{} · {}", repository.name, repository.path),
+                    p,
+                ))
+                .child(
+                    div()
+                        .text_size(px(font::DETAIL))
+                        .text_color(p.subtle)
+                        .child("Base"),
+                )
+                .child(field)
+                .children(
+                    edit.error
+                        .clone()
+                        .map(|error| hint(error, p).text_color(p.red)),
+                )
+                .child(hint(BASE_HINT, p))
+                .child(
+                    div()
+                        .text_size(px(font::CAPTION))
+                        .text_color(p.subtle)
+                        .child("Enter saves · Esc cancels"),
+                ),
+        )
+    }
+
+    /// Opens the base editor under one row, closing any other editor, with the saved base.
+    fn begin_base_edit(
+        &mut self,
+        repository_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(base) = (self.shared.snapshot().into_iter())
+            .flat_map(|s| &s.repositories)
+            .find(|r| r.id == repository_id)
+            .map(|r| r.base.clone())
+        else {
+            return;
+        };
+        self.base_input
+            .update(cx, |input, cx| input.set_value(base, window, cx));
+        self.checks_edit = None;
+        self.base_edit = Some(BaseEdit {
+            repository_id: repository_id.to_owned(),
+            error: None,
+        });
+        // Focus once the input is in the next frame's dispatch tree.
+        cx.on_next_frame(window, |v, window, cx| {
+            if v.base_edit.is_some() {
+                v.base_input.update(cx, |input, cx| input.focus(window, cx));
+            }
+        });
+        cx.notify();
+    }
+
+    fn cancel_base_edit(&mut self, cx: &mut Context<Self>) {
+        self.base_edit = None;
+        cx.notify();
+    }
+
+    /// Saves the base as typed; the host refuses one that doesn't resolve to a commit.
+    fn save_base(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.base_edit else {
+            return;
+        };
+        let command = Command::SetRepositoryBase {
+            repository_id: edit.repository_id.clone(),
+            base: self.base_input.read(cx).value().trim().to_owned(),
         };
         self.request(command, window, cx);
     }
@@ -748,6 +892,14 @@ fn checks_summary(checks: Option<&RepositoryChecks>, kept: bool) -> (Option<Stri
     }
 }
 
+/// Why a base was not saved, and the base that stands.
+fn refused_base(error: &str, saved: Option<&str>) -> String {
+    match saved {
+        Some(saved) => format!("{error}. The base is still {saved}."),
+        None => error.to_owned(),
+    }
+}
+
 fn open_tickets<'a>(
     snapshot: &'a Snapshot,
     repository: &'a Repository,
@@ -818,6 +970,22 @@ impl Requests for RepositoriesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Command::SetRepositoryBase { repository_id, .. } = &command {
+            let saved = self.shared.snapshot().and_then(|s| {
+                let repository = s.repositories.iter().find(|r| r.id == *repository_id)?;
+                Some(repository.base.clone())
+            });
+            let editing = (self.base_edit.as_mut()).filter(|e| e.repository_id == *repository_id);
+            match (editing, reply) {
+                (Some(_), Ok(_)) => self.base_edit = None,
+                (Some(edit), Err(error)) => {
+                    edit.error = Some(refused_base(&error, saved.as_deref()))
+                }
+                (None, Err(error)) => toast_error(error, window, cx),
+                (None, Ok(_)) => {}
+            }
+            return;
+        }
         match reply {
             Err(error) => toast_error(error, window, cx),
             Ok(_) if matches!(command, Command::SetRepositoryChecks { .. }) => {
@@ -849,8 +1017,8 @@ impl Render for RepositoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on, held_lines,
-        partly_on_hint, pr_check_status, repository_counts, with_fixes,
+        BASE_HINT, NEVER, UNTIL_GITHUB_ANSWERS, WITHOUT_ASKING, checks_summary, fixes_are_on,
+        held_lines, partly_on_hint, pr_check_status, refused_base, repository_counts, with_fixes,
     };
     use crate::ui;
     use workspace_core::*;
@@ -1066,6 +1234,21 @@ mod tests {
         assert_eq!(
             WITHOUT_ASKING,
             "For repositories owned by these accounts. Everything else asks you first."
+        );
+    }
+
+    #[test]
+    fn a_refused_base_names_the_ref_and_the_base_that_stands() {
+        assert_eq!(
+            refused_base(
+                "“origin/mian” doesn’t resolve to a commit in this repository",
+                Some("main")
+            ),
+            "“origin/mian” doesn’t resolve to a commit in this repository. The base is still main."
+        );
+        assert_eq!(
+            BASE_HINT,
+            "Changes the base used for tickets and publishing. Existing branches and worktrees are not rebased."
         );
     }
 

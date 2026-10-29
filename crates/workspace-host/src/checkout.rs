@@ -723,7 +723,8 @@ impl Reservations {
             Command::SetProjectRepositories { project_id, .. }
             | Command::SetLive { project_id, .. } => self.blocks_project(host, project_id),
             Command::RemoveRepository { repository_id }
-            | Command::SetRepositoryChecks { repository_id, .. } => self.held.iter().any(|id| {
+            | Command::SetRepositoryChecks { repository_id, .. }
+            | Command::SetRepositoryBase { repository_id, .. } => self.held.iter().any(|id| {
                 host.ticket(id)
                     .is_ok_and(|t| t.repository_id == *repository_id)
             }),

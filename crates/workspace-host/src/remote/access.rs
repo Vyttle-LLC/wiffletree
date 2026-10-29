@@ -105,6 +105,7 @@ pub(crate) fn row(command: &Command) -> Row {
         | Command::AnswerSkillQuestion { .. }
         | Command::DismissSkillMerge { .. }
         | Command::SetRepositoryChecks { .. }
+        | Command::SetRepositoryBase { .. }
         | Command::RemoveLeftoverWorktrees { .. }
         | Command::StopProcesses { .. }
         | Command::UploadAttachment { .. } => Row::Change,

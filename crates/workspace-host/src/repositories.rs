@@ -100,6 +100,25 @@ fn folder_path(value: &str) -> Result<PathBuf> {
     fs::canonicalize(settings::expand_home(value)?).context("Folder does not exist")
 }
 
+fn resolves_to_commit(path: &Path, base: &str) -> bool {
+    runtime::git_output(
+        path,
+        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+    )
+    .is_ok()
+}
+
+/// Refuses a base that is not a ref naming a commit in the repository at `path`.
+fn verify_base(path: &Path, base: &str) -> Result<()> {
+    text(base, 256)?;
+    ensure!(!base.starts_with('-'), "Invalid base ref");
+    ensure!(
+        resolves_to_commit(path, base),
+        "“{base}” doesn’t resolve to a commit in this repository"
+    );
+    Ok(())
+}
+
 fn candidate(path: &Path, known: &BTreeSet<String>) -> Result<RepositoryCandidate> {
     let path = fs::canonicalize(path)?;
     let root = runtime::git_output(&path, &["rev-parse", "--show-toplevel"])?;
@@ -112,17 +131,12 @@ fn candidate(path: &Path, known: &BTreeSet<String>) -> Result<RepositoryCandidat
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .ok();
+    // Publishing needs a base on origin, so origin's refs come before local branches.
     let base = remote_head
         .iter()
         .map(|s| s.trim())
-        .chain(["main", "master", "origin/main", "origin/master", "HEAD"])
-        .find(|base| {
-            runtime::git_output(
-                &path,
-                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-            )
-            .is_ok()
-        })
+        .chain(["origin/main", "origin/master", "main", "master", "HEAD"])
+        .find(|base| resolves_to_commit(&path, base))
         .context("Repository has no committed base")?
         .to_owned();
     let name = path
@@ -501,8 +515,6 @@ impl Host {
 
     /// Adds a repository to the workspace, or updates the base of one it already knows.
     pub fn add_repository(&mut self, path: &str, base: &str) -> Result<Repository> {
-        text(base, 256)?;
-        ensure!(!base.starts_with('-'), "Invalid base ref");
         let path = fs::canonicalize(path).context("Repository path does not exist")?;
         let root = runtime::git_output(&path, &["rev-parse", "--show-toplevel"])?;
         let root = fs::canonicalize(root.trim())?;
@@ -510,11 +522,7 @@ impl Host {
             path == root,
             "Attach the repository root rather than a subdirectory"
         );
-        runtime::git_output(
-            &path,
-            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-        )
-        .context("Configured base must resolve to a commit")?;
+        verify_base(&path, base)?;
         let path = path
             .to_str()
             .context("Repository path is not UTF-8")?
@@ -555,6 +563,25 @@ impl Host {
         self.db.execute(
             "DELETE FROM dismissed_repositories WHERE path=?1",
             [&repository.path],
+        )?;
+        Ok(repository)
+    }
+
+    /// Changes the base of a workspace repository in place. Its branches, worktrees, projects
+    /// and publishing rules stay as they are.
+    pub fn set_repository_base(&mut self, id: &str, base: &str) -> Result<Repository> {
+        let known = self.repository(id)?;
+        verify_base(Path::new(&known.path), base)?;
+        if known.base == base {
+            return Ok(known);
+        }
+        let repository = Repository {
+            base: base.into(),
+            ..known
+        };
+        self.db.execute(
+            "UPDATE repositories SET data=?2 WHERE id=?1",
+            params![repository.id, encode(&repository)?],
         )?;
         Ok(repository)
     }
@@ -1326,6 +1353,132 @@ mod tests {
             );
         }
         assert_eq!(host.settings().allowed_owners, ["Sage-Social"]);
+    }
+
+    /// A repository under `root` with one commit on `branch` and no remote.
+    fn committed(root: &Path, name: &str, branch: &str) -> PathBuf {
+        let path = root.join(name);
+        fs::create_dir_all(&path).unwrap();
+        git(&path, &["init", "-q", "-b", branch]);
+        git(&path, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        fs::canonicalize(path).unwrap()
+    }
+    fn picked(path: &Path) -> String {
+        candidate(path, &BTreeSet::new()).unwrap().base
+    }
+
+    #[test]
+    fn import_prefers_origins_refs_and_falls_back_to_local_branches() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        // A clone has origin/HEAD.
+        let upstream = committed(root, "upstream", "develop");
+        git(root, &["clone", "-q", upstream.to_str().unwrap(), "clone"]);
+        let clone = root.join("clone");
+        git(&clone, &["branch", "main"]);
+        assert_eq!(picked(&clone), "origin/develop");
+        // Without origin/HEAD, origin/main and then origin/master come before local branches.
+        let fetched = committed(root, "fetched", "main");
+        git(
+            &fetched,
+            &["update-ref", "refs/remotes/origin/master", "HEAD"],
+        );
+        assert_eq!(picked(&fetched), "origin/master");
+        git(
+            &fetched,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        assert_eq!(picked(&fetched), "origin/main");
+        // No remote: local main, then master, then HEAD.
+        assert_eq!(picked(&committed(root, "local", "main")), "main");
+        assert_eq!(picked(&committed(root, "old", "master")), "master");
+        assert_eq!(picked(&committed(root, "trunk", "trunk")), "HEAD");
+    }
+
+    #[test]
+    fn a_base_edit_keeps_the_repository_and_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
+        let path = committed(home.path(), "mudling", "main");
+        let added = host.add_repository(path.to_str().unwrap(), "main").unwrap();
+        let checks = RepositoryChecks {
+            command: "cargo test".into(),
+            minutes: 20,
+        };
+        host.set_repository_checks(&added.id, Some(checks.clone()))
+            .unwrap();
+        let project = host.create_project("Mud").unwrap();
+        host.set_project_repositories(&project.id, Some(vec![added.id.clone()]))
+            .unwrap();
+        git(&path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let head = git(&path, &["rev-parse", "HEAD"]);
+        let saved = host
+            .execute(Command::SetRepositoryBase {
+                repository_id: added.id.clone(),
+                base: "origin/main".into(),
+            })
+            .unwrap();
+        assert_eq!(saved["base"], "origin/main");
+        // Nothing in Git moved.
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&path, &["rev-parse", "origin/main"]), head);
+        drop(host);
+        let host = Host::open_set_up(home.path().join("home")).unwrap();
+        assert_eq!(
+            host.repositories().unwrap(),
+            [Repository {
+                base: "origin/main".into(),
+                checks: Some(checks),
+                ..added.clone()
+            }]
+        );
+        assert_eq!(
+            host.project(&project.id).unwrap().repositories,
+            Some(vec![added.id])
+        );
+    }
+
+    #[test]
+    fn a_base_that_does_not_resolve_is_refused_and_the_saved_one_stands() {
+        let (_home, mut host) = host_with(&["git@github.com:Vyttle-LLC/mudling.git"]);
+        let repository = host.repositories().unwrap().remove(0);
+        let error = host
+            .set_repository_base(&repository.id, "origin/mian")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "“origin/mian” doesn’t resolve to a commit in this repository"
+        );
+        for refused in ["-c", " ", &"a".repeat(257)] {
+            assert!(host.set_repository_base(&repository.id, refused).is_err());
+        }
+        assert!(host.set_repository_base("unknown", "HEAD").is_err());
+        assert_eq!(host.repositories().unwrap(), [repository]);
+    }
+
+    #[test]
+    fn a_rescan_or_reimport_keeps_a_saved_base() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path().join("home")).unwrap();
+        let folder = home.path().join("dev");
+        let path = committed(&folder, "mudling", "main");
+        git(&path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let paths = [path.to_str().unwrap().to_owned()];
+        let roots = [folder.to_str().unwrap().to_owned()];
+        let imported = host.import_repositories(None, &paths, &roots, &[]).unwrap();
+        let id = imported.imported[0].id.clone();
+        assert_eq!(imported.imported[0].base, "origin/main");
+        host.set_repository_base(&id, "main").unwrap();
+        assert!(host.refresh_repositories().unwrap().added.is_empty());
+        let again = host.import_repositories(None, &paths, &roots, &[]).unwrap();
+        assert_eq!(
+            (
+                again.imported[0].id.as_str(),
+                again.imported[0].base.as_str()
+            ),
+            (id.as_str(), "main")
+        );
+        assert_eq!(host.repository(&id).unwrap().base, "main");
     }
 
     #[test]

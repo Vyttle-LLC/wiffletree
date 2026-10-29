@@ -3037,6 +3037,12 @@ pub enum Command {
         repository_id: String,
         checks: Option<RepositoryChecks>,
     },
+    /// Changes a repository's base in place once it resolves to a commit; answers with the
+    /// `Repository`. Only the human's client sends it.
+    SetRepositoryBase {
+        repository_id: String,
+        base: String,
+    },
     /// Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`.
     LeftoverWorktrees,
     /// Removes the worktrees of the tickets the human selected from the listing, re-checking
@@ -3218,6 +3224,7 @@ impl Command {
             | Self::AnswerSkillQuestion { .. }
             | Self::DismissSkillMerge { .. }
             | Self::SetRepositoryChecks { .. }
+            | Self::SetRepositoryBase { .. }
             | Self::RemoveLeftoverWorktrees { .. }
             | Self::StopProcesses { .. }
             | Self::StopAgentsAndQuit
