@@ -4612,6 +4612,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_withdrawn_keeper_review_leaves_a_noted_entry_it_reported_again_as_it_was() {
+        let (mut f, r) = reviewing("true");
+        let noted = LedgerEntry {
+            focus: "Correctness".into(),
+            status: EntryStatus::Noted,
+            ..untriaged("F1")
+        };
+        let mut ticket = f.ticket();
+        ticket.ledger.push(noted.clone());
+        f.host.save_ticket(&ticket).unwrap();
+        under_review(&mut f, &r);
+        let again = |severity| {
+            let mut again = finding(severity, "Earlier, again");
+            again["id"] = json!("F1");
+            again
+        };
+        verdict(
+            &mut f,
+            "Correctness",
+            "failed",
+            json!([again("blocking"), again("non_blocking")]),
+        );
+
+        let ticket = f.ticket();
+        assert_eq!(ticket.ledger, [noted]);
+        let withdrawn = ticket.keeper_reviews()[0].withdrawn.clone().unwrap();
+        let entries: Vec<(&str, Severity)> = (withdrawn.entries.iter())
+            .map(|e| (e.id.as_str(), e.finding.severity))
+            .collect();
+        assert_eq!(entries, [("F2", Severity::Blocking)]);
+    }
+
+    #[test]
     fn a_failed_keeper_review_is_withdrawn_keeping_the_coordinators_decisions_and_the_branch_goes_back()
      {
         let (mut f, r) = reviewing("true");

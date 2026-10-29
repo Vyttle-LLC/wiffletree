@@ -212,11 +212,14 @@ fn is_failing(ledger: &[LedgerEntry], reported: &ReportedFinding) -> bool {
 /// Applies a completed check to the ledger: the focus's open entries it did not report again are
 /// fixed, an open entry it reports again stays open with the new report, a noted one becomes open
 /// when reported again as an evidenced blocking finding, and new findings are added. A settled
-/// entry reported again is left alone.
+/// entry reported again is left alone. A keeper review, which may be withdrawn with exactly the
+/// entries it recorded, leaves a noted entry alone too, recording an evidenced blocking re-report
+/// of it as a new entry.
 fn record_findings(
     ticket: &mut Ticket,
     focus: &str,
     (cycle, round): (u32, u32),
+    keeper: bool,
     findings: &[ReportedFinding],
 ) {
     let withdrawn = ticket.withdrawn_findings();
@@ -243,16 +246,18 @@ fn record_findings(
             .id
             .as_ref()
             .and_then(|id| ledger.iter_mut().find(|e| &e.id == id));
+        let kept_by_keeper = |entry: &LedgerEntry| keeper && entry.status == EntryStatus::Noted;
         match existing {
             Some(entry) if entry.status.is_settled() => {}
-            Some(entry) => {
+            Some(entry) if kept_by_keeper(entry) && !reported.finding.is_evidenced_blocking() => {}
+            Some(entry) if !kept_by_keeper(entry) => {
                 entry.finding = reported.finding.clone();
                 (entry.cycle, entry.round) = (cycle, round);
                 if entry.finding.is_evidenced_blocking() {
                     entry.status = EntryStatus::Open;
                 }
             }
-            None => {
+            _ => {
                 let id = format!("F{}", ledger.len() + withdrawn + 1);
                 ledger.push(LedgerEntry {
                     id,
@@ -1160,10 +1165,11 @@ impl Host {
             .all(|v| v.result != VerifierResult::Pending);
         let source = (verification.cycle, round.round);
         let running = verification.outcome == VerificationOutcome::Running;
+        let keeper = verification.keeper;
         // Only a completed check moves the ledger, and not once the coordinator has the cycle's
         // outcome.
         if running && untouched && kind != "blocked" {
-            record_findings(&mut ticket, &focus, source, findings);
+            record_findings(&mut ticket, &focus, source, keeper, findings);
         }
         self.save_ticket(&ticket)?;
         if ended && running {
