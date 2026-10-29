@@ -92,7 +92,7 @@ Wiffletree has opinions about how agent work should be organized.
 
 **Software does the routine work; models do the thinking.** Git state, status, polling and usage tracking are ordinary deterministic code. Models are woken only for decisions that need reasoning, so coordinators sleep between events instead of polling.
 
-**You can see how far along the work is.** The app derives the progress bars from each agent's checklist, each ticket's stage and its review results. The coordinator's strip shows the project's phase, one segment per ticket and how many tickets are accepted. Its Crew panel lists every ticket with its agents, their models and their progress.
+**You can see how far along the work is.** The app derives the progress bars from each agent's checklist, each ticket's stage and its review results. The coordinator's strip shows the project's phase, one segment per ticket and how many tickets are accepted. The Agents panel, opened from any of the project's conversations, lists every ticket with its agents, their models and their progress, and marks an agent that is stuck.
 
 **You can see what fills an agent's context.** Each agent's Overview has a Context card that shows how full its context window is and with what, measured after every turn without a model call. Claude reports its own categories; for Codex they are estimates. **Compact…** on the same card replaces a Claude or Codex agent's conversation with a summary when you choose, and for Claude you can say what to keep.
 

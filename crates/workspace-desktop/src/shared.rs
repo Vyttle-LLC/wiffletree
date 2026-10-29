@@ -153,6 +153,17 @@ impl Shared {
     pub(super) fn project_progress(&self) -> Option<&ProjectProgress> {
         self.progress.project(&self.selected_session()?.project_id)
     }
+    /// Everyone the Agents panel lists for the selected project.
+    pub(super) fn roster(&self) -> Option<agents_panel::Roster<'_>> {
+        let index = self.index.as_deref()?;
+        let project = self.project_progress()?;
+        Some(agents_panel::Roster::new(&self.progress, index, project))
+    }
+    /// The selected project's coordinator, the first of its sessions without a parent.
+    pub(super) fn coordinator(&self) -> Option<&Session> {
+        let project = &self.selected_session()?.project_id;
+        self.index.as_ref()?.roots(project).next()
+    }
     /// A running compaction reads as work in a session's badge.
     pub(super) fn compacting(&self, session_id: &str) -> bool {
         context_view::compacting(self.runtime(session_id))

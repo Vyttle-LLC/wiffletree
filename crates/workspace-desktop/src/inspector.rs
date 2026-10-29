@@ -83,7 +83,7 @@ impl Panel {
             Self::Git => "git",
             Self::Files => "folder",
             Self::Processes => "terminal",
-            Self::Crew => "team",
+            Self::Agents => "team",
         }
     }
     fn title(self) -> &'static str {
@@ -96,7 +96,7 @@ impl Panel {
             Self::Git => "Git",
             Self::Files => "Files",
             Self::Processes => "Processes",
-            Self::Crew => "Crew",
+            Self::Agents => "Agents",
         }
     }
 }
@@ -118,7 +118,9 @@ pub(super) struct Inspector {
     pub(super) files: files_view::Files,
     /// What the Processes panel shows; read only while that panel is open.
     pub(super) processes: processes_view::Processes,
-    pub(super) crew_clock: bool,
+    pub(super) agents_clock: bool,
+    /// The Agents panel's "Previous agents" section is unfolded.
+    pub(super) previous_open: bool,
     /// The Compact form of each session that has it open, and the field they share.
     pub(super) compact_forms: BTreeMap<String, context_view::CompactForm>,
     pub(super) compact_note: Entity<TextareaState>,
@@ -157,7 +159,8 @@ impl Inspector {
             }),
             files: Default::default(),
             processes: Default::default(),
-            crew_clock: false,
+            agents_clock: false,
+            previous_open: false,
             compact_forms: BTreeMap::new(),
             compact_note: cx.new(|cx| {
                 TextareaState::new(window, cx)
@@ -187,7 +190,7 @@ impl Inspector {
             self.sync_process_readings(window, cx);
         }
         if selection || panel || progress {
-            self.sync_crew_clock(window, cx);
+            self.sync_agents_clock(window, cx);
         }
         if selection || moved || panel || page || progress {
             cx.notify();
@@ -290,7 +293,7 @@ impl Inspector {
             Panel::Git => self.git_panel(p),
             Panel::Files => self.files_message(p),
             Panel::Processes => self.processes_panel(p, cx),
-            Panel::Crew => self.crew_panel(p, cx),
+            Panel::Agents => self.agents_panel(p, cx),
         };
         // The Files panel lists its tree a screenful at a time, so the tree scrolls itself.
         let tree = (panel == Panel::Files)
@@ -302,9 +305,9 @@ impl Inspector {
             Panel::Processes => (self.processes_head(p, cx), None),
             _ => (None, None),
         };
-        // The crew is the project's, whichever of its agents is selected.
+        // The Agents panel is the project's, whichever of its agents is selected.
         let (scope, subtitle) = match panel {
-            Panel::Crew => ("Project", self.shared.project_name()),
+            Panel::Agents => ("Project", self.shared.project_name()),
             _ => (scope(role), self.shared.owner_name()),
         };
         div()
@@ -936,9 +939,9 @@ mod tests {
     use workspace_host::Host;
 
     #[test]
-    fn the_crew_panel_stays_open_whichever_agent_is_selected() {
+    fn the_agents_panel_stays_open_whichever_agent_is_selected() {
         for role in Role::ALL {
-            assert!(Panel::Crew.kept_for(role) == Panel::Crew);
+            assert!(Panel::Agents.kept_for(role) == Panel::Agents);
         }
         // A panel the selected session does not have still gives way to Overview.
         assert!(Panel::Attention.kept_for(Role::Implementer) == Panel::Overview);

@@ -162,7 +162,9 @@ impl Conversation {
             .update(cx, |header, cx| header.share(shared.clone(), cx));
         self.transcript
             .update(cx, |transcript, cx| transcript.share(shared, window, cx));
-        if selection || moved || catalog || old.panel != self.shared.panel {
+        // The agents card counts from the progress board.
+        let progress = !Rc::ptr_eq(&old.progress, &self.shared.progress);
+        if selection || moved || catalog || progress || old.panel != self.shared.panel {
             cx.notify();
         }
     }
@@ -505,6 +507,28 @@ impl Conversation {
             );
         }
         notices
+    }
+    /// Pinned above the coordinator's composer while any of its agents works or is stuck: how
+    /// many, on how many tickets, and a way to open the Agents panel.
+    fn agents_card(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let coordinator = self.shared.coordinator()?;
+        let (roster, index) = (self.shared.roster()?, self.shared.index.as_ref()?);
+        let (working, stuck) = (roster.working(), roster.stuck(index));
+        if coordinator.id != session.id || session.archived || working + stuck == 0 {
+            return None;
+        }
+        let summary = wording::agents_summary(working, roster.busy_tickets(), stuck);
+        Some(
+            banner(if stuck > 0 { p.yellow } else { p.subtle })
+                .max_w(px(COLUMN))
+                .child(icon("team").text_color(p.subtle))
+                .child(div().flex_1().min_w_0().text_ellipsis().child(summary))
+                .child(
+                    button("open-agents").ghost().label("Open Agents").on_click(
+                        cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Agents))),
+                    ),
+                ),
+        )
     }
     /// The project's open decisions, one at a time, so the human can settle them in place.
     /// Hidden while the inbox is open, which already lists them all. The card takes at most
@@ -897,6 +921,7 @@ impl Conversation {
                     .into_iter()
                     .map(|notice| notice.max_w(px(COLUMN))),
             )
+            .children(self.agents_card(session, p, cx))
             .children(self.chosen_by_line(session, p))
             .children(self.waiting_line(session, p))
             .child(

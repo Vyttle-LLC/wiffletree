@@ -1,4 +1,5 @@
 mod activity;
+mod agents_panel;
 mod assets;
 mod attachment_chips;
 mod automation;
@@ -10,7 +11,6 @@ mod context_view;
 mod conversation;
 mod conversation_header;
 mod creation;
-mod crew_panel;
 mod events_view;
 mod file_links;
 mod files_view;
@@ -89,9 +89,10 @@ enum Panel {
     Git,
     Files,
     Processes,
-    /// Opened from the coordinator's progress strip, not from the rail. It lists the whole
-    /// project, so it stays open whichever of the project's agents is selected.
-    Crew,
+    /// Opened from the conversation header or the coordinator's agents card, not from the
+    /// rail. It lists the whole project, so it stays open whichever of the project's agents is
+    /// selected.
+    Agents,
 }
 
 /// What the open Memory, Events or Git panel loaded, decoded once when its reply arrives.
@@ -134,7 +135,7 @@ struct ArchiveDemand<'a> {
     messages: &'a [Message],
 }
 
-/// The archive is out of date and something shown needs it: Show archived, the Tickets, Crew or
+/// The archive is out of date and something shown needs it: Show archived, the Tickets, Agents or
 /// Events panel, the Repositories page or a publish request, or a selected session or message sender
 /// that the snapshot does not list, which only the archive holds.
 fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
@@ -143,7 +144,10 @@ fn wants_archive(index: &WorkspaceIndex, shown: &ArchiveDemand) -> bool {
     let archived = |id: &str| !live.contains(id);
     index.archive_is_stale()
         && (shown.show_archived
-            || matches!(shown.panel, Some(Panel::Team | Panel::Crew | Panel::Events))
+            || matches!(
+                shown.panel,
+                Some(Panel::Team | Panel::Agents | Panel::Events)
+            )
             || shown.page == Page::Repositories
             || snapshot.attention.iter().any(Attention::is_publish)
             || shown.selected.is_some_and(archived)
@@ -1458,7 +1462,7 @@ mod tests {
                 ..shown("live")
             },
             ArchiveDemand {
-                panel: Some(Panel::Crew),
+                panel: Some(Panel::Agents),
                 ..shown("live")
             },
             // It names the agents behind each event.
