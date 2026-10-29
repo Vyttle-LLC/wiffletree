@@ -16,6 +16,8 @@ Project order and groups have their own static study, [project-groups.html](mock
 
 Remote control has its own static study, [remote-hosts/ui/mockups.html](../openspec/changes/archive/2026-10-20-remote-hosts/ui/mockups.html), with no script: the sidebar's host switcher, Settings › Remote access on the host with a pairing code, Connect a computer, a remote project connected and reconnecting, the quit prompt, a later iPhone view, and whose settings a Mac driving another shows. The human approved it on October 19, 2026. `openspec/changes/archive/2026-10-19-standalone-host` and `openspec/changes/archive/2026-10-20-remote-hosts` specify what the native app implements.
 
+Shared issues have their own static study, [shared-issues/ui/mockups.html](../openspec/changes/shared-issues/ui/mockups.html), with no script: the Issues page as a list and a board, one issue with the issue assistant beside it, New issue with its warning, the Inbox with an issue paused by a conflict, and setting up the tracker repository with what it holds on disk. The human approved it on October 29, 2026. Its people, repositories and issues are invented Celadon samples. `openspec/changes/shared-issues` specifies what the native app will implement.
+
 **Wiffletree** is the product name, selected October 5, 2026; **Tidal** remains the selected brand color palette as of October 2, 2026. The current study uses Wiffletree branding and paired Tidal light and dark modes. Celadon remains its sample project; it is no longer the product's theme family. See [Brand colors](brand.md) for the palette, semantic roles, and usage rules. The [brand kit](brand/README.md) pairs the selected red Interlock open-joint symbol with the original two-tone wordmark; [preview both appearances](brand/png/preview.png).
 
 ## Prototype boundaries
@@ -29,6 +31,7 @@ Remote control has its own static study, [remote-hosts/ui/mockups.html](../opens
 - The responsive layout was checked at desktop and 320 px widths. The application is intended for a desktop-first native implementation.
 - The project order and groups study is static: its project names, figures, states and drag positions are drawn by hand, and nothing in it moves.
 - The remote control study is static: its hosts, devices, codes, states and figures are drawn by hand, and nothing in it connects, pairs or reaches the network.
+- The shared issues study is static: its issues, people, states and sync times are drawn by hand, and nothing in it reads or writes a repository.
 - These are HTML studies, not the GPUI implementation or evidence of native performance.
 
 ## Earlier studies

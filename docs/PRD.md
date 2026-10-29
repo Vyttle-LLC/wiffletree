@@ -34,7 +34,7 @@ Primary user: Michael, initially working locally on Apple Silicon with several r
 
 - Keep source control and monitoring deterministic. Use models for decisions that require reasoning, not routine polling or status calculation.
 
-Out of scope for the first usable release: remote execution, a Linux graphical client, Windows, managed cloud hosting, multi-user collaboration, a full code editor, terminal emulation, provider switching within a running conversation, arbitrary workflow scripting, and unrestricted automatic merges. A standalone host on macOS, driven from other paired devices, is the next delivery stage (see [Headless hosts and remote control](#headless-hosts-and-remote-control)); a Linux host follows. The core must have no GUI dependency from the start.
+Out of scope for the first usable release: remote execution, a Linux graphical client, Windows, managed cloud hosting, multi-user collaboration beyond [shared issues](#shared-issues), a full code editor, terminal emulation, provider switching within a running conversation, arbitrary workflow scripting, and unrestricted automatic merges. A standalone host on macOS, driven from other paired devices, is the next delivery stage (see [Headless hosts and remote control](#headless-hosts-and-remote-control)); a Linux host follows. The core must have no GUI dependency from the start.
 
 ## Project hierarchy and ownership
 
@@ -182,7 +182,7 @@ A ticket can have several reviewers, such as a Claude and a Codex correctness pa
 
 ## Settings shared between machines
 
-The human's own way of working follows them to every machine; what describes one machine stays on it. The shared settings are the skills with the human's rules, rewrites and history, the review settings, the model guide, the switch threshold, the check-in thresholds and the PR keeper's triggers, quiet period and review level. They live in one shared folder in the data folder on every machine. Everything else stays per machine: the Who runs what table, the PR keeper's row among it, the workspace folder, the allowed owners, the repositories and their checks, the settings repository chosen and appearance. Credentials, the database, conversations, projects and tickets are never shared.
+The human's own way of working follows them to every machine; what describes one machine stays on it. The shared settings are the skills with the human's rules, rewrites and history, the review settings, the model guide, the switch threshold, the check-in thresholds and the PR keeper's triggers, quiet period and review level. They live in one shared folder in the data folder on every machine. Everything else stays per machine: the Who runs what table, the PR keeper's row among it, the workspace folder, the allowed owners, the repositories and their checks, the settings repository chosen and appearance. Credentials, the database, conversations, projects and tickets are never shared through settings; a team shares its backlog through [shared issues](#shared-issues) instead.
 
 - **The human chooses a settings repository on each machine.** Settings takes a private GitHub repository the human created. Before anything is written, a read-only check says who can read it: only the human and their invitees for a user's repository, or, in yellow, every member of an organization whose base permission is Read or more. A public repository is refused. Setting up asks first and adds the shared folder in one commit beside what the repository holds. A second machine joins with the repository's settings, keeping its own in a backup and adding its skill history, or after a confirmation replaces them with its own; afterwards it lists what it still needs to run them, such as a PR keeper model, with a link to the page that provides it.
 - **Choosing the repository is the permission to push.** The host pushes only the repository's default branch, only the shared folder's files, never by force and only files it would accept when reading them. The allowed owners neither grant nor need this push. Whoever can push to the repository can change every machine's agents' instructions.
@@ -195,6 +195,23 @@ Acceptance:
 - Two machines' different edits to one setting pause it on the second to sync; Keep this Mac's pushes this machine's version and closes the note in every Inbox, and the other version stays in the repository's history.
 - An agent's shell edit to a skill is not pushed until the human syncs it.
 - Stopping sync asks first, keeps every setting and changes nothing on GitHub.
+
+## Shared issues
+
+Proposed in [shared-issues](../openspec/changes/shared-issues/proposal.md); the approved study is [shared-issues/ui/mockups.html](../openspec/changes/shared-issues/ui/mockups.html). A team's backlog lives in Wiffletree instead of an external tracker such as Linear, with no server: issues are Markdown files in a private GitHub repository the team owns, the tracker, synced by Wiffletree on every member's Mac. An **issue** is a shared idea, bug or request with its discussion. A **ticket** keeps its meaning, a local workspace, and is never shared; starting a project from an issue links them.
+
+- **One tracker per team, several per Mac.** The human names each tracker on each Mac, checked and set up as the settings repository is; a public repository is refused and setup says who can read it. Each tracker has its own prefix, such as `CEL`, and the Issues page can filter by tracker.
+- **Sync as for settings, with three differences.** It pushes only the default branch, never by force and only the tracker's files. It pulls every minute and pushes seconds after a change. A front matter field changed on two Macs pauses alone, with Compare, while the rest syncs; comments are one file each and never conflict. Changes a teammate commits without Wiffletree are accepted. IDs are allocated when an issue reaches GitHub; an issue filed offline carries a temporary ID.
+- **Identity is the GitHub login** `gh` reports.
+- **States follow the work.** Triage, Backlog, Todo, In progress, In review, Done and Canceled; In progress, In review and Done follow the linked project's tickets and pull requests, and a manual move holds until the work changes again. The tracker records who started a project and its pull requests, never ticket or agent detail.
+- **The issue assistant** is a lightweight role, not a coordinator, with its own Who runs what row. It reads issues and searches repositories read-only, and proposes edits, comments, splits and duplicate links that the human applies. It has no worktree and never pushes. Coordinators can list, read and link issues. Issue text written by others is untrusted context for every agent.
+- **Linear import** runs once, through Linear's API. There is no two-way sync.
+
+Acceptance:
+- Two Macs filing at once get two distinct IDs, and neither loses its issue.
+- Two people changing different fields of one issue both see both changes; the same field pauses only that field.
+- An issue started as a project moves to In review when its PR opens and to Done when the PRs merge, and the tracker holds no ticket detail.
+- No assistant action reaches the tracker until the human applies it.
 
 ## Agent communication and shared context
 
