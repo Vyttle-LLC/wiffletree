@@ -1,0 +1,821 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>Wiffletree · Brains study</title>
+<!--
+  Interactive study for the team-shared second brain (approval gate before any OpenSpec change).
+  One file, no network: the CSP allows only this page's inline style and script.
+  Reachable by clicking:
+  (a) Workspace › Brains: the two brains, the compiler host, the PR gate pipeline, and the
+      repository → brain mapping (owner defaults and per-repository overrides, editable).
+  (b) Brain browser: Status, Wiki (index tree, note, wikilinks, backlinks, Sources per claim),
+      Logs (filters, pages, brain PR state, ticket and conversation) and Conflicts.
+  (c) A project's Memory inspector, opening the browser filtered to that project's repositories,
+      and its Inbox with the conflicts and one failed sensitive-information scan.
+  (d) Search: ⌘K, Ctrl+K or / opens it anywhere; arrows move, Enter opens, Esc closes.
+  Every brain, entry, commit, PR, person and time here is simulated sample data;
+  nothing is implemented host, Git or GitHub behavior.
+-->
+<style>
+:root{--base:#F3F2ED;--surface:#FFFDF7;--overlay:#E4E9E3;--text:#1A262D;--subtle:#526865;--muted:#748781;--edge:#C4CFCA;--accent:#902818;--focus:#2D5A5A;--green:#326348;--red:#A3213E;--yellow:#77551C;--blue:#365E78;color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not(:has(#theme-light:checked)){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}}
+:root:has(#theme-dark:checked){--base:#1A262D;--surface:#22373E;--overlay:#2A434A;--text:#F3F2ED;--subtle:#AFBFBC;--muted:#829B99;--edge:#496063;--accent:#E6977E;--focus:#86C1BC;--green:#A0CBB0;--red:#FFA6B8;--yellow:#E4C17A;--blue:#9AC4D8;color-scheme:dark}
+*{box-sizing:border-box}
+svg:not([width]){width:13px;height:13px;flex:none;vertical-align:-2px}
+body{margin:0;padding:28px;background:var(--base);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font:400 30px/1.1 Georgia,"Times New Roman",serif;letter-spacing:-.04em;margin:4px 0 8px}
+h2{font-size:15px;font-weight:500;margin:0}
+h3{font-size:13px;font-weight:500;margin:0}
+p{margin:0}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+select{font:inherit;font-size:12px;color:var(--text);background:var(--surface);border:1px solid var(--edge);border-radius:7px;padding:3px 6px}
+.eyebrow{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--subtle)}
+.subtle{color:var(--subtle)}
+.muted{color:var(--muted)}
+.small{font-size:11px}
+.mono{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+code{font:11px ui-monospace,monospace;background:var(--overlay);padding:1px 4px;border-radius:4px}
+.intro{max-width:900px;margin-bottom:14px}
+.intro p{color:var(--subtle);font-size:12px}
+.questions{max-width:900px;margin:0 0 16px;border:1px solid color-mix(in srgb,var(--yellow) 45%,transparent);background:color-mix(in srgb,var(--yellow) 8%,transparent);border-radius:10px;padding:10px 14px;font-size:12px}
+.questions summary{cursor:pointer;font-weight:500}
+.questions ol{margin:6px 0 0;padding-left:18px;color:var(--subtle)}
+.questions li{margin:3px 0}
+.questions b{color:var(--text);font-weight:500}
+.themes{display:flex;gap:4px;align-items:center;margin:0 0 16px;font-size:12px;color:var(--subtle)}
+.themes input{position:absolute;opacity:0;pointer-events:none}
+.themes label{padding:3px 10px;border:1px solid var(--edge);border-radius:20px;cursor:pointer}
+.themes input:checked+label{background:var(--focus);border-color:var(--focus);color:var(--surface)}
+.themes .tip{margin-left:auto;color:var(--muted)}
+.pill{flex:none;display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:500;white-space:nowrap}
+.pill svg{width:10px;height:10px}
+.pill.subtle{color:var(--subtle);background:var(--overlay)}
+.pill.green{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.pill.focus{color:var(--focus);background:color-mix(in srgb,var(--focus) 12%,transparent)}
+.pill.yellow{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.pill.red{color:var(--red);background:color-mix(in srgb,var(--red) 11%,transparent)}
+.pill.blue{color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,transparent)}
+.pill.dashed{color:var(--muted);border:1px dashed var(--edge)}
+.btn{padding:4px 11px;border-radius:7px;font-size:12px;font-weight:500;border:1px solid transparent;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.btn.ghost{color:var(--subtle);border-color:var(--edge)}
+.btn.ghost:hover{background:var(--overlay)}
+.btn.primary{background:var(--focus);color:var(--surface)}
+.btn.link{color:var(--focus);padding:0;border:0;font-weight:400}
+.btn.link:hover{text-decoration:underline}
+.btn svg{width:12px;height:12px}
+.hint{font-size:12px;color:var(--subtle)}
+svg.i{width:14px;height:14px;flex:none;color:var(--subtle)}
+/* The window: sidebar, page or conversation, inspector and rail. */
+.window{display:grid;grid-template-columns:224px minmax(0,1fr) auto;height:760px;background:var(--surface);border:1px solid var(--edge);border-radius:14px;overflow:hidden;position:relative}
+.side{background:var(--base);border-right:1px solid var(--edge);padding:10px 8px;display:flex;flex-direction:column;gap:1px;overflow:auto}
+.side .eyebrow{padding:8px 8px 4px}
+.row{min-height:30px;width:100%;display:flex;align-items:center;gap:8px;padding:0 8px;border-radius:6px;font-size:12.5px}
+.row:hover{background:var(--overlay)}
+.row .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row.selected{background:color-mix(in srgb,var(--focus) 14%,transparent)}
+.row.selected svg.i{color:var(--text)}
+.row.new{box-shadow:inset 2px 0 0 var(--accent)}
+.row .count{font-size:10.5px;color:var(--red);font-weight:500}
+.navsep{border-top:1px solid color-mix(in srgb,var(--edge) 35%,transparent);margin:8px 0 2px}
+.side .foot{margin-top:auto;padding:8px;font-size:11px;color:var(--muted)}
+.main{overflow:auto;min-width:0;display:flex;flex-direction:column}
+.page{padding:18px 22px}
+.page-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;flex-wrap:wrap}
+.page-head h2{font-size:17px}
+.section-label{margin:18px 0 6px;display:flex;align-items:baseline;gap:8px}
+.section-label .hint{text-transform:none;letter-spacing:0;font:11px -apple-system,BlinkMacSystemFont,sans-serif}
+/* Brains page. */
+.brains{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.brain{border:1px solid color-mix(in srgb,var(--edge) 60%,transparent);border-radius:11px;padding:12px 14px;background:var(--base);display:flex;flex-direction:column;gap:8px}
+.brain-head{display:flex;align-items:center;gap:8px}
+.brain-head b{font-weight:500;font-size:14px;flex:1}
+.facts{display:grid;grid-template-columns:96px minmax(0,1fr);gap:3px 10px;font-size:12px}
+.facts dt{color:var(--muted);font-size:11px;padding-top:1px}
+.facts dd{margin:0}
+.brain .actions{display:flex;gap:6px;flex-wrap:wrap}
+.gate{border:1px solid color-mix(in srgb,var(--edge) 60%,transparent);border-radius:11px;overflow:hidden}
+.gate-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(140px,210px);gap:12px;align-items:center;padding:9px 12px;border-top:1px solid color-mix(in srgb,var(--edge) 30%,transparent);width:100%}
+.gate-row:first-child{border-top:0}
+.gate-row:hover{background:color-mix(in srgb,var(--overlay) 45%,transparent)}
+.gate-row .what b{font-weight:500}
+.gate-row .what .hint{font-size:11px}
+.stepper{display:flex;align-items:center;gap:0;font-size:10.5px}
+.step{display:flex;align-items:center;gap:4px;color:var(--muted);white-space:nowrap}
+.step i{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--edge);flex:none}
+.step.done{color:var(--subtle)}.step.done i{background:var(--focus);border-color:var(--focus)}
+.step.now{color:var(--text);font-weight:500}.step.now i{border-color:var(--focus);box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 18%,transparent)}
+.step.fail{color:var(--red);font-weight:500}.step.fail i{background:var(--red);border-color:var(--red)}
+.step.run i{border-style:dashed;border-color:var(--focus)}
+.stepper .bar{flex:1;min-width:10px;height:1.5px;background:var(--edge);margin:0 5px}
+.stepper .bar.done{background:var(--focus)}
+.checks{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px 14px;padding:8px 10px;margin-top:2px;background:var(--base);border-radius:8px;font-size:11.5px}
+.checks span{display:flex;align-items:center;gap:6px}
+.checks svg{width:11px;height:11px}
+.ok{color:var(--green)}.bad{color:var(--red)}
+.mapping{width:100%;border-collapse:collapse;font-size:12px}
+.mapping th{text-align:left;font-weight:400;color:var(--muted);font-size:11px;padding:4px 8px;border-bottom:1px solid var(--edge)}
+.mapping td{padding:5px 8px;border-bottom:1px solid color-mix(in srgb,var(--edge) 30%,transparent);vertical-align:middle}
+.mapping tr.rule td{background:color-mix(in srgb,var(--overlay) 40%,transparent)}
+/* Brain browser. */
+.bhead{padding:14px 22px 0;border-bottom:1px solid var(--edge);background:var(--surface);position:sticky;top:0;z-index:2}
+.bhead .top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.bhead h2{font-size:17px}
+.searchbtn{margin-left:auto;display:flex;align-items:center;gap:8px;min-width:230px;padding:5px 10px;border:1px solid var(--edge);border-radius:8px;color:var(--muted);font-size:12px;background:var(--base)}
+.searchbtn kbd,.kbd{font:10.5px ui-monospace,monospace;border:1px solid var(--edge);border-radius:4px;padding:0 4px;color:var(--subtle);margin-left:auto}
+.chips{display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin:8px 0 2px;font-size:11.5px}
+.chip{padding:2px 9px;border:1px solid var(--edge);border-radius:20px;color:var(--subtle);font-size:11.5px}
+.chip[aria-pressed=true]{background:color-mix(in srgb,var(--focus) 14%,transparent);border-color:color-mix(in srgb,var(--focus) 50%,transparent);color:var(--text);font-weight:500}
+.chip:disabled{opacity:.45;cursor:default}
+.tabs{display:flex;gap:2px;margin-top:8px}
+.tab{padding:6px 12px;font-size:12.5px;color:var(--subtle);border-bottom:2px solid transparent;display:flex;gap:6px;align-items:center}
+.tab[aria-selected=true]{color:var(--text);font-weight:500;border-bottom-color:var(--accent)}
+.tab .n{font-size:10.5px;color:var(--red);font-weight:500}
+.bbody{padding:16px 22px 26px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:18px;align-items:start}
+.md h1{font:400 22px/1.2 Georgia,"Times New Roman",serif;letter-spacing:-.02em;margin:0 0 4px}
+.md h4{font-size:12.5px;font-weight:500;margin:16px 0 4px}
+.md p{margin:6px 0;max-width:68ch}
+.md ul{margin:4px 0;padding-left:18px;max-width:68ch}
+.md li{margin:3px 0}
+.wikilink{color:var(--focus);border-bottom:1px dotted var(--focus)}
+.wikilink:hover{border-bottom-style:solid}
+.claimref{font-size:9.5px;vertical-align:super;color:var(--focus);font-weight:600;margin-left:1px}
+.box{border:1px solid color-mix(in srgb,var(--edge) 60%,transparent);border-radius:10px;padding:10px 12px;background:var(--base);font-size:12px}
+.box+.box{margin-top:10px}
+.box .eyebrow{margin-bottom:4px}
+.kv{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+.kv span:first-child{color:var(--muted);font-size:11px}
+.prrow{display:flex;align-items:center;gap:6px;padding:4px 0;border-top:1px solid color-mix(in srgb,var(--edge) 25%,transparent);font-size:11.5px;width:100%}
+.prrow:first-of-type{border-top:0}
+.wiki{display:grid;grid-template-columns:190px minmax(0,1fr) 270px;gap:18px;align-items:start}
+.tree .folder{font-size:11px;color:var(--muted);padding:8px 6px 2px}
+.tree button{display:flex;gap:6px;align-items:center;width:100%;padding:3px 6px;border-radius:6px;font-size:12px}
+.tree button:hover{background:var(--overlay)}
+.tree button[aria-current=true]{background:color-mix(in srgb,var(--focus) 14%,transparent);font-weight:500}
+.tree .k{width:6px;height:6px;border-radius:50%;flex:none}
+.k.decision{background:var(--accent)}.k.observation{background:var(--muted)}
+.tree .hidden-note{font-size:11px;color:var(--muted);padding:8px 6px}
+.fm{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0 10px;font-size:11px;color:var(--muted)}
+.backlinks{margin-top:18px;padding-top:10px;border-top:1px solid color-mix(in srgb,var(--edge) 40%,transparent)}
+.backlinks .list{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+.src{padding:8px 0;border-top:1px solid color-mix(in srgb,var(--edge) 30%,transparent);font-size:11.5px}
+.src:first-of-type{border-top:0}
+.src.lit{background:color-mix(in srgb,var(--focus) 7%,transparent);border-radius:7px;padding:8px;margin:0 -8px}
+.src .claim{display:flex;gap:6px;align-items:baseline}
+.src .claim b{color:var(--focus);font-size:10.5px}
+.chain{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:5px;padding-left:14px}
+.chain .arrow{color:var(--muted);font-size:10px}
+.anchor{font:10.5px ui-monospace,monospace;padding:1px 5px;border-radius:4px;background:var(--overlay);color:var(--text)}
+button.anchor:hover{outline:1px solid var(--focus)}
+/* Logs. */
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.filters label{font-size:11px;color:var(--muted);display:flex;gap:5px;align-items:center}
+.entry{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:var(--base)}
+.entry.lit{border-color:var(--focus);box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 14%,transparent)}
+.entry-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.entry-head b{font-weight:500;font-size:13px}
+.entry .meta{font-size:11px;color:var(--muted);margin-top:2px}
+.entry dl{display:grid;grid-template-columns:62px minmax(0,1fr);gap:1px 8px;margin:7px 0 0;font-size:12px}
+.entry dt{color:var(--muted);font:11px ui-monospace,monospace;padding-top:1px}
+.entry dd{margin:0}
+.entry .links{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px;padding-top:7px;border-top:1px solid color-mix(in srgb,var(--edge) 30%,transparent);font-size:11.5px}
+.pager{display:flex;align-items:center;gap:8px;justify-content:flex-end;font-size:12px;color:var(--subtle);margin-top:4px}
+/* Conflicts, inbox. */
+.conflict{border:1px solid color-mix(in srgb,var(--yellow) 45%,transparent);border-radius:11px;padding:12px 14px;margin-bottom:12px;background:var(--base)}
+.conflict.done{border-color:color-mix(in srgb,var(--edge) 60%,transparent);opacity:.8}
+.conflict .vs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin:8px 0}
+.conflict .side-box{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:8px;padding:8px 10px;background:var(--surface);font-size:12px}
+.conflict .side-box .eyebrow{margin-bottom:3px}
+.evidence{margin:4px 0 0;padding-left:16px;font-size:11.5px;color:var(--subtle)}
+.evidence li{margin:2px 0}
+.ruling{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.ruling .btn.rec{border-color:var(--focus);color:var(--focus)}
+.ruling .btn.rec::after{content:"recommended";font-size:9.5px;font-weight:400;color:var(--muted);margin-left:2px}
+.recommend{font-size:12px;margin-top:6px;padding:7px 10px;border-left:2px solid var(--focus);background:color-mix(in srgb,var(--focus) 6%,transparent);border-radius:0 6px 6px 0}
+.empty{padding:28px;text-align:center;color:var(--muted);font-size:12px;border:1px dashed var(--edge);border-radius:10px}
+/* Project conversation, inspector and rail. */
+.convo{flex:1;display:flex;flex-direction:column;min-height:0}
+.sessionbar{padding:14px 22px;border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px}
+.sessionbar h2{font-size:15px}
+.messages{flex:1;overflow:auto;padding:18px 22px;display:flex;flex-direction:column;gap:12px}
+.message{border:1px solid var(--edge);border-radius:12px;padding:11px 14px;background:var(--base);font-size:12.5px;max-width:640px}
+.message .from{display:flex;align-items:center;gap:7px;margin-bottom:6px;font-size:11px;color:var(--subtle)}
+.message .from b{color:var(--text);font-weight:500}
+.message.you{align-self:flex-end;background:color-mix(in srgb,var(--focus) 9%,var(--base))}
+.composer{margin:0 22px 16px;border:1px solid var(--edge);border-radius:12px;padding:10px 12px;color:var(--muted);font-size:12px}
+.right{display:flex;border-left:1px solid var(--edge);min-height:0}
+.inspector{width:330px;border-right:1px solid color-mix(in srgb,var(--edge) 45%,transparent);overflow:auto;padding:14px}
+.inspector-head{display:flex;align-items:flex-start;gap:8px;margin-bottom:10px}
+.inspector-head>div{flex:1}
+.inspector-head .owner{font-size:11px;color:var(--muted)}
+.rail{width:64px;background:var(--surface);padding:10px 4px;display:flex;flex-direction:column;gap:4px}
+.rail button{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:10px;min-height:51px;padding:6px 2px;border-radius:9px;color:var(--subtle);position:relative;justify-content:center}
+.rail button svg{width:17px;height:17px;color:currentColor}
+.rail button[aria-pressed=true]{color:var(--accent);background:var(--overlay)}
+.rail .badge{position:absolute;top:5px;right:9px;font-size:9.5px;color:var(--surface);background:var(--red);border-radius:10px;padding:0 4px;font-weight:600}
+.card{border:1px solid color-mix(in srgb,var(--edge) 55%,transparent);border-radius:10px;padding:10px 11px;background:var(--base);font-size:12px;margin-bottom:10px}
+.card.alert{border-color:color-mix(in srgb,var(--red) 45%,transparent)}
+.card.warn{border-color:color-mix(in srgb,var(--yellow) 45%,transparent)}
+.card .t{display:flex;gap:6px;align-items:flex-start;font-weight:500;margin-bottom:4px}
+.card .t span{flex:1}
+.card p{color:var(--subtle);font-size:11.5px;margin:3px 0}
+.todo{margin:6px 0 0;padding:0;list-style:none;display:grid;gap:6px}
+.todo li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 8px;align-items:start;font-size:11.5px}
+.todo li .why{grid-column:2;color:var(--muted);font-size:11px}
+.mini-entry{padding:6px 0;border-top:1px solid color-mix(in srgb,var(--edge) 30%,transparent);font-size:12px;width:100%;display:block}
+.mini-entry:hover{background:color-mix(in srgb,var(--overlay) 40%,transparent)}
+.mini-entry .meta{font-size:10.5px;color:var(--muted)}
+/* Search. */
+.scrim{position:absolute;inset:0;background:color-mix(in srgb,var(--text) 22%,transparent);display:flex;justify-content:center;align-items:flex-start;padding-top:70px;z-index:10}
+.palette{width:min(640px,92%);background:var(--surface);border:1px solid var(--edge);border-radius:13px;box-shadow:0 24px 60px color-mix(in srgb,#000 30%,transparent);overflow:hidden}
+.palette .field{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--edge)}
+.palette input{flex:1;border:0;background:none;font:14px -apple-system,BlinkMacSystemFont,sans-serif;color:var(--text);outline:none}
+.palette .chips{margin:0;padding:8px 14px;border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
+.results{list-style:none;margin:0;padding:6px;max-height:420px;overflow:auto}
+.result{display:block;width:100%;padding:8px 10px;border-radius:8px}
+.result[aria-selected=true]{background:color-mix(in srgb,var(--focus) 13%,transparent)}
+.result .rt{display:flex;gap:6px;align-items:center;font-size:12.5px}
+.result .rt b{font-weight:500}
+.result .rt .where{margin-left:auto;font-size:10.5px;color:var(--muted)}
+.result .ex{font-size:11.5px;color:var(--subtle);margin-top:2px}
+mark{background:color-mix(in srgb,var(--yellow) 30%,transparent);color:var(--text);border-radius:2px;padding:0 1px}
+.palette .foot{display:flex;gap:14px;padding:7px 14px;border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent);font-size:10.5px;color:var(--muted)}
+.toast{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);background:var(--text);color:var(--base);padding:6px 14px;border-radius:20px;font-size:12px;z-index:20;max-width:80%}
+.notes{max-width:900px;margin-top:22px;font-size:12px;color:var(--subtle)}
+.notes li{margin:4px 0}
+.notes b{color:var(--text);font-weight:500}
+@media(max-width:1180px){.wiki{grid-template-columns:170px minmax(0,1fr)}.wiki .sources{grid-column:1/-1}.brains{grid-template-columns:minmax(0,1fr)}.gate-row{grid-template-columns:minmax(0,1fr) auto}.gate-row .stepper{grid-column:1/-1;grid-row:2}.split{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:900px){body{padding:14px}.window{grid-template-columns:minmax(0,1fr);height:auto}.side{border-right:0;border-bottom:1px solid var(--edge)}.right{border-left:0;border-top:1px solid var(--edge)}.inspector{width:auto;flex:1}.wiki{grid-template-columns:minmax(0,1fr)}.conflict .vs{grid-template-columns:minmax(0,1fr)}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+  <symbol id="book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V5a2 2 0 0 1 2-2h13v16H6.5A2.5 2.5 0 0 0 4 21.5"/><path d="M19 19v3H6.5"/><path d="M8 7h7M8 11h5"/></symbol>
+  <symbol id="brain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 6 1V5a2 2 0 0 0-3-1z"/><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-6 1"/><path d="M12 9h2M12 14h3"/></symbol>
+  <symbol id="orbit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><path d="M10.4 21.9a10 10 0 0 0 9.94-15.93M13.6 2.1A10 10 0 0 0 3.66 18.03"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+  <symbol id="pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="m13 3.5-2.5 2.5L13 8.5"/></symbol>
+  <symbol id="merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 7.5v9M6 7.5c0 3 3 4.5 9.5 4.5"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></symbol>
+  <symbol id="cross" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="running" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="12" cy="12" r="8" stroke-dasharray="3 4"/></symbol>
+  <symbol id="server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/></symbol>
+  <symbol id="overview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+  <symbol id="task" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/></symbol>
+  <symbol id="inbox" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13L22 12v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"/></symbol>
+  <symbol id="team" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/></symbol>
+  <symbol id="link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></symbol>
+  <symbol id="chat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></symbol>
+  <symbol id="play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></symbol>
+</svg>
+
+<header class="intro">
+  <div class="eyebrow">Design study · Second brain</div>
+  <h1>Brains: a team-shared, PR-gated memory</h1>
+  <p>Interactive study for bringing the Git-backed second brain into Wiffletree. Start on <b>Workspace › Brains</b>, open a brain, or select the <b>Watch app call relay</b> project and use its Memory and Inbox panels. Press <span class="kbd">⌘K</span> anywhere to search. Every brain, entry, commit, PR, person and time is simulated; nothing here reads Git, GitHub or a provider.</p>
+</header>
+
+<details class="questions" open>
+  <summary>Questions this mockup leaves open for Michael</summary>
+  <ol>
+    <li><b>Where the browser lives.</b> Shown as one workspace page, filtered by a project chip, with the project's Memory panel as a summary that opens it. Should a project also get its own Brain destination, as the PRD's "project Brain destination" suggests?</li>
+    <li><b>Fixing a failed check.</b> The Inbox offers "Redact the line" (the host commits a fix to the batch branch, checks rerun) and "Not sensitive" (an inline allow marker a reviewer sees in the PR). Is amending an unmerged batch acceptable, given entries are append-only once on <code>main</code>?</li>
+    <li><b>Ruling path.</b> A ruling here writes a <code>decision</code> entry into the next log batch PR, and the wiki changes at the next compile. Should a ruling instead trigger a compile right away?</li>
+    <li><b>Ruling names.</b> The brief's uphold / keep / both / defer are shown as "Uphold existing", "Keep new", "Keep both" and "Defer". Are those the meanings you intend?</li>
+    <li><b>Personal and unowned repositories.</b> <code>MHohlios</code> and <code>celadon-theme</code> default to no brain. Should personal repositories log to <code>personal-brain</code>, which today holds only the journal?</li>
+    <li><b>Teammates' entries.</b> RB's and Oscar's entries come from the skill, so they have no Wiffletree ticket or conversation link. Is author plus PR enough, or should the skill record a session reference?</li>
+    <li><b>Search reach.</b> Search covers one brain, scoped to the project or the whole brain. Should it ever search Sage and Vyttle together?</li>
+    <li><b>Compiler host.</b> When Michael's Mac sleeps through a run, one catch-up run happens on wake. Can the compiler move to another Mac from this page, or only by changing the brain's settings in its repository?</li>
+  </ol>
+</details>
+
+<div class="themes" aria-label="Theme">
+  <span style="margin-right:6px">Theme</span>
+  <input type="radio" name="theme" id="theme-system" checked><label for="theme-system">System</label>
+  <input type="radio" name="theme" id="theme-light"><label for="theme-light">Tidal Light</label>
+  <input type="radio" name="theme" id="theme-dark"><label for="theme-dark">Tidal Dark</label>
+  <span class="tip">Search: <span class="kbd">⌘K</span> · <span class="kbd">Ctrl K</span> · <span class="kbd">/</span></span>
+</div>
+
+<div class="window" id="window">
+  <nav class="side" id="side" aria-label="Sidebar"></nav>
+  <div class="main" id="main"></div>
+  <div class="right" id="right"></div>
+</div>
+
+<ul class="notes">
+  <li><b>The PR gate.</b> Each log batch (one per ticket or session) and each compile run becomes one PR in the brain repository that auto-merges when its six checks pass: gitleaks, sensitive-information scan, markdownlint, wikilinks, log schema and size, and path ownership. A failed check pauses auto-merge and raises one Inbox item on the project that wrote the batch. The scan reports file and line, never the matched value.</li>
+  <li><b>Who sees what.</b> Every install logs; only the brain's compiler host (here Michael's Mac) compiles. RB and Oscar log through the skill and read the brain on GitHub or in their own Wiffletree.</li>
+  <li><b>Verification.</b> <i>verified</i>: the commit, merged PR or tag exists in a known repository. <i>claimed</i>: the entry names an anchor that is not merged yet. <i>unverified</i>: no anchor. A commit verifies the Git anchor, not every word of the claim.</li>
+  <li>This is an HTML study, not the GPUI implementation. Ruling, redacting and remapping change only this page's state and reset on reload.</li>
+</ul>
+
+<script>
+'use strict';
+// ---------- Sample data (simulated) ----------
+const BRAINS={
+  sage:{name:'sagehaven-docs',owner:'Sage-Social',remote:'github.com/Sage-Social/sagehaven-docs',path:'~/dev/sagehaven/sagehaven-docs/second-brain',sync:['green','Synced 4 min ago'],lastPR:[212,'compile run','auto-merged 2:06 AM'],compiler:'Michael’s Mac (this Mac)',next:'Tonight 2:00 AM ET',last:'Today 2:04 AM ET · 11 entries folded · 2 conflicts queued · 41 s',loggers:'Michael, RB, Oscar',compiled:'Oct 29, 2:04 AM ET'},
+  vyttle:{name:'vyttle-docs',owner:'Vyttle-LLC',remote:'github.com/Vyttle-LLC/vyttle-docs',path:'~/dev/vyttle/vyttle-docs/second-brain',sync:['green','Synced 12 min ago'],lastPR:[37,'log batch','merged 11:48 AM'],compiler:'Michael’s Mac (this Mac)',next:'Tonight 2:30 AM ET',last:'Today 2:31 AM ET · no pending entries · no model call',loggers:'Michael',compiled:'Oct 29, 2:31 AM ET'}
+};
+const PROJECTS={
+  relay:{name:'Watch app call relay',brain:'sage',repos:['sagechat-call-watch-relay','sagechat-call-watch-relay-node','sagechat-app-watchos']},
+  brainlog:{name:'wiffletree: Second brain log',brain:'vyttle',repos:['wiffletree']},
+  celadon:{name:'Celadon website refresh',brain:null,repos:['celadon-website']}
+};
+const OWNERS={'Sage-Social':'sagehaven-docs','Vyttle-LLC':'vyttle-docs','MHohlios':'','celadon-theme':''};
+const REPOS=[
+  ['sagechat-call-watch-relay','Sage-Social'],['sagechat-call-watch-relay-node','Sage-Social'],['sagechat-app-watchos','Sage-Social'],
+  ['simpatico-sage','Sage-Social'],['sagechat-platform-api','Sage-Social'],['sagechat-klipy-proxy','Sage-Social'],
+  ['sagehaven-docs','Sage-Social'],['wiffletree','Vyttle-LLC'],['dotfiles','MHohlios'],['personal-agents','MHohlios'],['celadon-website','celadon-theme']
+];
+const STAGES=['Queued','PR open','Checks','Auto-merged'];
+const CHECKS=['gitleaks','Sensitive-information scan','markdownlint','Wikilinks','Log schema and size','Path ownership'];
+// stage: index reached; result: done | now | run | fail
+const GATE=[
+  {id:'g214',brain:'sage',kind:'Log batch',what:'Call relay: retry on Telnyx timeout',detail:'2 entries · Michael · ticket',project:'relay',pr:214,stage:2,result:'fail',note:'Sensitive-information scan failed · auto-merge paused',failed:[1]},
+  {id:'g215',brain:'sage',kind:'Log batch',what:'simpatico-sage session',detail:'1 entry · RB · brain-log skill',pr:215,stage:2,result:'run',note:'Checks running · 4 of 6 passed',running:[4,5]},
+  {id:'g213',brain:'sage',kind:'Log batch',what:'Watch complication refresh',detail:'2 entries · Michael · ticket',project:'relay',pr:213,stage:3,result:'run',note:'All 6 checks passed · auto-merging'},
+  {id:'g212',brain:'sage',kind:'Compile run',what:'Nightly compile',detail:'11 entries folded · 2 conflicts queued',pr:212,stage:3,result:'done',note:'Auto-merged 2:06 AM'},
+  {id:'gq1',brain:'vyttle',kind:'Log batch',what:'Mockup: Brains page and Brain browser',detail:'2 entries · Michael · ticket',project:'brainlog',stage:0,result:'now',note:'Waits for the ticket’s ready_for_testing'},
+  {id:'g37',brain:'vyttle',kind:'Log batch',what:'Brain PR gate design',detail:'1 entry · Michael · coordinator',project:'brainlog',pr:37,stage:3,result:'done',note:'Merged 11:48 AM'}
+];
+const LOGS=[
+  {id:'01jbzb7q2m8r4t6v8x0y2a4c6e',brain:'sage',date:'2026-10-29',title:'Retry Telnyx timeouts with capped backoff',type:'decision',repo:'sagechat-call-watch-relay',author:'mhohlios',source:'wiffletree',ref:'wiffletree/retry-telnyx-timeout @ 7d03b1e · PR #92',changed:'Call setup retries a Telnyx timeout with exponential backoff, at most 3 attempts.',why:'Five attempts held a watch call open for up to 40 s before failing.',state:'PR #92 open; checks green.',verify:'claimed',pr:[214,'failed'],ticket:'Call relay: retry on Telnyx timeout',convo:'Implementer · Call relay retry'},
+  {id:'01jbzb7r5k1n3p5s7u9w1z3b5d',brain:'sage',date:'2026-10-29',title:'Retry fixture records call setup timings',type:'observation',repo:'sagechat-call-watch-relay',author:'mhohlios',source:'wiffletree',ref:'wiffletree/retry-telnyx-timeout @ 7d03b1e',changed:'Added a fixture that replays call setup against a stubbed carrier. (line 9 flagged by the scan; value not shown)',why:'Lets the retry path be tested without the carrier.',state:'Fixture in the branch; not merged.',verify:'claimed',pr:[214,'failed'],ticket:'Call relay: retry on Telnyx timeout',convo:'Implementer · Call relay retry'},
+  {id:'01jbz9w4c6e8g0j2l4n6q8s0u2',brain:'sage',date:'2026-10-29',title:'Token refresh threshold set to 2 minutes',type:'decision',repo:'sagechat-app-watchos',author:'mhohlios',source:'wiffletree',ref:'main @ c81f4d2 · PR #118',changed:'The watch refreshes its call token when under 2 minutes remain.',why:'One minute left too little margin on a slow wrist-raise wake.',state:'Merged in PR #118.',verify:'verified',pr:[213,'auto-merging'],ticket:'Watch complication refresh',convo:'Implementer · Complication refresh'},
+  {id:'01jbz9w7f9h1k3m5p7r9t1v3x5',brain:'sage',date:'2026-10-29',title:'Complication refreshes the token on wrist-raise',type:'observation',repo:'sagechat-app-watchos',author:'mhohlios',source:'wiffletree',ref:'main @ c81f4d2 · PR #118',changed:'The complication checks the token on wrist-raise instead of on a timer.',why:'Timers are throttled in the background.',state:'Shipped to TestFlight build 214.',verify:'verified',pr:[213,'auto-merging'],ticket:'Watch complication refresh',convo:'Implementer · Complication refresh'},
+  {id:'01jbx2m6p8r0t2v4x6z8b0d2f4',brain:'sage',date:'2026-10-28',title:'Moderation timeout blocks the message',type:'decision',repo:'simpatico-sage',author:'rboyce',source:'skill',ref:'rb/moderation-timeout @ 5a90e13 · PR #742',changed:'A moderation call that times out now blocks the message and shows a retry.',why:'Fail closed on safety paths.',state:'PR #742 open.',verify:'claimed',pr:[215,'open']},
+  {id:'01jbx0h3k5m7p9r1t3v5x7z9b1',brain:'sage',date:'2026-10-28',title:'Relay health check moved to /healthz',type:'observation',repo:'sagechat-call-watch-relay',author:'oabrego',source:'skill',ref:'main @ 2be7f90 · PR #90',changed:'The ALB target group checks /healthz instead of /.',why:'The root path started requiring auth.',state:'Merged and released in v1.7.1.',verify:'verified',pr:[209,'merged']},
+  {id:'01jbtx4n6q8s0u2w4y6a8c0e2g',brain:'sage',date:'2026-10-26',title:'Call token lifetime is 10 minutes',type:'decision',repo:'sagechat-platform-api',author:'mhohlios',source:'wiffletree',ref:'main @ 9c3e5a1 · PR #455',changed:'Platform API mints watch call tokens that expire after 10 minutes.',why:'Bounds the damage of a leaked token without forcing mid-call refresh.',state:'Released in v3.12.0.',verify:'verified',pr:[205,'merged'],ticket:'Short-lived call tokens',convo:'Implementer · Call tokens'},
+  {id:'01jbrq8t0v2x4z6b8d0f2h4k6m',brain:'sage',date:'2026-10-24',title:'Retire relay-node after Go relay parity',type:'decision',repo:'sagechat-call-watch-relay-node',author:'oabrego',source:'skill',ref:'—',changed:'Plan to retire the Node relay once the Go relay handles every client.',why:'Two relays double the on-call surface.',state:'No code yet.',verify:'unverified',pr:[201,'merged']},
+  {id:'01jbnk2w4y6a8c0e2g4j6l8n0q',brain:'sage',date:'2026-10-22',title:'Relay retries Telnyx up to 5 times',type:'decision',repo:'sagechat-call-watch-relay',author:'oabrego',source:'skill',ref:'main @ a41f2c0 · PR #81',changed:'Call setup retries a Telnyx timeout up to 5 times with a fixed 1 s delay.',why:'Carrier setup sometimes needs 3 or more tries at peak.',state:'Released in v1.6.0.',verify:'verified',pr:[198,'merged']},
+  {id:'01jbm3e5g7j9l1n3q5s7u9w1y3',brain:'sage',date:'2026-10-21',title:'Klipy proxy cache TTL is 1 hour',type:'observation',repo:'sagechat-klipy-proxy',author:'rboyce',source:'skill',ref:'main @ 61d8b2f · PR #24',changed:'Search responses are cached for 1 hour in Redis.',why:'Cuts upstream calls by about 70% in the sample week.',state:'Released in v0.9.0.',verify:'verified',pr:[196,'merged']},
+  {id:'01jbj7r9t1v3x5z7b9d1f3h5k7',brain:'sage',date:'2026-10-20',title:'Watch app drops the direct Telnyx SDK',type:'decision',repo:'sagechat-app-watchos',author:'mhohlios',source:'wiffletree',ref:'main @ e2a7c40 · PR #104',changed:'The watch no longer links the Telnyx SDK; every call goes through the relay.',why:'Carrier credentials must not ship on a child’s device.',state:'Released in 2.4.0.',verify:'verified',pr:[193,'merged'],ticket:'Relay-only calling',convo:'Implementer · Relay-only calling'},
+  {id:'01jbfz1c3e5g7j9l1n3q5s7u9w',brain:'sage',date:'2026-10-18',title:'Relay logs to its own log group',type:'observation',repo:'sagechat-call-watch-relay',author:'mhohlios',source:'wiffletree',ref:'main @ 3f9a0d7 · PR #77',changed:'The Go relay logs to /ecs/sagechat-call-watch-relay.',why:'Separates it from relay-node during the migration.',state:'Released in v1.5.0.',verify:'verified',pr:[190,'merged'],ticket:'Relay logging',convo:'Implementer · Relay logging'},
+  {id:'01jbd4x6z8b0d2f4h6k8m0p2r4',brain:'sage',date:'2026-10-15',title:'Releases are tag-driven',type:'decision',repo:'sagehaven-docs',author:'mhohlios',source:'skill',ref:'—',changed:'A v* tag on main releases; merging to main does not deploy.',why:'Keeps deploys deliberate.',state:'Applies to every service repository.',verify:'unverified',pr:[187,'merged']},
+  {id:'01jbzc1a3c5e7g9j1l3n5q7s9u',brain:'vyttle',date:'2026-10-29',title:'Brain changes reach main only by PR',type:'decision',repo:'wiffletree',author:'mhohlios',source:'wiffletree',ref:'—',changed:'Every brain change goes through a PR that auto-merges when the gate passes.',why:'The PR is both the gatekeeper and the history for a team-shared brain.',state:'Gate ticket in progress in sagehaven-docs.',verify:'unverified',pr:[37,'merged'],ticket:'Brain PR gate design',convo:'wiffletree: Second brain log'},
+  {id:'01jbzc4d6f8h0k2m4p6r8t0w2y',brain:'vyttle',date:'2026-10-29',title:'One file per log entry',type:'decision',repo:'wiffletree',author:'mhohlios',source:'wiffletree',ref:'—',changed:'Entries live at logs/<repo>/YYYY/MM/<date>-<id>.md and are never edited.',why:'Several machines and people logging to one file conflict in Git.',state:'Contract shared with the gate ticket.',verify:'unverified',pr:[37,'merged'],ticket:'Brain PR gate design',convo:'wiffletree: Second brain log'},
+  {id:'01jbw8k0m2p4r6t8v0x2z4b6d8',brain:'vyttle',date:'2026-10-27',title:'Nested cached views redraw with their parent',type:'observation',repo:'wiffletree',author:'mhohlios',source:'wiffletree',ref:'main @ e93d8af · PR #161',changed:'A cached GPUI view still redraws when its parent redraws.',why:'Found while measuring the sidebar.',state:'Documented; no fix planned.',verify:'verified',pr:[35,'merged'],ticket:'Sidebar lists coordinators only',convo:'Implementer · Sidebar'},
+  {id:'01jbs5f7h9k1m3p5r7t9w1y3a5',brain:'vyttle',date:'2026-10-24',title:'Projects are independent of repositories',type:'decision',repo:'wiffletree',author:'mhohlios',source:'wiffletree',ref:'main @ 839fd0d · PR #160',changed:'A project holds tickets across any repositories; several projects may share one.',why:'Work rarely maps to a single repository.',state:'In the PRD and the native app.',verify:'verified',pr:[33,'merged'],ticket:'Agents panel replaces Crew',convo:'Implementer · Agents panel'}
+];
+const L=id=>LOGS.find(l=>l.id===id);
+// Note bodies: ['h', text] | ['p', text, claim] | ['li', text, claim]. [[Wikilinks]] resolve to notes.
+const NOTES={
+  sage:[
+    {title:'Call Relay Architecture',folder:'Architecture',kind:'decision',updated:'2026-10-29',repos:['sagechat-call-watch-relay','sagechat-call-watch-relay-node','sagechat-app-watchos'],body:[
+      ['p','Watch calls go through the call-watch relay, never from the watch straight to the carrier. The relay holds the Telnyx credentials; the watch holds only a short-lived call token, see [[Watch Call Token Lifetime]].',1],
+      ['h','Runtime'],
+      ['li','The Go relay runs on ECS Fargate (arm64) and logs to its own group, /ecs/sagechat-call-watch-relay.',2],
+      ['li','The load balancer checks /healthz.',3],
+      ['h','Retries'],
+      ['li','A Telnyx timeout is retried up to 5 times with a fixed 1 s delay. A proposed cap of 3 attempts is in the conflict queue.',4],
+      ['h','Migration'],
+      ['li','The Node relay is to be retired once the Go relay reaches parity. Deploys follow [[Release Tagging]].',5]
+    ],claims:{
+      1:{text:'Calls go through the relay; the watch holds no carrier credentials.',sources:[['01jbj7r9t1v3x5z7b9d1f3h5k7','verified',['commit e2a7c40','PR #104 merged','tag 2.4.0']]]},
+      2:{text:'Go relay on Fargate, own log group.',sources:[['01jbfz1c3e5g7j9l1n3q5s7u9w','verified',['commit 3f9a0d7','PR #77 merged','tag v1.5.0']]]},
+      3:{text:'Health check on /healthz.',sources:[['01jbx0h3k5m7p9r1t3v5x7z9b1','verified',['commit 2be7f90','PR #90 merged','tag v1.7.1']]]},
+      4:{text:'Up to 5 retries, fixed 1 s delay.',sources:[['01jbnk2w4y6a8c0e2g4j6l8n0q','verified',['commit a41f2c0','PR #81 merged','tag v1.6.0']],['01jbzb7q2m8r4t6v8x0y2a4c6e','claimed',['commit 7d03b1e','PR #92 open']]]},
+      5:{text:'Retire relay-node after parity.',sources:[['01jbrq8t0v2x4z6b8d0f2h4k6m','unverified',[]]]}
+    }},
+    {title:'Watch Call Token Lifetime',folder:'Architecture',kind:'decision',updated:'2026-10-29',repos:['sagechat-app-watchos','sagechat-platform-api'],body:[
+      ['p','Platform API mints call tokens for the watch that expire after 10 minutes.',1],
+      ['p','The watch refreshes the token on wrist-raise once under 2 minutes remain, not on a background timer.',2],
+      ['p','Used by [[Call Relay Architecture]].']
+    ],claims:{
+      1:{text:'Tokens expire after 10 minutes.',sources:[['01jbtx4n6q8s0u2w4y6a8c0e2g','verified',['commit 9c3e5a1','PR #455 merged','tag v3.12.0']]]},
+      2:{text:'Refresh on wrist-raise under 2 minutes.',sources:[['01jbz9w4c6e8g0j2l4n6q8s0u2','verified',['commit c81f4d2','PR #118 merged']],['01jbz9w7f9h1k3m5p7r9t1v3x5','verified',['commit c81f4d2']]]}
+    }},
+    {title:'Moderation Fail-Closed',folder:'Safety',kind:'decision',updated:'2026-10-29',repos:['simpatico-sage','sagechat-platform-api'],body:[
+      ['p','If moderation fails or times out, the message is blocked and the sender may retry. No path delivers unmoderated content.',1],
+      ['p','See [[Release Tagging]] for when this ships.']
+    ],claims:{1:{text:'Moderation timeout blocks the message.',sources:[['01jbx2m6p8r0t2v4x6z8b0d2f4','claimed',['commit 5a90e13','PR #742 open']]]}}},
+    {title:'Klipy Proxy',folder:'Services',kind:'observation',updated:'2026-10-21',repos:['sagechat-klipy-proxy'],body:[
+      ['p','The Klipy proxy is the reference layout for new Go ECS services. Search responses are cached in Redis for 1 hour.',1],
+      ['p','Releases follow [[Release Tagging]].']
+    ],claims:{1:{text:'1 hour cache TTL.',sources:[['01jbm3e5g7j9l1n3q5s7u9w1y3','verified',['commit 61d8b2f','PR #24 merged','tag v0.9.0']]]}}},
+    {title:'Release Tagging',folder:'Process',kind:'decision',updated:'2026-10-15',repos:['*'],body:[
+      ['p','A v* tag on main releases a service. Merging to main does not deploy. deploy/** tags deploy a branch.',1]
+    ],claims:{1:{text:'Tag-driven releases.',sources:[['01jbd4x6z8b0d2f4h6k8m0p2r4','unverified',[]]]}}}
+  ],
+  vyttle:[
+    {title:'Brain PR Gate',folder:'Brain',kind:'decision',updated:'2026-10-29',repos:['wiffletree'],body:[
+      ['p','Every change to a team brain reaches main through a PR that auto-merges when six deterministic checks pass. Log PRs only add entries; compile PRs only change notes, STATUS and the queue. See [[Per-entry Log Layout]].',1]
+    ],claims:{1:{text:'PR-only, auto-merge on green.',sources:[['01jbzc1a3c5e7g9j1l3n5q7s9u','unverified',[]]]}}},
+    {title:'Per-entry Log Layout',folder:'Brain',kind:'decision',updated:'2026-10-29',repos:['wiffletree'],body:[
+      ['p','Each log entry is its own file under logs/<repo>/YYYY/MM/, named by date and a lowercase ULID, and is never edited after merge. Required by [[Brain PR Gate]].',1]
+    ],claims:{1:{text:'One file per entry.',sources:[['01jbzc4d6f8h0k2m4p6r8t0w2y','unverified',[]]]}}},
+    {title:'Project Model',folder:'Product',kind:'decision',updated:'2026-10-24',repos:['wiffletree'],body:[
+      ['p','A project is independent of code repositories; tickets in several projects may share one repository. Brains are derived from a project’s repositories, see [[Brain PR Gate]].',1]
+    ],claims:{1:{text:'Projects are independent of repositories.',sources:[['01jbs5f7h9k1m3p5r7t9w1y3a5','verified',['commit 839fd0d','PR #160 merged']]]}}},
+    {title:'GPUI View Caching',folder:'Engineering',kind:'observation',updated:'2026-10-27',repos:['wiffletree'],body:[
+      ['p','A nested cached view still redraws when its parent redraws; refresh() discards the cache.',1]
+    ],claims:{1:{text:'Nested cached views redraw with the parent.',sources:[['01jbw8k0m2p4r6t8v0x2z4b6d8','verified',['commit e93d8af','PR #161 merged']]]}}}
+  ]
+};
+const STATUS={
+  sage:[['h','Active threads'],['li','Watch calling: retry cap under review, see [[Call Relay Architecture]]. Token refresh on wrist-raise shipped, see [[Watch Call Token Lifetime]].'],['li','Moderation: timeouts now fail closed (PR #742 open), see [[Moderation Fail-Closed]].'],['li','Klipy proxy stable; reference layout for new Go services, see [[Klipy Proxy]].'],['h','Recently decided'],['li','Oct 29 · Token refresh threshold set to 2 minutes.'],['li','Oct 26 · Call tokens expire after 10 minutes.'],['h','Watch for'],['li','2 conflicts wait for a ruling: the relay retry cap and retiring relay-node.'],['li','Batch PR #214 is held by the sensitive-information scan.']],
+  vyttle:[['h','Active threads'],['li','Second brain in Wiffletree: mockup awaiting approval; gate ticket in progress. See [[Brain PR Gate]] and [[Per-entry Log Layout]].'],['li','Native app: Agents panel shipped; sidebar lists coordinators only. See [[Project Model]].'],['h','Watch for'],['li','No conflicts. The next compile has 2 queued entries.']]
+};
+const CONFLICTS=[
+  {id:'c1',brain:'sage',project:'relay',repo:'sagechat-call-watch-relay',title:'Relay retry cap: 3 attempts or 5?',note:'Call Relay Architecture',
+   claim:['01jbzb7q2m8r4t6v8x0y2a4c6e','Retry a Telnyx timeout with exponential backoff, at most 3 attempts.'],
+   existing:['01jbnk2w4y6a8c0e2g4j6l8n0q','Retry up to 5 times with a fixed 1 s delay. In production since v1.6.0.'],
+   evidence:['PR #92 (open) changes the cap from 5 to 3; nothing merged yet.','PR #81 (merged, v1.6.0) set 5, citing peak carrier setup needing 3 or more tries.','Two agents disagree: Michael’s implementer and Oscar’s session.'],
+   rec:'defer',why:'Main still runs 5 attempts. Revisit when PR #92 merges or is closed; the compiler will raise it again then.'},
+  {id:'c2',brain:'sage',project:'relay',repo:'sagechat-call-watch-relay-node',title:'Retire relay-node: deprecates a live service',note:'Call Relay Architecture',
+   claim:['01jbrq8t0v2x4z6b8d0f2h4k6m','Retire the Node relay once the Go relay handles every client.'],
+   existing:[null,'Relay-node serves watchOS 9 clients until the Go relay supports them (decision, Aug 12).'],
+   evidence:['No commit or PR yet: the claim is unverified.','Deprecations always queue for a ruling; they are never folded automatically.'],
+   rec:'both',why:'Keep both, scoped: retire relay-node for watchOS 10 and later now; keep it for watchOS 9 until that client is gone.'}
+];
+const RULINGS={uphold:'Uphold existing',keep:'Keep new',both:'Keep both',defer:'Defer'};
+const MESSAGES={
+  relay:[['coord','Coordinator','The retry ticket is ready for testing. Its implementer logged 2 entries to <code>sagehaven-docs</code>; the batch PR #214 failed the sensitive-information scan, so it is held. The Inbox has what to do.'],['you','You','Why did it fail?'],['coord','Coordinator','The scan matched a phone-number pattern on line 9 of one entry. Wiffletree does not show the value, here or in CI. It is probably a fixture string; if so, redact it and the checks rerun.']],
+  brainlog:[['coord','Coordinator','The mockup ticket is with its implementer. Its log batch is queued and opens a PR when the ticket is ready for testing.']],
+  celadon:[['coord','Coordinator','Nothing to log yet; the website repository is not mapped to a brain.']]
+};
+
+// ---------- State ----------
+const state={page:'brains',project:'relay',panel:'memory',brain:'sage',scope:null,tab:'status',note:'Call Relay Architecture',claim:null,
+  logf:{repo:'',type:'',author:'',verify:''},logPage:0,focusLog:null,openGate:'g214',rulings:{},redacted:false,
+  owners:{...OWNERS},overrides:{},search:null,toast:''};
+
+// ---------- Helpers ----------
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const icon=(id,cls='i')=>`<svg class="${cls}" aria-hidden="true"><use href="#${id}"/></svg>`;
+const brainKey=name=>Object.keys(BRAINS).find(k=>BRAINS[k].name===name)||null;
+const repoBrain=(repo,owner)=>state.overrides[repo]!==undefined?state.overrides[repo]:state.owners[owner];
+const scopeRepos=()=>state.scope&&PROJECTS[state.scope].brain===state.brain?PROJECTS[state.scope].repos:null;
+const inScope=repos=>{const s=scopeRepos();return !s||repos.includes('*')||repos.some(r=>s.includes(r))};
+const noteByTitle=(b,t)=>NOTES[b].find(n=>n.title===t);
+const shortId=id=>id.slice(0,10)+'…';
+const people={mhohlios:'Michael',rboyce:'RB',oabrego:'Oscar'};
+const verifyPill=v=>`<span class="pill ${v==='verified'?'green':v==='claimed'?'yellow':'dashed'}">${v}</span>`;
+const kindPill=k=>`<span class="pill ${k==='decision'?'focus':'subtle'}">kind: ${k}</span>`;
+function gateFor(pr){return GATE.find(g=>g.pr===pr)}
+function prState(pr){
+  const g=gateFor(pr[0]);
+  if(g&&state.redacted&&g.id==='g214')return[pr[0],g.stage<3?'checks running':'auto-merging'];
+  return pr;
+}
+function prPill(pr){
+  const [n,s]=prState(pr);
+  const tone={failed:'red','auto-merging':'green',merged:'focus',open:'blue','checks running':'blue'}[s]||'subtle';
+  const ic=s==='merged'?'merge':s==='failed'?'cross':'pr';
+  const label=s==='failed'?'failed check':s;
+  return `<button class="pill ${tone}" data-act="gate" data-gate="${gateFor(n)?gateFor(n).id:''}" title="Brain PR #${n}">${icon(ic,'')}Brain PR #${n} · ${label}</button>`;
+}
+const wikilinks=(text,brain)=>esc(text).replace(/\[\[([^\]]+)\]\]/g,(m,t)=>noteByTitle(brain,t)?`<button class="wikilink" data-act="note" data-note="${esc(t)}">${esc(t)}</button>`:`<span class="bad">[[${esc(t)}]]</span>`);
+function renderMd(blocks,brain){
+  let out='',list=false;
+  for(const [k,text,claim] of blocks){
+    if(k!=='li'&&list){out+='</ul>';list=false}
+    const ref=claim?`<button class="claimref" data-act="claim" data-claim="${claim}" aria-label="Sources for claim ${claim}">[${claim}]</button>`:'';
+    if(k==='h')out+=`<h4>${esc(text)}</h4>`;
+    else if(k==='p')out+=`<p>${wikilinks(text,brain)}${ref}</p>`;
+    else{if(!list){out+='<ul>';list=true}out+=`<li>${wikilinks(text,brain)}${ref}</li>`}
+  }
+  return out+(list?'</ul>':'');
+}
+function openConflicts(brain,project){return CONFLICTS.filter(c=>c.brain===brain&&!state.rulings[c.id]&&(!project||c.project===project))}
+function inboxCount(p){return openConflicts(PROJECTS[p].brain,p).length+(p==='relay'&&!state.redacted?1:0)}
+function toast(msg){state.toast=msg;render();clearTimeout(toast.t);toast.t=setTimeout(()=>{state.toast='';render()},2600)}
+
+// ---------- Sidebar ----------
+function renderSide(){
+  const proj=Object.entries(PROJECTS).map(([k,p])=>{const n=inboxCount(k);return `<button class="row ${state.page==='project'&&state.project===k?'selected':''}" data-act="project" data-project="${k}">${icon('orbit')}<span class="label">${esc(p.name)}</span>${n?`<span class="count" title="${n} in Inbox">${n}</span>`:''}</button>`}).join('');
+  const ws=[['repos','Repositories','folder'],['usage','Usage and limits','activity'],['models','Models','settings'],['skills','Skills','book'],['brains','Brains','brain']].map(([k,label,ic])=>{
+    const sel=k==='brains'&&(state.page==='brains'||state.page==='browser');
+    return `<button class="row ${sel?'selected':''} ${k==='brains'?'new':''}" data-act="${k==='brains'?'brains':'stub'}">${icon(ic)}<span class="label">${label}</span></button>`}).join('');
+  document.getElementById('side').innerHTML=`<div class="eyebrow">Projects</div>${proj}<div class="navsep"></div><div class="eyebrow">Workspace</div>${ws}<div class="foot">${icon('server')} Michael’s Mac · compiles 2 brains<br><span class="pill dashed" style="margin-top:6px">Simulated data</span></div>`;
+}
+
+// ---------- Brains page ----------
+function stepper(g){
+  let out='';
+  STAGES.forEach((s,i)=>{
+    let cls='';
+    if(i<g.stage)cls='done';else if(i===g.stage)cls=g.result==='fail'?'fail':g.result==='run'?'now run':g.result==='done'?'done':'now';
+    let label=s;
+    if(i===2&&cls.includes('fail'))label='Checks failed';
+    if(i===3&&g.stage===3&&g.result==='run')label='Auto-merging';
+    out+=(i?`<span class="bar ${i<=g.stage?'done':''}"></span>`:'')+`<span class="step ${cls}"><i></i>${label}${i===1&&g.pr?` #${g.pr}`:''}</span>`;
+  });
+  return `<div class="stepper" aria-label="PR gate stage">${out}</div>`;
+}
+function gateRows(list){
+  return list.map(g=>{
+    const open=state.openGate===g.id&&g.pr;
+    const failing=g.result==='fail';
+    const checks=open?`<div class="checks">${CHECKS.map((c,i)=>{
+      const fail=failing&&g.failed.includes(i), run=g.running&&g.running.includes(i);
+      const pending=g.stage<2;
+      return `<span>${pending?icon('running','muted'):fail?icon('cross','bad'):run?icon('running',''):icon('check','ok')}${c}${fail?' · <span class="bad">file and line in Inbox</span>':''}</span>`}).join('')}</div>`:'';
+    return `<div class="gate-row" role="button" tabindex="0" data-act="toggle-gate" data-gate="${g.id}" aria-expanded="${!!open}">
+      <div class="what"><b>${esc(g.kind)}</b> · ${esc(g.what)}<div class="hint">${esc(g.detail)}${g.project?` · ${esc(PROJECTS[g.project].name)}`:''}</div></div>
+      ${stepper(g)}
+      <div class="small ${failing?'bad':'subtle'}" style="text-align:right">${esc(g.note)}${failing?`<br><button class="btn link" data-act="inbox" data-project="${g.project}">Open in Inbox</button>`:''}</div>
+      ${checks}</div>`}).join('');
+}
+function renderBrains(){
+  const cards=Object.entries(BRAINS).map(([k,b])=>{
+    const pend=GATE.filter(g=>g.brain===k&&g.stage<3).length;
+    return `<div class="brain"><div class="brain-head">${icon('brain')}<b>${b.name}</b><span class="pill ${b.sync[0]}">${b.sync[1]}</span></div>
+    <dl class="facts"><dt>Remote</dt><dd class="mono">${b.remote}</dd><dt>Checkout</dt><dd class="mono">${b.path}</dd>
+    <dt>Last PR</dt><dd>${icon('merge','')} #${b.lastPR[0]} ${b.lastPR[1]} · ${b.lastPR[2]}${pend?` · <span class="subtle">${pend} in the gate</span>`:''}</dd>
+    <dt>Compiles on</dt><dd>${b.compiler}</dd><dt>Next compile</dt><dd>${b.next}</dd><dt>Last compile</dt><dd>${b.last}</dd>
+    <dt>Logged by</dt><dd>${b.loggers}</dd></dl>
+    <div class="actions"><button class="btn primary" data-act="browse" data-brain="${k}">Open brain</button><button class="btn ghost" data-act="compile" data-brain="${k}">${icon('play','')}Compile now</button><button class="btn ghost" data-act="stub">Settings</button></div></div>`}).join('');
+  const brainOpts=v=>['','sagehaven-docs','vyttle-docs'].map(o=>`<option value="${o}" ${o===v?'selected':''}>${o||'No brain'}</option>`).join('');
+  const rules=Object.keys(state.owners).map(o=>`<tr class="rule"><td><b>${o}</b> <span class="muted small">all repositories</span></td><td><select data-act="owner" data-owner="${o}" aria-label="Brain for ${o}">${brainOpts(state.owners[o])}</select></td><td class="small subtle">owner default</td></tr>`).join('');
+  const repos=REPOS.map(([r,o])=>{
+    const over=state.overrides[r]!==undefined;
+    return `<tr><td class="mono">${o}/${r}</td><td><select data-act="repo-brain" data-repo="${r}" aria-label="Brain for ${r}">${brainOpts(repoBrain(r,o))}</select></td><td class="small">${over?`<span class="pill yellow">override</span> <button class="btn link" data-act="reset-repo" data-repo="${r}">Use ${o} default</button>`:`<span class="subtle">from ${o}</span>`}</td></tr>`}).join('');
+  return `<div class="page"><div class="page-head"><h2>Brains</h2><span class="hint">Git-backed Markdown memory shared with your team · every change reaches main through a PR</span></div>
+  <div class="eyebrow section-label">Brains</div><div class="brains">${cards}</div>
+  <div class="eyebrow section-label">PR gate <span class="hint">log batches and compile runs on their way to main · click a row for its checks</span></div>
+  <div class="gate">${gateRows(GATE)}</div>
+  <div class="eyebrow section-label">Repository → brain <span class="hint">defaults follow the GitHub owner · a project’s brain comes from its repositories</span></div>
+  <table class="mapping"><thead><tr><th>Owner or repository</th><th>Brain</th><th></th></tr></thead><tbody>${rules}${repos}</tbody></table></div>`;
+}
+
+// ---------- Brain browser ----------
+function renderBrowser(){
+  const b=BRAINS[state.brain];
+  const projects=Object.entries(PROJECTS).filter(([,p])=>p.brain===state.brain);
+  const chips=`<span class="muted">Show</span>${projects.map(([k,p])=>`<button class="chip" data-act="scope" data-scope="${k}" aria-pressed="${state.scope===k}">This project · ${esc(p.name)} (${p.repos.length} repos)</button>`).join('')}<button class="chip" data-act="scope" data-scope="" aria-pressed="${!state.scope}">Whole brain</button>`;
+  const nConf=CONFLICTS.filter(c=>c.brain===state.brain&&!state.rulings[c.id]&&inScope([c.repo])).length;
+  const tabs=[['status','Status'],['wiki','Wiki'],['logs','Logs'],['conflicts','Conflicts']].map(([k,l])=>`<button class="tab" role="tab" data-act="tab" data-tab="${k}" aria-selected="${state.tab===k}">${l}${k==='conflicts'&&nConf?`<span class="n">${nConf}</span>`:''}</button>`).join('');
+  const body={status:browserStatus,wiki:browserWiki,logs:browserLogs,conflicts:browserConflicts}[state.tab]();
+  return `<div class="bhead"><div class="top">${icon('brain')}<h2>${b.name}</h2>
+    <select data-act="brain" aria-label="Brain">${Object.entries(BRAINS).map(([k,x])=>`<option value="${k}" ${k===state.brain?'selected':''}>${x.name}</option>`).join('')}</select>
+    <span class="hint">compiled ${b.compiled}</span>
+    <button class="searchbtn" data-act="search">${icon('search')}Search notes and logs<kbd>⌘K</kbd></button></div>
+    <div class="chips">${chips}</div><div class="tabs" role="tablist">${tabs}</div></div><div class="bbody">${body}</div>`;
+}
+function browserStatus(){
+  const b=BRAINS[state.brain];
+  const open=GATE.filter(g=>g.brain===state.brain&&g.stage<3||(g.brain===state.brain&&g.result==='run'));
+  return `<div class="split"><div class="md"><h1>Status</h1><div class="fm"><span class="mono">STATUS.md</span> · written by compile run ${b.compiled} · within the 500-word target</div>${renderMd(STATUS[state.brain],state.brain)}</div>
+  <div><div class="box"><div class="eyebrow">Compile</div><div class="kv"><span>Last</span><span>${b.compiled}</span></div><div class="kv"><span>Next</span><span>${b.next}</span></div><div class="kv"><span>Runs on</span><span>${b.compiler}</span></div><div class="kv"><span>Pending entries</span><span>${state.brain==='sage'?5:2}</span></div></div>
+  <div class="box"><div class="eyebrow">Open PRs</div>${open.length?open.map(g=>`<button class="prrow" data-act="gate-page" data-gate="${g.id}">${icon(g.pr?'pr':'running')}<span style="flex:1">${g.pr?'#'+g.pr:'queued'} · ${esc(g.what)}</span><span class="${g.result==='fail'?'bad':'subtle'}">${g.result==='fail'?'failed check':g.stage===3?'auto-merging':g.stage===0?'queued':'checks'}</span></button>`).join(''):'<span class="muted">None</span>'}</div></div></div>`;
+}
+function browserWiki(){
+  const notes=NOTES[state.brain];
+  const shown=notes.filter(n=>inScope(n.repos));
+  let note=noteByTitle(state.brain,state.note);
+  if(!note||!shown.includes(note))note=shown[0];
+  const folders=[...new Set(notes.map(n=>n.folder))];
+  const tree=folders.map(f=>{const ns=shown.filter(n=>n.folder===f);return ns.length?`<div class="folder">${f}</div>`+ns.map(n=>`<button data-act="note" data-note="${esc(n.title)}" aria-current="${n===note}"><span class="k ${n.kind}" title="${n.kind}"></span>${esc(n.title)}</button>`).join(''):''}).join('');
+  const hidden=notes.length-shown.length;
+  const backlinks=notes.filter(n=>n!==note&&n.body.some(([,t])=>t.includes(`[[${note.title}]]`))).map(n=>n.title);
+  const fromStatus=STATUS[state.brain].some(([,t])=>t.includes(`[[${note.title}]]`));
+  const sources=Object.entries(note.claims).map(([id,c])=>`<div class="src ${String(state.claim)===id?'lit':''}" id="claim-${id}"><div class="claim"><b>[${id}]</b><span>${esc(c.text)}</span></div>${c.sources.map(([log,v,anchors])=>{const l=L(log);return `<div class="chain"><button class="anchor" data-act="log" data-log="${log}" title="Open log entry">${l.date} · ${shortId(log)}</button><span class="subtle small">${people[l.author]}</span>${anchors.map(a=>`<span class="arrow">→</span><span class="anchor">${esc(a)}</span>`).join('')} ${verifyPill(v)}</div>`}).join('')}</div>`).join('');
+  return `<div class="wiki"><nav class="tree" aria-label="Note index"><div class="folder" style="padding-top:0"><span class="mono">notes/INDEX.md</span></div>${tree}${hidden?`<div class="hidden-note">${hidden} note${hidden>1?'s':''} outside this project hidden · <button class="btn link" data-act="scope" data-scope="">show all</button></div>`:''}</nav>
+  <article class="md"><h1>${esc(note.title)}</h1><div class="fm">${kindPill(note.kind)}<span>updated ${note.updated}</span><span>· ${Object.keys(note.claims).length} sourced claims</span><span>· ${note.repos.includes('*')?'all repositories':note.repos.join(', ')}</span></div>${renderMd(note.body,state.brain)}
+  <div class="backlinks"><div class="eyebrow">Backlinks</div><div class="list">${backlinks.map(t=>`<button class="wikilink" data-act="note" data-note="${esc(t)}">${esc(t)}</button>`).join('')}${fromStatus?`<button class="wikilink" data-act="tab" data-tab="status">STATUS</button>`:''}${!backlinks.length&&!fromStatus?'<span class="muted small">No notes link here.</span>':''}</div></div></article>
+  <aside class="sources box"><div class="eyebrow">Sources</div><div class="small muted" style="margin-bottom:4px">claim → log entry → commit and PR</div>${sources}</aside></div>`;
+}
+function filteredLogs(){
+  const f=state.logf;
+  return LOGS.filter(l=>l.brain===state.brain&&inScope([l.repo])&&(!f.repo||l.repo===f.repo)&&(!f.type||l.type===f.type)&&(!f.author||l.author===f.author)&&(!f.verify||l.verify===f.verify));
+}
+const PAGE=4;
+function browserLogs(){
+  const all=LOGS.filter(l=>l.brain===state.brain&&inScope([l.repo]));
+  const opts=(key,vals,label)=>`<label>${label}<select data-act="logf" data-key="${key}"><option value="">All</option>${vals.map(v=>`<option value="${v}" ${state.logf[key]===v?'selected':''}>${key==='author'?people[v]:v}</option>`).join('')}</select></label>`;
+  const uniq=k=>[...new Set(all.map(l=>l[k]))];
+  const list=filteredLogs(), pages=Math.max(1,Math.ceil(list.length/PAGE));
+  const page=Math.min(state.logPage,pages-1), slice=list.slice(page*PAGE,page*PAGE+PAGE);
+  const entries=slice.map(l=>`<div class="entry ${state.focusLog===l.id?'lit':''}" id="log-${l.id}">
+    <div class="entry-head"><b>${esc(l.title)}</b>${kindPill(l.type).replace('kind: ','')}${verifyPill(l.verify)}<span style="flex:1"></span>${prPill(l.pr)}</div>
+    <div class="meta">${l.date} · ${esc(l.repo)} · ${people[l.author]} · via ${l.source==='skill'?'brain-log skill':'Wiffletree'} · <span class="mono">logs/${esc(l.repo)}/${l.date.slice(0,4)}/${l.date.slice(5,7)}/${l.date}-${shortId(l.id)}.md</span></div>
+    <dl><dt>ref</dt><dd class="mono">${esc(l.ref)}</dd><dt>changed</dt><dd>${esc(l.changed)}</dd><dt>why</dt><dd>${esc(l.why)}</dd><dt>state</dt><dd>${esc(l.state)}</dd></dl>
+    <div class="links">${l.ticket?`<button class="btn link" data-act="stub">${icon('task','')}Ticket · ${esc(l.ticket)}</button><button class="btn link" data-act="stub">${icon('chat','')}Conversation · ${esc(l.convo)}</button>`:'<span class="muted">No Wiffletree ticket or conversation: logged by the skill outside Wiffletree</span>'}</div></div>`).join('');
+  return `<div class="filters">${opts('repo',uniq('repo'),'Repo')}${opts('type',['decision','observation'],'Type')}${opts('author',uniq('author'),'Author')}${opts('verify',['verified','claimed','unverified'],'Verification')}<span class="hint" style="margin-left:auto">${list.length} entries · newest first</span></div>
+  ${entries||'<div class="empty">No entries match these filters.</div>'}
+  <div class="pager"><span>${list.length?`${page*PAGE+1}–${page*PAGE+slice.length} of ${list.length}`:''}</span><button class="btn ghost" data-act="page" data-dir="-1" ${page===0?'disabled':''} aria-label="Newer entries">‹ Newer</button><button class="btn ghost" data-act="page" data-dir="1" ${page>=pages-1?'disabled':''} aria-label="Older entries">Older ›</button></div>`;
+}
+function conflictCard(c,compact){
+  const ruled=state.rulings[c.id];
+  const claim=L(c.claim[0]), ex=c.existing[0]&&L(c.existing[0]);
+  const side=(label,text,l,fallback)=>`<div class="side-box"><div class="eyebrow">${label}</div>${esc(text)}<div class="small muted" style="margin-top:4px">${l?`<button class="anchor" data-act="log" data-log="${l.id}">${l.date} · ${people[l.author]}</button> ${verifyPill(l.verify)}`:esc(fallback)}</div></div>`;
+  const ruling=ruled?`<div class="recommend"><b>Ruled: ${RULINGS[ruled]}.</b> A decision entry joins this project’s next log batch PR; the wiki changes at the next compile. <button class="btn link" data-act="undo" data-conflict="${c.id}">Undo</button></div>`
+    :`<div class="recommend"><b>Recommended: ${RULINGS[c.rec]}.</b> ${esc(c.why)}</div><div class="ruling">${Object.entries(RULINGS).map(([k,v])=>`<button class="btn ghost ${k===c.rec?'rec':''}" data-act="rule" data-conflict="${c.id}" data-ruling="${k}">${v}</button>`).join('')}${compact?`<button class="btn link" data-act="conflict-open" data-conflict="${c.id}">Open evidence</button>`:''}</div>`;
+  if(compact)return `<div class="card warn"><div class="t">${icon('brain')}<span>${esc(c.title)}</span></div><p>${esc(BRAINS[c.brain].name)} · note <button class="wikilink" data-act="note-open" data-note="${esc(c.note)}">${esc(c.note)}</button></p>${ruling}</div>`;
+  return `<div class="conflict ${ruled?'done':''}"><div class="entry-head"><b>${esc(c.title)}</b><span class="pill yellow">conflict</span><span class="small muted">note <button class="wikilink" data-act="note" data-note="${esc(c.note)}">${esc(c.note)}</button> · ${esc(c.repo)}</span></div>
+    <div class="vs">${side('New claim',c.claim[1],claim)}${side('Established decision',c.existing[1],ex,'From the note; its source predates the per-entry layout')}</div>
+    <div class="eyebrow">Evidence</div><ul class="evidence">${c.evidence.map(e=>`<li>${esc(e)}</li>`).join('')}</ul>${ruling}</div>`;
+}
+function browserConflicts(){
+  const list=CONFLICTS.filter(c=>c.brain===state.brain&&inScope([c.repo]));
+  return `<p class="hint" style="margin-bottom:12px">Contradictions of established decisions, disagreements between agents and deprecations wait here instead of changing the wiki. Each one is also an item in its project’s Inbox.</p>${list.length?list.map(c=>conflictCard(c,false)).join(''):'<div class="empty">No conflicts. The last compile folded every entry.</div>'}`;
+}
+
+// ---------- Project conversation, inspector, rail ----------
+function renderProject(){
+  const p=PROJECTS[state.project];
+  return `<div class="convo"><div class="sessionbar">${icon('orbit')}<h2>${esc(p.name)}</h2><span class="pill subtle">Coordinator</span><span class="hint" title="${p.repos.join(', ')}">${p.repos.length} ${p.repos.length===1?'repository':'repositories'}</span></div>
+  <div class="messages">${MESSAGES[state.project].map(([who,name,html])=>`<div class="message ${who==='you'?'you':''}"><div class="from">${icon(who==='you'?'chat':'orbit')}<b>${name}</b></div><p>${html}</p></div>`).join('')}</div>
+  <div class="composer">Message the coordinator… <span class="muted">(simulated)</span></div></div>`;
+}
+function memoryPanel(){
+  const p=PROJECTS[state.project];
+  if(!p.brain)return `<div class="card"><div class="t">${icon('brain')}<span>No brain for this project</span></div><p>Its repository belongs to <code>celadon-theme</code>, which maps to no brain. Choose one on the Brains page; entries are not captured until then.</p><button class="btn ghost" data-act="brains">Open Brains</button></div>`;
+  const b=BRAINS[p.brain];
+  const recent=LOGS.filter(l=>l.brain===p.brain&&p.repos.some(r=>r===l.repo)).slice(0,4);
+  const gate=GATE.filter(g=>g.project===state.project&&!(g.stage===3&&g.result==='done'));
+  const conf=openConflicts(p.brain,state.project).length;
+  return `<div class="card"><div class="t">${icon('brain')}<span>${b.name}</span><span class="pill ${b.sync[0]}">${b.sync[1]}</span></div><p>From this project’s ${b.owner} repositories · compiled ${b.compiled}</p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><button class="btn primary" data-act="browse-project">Open brain browser</button><button class="btn ghost" data-act="search">${icon('search','')}Search</button></div></div>
+  ${gate.length?`<div class="eyebrow" style="margin:12px 0 4px">This project’s batches</div>${gate.map(g=>`<div class="card ${g.result==='fail'?'alert':''}"><div class="t"><span>${esc(g.what)}</span></div>${stepper(g)}<p>${esc(g.note)}</p></div>`).join('')}`:''}
+  ${conf?`<button class="btn link" data-act="panel" data-panel="inbox">${conf} conflict${conf>1?'s':''} waiting in the Inbox</button>`:''}
+  <div class="eyebrow" style="margin:12px 0 2px">Recent entries</div>
+  ${recent.map(l=>`<button class="mini-entry" data-act="log-project" data-log="${l.id}"><div>${esc(l.title)}</div><div class="meta">${l.date} · ${l.type} · ${people[l.author]} · ${l.verify}</div></button>`).join('')||'<p class="muted small">None yet.</p>'}`;
+}
+function inboxPanel(){
+  const p=PROJECTS[state.project];
+  const items=[];
+  if(state.project==='relay'&&!state.redacted)items.push(`<div class="card alert"><div class="t">${icon('cross','i bad')}<span>Brain PR #214 failed the sensitive-information scan</span></div>
+    <p>Log batch from ticket “Call relay: retry on Telnyx timeout”, 2 entries for <code>sagehaven-docs</code>. Auto-merge is paused; the other 5 checks passed.</p>
+    <p><span class="mono">logs/sagechat-call-watch-relay/2026/10/2026-10-29-01jbzb7r5k….md</span>, line 9 (<code>changed:</code>) matches the US phone number pattern. The value is not shown here or in CI logs.</p>
+    <div class="eyebrow" style="margin-top:8px">What to do</div>
+    <ul class="todo"><li><button class="btn primary" data-act="redact">Redact the line</button><span class="why">Wiffletree replaces the match with [removed] on the batch branch and pushes one commit; the checks rerun.</span></li>
+    <li><button class="btn ghost" data-act="stub">Not sensitive</button><span class="why">Adds an inline allow marker that reviewers see in the PR diff.</span></li>
+    <li><button class="btn link" data-act="log-project" data-log="01jbzb7r5k1n3p5s7u9w1z3b5d">Open the entry</button><span class="why"></span></li></ul></div>`);
+  if(p.brain)items.push(...openConflicts(p.brain,state.project).map(c=>conflictCard(c,true)));
+  return items.join('')||'<div class="empty">Nothing needs you.</div>';
+}
+function renderRight(){
+  const el=document.getElementById('right');
+  if(state.page!=='project'){el.innerHTML='';el.hidden=true;return}
+  el.hidden=false;
+  const p=PROJECTS[state.project];
+  const panels=[['overview','Overview','overview'],['tickets','Tickets','task'],['memory','Memory','brain'],['events','Events','activity'],['inbox','Inbox','inbox'],['files','Files','folder'],['agents','Agents','team']];
+  const name=panels.find(x=>x[0]===state.panel)[1];
+  const body=state.panel==='memory'?memoryPanel():state.panel==='inbox'?inboxPanel():`<div class="empty">${name} is not part of this study.</div>`;
+  const n=inboxCount(state.project);
+  el.innerHTML=`<aside class="inspector" aria-label="${name} side panel"><div class="inspector-head"><div><div class="eyebrow">Project</div><h2>${name}</h2><div class="owner">${esc(p.name)}</div></div></div>${body}</aside>
+  <nav class="rail" aria-label="Inspector">${panels.map(([k,l,ic])=>`<button data-act="panel" data-panel="${k}" aria-pressed="${state.panel===k}">${icon(ic,'')}<span>${l}</span>${k==='inbox'&&n?`<b class="badge">${n}</b>`:''}</button>`).join('')}</nav>`;
+}
+
+// ---------- Search ----------
+function corpus(){
+  const notes=NOTES[state.search.brain].map(n=>({type:'note',kind:n.kind,title:n.title,repos:n.repos,text:n.body.map(b=>b[1]).join(' ').replace(/\[\[|\]\]/g,''),where:'note · '+n.folder}));
+  const logs=LOGS.filter(l=>l.brain===state.search.brain).map(l=>({type:'log',kind:l.type,title:l.title,repos:[l.repo],id:l.id,text:`${l.changed} ${l.why} ${l.state}`,where:`log · ${l.repo} · ${l.date}`}));
+  return notes.concat(logs);
+}
+// A crude stem so "retry" also finds "retried" and "retries"; the real index would use FTS5.
+const queryTerms=q=>q.toLowerCase().split(/\s+/).filter(t=>t.length>1).map(t=>t.length>4?t.replace(/(ies|ied|y|s|ed|ing)$/,''):t);
+const NO_RESULTS='<li class="empty" style="margin:6px">No notes or entries match. Try “retry”, “token” or “moderation”.</li>';
+const searchFoot=(s,n)=>s.q?`${n} result${n===1?'':'s'} · decisions first`:'Notes in this scope';
+function runSearch(){
+  const s=state.search, terms=queryTerms(s.q);
+  const scope=s.scope?PROJECTS[s.scope].repos:null;
+  let items=corpus().filter(d=>!scope||d.repos.includes('*')||d.repos.some(r=>scope.includes(r)));
+  if(!terms.length)return items.filter(d=>d.type==='note').slice(0,6).map(d=>({...d,score:0}));
+  items=items.map(d=>{const t=d.title.toLowerCase(),x=d.text.toLowerCase();let score=0,hits=0;
+    for(const term of terms){const a=t.split(term).length-1,b=x.split(term).length-1;if(a||b)hits++;score+=a*3+b}
+    return {...d,score,hits}}).filter(d=>d.hits===terms.length);
+  // Decisions rank above observations; then by term frequency.
+  return items.sort((a,b)=>(a.kind===b.kind?0:a.kind==='decision'?-1:1)||b.score-a.score).slice(0,8);
+}
+function highlight(text,terms){
+  if(!terms.length)return esc(text);
+  const re=new RegExp('('+terms.map(t=>t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|')+')(\\w*)','gi');
+  return esc(text).replace(re,'<mark>$1$2</mark>');
+}
+function excerpt(text,terms){
+  const lower=text.toLowerCase(), i=terms.length?Math.min(...terms.map(t=>{const k=lower.indexOf(t);return k<0?Infinity:k})):0;
+  const start=Math.max(0,(isFinite(i)?i:0)-50), end=Math.min(text.length,start+150);
+  return (start?'…':'')+text.slice(start,end)+(end<text.length?'…':'');
+}
+function renderSearch(){
+  let el=document.getElementById('scrim');
+  if(!state.search){if(el)el.remove();return}
+  const s=state.search, results=runSearch(), terms=queryTerms(s.q);
+  s.results=results; s.sel=Math.min(s.sel,Math.max(0,results.length-1));
+  const projects=Object.entries(PROJECTS).filter(([,p])=>p.brain===s.brain);
+  const chips=projects.map(([k,p])=>`<button class="chip" data-act="sscope" data-scope="${k}" aria-pressed="${s.scope===k}">This project · ${esc(p.name)}</button>`).join('')+`<button class="chip" data-act="sscope" data-scope="" aria-pressed="${!s.scope}">Whole brain · ${BRAINS[s.brain].name}</button>`;
+  const list=results.map((r,i)=>`<li><button class="result" role="option" id="res-${i}" data-act="result" data-i="${i}" aria-selected="${i===s.sel}" tabindex="-1"><div class="rt">${icon(r.type==='note'?'book':'activity')}<b>${highlight(r.title,terms)}</b><span class="pill ${r.kind==='decision'?'focus':'subtle'}">${r.kind}</span><span class="where">${esc(r.where)}</span></div><div class="ex">${highlight(excerpt(r.text,terms),terms)}</div></button></li>`).join('');
+  const html=`<div class="palette" role="dialog" aria-modal="true" aria-label="Search the brain"><div class="field">${icon('search')}<input id="q" type="search" placeholder="Search notes and logs" value="${esc(s.q)}" aria-controls="results" aria-activedescendant="res-${s.sel}" autocomplete="off"><span class="kbd">esc</span></div>
+    <div class="chips">${chips}</div><ul class="results" id="results" role="listbox">${list||NO_RESULTS}</ul>
+    <div class="foot"><span>↑↓ move</span><span>↵ open</span><span>Tab scope</span><span style="margin-left:auto">${searchFoot(s,results.length)}</span></div></div>`;
+  if(!el){el=document.createElement('div');el.id='scrim';el.className='scrim';el.dataset.act='close-search';document.getElementById('window').appendChild(el);el.innerHTML=html;const q=el.querySelector('#q');q.focus();q.setSelectionRange(q.value.length,q.value.length);return}
+  // Keep the input element (and its caret) while redrawing the rest.
+  el.querySelector('.chips').innerHTML=chips;
+  el.querySelector('#results').innerHTML=list||NO_RESULTS;
+  el.querySelector('.foot').lastElementChild.textContent=searchFoot(s,results.length);
+  el.querySelector('#q').setAttribute('aria-activedescendant','res-'+s.sel);
+  const sel=el.querySelector('#res-'+s.sel); if(sel)sel.scrollIntoView({block:'nearest'});
+}
+function openSearch(){
+  const brain=state.page==='browser'?state.brain:state.page==='project'&&PROJECTS[state.project].brain||state.brain;
+  const scope=state.page==='browser'?state.scope:state.page==='project'&&PROJECTS[state.project].brain?state.project:null;
+  state.search={brain,scope,q:'',sel:0,results:[]};
+  renderSearch();
+}
+function openResult(r){
+  const s=state.search;
+  state.search=null; renderSearch();
+  Object.assign(state,{page:'browser',brain:s.brain,scope:s.scope});
+  if(r.type==='note'){state.tab='wiki';state.note=r.title;state.claim=null}else focusLog(r.id);
+  render();
+}
+
+// ---------- Navigation ----------
+function focusLog(id){
+  state.tab='logs';state.logf={repo:'',type:'',author:'',verify:''};state.focusLog=id;
+  const l=L(id);state.brain=l.brain;
+  if(state.scope&&!PROJECTS[state.scope].repos.includes(l.repo))state.scope=null;
+  const list=filteredLogs();state.logPage=Math.floor(list.findIndex(x=>x.id===id)/PAGE);
+}
+function render(){
+  renderSide();
+  const main=document.getElementById('main');
+  main.innerHTML=state.page==='brains'?renderBrains():state.page==='browser'?renderBrowser():renderProject();
+  renderRight();
+  let t=document.getElementById('toast');
+  if(state.toast){if(!t){t=document.createElement('div');t.id='toast';t.className='toast';t.setAttribute('role','status');document.getElementById('window').appendChild(t)}t.textContent=state.toast}else if(t)t.remove();
+}
+function afterRender(selector){const el=selector&&document.querySelector(selector);if(el)el.scrollIntoView({block:'center'})}
+
+const actions={
+  brains(){state.page='brains'},
+  stub(){toast('Simulated: not part of this study')},
+  project(d){state.page='project';state.project=d.project;if(!['memory','inbox'].includes(state.panel))state.panel='memory'},
+  panel(d){state.panel=d.panel},
+  inbox(d){state.page='project';state.project=d.project;state.panel='inbox'},
+  browse(d){Object.assign(state,{page:'browser',brain:d.brain,scope:null,tab:'status',focusLog:null})},
+  'browse-project'(){const p=PROJECTS[state.project];Object.assign(state,{page:'browser',brain:p.brain,scope:state.project,tab:'wiki',focusLog:null,logPage:0})},
+  compile(d){toast(`Simulated: compile of ${BRAINS[d.brain].name} queued on Michael’s Mac`)},
+  'toggle-gate'(d){state.openGate=state.openGate===d.gate?null:d.gate},
+  gate(d){if(d.gate){state.page='brains';state.openGate=d.gate;render();afterRender(`[data-gate="${d.gate}"].gate-row`);return false}},
+  'gate-page'(d){return actions.gate(d)},
+  tab(d){state.tab=d.tab;state.focusLog=null},
+  scope(d){state.scope=d.scope||null;state.logPage=0;state.logf.repo=''},
+  note(d){state.tab='wiki';state.note=d.note;state.claim=null;if(!inScope(noteByTitle(state.brain,d.note).repos))state.scope=null},
+  'note-open'(d){const p=PROJECTS[state.project];Object.assign(state,{page:'browser',brain:p.brain,scope:state.project,tab:'wiki',note:d.note,claim:null})},
+  claim(d){state.claim=d.claim;render();afterRender('#claim-'+d.claim);return false},
+  log(d){focusLog(d.log);render();afterRender('#log-'+d.log);return false},
+  'log-project'(d){state.page='browser';state.scope=state.project;focusLog(d.log);render();afterRender('#log-'+d.log);return false},
+  page(d){state.logPage=Math.max(0,state.logPage+Number(d.dir));state.focusLog=null},
+  rule(d){state.rulings[d.conflict]=d.ruling;toast(`Simulated: “${RULINGS[d.ruling]}” recorded as a decision entry`)},
+  undo(d){delete state.rulings[d.conflict]},
+  'conflict-open'(d){const c=CONFLICTS.find(x=>x.id===d.conflict);Object.assign(state,{page:'browser',brain:c.brain,scope:c.project,tab:'conflicts'})},
+  redact(){
+    const g=gateFor(214);
+    state.redacted=true;Object.assign(g,{result:'run',running:[1],note:'Line 9 redacted · checks rerunning'});
+    toast('Simulated: line 9 redacted on the batch branch; checks rerunning');
+    setTimeout(()=>{Object.assign(g,{stage:3,running:[],note:'All 6 checks passed · auto-merging'});render()},2200)},
+  'reset-repo'(d){delete state.overrides[d.repo]},
+  search(){openSearch();return false},
+  'close-search'(){state.search=null;renderSearch();return false},
+  sscope(d){state.search.scope=d.scope||null;state.search.sel=0;renderSearch();document.getElementById('q').focus();return false},
+  result(d){openResult(state.search.results[Number(d.i)]);return false}
+};
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-act]');
+  if(!el||el.tagName==='SELECT')return;
+  if(el.id==='scrim'&&e.target!==el)return;
+  const fn=actions[el.dataset.act]; if(!fn)return;
+  e.preventDefault();
+  if(fn(el.dataset)!==false)render();
+});
+document.addEventListener('change',e=>{
+  const d=e.target.dataset;
+  if(d.act==='owner')state.owners[d.owner]=e.target.value;
+  else if(d.act==='repo-brain'){const owner=REPOS.find(r=>r[0]===d.repo)[1];if(e.target.value===state.owners[owner])delete state.overrides[d.repo];else state.overrides[d.repo]=e.target.value}
+  else if(d.act==='brain'){state.brain=e.target.value;state.scope=null;state.logPage=0;state.logf={repo:'',type:'',author:'',verify:''};state.note=NOTES[state.brain][0].title}
+  else if(d.act==='logf'){state.logf[d.key]=e.target.value;state.logPage=0;state.focusLog=null}
+  else return;
+  render();
+});
+document.addEventListener('input',e=>{if(e.target.id==='q'){state.search.q=e.target.value;state.search.sel=0;renderSearch()}});
+document.addEventListener('keydown',e=>{
+  const typing=/INPUT|SELECT|TEXTAREA/.test(e.target.tagName);
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();state.search?(state.search=null,renderSearch()):openSearch();return}
+  if(!state.search){
+    if(e.key==='/'&&!typing){e.preventDefault();openSearch()}
+    else if((e.key==='Enter'||e.key===' ')&&e.target.classList.contains('gate-row')){e.preventDefault();e.target.click()}
+    return;
+  }
+  const s=state.search;
+  if(e.key==='Escape'){e.preventDefault();state.search=null;renderSearch()}
+  else if(e.key==='ArrowDown'){e.preventDefault();s.sel=Math.min(s.sel+1,s.results.length-1);renderSearch()}
+  else if(e.key==='ArrowUp'){e.preventDefault();s.sel=Math.max(s.sel-1,0);renderSearch()}
+  else if(e.key==='Enter'&&e.target.id==='q'&&s.results[s.sel]){e.preventDefault();openResult(s.results[s.sel])}
+  else if(e.key==='Tab'){e.preventDefault();const opts=[...Object.keys(PROJECTS).filter(k=>PROJECTS[k].brain===s.brain),null];s.scope=opts[(opts.indexOf(s.scope)+1)%opts.length];s.sel=0;renderSearch();document.getElementById('q').focus()}
+});
+render();
+</script>
+</body>
+</html>
