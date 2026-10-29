@@ -429,7 +429,7 @@ Each model run the keeper starts SHALL be a turn of an agent of the ticket with 
 - **THEN** the try runs on GPT 6.1 Sol · medium in a Codex PR keeper agent
 
 ### Requirement: The keeper's model runs are ordinary agent runs
-The runs of a PR keeper agent SHALL be recorded as provider runs of a PR keeper agent, so Usage counts them in its coordinator's workers total, and its turns SHALL check in with the coordinator after 30 minutes as any agent's do. Sorting turns are the host's own work and SHALL NOT count toward the check-in after a number of turns without the coordinator. The agent SHALL appear under its ticket in the sidebar while it works.
+The runs of a PR keeper agent SHALL be recorded as provider runs of a PR keeper agent, so Usage counts them in its coordinator's workers total, and its turns SHALL check in with the coordinator after 30 minutes as any agent's do. Sorting turns are the host's own work and SHALL NOT count toward the check-in after a number of turns without the coordinator. The agent SHALL appear under its ticket's card in the Agents panel while it works.
 
 #### Scenario: Usage
 - **WHEN** the keeper has sorted comments on three tickets this week

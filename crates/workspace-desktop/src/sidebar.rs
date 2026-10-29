@@ -11,7 +11,7 @@ use ui::{
     bar_color, brand_image, card, eyebrow, hint, icon, needs_you_badge, now, pill, progress_bar,
     status_glyph,
 };
-use wording::{plural, status_label};
+use wording::{counted, plural, status_label};
 
 const INDENT: f32 = 14.;
 
@@ -90,8 +90,9 @@ impl Reorder<'_> {
         let moving = self.moving.as_ref()?;
         Some(tree::drops(self.entries, moving, over))
     }
-    /// For what is listed under the row of `over`, such as a project's tickets and agents: it
-    /// all aims where the lower half of that row does.
+    /// For the space under the row of `over`, such as the spacer and New ticket button under a
+    /// project or the spacer under a collapsed group: it aims where the lower half of that row
+    /// does.
     fn under(&self, over: &tree::Movable) -> Option<Halves> {
         let halves = self.onto(over)?;
         Some(halves.map(|(_, below)| (below.clone(), below)))
@@ -1600,7 +1601,7 @@ fn track(progress: Option<(Option<u16>, BarState)>, p: Palette) -> Div {
 
 /// "1 agent stuck", "3 agents stuck"; none when no agent is.
 fn stuck_label(stuck: usize) -> Option<String> {
-    (stuck > 0).then(|| format!("{stuck} {} stuck", plural(stuck, "agent", "agents")))
+    (stuck > 0).then(|| format!("{} stuck", counted(stuck, "agent")))
 }
 
 /// Yellow, like needs-you: a stuck agent is the one other case the human hears about.
@@ -1611,10 +1612,8 @@ fn stuck_pill(stuck: usize, p: Palette) -> Div {
 /// A project row's last line: how many of its agents are working, and how many are stuck.
 /// None when neither has anything to say.
 fn agents_line(agents: &tree::AgentCounts, p: Palette) -> Option<Div> {
-    let working = (agents.working > 0).then(|| {
-        let noun = plural(agents.working, "agent", "agents");
-        format!("{} {noun} working", agents.working)
-    });
+    let working =
+        (agents.working > 0).then(|| format!("{} working", counted(agents.working, "agent")));
     if working.is_none() && agents.stuck == 0 {
         return None;
     }
