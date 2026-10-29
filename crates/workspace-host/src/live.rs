@@ -543,6 +543,10 @@ impl Host {
             "open_questions":self.open_questions(&session)?});
         if session.role == Role::ProjectOrchestrator {
             context["model_selection"] = self.model_context()?;
+            let created = self.created_projects(id)?;
+            if !created.is_empty() {
+                context["created_projects"] = Value::Array(created);
+            }
         }
         let child_reports = self.child_reports(id)?;
         if !child_reports.is_empty() {
@@ -568,21 +572,58 @@ impl Host {
             overview.push(if ticket.is_open() {
                 self.full_ticket(&ticket, &repositories, &runtimes, &warnings)?
             } else {
-                let mut short = json!({"id":ticket.id,"title":ticket.title,"state":ticket.state,
-                    "repository":Self::repository_name(&repositories, &ticket),"branch":ticket.branch});
-                if let Some(parent) = &ticket.stacked_on {
-                    short["stacked_on"] = json!(parent);
-                }
-                if let Some(base) = &ticket.base {
-                    short["base"] = json!(base);
-                }
-                if let Some(pr) = &ticket.pull_request {
-                    short["pull_request"] = json!({"number":pr.number,"state":pr.state,"url":pr.url});
-                }
-                short
+                Self::short_ticket(&ticket, &repositories)
             });
         }
         Ok(overview)
+    }
+    fn short_ticket(ticket: &Ticket, repositories: &[Repository]) -> Value {
+        let mut short = json!({"id":ticket.id,"title":ticket.title,"state":ticket.state,
+            "repository":Self::repository_name(repositories, ticket),"branch":ticket.branch});
+        if let Some(parent) = &ticket.stacked_on {
+            short["stacked_on"] = json!(parent);
+        }
+        if let Some(base) = &ticket.base {
+            short["base"] = json!(base);
+        }
+        if let Some(pr) = &ticket.pull_request {
+            short["pull_request"] = json!({"number":pr.number,"state":pr.state,"url":pr.url});
+        }
+        short
+    }
+    /// The projects this coordinator created with `create_project`, each with its tickets as
+    /// short entries, so it can follow that work. Read only: it cannot act on those projects.
+    fn created_projects(&self, coordinator: &str) -> Result<Vec<Value>> {
+        let repositories = self.repositories()?;
+        let tickets = self.shown_tickets()?;
+        let mut created = vec![];
+        for project in self.projects()? {
+            if project
+                .created_by
+                .as_ref()
+                .is_none_or(|by| by.session_id != coordinator)
+            {
+                continue;
+            }
+            let created_at: Option<i64> = self
+                .db
+                .query_row(
+                    "SELECT created_at FROM activity WHERE project_id=?1 AND kind='project_created'",
+                    [&project.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let tickets: Vec<Value> = tickets
+                .iter()
+                .filter(|t| {
+                    self.session(&t.coordinator_id)
+                        .is_ok_and(|s| s.project_id == project.id)
+                })
+                .map(|t| Self::short_ticket(t, &repositories))
+                .collect();
+            created.push(json!({"id":project.id,"name":project.name,"created_at":created_at,"tickets":tickets}));
+        }
+        Ok(created)
     }
     /// One ticket of the caller's project in full, whatever its state.
     fn ticket_record(&self, caller: &Session, ticket_id: &str) -> Result<Value> {

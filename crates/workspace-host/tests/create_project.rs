@@ -116,6 +116,45 @@ fn the_brief_names_its_source_and_is_never_the_humans() {
 }
 
 #[test]
+fn only_the_creator_sees_the_created_projects_tickets() {
+    let (_home, mut host, creator, [web, _]) = fixture();
+    let unrelated = host.create_project("Unrelated").unwrap();
+    let unrelated = coordinator_of(&host, &unrelated.id);
+    let project = create(
+        &mut host,
+        &creator.id,
+        json!({"name": "Billing", "brief": "Fix the finding."}),
+    )
+    .unwrap();
+    let coordinator = coordinator_of(&host, &project.id);
+    let ticket = host
+        .create_ticket(&coordinator.id, &web.id, "Invoice rounding", "Do")
+        .unwrap();
+    host.close_ticket(&ticket.id).unwrap();
+
+    let context = host
+        .agent_tool(&creator.id, "workspace_context", json!({}))
+        .unwrap();
+    let created = context["created_projects"].as_array().unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0]["id"], project.id);
+    assert_eq!(created[0]["name"], "Billing");
+    assert!(created[0]["created_at"].as_i64().is_some());
+    let seen = &created[0]["tickets"][0];
+    assert_eq!(seen["id"], ticket.id);
+    assert_eq!(seen["title"], "Invoice rounding");
+    assert_eq!(seen["state"], "closed");
+    assert_eq!(seen["branch"], ticket.branch);
+
+    for other in [&unrelated, &coordinator] {
+        let context = host
+            .agent_tool(&other.id, "workspace_context", json!({}))
+            .unwrap();
+        assert!(context.get("created_projects").is_none(), "{}", other.name);
+    }
+}
+
+#[test]
 fn repository_ids_choose_the_new_projects_repositories() {
     let (_home, mut host, creator, [web, _api]) = fixture();
     let project = create(

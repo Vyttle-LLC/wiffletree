@@ -4,6 +4,7 @@
 - [x] 1.2 Create the project, choose its repositories, queue the labelled brief and start it in one savepoint, reusing `create_project`'s insert.
 - [x] 1.3 Record the creator on the project and in `project_created`.
 - [x] 1.4 Label `project-brief:` messages as Wiffletree's.
+- [x] 1.5 List the projects a coordinator created, with their tickets' short entries, in its `workspace_context`.
 
 ## 2. Text, tests and docs
 

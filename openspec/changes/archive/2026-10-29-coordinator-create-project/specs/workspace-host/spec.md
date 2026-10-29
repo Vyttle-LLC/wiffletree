@@ -35,6 +35,17 @@ Creation, the repository selection, the brief and the start SHALL succeed or fai
 - **WHEN** a coordinator calls `create_project` while the model setup is not saved
 - **THEN** it is refused, naming the Models setup, and nothing is created
 
+### Requirement: A coordinator follows the projects it created
+The `workspace_context` of a coordinator that created projects with `create_project` SHALL list them under `created_projects`, one entry each with its id, name and created time and each of its tickets as the short entry accepted and closed tickets have: id, title, state, repository, branch and its pull request's number, state and URL. The list SHALL be read only and SHALL appear in no other session's context. It SHALL give no way to message or act on those projects.
+
+#### Scenario: The creator checks the work
+- **WHEN** the project the coordinator of "Calls" created has a ticket that was closed, and that coordinator reads `workspace_context`
+- **THEN** `created_projects` lists that project with the ticket's state "closed" and its branch
+
+#### Scenario: Another coordinator
+- **WHEN** the coordinator of an unrelated project, or of the created project itself, reads `workspace_context`
+- **THEN** it has no `created_projects`
+
 ## MODIFIED Requirements
 
 ### Requirement: Host messages come from Wiffletree
