@@ -1961,6 +1961,7 @@ impl Actor {
                                 &attention.session_id,
                                 &format!("Human answer to {}: {answer}", attention.prompt),
                             )?;
+                            self.host.record_human_message(&attention.session_id)?;
                         }
                     }
                     Ok(response)
@@ -5039,6 +5040,44 @@ mod tests {
             let prompt = turn_prompt(&coordinator, "", &[(&message, None)], "");
             assert!(prompt.contains(&format!("Sender: {sender}\n")), "{prompt}");
         }
+    }
+
+    #[test]
+    fn an_inbox_answer_lets_a_briefed_coordinator_create_projects() {
+        let home = tempfile::tempdir().unwrap();
+        let mut host = Host::open_set_up(home.path()).unwrap();
+        host.create_project("Calls").unwrap();
+        let creator = host.sessions().unwrap().remove(0).id;
+        let billing = host
+            .create_project_from(&creator, "Billing", "Do", None)
+            .unwrap();
+        let briefed = host
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.project_id == billing.id)
+            .unwrap()
+            .id;
+        let question = host
+            .request_attention(&briefed, "local", "q1", "Which API?", &[])
+            .unwrap();
+        assert!(
+            host.create_project_from(&briefed, "Chained", "Do", None)
+                .is_err()
+        );
+        let (mut actor, ..) = idle_actor(host);
+        command(
+            &mut actor,
+            Command::ResolveAttention {
+                id: question.id,
+                answer: "The new one".into(),
+            },
+        )
+        .unwrap();
+        actor
+            .host
+            .create_project_from(&briefed, "Chained", "Do", None)
+            .unwrap();
     }
 
     #[test]

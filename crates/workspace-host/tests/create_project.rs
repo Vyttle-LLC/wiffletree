@@ -156,16 +156,30 @@ fn a_briefed_coordinator_creates_projects_only_once_the_human_has_messaged_it() 
     let args = json!({"name": "Chained", "brief": "Do"});
 
     let count = host_projects(&home);
-    let refused = create(&mut host, &briefed.id, args.clone())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        refused.contains("once the human has messaged you"),
-        "{refused}"
-    );
+    // The host's own messages without a sender, such as a waiting agent's notice, are not
+    // the human's.
+    for id in ["wait:s:1", "base-deleted:t:d", "anything"] {
+        host.send(id, None, &briefed.id, "Implementer has not started")
+            .unwrap();
+        let refused = create(&mut host, &briefed.id, args.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("once the human has messaged you"),
+            "{id}: {refused}"
+        );
+    }
     assert_eq!(host_projects(&home), count);
 
-    host.send("human-1", None, &briefed.id, "Go ahead").unwrap();
+    host.execute(Command::Send {
+        id: "human-1".into(),
+        sender: None,
+        recipient: briefed.id.clone(),
+        body: "Go ahead".into(),
+        attachments: vec![],
+        uploads: vec![],
+    })
+    .unwrap();
     let chained = create(&mut host, &briefed.id, args).unwrap();
     assert_eq!(chained.created_by.map(|by| by.session_id), Some(briefed.id));
 }

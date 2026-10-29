@@ -57,6 +57,8 @@ use std::{
 };
 use workspace_core::*;
 
+/// The activity kind that marks a session the human's own words have reached.
+const HUMAN_MESSAGED: &str = "human_messaged";
 /// A stored session's archived flag as SQL over its row, which `sessions_archived` indexes.
 const ARCHIVED_FLAG: &str = "coalesce(json_extract(data,'$.archived'),0)";
 /// Where a stored ticket is open, or with `false` accepted or closed, as SQL over its row that
@@ -587,15 +589,22 @@ impl Host {
             Ok(project)
         })
     }
-    /// Whether the human has sent this session anything: a message without a sender that is
-    /// not one of Wiffletree's notices, such as a project brief.
+    /// Records, once, that the human's own words reached `session`: called only where they
+    /// arrive, a client's `Send` without a sender and an Inbox answer. The host's messages
+    /// without a sender never count.
+    pub(crate) fn record_human_message(&self, session: &str) -> Result<()> {
+        if self.heard_from_human(session)? {
+            return Ok(());
+        }
+        let project = self.session(session)?.project_id;
+        Self::event(&self.db, &project, Some(session), HUMAN_MESSAGED, "")
+    }
     fn heard_from_human(&self, session: &str) -> Result<bool> {
-        let ids = self
-            .db
-            .prepare("SELECT id FROM messages WHERE recipient=?1 AND sender IS NULL")?
-            .query_map([session], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(ids.iter().any(|id| host_notice(id).is_none()))
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM activity WHERE session_id=?1 AND kind=?2)",
+            params![session, HUMAN_MESSAGED],
+            |r| r.get(0),
+        )?)
     }
     fn insert_project(
         &mut self,
@@ -1584,6 +1593,9 @@ impl Host {
                     &uploads,
                 )?;
                 self.uploads_used(&uploads, now());
+                if sender.is_none() {
+                    self.record_human_message(&recipient)?;
+                }
                 serde_json::to_value(message)?
             }
             Command::Messages {
