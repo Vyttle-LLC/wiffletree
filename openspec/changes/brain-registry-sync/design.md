@@ -82,12 +82,12 @@ The settings repository (`openspec/specs/settings-repository`) already pushes fr
 
 ## Migration Plan
 
-1. Ship with the registry empty. Existing projects lose `brain` at load, and earlier attachments are offered on the Brains page.
-2. Michael adds `sagehaven-docs` and `vyttle-docs`, and sets the owner defaults.
+1. Ship after the Spaces stage of `assistant-spaces-jobs-boards`. At its `spaces` upgrade, each earlier `Project.brain` folder becomes a Space's brain. Where the folder's `origin` names a GitHub repository, that repository is the Space's brain. Nothing is pushed until the human confirms the grant on the Brains page (decisions 3 and 11).
+2. Michael names `sagehaven-docs` as the Sage Space's brain and `vyttle-docs` as the Vyttle Space's brain in Settings › Spaces, or confirms the brains the upgrade carried over, and confirms each grant.
 3. Michael applies the repository settings from the gate README and merges the gate. Until then the Brains page shows the warning from Risks.
 4. The dotfiles ticket makes the safety-net skip managed checkouts.
 
-Rollback: removing a brain deletes the host's clone after confirmation and leaves GitHub untouched. Open batch PRs stay on GitHub for the human to close.
+Rollback: removing a brain from every Space that names it deletes the host's clone after confirmation and leaves GitHub untouched. Open batch PRs stay on GitHub for the human to close.
 
 ## Overlaps with other proposals
 
@@ -112,7 +112,7 @@ The other proposals are:
 | Human-only write commands | #162 decision 11: every tracker write is a human command on the host socket | **Align**: brain registry changes, amendments and rulings are likewise human-only commands. | None. |
 | Inspector rail | `files-panel` and `processes-panel` add rail entries; the Memory panel stays where it is | **Align** the rail order (Git, Files, Processes, Memory). This change only adds the "No brain" state. | None. |
 | Ticket review | `quiet-findings` | None. | None. |
-| Which brain a project uses | #163 (merged): every project belongs to a Space, a Space names a brain (a repository and a folder), and the coordinator logs to its Space's brain. Here, each repository maps to a brain by GitHub owner, and a project's brains come from its repositories | **Decided by Michael, 2026-10-29:** the Space decides the brain. The owner mapping is dropped, and the owner only suggests a brain when a Space is created. | None. |
+| Which brain a project uses | #163 (merged): every project belongs to a Space, a Space names a brain (a repository and a folder), and the coordinator logs to its Space's brain. This change first proposed mapping each repository to a brain by GitHub owner | **Decided by Michael, 2026-10-29:** the Space decides the brain. The owner mapping is dropped, and the owner only suggests a brain when a Space is created. | None. |
 | How brain writes reach `main` | #163 (merged) adds `project-memory` "Brain pushes from several people": fetch, rebase and push to `main` with a union merge of shared log files. That is its defaulted decision (c), "confirm at reconciliation" | **Decided by Michael, 2026-10-29:** PR-gated writes supersede (c). `brain-log-capture` removes #163's "Brain pushes from several people", and assistant entries use the per-entry contract (`logs/assistant/…`). | None. |
 | Brain settings shared in a repository | #163 keeps a Space's definition in its storage repository (`spaces/<name>/space.yaml`) with the settings repository's rules; here, `wiffletree-brain.json` lives in the brain repository and changes only by PR | **Align**: shared facts live in Git and per-machine facts (clone paths, models) stay local, in both. | Should the brain's compiler and gate settings move into the Space definition, or stay with the brain because several Spaces may name one brain? |
 | The Brains page and Settings › Spaces | #163 (merged): Spaces are edited on Settings › Spaces, and the assistant and Boards are pinned above Projects; here, Brains is a Workspace page | **Align** the navigation. | Is a brain configured inside a Space's settings, on its own Brains page, or both? |
