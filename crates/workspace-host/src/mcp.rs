@@ -21,7 +21,7 @@ pub fn tools() -> Value {
     json!([
         tool(
             "workspace_context",
-            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the Who runs what table, with each job's first and then choices (then null means it waits, and \"skip\", offered only on verifier rows, means a verify_ticket review goes ahead without it; a reviewer you start with assign_ticket on such a row waits instead), its small-work line and what each would start on right now and why, or that it skips; the switch threshold; the configured verifiers and review levels with their round and cycle caps; and the human's optional notes. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, stacked_on, base, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
+            "Read your identity, parent, team, repositories, tickets and runtime. The coordinator also gets model_selection: the Who runs what table, with each job's first and then choices (then null means it waits, and \"skip\", offered only on verifier rows, means a verify_ticket review goes ahead without it; a reviewer you start with assign_ticket on such a row waits instead), its small-work line and what each would start on right now and why, or that it skips; the switch threshold; the configured verifiers and review levels with their round and cycle caps; and the human's optional notes. A coordinator that created projects with create_project also gets created_projects: each one's id, name and created time with its tickets as short entries, to follow, not to act on. Accepted and closed tickets appear as one short entry (id, title, state, repository, branch, stacked_on, base, pull request) and archived agents as short entries; pass ticket_id to read one ticket of your project in full, with its brief, cycles, ledger and pull request, instead of the rest of the context.",
             json!({"ticket_id":string}),
             vec![]
         ),
@@ -30,6 +30,12 @@ pub fn tools() -> Value {
             "Coordinator: create a ticket in one of the project's repositories, with its own branch and worktree. Repeating the same repository and title returns the existing ticket. For work that depends on another ticket's unmerged work in the same repository, give that ticket's id as stack_on: the new branch starts from its branch tip, reviews see only the new ticket's changes, and its pull request opens into that branch. The parent must not be closed. For work that belongs on a branch other than the repository's base, give that branch's name on origin as base, such as Parental-controls: the new branch starts from origin/<base>, reviews measure against it, and its pull request opens into it. The branch must be on origin. Give base or stack_on, not both; a stacked ticket takes its parent's base, and repeating a title on another base is refused.",
             json!({"repository_id":string,"title":string,"brief":string,"stack_on":string,"base":string}),
             vec!["repository_id", "title", "brief"]
+        ),
+        tool(
+            "create_project",
+            "Coordinator: create a separate Wiffletree project for an outcome that is not a ticket of this one. It starts at once, with its own coordinator from Who runs what, and appears in the sidebar like any other. brief becomes that coordinator's first message, labelled as your words and not the human's, so it plans and asks the human before creating tickets. Give repository_ids to choose the repositories it uses, or leave them out for every workspace repository; an unknown id is refused. Refused before the human saves the model setup, and in a project another coordinator's brief started until the human has messaged its coordinator. A refusal creates nothing. Each call creates a new project, so repeating a name creates a second one. The new project records you as its creator, and the two coordinators cannot message each other.",
+            json!({"name":string,"brief":string,"repository_ids":{"type":"array","items":string}}),
+            vec!["name", "brief"]
         ),
         tool(
             "assign_ticket",

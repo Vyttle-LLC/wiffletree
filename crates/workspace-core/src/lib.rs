@@ -334,6 +334,14 @@ pub struct Project {
     /// Names the folders of a project without `home`, fixed when its first ticket needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    /// The coordinator whose `create_project` call made this project; `None` when the human did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<ProjectCreator>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectCreator {
+    pub project_id: String,
+    pub session_id: String,
 }
 impl Project {
     pub fn uses(&self, repository_id: &str) -> bool {
@@ -2163,15 +2171,19 @@ pub const PROCESS_NOTICE_PREFIX: &str = "processes:";
 const VERIFICATION_NOTICE_PREFIX: &str = "verification:";
 const WORKTREE_KEPT_PREFIX: &str = "worktree-kept:";
 const MIGRATION_PREFIX: &str = "migration:";
+/// The id prefix of the brief a coordinator's `create_project` hands the new coordinator. It
+/// carries another coordinator's words, never the human's.
+pub const PROJECT_BRIEF_PREFIX: &str = "project-brief:";
 /// The id prefixes of the host's other messages without a sender: verification results, kept
-/// worktrees, migration notices, publish results and process notices. Inbox answers (`answer:`)
-/// carry the human's words.
-const HOST_NOTICE_PREFIXES: [&str; 5] = [
+/// worktrees, migration notices, publish results, process notices and project briefs. Inbox
+/// answers (`answer:`) carry the human's words.
+const HOST_NOTICE_PREFIXES: [&str; 6] = [
     VERIFICATION_NOTICE_PREFIX,
     WORKTREE_KEPT_PREFIX,
     MIGRATION_PREFIX,
     PUBLISH_PREFIX,
     PROCESS_NOTICE_PREFIX,
+    PROJECT_BRIEF_PREFIX,
 ];
 /// A ticket's latest verification cycle: rounds of concurrent, commit-pinned verifier turns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
