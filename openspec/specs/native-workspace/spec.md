@@ -6,7 +6,7 @@ Render a responsive native chat-first workspace backed by durable host records a
 ## Requirements
 
 ### Requirement: Native durable workspace
-The macOS client SHALL render project → ticket → agents, select conversations, queue messages, retain per-session drafts during navigation, add tickets and agents, show status separately from attention and open context panels without replacing chat.
+The macOS client SHALL list projects in the sidebar and their tickets and agents in the Agents panel, select conversations, queue messages, retain per-session drafts during navigation, add tickets and agents, show status separately from attention and open context panels without replacing chat.
 
 A persistent right-edge inspector rail SHALL follow the selected project, ticket or agent. Its destinations SHALL reflect that scope, and its panel SHALL identify the owner. Project Inbox SHALL remain separate from ticket and agent status; Git SHALL appear only for repository-backed ticket and agent views. Ticket, agent, project and repository creation SHALL use separate dialogs with explicit repository or ticket ownership, retained values on failure and guarded pending submissions. Successful project creation SHALL select the new project orchestrator. The hierarchy and context panes SHALL have draggable width dividers and compact native typography.
 
@@ -174,11 +174,11 @@ The Settings window SHALL have a Check-ins section under the workspace folder wi
 - **THEN** the section opens with no coordinator preset highlighted, and the host uses 300
 
 ### Requirement: Questions waiting beside an agent's status
-An agent's status badge SHALL name the questions it still waits on after its status, as "Working · 1 question waiting" or "Blocked · 2 questions waiting", and its sidebar row SHALL show the short figure "1 question" or "2 questions". The badge text SHALL use the status's own color and the sidebar figure the subtle color, never yellow, because a worker's question goes to its coordinator and yellow is reserved for what needs the human. The question's text SHALL NOT be repeated beside the status. A session with no question waiting SHALL show neither.
+An agent's status badge SHALL name the questions it still waits on after its status, as "Working · 1 question waiting" or "Blocked · 2 questions waiting". The badge text SHALL use the status's own color, never yellow, because a worker's question goes to its coordinator and yellow is reserved for what needs the human. The question's text SHALL NOT be repeated beside the status. A session with no question waiting SHALL show none.
 
 #### Scenario: Working with a question
 - **WHEN** an implementer reported `blocked` once and its turn is still running
-- **THEN** its badge reads "Working · 1 question waiting" and its sidebar row shows "1 question"
+- **THEN** its badge reads "Working · 1 question waiting"
 
 #### Scenario: Turn ended unanswered
 - **WHEN** that turn ends and the coordinator has not answered
@@ -186,7 +186,7 @@ An agent's status badge SHALL name the questions it still waits on after its sta
 
 #### Scenario: Nothing waiting
 - **WHEN** a session has no unanswered `blocked` report
-- **THEN** its badge and sidebar row show no question text
+- **THEN** its badge shows no question text
 
 ### Requirement: Compact action on the Context card
 The Context card SHALL show, under its measurement, one row with a short hint and a Compact button, for every agent. For an agent with a provider session, Claude or Codex, the hint SHALL read "Replace the conversation with a summary." and the button "Compact…", or "Compact after this turn" while the agent is working. Activating it SHALL open a form in the card, not a dialog. For a Claude agent the form SHALL have one optional field labelled "What to keep", empty by default, and a line saying that Claude replaces the agent's conversation with a summary, that this can't be undone and that it uses one model call. For a Codex agent the form SHALL have no field, SHALL send no instructions, and its line SHALL say that Codex replaces the agent's conversation with a summary and chooses what the summary keeps, that this can't be undone and that it uses one model call. Either form SHALL have Cancel and a confirm button reading "Compact now", or "Compact after this turn" while the agent is working, when the line SHALL also say that it runs when the turn ends, before waiting messages are delivered. Nothing SHALL be sent to the host before the confirm button. For an agent with no provider session it SHALL be disabled beside "Available after this agent's first turn." A request the host refuses SHALL show the host's reason in the form and keep what was typed.
@@ -336,14 +336,18 @@ A project row inside a group SHALL show its name without the first word and the 
 - **THEN** its row reads "wiffletree"
 
 ### Requirement: A group row collapses and rolls up what is inside
-A group row SHALL show a chevron, a folder icon, the group's label and how many projects it holds, and activating it SHALL collapse or expand the group as a project row's chevron does its project. A collapsed group SHALL show the most urgent state among its shown members: the number of items that need the human when there are any, otherwise blocked when a member's row would show blocked, otherwise working when a member's row would show working, and otherwise nothing.
+A group row SHALL show a chevron, a folder icon, the group's label and how many projects it holds, and activating it SHALL collapse or expand the group. A collapsed group SHALL show the most urgent state among its shown members: the number of items that need the human when there are any, otherwise the number of its members' stuck agents as the stuck pill when there are any, otherwise blocked when a member's row would show blocked, otherwise working when a member's row would show working, and otherwise nothing.
 
 #### Scenario: Needs-you outranks blocked and working
 - **WHEN** a collapsed group holds one project with one item needing the human, one blocked project and one working project
 - **THEN** the group row shows the needs-you count "1"
 
+#### Scenario: Stuck agents outrank blocked and working
+- **WHEN** a collapsed group holds a project with one stuck agent, a blocked project and a working project, and nothing needs the human
+- **THEN** the group row shows the "1 agent stuck" pill
+
 #### Scenario: Blocked outranks working
-- **WHEN** a collapsed group holds a blocked project and a working project and nothing needs the human
+- **WHEN** a collapsed group holds a blocked project and a working project, nothing needs the human and no agent is stuck
 - **THEN** the group row shows the blocked mark
 
 #### Scenario: A quiet group
@@ -362,7 +366,7 @@ The PROJECTS header SHALL carry a button labelled "Group" with a folder icon, to
 - **THEN** grouping is on and the file's other choices are kept
 
 ### Requirement: Projects are reordered by dragging
-A person SHALL be able to drag project rows to reorder them, and each drop SHALL be sent to the host as one move, with the list redrawn from the order the host returns. While grouping is off, any project row SHALL be droppable at any place in the flat list. While grouping is on, a project inside a group SHALL be droppable only within that group, and a group row or an ungrouped project row SHALL be droppable only among the other groups and ungrouped projects; dragging a group SHALL move all its shown members as one block, and reordering inside a group SHALL NOT move the group. While a row is dragged, an insertion line SHALL show where it would land and the dragged row SHALL be dimmed. While a row is dragged and the pointer is near the top or bottom edge of the list, the list SHALL scroll in that direction, also while the pointer rests there, until it reaches its end; it SHALL stop scrolling when the pointer leaves that edge or the list, or the drag ends, and the insertion line SHALL keep to the row under the pointer as the list scrolls. Ticket rows and agent rows SHALL NOT be draggable, and a project row whose name is being edited SHALL NOT start a drag. A drag that left its row and is released back on it SHALL change nothing. Dragging SHALL NOT change what a click, a double-click, the chevron or the actions menu does, including when the pointer moves a little between press and release without leaving the row.
+A person SHALL be able to drag project rows to reorder them, and each drop SHALL be sent to the host as one move, with the list redrawn from the order the host returns. While grouping is off, any project row SHALL be droppable at any place in the flat list. While grouping is on, a project inside a group SHALL be droppable only within that group, and a group row or an ungrouped project row SHALL be droppable only among the other groups and ungrouped projects; dragging a group SHALL move all its shown members as one block, and reordering inside a group SHALL NOT move the group. While a row is dragged, an insertion line SHALL show where it would land and the dragged row SHALL be dimmed. While a row is dragged and the pointer is near the top or bottom edge of the list, the list SHALL scroll in that direction, also while the pointer rests there, until it reaches its end; it SHALL stop scrolling when the pointer leaves that edge or the list, or the drag ends, and the insertion line SHALL keep to the row under the pointer as the list scrolls. A project row whose name is being edited SHALL NOT start a drag. A drag that left its row and is released back on it SHALL change nothing. Dragging SHALL NOT change what a click, a double-click or the actions menu does, including when the pointer moves a little between press and release without leaving the row.
 
 #### Scenario: A project moves within the flat list
 - **WHEN** grouping is off, the list is A, B, C and C is dropped above A
@@ -398,7 +402,7 @@ A person SHALL be able to drag project rows to reorder them, and each drop SHALL
 
 #### Scenario: A click that moves is still a click
 - **WHEN** the pointer moves a few pixels between press and release without leaving the row
-- **THEN** a project row is selected, a group row is collapsed or expanded, a project's chevron collapses or expands it, and the second click of a double-click opens rename, as each does without moving
+- **THEN** a project row is selected, a group row is collapsed or expanded, and the second click of a double-click opens rename, as each does without moving
 
 ### Requirement: The decision card can be minimized
 The decision card above the project coordinator's composer SHALL have a Minimize button, tooltip "Minimize", at the right end of the row above the card, after Open inbox. Minimized, the card SHALL become one row with the card's yellow edge, a small yellow dot, the current decision's prompt on one line with an ellipsis, "N of M" only when there are several open decisions, and an Expand button, tooltip "Expand". Clicking anywhere on the row SHALL restore the full card on the same decision. Questions and approvals SHALL minimize alike. The minimized state SHALL be kept for each project, in memory only: it SHALL survive reading, typing, sending and switching to another conversation and back, and an app restart SHALL start expanded. A decision arriving SHALL NOT expand it; the row's count SHALL update. When a project has no open decision, its minimized state SHALL be cleared, so the next decision starts expanded. Answering, choices, Dismiss, Open inbox and the Inbox panel SHALL behave as before.
@@ -514,3 +518,26 @@ When files are dropped on a conversation, the desktop SHALL copy each one into i
 #### Scenario: Copies do not outlive their draft
 - **WHEN** a draft with staged files is sent, a staged file is removed, the window closes, or the app restarts
 - **THEN** those staged copies are deleted
+
+### Requirement: The sidebar lists projects only
+The sidebar tree SHALL list group rows and project rows only, one project row for each coordinator. It SHALL NOT list tickets or agents, archived, legacy or retired ones included; the Agents panel lists them (see work-progress). A project row SHALL have no chevron and SHALL NOT collapse. Its last line SHALL read "N agents working", counting the agents the Agents panel lists for the project that are in a turn, and SHALL be left out when none is. When the stuck rule (see work-progress) flags any of the project's unarchived agents, that line SHALL also show a yellow pill reading "1 agent stuck" or "N agents stuck", and the row's tooltip SHALL say the same. The row SHALL keep its glyph, figure, progress track and needs-you badge. While the coordinator's or any of the project's agents' conversation is selected, the project row SHALL show as selected.
+
+#### Scenario: Only projects
+- **WHEN** a project has an open ticket with an implementer, an archived reviewer, a closed ticket and a worker from before tickets existed, and archived sessions are shown
+- **THEN** the sidebar shows one row for the project and none for its tickets or agents
+
+#### Scenario: Agents working
+- **WHEN** two of a project's agents are in a turn and none is stuck
+- **THEN** its row's last line reads "2 agents working" with no pill
+
+#### Scenario: A stuck agent
+- **WHEN** one of a project's agents is disconnected and another is in a turn
+- **THEN** its row's last line reads "1 agent working" beside a yellow "1 agent stuck" pill, and its tooltip says "1 agent stuck"
+
+#### Scenario: A blocked agent is not stuck
+- **WHEN** a project's only agent is blocked after a failed turn
+- **THEN** its row shows no agents line and no pill
+
+#### Scenario: An agent is open
+- **WHEN** the human selects one of a project's agents from the Agents panel
+- **THEN** that project's row shows as selected

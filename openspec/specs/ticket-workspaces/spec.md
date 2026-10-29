@@ -102,21 +102,6 @@ Every agent assigned to a ticket SHALL have the ticket's project coordinator as 
 - **WHEN** the PR keeper adopted a commit that only re-indents a line, so the worktree's HEAD has the verified commit's stable patch id, and the coordinator accepts the ticket before any later review
 - **THEN** the host refuses, saying the branch has commits no review has checked
 
-### Requirement: Ticket workspaces in the sidebar
-The sidebar SHALL show each project as its coordinator, then its ticket workspaces, then each ticket's agents. A ticket workspace row SHALL be labelled "repository · ticket" with the repository name and ticket title, and SHALL show the ticket's state. A ticket accepted with a waiver SHALL show a distinct waived glyph, never the glyph for passed or accepted, and its tooltip SHALL say it was accepted with a waiver and how many entries are still `open`. Accepted tickets, waived or not, SHALL stay hidden with their archived agents unless archived sessions are shown. There SHALL be no repository-team row or "Add repository team" action.
-
-#### Scenario: Tree shape
-- **WHEN** a project has a ticket "Fix inbound calls" in repository "sagechat-sms" with an implementer and two reviewers
-- **THEN** the sidebar shows the coordinator, beneath it a row "sagechat-sms · Fix inbound calls" with the ticket's state, and beneath that the three agents
-
-#### Scenario: Waived ticket
-- **WHEN** archived sessions are shown and a project has one passed ticket, one blocked ticket and one ticket accepted with a waiver
-- **THEN** the waived ticket's row shows the waived glyph, distinct from the passed and blocked rows, and its tooltip reads "Accepted with waiver" with its number of open entries
-
-#### Scenario: New ticket picks a repository
-- **WHEN** the human opens New ticket for a project
-- **THEN** the dialog asks for a repository the project uses, a title and a brief, and creates the ticket under that project's coordinator
-
 ### Requirement: Role instructions match the flat hierarchy
 The bundled role instructions SHALL contain no repository coordinator contract. The project coordinator contract SHALL cover planning, creating tickets per repository, assigning agents with an exact model and reason (see model-routing), starting verification with `verify_ticket`, triaging every untriaged finding once with `triage_findings`, leaving `noted` findings undecided unless one should be fixed, pulling such a finding into a fix with `triage_findings` `fix_now` and sending it to the implementer, accepting with or without a waiver, and closing tickets. It SHALL state that non-blocking and pre-existing findings are `noted` and need no decision before accepting or publishing. It SHALL state the stop rule: a round with only non-blocking findings ends the loop, and so do non-blocking findings left after two or three rounds; they stay `noted`, or become follow-up or won't-fix entries when the coordinator decides so, and the coordinator never marks them `fix_now` to chase them and never starts a fresh cycle to chase them. It SHALL tell the coordinator that a ticket shipping as a PR lists its follow-up entries in the PR description. It SHALL also tell the coordinator to ask the human when a waiver would cover a product, security or data-loss decision. The implementer contract SHALL tell the implementer to fix each routed finding with the smallest change, to make only changes that are requested or clearly necessary, and to tell the coordinator in one sentence with evidence, instead of implementing it, when a finding is wrong or out of scope. The tester and reviewer contract SHALL require every finding to be reported with its severity, `path:line` location, trigger and evidence, without patches. It SHALL define blocking as breaking an acceptance criterion, breaking existing behavior or tests, or having a concrete trigger reachable in this change. A race SHALL block only with a failing test or a step-by-step trace citing `file:line`, and bugs that predate the change SHALL be `pre_existing`. The communication, implementer and tester/reviewer contracts SHALL name the project coordinator as the agent's parent and acceptor.
 
@@ -214,3 +199,18 @@ The open-branch check SHALL group a repository's open tickets by their base, `or
 #### Scenario: A ticket on another base
 - **WHEN** a repository has an open ticket on its base and one created on `release`
 - **THEN** the ticket on `release` is checked against `origin/release` in a check of its own
+
+### Requirement: Ticket workspaces in the Agents panel
+The Agents panel SHALL show each counted ticket of a project as a card labelled "repository · ticket" with the repository name and ticket title, and under it the ticket's agents (see work-progress). A ticket accepted with a waiver SHALL say so in the warning color on its card, as "Accepted with waiver · N open findings", and SHALL never be shown only as passed or accepted. There SHALL be no repository-team row or "Add repository team" action.
+
+#### Scenario: Card shape
+- **WHEN** a project has a ticket "Fix inbound calls" in repository "sagechat-sms" with an implementer and two reviewers
+- **THEN** the Agents panel shows a card "sagechat-sms · Fix inbound calls" with its stage, and beneath its bar the three agents
+
+#### Scenario: Waived ticket
+- **WHEN** a project has one passed ticket, one blocked ticket and one ticket accepted with a waiver and one open entry
+- **THEN** the waived ticket's card reads "Accepted with waiver · 1 open finding", and the others' cards do not
+
+#### Scenario: New ticket picks a repository
+- **WHEN** the human opens New ticket for a project
+- **THEN** the dialog asks for a repository the project uses, a title and a brief, and creates the ticket under that project's coordinator

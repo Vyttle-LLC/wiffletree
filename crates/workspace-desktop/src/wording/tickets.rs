@@ -70,7 +70,7 @@ pub(crate) fn publish_waiting(ticket: &Ticket) -> Option<String> {
         .map(|_| format!("{} waits for your approval", request.step.label()))
 }
 
-/// A ticket accepted with a waiver: its row's waived ring says this beside the label.
+/// A ticket accepted with a waiver: its Agents panel card says this under its bar.
 pub(crate) fn waiver_note(ticket: &Ticket) -> Option<String> {
     ticket
         .waiver

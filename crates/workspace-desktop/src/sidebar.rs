@@ -9,9 +9,9 @@ use gpui_component::{
 };
 use ui::{
     bar_color, brand_image, card, eyebrow, hint, icon, needs_you_badge, now, pill, progress_bar,
-    session_icon, status_glyph, ticket_state_color,
+    status_glyph,
 };
-use wording::{humanize, plural, status_label};
+use wording::{counted, plural, status_label};
 
 const INDENT: f32 = 14.;
 
@@ -90,8 +90,9 @@ impl Reorder<'_> {
         let moving = self.moving.as_ref()?;
         Some(tree::drops(self.entries, moving, over))
     }
-    /// For what is listed under the row of `over`, such as a project's tickets and agents: it
-    /// all aims where the lower half of that row does.
+    /// For the space under the row of `over`, such as the spacer and New ticket button under a
+    /// project or the spacer under a collapsed group: it aims where the lower half of that row
+    /// does.
     fn under(&self, over: &tree::Movable) -> Option<Halves> {
         let halves = self.onto(over)?;
         Some(halves.map(|(_, below)| (below.clone(), below)))
@@ -162,15 +163,14 @@ pub(super) struct Sidebar {
     pub(super) creating_project: bool,
     pub(super) project_name: Entity<InputState>,
     pub(super) project_edit: Option<project_name::NameEdit>,
-    collapsed_projects: BTreeSet<String>,
     /// Collapsed project groups, by their first word in lowercase.
     collapsed_groups: BTreeSet<String>,
     /// The project or group being dragged in the sidebar; gone once the drag ends.
     project_drag: Option<WeakEntity<ProjectDrag>>,
     /// The press in progress ended a rename, so it does not also start a drag.
     rename_press: bool,
-    /// How the latest press on a project row began.
-    row_press: tree::RowPress,
+    /// The click count of the latest press on a project row.
+    press_clicks: usize,
     /// The tree is scrolling under a row dragged to its edge.
     drag_scrolling: bool,
     tree_scroll: ScrollHandle,
@@ -202,11 +202,10 @@ impl Sidebar {
             creating_project: false,
             project_name,
             project_edit: None,
-            collapsed_projects: BTreeSet::new(),
             collapsed_groups: BTreeSet::new(),
             project_drag: None,
             rename_press: false,
-            row_press: tree::RowPress::default(),
+            press_clicks: 0,
             drag_scrolling: false,
             tree_scroll: ScrollHandle::new(),
             checking_update: false,
@@ -250,7 +249,6 @@ impl Sidebar {
         };
         let project_id = self.pending_project_selection.take().unwrap();
         self.creating_project = false;
-        self.collapsed_projects.remove(&project_id);
         // Naming it needs its row, which a collapsed group would hide.
         self.collapsed_groups.remove(&tree::group_key(&root.name));
         cx.emit(Intent::Select(root.id));
@@ -619,7 +617,7 @@ impl Sidebar {
         ] {
             let selected = self.shared.page == page;
             nav = nav.child(
-                self.row(SharedString::from(label), 0, selected, p)
+                self.row(SharedString::from(label), selected, p)
                     .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenPage(page))))
                     .child(
                         div()
@@ -922,33 +920,30 @@ impl Sidebar {
             (target.as_ref() == Some(&drop)).then(|| insertion_line(grouped, p))
         };
         let mut project = None;
-        // Where a drag over what is listed under the last project row aims.
+        // Where a drag over the space under the last project row aims.
         let mut under = None;
         // The group whose projects are being listed, and whether the last project row is in it.
         let mut group = None;
         let mut in_group = false;
-        for row in tree::rows(
+        let rows = tree::rows(
             index,
             self.shared.show_archived,
             grouping,
-            &self.collapsed_projects,
             &self.collapsed_groups,
-        ) {
-            // A project or group row completes the project above it, and a top-level row
-            // completes the group above it.
+        );
+        for row in rows {
+            // Every row completes the project above it, and a top-level row completes the
+            // group above it.
             let top_level = match &row {
-                tree::Row::Group(_) => Some(true),
-                tree::Row::Project { grouped, .. } => Some(!grouped),
-                tree::Row::Ticket { .. } | tree::Row::Agent { .. } => None,
+                tree::Row::Group(_) => true,
+                tree::Row::Project { grouped, .. } => !grouped,
             };
-            if let Some(top_level) = top_level {
-                if let Some(previous) = project.take() {
-                    let under = under.take();
-                    tree = self.close_project(tree, previous, in_group, under, has_tickets, cx);
-                }
-                if let Some(key) = group.take_if(|_| top_level) {
-                    tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
-                }
+            if let Some(previous) = project.take() {
+                let under = under.take();
+                tree = self.close_project(tree, previous, in_group, under, has_tickets, cx);
+            }
+            if let Some(key) = group.take_if(|_| top_level) {
+                tree = tree.children(line(tree::Drop::EndOfGroup(key), true));
             }
             match row {
                 tree::Row::Group(listed) => {
@@ -973,18 +968,6 @@ impl Sidebar {
                         .child(self.project_row(root, label, grouped, &reorder, p, cx));
                     project = Some(root);
                     in_group = grouped;
-                }
-                tree::Row::Ticket { ticket, label } => {
-                    let row = self.ticket_row(ticket, label, p, cx);
-                    tree = tree.child(aiming(row.pl(inset(1, in_group)), under.clone(), cx));
-                }
-                tree::Row::Agent {
-                    session,
-                    depth,
-                    label,
-                } => {
-                    let row = self.session_row(session, depth, label, p, cx);
-                    tree = tree.child(aiming(row.pl(inset(depth, in_group)), under.clone(), cx));
                 }
             }
         }
@@ -1050,7 +1033,7 @@ impl Sidebar {
                 }),
             )
             .on_drop(cx.listener(move |v, moving: &tree::Movable, w, c| {
-                v.drop_on_row(moving, &own, false, w, c)
+                v.drop_on_row(moving, &own, w, c)
             }));
         aiming(row, halves, cx)
     }
@@ -1067,7 +1050,6 @@ impl Sidebar {
         &mut self,
         moving: &tree::Movable,
         row: &tree::Movable,
-        on_chevron: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1076,13 +1058,10 @@ impl Sidebar {
         }
         let drag = self.project_drag.take().and_then(|drag| drag.upgrade());
         let left_row = drag.is_none_or(|drag| drag.read(cx).left_row);
-        let release = tree::own_release(left_row, self.row_press, on_chevron);
+        let release = tree::own_release(left_row, self.press_clicks);
         match (row, release) {
             (_, tree::OwnRelease::Nothing) => {}
             (tree::Movable::Group(key), _) => self.toggle_group(key, cx),
-            (tree::Movable::Project(project_id), tree::OwnRelease::Toggle) => {
-                self.toggle_project(project_id, cx)
-            }
             (tree::Movable::Project(project_id), release) => {
                 let root = (self.shared.index.as_ref()).and_then(|i| i.roots(project_id).next());
                 if let Some(id) = root.map(|root| root.id.clone()) {
@@ -1098,13 +1077,6 @@ impl Sidebar {
     fn toggle_group(&mut self, key: &str, cx: &mut Context<Self>) {
         if !self.collapsed_groups.remove(key) {
             self.collapsed_groups.insert(key.to_owned());
-        }
-        cx.notify();
-    }
-
-    fn toggle_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        if !self.collapsed_projects.remove(project_id) {
-            self.collapsed_projects.insert(project_id.to_owned());
         }
         cx.notify();
     }
@@ -1223,22 +1195,26 @@ impl Sidebar {
                     .flat_map(|s| &s.attention)
                     .filter(|a| group.members.iter().any(|m| m.project_id == a.project_id))
                     .count();
+                let stuck = (group.members.iter())
+                    .map(|root| self.agent_counts(root).stuck)
+                    .sum();
                 let shown: Vec<Status> = group
                     .members
                     .iter()
                     .map(|root| self.shared.shown_status(root))
                     .collect();
-                tree::rollup(needs_you, &shown)
+                tree::rollup(needs_you, stuck, &shown)
             })
             .flatten()
             .map(|rollup| match rollup {
                 tree::Rollup::NeedsYou(count) => needs_you_badge(count, p).into_any_element(),
+                tree::Rollup::Stuck(count) => stuck_pill(count, p).into_any_element(),
                 tree::Rollup::Blocked => status_glyph(Status::Blocked, 12., p),
                 tree::Rollup::Working => status_glyph(Status::Working, 12., p),
             });
         let toggle = key.clone();
         let row = self
-            .row(SharedString::from(format!("group-{key}")), 0, false, p)
+            .row(SharedString::from(format!("group-{key}")), false, p)
             .pl(inset(0, false) - px(4.))
             .text_size(px(font::SMALL))
             .text_color(p.subtle)
@@ -1291,10 +1267,7 @@ impl Sidebar {
         has_tickets: &BTreeMap<String, u32>,
         cx: &mut Context<Self>,
     ) -> Div {
-        if !has_tickets.contains_key(&root.id)
-            && !self.collapsed_projects.contains(&root.project_id)
-            && self.shared.selected.as_ref() == Some(&root.id)
-        {
+        if !has_tickets.contains_key(&root.id) && self.shared.selected.as_ref() == Some(&root.id) {
             let add = button(SharedString::from(format!("add-ticket-{}", root.id)))
                 .ghost()
                 .icon(icon("plus"))
@@ -1345,23 +1318,19 @@ impl Sidebar {
     }
 
     /// A single-line tree row.
-    fn row(&self, id: SharedString, depth: usize, selected: bool, p: Palette) -> Stateful<Div> {
+    fn row(&self, id: SharedString, selected: bool, p: Palette) -> Stateful<Div> {
         div()
             .id(id)
             .min_h(px(30.))
             .flex()
             .items_center()
             .gap_2()
-            .pl(inset(depth, false))
+            .pl(inset(0, false))
             .pr_2()
             .rounded_md()
             .text_size(px(font::MESSAGE))
             .when(selected, |d| d.bg(p.overlay))
-            .text_color(if depth >= 2 && !selected {
-                p.subtle
-            } else {
-                p.text
-            })
+            .text_color(p.text)
             .cursor_pointer()
             .hover(move |d| d.bg(p.overlay.opacity(if selected { 1. } else { 0.6 })))
     }
@@ -1378,9 +1347,13 @@ impl Sidebar {
     ) -> Stateful<Div> {
         let id = root.id.clone();
         let project_id = root.project_id.clone();
-        let selected =
-            self.shared.page == Page::Conversation && self.shared.selected.as_ref() == Some(&id);
-        let collapsed = self.collapsed_projects.contains(&project_id);
+        // The coordinator or any of its agents being open selects the project.
+        let selected = self.shared.page == Page::Conversation
+            && self
+                .shared
+                .selected_session()
+                .is_some_and(|s| s.project_id == project_id);
+        let agents = self.agent_counts(root);
         let edit = self
             .project_edit
             .as_ref()
@@ -1394,39 +1367,37 @@ impl Sidebar {
             needs_you(&s.attention, &s.workspace_notes, &project_id)
         });
         let detail = format!(
-            "{} · {}{}{}",
+            "{} · {}{}{}{}",
             root.name,
             self.status_detail(root),
             if live { " · Running" } else { " · Stopped" },
             match attention {
                 0 => String::new(),
                 n => format!(" · {n} {} you", plural(n, "item needs", "items need")),
-            }
+            },
+            stuck_label(agents.stuck).map_or(String::new(), |stuck| format!(" · {stuck}")),
         );
         let project = self.shared.progress.project(&project_id);
         let archived = root.archived;
         let archive_id = id.clone();
-        let toggle_id = project_id.clone();
         let rename_id = project_id.clone();
         let click_project = project_id.clone();
         let movable = tree::Movable::Project(project_id.clone());
-        let chevron_row = movable.clone();
         let row = self
-            .row(SharedString::from(format!("tree-{id}")), 0, selected, p)
-            // Its children wrap, so the progress track added last takes its own line under the label.
+            .row(SharedString::from(format!("tree-{id}")), selected, p)
+            // Its children wrap, so the progress track and the agents line added last each take
+            // their own line under the label.
             .min_h(px(36.))
             .py(px(5.))
             .flex_wrap()
             .gap_y(px(3.))
-            .pl(inset(0, grouped) - px(4.))
+            // The icon lines up with a group row's, past its chevron.
+            .pl(inset(0, grouped) + px(22.))
             .text_size(px(font::TEXT))
             .when(root.archived, |d| d.opacity(0.55))
             .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
             .capture_any_mouse_down(cx.listener(|v, event: &MouseDownEvent, _, _| {
-                v.row_press = tree::RowPress {
-                    on_chevron: false,
-                    click_count: event.click_count,
-                };
+                v.press_clicks = event.click_count;
             }))
             .on_click(cx.listener(move |v, event: &ClickEvent, w, c| {
                 if !editing {
@@ -1436,37 +1407,6 @@ impl Sidebar {
                     }
                 }
             }))
-            .child(
-                div()
-                    .id(SharedString::from(format!("collapse-{project_id}")))
-                    .flex_none()
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .text_color(p.subtle)
-                    .hover(move |d| d.bg(p.edge.opacity(edge::HALF)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|v, _, _, _| v.row_press.on_chevron = true),
-                    )
-                    .on_click(cx.listener(move |v, _, _, c| {
-                        c.stop_propagation();
-                        v.toggle_project(&toggle_id, c);
-                    }))
-                    .on_drop(cx.listener(move |v, moving: &tree::Movable, w, c| {
-                        v.drop_on_row(moving, &chevron_row, true, w, c)
-                    }))
-                    .child(
-                        icon(if collapsed {
-                            "chevron-right"
-                        } else {
-                            "chevron-down"
-                        })
-                        .size(px(12.)),
-                    ),
-            )
             .child(
                 div()
                     .flex_none()
@@ -1584,7 +1524,8 @@ impl Sidebar {
                     project.map(|project| (project.position, project.state)),
                     p,
                 ))
-            });
+            })
+            .children(agents_line(&agents, p));
         if editing {
             row
         } else {
@@ -1592,162 +1533,11 @@ impl Sidebar {
         }
     }
 
-    fn session_row(
-        &self,
-        session: &Session,
-        depth: usize,
-        label: String,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let id = session.id.clone();
-        let selected =
-            self.shared.page == Page::Conversation && self.shared.selected.as_ref() == Some(&id);
-        let status = self.shared.shown_status(session);
-        let questions = self
-            .shared
-            .snapshot()
-            .map_or(0, |s| s.questions_waiting(&session.id));
-        let detail = format!(
-            "{} · {} · {} · {}",
-            session.name,
-            session.role.label(),
-            session.provider.label(),
-            self.status_detail(session)
-        );
-        self.row(SharedString::from(format!("tree-{id}")), depth, selected, p)
-            .when(session.archived, |d| d.opacity(0.55))
-            // Working agents keep full-strength text; idle ones recede.
-            .when(status == Status::Working, |d| d.text_color(p.text))
-            .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
-            .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(if selected { p.text } else { p.subtle })
-                    .child(icon(session_icon(session.role)).size(px(14.))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_ellipsis()
-                    .when(depth == 1, |d| d.font_weight(FontWeight::MEDIUM))
-                    .child(label),
-            )
-            .when_some(self.waiting_input(session), |d, waiting| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(font::CAPTION))
-                        .text_color(p.subtle)
-                        .child(waiting),
-                )
-            })
-            .when_some(wording::questions_figure(questions), |d, questions| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(font::CAPTION))
-                        .text_color(p.subtle)
-                        .child(questions),
-                )
-            })
-            .child(div().flex_none().child(status_glyph(status, 12., p)))
-    }
-
-    fn ticket_row(
-        &self,
-        ticket: &Ticket,
-        label: String,
-        p: Palette,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let coordinator = ticket.coordinator_id.clone();
-        let waiver = wording::waiver_note(ticket);
-        let state = waiver
-            .clone()
-            .unwrap_or_else(|| humanize(ticket.state.name()));
-        let waiting = wording::publish_waiting(ticket);
-        // A PR or a waiting publish step adds a second line.
-        let two_lines = ticket.pull_request.is_some() || waiting.is_some();
-        let mut detail = format!("{label} · {state}");
-        if let Some(waiting) = &waiting {
-            detail.push('\n');
-            detail.push_str(waiting);
-        }
-        if let Some(pr) = &ticket.pull_request {
-            detail.push('\n');
-            detail.push_str(&wording::pr_sentence(pr));
-            if let Some(checked) = self
-                .shared
-                .snapshot()
-                .and_then(|s| wording::pr_checked(s, ticket))
-            {
-                detail.push('\n');
-                detail.push_str(&checked);
-            }
-        }
-        // A waived acceptance is never drawn as passed.
-        let mark = match waiver {
-            Some(_) => icon("waived")
-                .size(px(12.))
-                .text_color(p.yellow)
-                .into_any_element(),
-            None => div()
-                .size(px(6.))
-                .mr(px(3.))
-                .rounded_full()
-                .bg(ticket_state_color(ticket.state, p))
-                .into_any_element(),
-        };
-        self.row(
-            SharedString::from(format!("ticket-{}", ticket.id)),
-            1,
-            false,
-            p,
-        )
-        .tooltip(move |w, c| Tooltip::new(detail.clone()).build(w, c))
-        .on_click(cx.listener(move |_, _, _, c| {
-            c.emit(Intent::Select(coordinator.clone()));
-            c.emit(Intent::ShowPanel(Panel::Team));
-        }))
-        // The icon and mark stay beside the first line.
-        .when(two_lines, |row| row.items_start().pt(px(6.)).pb(px(5.)))
-        .child(
-            div()
-                .flex_none()
-                .when(two_lines, |d| d.mt(px(1.)))
-                .child(icon("task").size(px(14.))),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_ellipsis().text_color(p.text).child(label))
-                .children(ticket.pull_request.as_ref().map(|pr| {
-                    let keeper = self
-                        .shared
-                        .snapshot()
-                        .and_then(|s| s.keeper_parts.get(&ticket.id));
-                    let keeper = ticket.try_part().or(keeper.copied());
-                    let comments = ticket.waiting_comments();
-                    pr_line(pr, ticket.unreviewed(), keeper, comments, p)
-                }))
-                .children(waiting.map(|waiting| {
-                    div()
-                        .text_size(px(font::CAPTION))
-                        .text_color(p.yellow)
-                        .text_ellipsis()
-                        .child(waiting)
-                })),
-        )
-        .child(
-            div()
-                .flex_none()
-                .when(two_lines, |d| d.mt(px(5.)))
-                .child(mark),
-        )
+    fn agent_counts(&self, coordinator: &Session) -> tree::AgentCounts {
+        let index = self.shared.index.as_deref();
+        index.map_or_else(Default::default, |index| {
+            tree::agent_counts(&self.shared.progress, index, coordinator)
+        })
     }
 }
 
@@ -1809,50 +1599,40 @@ fn track(progress: Option<(Option<u16>, BarState)>, p: Palette) -> Div {
     progress_bar(position, state, 3., p)
 }
 
-/// A ticket row's second line: its PR, muted except for passed or failed checks, a conflict,
-/// a merge and commits no review has checked, and the keeper's part at its end.
-fn pr_line(
-    pr: &PullRequest,
-    unreviewed: Option<&Unreviewed>,
-    keeper: Option<KeeperPart>,
-    comments: Option<&KeeperComments>,
-    p: Palette,
-) -> Div {
-    let glyph = if pr.state == PrState::Merged {
-        "git-merge"
-    } else {
-        "git-pull-request"
-    };
-    let mut line = div()
-        .flex()
-        .items_center()
-        .gap(px(5.))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_size(px(font::CAPTION))
-        .text_color(p.subtle)
-        .child(icon(glyph).size(px(11.)));
-    for (i, part) in wording::pr_line(pr, unreviewed, keeper, comments, now())
-        .into_iter()
-        .enumerate()
-    {
-        if i > 0 {
-            line = line.child(div().text_color(p.subtle.opacity(0.6)).child("·"));
-        }
-        let color = match part.tone {
-            wording::Tone::Muted => p.subtle,
-            wording::Tone::Good => p.green,
-            wording::Tone::Bad => p.red,
-            wording::Tone::Merged => p.focus,
-            wording::Tone::Warn => p.yellow,
-            wording::Tone::Busy => p.focus,
-        };
-        line = line.child(div().text_color(color).child(part.text));
-    }
-    line
+/// "1 agent stuck", "3 agents stuck"; none when no agent is.
+fn stuck_label(stuck: usize) -> Option<String> {
+    (stuck > 0).then(|| format!("{} stuck", counted(stuck, "agent")))
 }
 
-/// An idle coordinator shows its team's work, so a collapsed or quiet parent never hides it.
+/// Yellow, like needs-you: a stuck agent is the one other case the human hears about.
+fn stuck_pill(stuck: usize, p: Palette) -> Div {
+    pill(stuck_label(stuck).unwrap_or_default(), p.yellow)
+}
+
+/// A project row's last line: how many of its agents are working, and how many are stuck.
+/// None when neither has anything to say.
+fn agents_line(agents: &tree::AgentCounts, p: Palette) -> Option<Div> {
+    let working =
+        (agents.working > 0).then(|| format!("{} working", counted(agents.working, "agent")));
+    if working.is_none() && agents.stuck == 0 {
+        return None;
+    }
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            // Under the label, clear of the icon.
+            .pl(px(22.))
+            .text_size(px(font::CAPTION))
+            .text_color(p.subtle)
+            .children(working)
+            .when(agents.stuck > 0, |d| d.child(stuck_pill(agents.stuck, p))),
+    )
+}
+
+/// An idle coordinator shows its team's work, so a quiet parent never hides it.
 pub(super) fn shown_status(session: &Session, index: &WorkspaceIndex) -> Status {
     let idle = matches!(session.status, Status::Ready | Status::Done);
     if idle && index.team_working(&session.id) {

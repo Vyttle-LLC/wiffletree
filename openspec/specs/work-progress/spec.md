@@ -242,29 +242,6 @@ The selected conversation SHALL show one progress strip pinned directly under it
 - **WHEN** an agent's plan changes while the human reads earlier messages
 - **THEN** the strip updates in place and the transcript's scroll position does not change
 
-### Requirement: Progress in the sidebar tree
-The project row in the sidebar tree SHALL show a thin bar beneath its label and the project's percentage beside it, and an archived project's row SHALL show neither bar nor percentage. Ticket rows and agent rows SHALL show neither a bar nor a progress figure, and SHALL be single-line rows whose height does not depend on progress; a ticket row with a pull request keeps its second line for the pull request. A project with nothing to show SHALL keep an empty track and no figure, so the project row's height never depends on its progress. Notes that are not progress, such as an agent's "held" or "queued input" and its questions figure, SHALL stay on the agent row.
-
-#### Scenario: Rows under one project
-- **WHEN** a project at 56% has a ticket Verifying at 70% with a finished implementer, a tester at 3 of 5 and a reviewer working without a plan
-- **THEN** the project row shows "56%" and its bar, and the ticket row and the three agent rows show no figure and no bar
-
-#### Scenario: Blocked ticket row
-- **WHEN** a ticket is blocked at 26%
-- **THEN** its sidebar row shows no "blocked" figure and no bar, and the strip and Agents panel still show its blocked state
-
-#### Scenario: Project with nothing to show
-- **WHEN** a project has no tickets and no progress to report
-- **THEN** its row keeps an empty track and no figure, at the same height as other projects' rows
-
-#### Scenario: Idle agent with no plan
-- **WHEN** an agent is ready and its latest run had no plan
-- **THEN** its row shows no figure and no track, at the same height as every other agent's and ticket's row
-
-#### Scenario: Working agent and open ticket stay one line
-- **WHEN** an agent is working at 3 of 5, or a ticket without a pull request is at 70%
-- **THEN** its row has the same single-line height as an idle agent's, with no figure and no track line
-
 ### Requirement: Progress states
 Every bar SHALL be in exactly one of four states: in progress, drawn in the focus color; indeterminate, drawn as a striped track with no percentage; blocked, drawn in red at the position it had; or finished, drawn in green at 100%. An idle bar SHALL be drawn as in progress. When a bar would be both blocked and indeterminate, it SHALL be blocked. No bar SHALL show a percentage that these rules do not define.
 
@@ -312,7 +289,7 @@ The host SHALL keep progress current whenever a plan step, a session's status, a
 - **THEN** the agent shows an empty track and no figure
 
 ### Requirement: Agents panel
-The header of every conversation of a project, its coordinator's and each of its agents', SHALL carry an Agents toggle labelled "Agents · N working", where N is the number of agents the panel lists that are in a turn, or "Agents" when none is. Activating it SHALL open the Agents panel beside the conversation, without replacing it, and activating it again SHALL close it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents, each once. Each agent row SHALL show its role and focus, its figure, its current step while it works, its model, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and an agent listed under a ticket is working. Below the tickets, a "Previous agents (N)" section, folded until the human unfolds it, SHALL list every other agent the sidebar tree lists under the project's coordinator, archived or not: archived agents, such as finished verifiers of any cycle, agents of accepted or closed tickets, workers created before tickets existed, and retired repository coordinators. An archived project has no progress, so every agent it has SHALL be listed there, and its conversations SHALL still carry the toggle. Each previous agent's row SHALL show its role and focus and the ticket it worked on, or, without a ticket, its name, with "(retired)" after a retired repository coordinator's, and its figure while the board still lists it, such as "passed". Selecting any agent row SHALL select that agent's conversation, read-only when the agent is archived, and SHALL leave the panel open, still listing the whole project, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
+The header of every conversation of a project, its coordinator's and each of its agents', SHALL carry an Agents toggle labelled "Agents · N working", where N is the number of agents the panel lists that are in a turn, or "Agents" when none is. Activating it SHALL open the Agents panel beside the conversation, without replacing it, and activating it again SHALL close it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents, each once. Each agent row SHALL show its role and focus, its figure, its current step while it works, its model, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and an agent listed under a ticket is working. Below the tickets, a "Previous agents (N)" section, folded until the human unfolds it, SHALL list every other agent of the project's coordinator, archived or not: archived agents, such as finished verifiers of any cycle, agents of accepted or closed tickets, workers created before tickets existed, and retired repository coordinators. An archived project has no progress, so every agent it has SHALL be listed there, and its conversations SHALL still carry the toggle. Each previous agent's row SHALL show its role and focus and the ticket it worked on, or, without a ticket, its name, with "(retired)" after a retired repository coordinator's, and its figure while the board still lists it, such as "passed". Selecting any agent row SHALL select that agent's conversation, read-only when the agent is archived, and SHALL leave the panel open, still listing the whole project, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
 
 #### Scenario: Open the panel
 - **WHEN** the human activates "Agents · 2 working" in the coordinator's header
@@ -394,3 +371,14 @@ The header of any conversation of a project other than its coordinator's SHALL s
 #### Scenario: Back from a reviewer
 - **WHEN** the human has a ticket's correctness reviewer selected and activates "← Calls" in its header
 - **THEN** the project's coordinator is selected
+
+### Requirement: Progress on the project row
+The project row in the sidebar tree SHALL show a thin bar beneath its label and the project's percentage beside it, and an archived project's row SHALL show neither bar nor percentage. A project with nothing to show SHALL keep an empty track and no figure, so the project row's height never depends on its progress. The tree SHALL show no progress for tickets or agents, which it does not list; the strip and the Agents panel show theirs.
+
+#### Scenario: A project row
+- **WHEN** a project at 56% has a ticket Verifying at 70% with a finished implementer, a tester at 3 of 5 and a reviewer working without a plan
+- **THEN** the project row shows "56%" and its bar, and the ticket and its agents show their progress in the Agents panel
+
+#### Scenario: Project with nothing to show
+- **WHEN** a project has no tickets and no progress to report
+- **THEN** its row keeps an empty track and no figure, at the same height as other projects' rows
