@@ -269,13 +269,15 @@ fn waiver_block(ticket: &Ticket, reason: &str, p: Palette) -> Div {
         .filter(|e| e.status == EntryStatus::Open)
         .map(|e| e.id.as_str())
         .collect();
+    // A ticket published under a waiver is still open.
+    let at = match ticket.state {
+        TicketState::Accepted => " at acceptance",
+        _ => "",
+    };
     let left = if open.is_empty() {
         "Verdict stays blocked".to_owned()
     } else {
-        format!(
-            "Open at acceptance: {} · verdict stays blocked",
-            open.join(", ")
-        )
+        format!("Open{at}: {} · verdict stays blocked", open.join(", "))
     };
     div()
         .border_l_2()

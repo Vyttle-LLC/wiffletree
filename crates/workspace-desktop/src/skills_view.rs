@@ -2447,8 +2447,8 @@ mod tests {
         assert_eq!(
             tabs,
             [
-                "Contract v9",
-                "Coordinator v3",
+                "Contract v10",
+                "Coordinator v4",
                 "Implementer v2",
                 "Verifier v1",
                 "PR keeper v1"

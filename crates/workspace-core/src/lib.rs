@@ -1567,8 +1567,8 @@ pub struct Ticket {
     /// Every finding verifiers recorded, across all cycles, with the coordinator's decisions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ledger: Vec<LedgerEntry>,
-    /// Why the coordinator accepted the ticket after a blocked cycle, or with commits no review
-    /// checked once it had used every full review.
+    /// Why the coordinator accepted or published the ticket after a blocked cycle, or with
+    /// commits no review checked once it had used every full review. A new cycle clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiver: Option<String>,
     /// The commits no review checked that the waiver named, past the verified commit.
@@ -1818,15 +1818,16 @@ pub struct PublishRequest {
     /// The Inbox item the step waits on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
-    /// The human approved this commit's steps on one item after a blocked review, or a waiver of
-    /// unreviewed commits, in an allowed owner's repository.
+    /// The human approved this commit's steps on one item after a blocked review in an allowed
+    /// owner's repository.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked_review_approved: bool,
     /// How many of this request's Inbox items the human approved.
     #[serde(default)]
     pub approvals: u8,
-    /// The coordinator's waiver for commits past the verified one, once the ticket had used
-    /// every full review. Such a request always waits for the human.
+    /// The coordinator's waiver: of a blocked review's open findings, or of commits past the
+    /// verified one once the ticket had used every full review. In an allowed owner's
+    /// repository such a request runs without asking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waived: Option<CommitWaiver>,
     /// Started by the host for the PR keeper: it never asks, and its result goes to the
@@ -1834,7 +1835,8 @@ pub struct PublishRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keeper: bool,
 }
-/// A waiver for commits no review checked: its one-line reason and the commits it names.
+/// The coordinator's waiver: its one-line reason and the commits no review checked that it
+/// names, none when it waives only a blocked review's open findings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitWaiver {
     pub reason: String,
@@ -1887,6 +1889,21 @@ impl Ticket {
         self.verification
             .as_ref()
             .filter(|v| v.outcome == VerificationOutcome::Running)
+    }
+    /// The latest cycle when a publish may stand on it without the human: it passed, or it
+    /// ended blocked and the coordinator waived it.
+    pub fn standing_review(&self) -> Option<&Verification> {
+        self.verification.as_ref().filter(|v| match v.outcome {
+            VerificationOutcome::Passed => true,
+            VerificationOutcome::Blocked => self.waiver.is_some(),
+            VerificationOutcome::Running => false,
+        })
+    }
+    /// The commit a publish stands on: the last commit a waiver at the cap covered, past the
+    /// verified one, or else the verified commit.
+    pub fn standing_commit(&self) -> Option<&str> {
+        (self.waived_commits.last().map(String::as_str))
+            .or_else(|| self.verification.as_ref()?.verified_commit())
     }
     /// When the running cycle of this open ticket was queued, while it waits for a slot.
     pub fn queued_since(&self) -> Option<i64> {

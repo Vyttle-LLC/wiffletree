@@ -562,6 +562,9 @@ impl Host {
                 });
             }
             ticket.previous_cycles.extend(ticket.verification.take());
+            // A waiver covered the cycle it was given on; the new one is judged anew.
+            ticket.waiver = None;
+            ticket.waived_commits.clear();
             match review.clone() {
                 Some(review) => ticket.keeper.get_or_insert_default().reviews.push(review),
                 // The review now judges the work done in answer to the waiting comments.
@@ -1231,9 +1234,9 @@ impl Host {
             }
             if !blocked {
                 actions.push(if review_left {
-                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings"
+                    "once no finding is untriaged, accept_ticket or publish_ticket with a waived reason naming the open findings"
                 } else {
-                    "once no finding is untriaged, accept with accept_ticket's waived reason naming the open findings and, by short SHA, any commit no review checked; give publish_ticket waived only for such commits"
+                    "once no finding is untriaged, accept_ticket or publish_ticket with a waived reason naming the open findings and, by short SHA, any commit no review checked"
                 });
             }
             actions.push("close the ticket");

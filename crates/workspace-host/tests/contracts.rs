@@ -154,8 +154,9 @@ fn publishing_is_one_tool_and_no_tool_merges_approves_closes_or_comments() {
 
 #[test]
 fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words() {
-    // The paragraph the human confirmed on October 13, 2026.
-    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the review passed and the human allowed the repository's owner, which workspace_context shows, and otherwise only after the human approves each step in their inbox. A review that ended blocked always needs that approval. Write the pull request's title and description by the repository's and the human's own PR rules. Only the human merges.";
+    // The paragraph the human confirmed on October 13, 2026, with the coordinator's waiver of a
+    // blocked review standing since October 29.
+    let confirmed = "Do not deploy, publish, change credentials, touch production, or alter main, the default branch or another shared branch without explicit human authorization. Nothing leaves this machine from your shell: never run git push, and never create, edit, comment on, review, close or merge a pull request yourself. To push a ticket's branch and open or update its pull request, call publish_ticket once the ticket's review has ended. The workspace runs the push itself: without asking when the human allowed the repository's owner, which workspace_context shows, and the review passed or the coordinator waived a blocked review; otherwise only after the human approves each step in their inbox. Write the pull request's title and description by the repository's and the human's own PR rules. Only the human merges.";
     for role in Role::ALL {
         assert!(core(role).contains(confirmed), "{role:?}");
         // With every skill at stock no skill for pull requests is named, and nobody but the
@@ -193,7 +194,7 @@ fn every_roles_instructions_state_the_publishing_rules_in_wiffletrees_own_words(
         "publish it with publish_ticket after its cycle ends, or have its implementer do it"
     ));
     assert!(coordinator.contains(
-        "after a blocked cycle, publish only where you would otherwise accept with a waiver"
+        "After a blocked cycle, publish it yourself with waived, under the same rules as accepting with a waiver"
     ));
     let implementer = core(Role::Implementer);
     assert!(implementer.contains("When asked to publish the ticket, write the pull request's title and description by the repository's and the human's PR rules and call publish_ticket."));
@@ -250,10 +251,10 @@ fn bundled_instructions_describe_the_flat_hierarchy() {
         }
     }
     let coordinator = core(Role::ProjectOrchestrator);
-    assert!(coordinator.contains("Project coordinator core — v3"));
+    assert!(coordinator.contains("Project coordinator core — v4"));
     for role in Role::ALL {
         let core = core(role);
-        assert!(core.contains("Wiffletree communication contract — v9"));
+        assert!(core.contains("Wiffletree communication contract — v10"));
         // The core outranks the skill that follows it.
         assert!(core.contains(
             "where it disagrees with this contract, the contract's tools and rules still apply"

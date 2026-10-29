@@ -11,19 +11,16 @@ use crate::{
 pub enum PublishAsk {
     /// The repository does not publish without asking, so each step asks.
     NotAllowed,
-    /// The review ended blocked in an allowed owner's repository: one approval covers the
-    /// commit's push and pull request.
+    /// The review ended blocked in an allowed owner's repository and the coordinator did not
+    /// waive it: one approval covers the commit's push and pull request.
     BlockedReview,
-    /// The coordinator waived commits no review checked: one approval covers the commit's push
-    /// and pull request, even in an allowed owner's repository after a passed review.
-    UnreviewedCommits,
     /// The ticket's earlier pull request was closed or merged, so opening another asks.
     EndedPullRequest,
 }
 
 /// Whether the request's next step must wait for the human, and why. `None` runs it without
-/// asking: the repository publishes without asking, the review passed and no unreviewed commits
-/// are waived, or the human already approved this commit's steps.
+/// asking: the repository publishes without asking, and the review passed, the coordinator
+/// waived it, or the human already approved this commit's steps.
 pub fn publish_ask(
     ticket: &Ticket,
     request: &PublishRequest,
@@ -38,9 +35,7 @@ pub fn publish_ask(
         Some(PublishAsk::NotAllowed)
     } else if request.blocked_review_approved {
         None
-    } else if request.waived.is_some() {
-        Some(PublishAsk::UnreviewedCommits)
-    } else if !passed {
+    } else if !passed && request.waived.is_none() {
         Some(PublishAsk::BlockedReview)
     } else if request.step == PublishStep::OpenPullRequest && ticket.ended_pull_request().is_some()
     {
@@ -149,10 +144,7 @@ pub fn publish_card(
         (_, Some(owner)) => format!("{owner} is an allowed owner"),
     };
     let open_pr = ticket.open_pull_request();
-    let covers_commit = matches!(
-        ask,
-        PublishAsk::BlockedReview | PublishAsk::UnreviewedCommits
-    );
+    let covers_commit = ask == PublishAsk::BlockedReview;
     let mut rows = vec![(
         "Repository",
         format!("{} · {visibility} · {rule}", request.repository),
@@ -209,7 +201,9 @@ pub fn publish_card(
     }
     if let Some(waived) = &request.waived {
         let commits: Vec<&str> = waived.commits.iter().map(|c| short_sha(c)).collect();
-        rows.push(("Unreviewed commits", commits.join(", ")));
+        if !commits.is_empty() {
+            rows.push(("Unreviewed commits", commits.join(", ")));
+        }
         rows.push(("Waiver", waived.reason.clone()));
     }
     if let Some(notice) = ended_pull_request_notice(ticket) {
@@ -220,11 +214,6 @@ pub fn publish_card(
         (PublishAsk::BlockedReview, _) => (
             "Publish this ticket although its review ended blocked?".to_owned(),
             "Wiffletree asks because the review did not pass, even though the owner is allowed. Approving covers this commit only.".to_owned(),
-            "Publish anyway",
-        ),
-        (PublishAsk::UnreviewedCommits, _) => (
-            "Publish this ticket with commits no review checked?".to_owned(),
-            "Wiffletree asks because the coordinator waived review of these commits after the ticket used all its full reviews, even if the owner is allowed. Approving covers this commit only.".to_owned(),
             "Publish anyway",
         ),
         (_, PublishStep::Push) => (

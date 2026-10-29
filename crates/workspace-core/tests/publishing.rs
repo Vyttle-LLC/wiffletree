@@ -600,6 +600,18 @@ fn a_step_waits_only_where_the_rules_require() {
     ticket.publishing.as_mut().unwrap().blocked_review_approved = true;
     assert_eq!(ask(&ticket, &allowed), None);
     assert_eq!(ask(&ticket, &[]), Some(PublishAsk::NotAllowed));
+    // The coordinator's waiver stands where the owner is allowed, but not before another
+    // pull request after an ended one.
+    ticket.publishing.as_mut().unwrap().blocked_review_approved = false;
+    ticket.publishing.as_mut().unwrap().waived = Some(CommitWaiver {
+        reason: "F1 is acceptable".into(),
+        commits: vec![],
+    });
+    assert_eq!(ask(&ticket, &allowed), None);
+    assert_eq!(ask(&ticket, &[]), Some(PublishAsk::NotAllowed));
+    ticket.pull_request = Some(pull_request(45, "merged"));
+    ticket.publishing.as_mut().unwrap().step = PublishStep::OpenPullRequest;
+    assert_eq!(ask(&ticket, &allowed), Some(PublishAsk::EndedPullRequest));
     // A closed or merged pull request asks before another is opened, and only then.
     let (mut ticket, _) = waiting_ticket("push", "passed");
     ticket.pull_request = Some(pull_request(45, "closed"));

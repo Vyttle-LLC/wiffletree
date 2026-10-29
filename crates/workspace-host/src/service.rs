@@ -1130,6 +1130,7 @@ impl Actor {
                 ticket,
                 args["title"].as_str(),
                 args["body"].as_str(),
+                args["waived"].as_str().is_some(),
             )?;
         }
         // A new request brings its own waiver; a waiting or running one keeps the one it froze.

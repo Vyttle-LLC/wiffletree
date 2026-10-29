@@ -1947,9 +1947,9 @@ fn the_last_cycle_blocked_offers_no_further_verification() {
             && body.contains("close the ticket")
             && body.contains("ask the human, only for a product, security or data-loss decision")
     );
-    // A publish waiver covers only unreviewed commits, never the findings alone.
+    // A publish waiver covers the open findings as an acceptance waiver does.
     assert!(
-        body.contains("give publish_ticket waived only for such commits"),
+        body.contains("accept_ticket or publish_ticket with a waived reason naming the open findings and, by short SHA, any commit no review checked"),
         "{body}"
     );
     assert!(!body.contains("verify_ticket"), "{body}");

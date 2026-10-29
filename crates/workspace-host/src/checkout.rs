@@ -141,9 +141,7 @@ impl KeeperPoll {
                 if ticket.publishing.is_none()
                     && head == pr.head
                     && ticket
-                        .verification
-                        .as_ref()
-                        .filter(|v| v.outcome == VerificationOutcome::Passed)
+                        .standing_review()
                         .and_then(Verification::verified_commit)
                         .is_some_and(|verified| {
                             live::verified_head(ticket, verified, || Ok(ticket_base.clone()), None)
@@ -611,6 +609,7 @@ impl Publication {
         let repository = host.ticket_repository(&ticket)?;
         let base = host.ticket_base(&ticket)?;
         let waived = waived.map(one_line_reason).transpose()?;
+        let waived = waived.or(ticket.waiver.as_deref());
         Ok(Self {
             waived: host.unreviewed_waiver(&ticket, waived).map(Into::into),
             ticket,
@@ -964,9 +963,7 @@ impl KeeperCheckout {
     pub(crate) fn run(&self, git: &publish::GitTool) -> KeeperResult {
         let may_change = self
             .ticket
-            .verification
-            .as_ref()
-            .filter(|v| v.outcome == VerificationOutcome::Passed)
+            .standing_review()
             .and_then(Verification::verified_commit)
             .zip(self.ticket.open_pull_request())
             .is_some_and(|(verified, pr)| {

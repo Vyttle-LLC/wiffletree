@@ -86,7 +86,8 @@ pub(crate) struct Job {
     pub base_commit: String,
     /// The PR's head, which is the worktree's HEAD.
     pub head: String,
-    /// The commit the ticket's latest cycle verified.
+    /// The commit the ticket's latest cycle verified, or the last one a waiver at the cap
+    /// covered past it.
     pub verified: String,
     pub checkout: PathBuf,
     /// The repository's checks, run on a rebase whose patch changed when the keeper could
@@ -751,8 +752,9 @@ impl Host {
         Ok(())
     }
     /// Whether the keeper may change a kept ticket's branch: exactly when `publish_ticket` would
-    /// push it without asking. The latest cycle passed, the worktree's HEAD is the verified
-    /// commit or patch-equivalent to it and is the PR's head, and no publish request exists.
+    /// push it without asking. The latest cycle passed or the coordinator waived it, the
+    /// worktree's HEAD is the verified commit or patch-equivalent to it and is the PR's head,
+    /// and no publish request exists.
     pub(crate) fn may_change_branch(&self, ticket: &Ticket) -> bool {
         if let Some(may) = self
             .completed_move
@@ -761,12 +763,10 @@ impl Host {
         {
             return may;
         }
-        let passed = ticket
-            .verification
-            .as_ref()
-            .filter(|v| v.outcome == VerificationOutcome::Passed);
         let (Some(verified), Some(pr)) = (
-            passed.and_then(Verification::verified_commit),
+            ticket
+                .standing_review()
+                .and_then(Verification::verified_commit),
             ticket.open_pull_request(),
         ) else {
             return false;
@@ -1205,11 +1205,8 @@ impl Host {
         if at < quiet_at {
             return Ok(Some(KeeperPart::RebaseAt(quiet_at)));
         }
-        let verified = ticket
-            .verification
-            .as_ref()
-            .and_then(|v| v.verified_commit());
-        let verified = verified.context("No verified commit")?;
+        // A rebase keeps the review when its patch is the reviewed commit's, or the waived one's.
+        let verified = ticket.standing_commit().context("No verified commit")?;
         let checks = repository.checks.clone().filter(|_| {
             settings.keeper.conflicts
                 && self
