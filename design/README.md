@@ -18,6 +18,8 @@ Remote control has its own static study, [remote-hosts/ui/mockups.html](../opens
 
 Shared issues have their own static study, [shared-issues/ui/mockups.html](../openspec/changes/shared-issues/ui/mockups.html), with no script: the Issues page as a list and a board, one issue with the issue assistant beside it, New issue with its warning, the Inbox with an issue paused by a conflict, and setting up the tracker repository with what it holds on disk. The human approved it on October 29, 2026. Its people, repositories and issues are invented Celadon samples. `openspec/changes/shared-issues` specifies what the native app will implement.
 
+The assistant, Spaces, scheduled jobs and Boards have a proposed static study, [assistant-spaces-jobs-boards/ui/mockups.html](../openspec/changes/assistant-spaces-jobs-boards/ui/mockups.html), with no script: the assistant with thread tabs in light and dark, the router's inline "Is this Sage or Personal?" question, a job recipe to confirm, the Boards library, an open HTML board and a Space's settings page. It awaits the human's approval. `openspec/changes/assistant-spaces-jobs-boards` specifies the proposal.
+
 **Wiffletree** is the product name, selected October 5, 2026; **Tidal** remains the selected brand color palette as of October 2, 2026. The current study uses Wiffletree branding and paired Tidal light and dark modes. Celadon remains its sample project; it is no longer the product's theme family. See [Brand colors](brand.md) for the palette, semantic roles, and usage rules. The [brand kit](brand/README.md) pairs the selected red Interlock open-joint symbol with the original two-tone wordmark; [preview both appearances](brand/png/preview.png).
 
 ## Prototype boundaries
@@ -32,6 +34,7 @@ Shared issues have their own static study, [shared-issues/ui/mockups.html](../op
 - The project order and groups study is static: its project names, figures, states and drag positions are drawn by hand, and nothing in it moves.
 - The remote control study is static: its hosts, devices, codes, states and figures are drawn by hand, and nothing in it connects, pairs or reaches the network.
 - The shared issues study is static: its issues, people, states and sync times are drawn by hand, and nothing in it reads or writes a repository.
+- The assistant, Spaces, jobs and Boards study is static: its Spaces, threads, jobs, outputs and figures are drawn by hand, its dashboard is drawn with CSS, and nothing in it sends a message, asks a router, schedules a job or touches a repository.
 - These are HTML studies, not the GPUI implementation or evidence of native performance.
 
 ## Earlier studies
