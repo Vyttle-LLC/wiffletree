@@ -266,6 +266,10 @@ fn reads_are_exactly_the_commands_that_change_nothing() {
             repository_id: text(),
             checks: None,
         },
+        Command::SetRepositoryBase {
+            repository_id: text(),
+            base: text(),
+        },
         Command::RemoveLeftoverWorktrees { ticket_ids: vec![] },
         Command::StopProcesses {
             session_id: text(),

@@ -1765,6 +1765,10 @@ impl Host {
                 repository_id,
                 checks,
             } => serde_json::to_value(self.set_repository_checks(&repository_id, checks)?)?,
+            Command::SetRepositoryBase {
+                repository_id,
+                base,
+            } => serde_json::to_value(self.set_repository_base(&repository_id, &base)?)?,
             Command::LeftoverWorktrees => serde_json::to_value(self.leftover_worktrees()?)?,
             Command::RemoveLeftoverWorktrees { ticket_ids } => {
                 serde_json::to_value(self.remove_leftover_worktrees(&ticket_ids)?)?

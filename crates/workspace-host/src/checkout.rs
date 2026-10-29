@@ -723,7 +723,8 @@ impl Reservations {
             Command::SetProjectRepositories { project_id, .. }
             | Command::SetLive { project_id, .. } => self.blocks_project(host, project_id),
             Command::RemoveRepository { repository_id }
-            | Command::SetRepositoryChecks { repository_id, .. } => self.held.iter().any(|id| {
+            | Command::SetRepositoryChecks { repository_id, .. }
+            | Command::SetRepositoryBase { repository_id, .. } => self.held.iter().any(|id| {
                 host.ticket(id)
                     .is_ok_and(|t| t.repository_id == *repository_id)
             }),
@@ -1393,6 +1394,22 @@ mod tests {
             fs::read_to_string(f.worktree.join("untracked")).unwrap(),
             "keep me"
         );
+    }
+
+    #[test]
+    fn a_base_change_waits_only_for_a_held_ticket_in_its_repository() {
+        let (mut f, _remote, _) = keeper::tests::waiting();
+        let repository = f.ticket().repository_id;
+        let set_base = |repository_id: &str| Command::SetRepositoryBase {
+            repository_id: repository_id.into(),
+            base: "origin/main".into(),
+        };
+        let reservations = &f.host.checkout_reservations;
+        assert!(!reservations.blocks_command(&f.host, &set_base(&repository)));
+        f.host.checkout_reservations.acquire(&f.ticket);
+        let reservations = &f.host.checkout_reservations;
+        assert!(reservations.blocks_command(&f.host, &set_base(&repository)));
+        assert!(!reservations.blocks_command(&f.host, &set_base("another-repository")));
     }
 
     #[test]

@@ -228,6 +228,7 @@ Every `Command`, by `type`. A read changes nothing in the store, so no event fol
 | `skill_merge_review` | `skill: Skill`, `entry: String` | read | Read-only: the rewrite before and after the merge `entry` names, line by line, each change with where it came from. |
 | `skill_stock_changes` | `skill: Skill` | read | Read-only: what changed, line by line, from a rewrite's base to this release's stock text. |
 | `set_repository_checks` | `repository_id: String`, `checks: Option<RepositoryChecks>` | change | Saves or, with none, removes a repository's checks command; answers with the `Repository`. Only the human's client sends it. |
+| `set_repository_base` | `repository_id: String`, `base: String` | change | Changes a repository's base in place once it resolves to a commit; answers with the `Repository`. Only the human's client sends it. |
 | `leftover_worktrees` | — | read | Read-only listing of leftover worktrees, answered with `Vec<LeftoverWorktree>`. |
 | `remove_leftover_worktrees` | `ticket_ids: Vec<String>` | change | Removes the worktrees of the tickets the human selected from the listing, re-checking each first; answered with `Vec<LeftoverRemoval>`. |
 | `processes` | `session_id: String` | read | What the agent has left running, or for a coordinator every agent of its project; answered with `Vec<AgentProcesses>`. Groups that have exited are forgotten. |
