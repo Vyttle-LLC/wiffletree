@@ -62,7 +62,6 @@ fn a_coordinator_creates_a_project_that_starts_on_its_labelled_brief() {
             .is_some()
     );
 
-    // The creator is recorded on the project and in its project_created event.
     assert_eq!(
         project.created_by,
         Some(ProjectCreator {
@@ -79,7 +78,6 @@ fn a_coordinator_creates_a_project_that_starts_on_its_labelled_brief() {
     assert!(created.detail.contains(&creator.id), "{}", created.detail);
     assert!(created.detail.contains(&creator.project_id));
 
-    // The brief is the coordinator's first input, a turn's input in a live project.
     let messages = host.messages(&coordinator.id, None, 100).unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].receipt, Receipt::Queued);
@@ -113,6 +111,63 @@ fn the_brief_names_its_source_and_is_never_the_humans() {
     ] {
         assert!(brief.body.contains(stated), "{stated}: {}", brief.body);
     }
+}
+
+#[test]
+fn a_brief_may_fill_the_message_limit_left_after_its_source_line() {
+    let (home, mut host, creator, _) = fixture();
+    let first = create(&mut host, &creator.id, json!({"name": "One", "brief": "x"})).unwrap();
+    let delivered = host
+        .messages(&coordinator_of(&host, &first.id).id, None, 1)
+        .unwrap()
+        .remove(0);
+    let allowed = MAX_TEXT_BYTES - (delivered.body.len() - 1);
+
+    let count = host_projects(&home);
+    let refused = create(
+        &mut host,
+        &creator.id,
+        json!({"name": "Two", "brief": "x".repeat(allowed + 1)}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("Brief too long"), "{refused}");
+    assert!(refused.contains(&format!("at most {allowed}")), "{refused}");
+    assert_eq!(host_projects(&home), count);
+
+    create(
+        &mut host,
+        &creator.id,
+        json!({"name": "Two", "brief": "x".repeat(allowed)}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_briefed_coordinator_creates_projects_only_once_the_human_has_messaged_it() {
+    let (home, mut host, creator, _) = fixture();
+    let project = create(
+        &mut host,
+        &creator.id,
+        json!({"name": "Billing", "brief": "Do"}),
+    )
+    .unwrap();
+    let briefed = coordinator_of(&host, &project.id);
+    let args = json!({"name": "Chained", "brief": "Do"});
+
+    let count = host_projects(&home);
+    let refused = create(&mut host, &briefed.id, args.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("once the human has messaged you"),
+        "{refused}"
+    );
+    assert_eq!(host_projects(&home), count);
+
+    host.send("human-1", None, &briefed.id, "Go ahead").unwrap();
+    let chained = create(&mut host, &briefed.id, args).unwrap();
+    assert_eq!(chained.created_by.map(|by| by.session_id), Some(briefed.id));
 }
 
 #[test]
@@ -231,7 +286,6 @@ fn refusals_create_nothing() {
     }
     assert_eq!(projects(), count);
 
-    // Before the model setup is saved.
     let db = rusqlite::Connection::open(home.path().join("home/workspace.sqlite3")).unwrap();
     db.execute("DELETE FROM model_selection", []).unwrap();
     let unsaved = create(
