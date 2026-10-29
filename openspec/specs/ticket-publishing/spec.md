@@ -44,7 +44,7 @@ The host SHALL offer agents one tool, `publish_ticket`, taking a ticket id, an o
 - **THEN** it is refused and nothing is sent
 
 ### Requirement: Checks before anything leaves the machine
-Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase, or, once the ticket has started as many full reviews as the cycle cap allows, a later one whose commits since the checked one the call's `waived` reason names, each by a short SHA of at least 7 characters; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. The host SHALL also refuse while the ticket records a head that is not reviewed, as after the PR keeper adopted commits Wiffletree did not make (see pr-keeper), whatever the HEAD's patch id; the refusal SHALL say that the branch has commits no review has checked. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. A waiver that leaves a commit out SHALL be refused with that commit's short SHA, and a waiver when no commit needs one SHALL be refused. The host SHALL make the same checks again, with the same waived commits, for the same commit, when the human approves a step and immediately before it sends anything. A request SHALL record the verification cycle it was decided on and how that cycle ended. If the ticket's latest cycle is no longer that one at either of those moments, the host SHALL send nothing, SHALL end the request and SHALL tell the caller to publish again, so that the later cycle decides whether the human is asked.
+Before pushing or asking the human, the host SHALL refuse a publish unless all of these hold: the ticket is open; the ticket has a verification cycle and none is running; the worktree's HEAD is the commit that cycle's last round checked, or a patch-equivalent one such as a squash or a clean rebase, or, once the ticket has started as many full reviews as the cycle cap allows, a later one whose commits since the checked one the call's `waived` reason names, each by a short SHA of at least 7 characters, or one patch-equivalent to the last commit a waiver recorded on the ticket covered, as after the PR keeper's rebase; the worktree is on the ticket's branch; and the repository's `origin` is on `github.com`, has exactly one push URL, has a fetch URL naming the same repository, still names the repository the host recorded for it, and is the remote its base tracks. The host SHALL also refuse while the ticket records a head that is not reviewed, as after the PR keeper adopted commits Wiffletree did not make (see pr-keeper), whatever the HEAD's patch id; the refusal SHALL say that the branch has commits no review has checked. A refusal SHALL say why and SHALL send nothing. No answer from the human SHALL override these checks. A waiver that leaves a commit out SHALL be refused with that commit's short SHA, and after a passed cycle a waiver when no commit needs one SHALL be refused; after a blocked cycle the waiver covers its open findings (see "The coordinator's waiver publishes without asking"). The host SHALL make the same checks again, with the same waived commits, for the same commit, when the human approves a step and immediately before it sends anything. A request SHALL record the verification cycle it was decided on and how that cycle ended. If the ticket's latest cycle is no longer that one at either of those moments, the host SHALL send nothing, SHALL end the request and SHALL tell the caller to publish again, so that the later cycle decides whether the human is asked.
 
 #### Scenario: Never reviewed
 - **WHEN** `publish_ticket` is called for a ticket that has had no verification cycle
@@ -76,7 +76,7 @@ Before pushing or asking the human, the host SHALL refuse a publish unless all o
 
 #### Scenario: A later review ends blocked before a queued push sends
 - **WHEN** a push was queued without asking after cycle 1 passed, and before it sends a second cycle of the same commit ends blocked
-- **THEN** nothing is pushed, the caller is told the review changed, and publishing again waits for the human's approval
+- **THEN** nothing is pushed, the caller is told the review changed, and publishing again waits for the human's approval unless the coordinator waives the new cycle
 
 #### Scenario: HEAD moves while a card waits
 - **WHEN** the human approves a push after the worktree's HEAD has moved to different changes
@@ -89,6 +89,10 @@ Before pushing or asking the human, the host SHALL refuse a publish unless all o
 #### Scenario: After the adopted head was reviewed
 - **WHEN** a review started after the adoption has passed at the adopted head and `publish_ticket` is called
 - **THEN** the publish goes ahead
+
+#### Scenario: A rebase of commits waived at the cap
+- **WHEN** at the cap the coordinator published commits past the verified one under a waiver naming them, and the PR keeper later rebased the branch without changing its patch
+- **THEN** the rebased head counts as the waived one, and its push goes ahead without asking in an allowed owner's repository
 
 ### Requirement: The host never overwrites commits it did not push
 The host SHALL record the commit it last pushed for each ticket. It SHALL push a ticket's branch only when GitHub's branch is absent, is behind the commit being pushed, or is at a commit the host may replace, as after a squash or a clean rebase. The host MAY replace GitHub's branch head only when it is the commit the host last pushed, or a commit that was once the tip of this ticket's branch in this repository on this machine, as the branch's reflog records, such as one an agent's shell pushed before the host published tickets. Otherwise it SHALL refuse and push nothing.
@@ -324,7 +328,7 @@ The README and the development notes SHALL say that Wiffletree pushes a ticket's
 - **THEN** neither says Wiffletree never pushes or opens pull requests, and the warning says agents can still run any command, including a push
 
 ### Requirement: The approval names the review level
-A publish approval's Review row SHALL name the level of the ticket's latest verification cycle and SHALL say when that cycle was a re-check. When the latest cycle is a re-check, the approval SHALL also show a "Last full review" row naming the most recent passed full review of the ticket: its cycle, its level, the commit it verified and its verifiers. A cycle recorded without a level SHALL be shown without one and SHALL count as a full review. The level SHALL NOT change whether the human is asked: a passed re-check SHALL publish as any passed review does, and a review that ended blocked SHALL need the human's approval at every level.
+A publish approval's Review row SHALL name the level of the ticket's latest verification cycle and SHALL say when that cycle was a re-check. When the latest cycle is a re-check, the approval SHALL also show a "Last full review" row naming the most recent passed full review of the ticket: its cycle, its level, the commit it verified and its verifiers. A cycle recorded without a level SHALL be shown without one and SHALL count as a full review. The level SHALL NOT change whether the human is asked: a passed re-check SHALL publish as any passed review does, and a review that ended blocked SHALL need the human's approval at every level unless the coordinator waived it.
 
 #### Scenario: After a full review
 - **WHEN** a push waits for approval and the ticket's latest cycle is cycle 1, a passed "Full" review by Tests, Correctness and Regressions at the commit being pushed
@@ -336,7 +340,7 @@ A publish approval's Review row SHALL name the level of the ticket's latest veri
 - **AND** a "Last full review" row reads "Cycle 1 · Full passed at 9e03c1b · Tests, Correctness, Regressions"
 
 #### Scenario: A re-check that ended blocked
-- **WHEN** `publish_ticket` is called in an allowed owner's repository for a ticket whose latest cycle, a "Light" re-check, ended blocked
+- **WHEN** `publish_ticket` is called without `waived` in an allowed owner's repository for a ticket whose latest cycle, a "Light" re-check, ended blocked
 - **THEN** nothing is sent, and the approval says the review ended blocked, names it as a Light re-check, lists the open findings and shows the "Last full review" row
 
 #### Scenario: A passed re-check in an allowed owner's repository

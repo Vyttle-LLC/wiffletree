@@ -421,6 +421,11 @@ impl Host {
             "Verification cycle {} passed at the commit checked out; there is nothing to waive",
             verification.cycle
         );
+        // Commits a publish's waiver covered are accepted only under a waiver naming them too.
+        ensure!(
+            waived.is_some() || waived_commits.is_empty(),
+            "The branch has commits no review checked; accept with waived naming each by its short SHA"
+        );
         ticket.waiver = waived.map(Into::into);
         ticket.waived_commits = waived_commits;
         self.finish_ticket(ticket, TicketState::Accepted, "ticket_accepted")
@@ -1044,11 +1049,12 @@ pub(crate) fn ensure_findings_settled(
 /// `Host::check_verified_head` for a caller that has the ticket's base without the store,
 /// as a publish step has on its own thread. With `waived`, which `Host::unreviewed_waiver`
 /// allows only at the full-review cap, HEAD may be past the verified commit when the waiver
-/// names every commit since; those commits are returned.
+/// names every commit since; those commits are returned. So are the commits a waiver recorded
+/// on the ticket, when HEAD has their changes, as after the PR keeper's rebase.
 pub(crate) fn verified_head(
     ticket: &Ticket,
     verified: &str,
-    base: impl FnOnce() -> Result<stacks::Base>,
+    base: impl Fn() -> Result<stacks::Base>,
     waived: Option<&str>,
 ) -> Result<Vec<String>> {
     // Whatever their patch id: `git patch-id` ignores whitespace, which can change behaviour.
@@ -1063,8 +1069,13 @@ pub(crate) fn verified_head(
         return Ok(vec![]);
     }
     let worktree = Path::new(&ticket.worktree);
-    let same_patch = || base()?.same_patch(worktree, verified, &head);
-    let differs = match same_patch() {
+    let same_patch = |commit: &str| base()?.same_patch(worktree, commit, &head);
+    if let Some(waived) = ticket.waived_commits.last()
+        && same_patch(waived).is_ok_and(|same| same)
+    {
+        return Ok(ticket.waived_commits.clone());
+    }
+    let differs = match same_patch(verified) {
         Ok(true) => return Ok(vec![]),
         Ok(false) => format!(
             "The worktree's changes differ from the verified commit: verified {verified}, current {head}"

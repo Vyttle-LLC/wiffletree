@@ -1899,6 +1899,12 @@ impl Ticket {
             VerificationOutcome::Running => false,
         })
     }
+    /// The commit a publish stands on: the last commit a waiver at the cap covered, past the
+    /// verified one, or else the verified commit.
+    pub fn standing_commit(&self) -> Option<&str> {
+        (self.waived_commits.last().map(String::as_str))
+            .or_else(|| self.verification.as_ref()?.verified_commit())
+    }
     /// When the running cycle of this open ticket was queued, while it waits for a slot.
     pub fn queued_since(&self) -> Option<i64> {
         self.running_cycle()

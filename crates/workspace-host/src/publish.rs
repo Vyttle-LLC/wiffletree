@@ -4129,6 +4129,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_keeper_pushes_a_same_change_rebase_of_commits_waived_at_the_cap() {
+        let (mut f, remote) = keeper::tests::kept();
+        let mut settings = f.host.settings().verification;
+        settings.max_cycles = 1;
+        f.host.set_verification(settings).unwrap();
+        f.review(VerificationOutcome::Blocked);
+        let late = f.commit("late.txt", "after\n");
+        let waiver = format!("Read {}; it holds up", short_sha(&late));
+        let (_, step) = publish_waived(&mut f, Role::ProjectOrchestrator, &waiver).unwrap();
+        drive(&mut f, &remote, step);
+        assert_eq!(remote.branch(BRANCH), Some(late.clone()));
+        watch_open_pr(&mut f, keeper::tests::NUMBER);
+
+        let base = keeper::tests::move_base(&f, &remote, "other.txt", "1\n");
+        let job = keeper::tests::due(&mut f, &base);
+        keeper::tests::keep(&mut f, &remote, job);
+        let rebased = f.head();
+        assert_ne!(rebased, late);
+        assert_eq!(remote.branch(BRANCH), Some(rebased));
+        assert!(f.open_items().is_empty());
+        assert!(f.ticket().publishing.is_none());
+    }
+
+    #[test]
     fn a_keeper_push_to_a_transferred_repository_sends_nothing_and_tells_the_coordinator() {
         let (mut f, remote, _) = keeper::tests::waiting();
         let pushed = remote.branch(BRANCH);
