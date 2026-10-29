@@ -37,6 +37,8 @@ pub(super) struct ChecksEdit {
 pub(super) struct BaseEdit {
     repository_id: String,
     error: Option<String>,
+    /// A save is waiting for the host; the field and Save wait with it, so one reply answers it.
+    saving: bool,
 }
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
@@ -643,7 +645,13 @@ impl RepositoriesPage {
             .flex()
             .items_center()
             .gap_2()
-            .child(Input::new(&self.base_input).xsmall().flex_1().min_w_0())
+            .child(
+                Input::new(&self.base_input)
+                    .xsmall()
+                    .flex_1()
+                    .min_w_0()
+                    .disabled(edit.saving),
+            )
             .child(
                 button("cancel-base")
                     .ghost()
@@ -653,7 +661,11 @@ impl RepositoriesPage {
             )
             .child(
                 ui::gated(
-                    button("save-base").primary().xsmall().label("Save"),
+                    button("save-base")
+                        .primary()
+                        .xsmall()
+                        .label("Save")
+                        .disabled(edit.saving),
                     &self.shared.host,
                 )
                 .on_click(cx.listener(|v, _, w, c| v.save_base(w, c))),
@@ -714,6 +726,7 @@ impl RepositoriesPage {
         self.base_edit = Some(BaseEdit {
             repository_id: repository_id.to_owned(),
             error: None,
+            saving: false,
         });
         // Focus once the input is in the next frame's dispatch tree.
         cx.on_next_frame(window, |v, window, cx| {
@@ -731,14 +744,16 @@ impl RepositoriesPage {
 
     /// Saves the base as typed; the host refuses one that doesn't resolve to a commit.
     fn save_base(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = &self.base_edit else {
+        let Some(edit) = self.base_edit.as_mut().filter(|e| !e.saving) else {
             return;
         };
+        edit.saving = true;
         let command = Command::SetRepositoryBase {
             repository_id: edit.repository_id.clone(),
             base: self.base_input.read(cx).value().trim().to_owned(),
         };
         self.request(command, window, cx);
+        cx.notify();
     }
 
     /// The re-check levels the keeper's reviews may run, from the saved verification setting;
@@ -975,10 +990,13 @@ impl Requests for RepositoriesPage {
                 let repository = s.repositories.iter().find(|r| r.id == *repository_id)?;
                 Some(repository.base.clone())
             });
-            let editing = (self.base_edit.as_mut()).filter(|e| e.repository_id == *repository_id);
+            // Only the editor that sent the save takes its reply, not one opened since.
+            let editing =
+                (self.base_edit.as_mut()).filter(|e| e.saving && e.repository_id == *repository_id);
             match (editing, reply) {
                 (Some(_), Ok(_)) => self.base_edit = None,
                 (Some(edit), Err(error)) => {
+                    edit.saving = false;
                     edit.error = Some(refused_base(&error, saved.as_deref()))
                 }
                 (None, Err(error)) => toast_error(error, window, cx),
