@@ -100,6 +100,8 @@ Ship after `brain-log-capture`. Status and Conflicts show "No compile yet" until
 
 ## Overlaps with other proposals
 
+PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same thing, this change goes second.
+
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
 | A SQLite index rebuilt from files | #162 indexes each tracker in `issues.sql` for its list, search and unread marks; this change indexes each brain with FTS5 | **Share** the pattern: a rebuildable projection, reindexed by content hash after each fetch. A common indexing helper is worth extracting. | One FTS facility for both, or one per feature? |

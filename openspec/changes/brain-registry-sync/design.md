@@ -90,14 +90,14 @@ Rollback: removing a brain deletes the host's clone after confirmation and leave
 
 ## Overlaps with other proposals
 
-The other open proposals are:
-- PR #162, "Proposal: shared issues in a tracker repository" (`shared-issues`, `issue-assistant`);
-- the changes on `main`: `files-panel`, `processes-panel` and `quiet-findings`;
+The other proposals are:
+- PR #162, "Proposal: shared issues in a tracker repository" (`shared-issues`, `issue-assistant`). It is **merged on `main`** as 6194b99a and is an open change there, not yet archived. Where a spec both change, the brain changes go second.
+- the other changes open on `main`: `files-panel`, `processes-panel` and `quiet-findings`;
 - `brain-gate`, in this proposal.
 
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
-| Git-backed shared repository on GitHub, reached as gh does | `settings-repository` (spec); `shared-issues` (#162) reuses its reach, clone and backoff | **Share** one host module for reaching, cloning, fetching and backing off, used by settings, trackers and brains. | Extract that module before the second of #162 and this change is built, or let the second one extract it? |
+| Git-backed shared repository on GitHub, reached as gh does | `settings-repository` (spec); `shared-issues` (#162, merged on `main`) reuses its reach, clone and backoff | **Share** one host module for reaching, cloning, fetching and backing off, used by settings, trackers and brains. | This change goes second. Should the shared-issues build extract the module, or this one when it reuses it? |
 | How writes reach `main` | Settings and trackers push `main` directly (never forced); brains go only through PRs that auto-merge | **Align, keep different on purpose.** Settings and issues are a conversation that needs seconds-level sync; brain content needs the gate. | Should a tracker ever be PR-gated, for example for the sensitive-information scan on issue text? See `brain-gate`'s overlap notes. |
 | Where the host keeps its clone | Trackers: `<data folder>/trackers/<owner>-<name>/`; brains: `<workspaces folder>/brains/<name>` (decision 1) | **Align.** Use one root and one naming scheme. The recommendation is `<data folder>/brains/<owner>-<name>/`, beside trackers and the settings clone, which also avoids name clashes between owners. | Confirm the data folder as the root for every host-owned clone. |
 | Files Wiffletree did not write | Trackers hold back a file in this Mac's clone that Wiffletree did not write; brains hold all writing on any unexpected change | **Align** on "never push what Wiffletree did not write". Brains are stricter because their writes are PRs that auto-merge. | None. |

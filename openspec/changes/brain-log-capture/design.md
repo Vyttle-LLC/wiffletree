@@ -113,13 +113,15 @@ The frontmatter has exactly these four keys. The body, everything after the fron
 
 ## Overlaps with other proposals
 
+PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same thing, this change goes second.
+
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
 | Per-item files in a shared Git repository | #162: `issues/<ID>/issue.md`, one file per comment and `events.jsonl`; here, one file per entry | **Align**: both avoid shared-file conflicts with one file per record. Issues merge fields three-way; entries never change after merge, so they need no merge. | None. |
 | Identity and author | #162 uses gh's `login` for authors; entries' `author` is the same login | **Share** the cached identity from `brain-registry-sync`. | None. |
 | One-time imports | #162's Linear import (one commit per 100 issues); the legacy log import here (log PRs of at most 200 files, deterministic ids) | **Align** on idempotent, batched imports that never write back to the source. | None. |
 | The entry contract | `brain-gate` owns it, with the fixtures in `gate/tests/fixtures/` | **Share**: the renderer is tested against the gate's fixtures and writes the contract of the brain's pinned gate version. | When the gate's contract gets a new major version, does Wiffletree write both versions during the transition, or refuse to log to a brain still on the old gate? (`brain-gate` holds the brain's batches.) |
-| Fixed core instructions | `quiet-findings` bumps the coordinator core to v5; #162 changes the fixed core for issue reading; this change adds the log rules to the coordinator and implementer cores | **Align** the order: whichever lands later rebases its wording on the earlier one and bumps the version again. | None, beyond ordering. |
+| Fixed core instructions | `quiet-findings` bumps the coordinator core to v5; #162 changes the fixed core for issue reading; this change adds the log rules to the coordinator and implementer cores | **Align** the order. #162 is merged on `main`, so this change goes after it and after `quiet-findings`: it rebases its wording on theirs and bumps the core versions again. | None, beyond ordering. |
 | Where follow-ups go | `quiet-findings` lists a ticket's `follow_up` findings in its PR description; #162 adds issues | **Align**: a follow-up is work to do, which belongs in an issue rather than a log entry. Logging stays for decisions and state. | Once #162 ships, should the coordinator file follow-ups as issues instead of only listing them in the PR? |
 | Tool results that prompt for more work | Milestone prompts here; `quiet-findings` changes the cycle-outcome message's closing line | **Align**: the log prompt is one line appended after the host's existing text, so the two do not conflict. | None. |
 | The capture surface | `files-panel` records `Step.paths` per step | None now. A later change could suggest a log entry's `changed` from the files a ticket touched. | Not in scope. |

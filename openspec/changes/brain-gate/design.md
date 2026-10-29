@@ -97,6 +97,8 @@ Wiffletree is a public repository (`Vyttle-LLC/wiffletree`). Brain repositories 
 
 ## Overlaps with other proposals
 
+PR #162 (`shared-issues`) is merged on `main` as 6194b99a and is an open change there, not yet archived. Where both change the same thing, this change goes second.
+
 | Shared concept | Where else | Share or align | Open question |
 | --- | --- | --- | --- |
 | Checks on writes to a shared repository | #162's tracker accepts direct pushes and commits from teammates outside Wiffletree, with no CI | **Align**: the gate's sensitive-information scan is generic and could guard a tracker too, because issue text can carry child PII just as log text can. | Should trackers get a caller of the same action (only `sensitive-info` and `secret-scan`), run as checks on pushes to `main` since trackers have no PRs? |
