@@ -1397,6 +1397,22 @@ mod tests {
     }
 
     #[test]
+    fn a_base_change_waits_only_for_a_held_ticket_in_its_repository() {
+        let (mut f, _remote, _) = keeper::tests::waiting();
+        let repository = f.ticket().repository_id;
+        let set_base = |repository_id: &str| Command::SetRepositoryBase {
+            repository_id: repository_id.into(),
+            base: "origin/main".into(),
+        };
+        let reservations = &f.host.checkout_reservations;
+        assert!(!reservations.blocks_command(&f.host, &set_base(&repository)));
+        f.host.checkout_reservations.acquire(&f.ticket);
+        let reservations = &f.host.checkout_reservations;
+        assert!(reservations.blocks_command(&f.host, &set_base(&repository)));
+        assert!(!reservations.blocks_command(&f.host, &set_base("another-repository")));
+    }
+
+    #[test]
     fn a_reserved_move_reports_back_before_store_state_applies_and_releases_its_reservation() {
         let (mut f, remote, target) = keeper::tests::waiting();
         let id = f.ticket.clone();

@@ -37,8 +37,8 @@ pub(super) struct ChecksEdit {
 pub(super) struct BaseEdit {
     repository_id: String,
     error: Option<String>,
-    /// A save is waiting for the host; the field and Save wait with it, so one reply answers it.
-    saving: bool,
+    /// The base a save sent and is waiting for; only the reply to it applies here.
+    pending: Option<String>,
 }
 
 /// One of the PR keeper's triggers: its tick box beside its name and what it does.
@@ -633,7 +633,6 @@ impl RepositoriesPage {
         self.request(command, window, cx);
     }
 
-    /// The editor under a repository's row while the human changes its base.
     fn base_editor(
         &self,
         repository: &Repository,
@@ -650,7 +649,7 @@ impl RepositoriesPage {
                     .xsmall()
                     .flex_1()
                     .min_w_0()
-                    .disabled(edit.saving),
+                    .disabled(edit.pending.is_some()),
             )
             .child(
                 button("cancel-base")
@@ -665,7 +664,7 @@ impl RepositoriesPage {
                         .primary()
                         .xsmall()
                         .label("Save")
-                        .disabled(edit.saving),
+                        .disabled(edit.pending.is_some()),
                     &self.shared.host,
                 )
                 .on_click(cx.listener(|v, _, w, c| v.save_base(w, c))),
@@ -726,7 +725,7 @@ impl RepositoriesPage {
         self.base_edit = Some(BaseEdit {
             repository_id: repository_id.to_owned(),
             error: None,
-            saving: false,
+            pending: None,
         });
         // Focus once the input is in the next frame's dispatch tree.
         cx.on_next_frame(window, |v, window, cx| {
@@ -744,13 +743,18 @@ impl RepositoriesPage {
 
     /// Saves the base as typed; the host refuses one that doesn't resolve to a commit.
     fn save_base(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.base_edit.as_mut().filter(|e| !e.saving) else {
+        // Enter reaches here too, so it checks what gates Save.
+        if self.shared.host.changes_refused().is_some() {
+            return;
+        }
+        let base = self.base_input.read(cx).value().trim().to_owned();
+        let Some(edit) = self.base_edit.as_mut().filter(|e| e.pending.is_none()) else {
             return;
         };
-        edit.saving = true;
+        edit.pending = Some(base.clone());
         let command = Command::SetRepositoryBase {
             repository_id: edit.repository_id.clone(),
-            base: self.base_input.read(cx).value().trim().to_owned(),
+            base,
         };
         self.request(command, window, cx);
         cx.notify();
@@ -985,18 +989,22 @@ impl Requests for RepositoriesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Command::SetRepositoryBase { repository_id, .. } = &command {
+        if let Command::SetRepositoryBase {
+            repository_id,
+            base,
+        } = &command
+        {
             let saved = self.shared.snapshot().and_then(|s| {
                 let repository = s.repositories.iter().find(|r| r.id == *repository_id)?;
                 Some(repository.base.clone())
             });
-            // Only the editor that sent the save takes its reply, not one opened since.
-            let editing =
-                (self.base_edit.as_mut()).filter(|e| e.saving && e.repository_id == *repository_id);
+            // Only the editor waiting for this save takes its reply, not one opened since.
+            let editing = (self.base_edit.as_mut())
+                .filter(|e| e.repository_id == *repository_id && e.pending.as_ref() == Some(base));
             match (editing, reply) {
                 (Some(_), Ok(_)) => self.base_edit = None,
                 (Some(edit), Err(error)) => {
-                    edit.saving = false;
+                    edit.pending = None;
                     edit.error = Some(refused_base(&error, saved.as_deref()))
                 }
                 (None, Err(error)) => toast_error(error, window, cx),

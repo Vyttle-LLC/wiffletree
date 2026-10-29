@@ -108,7 +108,6 @@ fn resolves_to_commit(path: &Path, base: &str) -> bool {
     .is_ok()
 }
 
-/// Refuses a base that is not a ref naming a commit in the repository at `path`.
 fn verify_base(path: &Path, base: &str) -> Result<()> {
     text(base, 256)?;
     ensure!(!base.starts_with('-'), "Invalid base ref");
