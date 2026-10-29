@@ -304,7 +304,7 @@
 #celadon-chat .turn-group code,#celadon-chat .ac-narration code{font:12px ui-monospace,SFMono-Regular,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
 #celadon-chat .turn-foot{padding:10px 20px;font-size:10px;color:var(--subtle);border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
 @media(prefers-reduced-motion:reduce){#celadon-chat .ac-body,#celadon-chat .ac-toggle .lucide{transition:none}#celadon-chat .wt-spin,#celadon-chat .step-row.new,#celadon-chat .sheet.turn-sheet{animation:none}#celadon-chat .ac-narration.streaming{animation:none;background:none;color:var(--text)}}
-/* Work progress: strip under the session title, bars in the tree and the crew panel. */
+/* Work progress: strip under the session title, bars in the tree and the Agents panel. */
 #celadon-chat .wp-strip{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:40px;padding:8px 28px;background:var(--surface);border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent);font-size:12px}
 #celadon-chat .wp-label{flex:0 1 auto;min-width:0;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #celadon-chat .wp-label b{font-weight:600}
@@ -674,7 +674,7 @@ function progressStrip(){
   const p=projectProgress(),agents=p.tickets.length?childKeys('project').filter(isTicket).flatMap(childKeys).length:0;
   label=`<b>${p.phase}</b>`;bar=`<div class="wp-bar seg" aria-hidden="true">${p.tickets.map(t=>`<span>${barFill(t)}</span>`).join('')}</div>`;
   meta=`${percent(p.fraction)}% · 0 of ${p.tickets.length} tickets accepted`;
-  crew=button(`${agents} agents ${icon('chevron-right')}`,`data-crew aria-pressed="${state.crew===true}" aria-label="${state.crew?'Hide':'Show'} the crew: ${agents} agents"`,'wp-crew');
+  crew=button(`${agents} agents ${icon('chevron-right')}`,`data-crew aria-pressed="${state.crew===true}" aria-label="${state.crew?'Hide':'Show'} the Agents panel: ${agents} agents"`,'wp-crew');
  }else if(isTicket(key)){
   const t=ticketProgress(key);
   label=`<b>${t.stage}</b>${t.stage==='Verifying'?` · ${t.passed} of ${t.verifiers} verifiers passed`:''}`;bar=progressBar(t);meta=t.state==='unknown'?'':ticketFigure(t);
@@ -695,7 +695,7 @@ function crewPanel(){
   const t=ticketProgress(key);
   return `<section class="wp-card"><div class="wp-card-head"><span>${esc(entities[key].name)}</span><span class="wp-stage">${t.stage}${t.state==='unknown'?'':' · '+ticketFigure(t)}</span></div>${progressBar(t,true)}${childKeys(key).map(k=>{const a=agentProgress(k),m=minutes(k);return button(`<span>${esc(entities[k].name)}<small>${esc(sampleModels[k]||entities[k].provider)}</small></span><span class="wp-fig ${tone(a)}">${[a.figure,m===undefined?'':m+'m'].filter(Boolean).join(' · ')}</span>${progressBar(a,true)}`,`data-agent="${k}"`,'wp-agent');}).join('')}</section>`;
  }).join('');
- return `<aside class="inspector" data-crew-panel aria-label="Crew side panel"><header class="inspector-heading"><div><div class="eyebrow">Project</div><h2>Crew</h2><div class="inspector-owner">${esc(e.name)}</div></div>${button(icon('x'),'data-crew aria-label="Close crew panel"')}</header><div class="inspector-body"><p class="small subtle">Every ticket and the agents working on it. Sample data.</p>${cards}</div><div class="pane-handle inspector-handle" role="separator" aria-label="Resize inspector" tabindex="0" data-resize="inspector"></div></aside>`;
+ return `<aside class="inspector" data-crew-panel aria-label="Agents side panel"><header class="inspector-heading"><div><div class="eyebrow">Project</div><h2>Agents</h2><div class="inspector-owner">${esc(e.name)}</div></div>${button(icon('x'),'data-crew aria-label="Close Agents panel"')}</header><div class="inspector-body"><p class="small subtle">Every ticket and the agents working on it. Sample data.</p>${cards}</div><div class="pane-handle inspector-handle" role="separator" aria-label="Resize inspector" tabindex="0" data-resize="inspector"></div></aside>`;
 }
 tree=function(){
  function node(key,depth){

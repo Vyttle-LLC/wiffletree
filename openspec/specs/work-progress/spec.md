@@ -204,11 +204,11 @@ A project's progress SHALL be the equal-weight average of its tickets' positions
 - **THEN** the project shows "Done" at 100%, finished
 
 ### Requirement: Progress strip
-The selected conversation SHALL show one progress strip pinned directly under its session title. The strip SHALL NOT scroll with the transcript and SHALL keep a fixed height, so progress changes never move the transcript. For a project coordinator, the strip SHALL show the project's phase label, its segmented bar, its percentage and "N of M tickets accepted", and a crew button. For an agent on a ticket, it SHALL show the agent's own progress, as "Step K of N" with the current step, the bar and the percentage, followed by the ticket's figure, such as "ticket 30%". K SHALL be the number of items done plus one. When every item of a working agent's plan is done, the strip SHALL read "N of N" with no step label, never "Step N+1". "Step K of N" is the label of a working agent only. A finished agent's label SHALL be "Done", or "Passed" for a verifier whose latest result is `passed`. A blocked agent's label SHALL be "Failed" for a verifier whose latest result is `failed`, and otherwise "Blocked · step K of N", or "Blocked" when its latest run had no plan. An idle agent with a checklist from its latest run SHALL read "K of N", where K is the number of items done, with no "Step" and no current item. An agent with nothing of its own to show SHALL show only its ticket's stage and figure. A session with neither a ticket nor a project of its own SHALL show its own progress alone.
+The selected conversation SHALL show one progress strip pinned directly under its session title. The strip SHALL NOT scroll with the transcript and SHALL keep a fixed height, so progress changes never move the transcript. For a project coordinator, the strip SHALL show the project's phase label, its segmented bar, its percentage and "N of M tickets accepted". For an agent on a ticket, it SHALL show the agent's own progress, as "Step K of N" with the current step, the bar and the percentage, followed by the ticket's figure, such as "ticket 30%". K SHALL be the number of items done plus one. When every item of a working agent's plan is done, the strip SHALL read "N of N" with no step label, never "Step N+1". "Step K of N" is the label of a working agent only. A finished agent's label SHALL be "Done", or "Passed" for a verifier whose latest result is `passed`. A blocked agent's label SHALL be "Failed" for a verifier whose latest result is `failed`, and otherwise "Blocked · step K of N", or "Blocked" when its latest run had no plan. An idle agent with a checklist from its latest run SHALL read "K of N", where K is the number of items done, with no "Step" and no current item. An agent with nothing of its own to show SHALL show only its ticket's stage and figure. A session with neither a ticket nor a project of its own SHALL show its own progress alone.
 
 #### Scenario: Coordinator selected
-- **WHEN** the human selects the coordinator of a project at 56% with one of four tickets accepted and six agents in its crew
-- **THEN** the strip reads "Implementing", shows the four-segment bar, "56% · 1 of 4 tickets accepted" and a "6 agents" button
+- **WHEN** the human selects the coordinator of a project at 56% with one of four tickets accepted
+- **THEN** the strip reads "Implementing", shows the four-segment bar and "56% · 1 of 4 tickets accepted"
 
 #### Scenario: Worker selected
 - **WHEN** the human selects an implementer at 3 of 6 whose ticket is at 30%
@@ -251,7 +251,7 @@ The project row in the sidebar tree SHALL show a thin bar beneath its label and 
 
 #### Scenario: Blocked ticket row
 - **WHEN** a ticket is blocked at 26%
-- **THEN** its sidebar row shows no "blocked" figure and no bar, and the strip and Crew panel still show its blocked state
+- **THEN** its sidebar row shows no "blocked" figure and no bar, and the strip and Agents panel still show its blocked state
 
 #### Scenario: Project with nothing to show
 - **WHEN** a project has no tickets and no progress to report
@@ -264,37 +264,6 @@ The project row in the sidebar tree SHALL show a thin bar beneath its label and 
 #### Scenario: Working agent and open ticket stay one line
 - **WHEN** an agent is working at 3 of 5, or a ticket without a pull request is at 70%
 - **THEN** its row has the same single-line height as an idle agent's, with no figure and no track line
-
-### Requirement: Crew panel
-The coordinator's strip SHALL carry a crew button labelled with the number of agents the panel lists, such as "6 agents". Activating it SHALL open a crew panel beside the conversation, without replacing it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents and the verifiers of its latest cycle, each once, including a verifier the host archived after it passed. Verifiers of earlier cycles and other archived agents SHALL NOT be listed. Each agent row SHALL show its role and focus, its model, its figure, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and a listed agent is working. The crew button SHALL appear only on the coordinator's strip. Selecting an agent row SHALL select that agent's conversation and SHALL leave the panel open, still listing the whole project's crew, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
-
-#### Scenario: Open the crew
-- **WHEN** the human activates "6 agents" on the coordinator's strip
-- **THEN** the panel opens beside the conversation and lists every counted ticket with its stage and percentage, and each open ticket's agents with model, figure and elapsed time
-
-#### Scenario: Archived passed verifier
-- **WHEN** round 1 ended with the tester passed and archived, and round 2 is running with one reviewer
-- **THEN** the ticket's card still lists the tester as "passed" at 100%, beside the working reviewer
-
-#### Scenario: Earlier cycle's verifiers
-- **WHEN** cycle 2 is running on a ticket whose cycle 1 verifiers were archived
-- **THEN** the card lists cycle 2's verifiers and none of cycle 1's
-
-#### Scenario: Accepted ticket
-- **WHEN** a ticket is accepted
-- **THEN** its card shows "Accepted · 100%" and no agent rows
-
-#### Scenario: Step through the crew
-- **WHEN** the crew panel is open and the human selects the implementer's row, then a reviewer's row
-- **THEN** each selection shows that agent's conversation and strip, the panel stays open listing the whole project's crew, and the selected agent's row is marked
-
-#### Scenario: Leave the crew
-- **WHEN** an agent selected from the crew panel is shown and the human closes the panel
-- **THEN** the panel closes, and that agent's strip offers no crew button
-
-#### Scenario: Idle panel
-- **WHEN** the panel is open and no listed agent is working
-- **THEN** no elapsed-time timer runs
 
 ### Requirement: Progress states
 Every bar SHALL be in exactly one of four states: in progress, drawn in the focus color; indeterminate, drawn as a striped track with no percentage; blocked, drawn in red at the position it had; or finished, drawn in green at 100%. An idle bar SHALL be drawn as in progress. When a bar would be both blocked and indeterminate, it SHALL be blocked. No bar SHALL show a percentage that these rules do not define.
@@ -336,8 +305,92 @@ The host SHALL keep progress current whenever a plan step, a session's status, a
 
 #### Scenario: Restart with an archived verifier
 - **WHEN** a cycle ended blocked with a verifier failed at 4 of 5, the host archived it, and the host restarts
-- **THEN** the crew panel still lists that verifier as "failed" at 4 of 5
+- **THEN** the board still lists that verifier as "failed" at 4 of 5, and the Agents panel shows it under "Previous agents" as "failed"
 
 #### Scenario: Pruned run
 - **WHEN** an idle agent's latest run finished so long ago that the host pruned its steps
 - **THEN** the agent shows an empty track and no figure
+
+### Requirement: Agents panel
+The header of every conversation of a project, its coordinator's and each of its agents', SHALL carry an Agents toggle labelled "Agents · N working", where N is the number of agents the panel lists that are in a turn, or "Agents" when none is. Activating it SHALL open the Agents panel beside the conversation, without replacing it, and activating it again SHALL close it. The panel SHALL list each counted ticket of the project, in the order the tickets were created, with its title, stage, percentage and bar. Under each ticket that is not accepted, it SHALL list that ticket's unarchived agents, each once. Each agent row SHALL show its role and focus, its figure, its current step while it works, its model, its elapsed time and its bar. The elapsed time SHALL be the time since the agent's current run started while it is working, and otherwise the length of its latest run. The elapsed time SHALL refresh only while the panel is open and an agent listed under a ticket is working. Below the tickets, a "Previous agents (N)" section, folded until the human unfolds it, SHALL list every other agent the sidebar tree lists under the project's coordinator, archived or not: archived agents, such as finished verifiers of any cycle, agents of accepted or closed tickets, workers created before tickets existed, and retired repository coordinators. An archived project has no progress, so every agent it has SHALL be listed there, and its conversations SHALL still carry the toggle. Each previous agent's row SHALL show its role and focus and the ticket it worked on, or, without a ticket, its name, with "(retired)" after a retired repository coordinator's, and its figure while the board still lists it, such as "passed". Selecting any agent row SHALL select that agent's conversation, read-only when the agent is archived, and SHALL leave the panel open, still listing the whole project, with the selected agent's row marked, so the human can step through the agents. The strip SHALL follow the selected conversation. The panel SHALL stay open this way until the human closes it or opens another panel.
+
+#### Scenario: Open the panel
+- **WHEN** the human activates "Agents · 2 working" in the coordinator's header
+- **THEN** the panel opens beside the conversation and lists every counted ticket with its stage and percentage, and each open ticket's agents with current step, model and elapsed time
+
+#### Scenario: Toggle from an agent
+- **WHEN** an agent's conversation is selected and the human activates its header's Agents toggle twice
+- **THEN** the panel opens listing the agent's whole project, then closes
+
+#### Scenario: Nothing working
+- **WHEN** no agent the panel lists is in a turn
+- **THEN** the toggle reads "Agents"
+
+#### Scenario: Archived passed verifier
+- **WHEN** round 1 ended with the tester passed and archived, and round 2 is running with one reviewer
+- **THEN** the ticket's card lists the working reviewer, and the tester is under "Previous agents" as "passed"
+
+#### Scenario: Archived project
+- **WHEN** the human shows archived sessions and selects an archived project's coordinator
+- **THEN** its header offers the Agents toggle, and the panel lists every agent of the project under "Previous agents"
+
+#### Scenario: Earlier cycle's verifiers
+- **WHEN** cycle 2 is running on a ticket whose cycle 1 verifiers were archived
+- **THEN** the card lists cycle 2's verifiers, and cycle 1's are under "Previous agents"
+
+#### Scenario: Accepted ticket
+- **WHEN** a ticket is accepted
+- **THEN** its card shows "Accepted · 100%" and no agent rows, and its agents are under "Previous agents"
+
+#### Scenario: Agents from before tickets
+- **WHEN** a project has a worker created before tickets existed and a retired repository coordinator
+- **THEN** "Previous agents (2)" lists the worker by name and the coordinator as "<name> (retired)", and selecting either opens its conversation
+
+#### Scenario: Step through the agents
+- **WHEN** the panel is open and the human selects the implementer's row, then a reviewer's row
+- **THEN** each selection shows that agent's conversation and strip, the panel stays open listing the whole project, and the selected agent's row is marked
+
+#### Scenario: Leave the panel
+- **WHEN** an agent selected from the panel is shown and the human closes the panel
+- **THEN** the panel closes, and that agent's header still offers the Agents toggle
+
+#### Scenario: Idle panel
+- **WHEN** the panel is open and no agent listed under a ticket is working
+- **THEN** no elapsed-time timer runs
+
+### Requirement: Stuck agents
+An agent SHALL be stuck when it is not archived and either its status is disconnected, or its status is ready or done and its latest turn ended in an error. A blocked agent SHALL NOT be stuck, because its coordinator answers it, and neither SHALL a paused or working agent. One rule SHALL decide this for every view that shows it. In the Agents panel, a stuck agent's row SHALL show a warning icon and its reason, "Disconnected" or "Last turn failed", in the warning color, and the card of the ticket it works on SHALL have a border in the warning color.
+
+#### Scenario: Disconnected agent
+- **WHEN** a ticket's implementer is disconnected
+- **THEN** its row reads "Disconnected" in the warning color and its ticket's card has a warning border
+
+#### Scenario: Failed last turn
+- **WHEN** a reviewer's latest turn ended in an error and it is ready
+- **THEN** its row reads "Last turn failed" in the warning color
+
+#### Scenario: Blocked, paused or working
+- **WHEN** an agent is blocked, paused or working, even after a failed turn
+- **THEN** it is not stuck and its row and card keep their ordinary colors
+
+### Requirement: Agents card in the coordinator's conversation
+While any agent the Agents panel lists is working or stuck, the conversation of the project's coordinator SHALL show one card pinned above its composer reading "N agents working on M tickets", where M counts the tickets with an agent in a turn, followed by "· K stuck" when K agents are stuck, and an "Open Agents" action that opens the panel. With no agent working, it SHALL read "No agents working" before the stuck count. The card SHALL be in the warning color while any agent is stuck. It SHALL NOT appear in an agent's conversation or an archived coordinator's, and SHALL NOT be inserted between messages.
+
+#### Scenario: Work under way
+- **WHEN** three agents are working on two tickets and none is stuck
+- **THEN** the coordinator's conversation shows "3 agents working on 2 tickets" and "Open Agents" above the composer
+
+#### Scenario: A stuck agent
+- **WHEN** one agent is working on one ticket and another agent is disconnected
+- **THEN** the card reads "1 agent working on 1 ticket · 1 stuck" in the warning color
+
+#### Scenario: Quiet project
+- **WHEN** no agent is working or stuck
+- **THEN** no card is shown
+
+### Requirement: Breadcrumb back to the coordinator
+The header of any conversation of a project other than its coordinator's SHALL show, above its title, a link "← <project name>" followed by the agent's ticket, such as "← Calls / sagechat-sms · Fix inbound calls". Activating the link SHALL select the project's coordinator. Such an agent's title SHALL be its role and focus when it has a ticket, and otherwise its name. The coordinator's header SHALL show the project's name and its role above its title.
+
+#### Scenario: Back from a reviewer
+- **WHEN** the human has a ticket's correctness reviewer selected and activates "← Calls" in its header
+- **THEN** the project's coordinator is selected

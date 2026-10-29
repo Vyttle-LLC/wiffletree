@@ -71,116 +71,150 @@ impl ConversationHeader {
             .flat_map(|index| index.sessions())
             .any(|s| s.project_id == session.project_id && s.status == Status::Working)
     }
-    fn breadcrumb(&self, session: &Session) -> String {
-        let mut parts = vec![self.shared.project_name()];
-        if session.role.is_worker() {
-            if let Some(team) = session
-                .parent_id
-                .as_deref()
-                .and_then(|id| self.shared.session(id))
-            {
-                parts.push(team.name.clone());
-            }
-            if let Some(ticket) = self.shared.ticket_of(&session.id) {
-                parts.push(ticket.title.clone());
-            }
-        }
-        parts.push(session.role.label().into());
-        self.shared
-            .host
-            .breadcrumb(parts.iter().map(String::as_str))
+    /// Where the session sits: the project and role for its coordinator, and for any other
+    /// agent a link back to the coordinator, then the agent's ticket.
+    fn breadcrumb(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+        let project = self.shared.project_name();
+        let Some(coordinator) = (self.shared.coordinator()).filter(|c| c.id != session.id) else {
+            let parts = [project.as_str(), session.role.label()];
+            return div()
+                .text_ellipsis()
+                .child(self.shared.host.breadcrumb(parts));
+        };
+        let id = coordinator.id.clone();
+        let host = self.shared.host.breadcrumb([]);
+        let snapshot = self.shared.snapshot();
+        let ticket = (self.shared.ticket_of(&session.id).zip(snapshot))
+            .map(|(ticket, snapshot)| wording::ticket_label(snapshot, ticket));
+        div()
+            .min_w_0()
+            .flex()
+            .gap_1()
+            .when(!host.is_empty(), |d| d.child(format!("{host}  ›")))
+            .child(
+                div()
+                    .id("back-to-coordinator")
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_color(p.focus)
+                    .hover(|d| d.underline())
+                    .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::Select(id.clone()))))
+                    .child(format!("← {project}")),
+            )
+            .children(ticket.map(|ticket| {
+                div()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .child(format!("/  {ticket}"))
+            }))
+    }
+    /// Opens and closes the Agents panel, with how many of the project's agents are working.
+    fn agents_toggle(&self, cx: &mut Context<Self>) -> Option<Button> {
+        let working = self.shared.roster()?.working();
+        Some(
+            button("agents")
+                .outline()
+                .small()
+                .icon(icon("team"))
+                .label(wording::agents_label(working))
+                .selected(self.shared.panel == Some(Panel::Agents))
+                .tooltip("Every ticket and the agents working on it")
+                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Agents)))),
+        )
     }
     fn header(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
         let live = self.shared.live_enabled();
         let paused = session.status == Status::Paused;
         let compacting = self.shared.compacting(&session.id);
-        let title = if session.role.is_worker() {
-            self.shared
-                .ticket_of(&session.id)
-                .map_or(session.name.clone(), |t| t.title.clone())
-        } else {
-            session.name.clone()
+        // An agent's ticket is in its breadcrumb, so its title names the agent.
+        let title = match (self.shared.ticket_of(&session.id), &self.shared.index) {
+            (Some(_), Some(index)) => index.agent_label(session),
+            _ => session.name.clone(),
         };
-        let eyebrow = div().text_ellipsis().child(self.breadcrumb(session));
-        page_header(eyebrow, div().text_ellipsis().child(title), p)
-            .px_6()
-            .gap_3()
-            .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
-                chip.on_click(cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Overview))))
-            }))
-            .child(ui::session_badge(&self.shared, session, p))
-            .when(!session.archived, |d| {
-                d.child(
-                    button("pause-session")
-                        .ghost()
-                        .icon(icon(if paused { "play" } else { "pause" }))
-                        // A compaction that has started cannot be taken back.
-                        .disabled(compacting)
-                        .tooltip(if compacting {
-                            "Compacting · it cannot be interrupted"
-                        } else if paused {
-                            "Resume this session"
-                        } else {
-                            "Pause this session · interrupts an active turn"
-                        })
-                        .map(|b| ui::gated(b, &self.shared.host))
-                        .on_click(cx.listener(|v, _, w, c| v.toggle_pause(w, c))),
-                )
-            })
-            .when(
-                session.role == Role::ProjectOrchestrator && !session.archived,
-                |d| {
-                    d.child(
-                        button("new-ticket")
-                            .ghost()
-                            .icon(icon("plus"))
-                            .label("New ticket")
-                            .map(|b| ui::gated(b, &self.shared.host))
-                            .on_click(cx.listener(|_, _, _, c| {
-                                c.emit(Intent::Create {
-                                    kind: Creation::Ticket,
-                                    ticket: None,
-                                })
-                            })),
-                    )
-                },
+        page_header(
+            self.breadcrumb(session, p, cx),
+            div().text_ellipsis().child(title),
+            p,
+        )
+        .px_6()
+        .gap_3()
+        .children(self.agents_toggle(cx))
+        .children((self.contexts.read(cx).chip(session, p)).map(|chip| {
+            chip.on_click(cx.listener(|_, _, _, c| c.emit(Intent::ShowPanel(Panel::Overview))))
+        }))
+        .child(ui::session_badge(&self.shared, session, p))
+        .when(!session.archived, |d| {
+            d.child(
+                button("pause-session")
+                    .ghost()
+                    .icon(icon(if paused { "play" } else { "pause" }))
+                    // A compaction that has started cannot be taken back.
+                    .disabled(compacting)
+                    .tooltip(if compacting {
+                        "Compacting · it cannot be interrupted"
+                    } else if paused {
+                        "Resume this session"
+                    } else {
+                        "Pause this session · interrupts an active turn"
+                    })
+                    .map(|b| ui::gated(b, &self.shared.host))
+                    .on_click(cx.listener(|v, _, w, c| v.toggle_pause(w, c))),
             )
-            // A project runs once you message it, so the only control it needs is Stop.
-            .children(if session.archived {
-                Some(
-                    button("restore-session")
-                        .outline()
-                        .icon(icon("archive"))
-                        .label("Restore")
+        })
+        .when(
+            session.role == Role::ProjectOrchestrator && !session.archived,
+            |d| {
+                d.child(
+                    button("new-ticket")
+                        .ghost()
+                        .icon(icon("plus"))
+                        .label("New ticket")
                         .map(|b| ui::gated(b, &self.shared.host))
-                        .on_click(cx.listener(|v, _, w, c| {
-                            if let Some(id) = v.shared.selected.clone() {
-                                v.set_archived(id, false, w, c);
-                            }
+                        .on_click(cx.listener(|_, _, _, c| {
+                            c.emit(Intent::Create {
+                                kind: Creation::Ticket,
+                                ticket: None,
+                            })
                         })),
                 )
-            } else if live && self.project_working(session) {
-                Some(
-                    button("stop-project")
-                        .outline()
-                        .icon(icon("stop").text_color(p.red))
-                        .label("Stop")
-                        .tooltip("Interrupt this project’s active turns and hold its queue")
-                        .map(|b| ui::gated(b, &self.shared.host))
-                        .on_click(cx.listener(|v, _, w, c| {
-                            if let Some(project_id) = v.shared.project_id() {
-                                v.set_live(project_id, false, w, c)
-                            }
-                        })),
-                )
-            } else {
-                None
-            })
+            },
+        )
+        // A project runs once you message it, so the only control it needs is Stop.
+        .children(if session.archived {
+            Some(
+                button("restore-session")
+                    .outline()
+                    .icon(icon("archive"))
+                    .label("Restore")
+                    .map(|b| ui::gated(b, &self.shared.host))
+                    .on_click(cx.listener(|v, _, w, c| {
+                        if let Some(id) = v.shared.selected.clone() {
+                            v.set_archived(id, false, w, c);
+                        }
+                    })),
+            )
+        } else if live && self.project_working(session) {
+            Some(
+                button("stop-project")
+                    .outline()
+                    .icon(icon("stop").text_color(p.red))
+                    .label("Stop")
+                    .tooltip("Interrupt this project’s active turns and hold its queue")
+                    .map(|b| ui::gated(b, &self.shared.host))
+                    .on_click(cx.listener(|v, _, w, c| {
+                        if let Some(project_id) = v.shared.project_id() {
+                            v.set_live(project_id, false, w, c)
+                        }
+                    })),
+            )
+        } else {
+            None
+        })
     }
     /// The progress strip pinned under the title: the project for a coordinator, and for any
     /// other agent its own checklist beside its ticket's figure. Its height is fixed and it
     /// is always drawn, so a progress change never moves the transcript.
-    fn progress_strip(&self, session: &Session, p: Palette, cx: &mut Context<Self>) -> Div {
+    fn progress_strip(&self, session: &Session, p: Palette) -> Div {
         let project = self
             .shared
             .project_progress()
@@ -211,16 +245,6 @@ impl ConversationHeader {
             )
             .child(div().flex_1().min_w(px(80.)).child(bar))
             .child(div().flex_none().text_color(p.subtle).child(figure))
-            .children(project.map(|project| {
-                let crew = self.shared.progress.crew(project).len();
-                button("crew")
-                    .outline()
-                    .xsmall()
-                    .label(wording::crew_label(crew))
-                    .selected(self.shared.panel == Some(Panel::Crew))
-                    .tooltip("Every ticket and the agents working on it")
-                    .on_click(cx.listener(|_, _, _, c| c.emit(Intent::TogglePanel(Panel::Crew))))
-            }))
     }
     /// A project's phase, its bar with a segment per ticket, and its figure. Before any
     /// ticket exists the bar is the coordinator's own.
@@ -292,6 +316,6 @@ impl Render for ConversationHeader {
             .flex()
             .flex_col()
             .child(self.header(session, p, cx))
-            .child(self.progress_strip(session, p, cx))
+            .child(self.progress_strip(session, p))
     }
 }

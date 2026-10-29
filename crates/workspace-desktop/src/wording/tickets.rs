@@ -1,5 +1,5 @@
 //! How tickets, their pull requests, the PR keeper and progress read in the sidebar, the
-//! Tickets and Crew panels and the conversation's strip.
+//! Tickets and Agents panels, the conversation's header and strip, and the agents card.
 use super::{age, counted};
 use workspace_core::*;
 
@@ -543,9 +543,29 @@ pub(crate) fn project_summary(project: &ProjectProgress) -> String {
     parts.collect::<Vec<_>>().join(" · ")
 }
 
-/// "6 agents", the crew button's label.
-pub(crate) fn crew_label(agents: usize) -> String {
-    counted(agents, "agent")
+/// The header's Agents toggle: "Agents · 3 working", or "Agents" while none works.
+pub(crate) fn agents_label(working: usize) -> String {
+    match working {
+        0 => "Agents".into(),
+        working => format!("Agents · {working} working"),
+    }
+}
+
+/// The coordinator's agents card, such as "3 agents working on 2 tickets · 1 stuck".
+pub(crate) fn agents_summary(working: usize, tickets: usize, stuck: usize) -> String {
+    let working = match (working, tickets) {
+        (0, _) => "No agents working".into(),
+        (working, 0) => format!("{} working", counted(working, "agent")),
+        (working, tickets) => format!(
+            "{} working on {}",
+            counted(working, "agent"),
+            counted(tickets, "ticket")
+        ),
+    };
+    match stuck {
+        0 => working,
+        stuck => format!("{working} · {stuck} stuck"),
+    }
 }
 
 /// The strip's label for an agent. Only a working agent reads "Step K of N" with its current
@@ -596,7 +616,7 @@ pub(crate) fn strip_figure(
         .join(" · ")
 }
 
-/// A crew card's heading figure, such as "Verifying · 70%" or "Verifying · 80% · blocked".
+/// A ticket card's heading figure, such as "Verifying · 70%" or "Verifying · 80% · blocked".
 pub(crate) fn stage_figure(ticket: &TicketProgress) -> String {
     let stage = ticket.stage.label();
     let position = percent(ticket.position);
@@ -733,9 +753,21 @@ mod tests {
         );
         assert_eq!(project_summary(&project_at(Indeterminate, None, 0, 0)), "");
         assert_eq!(
-            (crew_label(6), crew_label(1)),
-            ("6 agents".into(), "1 agent".into())
+            (agents_label(3), agents_label(0)),
+            ("Agents · 3 working".into(), "Agents".into())
         );
+    }
+
+    #[test]
+    fn the_agents_card_counts_working_agents_their_tickets_and_the_stuck() {
+        assert_eq!(agents_summary(3, 2, 0), "3 agents working on 2 tickets");
+        assert_eq!(
+            agents_summary(1, 1, 1),
+            "1 agent working on 1 ticket · 1 stuck"
+        );
+        // A worker from before tickets existed works on none.
+        assert_eq!(agents_summary(1, 0, 0), "1 agent working");
+        assert_eq!(agents_summary(0, 0, 2), "No agents working · 2 stuck");
     }
 
     #[test]
@@ -814,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn a_crew_card_names_the_stage_and_percentage() {
+    fn a_ticket_card_names_the_stage_and_percentage() {
         use BarState::*;
         let figure = |stage, state, position| stage_figure(&ticket_at(stage, state, position));
         assert_eq!(

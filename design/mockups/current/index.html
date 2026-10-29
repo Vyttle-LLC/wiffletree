@@ -1843,7 +1843,7 @@ html&gt;body{padding:0}&lt;/style&gt;
 #celadon-chat .turn-group code,#celadon-chat .ac-narration code{font:12px ui-monospace,SFMono-Regular,monospace;background:var(--overlay);padding:0 4px;border-radius:4px}
 #celadon-chat .turn-foot{padding:10px 20px;font-size:10px;color:var(--subtle);border-top:1px solid color-mix(in srgb,var(--edge) 45%,transparent)}
 @media(prefers-reduced-motion:reduce){#celadon-chat .ac-body,#celadon-chat .ac-toggle .lucide{transition:none}#celadon-chat .wt-spin,#celadon-chat .step-row.new,#celadon-chat .sheet.turn-sheet{animation:none}#celadon-chat .ac-narration.streaming{animation:none;background:none;color:var(--text)}}
-/* Work progress: strip under the session title, bars in the tree and the crew panel. */
+/* Work progress: strip under the session title, bars in the tree and the Agents panel. */
 #celadon-chat .wp-strip{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:40px;padding:8px 28px;background:var(--surface);border-bottom:1px solid color-mix(in srgb,var(--edge) 45%,transparent);font-size:12px}
 #celadon-chat .wp-label{flex:0 1 auto;min-width:0;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #celadon-chat .wp-label b{font-weight:600}
@@ -2213,7 +2213,7 @@ function progressStrip(){
   const p=projectProgress(),agents=p.tickets.length?childKeys(&#x27;project&#x27;).filter(isTicket).flatMap(childKeys).length:0;
   label=`&lt;b&gt;${p.phase}&lt;/b&gt;`;bar=`&lt;div class=&quot;wp-bar seg&quot; aria-hidden=&quot;true&quot;&gt;${p.tickets.map(t=&gt;`&lt;span&gt;${barFill(t)}&lt;/span&gt;`).join(&#x27;&#x27;)}&lt;/div&gt;`;
   meta=`${percent(p.fraction)}% · 0 of ${p.tickets.length} tickets accepted`;
-  crew=button(`${agents} agents ${icon(&#x27;chevron-right&#x27;)}`,`data-crew aria-pressed=&quot;${state.crew===true}&quot; aria-label=&quot;${state.crew?&#x27;Hide&#x27;:&#x27;Show&#x27;} the crew: ${agents} agents&quot;`,&#x27;wp-crew&#x27;);
+  crew=button(`${agents} agents ${icon(&#x27;chevron-right&#x27;)}`,`data-crew aria-pressed=&quot;${state.crew===true}&quot; aria-label=&quot;${state.crew?&#x27;Hide&#x27;:&#x27;Show&#x27;} the Agents panel: ${agents} agents&quot;`,&#x27;wp-crew&#x27;);
  }else if(isTicket(key)){
   const t=ticketProgress(key);
   label=`&lt;b&gt;${t.stage}&lt;/b&gt;${t.stage===&#x27;Verifying&#x27;?` · ${t.passed} of ${t.verifiers} verifiers passed`:&#x27;&#x27;}`;bar=progressBar(t);meta=t.state===&#x27;unknown&#x27;?&#x27;&#x27;:ticketFigure(t);
@@ -2234,7 +2234,7 @@ function crewPanel(){
   const t=ticketProgress(key);
   return `&lt;section class=&quot;wp-card&quot;&gt;&lt;div class=&quot;wp-card-head&quot;&gt;&lt;span&gt;${esc(entities[key].name)}&lt;/span&gt;&lt;span class=&quot;wp-stage&quot;&gt;${t.stage}${t.state===&#x27;unknown&#x27;?&#x27;&#x27;:&#x27; · &#x27;+ticketFigure(t)}&lt;/span&gt;&lt;/div&gt;${progressBar(t,true)}${childKeys(key).map(k=&gt;{const a=agentProgress(k),m=minutes(k);return button(`&lt;span&gt;${esc(entities[k].name)}&lt;small&gt;${esc(sampleModels[k]||entities[k].provider)}&lt;/small&gt;&lt;/span&gt;&lt;span class=&quot;wp-fig ${tone(a)}&quot;&gt;${[a.figure,m===undefined?&#x27;&#x27;:m+&#x27;m&#x27;].filter(Boolean).join(&#x27; · &#x27;)}&lt;/span&gt;${progressBar(a,true)}`,`data-agent=&quot;${k}&quot;`,&#x27;wp-agent&#x27;);}).join(&#x27;&#x27;)}&lt;/section&gt;`;
  }).join(&#x27;&#x27;);
- return `&lt;aside class=&quot;inspector&quot; data-crew-panel aria-label=&quot;Crew side panel&quot;&gt;&lt;header class=&quot;inspector-heading&quot;&gt;&lt;div&gt;&lt;div class=&quot;eyebrow&quot;&gt;Project&lt;/div&gt;&lt;h2&gt;Crew&lt;/h2&gt;&lt;div class=&quot;inspector-owner&quot;&gt;${esc(e.name)}&lt;/div&gt;&lt;/div&gt;${button(icon(&#x27;x&#x27;),&#x27;data-crew aria-label=&quot;Close crew panel&quot;&#x27;)}&lt;/header&gt;&lt;div class=&quot;inspector-body&quot;&gt;&lt;p class=&quot;small subtle&quot;&gt;Every ticket and the agents working on it. Sample data.&lt;/p&gt;${cards}&lt;/div&gt;&lt;div class=&quot;pane-handle inspector-handle&quot; role=&quot;separator&quot; aria-label=&quot;Resize inspector&quot; tabindex=&quot;0&quot; data-resize=&quot;inspector&quot;&gt;&lt;/div&gt;&lt;/aside&gt;`;
+ return `&lt;aside class=&quot;inspector&quot; data-crew-panel aria-label=&quot;Agents side panel&quot;&gt;&lt;header class=&quot;inspector-heading&quot;&gt;&lt;div&gt;&lt;div class=&quot;eyebrow&quot;&gt;Project&lt;/div&gt;&lt;h2&gt;Agents&lt;/h2&gt;&lt;div class=&quot;inspector-owner&quot;&gt;${esc(e.name)}&lt;/div&gt;&lt;/div&gt;${button(icon(&#x27;x&#x27;),&#x27;data-crew aria-label=&quot;Close Agents panel&quot;&#x27;)}&lt;/header&gt;&lt;div class=&quot;inspector-body&quot;&gt;&lt;p class=&quot;small subtle&quot;&gt;Every ticket and the agents working on it. Sample data.&lt;/p&gt;${cards}&lt;/div&gt;&lt;div class=&quot;pane-handle inspector-handle&quot; role=&quot;separator&quot; aria-label=&quot;Resize inspector&quot; tabindex=&quot;0&quot; data-resize=&quot;inspector&quot;&gt;&lt;/div&gt;&lt;/aside&gt;`;
 }
 tree=function(){
  function node(key,depth){

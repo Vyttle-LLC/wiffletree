@@ -40,11 +40,6 @@ impl ProgressBoard {
         let listed = project.tickets.iter();
         listed.filter_map(|id| self.ticket(id)).collect()
     }
-    /// The agents the crew panel lists for a project, each ticket's in turn.
-    pub(crate) fn crew(&self, project: &ProjectProgress) -> Vec<&AgentProgress> {
-        let ids = self.tickets_of(project).into_iter().flat_map(|t| &t.agents);
-        ids.filter_map(|id| self.agent(id)).collect()
-    }
 }
 
 impl Workspace {
@@ -180,9 +175,12 @@ mod tests {
         assert_eq!(board.revision, 4);
         assert_eq!((done(&board, "a"), done(&board, "b")), (Some(5), Some(2)));
         let project = board.project("project").unwrap();
-        assert_eq!(board.tickets_of(project).len(), 2);
-        let crew: Vec<_> = board.crew(project).iter().map(|a| &a.session_id).collect();
-        assert_eq!(crew, ["a", "b"]);
+        let tickets: Vec<_> = board
+            .tickets_of(project)
+            .iter()
+            .map(|t| &t.ticket_id)
+            .collect();
+        assert_eq!(tickets, ["one", "two"]);
     }
 
     #[test]
@@ -205,6 +203,6 @@ mod tests {
         });
         assert!(board.agent("b").is_none() && board.ticket("two").is_none());
         let project = board.project("project").unwrap();
-        assert_eq!(board.crew(project).len(), 1);
+        assert_eq!(board.tickets_of(project).len(), 1);
     }
 }
