@@ -116,7 +116,6 @@ pub(super) struct Inspector {
     pub(super) memory_title: Entity<InputState>,
     pub(super) memory_body: Entity<TextareaState>,
     pub(super) memory_kind: LogKind,
-    pub(super) brain_path: Entity<InputState>,
     /// What the Files panel shows; fetched only while that panel is open.
     pub(super) files: files_view::Files,
     /// What the Processes panel shows; read only while that panel is open.
@@ -157,9 +156,6 @@ impl Inspector {
                     .placeholder("What was decided or observed, and why it matters")
             }),
             memory_kind: LogKind::Decision,
-            brain_path: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Path to a Markdown brain folder")
-            }),
             files: Default::default(),
             processes: Default::default(),
             agents_clock: false,
@@ -892,11 +888,6 @@ impl Requests for Inspector {
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 toast("Saved to project memory", window, cx);
                 self.load_panel(window, cx);
-            }
-            Command::AttachBrain { .. } => {
-                self.brain_path
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                toast("Markdown brain attached", window, cx);
             }
             Command::ExportLogs { .. } => {
                 let exported = value["exported"].as_u64().unwrap_or_default();

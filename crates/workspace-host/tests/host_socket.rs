@@ -684,7 +684,7 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
     let brain = tempfile::tempdir().unwrap();
     let fixture = Fixture::new(|host| {
         let calls = host.create_project("Calls").unwrap();
-        host.attach_brain(&calls.id, brain.path().to_str().unwrap())
+        host.set_space_brain(&calls.space, brain.path().to_str().unwrap())
             .unwrap();
         project.set(calls).unwrap();
     });
@@ -719,8 +719,8 @@ fn space_commands_need_the_apps_credential_and_reads_do_not() {
             project_id: project.id.clone(),
             space_id: personal.id.clone(),
         },
-        Command::AttachBrain {
-            project_id: project.id.clone(),
+        Command::SetSpaceBrain {
+            space_id: personal.id.clone(),
             path: fixture.data.path().to_string_lossy().into_owned(),
         },
         Command::SetRepositorySpaces {

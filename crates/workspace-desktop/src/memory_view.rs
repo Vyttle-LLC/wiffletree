@@ -13,10 +13,8 @@ impl Inspector {
         index.snapshot().spaces.iter().find(|s| &s.id == space)
     }
 
-    /// Where the brain of the project's Space is on this Mac.
-    fn project_brain(&self) -> Option<String> {
-        let space = self.project_space()?;
-        space.brain.as_ref()?;
+    /// Where a local brain of the project's Space is on this Mac, which pending memories export to.
+    fn local_brain_path(&self, space: &Space) -> Option<String> {
         let index = self.shared.index.as_ref()?;
         index
             .snapshot()
@@ -24,35 +22,6 @@ impl Inspector {
             .get(&space.id)?
             .brain_path
             .clone()
-    }
-
-    fn choose_brain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = folders::choose(
-            &self.bridge,
-            "Choose the Markdown brain folder",
-            false,
-            window,
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(paths) = paths.recv().await
-                && let Some(path) = paths.first()
-            {
-                let path = path.to_string_lossy().into_owned();
-                let _ = cx.update(|window, cx| {
-                    this.update(cx, |view, cx| view.attach_brain(path, window, cx))
-                });
-            }
-        })
-        .detach();
-    }
-
-    fn attach_brain(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(project_id) = self.shared.project_id()
-            && !path.trim().is_empty()
-        {
-            self.request(Command::AttachBrain { project_id, path }, window, cx);
-        }
     }
 
     fn capture_form(&self, p: Palette, cx: &mut Context<Self>) -> Div {
@@ -99,53 +68,69 @@ impl Inspector {
             )
     }
 
+    /// The brain of the project's Space, chosen in that Space's settings, or "No brain" with the
+    /// way to name one. The brain itself opens from the Brains page.
     fn brain_section(&self, p: Palette, cx: &mut Context<Self>) -> Div {
-        let brain = self.project_brain();
-        let attached = brain.is_some();
-        let space = match self.project_space() {
-            Some(space) => format!("The {} Space's brain, shared by its projects.", space.name),
-            None => "No Space".into(),
-        };
+        let space = self.project_space();
+        let brain = space.and_then(|s| s.brain.as_ref());
+        let local = (space.zip(brain))
+            .filter(|(_, b)| matches!(b.repository, BrainRepository::Local { .. }))
+            .and_then(|(s, _)| self.local_brain_path(s));
+        let exports = local.is_some();
+        let mut links = div().flex().flex_wrap().gap_2().child(
+            button("open-brains")
+                .outline()
+                .icon(icon("brain"))
+                .label("Open Brains")
+                .on_click(cx.listener(|_, _, _, c| c.emit(Intent::OpenPage(Page::Brains)))),
+        );
+        if let Some(space) = space.filter(|_| brain.is_none()) {
+            let id = space.id.clone();
+            links = links.child(
+                button("open-space-settings")
+                    .ghost()
+                    .label("Space settings")
+                    .on_click(cx.listener(move |_, _, _, c| c.emit(Intent::OpenSpace(id.clone())))),
+            );
+        }
         div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(section("MARKDOWN BRAIN", p))
-            .child(hint(space, p))
+            .child(section("BRAIN", p))
             .child(match brain {
-                Some(path) => div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(icon("folder").text_color(p.subtle))
-                    .child(mono(path, p).flex_1()),
-                None => hint(
-                    "Attach a docs repository so memories are exported as ordinary Markdown.",
-                    p,
-                ),
-            })
-            .child(Input::new(&self.brain_path).w_full())
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
+                None => card(p)
                     .child(
-                        button("attach-brain")
-                            .label(if attached { "Change" } else { "Attach" })
-                            .on_click(cx.listener(|v, _, w, c| {
-                                let path = v.brain_path.read(c).value().to_string();
-                                v.attach_brain(path, w, c);
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icon("brain").text_color(p.subtle))
+                            .child(div().font_weight(FontWeight::MEDIUM).child("No brain")),
                     )
+                    .child(hint(no_brain_line(space.map(|s| s.name.as_str())), p)),
+                Some(brain) => div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(hint(
+                        format!(
+                            "The {} Space's brain, shared by its projects.",
+                            space.map_or("", |s| s.name.as_str())
+                        ),
+                        p,
+                    ))
                     .child(
-                        button("choose-brain")
-                            .ghost()
-                            .icon(icon("folder"))
-                            .label("Choose folder…")
-                            .on_click(cx.listener(|v, _, w, c| v.choose_brain(w, c))),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icon("brain").text_color(p.subtle))
+                            .child(mono(brain_name(brain, local.as_deref()), p).flex_1()),
                     ),
-            )
-            .when(attached, |d| {
+            })
+            .child(links)
+            .when(exports, |d| {
                 d.child(
                     div().flex().child(
                         button("export")
@@ -218,5 +203,57 @@ impl Inspector {
             .child(self.capture_form(p, cx))
             .child(entries)
             .child(self.brain_section(p, cx))
+    }
+}
+
+/// Why a project has no brain, and where one is named.
+fn no_brain_line(space: Option<&str>) -> String {
+    match space {
+        Some(space) => format!(
+            "The {space} Space names no brain, so this project has none. Name one in the Space's settings; the Brains page lists the brains your Spaces name."
+        ),
+        None => "This project is in no Space, so it has no brain.".into(),
+    }
+}
+
+/// The brain as the panel names it: its repository, or where a local brain is on this Mac.
+fn brain_name(brain: &SpaceBrain, local: Option<&str>) -> String {
+    match &brain.repository {
+        BrainRepository::GitHub { owner, name, .. } => format!("{owner}/{name}"),
+        BrainRepository::Local { .. } => local.unwrap_or("A folder not found on this Mac").into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{brain_name, no_brain_line};
+    use workspace_core::*;
+
+    #[test]
+    fn a_project_without_a_brain_says_so_and_where_one_is_named() {
+        let line = no_brain_line(Some("Vyttle"));
+        assert!(line.contains("Vyttle Space names no brain") && line.contains("Space's settings"));
+        assert!(line.contains("Brains page"));
+        assert!(no_brain_line(None).contains("no brain"));
+    }
+
+    #[test]
+    fn a_github_brain_is_named_by_its_repository_and_a_local_one_by_its_folder() {
+        let brain = |repository| SpaceBrain {
+            repository,
+            folder: "second-brain".into(),
+            extra: Extra::new(),
+        };
+        let github = brain(BrainRepository::GitHub {
+            owner: "Sage-Social".into(),
+            name: "sagehaven-docs".into(),
+            extra: Extra::new(),
+        });
+        assert_eq!(
+            brain_name(&github, Some("/elsewhere")),
+            "Sage-Social/sagehaven-docs"
+        );
+        let local = brain(BrainRepository::local());
+        assert_eq!(brain_name(&local, Some("/Users/m/notes")), "/Users/m/notes");
     }
 }

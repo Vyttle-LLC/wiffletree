@@ -4,6 +4,7 @@ mod assets;
 mod attachment_chips;
 mod automation;
 mod background;
+mod brains_view;
 mod bridge;
 mod browse;
 mod connect_sheet;
@@ -202,6 +203,7 @@ enum Page {
     Skills,
     Repositories,
     Spaces,
+    Brains,
 }
 
 struct Workspace {
@@ -224,6 +226,7 @@ struct Workspace {
     creation: Option<Entity<CreationForm>>,
     repositories: Entity<repositories_view::RepositoriesPage>,
     spaces: Entity<spaces_view::SpacesPage>,
+    brains: Entity<brains_view::BrainsPage>,
     usage: Entity<usage_view::UsagePage>,
     sidebar: Entity<sidebar::Sidebar>,
     inspector: Entity<Inspector>,
@@ -272,6 +275,8 @@ impl Workspace {
         Self::adopt(&repositories, window, cx);
         let spaces = cx.new(|cx| spaces_view::SpacesPage::new(bridge.clone(), window, cx));
         Self::adopt(&spaces, window, cx);
+        let brains = cx.new(|cx| brains_view::BrainsPage::new(bridge.clone(), window, cx));
+        Self::adopt(&brains, window, cx);
         let sidebar = cx.new(|cx| sidebar::Sidebar::new(bridge.clone(), window, cx));
         Self::adopt(&sidebar, window, cx);
         let usage = cx.new(|_| usage_view::UsagePage::new(bridge.clone()));
@@ -294,6 +299,7 @@ impl Workspace {
             creation: None,
             repositories,
             spaces,
+            brains,
             usage,
             sidebar,
             inspector,
@@ -417,6 +423,12 @@ impl Workspace {
                     skills.open_skill(skills_view::SkillView::Skill(*skill), window, cx)
                 });
             }
+            Intent::OpenSpace(space) => {
+                self.open_page(Page::Spaces, window, cx);
+                self.spaces.update(cx, |spaces, cx| {
+                    spaces.open_space(space.clone(), window, cx)
+                });
+            }
             Intent::Catalog(catalog) => self.shared.catalog = catalog.clone(),
             Intent::Detected(detection) => self.shared.detection = detection.clone(),
             Intent::Amend(amendment) => self.amend(amendment),
@@ -440,6 +452,8 @@ impl Workspace {
         });
         self.spaces
             .update(cx, |spaces, cx| spaces.share(shared.clone(), window, cx));
+        self.brains
+            .update(cx, |brains, cx| brains.share(shared.clone(), window, cx));
         self.models
             .update(cx, |models, cx| models.share(shared.clone(), window, cx));
         self.skills

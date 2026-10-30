@@ -145,7 +145,7 @@ fn markdown_preserves_external_content_and_recovers_receipt_gap() {
     let brain = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Memory");
-    host.attach_brain(&project.id, brain.path().to_str().unwrap())
+    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
         .unwrap();
     let first = host.append_log(log(&session.id, "one")).unwrap();
     let second = host.append_log(log(&session.id, "two")).unwrap();
@@ -203,7 +203,7 @@ fn markdown_symlink_destination_is_rejected_and_failure_is_recorded() {
     let outside = tempfile::NamedTempFile::new().unwrap();
     let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Memory");
-    host.attach_brain(&project.id, brain.path().to_str().unwrap())
+    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
         .unwrap();
     host.append_log(log(&session.id, "one")).unwrap();
     let path = brain.path().join("second-brain/logs/project.md");
@@ -329,7 +329,7 @@ fn brain_parent_symlink_is_rejected_before_creating_outside_directories() {
     std::os::unix::fs::symlink(outside.path(), brain.path().join("second-brain")).unwrap();
     let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Memory");
-    host.attach_brain(&project.id, brain.path().to_str().unwrap())
+    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
         .unwrap();
     host.append_log(log(&session.id, "one")).unwrap();
     assert!(host.export_logs(&project.id).is_err());
@@ -342,7 +342,7 @@ fn markdown_batches_keep_header_compiler_marker_and_newest_first_order() {
     let brain = tempfile::tempdir().unwrap();
     let mut host = Host::open_set_up(directory.path()).unwrap();
     let (project, session) = project(&mut host, "Batch memory");
-    host.attach_brain(&project.id, brain.path().to_str().unwrap())
+    host.set_space_brain(&project.space, brain.path().to_str().unwrap())
         .unwrap();
     let path = brain.path().join("second-brain/logs/project.md");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -194,6 +194,10 @@ pub struct SpaceLocal {
     /// What the Space's page notes about this Mac, such as a model it falls back from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The local brain folder the `brain-registry-sync` upgrade took from this Space because
+    /// its `origin` is not on GitHub, so the Brains page can say why the Space has no brain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain_without_origin: Option<String>,
 }
 impl Default for SpaceLocal {
     fn default() -> Self {
@@ -202,6 +206,7 @@ impl Default for SpaceLocal {
             brain_path: None,
             models: None,
             notes: vec![],
+            brain_without_origin: None,
         }
     }
 }

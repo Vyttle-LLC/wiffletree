@@ -214,7 +214,8 @@ fn the_readme_says_what_wiffletree_publishes_and_what_it_cannot_prevent() {
     }
     for stated in [
         "pushes a ticket's branch and opens its pull request only through its own checked operation",
-        "It never approves, merges, closes or comments on a pull request.",
+        "It never approves, merges, closes or comments on a ticket's pull request.",
+        "it closes one only when you choose Discard",
         "Agents can still run any command on your Mac, including a push",
         "**Humans own integration.**",
     ] {

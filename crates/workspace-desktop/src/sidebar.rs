@@ -625,6 +625,7 @@ impl Sidebar {
         for (page, label, glyph) in [
             (Page::Spaces, "Spaces", "spaces"),
             (Page::Repositories, "Repositories", "folder"),
+            (Page::Brains, "Brains", "brain"),
             (Page::Usage, "Usage and limits", "activity"),
             (Page::Models, "Models", "settings"),
             (Page::Skills, "Skills", "book"),

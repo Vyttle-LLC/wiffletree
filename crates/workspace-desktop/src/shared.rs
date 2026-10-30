@@ -223,6 +223,8 @@ pub(super) enum Intent {
     },
     /// Opens the Skills page on one skill.
     OpenSkill(Skill),
+    /// Opens the Spaces page on one Space.
+    OpenSpace(SpaceId),
     Catalog(Rc<Vec<ModelOption>>),
     Detected(Rc<Detection>),
     /// Shows a change the host confirmed before the snapshot that has it arrives.

@@ -924,6 +924,7 @@ impl Render for Workspace {
             Page::Skills => self.skills.clone().cached(full()).into_any_element(),
             Page::Repositories => self.repositories.clone().cached(full()).into_any_element(),
             Page::Spaces => self.spaces.clone().cached(full()).into_any_element(),
+            Page::Brains => self.brains.clone().cached(full()).into_any_element(),
             Page::Conversation if self.shared.selected_session().is_some() => {
                 // Not cached: GPUI draws every view inside a cached view that renders again,
                 // so the transcript is cached only below an uncached conversation.
