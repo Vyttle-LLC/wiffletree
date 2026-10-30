@@ -53,9 +53,10 @@ impl Base {
                 == worktrees::patch_id(worktree, self.built_on(worktree, other), other)?,
         )
     }
-    /// The measured ref, except for a commit rebased off its parent's merged pull request: that
-    /// one no longer holds the parent's last pushed head, and is measured against the parent's
-    /// base, which now holds the parent's changes.
+    /// The measured ref, except for a commit rebased onto its parent's base after the parent's
+    /// pull request merged: that one holds the base's tip, which holds the parent's changes
+    /// however they were merged, and is measured against it. A tip the parent's head already
+    /// holds, as before the merge was fetched, is not past the parent's changes.
     fn built_on(&self, worktree: &Path, commit: &str) -> &str {
         match self {
             Self::Stacked {
@@ -63,7 +64,11 @@ impl Base {
                 pushed: Some(parent_head),
                 merged: true,
                 ..
-            } if !publish::is_ancestor(worktree, parent_head, commit) => repository,
+            } if publish::is_ancestor(worktree, repository, commit)
+                && !publish::is_ancestor(worktree, repository, parent_head) =>
+            {
+                repository
+            }
             _ => self.measured(),
         }
     }
@@ -459,6 +464,17 @@ mod tests {
 
     #[test]
     fn a_child_rebased_off_its_squash_merged_parent_keeps_its_review() {
+        rebased_off_merged_parent(true);
+    }
+
+    #[test]
+    fn a_child_rebased_off_its_parents_merge_commit_keeps_its_review() {
+        rebased_off_merged_parent(false);
+    }
+
+    /// The parent merges into main, which gained an unrelated commit first, as a squash or a
+    /// merge commit; the keeper rebases the reviewed child onto main.
+    fn rebased_off_merged_parent(squash: bool) {
         let mut f = fixture();
         let mut parent = f.ticket();
         parent.pushed = Some(f.head());
@@ -466,24 +482,33 @@ mod tests {
         let child = reviewed_child(&mut f);
         let worktree = Path::new(&child.worktree);
         let reviewed = git(worktree, &["rev-parse", "HEAD"]);
-        // The host squash-merged the parent into main.
+        let repository = &f.repository;
         git(
-            &f.repository,
-            &["checkout", "-q", "-b", "squash", "origin/main"],
+            repository,
+            &["checkout", "-q", "-b", "merged", "origin/main"],
         );
-        fs::write(f.repository.join("a.txt"), "one\n").unwrap();
-        fs::write(f.repository.join("b.txt"), "two\n").unwrap();
-        git(&f.repository, &["add", "."]);
+        fs::write(repository.join("u.txt"), "unrelated\n").unwrap();
+        git(repository, &["add", "."]);
+        git(repository, &["commit", "-q", "-m", "Unrelated"]);
+        let parent_head = parent.pushed.clone().unwrap();
+        if squash {
+            fs::write(repository.join("a.txt"), "one\n").unwrap();
+            fs::write(repository.join("b.txt"), "two\n").unwrap();
+            git(repository, &["add", "."]);
+            git(repository, &["commit", "-q", "-m", "Fix contrast (#180)"]);
+        } else {
+            let message = "Merge pull request #180";
+            git(
+                repository,
+                &["merge", "-q", "--no-ff", "-m", message, &parent_head],
+            );
+        }
+        let main_tip = git(repository, &["rev-parse", "HEAD"]);
         git(
-            &f.repository,
-            &["commit", "-q", "-m", "Fix contrast (#180)"],
+            repository,
+            &["update-ref", "refs/remotes/origin/main", &main_tip],
         );
-        let squashed = git(&f.repository, &["rev-parse", "HEAD"]);
-        git(
-            &f.repository,
-            &["update-ref", "refs/remotes/origin/main", &squashed],
-        );
-        git(&f.repository, &["checkout", "-q", "main"]);
+        git(repository, &["checkout", "-q", "main"]);
         let mut merged = crate::publish::tests::watch_open_pr(&mut f, 180);
         merged.state = PrState::Merged;
         let mut parent = f.ticket();
@@ -498,7 +523,7 @@ mod tests {
             upstream: base.merged_parent_head().map(Into::into),
             base,
             pr_base: "origin/main".into(),
-            base_commit: squashed.clone(),
+            base_commit: main_tip.clone(),
             head: reviewed.clone(),
             verified: reviewed.clone(),
             checkout: f.home.path().join("keeper-checkout"),
@@ -509,10 +534,10 @@ mod tests {
         let crate::keeper::Rebased::Same(rebased) = outcome.result else {
             panic!("the rebase is not the same change");
         };
-        // Only the child's own commit was replayed onto the squash.
+        // Only the child's own commit was replayed onto the merge.
         assert_eq!(
             git(worktree, &["rev-parse", &format!("{rebased}^")]),
-            squashed
+            main_tip
         );
         git(worktree, &["reset", "-q", "--hard", &rebased]);
         f.host.check_verified_head(&child, &reviewed, None).unwrap();

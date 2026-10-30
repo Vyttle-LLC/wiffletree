@@ -14,7 +14,6 @@ pub(crate) const APPROVED_WAIVER: &str = "Merged after a blocked review with the
 pub(crate) struct Job {
     pub ticket_id: String,
     pub request: MergeRequest,
-    pub worktree: PathBuf,
     /// The store's database, read again on the job's own thread just before it merges.
     pub store: PathBuf,
     /// The repository as stored: its protected branches and what GitHub said in the daily read.
@@ -125,6 +124,12 @@ fn decide_and_merge(job: &Job, tools: &Tools) -> Decided {
     merge(job, tools, method)
 }
 
+/// Where `gh` runs: the repository's own folder, which outlives the ticket's worktree, as a
+/// recovery after acceptance needs.
+fn gh_folder(job: &Job) -> &Path {
+    Path::new(&job.repository.path)
+}
+
 fn gh_repository(job: &Job) -> String {
     format!("{}/{}", repositories::GITHUB_HOST, job.request.repository)
 }
@@ -141,7 +146,7 @@ fn read_pull_request(job: &Job, tools: &Tools, number: u64) -> Result<PullReques
         "--json",
         PULL_REQUEST_FIELDS,
     ];
-    let answer = (tools.gh)(&job.worktree, &args)?;
+    let answer = (tools.gh)(gh_folder(job), &args)?;
     ensure!(
         answer.status.success(),
         "gh pr view failed: {}",
@@ -204,7 +209,7 @@ fn rollup(checks: &[Value]) -> CheckState {
 /// The repository's default branch and merge methods, and the base's protection and rulesets,
 /// read now: the merge never relies on the daily read.
 fn read_github(job: &Job, tools: &Tools) -> Result<GitHubNow> {
-    let read = |endpoint: &str| github_access::gh_json(tools, &job.worktree, endpoint);
+    let read = |endpoint: &str| github_access::gh_json(tools, gh_folder(job), endpoint);
     let repository = read(&format!("repos/{}", job.request.repository))?;
     let methods = [
         ("allow_squash_merge", MergeMethod::Squash),
@@ -341,6 +346,23 @@ fn recheck_stored(job: &Job) -> Result<()> {
         "The worktree's HEAD moved to {}",
         short_sha(&head)
     );
+    // The human may have protected the base or revoked the owner while GitHub was read.
+    let repository: Repository = store
+        .query_row(
+            "SELECT data FROM repositories WHERE id=?1",
+            [&ticket.repository_id],
+            |r| decode(r, 0),
+        )
+        .context("Repository not found")?;
+    let home = job.store.parent().context("No data folder")?;
+    ensure!(
+        is_allowed(&repository, &settings::allowed_owners(home)),
+        "{} no longer publishes without asking",
+        repository.name
+    );
+    if let Some(why) = ProtectedBranches::of(&repository).why(&job.request.base) {
+        bail!("{} is now protected: {why}", job.request.base);
+    }
     Ok(())
 }
 
@@ -363,7 +385,7 @@ fn merge(job: &Job, tools: &Tools, method: MergeMethod) -> Decided {
         "--match-head-commit",
         &job.request.head,
     ];
-    match (tools.gh)(&job.worktree, &args) {
+    match (tools.gh)(gh_folder(job), &args) {
         Ok(answer) if answer.status.success() => Decided::Merged {
             method: Some(method),
             commit: read_pull_request(job, tools, job.request.number)
@@ -422,7 +444,7 @@ fn retarget(job: &Job, tools: &Tools) -> Vec<(Child, Retarget)> {
         ensure!(pr.base == *from, "it opens into {}", pr.base);
         let number = child.number.to_string();
         let args = ["pr", "edit", &number, "--repo", &repository, "--base", to];
-        let answer = (tools.gh)(&job.worktree, &args)?;
+        let answer = (tools.gh)(gh_folder(job), &args)?;
         ensure!(
             answer.status.success(),
             "gh pr edit failed: {}",
@@ -595,7 +617,6 @@ impl Host {
         Ok(Job {
             ticket_id: ticket.id.clone(),
             request,
-            worktree: ticket.worktree.clone().into(),
             store: self.home.join(STORE_FILE),
             repository: repository.clone(),
             children,
@@ -939,24 +960,33 @@ impl Host {
                 }
                 request.head = pr.head.clone();
             }
-            if !request.may_merge() {
-                // It waits for the human, on the same head.
-                continue;
-            }
-            match self.recheck_merge(&ticket, &request) {
-                Ok(repository) => {
-                    ticket.merging = Some(MergeRequest {
-                        stage: MergeStage::Merging,
-                        ..request
-                    });
-                    self.save_ticket(&ticket)?;
-                    jobs.push(self.merge_job(&ticket, &repository)?);
-                }
+            let repository = match self.recheck_merge(&ticket, &request) {
+                Ok(repository) => repository,
                 Err(why) => {
                     let ended = format!("{named} was not merged: {why:#}.");
                     self.end_merge(&mut ticket, &ended)?;
+                    continue;
                 }
+            };
+            if !request.may_merge() {
+                // It waits for the human, unless the pass found what would refuse it anyway;
+                // GitHub is read in full once the human approves.
+                let refused = match (pr.checks, pr.merge_state) {
+                    (CheckState::Failure, _) => Some("its checks failed"),
+                    (_, MergeState::Dirty) => Some("it conflicts with its base"),
+                    _ => None,
+                };
+                if let Some(why) = refused {
+                    self.end_merge(&mut ticket, &format!("{named} was not merged: {why}."))?;
+                }
+                continue;
             }
+            ticket.merging = Some(MergeRequest {
+                stage: MergeStage::Merging,
+                ..request
+            });
+            self.save_ticket(&ticket)?;
+            jobs.push(self.merge_job(&ticket, &repository)?);
         }
         Ok(jobs)
     }
@@ -1190,7 +1220,9 @@ mod tests {
             edits: vec![],
         }));
         let state = github.clone();
-        let gh = move |_: &Path, args: &[&str]| -> Result<runtime::GhAnswer> {
+        let gh = move |folder: &Path, args: &[&str]| -> Result<runtime::GhAnswer> {
+            // As the real `gh`, which cannot start in a folder that is gone.
+            ensure!(folder.is_dir(), "gh could not run in {}", folder.display());
             let mut gh = state.lock().unwrap();
             let ok = |output: String| {
                 Ok(runtime::GhAnswer {
@@ -2067,6 +2099,92 @@ mod tests {
         assert_eq!(merged["status"], "merged");
         assert_eq!(merged["method"], "squash");
         assert_eq!(f.ticket().state, TicketState::Accepted);
+    }
+
+    #[test]
+    fn protecting_the_base_or_revoking_the_owner_while_github_is_read_merges_nothing() {
+        type Change = fn(&mut Fixture);
+        let revoke: [(&str, Change); 2] = [
+            ("feature/spaces is now protected", |f| {
+                let repository = f.ticket().repository_id;
+                (f.host)
+                    .set_protected_branch(&repository, "feature/*", true)
+                    .unwrap();
+            }),
+            ("no longer publishes without asking", |f| {
+                f.host.set_owner_allowed("allowed-org", false).unwrap();
+            }),
+        ];
+        for (reason, change) in revoke {
+            let (mut f, fake) = ready();
+            let job = (f.host)
+                .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
+                .unwrap();
+            change(&mut f);
+            let error = f
+                .host
+                .record_merge(run(&job, &fake.tools), true)
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(reason), "{error:#}");
+            assert!(fake.merges().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_merge_waiting_for_the_human_ends_on_failed_checks_a_conflict_or_a_protected_base() {
+        type Change = fn(&mut Fixture);
+        let changes: [(&str, Change); 3] = [
+            ("its checks failed", |f| {
+                let mut ticket = f.ticket();
+                ticket.pull_request.as_mut().unwrap().checks = CheckState::Failure;
+                f.host.save_ticket(&ticket).unwrap();
+            }),
+            ("it conflicts with its base", |f| {
+                let mut ticket = f.ticket();
+                ticket.pull_request.as_mut().unwrap().merge_state = MergeState::Dirty;
+                f.host.save_ticket(&ticket).unwrap();
+            }),
+            ("feature/spaces is protected", |f| {
+                let repository = f.ticket().repository_id;
+                (f.host)
+                    .set_protected_branch(&repository, "feature/*", true)
+                    .unwrap();
+            }),
+        ];
+        for (reason, change) in changes {
+            let (mut f, fake) = ready();
+            f.review(VerificationOutcome::Blocked);
+            merge(&mut f, &fake, None).unwrap();
+            assert_eq!(f.open_items().len(), 1);
+            change(&mut f);
+            pass(&mut f, &fake);
+            assert!(f.open_items().is_empty(), "the Inbox item is withdrawn");
+            assert!(f.ticket().merging.is_none());
+            let told = messages(&f.host);
+            assert_eq!(told.len(), 1);
+            assert!(told[0].contains(reason), "{told:?}");
+        }
+    }
+
+    #[test]
+    fn a_restart_after_acceptance_still_finishes_the_merge_with_its_result() {
+        let (mut f, fake) = ready();
+        (f.host)
+            .merge_ticket(&coordinator(&f), &f.ticket.clone(), None)
+            .unwrap();
+        fake.set(180, "state", json!("MERGED"));
+        // The host stopped after merged() accepted the ticket, which removed its worktree.
+        f.host.accept_ticket(&f.ticket.clone(), None).unwrap();
+        assert!(!f.worktree.exists());
+        let mut f = restart(f);
+        let jobs = f.host.interrupted_merges().unwrap();
+        f.host
+            .record_merge(run(&jobs[0], &fake.tools), false)
+            .unwrap();
+        let told = messages(&f.host);
+        assert_eq!(told.len(), 1);
+        assert!(told[0].starts_with("Merged PR #180"), "{told:?}");
+        assert!(f.ticket().merging.is_none());
     }
 
     #[test]

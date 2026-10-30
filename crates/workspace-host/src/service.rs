@@ -2614,7 +2614,11 @@ impl Actor {
                 true
             }
             Event::Merged(outcome, reply) => {
-                if let Ok(ticket) = self.host.ticket(&outcome.ticket_id) {
+                // Only a merge changes what the watcher shows; a decision to wait must not
+                // start a pass, whose end decides waiting merges again.
+                if matches!(outcome.result, merge::Decided::Merged { .. })
+                    && let Ok(ticket) = self.host.ticket(&outcome.ticket_id)
+                {
                     self.pr_watch.check_now(&ticket.repository_id);
                 }
                 let recorded = self.host.record_merge(*outcome, reply.is_some());
