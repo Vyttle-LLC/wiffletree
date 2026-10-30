@@ -95,10 +95,11 @@ jobs:
         run: cargo nextest run --locked --workspace --profile mac
 
       # Every core and host test macOS builds, and those the `mac` profile runs, for the `check` job's coverage check.
+      # Listing the whole workspace reuses the build above; `-p` would unify features differently and recompile.
       - name: List them
         run: |
-          cargo nextest list --locked -p workspace-core -p workspace-host --message-format oneline > mac-tests.txt
-          cargo nextest list --locked -p workspace-core -p workspace-host --profile mac --message-format oneline > mac-only-tests.txt
+          cargo nextest list --locked --workspace -E 'package(workspace-core) | package(workspace-host)' --message-format oneline > mac-tests.txt
+          cargo nextest list --locked --workspace -E 'package(workspace-core) | package(workspace-host)' --profile mac --message-format oneline > mac-only-tests.txt
 
       - uses: actions/upload-artifact@v7
         with:
