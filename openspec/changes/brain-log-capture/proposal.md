@@ -6,14 +6,18 @@ Michael decided on October 29, 2026 that brains are team-shared and that every c
 
 ## What Changes
 
-- **A `log_work` MCP tool** for the project coordinator and implementers. The agent gives only the type, a title and the `changed`, `why` and `state` text. The host fills in the rest:
-  - the entry's id and date;
-  - the repository folder and `ref`, from the ticket's worktree: branch, commits since the base, and PR;
-  - the author (the human's GitHub login) and `source: wiffletree`;
-  - the provider, model, machine, project, ticket and session, which stay in the host's store because the entry contract allows exactly four frontmatter keys.
+- **A `log_work` MCP tool** for the project coordinator, implementers and assistant threads.
+  - The brain is always the caller's Space's brain (Michael, 2026-10-29), so a project never spans brains.
+  - The agent gives only the type, a title and the `changed`, `why` and `state` text. The host fills in the rest:
+    - the entry's id and date;
+    - the repository folder and `ref`, from the ticket's worktree: branch, commits since the base, and PR;
+    - the author (the human's GitHub login) and `source: wiffletree`;
+    - the provider, model, machine, Space, project, ticket, session and thread, which stay in the host's store because the entry contract allows exactly four frontmatter keys.
+- **Assistant thread entries use the same contract**, in `logs/assistant/YYYY/MM/…` with `repo: assistant`, instead of the rolling `logs/assistant.md` that `assistant-spaces-jobs-boards` proposed.
+- **PR-gated writes supersede #163's decision (c)** (Michael, 2026-10-29). This change removes #163's `project-memory` requirement "Brain pushes from several people".
 - **The entry contract from the gate, exactly.** One file per entry at `second-brain/logs/<repo>/YYYY/MM/YYYY-MM-DD-<ulid>.md`, never edited after merge. Its `ref` is `—`, `<branch> @ —` or `<branch> @ <sha>[…<sha>][ · PR #NN]`. The host refuses an entry whose body exceeds 2,000 characters, saying how much to cut.
-- **Milestone prompts.** When an implementer reports ready_for_testing, or the coordinator accepts or publishes a ticket, the tool result asks for one `log_work` call if the session has not logged since the last milestone and the ticket's repository maps to a brain.
-- **Batching.** Entries collect into one batch per brain and ticket, or per brain and coordinator session. A batch opens its PR when its ticket is accepted or closed, when its session is archived, after 24 hours, or on Send now. It is never one PR per entry.
+- **Milestone prompts.** When an implementer reports ready_for_testing, or the coordinator accepts or publishes a ticket, the tool result asks for one `log_work` call if the session has not logged since the last milestone and the project's Space has a brain.
+- **Batching.** Entries collect into one batch per brain and ticket, per brain and coordinator session, or per brain and assistant thread. A batch opens its PR when its ticket is accepted or closed, when its session is archived, after 24 hours, or on Send now. It is never one PR per entry.
 - **A one-time legacy import** per brain. It converts `logs/<repo>.md` entries into per-entry files in log-only PRs, with deterministic ids so a repeated import adds nothing. Entries already compiled are recorded as compiled. Legacy files are left for the migration ticket.
 - **Migration of the existing capture code.** `work_logs` gains the new fields. Rows never exported are queued into batches. `export_logs`, `log_exports`, `maintenance_runs` and the legacy renderer are removed. The human's capture form in the Memory panel writes through the same path as `log_work`.
 - **Agents are told the rules.** The coordinator and implementer core instructions say when to log, how tersely, and never to log child PII, secrets or transcripts.
@@ -24,7 +28,7 @@ Michael decided on October 29, 2026 that brains are team-shared and that every c
 <!-- None. -->
 
 ### Modified Capabilities
-- `project-memory`: capture moves to `log_work` and per-entry files in batches. The Markdown export and the export-only maintenance requirements are removed. Milestone prompts, batching, the legacy import and the agent rules are added.
+- `project-memory`: capture moves to `log_work` and per-entry files in batches. The Markdown export, the export-only maintenance and #163's "Brain pushes from several people" requirements are removed. Milestone prompts, batching, the legacy import and the agent rules are added.
 
 ## Impact
 

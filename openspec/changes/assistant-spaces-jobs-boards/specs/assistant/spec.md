@@ -64,7 +64,7 @@ Threads and job runs SHALL NOT start in the providers' YOLO mode. A Claude threa
 - **THEN** the host stops the run and the thread shows that an unlisted MCP server was offered
 
 ### Requirement: Topics are filed in their Space's brain
-The user SHALL NOT have to choose where to file anything. Each thread SHALL belong to one Space, and its log entries SHALL go to that Space's brain under `logs/assistant.md`, each carrying the thread's id and Space. When a message starts a new topic, the router (see assistant-router) SHALL send it to the thread and Space it belongs to, asking the user when unsure. A thread in a Space with no brain SHALL add no log entries and SHALL say so when asked to remember something.
+The user SHALL NOT have to choose where to file anything. Each thread SHALL belong to one Space, and its log entries SHALL go to that Space's brain as per-entry files under `logs/assistant/YYYY/MM/`, with `repo: assistant`, written through `log_work` and reaching `main` through a gated batch PR (see `project-memory` in `brain-log-capture`), with the thread's id and Space kept in the host store. When a message starts a new topic, the router (see assistant-router) SHALL send it to the thread and Space it belongs to, asking the user when unsure. A thread in a Space with no brain SHALL add no log entries and SHALL say so when asked to remember something.
 
 #### Scenario: Personal then Vyttle
 - **WHEN** the user asks about a dentist appointment and then, in the same tab, about Vyttle's pricing page
